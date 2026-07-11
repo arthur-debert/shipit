@@ -92,6 +92,110 @@ def test_run_codex_creates_ephemeral_tree_and_execs_codex(
     assert f"codex session {session_id}" in capsys.readouterr().out
 
 
+def test_run_codex_activates_the_tree_pixi_env(monkeypatch, tmp_path):
+    capture = LaunchCapture()
+    source = tmp_path / "source"
+    tree_path = tmp_path / "tree"
+    tree_path.mkdir()
+    (tree_path / "pixi.toml").write_text("[workspace]\nname = 'x'\n")
+
+    monkeypatch.setattr(session.git, "repo_root", lambda: str(source))
+    monkeypatch.setattr(
+        session.identity,
+        "resolve_repo",
+        lambda root: Repo("arthur-debert", "shipit"),
+    )
+    monkeypatch.setattr(session, "new_agent_hash", lambda: "deadbeef")
+    monkeypatch.setattr(session.time, "time", lambda: 1783585261)
+    monkeypatch.setattr(session.os, "getpid", lambda: 4242)
+
+    def fake_creator(spec, *, source_repo):
+        return Tree(path=str(tree_path), branch="ephemeral/codex-1", base="origin/main")
+
+    def fake_execute(file: str, argv: list[str], env: dict[str, str]) -> None:
+        capture.env = env
+
+    def activation_runner(cmd, **kwargs):
+        assert cmd[:3] == ["pixi", "shell-hook", "--json"]
+        return type(
+            "Result",
+            (),
+            {
+                "stdout": json.dumps(
+                    {
+                        "environment_variables": {
+                            "PATH": f"{tree_path}/.pixi/envs/default/bin:/bin",
+                            "CONDA_PREFIX": f"{tree_path}/.pixi/envs/default",
+                        },
+                        "activation_scripts": [],
+                    }
+                )
+            },
+        )()
+
+    rc = session.run_codex(
+        [],
+        creator=fake_creator,
+        chdir=lambda path: None,
+        execute=fake_execute,
+        which=lambda binary: "/usr/local/bin/codex",
+        environ={"PATH": "/bin"},
+        activation_runner=activation_runner,
+    )
+
+    assert rc == 0
+    assert capture.env is not None
+    assert capture.env["PATH"] == f"{tree_path}/.pixi/envs/default/bin:/bin"
+    assert capture.env["CONDA_PREFIX"] == f"{tree_path}/.pixi/envs/default"
+
+
+def test_run_codex_resume_uses_first_class_resume_argv(monkeypatch, tmp_path):
+    capture = LaunchCapture()
+    source = tmp_path / "source"
+    tree_path = tmp_path / "tree"
+
+    monkeypatch.setattr(session.git, "repo_root", lambda: str(source))
+    monkeypatch.setattr(
+        session.identity,
+        "resolve_repo",
+        lambda root: Repo("arthur-debert", "shipit"),
+    )
+    monkeypatch.setattr(session, "new_agent_hash", lambda: "deadbeef")
+    monkeypatch.setattr(session.time, "time", lambda: 1783585261)
+    monkeypatch.setattr(session.os, "getpid", lambda: 4242)
+
+    def fake_creator(spec, *, source_repo):
+        capture.spec = spec
+        return Tree(path=str(tree_path), branch="ephemeral/codex-1", base="origin/main")
+
+    def fake_execute(file: str, argv: list[str], env: dict[str, str]) -> None:
+        capture.exec_file = file
+        capture.argv = argv
+
+    rc = session.run_codex(
+        ["--model", "gpt-5"],
+        resume_thread_id="019f-thread",
+        creator=fake_creator,
+        chdir=lambda path: None,
+        execute=fake_execute,
+        which=lambda binary: "/usr/local/bin/codex",
+        environ={"PATH": "/bin"},
+    )
+
+    assert rc == 0
+    assert capture.exec_file == "codex"
+    assert capture.argv == [
+        "codex",
+        "resume",
+        "--cd",
+        str(tree_path),
+        "--dangerously-bypass-approvals-and-sandbox",
+        "019f-thread",
+        "--model",
+        "gpt-5",
+    ]
+
+
 def test_run_codex_spec_matches_the_coordinator_worktreecreate_spec(
     monkeypatch, tmp_path
 ):

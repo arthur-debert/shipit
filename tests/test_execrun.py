@@ -98,6 +98,26 @@ def test_nonzero_with_check_false_returns_result(monkeypatch):
     assert not result.ok
 
 
+def test_prompt_bearing_argv_is_summarized_for_exec_records():
+    display = execrun._display_argv(
+        [
+            "codex",
+            "exec",
+            "-c",
+            "developer_instructions=SECRET ROLE SLICE",
+            "--model",
+            "gpt-5.5",
+            "SECRET TASK PROMPT",
+        ]
+    )
+
+    joined = " ".join(display)
+    assert "SECRET ROLE SLICE" not in joined
+    assert "SECRET TASK PROMPT" not in joined
+    assert "developer_instructions=<redacted: prompt sha256=" in joined
+    assert joined.count("<redacted: prompt sha256=") == 2
+
+
 # ---------------------------------------------------------------------------
 # Missing binary / OS normalization
 # ---------------------------------------------------------------------------

@@ -69,6 +69,7 @@ parameter defaulting to :func:`run`, and the runner's own suite fakes
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import shlex
@@ -179,13 +180,58 @@ def _record_fields(
     masks every field, on every sink, at format time.
     """
     fields: dict[str, int | str] = {
-        "argv": shlex.join(argv),
+        "argv": shlex.join(_display_argv(argv)),
         "cwd": str(cwd or "."),
     }
     for key, value in outcome.items():
         if value is not None:
             fields[key] = value
     return fields
+
+
+def _prompt_summary(text: str) -> str:
+    """Stable bounded stand-in for agent prompt/developer-instruction payloads."""
+    digest = hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()[:12]
+    return f"<redacted: prompt sha256={digest} chars={len(text)}>"
+
+
+def _display_argv(argv: list[str] | tuple[str, ...]) -> list[str]:
+    """Return an argv safe for durable logs, preserving shape but not prompts.
+
+    Agent CLIs carry large/sensitive prompt material as argv (`claude -p`,
+    `codex exec`, `agy --print`) and Codex additionally accepts a
+    `developer_instructions=...` config override. The child still receives the
+    original argv; only the structured Exec record and its human message use
+    this summarized view.
+    """
+    display = [str(arg) for arg in argv]
+    if not display:
+        return display
+
+    def redact_after(flag: str) -> None:
+        if flag in display:
+            index = display.index(flag) + 1
+            if index < len(display):
+                display[index] = _prompt_summary(display[index])
+
+    binary = os.path.basename(display[0])
+    if binary == "claude":
+        redact_after("-p")
+    elif binary == "codex" and "exec" in display:
+        for index, arg in enumerate(display):
+            if arg.startswith("developer_instructions="):
+                display[index] = "developer_instructions=" + _prompt_summary(
+                    arg.split("=", 1)[1]
+                )
+        # The prompt is the final positional argument in shipit's codex adapter.
+        if display:
+            display[-1] = _prompt_summary(display[-1])
+    elif binary in {"agy", "antigravity"}:
+        redact_after("--print")
+        for index, arg in enumerate(display):
+            if arg.startswith("--print="):
+                display[index] = "--print=" + _prompt_summary(arg.split("=", 1)[1])
+    return display
 
 
 def run(

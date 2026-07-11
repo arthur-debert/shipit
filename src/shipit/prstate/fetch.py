@@ -417,7 +417,11 @@ def gather_reviews(pr: PrId, roster: Roster) -> ReadinessView:
 
 
 def gather(
-    pr: PrId, roster: Roster, *, sightings: events.Sightings | None = None
+    pr: PrId,
+    roster: Roster,
+    *,
+    sightings: events.Sightings | None = None,
+    emit_events: bool = True,
 ) -> ReadinessView:
     """Fetch every raw input the engine needs for `pr`, live, via `gh`.
 
@@ -483,6 +487,7 @@ def gather(
         # `evaluate`'s observational events dedupe against the SAME registry the
         # gather-side sightings below use.
         sightings=sightings,
+        emit_events=emit_events,
     )
     # The `review.received` dev-cycle event (ADR-0032 / LOG04-WS02): the gather
     # is the engine's first sight of a LANDED review — nothing in shipit posts
@@ -492,25 +497,26 @@ def gather(
     # ONE registry; ADR-0029/0032 reject a cross-run store), keyed by the
     # review's own identity so a reader can dedupe on data. A PENDING review
     # has not landed (it is an unsubmitted draft) and is not sighted.
-    for review in ctx.reviews:
-        if review.state == "PENDING":
-            continue
-        events.emit_once(
-            sightings,
-            logger,
-            "review.received",
-            (repo.slug, pr.number, review.review_id),
-            "review received from %s on pr#%s (%s)",
-            review.author,
-            pr.number,
-            review.state.lower(),
-            extra={
-                "pr": pr.number,
-                "reviewer": review.author,
-                "review_id": review.review_id,
-                "review_state": review.state,
-            },
-        )
+    if emit_events:
+        for review in ctx.reviews:
+            if review.state == "PENDING":
+                continue
+            events.emit_once(
+                sightings,
+                logger,
+                "review.received",
+                (repo.slug, pr.number, review.review_id),
+                "review received from %s on pr#%s (%s)",
+                review.author,
+                pr.number,
+                review.state.lower(),
+                extra={
+                    "pr": pr.number,
+                    "reviewer": review.author,
+                    "review_id": review.review_id,
+                    "review_state": review.state,
+                },
+            )
     # The fetch milestone (glassbox spray): the full snapshot is the input every
     # `pr status` / `pr next` decision reads, so its shape + duration are the
     # lifecycle record — at info, with the pr key bound above.
@@ -546,6 +552,7 @@ def context_from_raw(
     overrides: dict[int, Severity] | None = None,
     now: datetime | None = None,
     sightings: events.Sightings | None = None,
+    emit_events: bool = True,
 ) -> ReadinessView:
     """Pure: assemble a `ReadinessView` from raw gh payloads. No network.
 
@@ -598,6 +605,7 @@ def context_from_raw(
         # when someone recorded one.
         overrides=overrides or {},
         sightings=sightings if sightings is not None else events.Sightings(),
+        emit_events=emit_events,
     )
 
 

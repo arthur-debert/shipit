@@ -313,7 +313,7 @@ def test_scrub_tree_env_is_silent_when_nothing_leaks(caplog):
 
 
 # ---------------------------------------------------------------------------
-# The agent.spawned / agent.done dev-cycle events (LOG04-WS02 / ADR-0032)
+# The agent phase / spawned / done dev-cycle events (LOG04-WS02 / ADR-0032)
 # ---------------------------------------------------------------------------
 
 
@@ -333,7 +333,13 @@ def test_write_spawn_tags_agent_spawned_and_agent_done(tmp_path, caplog):
     with caplog.at_level(logging.INFO, logger="shipit.spawn"):
         rc = _write_spawn(tmp_path)
     assert rc == 0
-    assert _event_tags(caplog) == ["agent.spawned", "agent.done"]
+    assert _event_tags(caplog) == [
+        "agent.phase",
+        "agent.spawned",
+        "agent.phase",
+        "agent.done",
+        "agent.phase",
+    ]
 
 
 def test_reviewer_spawn_tags_agent_spawned_and_agent_done(tmp_path, caplog):
@@ -343,7 +349,12 @@ def test_reviewer_spawn_tags_agent_spawned_and_agent_done(tmp_path, caplog):
             repo="widget", epic="TRE03", ws=3, role="reviewer", bounds=b
         )
     assert rc == 0
-    assert _event_tags(caplog) == ["agent.spawned", "agent.done"]
+    assert _event_tags(caplog) == [
+        "agent.phase",
+        "agent.spawned",
+        "agent.phase",
+        "agent.done",
+    ]
 
 
 def test_nonzero_child_exit_tags_no_agent_done(tmp_path, caplog):
@@ -353,4 +364,4 @@ def test_nonzero_child_exit_tags_no_agent_done(tmp_path, caplog):
     with caplog.at_level(logging.INFO, logger="shipit.spawn"):
         rc = _write_spawn(tmp_path, launcher=_launcher(returncode=3))
     assert rc == 1
-    assert _event_tags(caplog) == ["agent.spawned"]
+    assert _event_tags(caplog) == ["agent.phase", "agent.spawned", "agent.phase"]

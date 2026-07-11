@@ -70,7 +70,7 @@ def patched(monkeypatch):
         return PrId(repo=repo, number=pr if pr is not None else 42)
 
     monkeypatch.setattr(status_verb, "resolve_pr", resolve)
-    monkeypatch.setattr(status_verb, "gather", lambda target, roster: target)
+    monkeypatch.setattr(status_verb, "gather", lambda target, roster, **kw: target)
     monkeypatch.setattr(status_verb, "load_roster", lambda: Roster())
     monkeypatch.setattr(status_verb, "evaluate", lambda ctx: _fake_status(ctx.number))
 
@@ -110,6 +110,29 @@ def test_status_text_renders_state_and_next_action(patched, capsys):
     out = capsys.readouterr().out
     assert "ready" in out
     assert "run `pr ready`" in out
+
+
+def test_status_gathers_without_observational_flow_events(monkeypatch, capsys):
+    monkeypatch.setattr(
+        status_verb,
+        "resolve_pr",
+        lambda pr, repo, branch: PrId(repo=repo, number=42),
+    )
+    captured: dict = {}
+
+    def gather(target, roster, **kw):
+        captured.update(kw)
+        return target
+
+    monkeypatch.setattr(status_verb, "gather", gather)
+    monkeypatch.setattr(status_verb, "load_roster", lambda: Roster())
+    monkeypatch.setattr(status_verb, "evaluate", lambda ctx: _fake_status(ctx.number))
+
+    rc = cli.main(["pr", "status"])
+
+    assert rc == 0
+    assert captured == {"emit_events": False}
+    assert "ready" in capsys.readouterr().out
 
 
 def test_format_status_annotates_degraded_on_the_state_line():
@@ -199,7 +222,7 @@ def test_gh_failure_on_known_pr_is_runtime_tier_error_exit_1(monkeypatch, capsys
         status_verb, "resolve_pr", lambda pr, repo, branch: PrId(repo=repo, number=42)
     )
 
-    def boom(target, roster):
+    def boom(target, roster, **kw):
         raise ExecError(["gh"], rc=1, stderr="gh exploded")
 
     monkeypatch.setattr(status_verb, "gather", boom)

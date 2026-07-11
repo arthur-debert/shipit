@@ -69,6 +69,7 @@ EVENT_NAMES = frozenset(
         # substrate + agents
         "tree.created",
         "agent.spawned",
+        "agent.phase",
         "agent.done",
         # the pinned launcher's sanctioned dev override (ADR-0033): a shipit
         # invocation running under SHIPIT_EXEC announces the bypass durably —

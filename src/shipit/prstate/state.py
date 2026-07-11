@@ -349,7 +349,8 @@ def evaluate(
                 ),
             },
         )
-    _emit_snapshot_events(ctx, status, required)
+    if ctx.emit_events:
+        _emit_snapshot_events(ctx, status, required)
     return status
 
 

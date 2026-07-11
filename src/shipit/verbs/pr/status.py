@@ -92,7 +92,7 @@ def run(
     # The ONE reviewer-config read of this invocation (CLI01-WS04): the Roster
     # rides the snapshot from here — the engine and adapters read every
     # per-reviewer setting off it as a value.
-    ctx = gather(target, load_roster())
+    ctx = gather(target, load_roster(), emit_events=False)
     status = evaluate(ctx)
     emit(status, format_status, as_json=as_json)
     return 0

@@ -54,8 +54,9 @@ import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from .. import logcontext
+from .. import logcontext, pixienv
 from ..agent.backend import CODEX
+from ..harness import activation as harness_activation
 from ..spawn.backends.codex import CodexAdapter
 from ..spawn.launch import scrub_tree_env
 
@@ -110,8 +111,39 @@ def codex_argv(tree: str | Path, extra: Sequence[str] = ()) -> list[str]:
     return [CODEX.binary, "--cd", str(tree), BYPASS_FLAG, *extra]
 
 
+def codex_resume_argv(
+    tree: str | Path, thread_id: str, extra: Sequence[str] = ()
+) -> list[str]:
+    """The first-class Codex resume argv, deliberately re-rooted in ``tree``.
+
+    ``codex resume --cd <tree> <thread-id>`` preserves Codex's conversation
+    identity while making shipit's session Tree identity explicit. The same
+    low-friction coordinator posture is carried so a resumed coordinator can
+    still commit, push, and run ``gh`` inside the replacement Tree.
+    """
+    return [CODEX.binary, "resume", "--cd", str(tree), BYPASS_FLAG, thread_id, *extra]
+
+
+def activation_for_tree(tree: str | Path, *, runner=None) -> pixienv.Activation | None:
+    """Capture pixi activation for ``tree`` when it has an activatable toolchain.
+
+    Codex has no ``CLAUDE_ENV_FILE`` preamble, so the launch path applies the
+    same pixi activation snapshot directly to the child env before ``execvpe``.
+    Missing/non-pixi toolchains are a clean no-op; pixi failures propagate to
+    the verb, which logs them and falls back to an unactivated launch.
+    """
+    toolchain = harness_activation.detect_toolchain(Path(tree))
+    if toolchain is None:
+        return None
+    return pixienv.shell_hook(toolchain.manifest, runner=runner)
+
+
 def codex_env(
-    parent_env: Mapping[str, str], *, session_id: str, tree: str | Path
+    parent_env: Mapping[str, str],
+    *,
+    session_id: str,
+    tree: str | Path,
+    activation: pixienv.Activation | None = None,
 ) -> dict[str, str]:
     """The Codex session's COMPLETE child environment (for ``execvpe``).
 
@@ -143,6 +175,8 @@ def codex_env(
     Returns a fresh dict, never the caller's mapping.
     """
     env = scrub_tree_env(CodexAdapter().child_env(parent_env))
+    if activation is not None:
+        env = pixienv.activated_env(env, activation)
     for key in ("ROLE", "AGENT", "RUN"):
         env.pop(logcontext.ENV_PREFIX + key, None)
     env[logcontext.ENV_PREFIX + "SESSION"] = session_id

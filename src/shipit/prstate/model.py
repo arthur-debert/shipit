@@ -263,6 +263,11 @@ class ReadinessView:
     sightings: events.Sightings = field(
         default_factory=events.Sightings, repr=False, compare=False
     )
+    # Whether evaluating this snapshot should emit observational dev-cycle
+    # events. Read-only status renders use False so repeated status reads do
+    # not mint duplicate historical flow milestones; mutating/waiting drivers
+    # keep the default True and thread Sightings through their invocation.
+    emit_events: bool = field(default=True, repr=False, compare=False)
 
     # --- core, delegated to the composed PR (ADR-0024) ----------------------
     # The engine and adapters read `ctx.head_sha` / `ctx.is_draft` / … as before;
@@ -342,6 +347,7 @@ def readiness_view(
     requested_at: dict[str, str] | None = None,
     overrides: dict[int, Severity] | None = None,
     sightings: events.Sightings | None = None,
+    emit_events: bool = True,
 ) -> ReadinessView:
     """Compose a :class:`ReadinessView` from flattened core values — the ergonomic
     builder for callers (and tests) that hold the core directly rather than a raw
@@ -380,4 +386,5 @@ def readiness_view(
         requested_at=requested_at if requested_at is not None else {},
         overrides=overrides if overrides is not None else {},
         sightings=sightings if sightings is not None else events.Sightings(),
+        emit_events=emit_events,
     )

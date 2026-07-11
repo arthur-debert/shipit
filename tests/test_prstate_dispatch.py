@@ -451,7 +451,7 @@ def test_flip_act_goes_through_the_shared_guard(monkeypatch):
     monkeypatch.setattr(dispatch_mod, "guarded_flip", fake_guard)
     line = NextActs(TARGET).flip_ready(_status(TaskState.READY))
     assert flipped == [TARGET]
-    assert line == "flipped draft→ready — human validates + merges"
+    assert line == "flipped draft→ready — ready for human validation"
 
 
 def test_report_act_surfaces_the_engines_next_action():

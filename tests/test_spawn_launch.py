@@ -189,7 +189,8 @@ def test_exec_runner_emits_the_exec_record_with_duration(monkeypatch, caplog):
     records = [r for r in caplog.records if r.name == "shipit.exec"]
     assert len(records) == 1  # exactly one record per Exec
     message = records[0].getMessage()
-    assert "claude -p t" in message
+    assert "claude -p '<redacted: prompt sha256=" in message
+    assert " -p t" not in message
     assert "cwd=/trees/x" in message
     assert "rc=0" in message
     assert "ms" in message  # the duration rides the record

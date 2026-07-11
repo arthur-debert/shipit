@@ -55,6 +55,8 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from ...agent.backend import CODEX as _IDENTITY
+from ...harness.prompts import load_role_defs, render
+from ...harness.role import Role
 from .base import BackendAdapter
 
 #: The codex auth-env vars :meth:`CodexAdapter.child_env` scrubs (ADR-0020 §codex
@@ -121,6 +123,11 @@ NETWORK_ACCESS_OVERRIDE = "sandbox_workspace_write.network_access=true"
 #: ``medium`` / ``high``) are valid values verbatim.
 REASONING_EFFORT_KEY = "model_reasoning_effort"
 
+# Codex's developer-level instruction override. Spawned roles use this for the
+# generated role slice (ADR-0011) while the positional prompt stays the filled
+# task brief.
+DEVELOPER_INSTRUCTIONS_KEY = "developer_instructions"
+
 
 def _role_preamble(role: str) -> str:
     """The role line prepended to a codex prompt (the no-``--agent`` conveyance).
@@ -133,6 +140,20 @@ def _role_preamble(role: str) -> str:
     acting as so its judgement is anchored to it.
     """
     return f"You are acting as the '{role}' role for this Run."
+
+
+def _role_instructions(role: str) -> str:
+    """The developer-instruction payload for a spawned Codex role.
+
+    Known shipit roles get the generated role-scoped prompt. Unknown role names
+    keep the old minimal role line so a custom/non-registered worker still has a
+    sane identity without pretending to have a generated slice.
+    """
+    try:
+        known = Role(role)
+    except ValueError:
+        return _role_preamble(role)
+    return render(load_role_defs()).role_prompts[known]
 
 
 class CodexAdapter(BackendAdapter):
@@ -201,7 +222,7 @@ class CodexAdapter(BackendAdapter):
         It is never added to a WRITE Run (a write Run emits no captured JSON).
         """
         del cwd  # codex roots via the process cwd; no path belongs in its argv.
-        prompt = f"{_role_preamble(role)}\n\n{task}"
+        prompt = task
         posture = (
             [
                 "--ephemeral",
@@ -226,6 +247,8 @@ class CodexAdapter(BackendAdapter):
             "--skip-git-repo-check",
             *posture,
             *reasoning,
+            "-c",
+            f"{DEVELOPER_INSTRUCTIONS_KEY}={_role_instructions(role)}",
             "--model",
             self.model,
             prompt,
