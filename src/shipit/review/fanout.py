@@ -15,7 +15,11 @@ union/dedup/routing machinery below.
 By DEFAULT (RVW02-WS08) the union is posted through a MECHANICAL, deterministic
 dedup (:func:`dedup_union`): findings sharing a ``(file, line, claim)`` merge
 into one canonical that posts with its OWN pass-assigned severity — no LLM judge
-in the default path. The WS05/F2 baseline (#638, #665) showed the LLM
+in the default path. An OPT-IN treatment (#750, ``semantic_dedup`` — a Review
+Lab cell's ``dedup = "semantic"``, never the product default until a cell earns
+it) additionally collapses same-round NEAR-duplicates: same file, same line,
+claim-token overlap at the #673 seam's threshold (:func:`~shipit.review.match.same_claim`
+— still deterministic and LLM-free, ADR-0048). The WS05/F2 baseline (#638, #665) showed the LLM
 **Calibrator** (:mod:`shipit.review.calibrator`) net-negative on round-1 major
 recall (it refuted a true major the passes found, dragging recall below the
 single-pass baseline), so it is OPTIONAL and OFF by default. It is kept warm —
@@ -114,6 +118,7 @@ from .calibrator import (
 )
 from .diff import RangeView
 from .dimensions import Dimension, known_dimension_names, resolve_dimensions
+from .match import Claim, same_claim
 from .schema import finding_from_dict
 from .usage import UNREPORTED
 
@@ -215,6 +220,7 @@ def run_fanout_review(
     instructions_path: str | None = None,
     dimensions: Sequence[str] | None = None,
     calibrator: CalibratorConfig | None = None,
+    semantic_dedup: bool = False,
     nit_cap: int | None = None,
     invocation_overrides: Mapping[str, Mapping[str, str]] | None = None,
     incremental: bool = False,
@@ -245,6 +251,14 @@ def run_fanout_review(
     model run. A ``calibrator`` :class:`CalibratorConfig` opts the dormant LLM
     judge back on (the WS05/F2 baseline found it net-negative on major recall,
     #638/#665), routing the union through :func:`run_calibrator` instead.
+    ``semantic_dedup`` (#750) opts the mechanical dedup into the additional
+    NEAR-duplicate collapse (same file, same line, differently-worded same
+    claim — :func:`dedup_union` with ``semantic=True``; still deterministic and
+    LLM-free): a Review Lab treatment (a cell's ``dedup = "semantic"``), never
+    the product default until a cell earns it. It is the OFF path's knob, so
+    combining it with a ``calibrator`` is a caller error (``ValueError``) — the
+    judge does its own semantic dedup, and running both would post an arm no
+    config declares.
 
     ``incremental`` (RVW02-WS06, ADR-0045) selects the round-≥2 shape: ONE
     full-scope pass over the FIX RANGE — ``target.base_sha..target.head_sha``,
@@ -336,6 +350,13 @@ def run_fanout_review(
             "— the dry-run contract prints a would-run Tree launch, and an "
             "offline replay has no Tree"
         )
+    if semantic_dedup and calibrator is not None:
+        raise ValueError(
+            "run_fanout_review: semantic_dedup and a calibrator are mutually "
+            "exclusive — semantic_dedup is the mechanical (judge-off) path's "
+            "near-duplicate collapse (#750), and the calibrator does its own "
+            "dedup; both at once would post an arm no config declares"
+        )
     if invocation_overrides and incremental:
         raise ValueError(
             "run_fanout_review: invocation_overrides and incremental are "
@@ -411,9 +432,14 @@ def run_fanout_review(
                 incremental_range=incremental_range,
             )
         if calibrator is None:
+            collapse = (
+                " with the semantic near-duplicate collapse (#750)"
+                if semantic_dedup
+                else ""
+            )
             print(
                 "(dry-run: calibrator OFF — would post the mechanically-deduped "
-                "union using each pass's own severity)"
+                f"union{collapse} using each pass's own severity)"
             )
         else:
             print(
@@ -701,8 +727,10 @@ def run_fanout_review(
 
     if calibrator is None:
         # DEFAULT (RVW02-WS08): post the MECHANICALLY-deduped union using each
-        # pass's own severity — no model run, no LLM judge.
-        entries = dedup_union(union)
+        # pass's own severity — no model run, no LLM judge. `semantic_dedup`
+        # (#750, the Lab treatment) adds the deterministic near-duplicate
+        # collapse on top of the exact-claim merge.
+        entries = dedup_union(union, semantic=semantic_dedup)
         feedback = ""
     else:
         # Dormant judge opted back on: route the union through the calibrator.
@@ -858,6 +886,7 @@ def run_fanout_review(
         entries=findings,
         posted=posted,
         calibrated=calibrated,
+        semantic=semantic_dedup,
     )
     review = {
         "summary": {
@@ -1018,6 +1047,8 @@ def route_calibrated(
 
 def dedup_union(
     union: Sequence[Mapping[str, Any]],
+    *,
+    semantic: bool = False,
 ) -> tuple[CalibratedFinding, ...]:
     """Mechanically dedup the pass ``union`` into judged entries — the DEFAULT
     round-1 path (RVW02-WS08, calibrator off). PURE, no model.
@@ -1036,24 +1067,54 @@ def dedup_union(
     reaches the record (and, unless a nit-cap flip in :func:`route_calibrated`
     suppresses it, the PR).
 
+    ``semantic`` (#750, the opt-in Review Lab treatment — never the default
+    until a cell earns it) additionally collapses NEAR-duplicates: two passes
+    reporting the SAME defect at the SAME location in different words (the
+    #673 ``eval.rs:1299`` case the exact-claim key cannot merge). The rule is
+    the deterministic #673 seam (:func:`~shipit.review.match.same_claim` — no
+    LLM, ADR-0048) applied CONSERVATIVELY: both candidates must name the same
+    non-empty file (:func:`_near_duplicate` — a file-less candidate never
+    semantically merges, and cross-file candidates are never equivalent) with
+    zero line slack (:data:`SEMANTIC_DEDUP_LINE_SLACK` — every pass reviewed
+    the same head, so there is no cross-head drift to absorb), and a candidate
+    joins the FIRST group (creation order) where it near-matches EVERY member
+    — no transitive chaining, so a bridging middle finding can never fuse two
+    genuinely distinct defects at one line. Exact-key restatements still merge
+    unconditionally, exactly as without ``semantic``. Grouping is a pure
+    function of the union order, so the result is deterministic across runs.
+
     Every entry is disposition ``post`` — the nit cap and the duplicates-never-
     post rule are applied downstream by :func:`route_calibrated`, exactly as for
     the calibrator's entries. Canonicals are emitted first (in first-seen group
     order), then their duplicates, so the stable severity sort in
     :func:`route_calibrated` always sees a canonical before its duplicate.
     """
-    groups: dict[tuple[str, int | None, str], list[Mapping[str, Any]]] = {}
-    order: list[tuple[str, int | None, str]] = []
+    grouped: list[list[Mapping[str, Any]]] = []
+    group_by_key: dict[tuple[str, int | None, str], list[Mapping[str, Any]]] = {}
     for candidate in union:
         key = _dedup_key(candidate)
-        if key not in groups:
-            groups[key] = []
-            order.append(key)
-        groups[key].append(candidate)
+        group = group_by_key.get(key)
+        if group is None and semantic:
+            # The #750 near-duplicate collapse: join the FIRST group whose
+            # EVERY member is the same claim (conservative — no chaining).
+            group = next(
+                (
+                    members
+                    for members in grouped
+                    if all(_near_duplicate(candidate, member) for member in members)
+                ),
+                None,
+            )
+        if group is None:
+            group = []
+            grouped.append(group)
+        group.append(candidate)
+        # An exact restatement always follows its twin into the same group,
+        # even when that group was formed by a semantic join.
+        group_by_key.setdefault(key, group)
 
     entries: list[CalibratedFinding] = []
-    for key in order:
-        members = groups[key]
+    for members in grouped:
         canonical = min(
             members,
             key=lambda c: (
@@ -1087,23 +1148,66 @@ def dedup_union(
     return tuple(entries)
 
 
+#: How far apart two same-round findings' lines may sit and still be
+#: near-duplicate candidates in the SEMANTIC collapse (#750): ZERO, on purpose.
+#: The #673 seam's default slack (:data:`shipit.review.match.NEAR_MISS_LINE_SLACK`)
+#: absorbs drift between a pinned fixture head and what a reviewer reports —
+#: but within ONE round every pass reviewed the SAME head, so there is no
+#: drift to absorb, and two findings only collapse when they name the same
+#: line (or are both file-scoped). Conservatism is the contract: an
+#: over-merged pair of distinct defects is worse than a surviving duplicate.
+SEMANTIC_DEDUP_LINE_SLACK = 0
+
+
+def _near_duplicate(a: Mapping[str, Any], b: Mapping[str, Any]) -> bool:
+    """Are two union candidates the SAME defect stated in different words —
+    the #750 semantic-collapse predicate? PURE, deterministic, no LLM.
+
+    The #673 same-claim seam (:func:`~shipit.review.match.same_claim`: same
+    file, lines within slack, claim-token overlap ≥ the ADR-0048 threshold)
+    applied at its most conservative: zero line slack
+    (:data:`SEMANTIC_DEDUP_LINE_SLACK`), and a candidate with NO file never
+    matches — the seam would compare two file-less claims on text alone, and a
+    location-free merge has no "same location" to be conservative about.
+    Cross-file candidates are never equivalent (the seam's own non-negotiable
+    coordinate).
+    """
+    file = str(a.get("file") or "")
+    if not file:
+        return False
+    return same_claim(
+        Claim(file=file, line=_candidate_line(a), text=str(a.get("text") or "")),
+        Claim(
+            file=str(b.get("file") or ""),
+            line=_candidate_line(b),
+            text=str(b.get("text") or ""),
+        ),
+        line_slack=SEMANTIC_DEDUP_LINE_SLACK,
+    )
+
+
+def _candidate_line(candidate: Mapping[str, Any]) -> int | None:
+    """A union candidate's line as the domain shape: a real ``int`` or ``None``
+    (file-scoped) — the same bool-excluding coercion the dedup key and
+    :func:`_finding_from_candidate` apply."""
+    line = candidate.get("line")
+    return line if isinstance(line, int) and not isinstance(line, bool) else None
+
+
 def _dedup_key(candidate: Mapping[str, Any]) -> tuple[str, int | None, str]:
     """The mechanical dedup identity: file + line + normalized claim.
 
     The claim is the finding text with runs of whitespace collapsed and
     case-folded, so trivially-reworded-but-identical restatements of the same
-    claim at the same location still merge; anything more (semantic overlap of
-    differently-worded findings) is the LLM judge's job, deliberately NOT
-    attempted here — a mechanical merge stays conservative so it never fuses two
-    genuinely distinct findings.
+    claim at the same location still merge; anything more — the semantic
+    overlap of differently-worded findings — is either the opt-in #750
+    near-duplicate collapse (:func:`_near_duplicate`, still deterministic) or
+    the LLM judge's job, deliberately NOT attempted in this key — the exact
+    key stays maximally conservative so the default never fuses two genuinely
+    distinct findings.
     """
-    line = candidate.get("line")
     claim = " ".join(str(candidate.get("text") or "").split()).casefold()
-    return (
-        str(candidate.get("file") or ""),
-        line if isinstance(line, int) and not isinstance(line, bool) else None,
-        claim,
-    )
+    return (str(candidate.get("file") or ""), _candidate_line(candidate), claim)
 
 
 def _candidate_id(candidate: Mapping[str, Any]) -> int:
@@ -1129,13 +1233,12 @@ def _finding_from_candidate(
         if severity is not None
         else (parse_severity(candidate.get("severity")) or DEFAULT_SEVERITY)
     )
-    line = candidate.get("line")
     confidence = candidate.get("confidence")
     return Finding(
         severity=resolved,
         text=str(candidate.get("text") or ""),
         file=str(candidate.get("file") or ""),
-        line=line if isinstance(line, int) and not isinstance(line, bool) else None,
+        line=_candidate_line(candidate),
         category=str(candidate.get("category") or ""),
         confidence=(
             float(confidence)
@@ -1221,6 +1324,7 @@ def _attestation(
     entries: Sequence[JudgedFinding],
     posted: int,
     calibrated: bool,
+    semantic: bool = False,
 ) -> str:
     """The round's attestation paragraph for the posted summary: what ran
     (the default single full-scope pass, ADR-0052, or the opted-in dimension
@@ -1230,7 +1334,9 @@ def _attestation(
 
     ``calibrated`` selects the routing phrasing: the DEFAULT off path posts the
     mechanically-deduped union (only nit-suppressed and duplicate route out — no
-    drop/out-of-scope, which only the LLM judge produces); the on path posts
+    drop/out-of-scope, which only the LLM judge produces) — with ``semantic``
+    (#750, the near-duplicate collapse) the off-path line says so, so a treated
+    round never reads as the stock mechanical arm; the on path posts
     "after calibration" with the full routed-out breakdown. Either way the
     routed-out counts plus ``posted`` plus the merged-away ``duplicate`` count
     sum to ``union_size``: every candidate is accounted for, so the arithmetic a
@@ -1260,9 +1366,10 @@ def _attestation(
         # attest the clean pass without a misleading routing that never ran.
         lines = [f"{prelude}no candidate findings."]
     elif not calibrated:
+        union_word = "semantically-deduped union" if semantic else "deduped union"
         lines = [
             f"{prelude}{union_size} candidate finding(s) -> {posted} posted as the "
-            f"deduped union ({nit_suppressed} nit-suppressed, {duplicates} "
+            f"{union_word} ({nit_suppressed} nit-suppressed, {duplicates} "
             f"duplicate); calibrator off."
         ]
     else:

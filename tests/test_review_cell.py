@@ -271,6 +271,41 @@ def test_calibrator_config_is_constructed_so_a_bad_field_fails_loud():
     assert cell.calibrator is not None and cell.calibrator.backend == "claude"
 
 
+def test_semantic_dedup_parses_for_the_fanout_shape():
+    """`dedup = "semantic"` (#750) is a declared axis like any other: it parses
+    for the fan-out shape, needs no calibrator table (it is the judge-OFF
+    path's deterministic collapse), and lands on the Cell verbatim."""
+    cell = parse_cell(_cell_data(pipeline={"shape": "fanout", "dedup": "semantic"}))
+    assert cell.dedup == "semantic"
+    assert cell.calibrator is None
+
+
+def test_semantic_dedup_rejects_the_single_shape():
+    # A single pass has no union to dedup — same rule as "calibrated".
+    with pytest.raises(CellError, match="only to the fan-out shape"):
+        parse_cell(_cell_data(pipeline={"shape": "single", "dedup": "semantic"}))
+
+
+def test_calibrator_table_with_semantic_dedup_is_loud():
+    # The judge does its own dedup; a semantic cell declaring one is an
+    # unlabeled arm, exactly like the mechanical case.
+    with pytest.raises(CellError, match="dedup is 'semantic'"):
+        parse_cell(
+            _cell_data(
+                pipeline={
+                    "shape": "fanout",
+                    "dedup": "semantic",
+                    "calibrator": {"backend": "claude"},
+                }
+            )
+        )
+
+
+def test_dedup_vocabulary_is_closed():
+    with pytest.raises(CellError, match="mechanical, semantic, calibrated"):
+        parse_cell(_cell_data(pipeline={"shape": "fanout", "dedup": "psychic"}))
+
+
 # --- sweeps ------------------------------------------------------------------------
 
 

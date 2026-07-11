@@ -750,6 +750,210 @@ def test_dedup_union_canonical_precedes_its_duplicate_for_stable_routing():
     assert len(posts) == 1  # exactly one posts; the duplicate does not blow up
 
 
+# --- dedup_union(semantic=True): the #750 near-duplicate collapse (pure) -------
+
+#: The documented #673 evidence pair: core#440 posted the eval.rs:1299
+#: GPU-readback-zero-fill major TWICE — the same defect from two passes in
+#: different words, which the exact-claim mechanical key cannot merge (their
+#: claim-token overlap is ~0.7, above the ADR-0048 threshold).
+_ZERO_FILL_A = (
+    "GPU readback failure zero-fills the comparison buffer, so the compare "
+    "silently passes"
+)
+_ZERO_FILL_B = (
+    "when GPU readback fails the comparison buffer stays zero-filled and the "
+    "compare silently reports a pass"
+)
+
+
+def test_semantic_dedup_collapses_the_differently_worded_duplicate():
+    """The #750 regression on the documented #673 case: two passes reporting
+    the SAME defect at the SAME location in different words collapse to ONE
+    posted finding under `semantic=True` — while the exact-claim mechanical
+    key (the untouched default) still posts both, which is exactly the gap the
+    treatment exists to measure."""
+    union = [
+        _cand(0, _ZERO_FILL_A, severity="major", file="src/bin/eval.rs", line=1299),
+        _cand(1, _ZERO_FILL_B, severity="major", file="src/bin/eval.rs", line=1299),
+    ]
+    mechanical = fanout.dedup_union(union)
+    assert sum(1 for e in mechanical if e.duplicate_of is None) == 2
+    entries = fanout.dedup_union(union, semantic=True)
+    canonicals = [e for e in entries if e.duplicate_of is None]
+    assert len(canonicals) == 1
+    # Every union finding still reaches the record: the merged-away duplicate
+    # rides along with its provenance edge, never erased.
+    assert len(entries) == 2
+
+
+def test_semantic_dedup_keeps_distinct_defects_at_the_same_line():
+    """Two genuinely distinct defects sharing a line stay separate: their
+    claim tokens do not overlap, so the conservative seam never fuses them."""
+    union = [
+        _cand(0, "index off by one when the range is empty", line=7),
+        _cand(1, "lock is never released on the early-return path", line=7),
+    ]
+    entries = fanout.dedup_union(union, semantic=True)
+    assert sum(1 for e in entries if e.duplicate_of is None) == 2
+
+
+def test_semantic_dedup_never_merges_across_files():
+    """File identity is the non-negotiable coordinate (ADR-0048): identical
+    wording in two files is two findings, in semantic mode exactly as in the
+    mechanical default."""
+    union = [
+        _cand(0, "identical claim wording entirely", file="a.py", line=3),
+        _cand(1, "identical claim wording entirely", file="b.py", line=3),
+    ]
+    entries = fanout.dedup_union(union, semantic=True)
+    assert sum(1 for e in entries if e.duplicate_of is None) == 2
+
+
+def test_semantic_dedup_never_merges_file_less_candidates():
+    """A candidate with NO file has no location to be conservative about, so
+    it never semantically merges — only an exact-key restatement could."""
+    union = [
+        _cand(0, "alpha beta gamma delta wording", file="", line=None),
+        _cand(1, "wording alpha beta gamma delta differs", file="", line=None),
+    ]
+    entries = fanout.dedup_union(union, semantic=True)
+    assert sum(1 for e in entries if e.duplicate_of is None) == 2
+
+
+def test_semantic_dedup_zero_line_slack_keeps_adjacent_lines_separate():
+    """SEMANTIC_DEDUP_LINE_SLACK is ZERO: every pass reviewed the same head,
+    so there is no drift to absorb — findings one line apart never collapse."""
+    union = [
+        _cand(0, _ZERO_FILL_A, line=1299),
+        _cand(1, _ZERO_FILL_B, line=1300),
+    ]
+    entries = fanout.dedup_union(union, semantic=True)
+    assert sum(1 for e in entries if e.duplicate_of is None) == 2
+
+
+def test_semantic_dedup_canonical_is_highest_severity_then_lowest_id():
+    """Deterministic canonical selection + full provenance: the most-severe
+    member wins (ties -> lowest union id), the canonical lists its merged
+    group-mates, and each duplicate points back via `duplicate_of` carrying
+    the canonical's severity — the edges the round record persists."""
+    union = [
+        _cand(0, _ZERO_FILL_A, severity="minor", line=1299),
+        _cand(1, _ZERO_FILL_B, severity="major", line=1299),
+        _cand(2, _ZERO_FILL_A + " here", severity="major", line=1299),
+    ]
+    entries = fanout.dedup_union(union, semantic=True)
+    canonical = next(e for e in entries if e.duplicate_of is None)
+    assert canonical.id == 1  # major beats minor; 1 beats 2 on union id
+    assert canonical.finding.severity is Severity.MAJOR
+    assert set(canonical.merged) == {0, 2}
+    duplicates = [e for e in entries if e.duplicate_of is not None]
+    assert {(e.id, e.duplicate_of) for e in duplicates} == {(0, 1), (2, 1)}
+    assert all(e.finding.severity is Severity.MAJOR for e in duplicates)
+    # Canonicals precede their duplicates, so route_calibrated's stable
+    # severity sort always sees the twin first.
+    assert [e.duplicate_of is None for e in entries] == [True, False, False]
+
+
+def test_semantic_dedup_never_chains_through_a_bridging_finding():
+    """A candidate joins a group only by matching EVERY member: a middle
+    finding overlapping two mutually-distinct claims must not fuse them —
+    the conservative no-transitive-chaining rule."""
+    union = [
+        _cand(0, "alpha beta gamma delta", line=9),
+        _cand(1, "alpha beta gamma delta epsilon zeta eta theta", line=9),
+        _cand(2, "epsilon zeta eta theta", line=9),
+    ]
+    entries = fanout.dedup_union(union, semantic=True)
+    canonicals = [e for e in entries if e.duplicate_of is None]
+    # 1 bridges 0 and 2 (full overlap with each), but 2 shares nothing with 0,
+    # so 2 stays its own finding instead of chaining into 0's group.
+    assert len(canonicals) == 2
+    grouped = next(e for e in entries if e.duplicate_of is not None)
+    assert (grouped.id, grouped.duplicate_of) == (1, 0)
+
+
+def test_semantic_dedup_exact_restatement_follows_its_twin_into_the_group():
+    """An exact-key restatement always lands in its twin's group, even when
+    that group was formed by a semantic join — the exact key stays the
+    strongest identity in semantic mode too."""
+    union = [
+        _cand(0, _ZERO_FILL_A, line=1299),
+        _cand(1, _ZERO_FILL_B, line=1299),
+        _cand(2, _ZERO_FILL_B, line=1299),
+    ]
+    entries = fanout.dedup_union(union, semantic=True)
+    canonical = next(e for e in entries if e.duplicate_of is None)
+    assert canonical.id == 0
+    assert set(canonical.merged) == {1, 2}
+
+
+def test_semantic_dedup_rides_the_off_path_and_attests_itself(_seams):
+    """The opt-in treatment end-to-end through the orchestrator: two passes'
+    reworded same-location findings post ONCE, the attestation names the
+    semantic union (a treated round never reads as the stock mechanical arm),
+    and the merged-away duplicate rides the round record with its
+    `duplicate_of` provenance edge."""
+    from shipit.agent import backend as agent_backend
+
+    _seams["reviews"] = {
+        "correctness": _pass_review(
+            [_comment(_ZERO_FILL_A, severity="major", file="e.rs", line=1299)]
+        ),
+        "security-robustness": _pass_review(
+            [_comment(_ZERO_FILL_B, severity="major", file="e.rs", line=1299)]
+        ),
+    }
+    outcome = fanout.run_fanout_review(
+        agent_backend.CODEX,
+        _ctx(),
+        dimensions=["correctness", "security-robustness"],
+        semantic_dedup=True,
+    )
+    assert _seams["union"] is None  # still the off path: no judge ran
+    review = outcome.review
+    assert len(review["comments"]) == 1
+    assert review["comments"][0]["severity"] == "major"
+    assert "semantically-deduped union" in review["summary"]["overall_feedback"]
+    assert "1 duplicate)" in review["summary"]["overall_feedback"]
+    # Both union findings persist for the record: the posted canonical and the
+    # merged-away duplicate with its provenance edge.
+    canonical = next(j for j in outcome.findings if j.duplicate_of is None)
+    duplicate = next(j for j in outcome.findings if j.duplicate_of is not None)
+    assert canonical.posted and not duplicate.posted
+    assert duplicate.duplicate_of == 0  # lowest-union-id canonical of the pair
+
+
+def test_semantic_dedup_with_a_calibrator_is_a_loud_caller_error():
+    """semantic_dedup is the judge-OFF path's knob; combining it with the
+    calibrator would post an arm no config declares."""
+    with pytest.raises(ValueError, match="semantic_dedup"):
+        fanout.run_fanout_review(
+            object(),
+            _ctx(),
+            dimensions=["correctness"],
+            calibrator=_CAL,
+            semantic_dedup=True,
+        )
+
+
+def test_dry_run_semantic_notes_the_collapse_and_bills_nothing(monkeypatch, capsys):
+    from shipit.agent import backend as agent_backend
+
+    monkeypatch.setattr(
+        fanout.producer, "run_tree_review", lambda backend, ctx, **kw: {}
+    )
+    fanout.run_fanout_review(
+        agent_backend.CODEX,
+        _ctx(),
+        dimensions=["correctness"],
+        semantic_dedup=True,
+        dry_run=True,
+    )
+    out = capsys.readouterr().out
+    assert "semantic near-duplicate collapse" in out
+    assert "would calibrate" not in out
+
+
 # --- route_calibrated: the deterministic routing (pure) ------------------------
 
 

@@ -137,7 +137,10 @@ shape = "fanout"            # "single" | "fanout"
 dimensions = ["correctness", …]   # fan-out pass set (omit = the concern set,
                                   # ADR-0045; the fan-out itself is opt-in
                                   # portfolio-wide since ADR-0052)
-dedup = "mechanical"        # "mechanical" | "calibrated"
+dedup = "mechanical"        # "mechanical" | "semantic" | "calibrated"
+                            # ("semantic", #750: the deterministic same-claim
+                            # near-duplicate collapse — same file+line, wording
+                            # differs — layered on the mechanical key; no LLM)
 # [pipeline.calibrator]     # required iff dedup = "calibrated"
 # backend = "claude"
 

@@ -512,6 +512,11 @@ def _run_point(
                 instructions_path=instructions_path,
                 dimensions=cell.dimensions or None,
                 calibrator=cell.calibrator,
+                # `dedup = "semantic"` (#750): the deterministic near-duplicate
+                # collapse — a declared cell axis resolved here, exactly like
+                # the calibrator opt-in above ("calibrated" rides `calibrator`;
+                # "mechanical" is the driver's default).
+                semantic_dedup=cell.dedup == "semantic",
                 invocation_overrides=cell.dimension_invocations or None,
                 cell=point.key,
                 launcher=launcher,
