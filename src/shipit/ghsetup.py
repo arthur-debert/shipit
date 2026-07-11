@@ -6,13 +6,14 @@ Three idempotent passes (install AND update share this surface):
      TARGET repo's own checks (auto-discovered, never phos's captured set).
   b. labels  — ensure the standard label set exists (create-or-update).
   c. secrets — sync the DERIVED requirement set (TOL02-WS02, PRD stories
-     44/45): the registry declarations traversed from the artifact map
-     (:mod:`shipit.release.secretreq`) decide WHICH names must exist; the
-     ``.shipit.toml [secrets]`` table only says where each comes from. A
-     required name with no declared source fails the sync naming the
-     requiring entry; a declared entry nothing requires is flagged as an
-     orphan and NOT pushed (never under- or over-provisions); the
-     doppler/env/prompt resolution path is unchanged.
+     44/45): the registry declarations traversed from the artifact map AND
+     the ``[reviewers]`` table (#740 — a declared funnel reviewer's App
+     credential pair rides the derived set) decide WHICH names must exist
+     (:mod:`shipit.release.secretreq`); the ``.shipit.toml [secrets]`` table
+     only says where each comes from. A required name with no declared source
+     fails the sync naming the requiring entry; a declared entry nothing
+     requires is flagged as an orphan and NOT pushed (never under- or
+     over-provisions); the doppler/env/prompt resolution path is unchanged.
 
 Re-running is a clean no-op: the ruleset is PUT in place when it already exists,
 labels are ``--force`` upserts, and a changed secret is re-set to its new value.
@@ -42,6 +43,7 @@ from typing import Any
 from . import checks as checks_mod
 from . import config, execrun, gh, secretsrc
 from .identity import Repo
+from .prstate import reviewers_config
 from .release import secretreq
 
 logger = logging.getLogger("shipit.ghsetup")
@@ -326,6 +328,7 @@ def sync_secrets(
     artifacts: tuple[config.Artifact, ...],
     sources: list[config.SecretSource],
     *,
+    reviewers: tuple[str, ...],
     dry_run: bool,
     prompt: Callable[[str], str] | None = None,
 ) -> tuple[SecretOutcome, ...]:
@@ -333,11 +336,13 @@ def sync_secrets(
     sources (TOL02-WS02, PRD stories 44/45).
 
     The required names are the registry declarations traversed from the
-    artifact map (:mod:`shipit.release.secretreq`). The seeded App-secret names
-    (:func:`shipit.config.seeded_app_secrets`) are install's concern — seeded
-    into ``[secrets]`` declared and non-optional by ``shipit install`` — so the
-    sync only keeps a DECLARED one off the orphan list (via ``extra_required``),
-    never forcing or demanding them. Three outcome groups, in order:
+    artifact map plus the ``[reviewers]`` declarations
+    (:mod:`shipit.release.secretreq`, #740): ``reviewers`` is the validated
+    roster's required-name tuple, and each declared funnel reviewer (codex /
+    agy) contributes its App credential pair to the required set — so a repo
+    that opts an App reviewer in fails LOUD at sync time when the credentials
+    are unsourced, and a repo that doesn't sees the seeded pairs flagged as
+    orphans instead of pushed. Three outcome groups, in order:
 
     - the non-orphan declared sources, resolved and pushed by
       :func:`push_secrets` (dry-run resolves nothing); a source whose name is in
@@ -349,19 +354,17 @@ def sync_secrets(
     - one ``orphan`` outcome per declared source nothing requires — flagged
       and NOT pushed (never over-provisions, story 44).
     """
-    app_secrets = config.seeded_app_secrets()
-    orphan_names = set(
-        secretreq.orphans(artifacts, sources, extra_required=app_secrets)
-    )
-    required_names = set(secretreq.required_names(artifacts))
+    orphan_names = set(secretreq.orphans(artifacts, sources, reviewers=reviewers))
+    required_names = set(secretreq.required_names(artifacts, reviewers=reviewers))
     # A derived-REQUIRED secret is required by definition: its `optional` flag
     # cannot make an absent value a silent skip, or the sync would succeed while
     # under-provisioning (story 44). The derivation wins over the flag — force
     # required sources non-optional so a missing value resolves to `failed`, not
     # `skipped`. A genuinely optional source (nothing requires it) keeps its
-    # flag. Scoped to the artifact-map derivation: the seeded App secrets are
-    # install's concern (seeded declared + non-optional), so the sync neither
-    # forces nor demands them — it only keeps a declared one off the orphan list.
+    # flag. A declared reviewer's App credentials are in the required set like
+    # any other derived name (#740) — a hand-edited `optional = true` on a pair
+    # the repo's reviewers need can no longer sync "clean" and break the App
+    # later at review-posting time.
     to_push = [
         replace(source, optional=False)
         if source.optional and source.name in required_names
@@ -377,7 +380,7 @@ def sync_secrets(
             action="failed",
             reason=f"required by {req.required_by}; no [secrets] source declares it",
         )
-        for req in secretreq.missing_sources(artifacts, sources)
+        for req in secretreq.missing_sources(artifacts, sources, reviewers=reviewers)
     )
     orphans = tuple(
         SecretOutcome(
@@ -510,16 +513,34 @@ def setup(
     secrets_error: str | None = None
     sources: list[config.SecretSource] = []
     artifacts: tuple[config.Artifact, ...] = ()
+    reviewers: tuple[str, ...] = ()
     try:
         cfg = config.load(cfg_path)
         sources = config.load_secrets(cfg)
         artifacts = config.load_artifacts(cfg)
-    except config.ConfigError as exc:
+        # The reviewers derivation input (#740): the validated roster's required
+        # names, read through the ONE boundary loader (never a second parser).
+        # It searches up from the config's own directory, so it reads the same
+        # `.shipit.toml` the [secrets]/[artifacts] declarations came from.
+        reviewers = reviewers_config.load_roster(
+            str(Path(cfg_path).parent)
+        ).required_names
+    except (
+        config.ConfigError,
+        reviewers_config.RequiredReviewersConfigError,
+    ) as exc:
         # Degraded-but-continuing: the ruleset/labels passes already applied.
         secrets_error = str(exc)
         logger.warning("no secrets applied", exc_info=True, extra={"repo": slug})
     if secrets_error is None:
-        secrets = sync_secrets(slug, artifacts, sources, dry_run=dry_run, prompt=prompt)
+        secrets = sync_secrets(
+            slug,
+            artifacts,
+            sources,
+            reviewers=reviewers,
+            dry_run=dry_run,
+            prompt=prompt,
+        )
     else:
         # No parsed declarations to derive from — the config failure is the
         # report fact; deriving against an empty map would mint phantom
