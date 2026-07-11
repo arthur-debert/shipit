@@ -180,6 +180,13 @@ def test_publish_block_feeds_results_to_the_verb_not_yaml():
     step = next(s for s in publish["steps"] if "release publish" in s.get("run", ""))
     assert step["env"]["MATRIX"] == "${{ inputs.matrix }}"
     assert step["env"]["STAGES"] == "${{ inputs.stages }}"
+    # Direct wf-publish@v1 callers predate the matrix fact. Omitting it must
+    # still compile and must omit the CLI flag, preserving the verb's strict
+    # success-only default instead of passing an invalid empty JSON string.
+    matrix = doc["on"]["workflow_call"]["inputs"]["matrix"]
+    assert matrix["required"] is False
+    assert 'if [[ -n "$MATRIX" ]]' in script
+    assert 'args+=(--matrix "$MATRIX")' in script
 
 
 def test_prepare_pipeline_steps_set_pipefail():
@@ -352,7 +359,6 @@ _SMOKES: dict[str, dict] = {
             "build-result=success",
             "bundle-result=success",
             "sign-result=skipped",
-            f"matrix={_ENTRY}",
             f"unsigned-matrix={_ENTRY}",
             f"stages={_STAGES}",
         ),

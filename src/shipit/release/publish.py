@@ -307,10 +307,10 @@ def check_gate(
                 blockers.append(f"{stage}={result} (live {stage} requires success)")
         elif result not in (RESULT_SUCCESS, RESULT_SKIPPED):
             blockers.append(
-                f"{stage}={result} (skipped-or-success required for a non-live {stage})"
+                f"{stage}={result} (success-or-skipped required for a non-live {stage})"
             )
     if sign not in (RESULT_SUCCESS, RESULT_SKIPPED):
-        blockers.append(f"sign={sign} (skipped-or-success required)")
+        blockers.append(f"sign={sign} (success-or-skipped required)")
     if blockers:
         raise ReleaseError(
             "publish refused — upstream stage results block the release: "

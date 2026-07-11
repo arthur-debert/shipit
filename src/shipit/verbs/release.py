@@ -1145,9 +1145,9 @@ def run_publish(
        PRD story 32) — pure, before any I/O, so a blocked publish touches
        nothing. ``matrix``/``stages`` are the preflight plan's fields
        VERBATIM — the stage-liveness facts (issue #745): an empty matrix
-       proves build (and bundle) non-live, a stages list without ``bundle``
-       proves bundle non-live, and the gate then accepts ``skipped`` for
-       exactly those stages. Omitted facts default to LIVE — the strict
+       proves build non-live, while a stages list without ``bundle`` proves
+       bundle non-live; the gate then accepts ``skipped`` for exactly those
+       stages. Omitted facts default to LIVE — the strict
        contract (a caller that states no plan never weakens the gate);
        liveness is never inferred from the result strings.
     2. The plan (:func:`shipit.release.publish.plan`): the RC guard and

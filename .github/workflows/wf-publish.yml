@@ -69,9 +69,11 @@ on:
           The preflight plan's `matrix` field (JSON, verbatim) — the build
           stage's liveness fact (issue #745): an empty matrix proves the
           skipped build legitimate ("the tag is the release"), and the VERB
-          derives that verdict — this block never translates a result.
+          derives that verdict — this block never translates a result. Optional
+          for backwards compatibility: omitted keeps the strict success-only
+          build gate used by direct callers before issue #745.
         type: string
-        required: true
+        required: false
       sign-result:
         description: >-
           The sign stage's result: success (signed path) or skipped
@@ -212,15 +214,19 @@ jobs:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         # Scar #3 is the verb's first act (pure gate before any I/O), fed
-        # the stage results AND the plan's liveness facts verbatim (issue
-        # #745 — the verb, never this YAML, decides that an empty-matrix
+        # the stage results AND the plan's liveness facts verbatim (issue #745
+        # — the verb, never this YAML, decides that an empty-matrix
         # skipped build/bundle is legitimate); endpoints walk
         # release-before-derived and every dispatch is idempotent-resumable
         # (ADR-0009).
         run: |
-          pixi run --locked ./bin/shipit release publish "$VERSION" \
-            --build-result "$BUILD_RESULT" \
-            --bundle-result "$BUNDLE_RESULT" \
-            --sign-result "$SIGN_RESULT" \
-            --matrix "$MATRIX" \
+          args=(
+            --build-result "$BUILD_RESULT"
+            --bundle-result "$BUNDLE_RESULT"
+            --sign-result "$SIGN_RESULT"
             --stages "$STAGES"
+          )
+          if [[ -n "$MATRIX" ]]; then
+            args+=(--matrix "$MATRIX")
+          fi
+          pixi run --locked ./bin/shipit release publish "$VERSION" "${args[@]}"
