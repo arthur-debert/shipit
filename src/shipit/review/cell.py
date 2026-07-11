@@ -86,9 +86,12 @@ DEFAULT_CELLS_DIR = Path("lab") / "cells"
 SHAPES = ("single", "fanout")
 
 #: The dedup modes of the fan-out shape: the mechanical union dedup (the
-#: shipped default), or the dormant LLM judge opted back on (ADR-0049's late
-#: calibrator cell with its entry bar).
-DEDUP_MODES = ("mechanical", "calibrated")
+#: shipped default), the deterministic semantic near-duplicate collapse layered
+#: on it (#750 — the same-claim seam of :mod:`shipit.review.match`, still
+#: LLM-free; a Lab treatment until a cell earns a default proposal), or the
+#: dormant LLM judge opted back on (ADR-0049's late calibrator cell with its
+#: entry bar).
+DEDUP_MODES = ("mechanical", "semantic", "calibrated")
 
 #: The sweep modes: ``blind`` sweeps repeat the same instructions; ``informed``
 #: sweeps compose the prior sweeps' posted findings into the instructions (an
@@ -471,8 +474,8 @@ def parse_cell(data: Mapping[str, Any], *, where: str = "cell") -> Cell:
         )
     if dedup != "mechanical" and shape != "fanout":
         raise CellError(
-            f"{where}: [pipeline] dedup = 'calibrated' applies only to the "
-            "fan-out shape — a single pass has no union to calibrate"
+            f"{where}: [pipeline] dedup = {dedup!r} applies only to the "
+            "fan-out shape — a single pass has no union to dedup"
         )
     calibrator_raw = pipeline_raw.get("calibrator")
     calibrator: CalibratorConfig | None = None
