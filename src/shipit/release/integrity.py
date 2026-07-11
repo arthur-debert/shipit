@@ -46,7 +46,9 @@ def expected_main_binary(artifact: config.Artifact) -> str:
     """The expected main-binary name for ``artifact`` — the fallback chain
     (workflows.lex §3.2): mainBinaryName (``main-binary``) → productName
     (``product-name``) → the first build target's declared package (its
-    basename — ``./cmd/padz`` → ``padz``) → the artifact name. Pure."""
+    basename — ``./cmd/padz`` → ``padz``) → the artifact name. A package with
+    no usable basename (a bare ``.``/``./``/``..``/``/``) is skipped, never
+    asserted as the expected name. Pure."""
     if artifact.main_binary is not None:
         return artifact.main_binary
     if artifact.product_name is not None:
@@ -54,7 +56,7 @@ def expected_main_binary(artifact: config.Artifact) -> str:
     for target in artifact.build:
         if target.package is not None:
             name = PurePosixPath(target.package).name
-            if name:
+            if name and name not in (".", ".."):
                 return name
     return artifact.name
 

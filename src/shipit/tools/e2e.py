@@ -63,6 +63,15 @@ BINARY_TOOLCHAINS: tuple[str, ...] = ("rust", "go")
 _LEGACY_TR = str.maketrans("abcdefghijklmnopqrstuvwxyz-", "ABCDEFGHIJKLMNOPQRSTUVWXYZ_")
 
 
+def _package_basename(package: str) -> str | None:
+    """The binary name a build target's ``package`` yields — its path basename
+    — or ``None`` when it names no binary: an empty basename or a bare
+    path-navigation token (``./cmd/padz`` → ``padz``; ``.``/``./``/``..``/``/``
+    → ``None``). Pure."""
+    name = PurePosixPath(package).name
+    return name if name and name not in (".", "..") else None
+
+
 def bin_env_var(name: str) -> str:
     """The ``<NAME>_BIN`` env var the harness receives for artifact ``name``.
 
@@ -240,9 +249,9 @@ def binary_location(
     archive composition, TOL02-WS03), which share exactly this derivation.
     Raises :class:`~shipit.config.ConfigError` when the artifact needs a
     binary but declares no binary-producing target, when the target's
-    toolchain has no map leg to build on, or when a go target's package is
-    ambiguous (``.``, ``/`` — no basename to name the binary) — config
-    inconsistencies, refused loudly.
+    toolchain has no map leg to build on, or when a target's package is a bare
+    path-navigation token (``.``, ``./``, ``..``, ``/`` — no basename to name
+    the binary, for rust or go alike) — config inconsistencies, refused loudly.
     """
     target = next((t for t in artifact.build if t.toolchain in BINARY_TOOLCHAINS), None)
     if target is None:
@@ -261,20 +270,27 @@ def binary_location(
             f"[artifacts].{artifact.name} {consumer} needs a [toolchains] "
             f"{target.toolchain} leg to build its binary, and none is mapped"
         )
+    if target.package is not None and _package_basename(target.package) is None:
+        # A path-navigation package (`.`, `./`, `..`, `/`) names no binary —
+        # refuse it here with the real diagnosis (shared by rust and go), never
+        # let it degrade downstream into a nonsense binary path (rust's
+        # `target/release/.`) or a misleading "built green but no binary at
+        # <dir>".
+        hint = (
+            f"declare a real package path like './cmd/{artifact.name}', or drop "
+            f"`package` to build the module root as {artifact.name}"
+            if target.toolchain == "go"
+            else f"declare a real crate name, or drop `package` to build "
+            f"{artifact.name}"
+        )
+        raise config.ConfigError(
+            f"[artifacts].{artifact.name} {target.toolchain} build target "
+            f"package {target.package!r} has no binary name — {hint}"
+        )
     if target.toolchain == "rust":
         relpath = f"target/release/{target.package or artifact.name}"
     elif target.package is None:  # go, module root -> named by the artifact
         relpath = artifact.name
     else:  # go, an explicit package: the built binary is its basename
         relpath = PurePosixPath(target.package).name
-        if not relpath:
-            # An ambiguous package (`.`, `./`, `/`) has no basename to name
-            # the binary — refuse it here with the real diagnosis, never let
-            # it become a downstream "built green but no binary at <dir>".
-            raise config.ConfigError(
-                f"[artifacts].{artifact.name} go build target package "
-                f"{target.package!r} has no binary name — declare a real "
-                f"package path like './cmd/{artifact.name}', or drop "
-                f"`package` to build the module root as {artifact.name}"
-            )
     return BinaryLocation(leg_path=leg_path, relpath=relpath)

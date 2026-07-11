@@ -16,6 +16,8 @@ import plistlib
 import shutil
 import tarfile
 
+import pytest
+
 from shipit import config
 from shipit.release import integrity
 from shipit.verbs import release as release_verb
@@ -64,6 +66,14 @@ def test_expected_name_takes_a_go_package_basename():
 
 def test_expected_name_bottoms_out_at_the_artifact_name():
     artifact = _artifact({"build": ["rust"]})
+    assert integrity.expected_main_binary(artifact) == "phos"
+
+
+@pytest.mark.parametrize("package", [".", "./", "..", "/"])
+def test_expected_name_skips_a_package_with_no_usable_basename(package):
+    # A path-navigation package (`.`/`./`/`..`/`/`) names no binary — the chain
+    # skips it and bottoms out at the artifact name, never asserting `.`/`..`.
+    artifact = _artifact({"build": [{"toolchain": "go", "package": package}]})
     assert integrity.expected_main_binary(artifact) == "phos"
 
 
