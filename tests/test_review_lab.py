@@ -1445,6 +1445,7 @@ def test_the_committed_cells_load_and_pair_fairly():
     assert by_id["fanout-informed"].baseline == "fanout-baseline"
     assert by_id["fanout-sevtiers"].baseline == "fanout-baseline"
     assert by_id["sevtiers-informed"].baseline == "fanout-sevtiers"
+    assert by_id["singlepass"].baseline == "fanout-baseline"
     assert [
         c.id
         for c in load_baseline_lineage(by_id["sevtiers-informed"], fixture, cells_dir)
@@ -1459,6 +1460,7 @@ def test_the_committed_cells_load_and_pair_fairly():
         "fanout-informed": {"sweep_mode"},
         "fanout-sevtiers": {"dimensions"},
         "sevtiers-informed": {"sweep_mode"},
+        "singlepass": {"shape"},
     }
     for treatment in treatments:
         base = by_id[treatment.baseline]
@@ -1497,7 +1499,19 @@ def test_the_committed_cells_load_and_pair_fairly():
     assert by_id["sevtiers-informed"].dimensions == sev_tiers
     assert by_id["fanout-baseline"].dimensions == ()
     assert by_id["fanout-informed"].dimensions == ()
+    assert by_id["singlepass"].dimensions == ()
     assert by_id["fanout-baseline"].sweep_mode == "blind"
     assert by_id["fanout-sevtiers"].sweep_mode == "blind"
     assert by_id["fanout-informed"].sweep_mode == "informed"
     assert by_id["sevtiers-informed"].sweep_mode == "informed"
+    assert by_id["singlepass"].sweep_mode == "blind"
+    # The #666 single-pass treatment's one axis IS the pipeline shape: pin
+    # EVERY committed cell's shape (mirroring the dimensions/sweep_mode blocks
+    # above) so a stray `shape` edit — a fan-out revert on singlepass, or a
+    # `single` slip on any fan-out cell — fails here, not only on the
+    # singlepass pair.
+    assert by_id["singlepass"].shape == "single"
+    assert by_id["fanout-baseline"].shape == "fanout"
+    assert by_id["fanout-informed"].shape == "fanout"
+    assert by_id["fanout-sevtiers"].shape == "fanout"
+    assert by_id["sevtiers-informed"].shape == "fanout"
