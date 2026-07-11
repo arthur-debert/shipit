@@ -327,6 +327,16 @@ def test_resume_cli_last_preserves_backend_flags(monkeypatch):
     assert captured["backend_args"] == ["--model", "opus"]
 
 
+def test_resume_cli_last_rejects_an_explicit_target():
+    result = CliRunner().invoke(
+        session.resume_cmd,
+        ["--last", "--repo", "arthur-debert/shipit", "codex-explicit"],
+    )
+
+    assert result.exit_code == 1
+    assert "pass either a target or --last, not both" in result.output
+
+
 def test_run_codex_spec_matches_the_coordinator_worktreecreate_spec(
     monkeypatch, tmp_path
 ):

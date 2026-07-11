@@ -171,6 +171,30 @@ def test_resolve_merges_session_across_rotated_log_boundary(tmp_path: Path):
     assert target.tree == "/fresh/tree"
 
 
+def test_resolve_last_uses_the_session_with_the_newest_record(tmp_path: Path):
+    active = tmp_path / REPO.owner.login / REPO.name / resume.logsetup.LOG_FILENAME
+    active.parent.mkdir(parents=True)
+    active.with_name(f"{active.name}.1").write_text(
+        json.dumps({"repo": REPO.slug, "session": "codex-a", "codex_thread": "a"})
+        + "\n"
+    )
+    active.write_text(
+        "\n".join(
+            json.dumps(record)
+            for record in (
+                {"repo": REPO.slug, "session": "codex-b", "codex_thread": "b"},
+                {"repo": REPO.slug, "session": "codex-a", "tree": "/newest"},
+            )
+        )
+        + "\n"
+    )
+
+    target = resume.resolve(None, repo=REPO, last=True, base_dir=tmp_path)
+
+    assert target.shipit_session_id == "codex-a"
+    assert target.tree == "/newest"
+
+
 def test_source_checkout_prefers_matching_ambient_checkout(monkeypatch, tmp_path: Path):
     source = tmp_path / "source"
     source.mkdir()

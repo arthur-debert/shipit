@@ -205,6 +205,10 @@ def _sessions(
             previous.native_session_id if previous is not None else ""
         )
         tree = _str_field(record, "tree") or (previous.tree if previous else None)
+        # Dict assignment preserves a key's original position. Reinsert so
+        # ``--last`` follows the session's newest record even when its earlier
+        # fields came from a rotated file before another session was seen.
+        by_session.pop(session_id, None)
         by_session[session_id] = ResumeTarget(
             repo=record_repo,
             backend=backend,

@@ -131,8 +131,9 @@ def resume_cmd(
     # One variadic argument avoids Click assigning the first unknown backend
     # flag to an optional ``target`` positional. Under ``--last`` every token
     # is backend argv; otherwise the first token is the requested identity.
-    target = None if last or not args else args[0]
-    backend_args = args if last else args[1:]
+    last_with_target = last and bool(args) and not args[0].startswith("-")
+    target = args[0] if last_with_target or (not last and args) else None
+    backend_args = args[1:] if target is not None else args
     raise SystemExit(
         run_resume(
             target,
