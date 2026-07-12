@@ -138,7 +138,7 @@ def test_unknown_artifact_key_names_itself_and_the_known_set():
     with pytest.raises(config.ConfigError, match="unknown key `endpoint`") as exc:
         _load('[artifacts.x]\nendpoint = ["gh-release"]\n')
     assert (
-        "build, platforms, bundle, bundle-config, endpoints, e2e, "
+        "build, platforms, bundle, bundle-config, endpoints, downstreams, e2e, "
         "main-binary, product-name, sign" in str(exc.value)
     )
 
@@ -147,6 +147,62 @@ def test_unknown_endpoint_names_the_closed_registry():
     with pytest.raises(config.ConfigError, match="unknown endpoint `homebrew`") as exc:
         _load('[artifacts.x]\nendpoints = ["homebrew"]\n')
     assert "gh-release, crates, pypi, npm, brew" in str(exc.value)
+
+
+def test_downstreams_parse_with_the_notify_endpoint(tmp_path):
+    (artifact,) = _load(
+        "[artifacts.parser]\n"
+        'build = ["tree-sitter"]\n'
+        'bundle = { composition = "tarball" }\n'
+        'endpoints = ["gh-release", "notify-downstreams"]\n'
+        'downstreams = ["lex-fmt/vscode", "lex-fmt/nvim", "lex-fmt/lexed"]\n'
+    )
+    assert artifact.downstreams == ("lex-fmt/vscode", "lex-fmt/nvim", "lex-fmt/lexed")
+    assert "notify-downstreams" in artifact.endpoints
+
+
+def test_notify_endpoint_without_downstreams_is_refused():
+    # The endpoint fires repository_dispatch AT the list — an endpoint with no
+    # list is a no-op declaration, refused at parse (#792).
+    with pytest.raises(config.ConfigError, match="needs a `downstreams` list"):
+        _load(
+            "[artifacts.parser]\n"
+            'build = ["tree-sitter"]\n'
+            'bundle = { composition = "tarball" }\n'
+            'endpoints = ["gh-release", "notify-downstreams"]\n'
+        )
+
+
+def test_downstreams_without_the_notify_endpoint_is_refused():
+    # A downstreams list nothing fires is dead config — refused (#792).
+    with pytest.raises(config.ConfigError, match="notify-downstreams.*is not"):
+        _load(
+            "[artifacts.parser]\n"
+            'build = ["tree-sitter"]\n'
+            'bundle = { composition = "tarball" }\n'
+            'endpoints = ["gh-release"]\n'
+            'downstreams = ["lex-fmt/vscode"]\n'
+        )
+
+
+def test_downstream_not_owner_name_slug_is_refused():
+    with pytest.raises(config.ConfigError, match="is not an `owner/name` repo slug"):
+        _load(
+            "[artifacts.parser]\n"
+            'endpoints = ["notify-downstreams"]\n'
+            'downstreams = ["justname"]\n'
+        )
+
+
+def test_duplicate_downstream_is_refused():
+    with pytest.raises(
+        config.ConfigError, match="duplicate downstream `lex-fmt/vscode`"
+    ):
+        _load(
+            "[artifacts.parser]\n"
+            'endpoints = ["notify-downstreams"]\n'
+            'downstreams = ["lex-fmt/vscode", "lex-fmt/vscode"]\n'
+        )
 
 
 def test_unknown_platform_names_the_closed_registry():

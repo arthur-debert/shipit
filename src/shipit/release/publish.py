@@ -29,6 +29,16 @@ switch), one adapter per name of :data:`shipit.config.ENDPOINTS`:
   output, and pushes it to the :data:`HOMEBREW_TAP` — where an UNCHANGED
   formula is a no-op push. Stable-channel only: prereleases never move the
   tap formula (the plan skips it, :func:`plan`).
+- **notify-downstreams** (a *derived*, stable-only endpoint, TOL02-WS16
+  #792) — the generated-parser release's cross-repo cascade (legacy
+  ``tree-sitter.yml`` notify hook): fires ONE ``repository_dispatch``
+  (:data:`NOTIFY_EVENT_TYPE`) at each declared
+  :attr:`shipit.config.Artifact.downstreams` repo, carrying the source
+  repo/tag/version in its client payload, through a cross-repo PAT
+  (``DOWNSTREAM_DISPATCH_TOKEN`` — the ambient token cannot dispatch
+  cross-repo). Fires on REAL releases only: the plan skips it on any
+  prerelease (and the RC guard on a live-fire cut), so an rc/beta notifies
+  no one.
 
 The stage-wide invariants live HERE as pure cores, so they hold identically
 for the WS06 ``wf-publish`` block and a laptop invocation (ADR-0040):
@@ -129,6 +139,14 @@ PYPI_SECRET = secretreq.ENDPOINT_SECRETS["pypi"][0]
 TESTPYPI_SECRET = secretreq.TESTPYPI_SECRET
 NPM_SECRET = secretreq.ENDPOINT_SECRETS["npm"][0]
 TAP_SECRET = secretreq.ENDPOINT_SECRETS["brew"][0]
+NOTIFY_SECRET = secretreq.ENDPOINT_SECRETS["notify-downstreams"][0]
+
+#: The ``repository_dispatch`` event type the notify-downstreams cascade fires
+#: (TOL02-WS16 #792). A downstream repo (lex-fmt/vscode, nvim, lexed) wires
+#: ``on.repository_dispatch.types: [upstream-release]`` to rebuild against the
+#: freshly-released grammar. ONE stable type across the fleet so a downstream
+#: filters on a single name; the source repo/tag rides the client payload.
+NOTIFY_EVENT_TYPE = "upstream-release"
 
 #: The child-process env var each tool READS the token under — the runtime
 #: feed, tool-specific and distinct from the secret NAME the token is
@@ -341,6 +359,9 @@ def is_live_fire(version: str) -> bool:
 #: testable without dispatching anything.
 SKIP_RC_GUARD = "rc-guard: -release-rc publishes to the GH release only"
 SKIP_STABLE_ONLY = "stable-channel only: a prerelease never moves the tap formula"
+SKIP_NOTIFY_PRERELEASE = (
+    "notify-downstreams fires on real releases only: a prerelease notifies no one"
+)
 
 
 @dataclass(frozen=True)
@@ -366,9 +387,11 @@ def plan(
     brew's formula renders against the FINAL release-asset URLs/SHAs, so
     gh-release's asset upload must complete first. Skips are decided here,
     centrally: a live-fire cut keeps ONLY gh-release (the RC guard, story
-    33 — every external endpoint skipped); any prerelease skips brew (the
-    tap is the stable channel). An endpoint name outside the closed registry
-    is a hard :class:`ReleaseError` naming the known set.
+    33 — every external endpoint skipped); any prerelease skips the
+    ``stable_only`` endpoints — brew (the tap is the stable channel) and
+    notify-downstreams (a prerelease notifies no one, TOL02-WS16 #792). An
+    endpoint name outside the closed registry is a hard
+    :class:`ReleaseError` naming the known set.
 
     Cross-endpoint invariant: an unskipped brew dispatch REQUIRES an unskipped
     gh-release in the same plan — the formula points at
@@ -393,8 +416,8 @@ def plan(
                 skip = None
                 if live_fire and adapter.external:
                     skip = SKIP_RC_GUARD
-                elif prerelease and adapter.name == "brew":
-                    skip = SKIP_STABLE_ONLY
+                elif prerelease and adapter.stable_only:
+                    skip = adapter.stable_skip_reason
                 dispatches.append(Dispatch(artifact, adapter, skip))
     live = [d.adapter.name for d in dispatches if d.skip is None]
     if "brew" in live and "gh-release" not in live:
@@ -952,6 +975,50 @@ def _publish_brew(req: PublishRequest) -> Published:
 
 
 # --------------------------------------------------------------------------
+# notify-downstreams
+# --------------------------------------------------------------------------
+
+
+def _publish_notify_downstreams(req: PublishRequest) -> Published:
+    """Fire ``repository_dispatch`` at each declared downstream repo — the
+    cascade a generated-parser release triggers (TOL02-WS16 #792, legacy
+    ``tree-sitter.yml`` notify hook). See the module docstring's
+    notify-downstreams entry.
+
+    A derived, stable-only endpoint (the plan skips it on any prerelease and
+    the RC guard skips it on a live-fire cut), so it is reached ONLY for a
+    real release. Each downstream gets ONE ``upstream-release`` dispatch
+    carrying the source repo/tag/version/artifact in its client payload; a
+    failed dispatch raises loudly (never a silent partial notify). The
+    cross-repo PAT (``DOWNSTREAM_DISPATCH_TOKEN``) is required — the ambient
+    ``GITHUB_TOKEN`` cannot dispatch into another repo.
+    """
+    token = _require_token(req, "notify-downstreams", NOTIFY_SECRET)
+    if not req.artifact.downstreams:
+        # Belt for direct (test/library) callers — the config boundary already
+        # refuses a notify-downstreams endpoint with no downstreams list, so
+        # the verb never reaches here empty.
+        raise ReleaseError(
+            f"[artifacts.{req.artifact.name}] notify-downstreams: no "
+            f"`downstreams` declared — the endpoint fires repository_dispatch "
+            f"at the artifact's downstream repos, and there are none"
+        )
+    payload = {
+        "repo": req.repo or "",
+        "tag": req.tag,
+        "version": req.version,
+        "artifact": req.artifact.name,
+    }
+    actions = []
+    for slug in req.artifact.downstreams:
+        req.ghio.repository_dispatch(
+            slug, event_type=NOTIFY_EVENT_TYPE, payload=payload, token=token
+        )
+        actions.append(f"dispatched {NOTIFY_EVENT_TYPE} to {slug}")
+    return Published(req.artifact.name, "notify-downstreams", tuple(actions))
+
+
+# --------------------------------------------------------------------------
 # The closed registry
 # --------------------------------------------------------------------------
 
@@ -963,10 +1030,14 @@ class EndpointAdapter:
 
     ``stage`` is ``"release"`` or ``"derived"`` (PRD story 35 ordering);
     ``external`` marks the endpoints the RC guard skips on a live-fire cut
-    (everything but gh-release — story 33). ``secrets`` MIRRORS the endpoint's
-    :data:`secretreq.ENDPOINT_SECRETS` entry (the one derivation authority
-    gh-setup/preflight traverse, WS02, stories 43–45) rather than re-declaring
-    the names; the runtime validation set is :func:`required_env_keys`.
+    (everything but gh-release — story 33). ``stable_only`` marks the
+    endpoints :func:`plan` skips on ANY prerelease (brew's tap is the stable
+    channel; notify-downstreams fires on real releases only) with
+    ``stable_skip_reason`` as the stated cause. ``secrets`` MIRRORS the
+    endpoint's :data:`secretreq.ENDPOINT_SECRETS` entry (the one derivation
+    authority gh-setup/preflight traverse, WS02, stories 43–45) rather than
+    re-declaring the names; the runtime validation set is
+    :func:`required_env_keys`.
     """
 
     name: str
@@ -974,6 +1045,8 @@ class EndpointAdapter:
     publish: Callable[[PublishRequest], Published]
     secrets: tuple[str, ...] = ()
     external: bool = True
+    stable_only: bool = False
+    stable_skip_reason: str = SKIP_STABLE_ONLY
 
 
 GH_RELEASE = EndpointAdapter(
@@ -989,16 +1062,37 @@ NPM = EndpointAdapter(
     "npm", "release", _publish_npm, secrets=secretreq.ENDPOINT_SECRETS["npm"]
 )
 BREW = EndpointAdapter(
-    "brew", "derived", _publish_brew, secrets=secretreq.ENDPOINT_SECRETS["brew"]
+    "brew",
+    "derived",
+    _publish_brew,
+    secrets=secretreq.ENDPOINT_SECRETS["brew"],
+    stable_only=True,
+)
+NOTIFY_DOWNSTREAMS = EndpointAdapter(
+    "notify-downstreams",
+    "derived",
+    _publish_notify_downstreams,
+    secrets=secretreq.ENDPOINT_SECRETS["notify-downstreams"],
+    stable_only=True,
+    stable_skip_reason=SKIP_NOTIFY_PRERELEASE,
 )
 
 #: The CLOSED registry, in a stable order (the config boundary's
 #: :data:`shipit.config.ENDPOINTS` names exactly this set — asserted in the
 #: tests, so the two can never drift). Adding an endpoint is adding an entry
 #: here plus the config name — never a switch. Marketplace-class adapters
-#: (VS Marketplace, Open VSX, Zed, tree-sitter) are deliberately ABSENT
+#: (VS Marketplace, Open VSX, Zed) are deliberately ABSENT
 #: (PRD Out of Scope): their entries land when their repos migrate.
-ADAPTERS: tuple[EndpointAdapter, ...] = (GH_RELEASE, CRATES, PYPI, NPM, BREW)
+#: notify-downstreams (TOL02-WS16 #792) is present — not a marketplace
+#: publisher but the generated-parser release's cross-repo cascade.
+ADAPTERS: tuple[EndpointAdapter, ...] = (
+    GH_RELEASE,
+    CRATES,
+    PYPI,
+    NPM,
+    BREW,
+    NOTIFY_DOWNSTREAMS,
+)
 
 
 def names() -> tuple[str, ...]:

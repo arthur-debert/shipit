@@ -104,6 +104,9 @@ class FakeGh:
 
         return _Repo()
 
+    def repository_dispatch(self, slug, *, event_type, payload, token=None):
+        self.calls.append(("dispatch", slug, event_type, dict(payload), token))
+
 
 class FakeGit:
     """The recorded git-adapter seam for the tap push (clone → status →
@@ -316,11 +319,19 @@ def test_is_live_fire(version, live):
 
 def test_registry_mirrors_the_config_endpoint_set_and_stages():
     """The closed registry: exactly the config boundary's ENDPOINTS (no
-    marketplace-class adapters — PRD Out of Scope), brew the one derived
-    entry, gh-release the one the RC guard keeps."""
+    marketplace-class adapters — PRD Out of Scope), brew + notify-downstreams
+    the derived entries, gh-release the one the RC guard keeps, brew +
+    notify-downstreams the stable-only pair (#792)."""
     assert publish_mod.names() == config.ENDPOINTS
-    assert [a.name for a in publish_mod.ADAPTERS if a.stage == "derived"] == ["brew"]
+    assert [a.name for a in publish_mod.ADAPTERS if a.stage == "derived"] == [
+        "brew",
+        "notify-downstreams",
+    ]
     assert [a.name for a in publish_mod.ADAPTERS if not a.external] == ["gh-release"]
+    assert [a.name for a in publish_mod.ADAPTERS if a.stable_only] == [
+        "brew",
+        "notify-downstreams",
+    ]
 
 
 def test_registry_secret_names_mirror_the_derivation_authority():
@@ -375,6 +386,46 @@ def test_plan_prerelease_skips_only_brew():
     assert verdicts["gh-release"] is None
     assert verdicts["crates"] is None
     assert verdicts["brew"] == publish_mod.SKIP_STABLE_ONLY
+
+
+def _notify_artifacts(downstreams=("lex-fmt/vscode", "lex-fmt/nvim")):
+    return _artifacts(
+        {
+            "parser": {
+                "endpoints": ["gh-release", "notify-downstreams"],
+                "downstreams": list(downstreams),
+            }
+        }
+    )
+
+
+def test_plan_notify_downstreams_is_derived_after_gh_release():
+    """The cascade endpoint is derived: gh-release must land the release
+    before the downstreams are told to rebuild against it (#792)."""
+    dispatched = publish_mod.plan(
+        _notify_artifacts(), prerelease=False, live_fire=False
+    )
+    order = [d.adapter.name for d in dispatched]
+    assert order == ["gh-release", "notify-downstreams"]
+    assert all(d.skip is None for d in dispatched)
+
+
+def test_plan_prerelease_skips_notify_downstreams():
+    """Fires on REAL releases only: a plain prerelease notifies no one — its
+    own stated reason, distinct from brew's stable-only skip (#792)."""
+    dispatched = publish_mod.plan(_notify_artifacts(), prerelease=True, live_fire=False)
+    verdicts = {d.adapter.name: d.skip for d in dispatched}
+    assert verdicts["gh-release"] is None
+    assert verdicts["notify-downstreams"] == publish_mod.SKIP_NOTIFY_PRERELEASE
+
+
+def test_plan_live_fire_skips_notify_downstreams_via_rc_guard():
+    """An rc live-fire cut skips it as an external endpoint — the RC guard
+    wins over the stable-only skip (checked first), keeping only gh-release."""
+    dispatched = publish_mod.plan(_notify_artifacts(), prerelease=True, live_fire=True)
+    verdicts = {d.adapter.name: d.skip for d in dispatched}
+    assert verdicts["gh-release"] is None
+    assert verdicts["notify-downstreams"] == publish_mod.SKIP_RC_GUARD
 
 
 def test_plan_unknown_endpoint_is_a_hard_error_naming_the_known_set():
@@ -1492,3 +1543,64 @@ def test_publish_cli_requires_the_result_inputs():
     result = CliRunner().invoke(release_verb.release, ["publish", "1.2.3"])
     assert result.exit_code == 2
     assert "--build-result" in result.output
+
+
+# --------------------------------------------------------------------------
+# notify-downstreams adapter (TOL02-WS16 #792)
+# --------------------------------------------------------------------------
+
+
+def test_notify_downstreams_fires_one_dispatch_per_downstream(tmp_path):
+    """The cascade's happy path: one `upstream-release` repository_dispatch
+    per declared downstream, each carrying the source repo/tag/version/artifact
+    in its client payload, authenticated by the cross-repo PAT."""
+    artifact = _notify_artifacts()[0]
+    ghio = FakeGh()
+    req = _request(
+        tmp_path,
+        artifact,
+        version="1.2.3",
+        env={publish_mod.NOTIFY_SECRET: "pat-xyz"},
+        ghio=ghio,
+    )
+    published = publish_mod._publish_notify_downstreams(req)
+    dispatches = [c for c in ghio.calls if c[0] == "dispatch"]
+    assert [c[1] for c in dispatches] == ["lex-fmt/vscode", "lex-fmt/nvim"]
+    for _, _slug, event_type, payload, token in dispatches:
+        assert event_type == publish_mod.NOTIFY_EVENT_TYPE
+        assert token == "pat-xyz"
+        assert payload == {
+            "repo": "acme/widget",
+            "tag": "v1.2.3",
+            "version": "1.2.3",
+            "artifact": "parser",
+        }
+    assert published.endpoint == "notify-downstreams"
+    assert published.actions == (
+        "dispatched upstream-release to lex-fmt/vscode",
+        "dispatched upstream-release to lex-fmt/nvim",
+    )
+
+
+def test_notify_downstreams_refuses_without_the_cross_repo_token(tmp_path):
+    """The ambient GITHUB_TOKEN cannot dispatch cross-repo, so a missing
+    DOWNSTREAM_DISPATCH_TOKEN is a loud refusal — never a silent no-notify."""
+    artifact = _notify_artifacts()[0]
+    ghio = FakeGh()
+    req = _request(tmp_path, artifact, version="1.2.3", env={}, ghio=ghio)
+    with pytest.raises(ReleaseError, match="DOWNSTREAM_DISPATCH_TOKEN"):
+        publish_mod._publish_notify_downstreams(req)
+    assert not [c for c in ghio.calls if c[0] == "dispatch"]
+
+
+def test_notify_downstreams_secret_mirrors_the_derivation_authority():
+    """The endpoint's secret name IS its `secretreq.ENDPOINT_SECRETS` entry —
+    gh-setup syncs it and preflight validates its presence from that one map."""
+    assert (
+        publish_mod.NOTIFY_SECRET
+        == (secretreq_mod.ENDPOINT_SECRETS["notify-downstreams"][0])
+    )
+    adapter = publish_mod.adapter_for("notify-downstreams")
+    assert adapter is not None
+    assert adapter.secrets == secretreq_mod.ENDPOINT_SECRETS["notify-downstreams"]
+    assert adapter.stable_only and adapter.stage == "derived"

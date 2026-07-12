@@ -16,8 +16,10 @@ executes: the join between the path→toolchain map (the leg axis) and the
   whole-tree ``./...`` target it supersedes (go discards binaries when
   several packages compile at once, so ``./...`` in a binary-producing step
   would build green yet write nothing), npm appends ``--workspace
-  <package>``, python takes no narrowing (``uv build`` builds the project
-  whole);
+  <package>``, python and tree-sitter take no narrowing (``uv build`` builds
+  the project whole; ``tree-sitter generate`` regenerates the parser whole
+  from ``grammar.js`` — a generated-parser artifact is one grammar, never a
+  workspace of packages);
 - go legs get ``CGO_ENABLED=0`` in the env — the legacy static-by-default
   contract (cgo was opt-in and warned against);
 - a SUPPLIED version (ADR-0041: supplied, never computed) is injected into a

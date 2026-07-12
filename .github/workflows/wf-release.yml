@@ -74,6 +74,10 @@ on:
         required: false
       HOMEBREW_TAP_TOKEN:
         required: false
+      # notify-downstreams cross-repo PAT (TOL02-WS16 #792), forwarded to the
+      # publish stage — the one consumer of the cascade dispatch.
+      DOWNSTREAM_DISPATCH_TOKEN:
+        required: false
       APPLE_CERTIFICATE:
         required: false
       APPLE_CERTIFICATE_PASSWORD:
@@ -180,3 +184,4 @@ jobs:
       PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
       NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
       HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      DOWNSTREAM_DISPATCH_TOKEN: ${{ secrets.DOWNSTREAM_DISPATCH_TOKEN }}

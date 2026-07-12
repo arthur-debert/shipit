@@ -40,6 +40,11 @@ functions the entries carry:
   sign-then-bundle). The declared ``command`` is the only consumer-specific
   part; a missing payload is a bundle-stage failure, never a signer
   surprise. Mac targets only.
+- **tarball** — the generated-parser ``<name>.tar.gz`` (TOL02-WS16 #792,
+  legacy ``tree-sitter.yml@v3``): the tree-sitter leg's generated ``src/``
+  tree plus the grammar/queries/bindings that are present. Platform-
+  independent (generated C source, no per-OS variant — no ``-<target>``
+  suffix), so every matrix leg composes the identical bytes.
 
 Every external command runs through the injected runner — the one Exec seam
 (ADR-0028); the ``cargo`` / ``uv`` / ``tar`` / ``zip`` argv literals below
@@ -291,6 +296,61 @@ def _compose_wheel(req: ComposeRequest) -> Composed:
     return Composed(req.artifact.name, "wheel", (*wheels, *sdists))
 
 
+#: The generated-parser payload the ``tarball`` composition ships — tree-sitter's
+#: conventional layout under the tree-sitter leg's path. ``src`` (the
+#: ``tree-sitter generate`` output: ``parser.c``, the ``tree_sitter/``
+#: headers, ``node-types.json``, ``grammar.json``) is the REQUIRED core — its
+#: absence means the parser was never generated. The rest ride WHEN PRESENT
+#: (the :data:`DOC_FILES` "when present" shape): a grammar declares queries
+#: and bindings or it does not, and an absent one ships nothing rather than an
+#: empty dir. This is the legacy ``tree-sitter.yml@v3`` tarball contract
+#: (generated parser + grammar + queries), assembled shipit-side.
+TREE_SITTER_PAYLOAD: tuple[str, ...] = (
+    "src",
+    "queries",
+    "grammar.js",
+    "package.json",
+    "binding.gyp",
+    "bindings",
+)
+
+
+def _compose_tarball(req: ComposeRequest) -> Composed:
+    """The generated-parser tarball: ``<name>.tar.gz`` of the tree-sitter
+    leg's :data:`TREE_SITTER_PAYLOAD` (the ``tree-sitter generate`` output
+    plus the grammar/queries/bindings, when present). See the module
+    docstring's tarball entry.
+
+    A generated parser is platform-independent C source — no per-OS variant —
+    so the archive carries NO ``-<target>`` suffix: every matrix leg that runs
+    it composes the identical bytes under the one name (parity with legacy
+    ``tree-sitter.tar.gz``). ``src`` is required — its absence is a bundle-
+    stage failure (``shipit build`` runs ``tree-sitter generate`` first),
+    never a quiet empty archive.
+    """
+    leg = _leg_for(req.artifact, req.entries, "tree-sitter", "tarball")
+    leg_dir = req.root if leg.path in (".", "") else req.root / leg.path
+    if not (leg_dir / "src").is_dir():
+        raise ReleaseError(
+            f"[artifacts.{req.artifact.name}] tarball composition: no generated "
+            f"parser at {leg_dir / 'src'} — the tarball ships the "
+            f"`tree-sitter generate` output; run `shipit build` first"
+        )
+    present = [name for name in TREE_SITTER_PAYLOAD if (leg_dir / name).exists()]
+    archive = f"{req.artifact.name}.tar.gz"
+    archive_path = req.out_dir / archive
+    req.out_dir.mkdir(parents=True, exist_ok=True)
+    if archive_path.exists():
+        # tar -czf truncates, but an unlink keeps the rerun's artifact exactly
+        # the fresh tree (the archive/mac-app recreate-from-clean contract).
+        archive_path.unlink()
+    req.run_cmd(
+        ["tar", "-czf", str(archive_path), "-C", str(leg_dir), *present],
+        req.root,
+    )
+    return Composed(req.artifact.name, "tarball", (archive,))
+
+
 def _compose_mac_app(req: ComposeRequest) -> Composed:
     """The coupled unsigned ``.app``/``.dmg`` pair + the reseal payload.
 
@@ -350,7 +410,14 @@ class Composition:
     (:mod:`shipit.release.sign` — the mac-app leg's reseal payload, the
     archive leg's tarball, TOL02-WS08 #779): the config boundary refuses
     ``sign = true`` on any other composition, so a sign declaration can
-    never route to a signer leg that does not exist.
+    never route to a signer leg that does not exist. ``asserts_binary`` marks
+    the compositions whose output carries a MAIN BINARY the scar-#2 integrity
+    guard checks (:mod:`shipit.release.integrity`, workflows.lex §3.2) —
+    archive/deb/mac-app. A source/package composition (wheel's sdist+wheel,
+    tarball's generated C) has no binary to name, so the preflight planner
+    omits the ``assert-bundle`` stage for it (:func:`shipit.release.preflight.plan`):
+    running the guard over a source ``.tar.gz`` would hard-fail with "no main
+    binary" (the deb tier's #784-F4 lesson, inverted — nothing to assert).
     """
 
     name: str
@@ -358,6 +425,7 @@ class Composition:
     platforms: tuple[str, ...] = ()
     declared_command: bool = False
     signable: bool = False
+    asserts_binary: bool = True
 
     def applies(self, target: str) -> bool:
         """Whether this composition runs for ``target`` (substring match on
@@ -367,7 +435,10 @@ class Composition:
 
 ARCHIVE = Composition("archive", _compose_archive, signable=True)
 DEB = Composition("deb", _compose_deb, platforms=("linux",))
-WHEEL = Composition("wheel", _compose_wheel)
+#: wheel: a python sdist+wheel — no native binary, so the scar-#2 guard has
+#: nothing to assert (its sdist IS a ``.tar.gz``, which the guard would
+#: otherwise misread as a binary archive and hard-fail).
+WHEEL = Composition("wheel", _compose_wheel, asserts_binary=False)
 MAC_APP = Composition(
     "mac-app",
     _compose_mac_app,
@@ -375,10 +446,16 @@ MAC_APP = Composition(
     declared_command=True,
     signable=True,
 )
+#: tree-sitter's generated-parser tarball (TOL02-WS16 #792) — platform-
+#: independent (empty ``platforms``: the same generated C source on every
+#: leg), NOT signable (a source tarball has no binary the mac signer reopens),
+#: and NOT binary-asserting (a source ``.tar.gz`` has no main binary — the
+#: scar-#2 guard is skipped for it, like the wheel's sdist).
+TARBALL = Composition("tarball", _compose_tarball, asserts_binary=False)
 
 #: The CLOSED registry, in a stable order. Adding a composition is adding an
 #: entry here (the toolchain registry's mirror) — never a kind switch.
-COMPOSITIONS: tuple[Composition, ...] = (ARCHIVE, DEB, WHEEL, MAC_APP)
+COMPOSITIONS: tuple[Composition, ...] = (ARCHIVE, DEB, WHEEL, MAC_APP, TARBALL)
 
 
 def names() -> tuple[str, ...]:
