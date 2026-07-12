@@ -1087,6 +1087,71 @@ def test_open_vsx_publishes_with_ovsx_and_its_own_token(tmp_path):
     assert published.actions == ("published ext-linux-arm64.vsix",)
 
 
+def test_open_vsx_publish_over_existing_is_success(tmp_path):
+    # The ovsx path shares the idempotent-resume rule (already-published stderr
+    # is success) — covered independently of vscode-marketplace so a regression
+    # in the ovsx argv/token leg cannot hide behind the vsce tests.
+    artifact = _artifacts({"ext": {"endpoints": ["open-vsx"]}})[0]
+    entries = _entries({"editors/vscode": "npm"})
+    probe = SeamRecorder(
+        {"npm": lambda argv: _fail(argv, "ERROR  already exists in the registry.")}
+    )
+    req = _request(
+        tmp_path, artifact, entries=entries, env={"OVSX_PAT": "tok"}, probe=probe
+    )
+    _stage_vsix(req.assets_dir, "ext-linux-arm64.vsix")
+    published = publish_mod._publish_open_vsx(req)
+    assert published.actions == ("ext-linux-arm64.vsix already published — resumed",)
+
+
+def test_open_vsx_a_real_failure_aborts_with_the_stderr_tail(tmp_path):
+    artifact = _artifacts({"ext": {"endpoints": ["open-vsx"]}})[0]
+    entries = _entries({"editors/vscode": "npm"})
+    probe = SeamRecorder(
+        {"npm": lambda argv: _fail(argv, "ERROR  invalid access token")}
+    )
+    req = _request(
+        tmp_path, artifact, entries=entries, env={"OVSX_PAT": "tok"}, probe=probe
+    )
+    _stage_vsix(req.assets_dir, "ext-linux-arm64.vsix")
+    with pytest.raises(ReleaseError, match="invalid access token"):
+        publish_mod._publish_open_vsx(req)
+
+
+def test_open_vsx_without_a_vsix_refuses(tmp_path):
+    artifact = _artifacts({"ext": {"endpoints": ["open-vsx"]}})[0]
+    entries = _entries({"editors/vscode": "npm"})
+    req = _request(tmp_path, artifact, entries=entries, env={"OVSX_PAT": "tok"})
+    req.assets_dir.mkdir(parents=True, exist_ok=True)
+    with pytest.raises(ReleaseError, match="no .vsix under"):
+        publish_mod._publish_open_vsx(req)
+
+
+def test_open_vsx_missing_token_refuses(tmp_path):
+    artifact = _artifacts({"ext": {"endpoints": ["open-vsx"]}})[0]
+    entries = _entries({"editors/vscode": "npm"})
+    req = _request(tmp_path, artifact, entries=entries, env={})
+    _stage_vsix(req.assets_dir, "ext-linux-arm64.vsix")
+    with pytest.raises(ReleaseError, match="OVSX_PAT"):
+        publish_mod._publish_open_vsx(req)
+
+
+def test_marketplace_endpoints_refuse_without_an_npm_leg(tmp_path):
+    # Both marketplace adapters run from the npm leg dir (vsce/ovsx are the
+    # extension's node_modules/.bin devDependencies, and `vsce publish` reads
+    # the leg's package.json). With a token present but no npm leg mapped, the
+    # leg resolution is a loud refusal — never a silent run from req.root.
+    for endpoint, token, publish in (
+        ("vscode-marketplace", "VSCE_PAT", publish_mod._publish_vscode_marketplace),
+        ("open-vsx", "OVSX_PAT", publish_mod._publish_open_vsx),
+    ):
+        artifact = _artifacts({"ext": {"endpoints": [endpoint]}})[0]
+        req = _request(tmp_path, artifact, entries=(), env={token: "tok"})
+        _stage_vsix(req.assets_dir, "ext-darwin-arm64.vsix")
+        with pytest.raises(ReleaseError, match="needs a .* npm leg"):
+            publish(req)
+
+
 def test_plan_rc_guard_skips_both_marketplace_endpoints(tmp_path):
     """A -release-rc live-fire cut keeps ONLY gh-release: the two marketplace
     endpoints are external, so the RC guard skips them (rc = gh-release only —
