@@ -767,7 +767,8 @@ def test_managed_markdownlintignore_covers_managed_paths_and_testdata():
         for line in iunits.data_bytes("markdownlintignore").decode().splitlines()
         if line and not line.startswith("#")
     ]
-    assert "skills/" not in entries  # #777 — shipped skills are gated, not exempt
+    # #777 — shipped skills are gated, not exempt (the exhaustive equality below
+    # locks it in: `skills/` is absent from the managed ignore entries).
     assert entries == ["AGENTS.md", *lint.PROTECTED_TESTDATA_GLOBS]
 
 

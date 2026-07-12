@@ -323,14 +323,21 @@ def _skill_only_plan(root) -> irec.Plan:
 
 def _unwrapping_real_runner():
     """A self-cert Exec boundary that unwraps `pixi run ... -- <tool> <args>`
-    and runs the REAL tool on PATH. The tests provision the lint toolchain, so
-    this exercises the actual markdownlint gate over the delivered skill files —
-    the delivered `.markdownlint.yaml` (`--config`) and `.markdownlintignore`
-    (auto-discovered from cwd) — without solving a pixi env."""
+    and runs the REAL tool. The tests provision the lint toolchain, so this
+    exercises the actual markdownlint gate over the delivered skill files — the
+    delivered `.markdownlint.yaml` (`--config`) and `.markdownlintignore`
+    (auto-discovered from cwd) — without solving a pixi env.
+
+    The caller's kwargs are forwarded verbatim, so the probe stays faithful to
+    production self-cert: it runs under the SCRUBBED env (`scrub_env` keeps PATH,
+    dropping only leaked PIXI_*/conda pointers) and the `INSTALL_TIMEOUT` bound
+    `_lint_env_run_tool` passes — a wedged markdownlint fails on the timeout
+    rather than hanging the suite unbounded."""
 
     def runner(argv, *, cwd, **kw):
         real = argv[argv.index("--") + 1 :]
-        return execrun.run(real, cwd=cwd, check=False)
+        kw.setdefault("check", False)
+        return execrun.run(real, cwd=cwd, **kw)
 
     return runner
 
