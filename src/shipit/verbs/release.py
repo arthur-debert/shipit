@@ -14,11 +14,16 @@ pipeline's planner and its effectful stages:
 - ``shipit release assert-bundle`` (TOL02-WS03 #561) — the scar-#2
   integrity guard (workflows.lex §3.2), the thin shell over the pure core
   (:mod:`shipit.release.integrity`);
-- ``shipit release sign`` (TOL02-WS04 #562) — the consumer-agnostic mac
-  signer unit (workflows.lex §3.1: reopen → resign inner-first → reseal →
-  notarize → staple), the thin shell over :mod:`shipit.release.sign` that
-  owns the scratch-dir lifecycle. Act-untestable (real macOS + real Apple
-  credentials); remote verification is the TOL02-WS07 lex rc.
+- ``shipit release sign`` (TOL02-WS04 #562, archive leg TOL02-WS08 #779) —
+  the consumer-agnostic mac signer unit (workflows.lex §3.1), the thin shell
+  over :mod:`shipit.release.sign` that owns the scratch-dir lifecycle and
+  dispatches on the tree's shape (:func:`shipit.release.sign.detect_shape`):
+  a reseal payload routes the mac-app leg (reopen → resign inner-first →
+  reseal → notarize → staple), plain ``.tar.gz`` archive bundles route the
+  archive leg (reopen → codesign each Mach-O → notarize each as a zip, no
+  staple → re-emit the tarballs). Act-untestable (real macOS + real Apple
+  credentials); remote verification is the TOL02-WS07 lex rc (mac-app) and
+  the WS08 consumer rc (archive).
 - ``shipit release publish`` (TOL02-WS05 #563) — the TERMINAL stage: the
   effectful walk over the closed endpoint-adapter registry
   (:mod:`shipit.release.publish`), dispatching each artifact's declared
@@ -965,6 +970,26 @@ def format_sign(result: sign_mod.SignResult) -> str:
     )
 
 
+def format_sign_archives(result: sign_mod.ArchiveSignResult) -> str:
+    """The text rendering of an
+    :class:`~shipit.release.sign.ArchiveSignResult`. Pure."""
+    count = len(result.binaries)
+    lines = [
+        f"release: signed + notarized {count} "
+        f"binar{'ies' if count != 1 else 'y'} across "
+        f"{len(result.archives)} archive(s)",
+        f"  identity  {result.identity}",
+    ]
+    lines.extend(
+        f"  notary    {name}: {submission_id} (no staple — bare binary)"
+        for name, submission_id in zip(
+            result.binaries, result.submission_ids, strict=True
+        )
+    )
+    lines.extend(f"  archive   {archive}" for archive in result.archives)
+    return "\n".join(lines)
+
+
 def _run_sign_cmd(argv: Sequence[str], timeout: float) -> execrun.ExecResult:
     """Run one signer command through the one Exec runner (ADR-0028).
 
@@ -996,9 +1021,13 @@ def run_sign(
     """Run the sign stage over the bundle tree at ``tree``. Returns 0/1.
 
     The consumer-agnostic transformer needs no git checkout and no
-    ``.shipit.toml``: its inputs are the tree (carrying the reseal payload +
-    at most one ``.dmg``) and the credential env vars, hard-failing with the
-    missing names when they are absent (:mod:`shipit.release.sign`). This
+    ``.shipit.toml``: its inputs are the tree and the credential env vars,
+    hard-failing with the missing names when they are absent
+    (:mod:`shipit.release.sign`). The tree's SHAPE picks the leg
+    (:func:`shipit.release.sign.detect_shape`): a reseal payload (+ at most
+    one ``.dmg``) routes the mac-app leg, plain ``.tar.gz`` archive bundles
+    the archive leg (TOL02-WS08 #779); a tree with neither is a hard
+    refusal naming both shapes. This
     shell owns the scratch dir every intermediate lives under — removed whole
     on any exit, so no decoded credential material and no half-signed
     intermediate survives the run. ``run_cmd`` injects the Exec boundary (the
@@ -1012,22 +1041,36 @@ def run_sign(
     for name, value in (("uniq", uniq), ("mint_pass", mint_pass), ("sleep", sleep)):
         if value is not None:
             seams[name] = value
+    shape = sign_mod.detect_shape(tree_path)
     scratch = Path(tempfile.mkdtemp(prefix="shipit-sign-"))
     try:
-        result = sign_mod.sign_bundle(
-            sign_mod.SignRequest(
-                tree=tree_path,
-                out_dir=out_arg,
-                scratch=scratch,
-                run_cmd=run_cmd,
-                env=os.environ if env is None else env,
-                entitlements=Path(entitlements) if entitlements else None,
-                timeout_minutes=notary_timeout,
-                **seams,
-            )
+        request = sign_mod.SignRequest(
+            tree=tree_path,
+            out_dir=out_arg,
+            scratch=scratch,
+            run_cmd=run_cmd,
+            env=os.environ if env is None else env,
+            entitlements=Path(entitlements) if entitlements else None,
+            timeout_minutes=notary_timeout,
+            **seams,
         )
+        if shape == "archive":
+            archive_result = sign_mod.sign_archives(request)
+        else:
+            result = sign_mod.sign_bundle(request)
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
+    if shape == "archive":
+        emit(archive_result, format_sign_archives, as_json=as_json)
+        logger.info(
+            "release sign complete (archive leg)",
+            extra={
+                "archives": ", ".join(archive_result.archives),
+                "binaries": ", ".join(archive_result.binaries),
+                "submission_ids": ", ".join(archive_result.submission_ids),
+            },
+        )
+        return 0
     emit(result, format_sign, as_json=as_json)
     logger.info(
         "release sign complete",
@@ -1481,8 +1524,9 @@ def assert_bundle_cmd(
     "--out",
     type=click.Path(file_okay=False),
     help=(
-        "Stage the signed .dmg here (default: TREE itself, replacing the "
-        "unsigned .dmg under its original filename)."
+        "Stage the signed outputs here — the mac-app leg's .dmg or the "
+        "archive leg's re-emitted .tar.gz (default: TREE itself, replacing "
+        "the unsigned files under their original filenames)."
     ),
 )
 @click.option(
@@ -1492,7 +1536,8 @@ def assert_bundle_cmd(
         "Entitlements plist applied when codesigning the top-level .app ONLY "
         "(never its nested frameworks/helpers — that mis-application is what "
         "the notary rejects; mac apps with QL/Spotlight extensions usually "
-        "need one)."
+        "need one). mac-app leg only: refused for archive bundles (a raw CLI "
+        "binary carries none)."
     ),
 )
 @click.option(
@@ -1511,20 +1556,26 @@ def sign_cmd(
     notary_timeout: int,
     as_json: bool,
 ) -> None:
-    """Sign, notarize, and staple an unsigned mac bundle tree.
+    """Sign and notarize an unsigned mac bundle tree.
 
-    The consumer-agnostic mac signer unit (workflows.lex 3.1): TREE carries
+    The consumer-agnostic mac signer unit (workflows.lex 3.1), dispatched on
+    TREE's shape. The mac-app leg: TREE carries
     the unsigned .app reseal payload (<name>.unsigned-app.tar.gz) and at
     most one .dmg. The unit unpacks the .app, codesigns every nested signable
     (Mach-O files and nested bundle roots) inner-first and the .app LAST
     (hardened runtime + timestamp), reseals
     the .dmg from the SIGNED .app via hdiutil, codesigns it, notarizes +
     staples, and stages the signed .dmg under the original dmg filename.
+    The archive leg (TOL02-WS08 #779): TREE carries the archive
+    composition's plain .tar.gz bundles; the unit reopens each, codesigns
+    every Mach-O inside (detected by content), notarizes each signed binary
+    as a zip (no staple — a bare binary has no staple target), and re-emits
+    each tarball under its original filename.
     Runs on a mac laptop outside CI given the credential env vars; missing
     signing or notary secrets is a hard fail naming the missing names —
     there is no warn-and-skip (the unsigned path is upstream --unsigned
     break-glass, never a skip in here). Act-untestable: remote verification
-    is the TOL02-WS07 lex rc.
+    is the TOL02-WS07 lex rc (mac-app) and the WS08 consumer rc (archive).
     """
     raise SystemExit(
         run_sign(

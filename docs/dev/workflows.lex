@@ -101,6 +101,14 @@ logic is thin YAML) is stated in [./architecture.lex#3].
         that way — the only tauri-specific part is the bundler that produced the
         unsigned input, which lives in the caller.
 
+        The same reopen model covers the ARCHIVE composition's raw darwin CLI
+        binaries (the legacy rust-cli sign steps' shape): the tarball is
+        bundled unsigned, and the signer reopens it — codesign each Mach-O
+        inside, notarize each as a zip (a bare binary has no staple target),
+        re-emit the tarball. The tarball, not the loose staging binary, is
+        what the signer reopens and what ships: artifact transport strips
+        loose exec bits, the tar's own headers preserve them.
+
     3.2. The integrity guard — signing is not integrity
 
         Before upload, assert that the bundle's MAIN binary is the expected app

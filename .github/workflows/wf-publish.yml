@@ -181,13 +181,14 @@ jobs:
           pattern: bundle-*
           path: dist
           # One flat tree: asset filenames are target-qualified, so legs
-          # never collide (the dmg exception is handled by the signed
-          # overlay below).
+          # never collide (the signed .dmg/.tar.gz exception is handled by
+          # the signed overlay below).
           merge-multiple: true
       - name: Overlay the signed artifacts
-        # Plan path, not a re-check: on the signed path the signed .dmg —
-        # staged under the ORIGINAL dmg filename — replaces the unsigned
-        # one; cp -f makes the overwrite explicit instead of trusting
+        # Plan path, not a re-check: on the signed path the signed outputs —
+        # the mac-app leg's .dmg or the archive leg's re-emitted .tar.gz,
+        # each staged under its ORIGINAL filename — replace the unsigned
+        # ones; cp -f makes the overwrite explicit instead of trusting
         # download-order semantics.
         if: inputs.sign-result == 'success'
         uses: actions/download-artifact@v8

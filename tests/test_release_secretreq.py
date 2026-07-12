@@ -34,6 +34,7 @@ RUST_CLI = """
 [artifacts.lex]
 build = [{ toolchain = "rust", package = "lex-cli" }]
 platforms = ["darwin-arm64", "linux-x86_64"]
+bundle = { composition = "archive" }
 endpoints = ["gh-release", "crates", "brew"]
 sign = true
 """

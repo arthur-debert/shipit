@@ -304,17 +304,55 @@ def test_sign_must_be_a_boolean():
         _load('[artifacts.x]\nsign = "yes"\n')
 
 
-def test_sign_with_a_build_and_darwin_platform_parses():
+def test_sign_with_a_build_darwin_platform_and_signable_bundle_parses():
     # `sign = true` is coherent once a build-bearing artifact has a darwin lane
-    # (signing signs a build output, on macOS): the linux entry rides along
-    # un-signed, the darwin one signs.
+    # (signing signs a build output, on macOS) AND a bundle the signer can
+    # reopen (TOL02-WS08 #779): the linux entry rides along un-signed, the
+    # darwin one signs.
     (artifact,) = _load(
         "[artifacts.x]\n"
         'build = ["rust"]\n'
         'platforms = ["darwin-arm64", "linux-x86_64"]\n'
+        'bundle = { composition = "archive" }\n'
         "sign = true\n"
     )
     assert artifact.sign is True
+
+
+def test_sign_without_a_bundle_is_refused():
+    # The signer reopens what the bundle stage composed (workflows.lex §3.1);
+    # a sign declaration with no bundle would emit a sign matrix entry whose
+    # leg has no bundle tree to download — a deep-CI failure the parse
+    # boundary catches instead (TOL02-WS08 #779).
+    with pytest.raises(
+        config.ConfigError,
+        match=r"sign = true requires a bundle composition the signer can "
+        r"reopen \(archive, mac-app\); got no bundle",
+    ):
+        _load(
+            "[artifacts.x]\n"
+            'build = ["rust"]\n'
+            'platforms = ["darwin-arm64"]\n'
+            "sign = true\n"
+        )
+
+
+def test_sign_with_an_unsignable_composition_is_refused():
+    # The signer has legs for the mac-app payload and the archive tarball
+    # only; `sign = true` over a wheel (or deb) composition routes nowhere —
+    # refused at parse, naming the signable set.
+    with pytest.raises(
+        config.ConfigError,
+        match=r"sign = true requires a bundle composition the signer can "
+        r"reopen \(archive, mac-app\); got composition `wheel`",
+    ):
+        _load(
+            "[artifacts.x]\n"
+            'build = ["python"]\n'
+            'platforms = ["darwin-arm64"]\n'
+            'bundle = { composition = "wheel" }\n'
+            "sign = true\n"
+        )
 
 
 def test_bundle_without_a_build_target_is_refused():

@@ -1,9 +1,14 @@
-`shipit release sign` is the consumer-agnostic macOS signer unit: given a
-bundle tree carrying an UNSIGNED .app/.dmg pair, it reopens the bundle and
-produces a signed, notarized, stapled .dmg. The model is bundle(unsigned) →
-sign-reopens-and-reseals, never sign → bundle (workflows.lex §3.1).
+`shipit release sign` is the consumer-agnostic macOS signer unit. The model
+is bundle(unsigned) → sign-reopens-and-reseals, never sign → bundle
+(workflows.lex §3.1). The unit carries TWO legs, dispatched by what the
+bundle tree carries:
 
-One invocation, end to end:
+  mac-app leg     the tree carries an unsigned .app reseal payload
+                  (+ at most one .dmg) — the mac-app composition's shape
+  archive leg     the tree carries plain .tar.gz archive bundles — the
+                  archive composition's darwin raw-binary shape
+
+The mac-app leg, end to end:
 
 1. unpack the unsigned .app from its reseal payload
    (<name>.unsigned-app.tar.gz — a tarball because artifact upload destroys
@@ -22,13 +27,29 @@ One invocation, end to end:
 5. notarytool submit / poll / staple against the signed .dmg, then stage it
    under the original dmg filename (--out, default: TREE itself).
 
+The archive leg (the legacy rust-cli.yml sign steps' shipit equivalent):
+
+1. reopen every plain .tar.gz archive bundle (the loose staging binary
+   beside it loses its exec bit in artifact transport; the tar's headers
+   preserve it) and find the shipped binaries by CONTENT — Mach-O magic,
+   never filename;
+2. codesign every binary across all archives in ONE temporary-keychain pass
+   — hardened runtime + secure timestamp, verify --strict per path;
+3. notarize each signed binary: zip it (notarytool needs a container),
+   submit, poll. NO staple — a bare binary has no staple target; Gatekeeper
+   verifies the notarization online;
+4. re-emit each tarball from its signed tree and stage it under the
+   original archive filename (--out, default: TREE itself).
+   --entitlements is refused on this leg: entitlements belong to a .app
+   root, never a raw CLI binary.
+
 The unit makes zero tauri or electron assumptions: whatever bundler produced
 the unsigned input is the caller's business. It needs no git checkout and no
 .shipit.toml — it runs anywhere a mac, the tree, and the credentials are,
 laptop or CI. The assert-bundle integrity guard at the signer's entry is the
 wf-sign-mac workflow block's job, not this unit's.
 
-Credentials, from the environment:
+Credentials, from the environment (both legs, identically):
 
   signing         APPLE_CERTIFICATE (base64 Developer ID .p12) +
                   APPLE_CERTIFICATE_PASSWORD (an EMPTY password is valid —
@@ -46,7 +67,8 @@ material (.p12/.p8) is wiped on any exit, success or failure.
 
 This unit is act-untestable — codesign/notarytool need a real macOS runner
 and real Apple credentials — so its verification is remote-only: the
-TOL02-WS07 lex rc cut, and the full .app/.dmg leg with phos-app in ADP02.
+TOL02-WS07 lex rc cut (mac-app routing), the full .app/.dmg leg with
+phos-app in ADP02, and a signing consumer rc for the archive leg (TOL02-WS08).
 
 Exit codes: 0 signed + notarized (staple failure alone is non-fatal), 1
 runtime failure (missing secrets, bad tree, rejected or unconfirmed

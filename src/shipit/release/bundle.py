@@ -346,12 +346,18 @@ class Composition:
     whose producing command is DECLARED on the artifact (mac-app's bundler)
     rather than registry-assembled — the config boundary validates the
     declaration shape against it (:func:`shipit.config._parse_bundle`).
+    ``signable`` marks the compositions the mac signer can reopen
+    (:mod:`shipit.release.sign` — the mac-app leg's reseal payload, the
+    archive leg's tarball, TOL02-WS08 #779): the config boundary refuses
+    ``sign = true`` on any other composition, so a sign declaration can
+    never route to a signer leg that does not exist.
     """
 
     name: str
     compose: Callable[[ComposeRequest], Composed]
     platforms: tuple[str, ...] = ()
     declared_command: bool = False
+    signable: bool = False
 
     def applies(self, target: str) -> bool:
         """Whether this composition runs for ``target`` (substring match on
@@ -359,11 +365,15 @@ class Composition:
         return not self.platforms or any(p in target for p in self.platforms)
 
 
-ARCHIVE = Composition("archive", _compose_archive)
+ARCHIVE = Composition("archive", _compose_archive, signable=True)
 DEB = Composition("deb", _compose_deb, platforms=("linux",))
 WHEEL = Composition("wheel", _compose_wheel)
 MAC_APP = Composition(
-    "mac-app", _compose_mac_app, platforms=("apple-darwin",), declared_command=True
+    "mac-app",
+    _compose_mac_app,
+    platforms=("apple-darwin",),
+    declared_command=True,
+    signable=True,
 )
 
 #: The CLOSED registry, in a stable order. Adding a composition is adding an
@@ -375,6 +385,13 @@ def names() -> tuple[str, ...]:
     """The registered composition names, in registry order — for the config
     boundary's validation message (:func:`shipit.config._parse_bundle`)."""
     return tuple(c.name for c in COMPOSITIONS)
+
+
+def signable_names() -> tuple[str, ...]:
+    """The composition names the mac signer can reopen, registry order — for
+    the config boundary's ``sign = true`` refusal message
+    (:func:`shipit.config._parse_artifact`)."""
+    return tuple(c.name for c in COMPOSITIONS if c.signable)
 
 
 def composition(name: str) -> Composition | None:

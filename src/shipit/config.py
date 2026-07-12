@@ -579,10 +579,13 @@ class Artifact:
     productName → package name — the scar-#2 integrity guard's inputs); and
     ``sign`` also by the sign stage — that later.
 
-    ``sign = true`` requires at least one build target AND at least one darwin
-    platform (signing signs a build output, and runs on macOS only) — refused
-    at parse otherwise, so signing can never silently degrade to an unsigned
-    plan and preflight/gh-setup cannot disagree over it. ``bundle`` follows the
+    ``sign = true`` requires at least one build target, at least one darwin
+    platform (signing signs a build output, and runs on macOS only), AND a
+    bundle whose composition the signer can reopen (mac-app or archive —
+    :attr:`shipit.release.bundle.Composition.signable`, TOL02-WS08 #779) —
+    refused at parse otherwise, so signing can never silently degrade to an
+    unsigned plan, never route to a signer leg that does not exist, and
+    preflight/gh-setup cannot disagree over it. ``bundle`` follows the
     same rule for the same reason: it composes build outputs, so a bundle on a
     no-build artifact is refused at parse rather than silently dropped.
     """
@@ -857,6 +860,27 @@ def _parse_artifact(name: str, spec: object) -> Artifact:
             f"(a bundle composes build outputs; an artifact with no build "
             f"produces nothing to bundle)"
         )
+    if sign:
+        # The signer reopens what the bundle stage composed (workflows.lex
+        # §3.1) — the mac-app leg's reseal payload or the archive leg's
+        # tarball (TOL02-WS08 #779). A `sign = true` with no bundle (or with
+        # a composition the signer has no leg for — deb, wheel) would emit a
+        # sign matrix entry whose leg has no bundle tree to download, failing
+        # deep in CI while gh-setup demands the Apple secrets up front.
+        # Refused here, at the same boundary as the build/darwin rules.
+        from .release import bundle as bundle_registry  # lazy, like _parse_bundle
+
+        signable = bundle_registry.signable_names()
+        if bundle is None or bundle.composition not in signable:
+            got = (
+                f"composition `{bundle.composition}`"
+                if bundle is not None
+                else "no bundle"
+            )
+            raise ConfigError(
+                f"{where}: sign = true requires a bundle composition the "
+                f"signer can reopen ({', '.join(signable)}); got {got}"
+            )
     return Artifact(
         name=name,
         build=build,

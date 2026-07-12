@@ -858,3 +858,338 @@ def test_run_sign_stages_into_out_dir_when_given(tmp_path, capsys):
     # The tree's unsigned dmg is untouched when staging elsewhere.
     assert (tree / "Phos_1.0.0_aarch64.dmg").read_bytes() == b"unsigned-dmg"
     assert "signed + notarized Phos.app" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------
+# The archive leg (TOL02-WS08 #779) — shape dispatch + recorded sequences
+# --------------------------------------------------------------------------
+
+ARCHIVE_STEM = "lex-aarch64-apple-darwin"
+ARCHIVE_NAME = f"{ARCHIVE_STEM}.tar.gz"
+
+#: A safe `tar -tzf` member listing for the fixture archive (the archive
+#: composition's staging layout: binary + docs under `<name>-<target>/`).
+ARCHIVE_LISTING = f"{ARCHIVE_STEM}/\n{ARCHIVE_STEM}/lex\n{ARCHIVE_STEM}/README.md\n"
+
+
+class ArchiveRecorder(SignRecorder):
+    """The archive leg's recorded seam: the tar fakes extract a staging
+    subdir carrying REAL Mach-O bytes (the leg finds binaries by content,
+    never by name) beside a non-Mach-O doc, and ``tar -czf`` writes the
+    re-emitted tarball."""
+
+    def __init__(
+        self, tmp_path: Path, *, binaries=("lex",), statuses=("Accepted",), effects=None
+    ):
+        super().__init__(tmp_path, statuses=statuses, effects=effects)
+        self.binaries = binaries
+
+    def _respond(self, argv):
+        if argv[0] == "tar" and argv[1] == "-tzf":
+            return execrun.ExecResult(
+                argv=argv, rc=0, stdout=ARCHIVE_LISTING, stderr="", duration_ms=1
+            )
+        if argv[0] == "tar" and argv[1] == "-xzf":
+            stage = Path(argv[argv.index("-C") + 1]) / ARCHIVE_STEM
+            stage.mkdir(parents=True, exist_ok=True)
+            for name in self.binaries:
+                (stage / name).write_bytes(MACHO_64)
+            (stage / "README.md").write_text("docs, not Mach-O")
+            return execrun.ExecResult(
+                argv=argv, rc=0, stdout="", stderr="", duration_ms=1
+            )
+        if argv[0] == "tar" and argv[1] == "-czf":
+            Path(argv[2]).write_bytes(b"signed-tar")
+            return execrun.ExecResult(
+                argv=argv, rc=0, stdout="", stderr="", duration_ms=1
+            )
+        return super()._respond(argv)
+
+
+def _archive_tree(tmp_path: Path) -> Path:
+    """The archive leg's input tree: the unsigned tarball (a marker file —
+    the recorder's tar fake extracts the staging layout) plus the loose
+    staging dir the bundle stage leaves beside it (which the leg must ignore:
+    the TARBALL is what it reopens — loose exec bits do not survive artifact
+    transport)."""
+    tree = tmp_path / "dist"
+    tree.mkdir(parents=True)
+    (tree / ARCHIVE_NAME).write_bytes(b"unsigned-tar")
+    loose = tree / ARCHIVE_STEM
+    loose.mkdir()
+    (loose / "lex").write_bytes(MACHO_64)
+    return tree
+
+
+def _keychain_setup(kc: str, cert: str, password: str = "p12pass") -> list[tuple]:
+    """The temporary-keychain lifecycle argvs (create → … → find-identity)."""
+    return [
+        ("security", "create-keychain", "-p", "kc-pass", kc),
+        ("security", "set-keychain-settings", "-lut", "3600", kc),
+        ("security", "unlock-keychain", "-p", "kc-pass", kc),
+        (
+            "security",
+            "import",
+            cert,
+            "-k",
+            kc,
+            "-P",
+            password,
+            "-T",
+            "/usr/bin/codesign",
+        ),
+        (
+            "security",
+            "set-key-partition-list",
+            "-S",
+            "apple-tool:,apple:",
+            "-s",
+            "-k",
+            "kc-pass",
+            kc,
+        ),
+        ("security", "find-identity", "-v", "-p", "codesigning", kc),
+    ]
+
+
+def _codesigns(path: str, kc: str) -> list[tuple]:
+    """One raw-binary codesign + verify pair (no entitlements ever)."""
+    return [
+        (
+            "codesign",
+            "--force",
+            "--sign",
+            IDENTITY,
+            "--options",
+            "runtime",
+            "--timestamp",
+            "--keychain",
+            kc,
+            path,
+        ),
+        ("codesign", "--verify", "--strict", path),
+    ]
+
+
+def test_detect_shape_routes_payload_to_mac_app_and_tarball_to_archive(tmp_path):
+    mac_tree = _fixture_tree(tmp_path)
+    assert sign_mod.detect_shape(mac_tree) == "mac-app"
+    archive_tree = _archive_tree(tmp_path / "arch")
+    assert sign_mod.detect_shape(archive_tree) == "archive"
+
+
+def test_detect_shape_payload_wins_when_both_shapes_appear(tmp_path):
+    # The reseal payload is the explicit mac-app signal — if a tree ever
+    # carried both shapes, the signer must not silently pick the archive leg.
+    tree = _fixture_tree(tmp_path)
+    (tree / ARCHIVE_NAME).write_bytes(b"unsigned-tar")
+    assert sign_mod.detect_shape(tree) == "mac-app"
+
+
+def test_detect_shape_nothing_signable_is_a_hard_refusal(tmp_path):
+    tree = tmp_path / "dist"
+    tree.mkdir()
+    (tree / "lex.deb").write_bytes(b"deb")
+    with pytest.raises(ReleaseError, match="nothing signable"):
+        sign_mod.detect_shape(tree)
+
+
+def test_sign_archives_full_recorded_sequence(tmp_path):
+    tree = _archive_tree(tmp_path)
+    recorder = ArchiveRecorder(tmp_path)
+
+    result = sign_mod.sign_archives(_request(tmp_path, recorder))
+
+    scratch = tmp_path / "scratch"
+    kc1 = str(scratch / "signing-u1.keychain-db")
+    cert1 = str(scratch / "cert-u1.p12")
+    binary = str(scratch / "archive-0" / ARCHIVE_STEM / "lex")
+    zip_path = str(scratch / "lex-notarize.zip")
+    signed_tar = str(scratch / f"signed-0-{ARCHIVE_NAME}")
+    expected = [
+        ("tar", "-tzf", str(tree / ARCHIVE_NAME)),
+        ("tar", "-xzf", str(tree / ARCHIVE_NAME), "-C", str(scratch / "archive-0")),
+        *_keychain_setup(kc1, cert1),
+        *_codesigns(binary, kc1),
+        ("security", "delete-keychain", kc1),
+        # notarytool needs a container: the signed binary rides a zip (the
+        # legacy `zip <bin>-notarize.zip <bin>` layout; -j junks the path).
+        ("zip", "-j", zip_path, binary),
+        (
+            "xcrun",
+            "notarytool",
+            "submit",
+            zip_path,
+            "--key",
+            str(scratch / "AuthKey.p8"),  # ASC wins over Apple-ID
+            "--key-id",
+            "KEYID123",
+            "--issuer",
+            "issuer-uuid",
+            "--output-format",
+            "json",
+            "--no-wait",
+        ),
+        (
+            "xcrun",
+            "notarytool",
+            "info",
+            "sub-123",
+            "--key",
+            str(scratch / "AuthKey.p8"),
+            "--key-id",
+            "KEYID123",
+            "--issuer",
+            "issuer-uuid",
+            "--output-format",
+            "json",
+        ),
+        # The tarball is re-emitted from the signed staging tree AFTER the
+        # notary verdict — and there is NO stapler call: a bare binary (and
+        # its transport zip) has no staple target.
+        ("tar", "-czf", signed_tar, "-C", str(scratch / "archive-0"), ARCHIVE_STEM),
+    ]
+    assert recorder.argvs == expected
+
+    # Staged under the ORIGINAL archive filename, replacing the unsigned
+    # tarball in place; decoded credential material wiped.
+    assert (tree / ARCHIVE_NAME).read_bytes() == b"signed-tar"
+    assert not Path(cert1).exists()
+    assert not (scratch / "AuthKey.p8").exists()
+    assert not (scratch / "lex-notarize.zip").exists()
+    assert result == sign_mod.ArchiveSignResult(
+        archives=(str(tree / ARCHIVE_NAME),),
+        binaries=("lex",),
+        identity=IDENTITY,
+        submission_ids=("sub-123",),
+    )
+
+
+def test_sign_archives_signs_every_binary_in_one_keychain_pass(tmp_path):
+    # The legacy scar: the identity lives in a per-call temporary keychain,
+    # so EVERY binary must go through a single sign-mac call — one keychain,
+    # then one notary submission per binary.
+    _archive_tree(tmp_path)
+    recorder = ArchiveRecorder(
+        tmp_path, binaries=("lex", "lexd"), statuses=("Accepted", "Accepted")
+    )
+
+    result = sign_mod.sign_archives(_request(tmp_path, recorder))
+
+    assert len(recorder.heads("security", "create-keychain")) == 1
+    signed = [argv[-1] for argv in recorder.heads("codesign", "--force")]
+    assert [Path(p).name for p in signed] == ["lex", "lexd"]
+    assert len(recorder.heads("xcrun", "notarytool", "submit")) == 2
+    assert result.binaries == ("lex", "lexd")
+    assert result.submission_ids == ("sub-123", "sub-123")
+    assert not recorder.heads("xcrun", "stapler")
+
+
+def test_sign_archives_missing_secrets_fails_before_any_work(tmp_path):
+    _archive_tree(tmp_path)
+    recorder = ArchiveRecorder(tmp_path)
+    with pytest.raises(ReleaseError, match="APPLE_CERTIFICATE is not set"):
+        sign_mod.sign_archives(_request(tmp_path, recorder, env={}))
+    assert recorder.calls == []
+
+
+def test_sign_archives_refuses_entitlements(tmp_path):
+    # Entitlements belong to the mac-app leg's .app root; a raw CLI binary
+    # carries none (legacy rust-cli parity) — refused before any command.
+    _archive_tree(tmp_path)
+    ent = tmp_path / "app.entitlements"
+    ent.write_text("<plist/>")
+    recorder = ArchiveRecorder(tmp_path)
+    with pytest.raises(ReleaseError, match="entitlements apply to the mac-app leg"):
+        sign_mod.sign_archives(_request(tmp_path, recorder, entitlements=ent))
+    assert recorder.calls == []
+
+
+def test_sign_archives_no_macho_is_a_hard_fail(tmp_path):
+    # The docs beside the binary are not Mach-O; an archive with NO Mach-O at
+    # all is a wrong bundle, never a quiet pass (the leg detects by content).
+    _archive_tree(tmp_path)
+    recorder = ArchiveRecorder(tmp_path, binaries=())
+    with pytest.raises(ReleaseError, match="no Mach-O binary inside"):
+        sign_mod.sign_archives(_request(tmp_path, recorder))
+    assert not recorder.heads("security")  # no keychain was ever created
+
+
+def test_sign_archives_rejects_a_traversal_member(tmp_path):
+    # The same tar path-traversal refusal as the reseal payload: listed,
+    # validated, and refused BEFORE extraction.
+    _archive_tree(tmp_path)
+
+    def evil_listing(argv):
+        if argv[:2] == ("tar", "-tzf"):
+            return execrun.ExecResult(
+                argv=argv,
+                rc=0,
+                stdout=f"{ARCHIVE_STEM}/\n../../etc/evil\n",
+                stderr="",
+                duration_ms=1,
+            )
+        return None
+
+    recorder = ArchiveRecorder(tmp_path, effects={"tar": evil_listing})
+    with pytest.raises(ReleaseError, match="unsafe path in archive bundle"):
+        sign_mod.sign_archives(_request(tmp_path, recorder))
+    assert not recorder.heads("tar", "-xzf")
+
+
+def test_sign_archives_rejected_notarization_fails_before_any_reemit(tmp_path):
+    # ADR-0009's barrier: the notary verdict lands BEFORE any tarball is
+    # re-emitted, so a rejected binary leaves the unsigned tarball untouched.
+    tree = _archive_tree(tmp_path)
+    recorder = ArchiveRecorder(tmp_path, statuses=("Invalid",))
+    with pytest.raises(ReleaseError, match="notarization Invalid"):
+        sign_mod.sign_archives(_request(tmp_path, recorder))
+    assert not recorder.heads("tar", "-czf")
+    assert (tree / ARCHIVE_NAME).read_bytes() == b"unsigned-tar"
+
+
+def test_run_sign_dispatches_the_archive_tree_and_emits_the_typed_result(
+    tmp_path, capsys
+):
+    tree = _archive_tree(tmp_path)
+    recorder = ArchiveRecorder(tmp_path)
+
+    rc = release_verb.run_sign(
+        str(tree), as_json=True, run_cmd=recorder, env=FULL_ENV, sleep=lambda s: None
+    )
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {
+        "archives": [str(tree / ARCHIVE_NAME)],
+        "binaries": ["lex"],
+        "identity": IDENTITY,
+        "submission_ids": ["sub-123"],
+    }
+
+
+def test_run_sign_archive_stages_into_out_dir_when_given(tmp_path, capsys):
+    tree = _archive_tree(tmp_path)
+    out = tmp_path / "dist-signed"
+    recorder = ArchiveRecorder(tmp_path)
+
+    rc = release_verb.run_sign(str(tree), out=str(out), run_cmd=recorder, env=FULL_ENV)
+
+    assert rc == 0
+    # ONLY the signed tarball lands in out — exactly what wf-sign-mac uploads
+    # as the signed-* overlay; the tree's unsigned tarball stays untouched.
+    assert [p.name for p in sorted(out.iterdir())] == [ARCHIVE_NAME]
+    assert (out / ARCHIVE_NAME).read_bytes() == b"signed-tar"
+    assert (tree / ARCHIVE_NAME).read_bytes() == b"unsigned-tar"
+    assert "signed + notarized 1 binary" in capsys.readouterr().out
+
+
+def test_run_sign_nothing_signable_is_one_error_line(tmp_path, capsys):
+    tree = tmp_path / "dist"
+    tree.mkdir()
+    (tree / "notes.txt").write_text("nothing here")
+    rc = release_verb.run_sign(str(tree), run_cmd=ArchiveRecorder(tmp_path), env={})
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert err.startswith("error: ")
+    assert "nothing signable" in err
