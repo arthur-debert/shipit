@@ -79,6 +79,22 @@ functions the entries carry:
   sign-then-bundle). The declared ``command`` is the only consumer-specific
   part; a missing payload is a bundle-stage failure, never a signer
   surprise. Mac targets only.
+- **electron** — electron-builder's per-platform distributable set (the
+  darwin ``.dmg`` + ``.dmg.blockmap`` sidecar, the linux ``.AppImage``, the
+  windows ``.exe`` + ``.exe.blockmap``), collected from the declared
+  ``source`` output tree after the declared bundler runs. LIKE mac-app,
+  electron is SIGNABLE through the standalone macOS sign stage: the bundler's
+  own signing stays OFF, the darwin ``.app`` ships UNSIGNED and is re-emitted
+  as the ``<name>.unsigned-app.tar.gz`` reseal payload the signer reopens →
+  resigns → reseals → notarizes (ADR-0040, TOL02-WS14 #790). So a ``sign =
+  true`` electron artifact derives its Apple creds through the standard
+  sign-stage path, no build-time secret. The one nuance vs mac-app: electron's
+  darwin ``.app`` NESTS helper ``.app`` bundles, so the TOP-LEVEL ``.app`` is
+  the one staged. The reseal payload carries it across the artifact boundary
+  (upload strips a ``.app``'s symlinks/exec bits); assert-bundle reads its
+  ``CFBundleExecutable`` as the darwin anchor. Linux/windows legs ship unsigned.
+  Mac/linux/windows targets only (the windows leg's integrity + endpoint land
+  with WS11).
 - **tarball** — the generated-parser ``<name>.tar.gz`` (TOL02-WS16 #792,
   legacy ``tree-sitter.yml@v3``): the tree-sitter leg's generated ``src/``
   tree plus the grammar/queries/bindings that are present. Platform-
@@ -546,6 +562,194 @@ def _compose_mac_app(req: ComposeRequest) -> Composed:
     return Composed(req.artifact.name, "mac-app", (app.name, dmg.name, payload))
 
 
+#: The electron-builder distributable set per platform: a target-triple
+#: substring, the PRIMARY distributable suffix (hard-required — a leg that
+#: emits none is a bundle-stage failure, never a quiet pass), and the
+#: companion suffixes shipped beside it WHEN PRESENT (electron-builder's
+#: incremental-update ``.blockmap`` sidecars). electron-builder targets
+#: exactly this OS set; the composition gates on ``target`` and reads only the
+#: matching platform's set, so a darwin leg never scoops a stray linux
+#: ``.AppImage`` a shared source tree might carry.
+_ELECTRON_TARGETS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ("apple-darwin", ".dmg", (".dmg.blockmap",)),
+    ("linux", ".AppImage", (".AppImage.blockmap",)),
+    ("windows", ".exe", (".exe.blockmap",)),
+)
+
+
+def _electron_target(target: str) -> tuple[str, tuple[str, ...]]:
+    """The ``(primary_suffix, sidecar_suffixes)`` electron-builder emits for
+    ``target`` — the first :data:`_ELECTRON_TARGETS` whose substring matches.
+    Raises when no platform matches (the ``platforms`` gate keeps the verb
+    from reaching here for one, but the compose function refuses loudly rather
+    than compose an empty set). Pure."""
+    for needle, primary, sidecars in _ELECTRON_TARGETS:
+        if needle in target:
+            return primary, sidecars
+    raise ReleaseError(
+        f"electron composition: target `{target}` is not a darwin/linux/"
+        f"windows triple — electron-builder emits no distributable for it"
+    )
+
+
+def _compose_electron(req: ComposeRequest) -> Composed:
+    """electron-builder's declared bundle → the platform distributable set.
+
+    Runs the DECLARED bundler (``electron-builder`` — the one consumer-
+    specific part, like mac-app's) and collects the platform-appropriate
+    DISTRIBUTABLES from the declared ``source`` output tree: the darwin
+    ``.dmg`` (plus its ``.dmg.blockmap`` sidecar), the linux ``.AppImage``, or
+    the windows ``.exe`` — each PRIMARY distributable hard-required (a leg
+    producing none is a bundle-stage failure), its ``.blockmap`` sidecar
+    shipped when present. The darwin leg additionally requires EXACTLY ONE
+    ``.dmg`` (the signer reseals one, from the signed ``.app`` — several is a
+    stale/multi-arch leftover, failed here not at the signer); the linux/
+    windows sets stay open (no reseal step gates their count).
+
+    Like mac-app, electron is SIGNABLE through the standalone macOS sign stage
+    (:mod:`shipit.release.sign`, ADR-0040): electron-builder does NOT sign at
+    build (its own CSC/notarize stay OFF), the darwin ``.app`` ships UNSIGNED,
+    and the composition re-emits it as the ``<name>.unsigned-app.tar.gz``
+    reseal payload the signer reopens — the same bundle(unsigned) →
+    sign-reopens-and-reseals model as a tauri ``.app`` (workflows.lex §3.1).
+    The signer codesigns the ``.app`` inner-first and reseals the ``.dmg`` from
+    it. The ONE electron nuance vs mac-app: the darwin ``.app`` NESTS helper
+    ``.app`` bundles (the Electron Framework, the GPU/Renderer/Plugin helpers)
+    under ``Contents/Frameworks``, so the composition selects the TOP-LEVEL
+    ``.app`` (:func:`_stage_electron_reseal_payload`) rather than mac-app's
+    sole-``.app`` assumption; the reseal payload carries the whole tree and the
+    signer's inner-first walk (:func:`shipit.release.sign.nested_signable`)
+    reaches the helpers.
+
+    The naked ``.app`` rides the bundle tree, but the reseal payload is what
+    crosses the artifact boundary (upload strips a ``.app``'s symlinks/exec
+    bits), so assert-bundle reads the payload's ``CFBundleExecutable`` as the
+    darwin main-binary anchor (:mod:`shipit.release.integrity`), the opaque
+    ``.dmg``/``.AppImage`` NAME tiers being the fallback. Linux/windows legs
+    ship unsigned (not signable). Mac/linux/windows targets only; the windows
+    leg's integrity + endpoint land with WS11 (issue #790 acceptance).
+    """
+    spec = req.artifact.bundle
+    assert spec is not None and spec.command is not None and spec.source is not None
+    req.run_cmd(list(spec.command), req.root)
+    source = req.root / spec.source
+    if source.resolve() == req.out_dir.resolve():
+        # The composition copies the bundler's distributables OUT of `source`
+        # INTO the bundle tree, so the two must differ — a `source` that
+        # resolves to the output dir would copy a file onto itself (a cryptic
+        # shutil.SameFileError); refuse it up front with the fix.
+        raise ReleaseError(
+            f"[artifacts.{req.artifact.name}] electron composition: bundle "
+            f"`source` ({spec.source}) resolves to the bundle output tree — "
+            f"point `source` at electron-builder's own output dir, distinct "
+            f"from the bundle tree the composition copies its distributables into"
+        )
+    primary, sidecars = _electron_target(req.target)
+    dists = sorted(p for p in source.rglob(f"*{primary}") if p.is_file())
+    if not dists:
+        raise ReleaseError(
+            f"[artifacts.{req.artifact.name}] electron composition: the "
+            f"bundler produced no {primary} under {source} — hard fail, never "
+            f"a quiet pass (an electron leg must emit its distributable)"
+        )
+    # The darwin .dmg is what the standalone signer reseals from the signed
+    # .app (workflows.lex §3.1) — the signer reseals exactly one, so a darwin
+    # tree with several .dmg (a stale or multi-arch leftover in a shared source
+    # tree) is an ambiguity resolved loudly HERE, never a signer surprise — the
+    # same exactly-one contract mac-app enforces on its coupled pair. Linux
+    # .AppImage / windows .exe carry no such reseal step, so their set is open.
+    if "apple-darwin" in req.target and len(dists) != 1:
+        raise ReleaseError(
+            f"[artifacts.{req.artifact.name}] electron composition: the darwin "
+            f"leg needs exactly one {primary} to reseal under {source}; found "
+            f"{len(dists)} — electron-builder emits one per arch lane, so several "
+            f"is a stale/multi-arch leftover, resolved here, never at the signer"
+        )
+    req.out_dir.mkdir(parents=True, exist_ok=True)
+    outputs: list[str] = []
+    for dist in dists:
+        dest = req.out_dir / dist.name
+        if dest.exists():
+            dest.unlink()
+        shutil.copy2(dist, dest)
+        outputs.append(dist.name)
+    # The .blockmap sidecars (electron-builder's incremental-update maps), each
+    # collected ONLY when its primary distributable was: a `<primary>.blockmap`
+    # whose `<primary>` is not among the copied distributables is a stale
+    # leftover in the source tree, never scooped into the output set (copilot).
+    collected = set(outputs)
+    for sidecar in sidecars:
+        for side in sorted(source.rglob(f"*{sidecar}")):
+            if side.is_file() and side.name.removesuffix(".blockmap") in collected:
+                dest = req.out_dir / side.name
+                if dest.exists():
+                    dest.unlink()
+                shutil.copy2(side, dest)
+                outputs.append(side.name)
+    # The darwin leg additionally stages the unsigned .app + reseal payload the
+    # standalone mac signer reopens (electron routes through the sign stage, it
+    # does not self-sign). Linux/windows legs ship the distributable alone.
+    if "apple-darwin" in req.target:
+        outputs.extend(_stage_electron_reseal_payload(req, source))
+    return Composed(req.artifact.name, "electron", tuple(sorted(outputs)))
+
+
+def _electron_top_level_apps(source: Path) -> list[Path]:
+    """The TOP-LEVEL ``.app`` bundles under ``source`` — a ``.app`` not itself
+    nested inside another ``.app``. electron-builder's darwin output nests
+    helper ``.app`` bundles (the GPU/Renderer/Plugin helpers) under a main
+    app's ``Contents/Frameworks``, so a bare ``rglob('*.app')`` (mac-app's
+    sole-app assumption) would scoop every helper; this keeps only the outer
+    app the signer reopens. Pure."""
+    return [
+        p
+        for p in sorted(source.rglob("*.app"))
+        if p.is_dir()
+        and not any(part.endswith(".app") for part in p.relative_to(source).parts[:-1])
+    ]
+
+
+def _stage_electron_reseal_payload(req: ComposeRequest, source: Path) -> list[str]:
+    """Stage the darwin ``.app`` + the ``<name>.unsigned-app.tar.gz`` reseal
+    payload the standalone mac signer reopens (:mod:`shipit.release.sign`).
+
+    electron ships its darwin ``.app`` UNSIGNED through the ADR-0040 sign seam
+    (like mac-app): copy the ``.app`` into the bundle tree (symlinks preserved)
+    and re-emit it as the tar the signer reopens — artifact upload strips a
+    ``.app``'s symlinks/exec bits, so the payload, not the raw ``.app``, is
+    what crosses jobs. EXACTLY one top-level ``.app`` is required
+    (:func:`_electron_top_level_apps`); a missing or ambiguous one is a
+    bundle-stage failure (the bundler must leave the naked ``.app`` with its
+    own signing OFF), never a signer surprise.
+    """
+    apps = _electron_top_level_apps(source)
+    if len(apps) != 1:
+        raise ReleaseError(
+            f"[artifacts.{req.artifact.name}] electron composition: the darwin "
+            f"leg needs exactly one top-level .app to sign under {source}; found "
+            f"{len(apps)} — electron-builder must leave the naked .app (its own "
+            f"signing OFF) so the standalone signer reopens it"
+        )
+    app = apps[0]
+    app_dest = req.out_dir / app.name
+    if app_dest.exists():
+        shutil.rmtree(app_dest)
+    shutil.copytree(app, app_dest, symlinks=True)
+    payload = f"{req.artifact.name}.unsigned-app.tar.gz"
+    req.run_cmd(
+        ["tar", "-czf", str(req.out_dir / payload), "-C", str(app.parent), app.name],
+        req.root,
+    )
+    if not (req.out_dir / payload).is_file():
+        raise ReleaseError(
+            f"[artifacts.{req.artifact.name}] electron darwin leg emitted no "
+            f"reseal payload ({payload}) — the signer reopens the unsigned .app "
+            f"from it (workflows.lex §3.1), so its absence is a bundle-stage "
+            f"failure"
+        )
+    return [app.name, payload]
+
+
 def vsce_target(target: str) -> str:
     """The VS Code marketplace target string for a rust target triple
     (:data:`VSCE_TARGETS`), or a loud :class:`ReleaseError` naming the mapped
@@ -710,6 +914,19 @@ MAC_APP = Composition(
     declared_command=True,
     signable=True,
 )
+ELECTRON = Composition(
+    "electron",
+    _compose_electron,
+    platforms=("apple-darwin", "linux", "windows"),
+    declared_command=True,
+    # SIGNABLE, like mac-app: electron-builder does NOT sign at build; the
+    # darwin `.app` ships unsigned as the `<name>.unsigned-app.tar.gz` reseal
+    # payload, and the standalone mac sign stage (ADR-0040) reopens → resigns →
+    # reseals → notarizes it. So a `sign = true` electron artifact derives the
+    # Apple cert/notary requirement through the STANDARD sign-stage path — no
+    # composition-keyed build-time secret (TOL02-WS14 #790).
+    signable=True,
+)
 #: tree-sitter's generated-parser tarball (TOL02-WS16 #792) — platform-
 #: independent (the same generated C source on every leg, emitted as one
 #: unqualified ``<name>.tar.gz``), NOT signable (a source tarball has no binary
@@ -730,6 +947,7 @@ COMPOSITIONS: tuple[Composition, ...] = (
     WASM_PACK,
     VSIX,
     MAC_APP,
+    ELECTRON,
     TARBALL,
 )
 

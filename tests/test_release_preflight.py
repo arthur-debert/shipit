@@ -146,6 +146,36 @@ def test_mac_app_shape_plans_bundle_and_sign():
     assert plan.secret_alternatives == (secretreq.NOTARY_SECRETS,)
 
 
+ELECTRON_SIGNED = _artifacts(
+    """
+[artifacts.app]
+build = ["npm"]
+platforms = ["darwin-arm64", "linux-x86_64"]
+bundle = { composition = "electron", command = ["npm", "run", "dist"], source = "release" }
+endpoints = ["gh-release"]
+sign = true
+"""
+)
+
+
+def test_signed_electron_plans_the_sign_stage_and_apple_creds_via_the_standard_path():
+    # WS14 #790: electron is signable, so a `sign = true` electron artifact
+    # rides the SAME sign stage + Apple cert/notary derivation as mac-app — no
+    # composition-keyed build-time secret. The darwin leg signs, the linux leg
+    # does not.
+    plan = preflight.plan(ELECTRON_SIGNED, _resolved("1.0.0"))
+    assert [(e.platform, e.sign) for e in plan.matrix] == [
+        ("darwin-arm64", True),
+        ("linux-x86_64", False),
+    ]
+    assert "sign" in plan.stages
+    assert plan.secrets == ("RELEASE_TOKEN", *secretreq.SIGN_MAC_CERT_SECRETS)
+    assert plan.secret_alternatives == (secretreq.NOTARY_SECRETS,)
+    # The loud missing-secret contract still holds (nothing electron-specific).
+    missing = preflight.missing_secrets(plan, {"RELEASE_TOKEN": "t"})
+    assert "APPLE_CERTIFICATE" in missing
+
+
 def test_mixed_map_flags_bundle_per_entry_so_build_only_legs_skip_bundling():
     # codex, round 1: a bundled artifact beside a build-only one. `bundle`
     # is a plan-WIDE stage flag (live because SOME artifact bundles), but the

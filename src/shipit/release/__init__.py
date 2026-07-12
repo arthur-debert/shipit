@@ -19,8 +19,10 @@ work streams land:
   the one required set gh-setup syncs, preflight validates, and the
   cross-org caller's ``secrets:`` block lists. Pure.
 - :mod:`.bundle` — the closed bundle-composition registry (WS03): how a
-  declared artifact composes build outputs into its unsigned distributable
-  (archive, deb, wheel, mac-app). Command literals + compose functions,
+  declared artifact composes build outputs into its UNSIGNED distributable;
+  the signable legs (archive, mac-app, and electron — WS14) emit the reseal
+  payload the standalone mac sign stage reopens, so every darwin app is signed
+  once, in that stage, never at build. Command literals + compose functions,
   effectful only through the injected exec seam.
 - :mod:`.integrity` — the assert-bundle pure core (WS03, workflows.lex
   §3.2): the expected-main-binary fallback chain and the bundle-tree check

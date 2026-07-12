@@ -569,6 +569,261 @@ def test_mac_app_requires_exactly_one_coupled_pair(tmp_path):
 
 
 # --------------------------------------------------------------------------
+# electron — the per-platform distributable set (signed via the standalone stage)
+# --------------------------------------------------------------------------
+
+ELECTRON_SPEC = {
+    "app": {
+        "build": ["npm"],
+        "bundle": {
+            "composition": "electron",
+            "command": ["npm", "run", "dist"],
+            # A source distinct from the out tree (`dist`): the composition
+            # reads electron-builder's output dir and copies INTO the bundle
+            # out tree, so they must differ.
+            "source": "release",
+        },
+    }
+}
+
+
+def _electron_darwin_effect(root, product="Lexed", exe="lexed", ver="1.2.3"):
+    """Simulate electron-builder's darwin output: the UNSIGNED .dmg + its
+    .blockmap, plus the naked .app in the `mac-arm64/` subdir (carrying a
+    symlink, the thing artifact upload destroys) — which NESTS a helper .app
+    under Contents/Frameworks, the electron shape. The composition stages the
+    top-level .app + the `<name>.unsigned-app.tar.gz` reseal payload the mac
+    signer reopens; electron-builder does NOT sign at build."""
+
+    def effect(argv, cwd):
+        rel = root / "release"
+        rel.mkdir(parents=True, exist_ok=True)
+        (rel / f"{product}-{ver}-arm64.dmg").write_bytes(b"dmg")
+        (rel / f"{product}-{ver}-arm64.dmg.blockmap").write_bytes(b"blockmap")
+        app = rel / "mac-arm64" / f"{product}.app"
+        _executable(app / "Contents" / "MacOS" / exe)
+        (app / "Contents" / "Current").symlink_to("MacOS")
+        # A nested helper .app (Electron's GPU/Renderer/Plugin shape) — proves
+        # the top-level filter picks the outer .app, not each helper.
+        helper = app / "Contents" / "Frameworks" / f"{product} Helper.app"
+        _executable(helper / "Contents" / "MacOS" / f"{product} Helper")
+
+    return effect
+
+
+def _electron_linux_effect(root, product="Lexed", ver="1.2.3"):
+    """Simulate electron-builder's linux output: the .AppImage + its .blockmap.
+    A stray .app rides the shared source tree (a darwin leftover), which the
+    linux leg must NOT scoop — the composition collects .app on no leg."""
+
+    def effect(argv, cwd):
+        rel = root / "release"
+        rel.mkdir(parents=True, exist_ok=True)
+        (rel / f"{product}-{ver}.AppImage").write_bytes(b"appimage")
+        (rel / f"{product}-{ver}.AppImage.blockmap").write_bytes(b"blockmap")
+        _executable(rel / "mac-arm64" / f"{product}.app" / "Contents" / "MacOS" / "x")
+
+    return effect
+
+
+def test_electron_darwin_stages_the_dmg_app_and_reseal_payload(tmp_path):
+    (artifact,) = _artifacts(ELECTRON_SPEC)
+    recorder = RunRecorder(
+        {"npm": _electron_darwin_effect(tmp_path), "tar": _tar_effect}
+    )
+
+    composed = bundle_mod.ELECTRON.compose(
+        _request(tmp_path, artifact, (), target=MAC, run_cmd=recorder)
+    )
+
+    out = tmp_path / "dist"
+    source = tmp_path / "release"
+    # electron routes through the standalone sign stage: the bundler runs, then
+    # the composition tars the UNSIGNED top-level .app as the reseal payload the
+    # signer reopens (no codesign here — that is the sign stage's job).
+    # The reseal payload is named for the ARTIFACT (`app`), not the product.
+    assert recorder.calls == [
+        (("npm", "run", "dist"), tmp_path),
+        (
+            (
+                "tar",
+                "-czf",
+                str(out / "app.unsigned-app.tar.gz"),
+                "-C",
+                str(source / "mac-arm64"),
+                "Lexed.app",
+            ),
+            tmp_path,
+        ),
+    ]
+    assert (out / "Lexed-1.2.3-arm64.dmg").is_file()
+    assert (out / "Lexed-1.2.3-arm64.dmg.blockmap").is_file()
+    # The top-level .app is staged (symlink + nested helper intact) beside the
+    # reseal payload — the helper .app is NOT collected separately, it rides
+    # inside the top-level .app the payload carries.
+    assert (out / "Lexed.app/Contents/MacOS/lexed").is_file()
+    assert (out / "Lexed.app/Contents/Current").is_symlink()
+    assert (out / "Lexed.app/Contents/Frameworks/Lexed Helper.app").is_dir()
+    assert composed == bundle_mod.Composed(
+        "app",
+        "electron",
+        (
+            "Lexed-1.2.3-arm64.dmg",
+            "Lexed-1.2.3-arm64.dmg.blockmap",
+            "Lexed.app",
+            "app.unsigned-app.tar.gz",
+        ),
+    )
+
+
+def test_electron_darwin_without_a_top_level_app_is_a_bundle_failure(tmp_path):
+    # The signer reopens the unsigned .app from the reseal payload; a darwin
+    # leg that emits a .dmg but no naked .app cannot build it — hard fail HERE,
+    # never a signer surprise (electron-builder must leave the .app).
+    (artifact,) = _artifacts(ELECTRON_SPEC)
+
+    def effect(argv, cwd):
+        rel = tmp_path / "release"
+        rel.mkdir(parents=True, exist_ok=True)
+        (rel / "Lexed-1.2.3-arm64.dmg").write_bytes(b"dmg")
+
+    recorder = RunRecorder({"npm": effect, "tar": _tar_effect})
+    with pytest.raises(ReleaseError, match="exactly one top-level .app"):
+        bundle_mod.ELECTRON.compose(
+            _request(tmp_path, artifact, (), target=MAC, run_cmd=recorder)
+        )
+
+
+def test_electron_darwin_with_several_dmgs_is_a_bundle_failure(tmp_path):
+    # The signer reseals exactly one .dmg from the signed .app; a darwin tree
+    # carrying several (a stale or multi-arch leftover in a shared source tree)
+    # is an ambiguity resolved loudly HERE, never a signer surprise — the same
+    # exactly-one contract mac-app enforces on its coupled pair.
+    (artifact,) = _artifacts(ELECTRON_SPEC)
+
+    def effect(argv, cwd):
+        rel = tmp_path / "release"
+        rel.mkdir(parents=True, exist_ok=True)
+        (rel / "Lexed-1.2.3-arm64.dmg").write_bytes(b"dmg")
+        (rel / "Lexed-1.2.3-x64.dmg").write_bytes(b"dmg")  # a stale/other-arch leftover
+
+    recorder = RunRecorder({"npm": effect, "tar": _tar_effect})
+    with pytest.raises(ReleaseError, match=r"needs exactly one \.dmg to reseal"):
+        bundle_mod.ELECTRON.compose(
+            _request(tmp_path, artifact, (), target=MAC, run_cmd=recorder)
+        )
+
+
+def test_electron_linux_collects_the_appimage_and_no_app(tmp_path):
+    (artifact,) = _artifacts(ELECTRON_SPEC)
+    recorder = RunRecorder({"npm": _electron_linux_effect(tmp_path)})
+
+    composed = bundle_mod.ELECTRON.compose(
+        _request(tmp_path, artifact, (), target=LINUX, run_cmd=recorder)
+    )
+
+    out = tmp_path / "dist"
+    assert (out / "Lexed-1.2.3.AppImage").is_file()
+    assert (out / "Lexed-1.2.3.AppImage.blockmap").is_file()
+    # The stray .app in the shared source tree is not scooped into the bundle.
+    assert not (out / "Lexed.app").exists()
+    assert composed == bundle_mod.Composed(
+        "app",
+        "electron",
+        ("Lexed-1.2.3.AppImage", "Lexed-1.2.3.AppImage.blockmap"),
+    )
+
+
+def test_electron_windows_collects_the_exe_and_blockmap(tmp_path):
+    # The composition declares the windows leg; its integrity + endpoint land
+    # with WS11 (issue #790), but the artifact set is already declarable.
+    (artifact,) = _artifacts(ELECTRON_SPEC)
+
+    def effect(argv, cwd):
+        rel = tmp_path / "release"
+        rel.mkdir(parents=True, exist_ok=True)
+        (rel / "Lexed Setup 1.2.3.exe").write_bytes(b"exe")
+        (rel / "Lexed Setup 1.2.3.exe.blockmap").write_bytes(b"blockmap")
+
+    recorder = RunRecorder({"npm": effect})
+    composed = bundle_mod.ELECTRON.compose(
+        _request(tmp_path, artifact, (), target=WIN, run_cmd=recorder)
+    )
+    out = tmp_path / "dist"
+    assert (out / "Lexed Setup 1.2.3.exe").is_file()
+    assert (out / "Lexed Setup 1.2.3.exe.blockmap").is_file()
+    assert composed.outputs == (
+        "Lexed Setup 1.2.3.exe",
+        "Lexed Setup 1.2.3.exe.blockmap",
+    )
+
+
+def test_electron_missing_the_primary_distributable_is_a_bundle_failure(tmp_path):
+    # A darwin leg that emits no .dmg is a hard failure HERE, never a quiet
+    # pass (the ADR-0009 barrier): the bundler "succeeds" but writes nothing.
+    (artifact,) = _artifacts(ELECTRON_SPEC)
+    recorder = RunRecorder({"npm": lambda argv, cwd: None})
+    with pytest.raises(ReleaseError, match=r"produced no \.dmg"):
+        bundle_mod.ELECTRON.compose(
+            _request(tmp_path, artifact, (), target=MAC, run_cmd=recorder)
+        )
+
+
+def test_electron_skips_a_stale_blockmap_with_no_matching_distributable(tmp_path):
+    # A `<primary>.blockmap` whose primary was NOT collected is a leftover in
+    # the source tree — it must not ride into the output set (copilot rd2). The
+    # linux leg (no reseal payload) isolates the blockmap-filter behaviour.
+    (artifact,) = _artifacts(ELECTRON_SPEC)
+
+    def effect(argv, cwd):
+        rel = tmp_path / "release"
+        rel.mkdir(parents=True, exist_ok=True)
+        (rel / "Lexed-1.2.3.AppImage").write_bytes(b"img")
+        (rel / "Lexed-1.2.3.AppImage.blockmap").write_bytes(b"map")  # matches
+        (rel / "Stale-0.9.0.AppImage.blockmap").write_bytes(b"stale")  # no primary
+
+    composed = bundle_mod.ELECTRON.compose(
+        _request(
+            tmp_path, artifact, (), target=LINUX, run_cmd=RunRecorder({"npm": effect})
+        )
+    )
+    assert composed.outputs == (
+        "Lexed-1.2.3.AppImage",
+        "Lexed-1.2.3.AppImage.blockmap",
+    )
+    assert not (tmp_path / "dist" / "Stale-0.9.0.AppImage.blockmap").exists()
+
+
+def test_electron_refuses_a_source_that_is_the_bundle_output_tree(tmp_path):
+    # source == out_dir would copy a distributable onto itself (SameFileError);
+    # the composition refuses it up front with the fix (copilot rd2). out_dir is
+    # `<root>/dist`, so a `source = "dist"` collides.
+    (artifact,) = _artifacts(
+        {
+            "app": {
+                "build": ["npm"],
+                "bundle": {
+                    "composition": "electron",
+                    "command": ["npm", "run", "dist"],
+                    "source": "dist",
+                },
+            }
+        }
+    )
+
+    def effect(argv, cwd):
+        (tmp_path / "dist").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "dist" / "Lexed-1.2.3-arm64.dmg").write_bytes(b"dmg")
+
+    with pytest.raises(ReleaseError, match=r"resolves to the bundle output tree"):
+        bundle_mod.ELECTRON.compose(
+            _request(
+                tmp_path, artifact, (), target=MAC, run_cmd=RunRecorder({"npm": effect})
+            )
+        )
+
+
+# --------------------------------------------------------------------------
 # tarball — the generated-parser contract (TOL02-WS16 #792)
 # --------------------------------------------------------------------------
 
@@ -952,6 +1207,7 @@ def test_registry_is_closed_and_platform_scoped():
         "wasm-pack",
         "vsix",
         "mac-app",
+        "electron",
         "tarball",
     )
     assert bundle_mod.composition("deb") is bundle_mod.DEB
@@ -961,6 +1217,14 @@ def test_registry_is_closed_and_platform_scoped():
     assert bundle_mod.DEB.applies(LINUX) and not bundle_mod.DEB.applies(MAC)
     assert bundle_mod.MAC_APP.applies(MAC) and not bundle_mod.MAC_APP.applies(LINUX)
     assert bundle_mod.WHEEL.applies(WIN)
+    # electron applies on all three OS legs (its per-platform set differs) and
+    # nowhere else.
+    assert (
+        bundle_mod.ELECTRON.applies(MAC)
+        and bundle_mod.ELECTRON.applies(LINUX)
+        and bundle_mod.ELECTRON.applies(WIN)
+    )
+    assert not bundle_mod.ELECTRON.applies("wasm32-unknown-unknown")
     # vsix runs on every vsce-supported family (darwin/linux/windows).
     assert bundle_mod.VSIX.applies(MAC)
     assert bundle_mod.VSIX.applies(LINUX)
@@ -981,6 +1245,7 @@ def test_source_compositions_do_not_assert_a_binary():
     assert bundle_mod.ARCHIVE.asserts_binary
     assert bundle_mod.DEB.asserts_binary
     assert bundle_mod.MAC_APP.asserts_binary
+    assert bundle_mod.ELECTRON.asserts_binary
     assert not bundle_mod.WHEEL.asserts_binary
     assert not bundle_mod.TARBALL.asserts_binary
     assert not bundle_mod.WASM_PACK.asserts_binary
@@ -997,11 +1262,13 @@ def test_registry_marks_the_platform_independent_compositions():
 
 
 def test_registry_marks_the_signer_reopenable_compositions():
-    # The signable set IS the signer's leg set (TOL02-WS08 #779): mac-app
-    # (the reseal payload leg) and archive (the raw-binary tarball leg).
-    # The config boundary refuses `sign = true` on anything else, so a sign
-    # declaration can never route to a signer leg that does not exist.
-    assert bundle_mod.signable_names() == ("archive", "mac-app")
+    # The signable set IS the signer's leg set: mac-app + archive (TOL02-WS08
+    # #779) plus electron (WS14 #790). electron ships its darwin .app UNSIGNED
+    # as the `<name>.unsigned-app.tar.gz` reseal payload and routes through the
+    # SAME standalone mac sign stage (electron-builder does not sign at build),
+    # so it is signable like mac-app. The config boundary allows `sign = true`
+    # on exactly these, refusing it on deb/wheel.
+    assert bundle_mod.signable_names() == ("archive", "mac-app", "electron")
 
 
 @pytest.mark.parametrize(
