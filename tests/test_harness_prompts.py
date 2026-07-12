@@ -13,7 +13,9 @@ import logging
 from pathlib import Path
 
 import pytest
+import yaml
 
+from shipit.harness import prompts
 from shipit.harness.prompts import (
     BRIEF_ROLES,
     MANDATORY_BRIEF_SLOTS,
@@ -26,6 +28,7 @@ from shipit.harness.prompts import (
     render,
 )
 from shipit.harness.role import Role
+from shipit.harness.roleprofile import profile_for
 
 # A synthetic fixture with a unique sentinel per fragment, so containment is
 # unambiguous: no sentinel is a substring of another. The reduction property is a
@@ -156,7 +159,7 @@ def test_no_shipped_surface_says_fresh_shepherd_per_round():
     the committed agent-def frontmatter — the issue's residual-phrasing
     acceptance, pinned at every surface it could regress in. The frontmatter
     `description` is added at the boundary (not by :func:`render`), so a render-
-    only guard would miss a stale phrase in `_AGENT_FRONTMATTER`; the committed
+    only guard would miss a stale phrase in `_AGENT_DESCRIPTIONS`; the committed
     agent-defs (frontmatter included) are guarded here for that reason."""
     rendered = render(load_role_defs())
     agent_defs = [
@@ -258,6 +261,80 @@ def test_roles_reference_their_brief_template():
     assert "shipit spawn brief" in rendered.role_prompts[Role.COORDINATOR]
     assert "shipit spawn brief implementer" in rendered.role_prompts[Role.IMPLEMENTER]
     assert "shipit spawn brief shepherd" in rendered.role_prompts[Role.SHEPHERD]
+
+
+# --- structural metadata DERIVES from the Role Profile registry (RPE01-WS02) -
+
+
+def test_subagent_roles_derive_from_the_profile_registry():
+    """SUBAGENT_ROLES is not a hand-listed table: it IS the roles whose profile
+    declares a generated agent-def, so the generated-surface set cannot drift from
+    the structural source (and a Role added with generates_agent_def=True is picked
+    up with no edit here)."""
+    assert SUBAGENT_ROLES == tuple(
+        role for role in Role if profile_for(role).generates_agent_def
+    )
+    # The coordinator declares no agent-def, so it is absent by construction.
+    assert Role.COORDINATOR not in SUBAGENT_ROLES
+
+
+def test_brief_roles_derive_from_the_profile_registry():
+    """Brief availability is the profile's has_brief_template, the SAME structural
+    source the `shipit spawn brief` CLI choices read — so the two cannot disagree."""
+    assert BRIEF_ROLES == tuple(
+        role for role in Role if profile_for(role).has_brief_template
+    )
+
+
+@pytest.mark.parametrize("role", list(SUBAGENT_ROLES))
+def test_frontmatter_tools_posture_derives_from_enforcement_posture(role):
+    """The read-only `tools` allow-list is present in the frontmatter IFF the
+    role's profile posture forbids checkout mutation — the structural tool posture
+    is derived from the registry, never a per-role frontmatter table, so it cannot
+    disagree with the enforcement posture."""
+    frontmatter = prompts._frontmatter(role)
+    parsed = next(yaml.safe_load_all(frontmatter))
+    read_only = not profile_for(role).enforcement.checkout_mutation
+    assert parsed["name"] == role.value
+    assert parsed["description"] == prompts._AGENT_DESCRIPTIONS[role]
+    assert ("tools" in parsed) is read_only
+    if read_only:
+        assert parsed["tools"] == prompts._READ_ONLY_TOOLS
+
+
+# --- a Role cannot leave prompt/brief/enforcement metadata incomplete (crit. 6)
+
+
+def test_declared_agent_def_surface_cannot_ship_incomplete():
+    """Every Role that DECLARES a generated agent-def must have both its
+    description prose AND a committed agent-def file; every Role that does not must
+    have neither. Adding a Role with generates_agent_def=True but no description
+    fails HERE (KeyError-free, mechanical), never silently at generation."""
+    for role in Role:
+        declares = profile_for(role).generates_agent_def
+        assert (role in prompts._AGENT_DESCRIPTIONS) is declares
+        agent_def = _ROOT / ".claude" / "agents" / f"{role.value}.md"
+        assert agent_def.exists() is declares
+        if declares:
+            # The generator can build complete frontmatter for it — no missing
+            # description, and a posture-derived (not table-lookup) tools line.
+            parsed = next(yaml.safe_load_all(prompts._frontmatter(role)))
+            assert parsed["name"] == role.value
+            assert parsed["description"] == prompts._AGENT_DESCRIPTIONS[role]
+
+
+def test_declared_brief_surface_cannot_ship_incomplete():
+    """Every Role that DECLARES a brief template loads a template carrying all
+    mandatory slots; every Role that does not is a loud refusal. A Role added with
+    has_brief_template=True but no template file fails HERE."""
+    for role in Role:
+        if profile_for(role).has_brief_template:
+            template = load_brief_template(role)
+            for slot in MANDATORY_BRIEF_SLOTS:
+                assert slot in template
+        else:
+            with pytest.raises(ValueError, match="no brief template"):
+                load_brief_template(role)
 
 
 # --- the committed derived surfaces (no drift from the source) ---------------

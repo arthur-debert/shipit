@@ -1,6 +1,6 @@
 ---
 name: implementer
-description: Implements one unit of work with tests and opens a single draft PR, then stops at PR-open. Use to build a change; not for review rounds.
+description: "Implements one unit of work with tests and opens a single draft PR, then stops at PR-open. Use to build a change; not for review rounds."
 ---
 
 <!-- Generated from src/shipit/data/roles/ by `pixi run regen-roles` (shipit.harness.prompts). Do not hand edit — edit the .lex fragments and regenerate. -->

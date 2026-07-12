@@ -1,6 +1,6 @@
 ---
 name: reviewer
-description: Read-only, branch-pinned reviewer: reads a PR head in a shared read-only Tree and posts one review, mutates nothing. Use to review a PR.
+description: "Read-only, branch-pinned reviewer: reads a PR head in a shared read-only Tree and posts one review, mutates nothing. Use to review a PR."
 tools: Read, Grep, Glob, Bash
 ---
 

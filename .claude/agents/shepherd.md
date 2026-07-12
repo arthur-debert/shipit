@@ -1,6 +1,6 @@
 ---
 name: shepherd
-description: Owns addressing for one PR across its review rounds; parked between rounds. Use one per PR: briefed cold with the PR number on round 1, resume the SAME agent for later rounds.
+description: "Owns addressing for one PR across its review rounds; parked between rounds. Use one per PR: briefed cold with the PR number on round 1, resume the SAME agent for later rounds."
 ---
 
 <!-- Generated from src/shipit/data/roles/ by `pixi run regen-roles` (shipit.harness.prompts). Do not hand edit — edit the .lex fragments and regenerate. -->

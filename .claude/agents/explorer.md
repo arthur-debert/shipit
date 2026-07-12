@@ -1,6 +1,6 @@
 ---
 name: explorer
-description: Read-only, search-scoped investigator: searches and reports findings, mutates nothing. Use to answer a question about the code.
+description: "Read-only, search-scoped investigator: searches and reports findings, mutates nothing. Use to answer a question about the code."
 tools: Read, Grep, Glob, Bash
 ---
 

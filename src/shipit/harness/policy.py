@@ -1,16 +1,21 @@
 """Edit-enforcement decision — the ADR-0012 coordinator guard (security core).
 
 `decide(role, path, is_code, break_glass) -> Decision` is the security-critical
-core: the `edit` **operation** is **blocking** when the actor's **role** is
-`coordinator` AND the path is a code path AND no **break-glass** marker is
-present; every other combination is allowed. The deny `reason` *is* the
+core: the `edit` **operation** is **blocking** when the actor's **role** posture
+DELEGATES code authorship (`roleprofile.delegates_code_authorship` — a writable
+checkout that must not author code) AND the path is a code path AND no
+**break-glass** marker is present; every other combination is allowed. That
+posture is exactly the `coordinator` today, but the guard reads capability-shaped
+profile posture (RPE01-WS02), never a role-name test, so a future role with the
+same posture is guarded with no edit here. The deny `reason` *is* the
 coordinator's role-prompt slice, so the rule arrives as a wall at the moment of
 action (the block teaches the next step, not just stops).
 
 Three concerns, kept separate:
   - **The verdict** (`decide`) — pure over `(role, is_code, break_glass)`. `path`
     rides along for the (future) richer reason + the boundary's logging, but the
-    security matrix turns only on the role, the code-ness, and break-glass.
+    security matrix turns only on the role's profile posture, the code-ness, and
+    break-glass.
   - **The code-path classifier** (`is_code_path`) — its own module,
     `harness.codepath`. The boundary calls it and passes the bool in, so the
     verdict stays a pure function of plain values.
@@ -35,6 +40,7 @@ from enum import StrEnum
 
 from .prompts import load_coordinator_slice
 from .role import Role
+from .roleprofile import delegates_code_authorship
 
 #: The coordinator deny reason — the role-prompt slice that teaches the next
 #: action. WS03 repoints this seam at the GENERATED coordinator role-prompt slice
@@ -90,13 +96,18 @@ def is_edit_tool(tool_name: str) -> bool:
 def decide(role: Role, path: str, is_code: bool, break_glass: bool) -> Decision:
     """Decide whether an `edit` operation is allowed (ADR-0012). Pure.
 
-    DENY iff a `coordinator` edits a code path with no break-glass marker; every
-    other combination ALLOWs. The only path that blocks is the intended one — a
-    subagent edit, a coordinator edit on a non-code path, and any edit under
-    break-glass all pass. `path` is accepted for caller symmetry + logging; the
-    verdict turns on `role`, `is_code`, and `break_glass` only.
+    DENY iff a role whose profile posture DELEGATES code authorship
+    (`roleprofile.delegates_code_authorship` — a writable checkout that must not
+    author code, exactly the `coordinator` today) edits a code path with no
+    break-glass marker; every other combination ALLOWs. The only path that blocks
+    is the intended one — a subagent (implementer/shepherd) edit, a delegating
+    role's edit on a non-code path, and any edit under break-glass all pass. A
+    read-only role (reviewer/explorer) is not caught here at all: its checkout
+    cannot mutate, so its tools and read-only Tree are the load-bearing guard.
+    `path` is accepted for caller symmetry + logging; the verdict turns on the
+    role's posture, `is_code`, and `break_glass` only.
     """
-    if role is Role.COORDINATOR and is_code and not break_glass:
+    if delegates_code_authorship(role) and is_code and not break_glass:
         return Decision(permission=Permission.DENY, reason=COORDINATOR_DENY_REASON)
     return Decision(permission=Permission.ALLOW)
 
