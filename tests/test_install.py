@@ -1854,11 +1854,16 @@ def test_toolchain_block_units_have_the_right_shape():
     # the DEFAULT env — wf-prepare runs shipit via bare `pixi run --locked
     # ./bin/shipit`, which resolves [dependencies], not the lint feature — so
     # `cargo set-version` is on exactly the PATH `release prepare` executes
-    # with. Pinned to conda-forge 0.13.11 (the issue's decided pin).
+    # with. Pinned to conda-forge 0.13.11 (the issue's decided pin). wasm-pack
+    # rides the same rust-signal block (TOL02-WS12 #788): the wasm/npm bundle
+    # composition's builder, on conda-forge in the DEFAULT release env.
     rust_release = units[iunits.PIXI_RUST_RELEASE_DEPS_KEY]
     assert rust_release.dest == "pixi.toml"
     assert rust_release.anchor == "[dependencies]"
-    assert tomllib.loads(rust_release.desired_inner()) == {"cargo-edit": "0.13.11.*"}
+    assert tomllib.loads(rust_release.desired_inner()) == {
+        "cargo-edit": "0.13.11.*",
+        "wasm-pack": "0.13.*",
+    }
 
     # The rust RELEASE toolchain (#801, TOL02-WS17 hole 1): cargo itself in
     # the default env — a SINGLE-KEY block, deliberately separate from the

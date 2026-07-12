@@ -44,6 +44,7 @@ the runner its block pins; the DEFAULT pixi env is the PATH that run sees):
 | `cargo` (the binary itself) | prepare (subcommand dispatch), build (`cargo build`), publish (`cargo publish`, `cargo metadata`) | pixi-managed (`pixi.toml#shipit-rust-release-toolchain`, #801 — its own single-key block, see closed hole 1) | `rust` `1.96.*` (lockstep with the rust lint block) | `test_missing_cargo_binary_gets_the_reconcile_remedy` |
 | cargo-edit (`cargo set-version` / `cargo update`) | prepare (rust bump) | pixi-managed (`pixi.toml#shipit-rust-release-deps`, #793/#797) | `0.13.11.*` | `test_missing_cargo_set_version_gets_the_reconcile_remedy` |
 | `cargo-deb` (`cargo deb`) | bundle (deb composition) | self-provisioned (`cargo install`, #784/#785 — not on conda-forge) | `CARGO_DEB_VERSION = 3.7.0` | `test_deb_self_provisions_cargo_deb_when_missing` |
+| `wasm-pack` | bundle (wasm-pack composition, TOL02-WS12 #788) | pixi-managed (`pixi.toml#shipit-rust-release-deps`, rust signal — on conda-forge, which pulls the wasm32-unknown-unknown target std; WS10 #798) | `0.13.*` | `test_pins_agree_with_their_one_authority` (pin lockstep) |
 | `npm` (`nodejs`) | prepare (`npm version`), build (`npm run build`), publish (`npm publish`) | pixi-managed (`pixi.toml#shipit-node-deps`) | `nodejs` `26.*`, `pnpm` `11.*` | `test_missing_npm_gets_the_reconcile_remedy` (#801, closed hole 3) |
 | `go` | build (`go build`) | runner image (ubuntu images still carry Go) | floats | none (see holes) |
 | `pytest` | test lane (not a release stage) | consumer env | consumer's | — |
@@ -109,9 +110,10 @@ self-provision exception. The proof is the #801 canary rc — a shipit-canary
 `-release-rc` cut on stock managed blocks only — run after the canary repo's
 install reconcile picks these blocks up.
 
-Future composition tools (WS12–WS16: `wasm-pack`, `vsce`, `electron-builder`,
+Future composition tools (WS13–WS16: `vsce`, `electron-builder`,
 `tauri`, `tree-sitter`; notary tooling beyond `xcrun notarytool`) are not
-Exec tools yet. When their workstreams land argv for them, the drift guard
+Exec tools yet (WS12's `wasm-pack` has landed — its row is in the inventory
+above). When their workstreams land argv for them, the drift guard
 fails until the tool gets a provisioning row — that is the guard doing its
 job; do not allowlist around it.
 

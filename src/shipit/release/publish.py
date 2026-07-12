@@ -19,8 +19,10 @@ switch), one adapter per name of :data:`shipit.config.ENDPOINTS`:
   token presence is validated before any upload. The upload is SCOPED to the
   artifact's own distribution (its ``pyproject`` ``[project].name``), so a
   multi-artifact bundle tree never leaks a sibling's wheel to the index.
-- **npm** — publishes the prebuilt package tree (wasm-pack output style)
-  without rebuilding (``--ignore-scripts``); publish-over-existing is
+- **npm** — publishes the staged npm tarball (the wasm-pack composition's
+  ``<pkg>-<version>.tgz`` artifact, WS10 #798 — the SAME file the gh-release
+  ships) without rebuilding (``--ignore-scripts``), scoped to THIS artifact's
+  package name (the assert-bundle identity chain); publish-over-existing is
   SUCCESS.
 - **brew** (the one *derived* endpoint) — renders the shared formula
   template (:mod:`shipit.release.brew`) against the FINAL release-asset
@@ -800,29 +802,58 @@ def npm_already_published(stderr: str) -> bool:
     return any(marker in lowered for marker in NPM_ALREADY_PUBLISHED_MARKERS)
 
 
-def _publish_npm(req: PublishRequest) -> Published:
-    """Publish the prebuilt npm package tree — no rebuild. See the module
-    docstring's npm entry.
+def npm_tarball_name(pkg_name: str, version: str) -> str:
+    """The ``npm pack`` filename for package ``pkg_name`` at ``version``. Pure.
 
-    ``--ignore-scripts`` is the no-rebuild contract: the tree (a wasm-pack
-    ``pkg/``, a prepared package dir) was produced by the build/bundle
-    stages, and a lifecycle script re-running a build here would be a second
-    build path. The token is looked up under its secret name
-    (:data:`NPM_SECRET`) and rides the child env under the var npm reads (the
-    setup-node ``NODE_AUTH_TOKEN`` convention, :data:`NPM_AUTH_ENV`), never argv.
+    ``npm pack`` names its tarball ``<pkg>-<version>.tgz`` with the package
+    name FLATTENED: a leading ``@`` is dropped and the ``/`` scope separator
+    becomes ``-`` (``@lex-fmt/lex-wasm`` → ``lex-fmt-lex-wasm-1.2.3.tgz``).
+    This is the deterministic name the wasm-pack composition
+    (:mod:`shipit.release.bundle`) stages, so publish locates THIS artifact's
+    tarball without scanning package.json out of every ``.tgz`` in the tree.
     """
-    leg = _leg_for(req.artifact, req.entries, "npm", "npm")
+    stem = pkg_name.lstrip("@").replace("/", "-")
+    return f"{stem}-{version}.tgz"
+
+
+def _publish_npm(req: PublishRequest) -> Published:
+    """Publish the staged npm tarball — the wasm-pack composition's artifact,
+    no rebuild. See the module docstring's npm entry.
+
+    The tarball IS the artifact (WS10 #798): the wasm-pack bundle composition
+    (:mod:`shipit.release.bundle`) `npm pack`s the wasm/npm package into
+    ``<pkg>-<version>.tgz`` and stages it beside every other release asset, so
+    the SAME file the gh-release ships is what npm publishes — never a second
+    build path (``--ignore-scripts`` on the prebuilt tarball forecloses one).
+    The upload is SCOPED to THIS artifact's tarball via the declared npm
+    package name (the assert-bundle identity chain,
+    :func:`shipit.release.integrity.expected_main_binary` — the artifact's
+    ``main-binary``/``product-name``): ONE declaration names the package for
+    both the assert tier and this scoping, so a multi-artifact tree never
+    leaks a sibling's tarball to the registry (npm publishes are irreversible).
+    The token is looked up under its secret name (:data:`NPM_SECRET`) and rides
+    the child env under the var npm reads (the setup-node ``NODE_AUTH_TOKEN``
+    convention, :data:`NPM_AUTH_ENV`), never argv.
+    """
     token = _require_token(req, "npm", NPM_SECRET)
-    pkg_dir = _leg_dir(req.root, leg)
+    pkg_name = integrity_mod.expected_main_binary(req.artifact)
+    tarball = npm_tarball_name(pkg_name, req.version)
+    path = req.assets_dir / tarball
+    if not path.is_file():
+        raise ReleaseError(
+            f"[artifacts.{req.artifact.name}] npm: no tarball `{tarball}` for "
+            f"package `{pkg_name}` under {req.assets_dir} — the wasm-pack bundle "
+            f"composition produces it; run `shipit release bundle` first"
+        )
     result = req.probe(
-        ["npm", "publish", "--ignore-scripts"],
-        pkg_dir,
+        ["npm", "publish", str(path), "--ignore-scripts"],
+        req.root,
         {NPM_AUTH_ENV: token},
     )
     if result.rc == 0:
-        action = f"published {req.version} from {leg.path or '.'}"
+        action = f"published {pkg_name} {req.version} ({tarball})"
     elif npm_already_published(result.stderr):
-        action = f"{req.version} already published — resumed"
+        action = f"{pkg_name} {req.version} already published — resumed"
     else:
         raise ReleaseError(
             f"[artifacts.{req.artifact.name}] npm: `npm publish` failed:\n"

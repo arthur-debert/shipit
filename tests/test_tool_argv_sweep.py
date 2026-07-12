@@ -62,10 +62,15 @@ def _parsed(path: pathlib.Path) -> ast.Module:
 #:   ``cargo`` and ``npm`` gain a third: the closed bump-adapter registry
 #:   (:mod:`shipit.release.bump`, TOL02-WS01) — the release-side projection
 #:   commands (``cargo set-version``/``cargo update``, ``npm version``),
-#:   ADR-0041's one assembly point for the manifest bumps. ``cargo`` and
-#:   ``uv`` gain the bundle-composition registry
+#:   ADR-0041's one assembly point for the manifest bumps. ``cargo``,
+#:   ``uv`` and ``npm`` gain the bundle-composition registry
 #:   (:mod:`shipit.release.bundle`, TOL02-WS03) — the bundle-side composition
-#:   commands (``cargo deb``, ``uv build --out-dir``).
+#:   commands (``cargo deb``, ``uv build --out-dir``, ``npm pack`` of the
+#:   wasm-pack npm tree, TOL02-WS12 #788).
+#: - ``wasm-pack`` — the wasm/npm bundle composition's builder (TOL02-WS12
+#:   #788): assembled ONLY in the composition registry
+#:   (:mod:`shipit.release.bundle`) — ``wasm-pack build`` the rust crate into
+#:   the ``pkg/`` npm tree that ``npm pack`` then tarballs.
 #: - ``tar`` / ``zip`` — the archiver invocations of the bundle compositions
 #:   (TOL02-WS03): assembled ONLY in the composition registry
 #:   (:mod:`shipit.release.bundle`) — the tarball/zip contract and the mac
@@ -99,8 +104,13 @@ _ADAPTER_HOMES: dict[str, tuple[str, ...]] = {
         "tools/registry.py",
         "tree/create.py",
         "release/bump.py",
+        "release/bundle.py",
         "release/publish.py",
     ),
+    # wasm-pack: the wasm/npm bundle composition's builder (TOL02-WS12 #788) —
+    # assembled ONLY in the closed composition registry, like every other
+    # bundle-side tool.
+    "wasm-pack": ("release/bundle.py",),
     "uv": ("tools/registry.py", "release/bundle.py"),
     "tar": ("release/bundle.py", "release/sign.py"),
     "zip": ("release/bundle.py", "release/sign.py"),

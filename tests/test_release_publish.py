@@ -771,18 +771,30 @@ def test_pypi_pyproject_without_a_name_refuses(tmp_path):
 
 
 # --------------------------------------------------------------------------
-# npm — prebuilt tree, no rebuild, publish-over-existing is success
+# npm — the staged tarball IS the artifact, no rebuild, publish-over-existing
+# is success (TOL02-WS12 #788)
 # --------------------------------------------------------------------------
 
 
-def test_npm_publishes_the_prebuilt_tree_without_rebuilding(tmp_path):
-    artifact = _artifacts({"wasm": {"endpoints": ["npm"]}})[0]
-    entries = _entries({"pkg": "npm"})
+def _stage_npm_tarball(tmp_path, name):
+    dist = tmp_path / "dist"
+    dist.mkdir(parents=True, exist_ok=True)
+    (dist / name).write_bytes(b"tgz")
+    return dist / name
+
+
+def test_npm_publishes_the_staged_tarball_without_rebuilding(tmp_path):
+    # The declared npm package name (`product-name`) flattens to the `npm pack`
+    # tarball name (`@lex-fmt/lex-wasm` -> `lex-fmt-lex-wasm-<version>.tgz`),
+    # and that same declaration scopes the publish to THIS artifact's tarball.
+    (artifact,) = _artifacts(
+        {"wasm": {"product-name": "@lex-fmt/lex-wasm", "endpoints": ["npm"]}}
+    )
+    tarball = _stage_npm_tarball(tmp_path, "lex-fmt-lex-wasm-1.2.3.tgz")
     probe = SeamRecorder()
     req = _request(
         tmp_path,
         artifact,
-        entries=entries,
         env={"NPM_TOKEN": "npm-tok"},  # looked up under the secret name
         probe=probe,
     )
@@ -790,17 +802,33 @@ def test_npm_publishes_the_prebuilt_tree_without_rebuilding(tmp_path):
     published = publish_mod._publish_npm(req)
 
     argv, cwd, env = probe.calls[0]
-    assert argv == ("npm", "publish", "--ignore-scripts")
-    assert cwd == tmp_path / "pkg"  # the prebuilt tree, not a rebuild
-    # ...and fed to npm under the var npm reads (NODE_AUTH_TOKEN), not the
-    # secret name — the two-vocabulary indirection secretreq owns.
+    # the STAGED tarball (an absolute path), never a rebuild from a source tree
+    assert argv == ("npm", "publish", str(tarball), "--ignore-scripts")
+    assert cwd == tmp_path
+    # ...and the token is fed to npm under the var npm reads (NODE_AUTH_TOKEN),
+    # not the secret name — the two-vocabulary indirection secretreq owns.
     assert env == {"NODE_AUTH_TOKEN": "npm-tok"}
-    assert published.actions == ("published 1.2.3 from pkg",)
+    assert published.actions == (
+        "published @lex-fmt/lex-wasm 1.2.3 (lex-fmt-lex-wasm-1.2.3.tgz)",
+    )
+
+
+def test_npm_missing_staged_tarball_is_a_loud_refusal(tmp_path):
+    # No tarball staged -> the bundle stage never ran (or the name mismatched);
+    # publish refuses loudly rather than a silent no-op or scanning the tree.
+    (artifact,) = _artifacts(
+        {"wasm": {"product-name": "@lex-fmt/lex-wasm", "endpoints": ["npm"]}}
+    )
+    req = _request(tmp_path, artifact, env={"NPM_TOKEN": "tok"}, probe=SeamRecorder())
+    with pytest.raises(ReleaseError, match="no tarball `lex-fmt-lex-wasm-1.2.3.tgz`"):
+        publish_mod._publish_npm(req)
 
 
 def test_npm_publish_over_existing_is_success(tmp_path):
-    artifact = _artifacts({"wasm": {"endpoints": ["npm"]}})[0]
-    entries = _entries({"pkg": "npm"})
+    (artifact,) = _artifacts(
+        {"wasm": {"product-name": "@lex-fmt/lex-wasm", "endpoints": ["npm"]}}
+    )
+    _stage_npm_tarball(tmp_path, "lex-fmt-lex-wasm-1.2.3.tgz")
     probe = SeamRecorder(
         {
             "npm": lambda argv: _fail(
@@ -813,12 +841,11 @@ def test_npm_publish_over_existing_is_success(tmp_path):
     req = _request(
         tmp_path,
         artifact,
-        entries=entries,
         env={"NPM_TOKEN": "tok"},
         probe=probe,
     )
     published = publish_mod._publish_npm(req)
-    assert published.actions == ("1.2.3 already published — resumed",)
+    assert published.actions == ("@lex-fmt/lex-wasm 1.2.3 already published — resumed",)
 
 
 # --------------------------------------------------------------------------
@@ -1417,12 +1444,12 @@ def test_publish_missing_npm_binary_gets_the_reconcile_remedy(
         tmp_path,
         monkeypatch,
         toml="""
-[toolchains]
-"." = "npm"
-
 [artifacts.pkg]
 endpoints = ["npm"]
 """,
+        # The staged tarball IS the artifact (WS12); stage it so the npm probe
+        # is REACHED — the missing-binary death is then what the remedy catches.
+        assets=("pkg-1.2.3.tgz",),
     )
 
     rc = release_verb.run_publish(
