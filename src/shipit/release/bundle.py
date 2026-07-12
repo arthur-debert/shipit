@@ -35,8 +35,12 @@ functions the entries carry:
   wasm32 target, the npm tarball is the artifact). ``wasm-pack build`` the
   rust leg's crate into a fresh ``pkg/`` npm package tree (wasm + JS glue +
   ``package.json``, the version wasm-pack reads from the crate's ``Cargo.toml``
-  — bumped by ``release prepare``), then ``npm pack`` that tree into the ONE
-  ``<pkg>-<version>.tgz`` npm tarball staged under the bundle output tree.
+  — bumped by ``release prepare``), then ``npm pack --ignore-scripts`` that
+  tree into the ONE ``<pkg>-<version>.tgz`` npm tarball staged under the bundle
+  output tree (``--ignore-scripts`` forecloses a package lifecycle script —
+  ``prepare``/``prepack``/``postpack`` — running arbitrary code as a SECOND
+  build path during bundle, the same guarantee the npm publish leg makes on the
+  prebuilt tarball, ``release/publish.py``).
   That tarball is BOTH the gh-release asset and exactly what the npm endpoint
   publishes (``release/publish.py`` — no rebuild), and the assert-bundle npm
   tier reads its inner ``package.json`` ``name`` as the assertable identity.
@@ -323,8 +327,11 @@ def _compose_wasm_pack(req: ComposeRequest) -> Composed:
     rule): wasm-pack builds a rust crate, so the wasm/npm artifact maps its
     crate as a rust leg and declares ``build = ["rust"]``. ``wasm-pack build``
     writes a FRESH ``pkg/`` scratch tree under the output tree (wasm-pack
-    itself clears ``--out-dir``); ``npm pack`` then produces the tarball, moved
-    into ``out_dir``. The scratch ``pkg/`` is always removed — only the tarball
+    itself clears ``--out-dir``); ``npm pack --ignore-scripts`` then produces
+    the tarball, moved into ``out_dir`` (``--ignore-scripts`` keeps a generated
+    ``package.json`` lifecycle script from running a second build path during
+    bundle — the publish leg's ``--ignore-scripts`` guarantee, at the pack).
+    The scratch ``pkg/`` is always removed — only the tarball
     is a declared artifact (ADR-0009's barrier). A build that leaves no
     ``package.json``, or a pack that yields no single ``.tgz``, is a hard
     bundle-stage failure, never a quiet pass.
@@ -361,7 +368,9 @@ def _compose_wasm_pack(req: ComposeRequest) -> Composed:
                 f"package tree is the artifact; a build that produces none is a "
                 f"hard fail, never a quiet pass"
             )
-        produced = _emit_into_out(req, ["npm", "pack"], "--pack-destination", pkg)
+        produced = _emit_into_out(
+            req, ["npm", "pack", "--ignore-scripts"], "--pack-destination", pkg
+        )
     finally:
         if pkg.exists():
             shutil.rmtree(pkg)

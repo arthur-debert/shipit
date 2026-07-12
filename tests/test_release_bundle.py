@@ -565,8 +565,9 @@ def test_wasm_pack_builds_the_pkg_tree_and_packs_the_tarball(tmp_path):
     pkg = dist / ".pkg-wasm"
     scratch = dist / ".tmp-wasm"
     # wasm-pack builds the rust crate into a fresh pkg tree (default target
-    # `bundler`, the declared `--scope`); npm pack then tarballs it into a
-    # scratch that bundle moves into dist/.
+    # `bundler`, the declared `--scope`); npm pack (--ignore-scripts, no
+    # second build path) then tarballs it into a scratch that bundle moves
+    # into dist/.
     assert recorder.calls == [
         (
             (
@@ -582,7 +583,7 @@ def test_wasm_pack_builds_the_pkg_tree_and_packs_the_tarball(tmp_path):
             ),
             crate,
         ),
-        (("npm", "pack", "--pack-destination", str(scratch)), pkg),
+        (("npm", "pack", "--ignore-scripts", "--pack-destination", str(scratch)), pkg),
     ]
     assert composed == bundle_mod.Composed(
         "wasm", "wasm-pack", ("lex-fmt-lex-wasm-1.2.3.tgz",)
