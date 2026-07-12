@@ -332,6 +332,12 @@ def test_registry_mirrors_the_config_endpoint_set_and_stages():
         "brew",
         "notify-downstreams",
     ]
+    # The repo-reading endpoints: brew (asset URLs) + notify-downstreams
+    # (dispatch payload) — the verb resolves the source slug only for these.
+    assert [a.name for a in publish_mod.ADAPTERS if a.needs_repo] == [
+        "brew",
+        "notify-downstreams",
+    ]
 
 
 def test_registry_secret_names_mirror_the_derivation_authority():
@@ -408,6 +414,29 @@ def test_plan_notify_downstreams_is_derived_after_gh_release():
     order = [d.adapter.name for d in dispatched]
     assert order == ["gh-release", "notify-downstreams"]
     assert all(d.skip is None for d in dispatched)
+
+
+def test_plan_notify_downstreams_alone_refuses_without_an_unskipped_gh_release():
+    """notify-downstreams tells the downstreams to rebuild against this
+    release; without an unskipped gh-release in the plan it would notify them
+    of a release that never landed on GitHub — a hard plan refusal, mirroring
+    the brew→gh-release invariant (#792)."""
+    artifacts = _artifacts(
+        {"parser": {"endpoints": ["notify-downstreams"], "downstreams": ["a/b"]}}
+    )
+    with pytest.raises(ReleaseError, match="notify-downstreams tells the downstream"):
+        publish_mod.plan(artifacts, prerelease=False, live_fire=False)
+
+
+def test_plan_notify_downstreams_skipped_never_trips_the_gh_release_invariant():
+    """The invariant reads the UNSKIPPED set: a prerelease skips
+    notify-downstreams, so a plan without gh-release is valid — the endpoint
+    fires no cascade to strand."""
+    artifacts = _artifacts(
+        {"parser": {"endpoints": ["notify-downstreams"], "downstreams": ["a/b"]}}
+    )
+    dispatched = publish_mod.plan(artifacts, prerelease=True, live_fire=False)
+    assert dispatched[0].skip == publish_mod.SKIP_NOTIFY_PRERELEASE
 
 
 def test_plan_prerelease_skips_notify_downstreams():

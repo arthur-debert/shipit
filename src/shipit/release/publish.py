@@ -193,7 +193,8 @@ class PublishRequest:
     plus the signer's outputs on a signed run); ``notes_path`` the ONE
     coalesced notes text prepare wrote (story 26); ``repo`` the source
     repo's ``owner/name`` slug (resolved by the verb only when a planned
-    endpoint needs it — brew's asset URLs). ``env`` is the token lookup
+    ``needs_repo`` endpoint needs it — brew's asset URLs, notify-downstreams'
+    dispatch payload). ``env`` is the token lookup
     surface (validated by the verb before any dispatch); ``testpypi``
     reroutes the pypi adapter to the staging index.
     """
@@ -393,12 +394,16 @@ def plan(
     endpoint name outside the closed registry is a hard
     :class:`ReleaseError` naming the known set.
 
-    Cross-endpoint invariant: an unskipped brew dispatch REQUIRES an unskipped
-    gh-release in the same plan — the formula points at
+    Cross-endpoint invariant: an unskipped brew OR notify-downstreams dispatch
+    REQUIRES an unskipped gh-release in the same plan. brew's formula points at
     ``releases/download/<tag>/…`` assets that only gh-release creates and
     uploads, so brew alone would push a tap formula referencing a release this
-    run never produced. gh-release is itself idempotent-resumable, so a
-    tap-repair run simply lists both.
+    run never produced; notify-downstreams tells the downstream repos to
+    rebuild against this release, so notifying without a landed gh-release
+    points them at a release that never existed. Both derived endpoints are
+    checked against the UNSKIPPED set (a prerelease that skips them never trips
+    the invariant). gh-release is itself idempotent-resumable, so a repair run
+    simply lists it alongside the derived endpoint.
     """
     dispatches: list[Dispatch] = []
     for stage in ("release", "derived"):
@@ -426,6 +431,14 @@ def plan(
             "at gh-release assets (`releases/download/<tag>/…`), but no unskipped "
             "gh-release endpoint is planned: declare `gh-release` so the release "
             "the formula targets is created and its assets uploaded (both "
+            "endpoints are idempotent — a resume converges, nothing is duplicated)"
+        )
+    if "notify-downstreams" in live and "gh-release" not in live:
+        raise ReleaseError(
+            "publish plan invalid — notify-downstreams tells the downstream "
+            "repos to rebuild against this release, but no unskipped gh-release "
+            "endpoint is planned: declare `gh-release` so the release the "
+            "downstreams target lands on GitHub before they are notified (both "
             "endpoints are idempotent — a resume converges, nothing is duplicated)"
         )
     return tuple(dispatches)
@@ -993,6 +1006,9 @@ def _publish_notify_downstreams(req: PublishRequest) -> Published:
     cross-repo PAT (``DOWNSTREAM_DISPATCH_TOKEN``) is required — the ambient
     ``GITHUB_TOKEN`` cannot dispatch into another repo.
     """
+    # The verb resolves the slug for a planned notify (needs_repo=True), so the
+    # payload always names a real source repo — never a silent empty string.
+    assert req.repo is not None
     token = _require_token(req, "notify-downstreams", NOTIFY_SECRET)
     if not req.artifact.downstreams:
         # Belt for direct (test/library) callers — the config boundary already
@@ -1004,7 +1020,7 @@ def _publish_notify_downstreams(req: PublishRequest) -> Published:
             f"at the artifact's downstream repos, and there are none"
         )
     payload = {
-        "repo": req.repo or "",
+        "repo": req.repo,
         "tag": req.tag,
         "version": req.version,
         "artifact": req.artifact.name,
@@ -1033,7 +1049,12 @@ class EndpointAdapter:
     (everything but gh-release — story 33). ``stable_only`` marks the
     endpoints :func:`plan` skips on ANY prerelease (brew's tap is the stable
     channel; notify-downstreams fires on real releases only) with
-    ``stable_skip_reason`` as the stated cause. ``secrets`` MIRRORS the
+    ``stable_skip_reason`` as the stated cause. ``needs_repo`` marks the
+    endpoints whose publish reads the source ``owner/name`` slug
+    (:attr:`PublishRequest.repo`) — brew's asset URLs, notify-downstreams'
+    dispatch payload — so the verb resolves it (one gh round-trip) ONLY when a
+    live dispatch declares the need, keeping a laptop RC cut offline.
+    ``secrets`` MIRRORS the
     endpoint's :data:`secretreq.ENDPOINT_SECRETS` entry (the one derivation
     authority gh-setup/preflight traverse, WS02, stories 43–45) rather than
     re-declaring the names; the runtime validation set is
@@ -1047,6 +1068,7 @@ class EndpointAdapter:
     external: bool = True
     stable_only: bool = False
     stable_skip_reason: str = SKIP_STABLE_ONLY
+    needs_repo: bool = False
 
 
 GH_RELEASE = EndpointAdapter(
@@ -1067,6 +1089,7 @@ BREW = EndpointAdapter(
     _publish_brew,
     secrets=secretreq.ENDPOINT_SECRETS["brew"],
     stable_only=True,
+    needs_repo=True,
 )
 NOTIFY_DOWNSTREAMS = EndpointAdapter(
     "notify-downstreams",
@@ -1075,6 +1098,7 @@ NOTIFY_DOWNSTREAMS = EndpointAdapter(
     secrets=secretreq.ENDPOINT_SECRETS["notify-downstreams"],
     stable_only=True,
     stable_skip_reason=SKIP_NOTIFY_PRERELEASE,
+    needs_repo=True,
 )
 
 #: The CLOSED registry, in a stable order (the config boundary's

@@ -205,6 +205,30 @@ def test_duplicate_downstream_is_refused():
         )
 
 
+def test_downstreams_normalized_to_canonical_lowercase_slug(tmp_path):
+    # GitHub owner/name are case-insensitive; downstreams go through the
+    # canonical slug parser so every dispatch targets one normalized form (#792).
+    (artifact,) = _load(
+        "[artifacts.parser]\n"
+        'endpoints = ["notify-downstreams"]\n'
+        'downstreams = ["Lex-Fmt/VSCode", "LEX-FMT/Nvim"]\n'
+    )
+    assert artifact.downstreams == ("lex-fmt/vscode", "lex-fmt/nvim")
+
+
+def test_case_only_duplicate_downstream_is_refused():
+    # Case-only repeats collapse to one canonical slug — a repeated dispatch is
+    # never an intent, so the collision is refused rather than dispatched twice.
+    with pytest.raises(
+        config.ConfigError, match="duplicate downstream `lex-fmt/vscode`"
+    ):
+        _load(
+            "[artifacts.parser]\n"
+            'endpoints = ["notify-downstreams"]\n'
+            'downstreams = ["lex-fmt/vscode", "Lex-Fmt/VSCode"]\n'
+        )
+
+
 def test_unknown_platform_names_the_closed_registry():
     with pytest.raises(config.ConfigError, match="unknown platform `darwin`") as exc:
         _load('[artifacts.x]\nplatforms = ["darwin"]\n')

@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 
-from .identity import Sha
+from .identity import Sha, repo_from_slug
 
 CONFIG_NAME = ".shipit.toml"
 
@@ -704,23 +704,30 @@ def _parse_endpoints(where: str, value: object) -> tuple[str, ...]:
 def _parse_downstreams(where: str, value: object) -> tuple[str, ...]:
     """The ``downstreams`` list — the ``owner/name`` repos the
     ``notify-downstreams`` endpoint fires ``repository_dispatch`` at
-    (TOL02-WS16 #792). Each entry must be a non-empty ``owner/name`` slug
-    (exactly one ``/``, both sides present); duplicates are refused (a
-    repeated dispatch is never an intent)."""
+    (TOL02-WS16 #792). Each entry is normalized through the canonical slug
+    parser (:func:`identity.repo_from_slug`): lowercased to its GitHub
+    identity (owner and name are case-insensitive) and rejected if malformed
+    (not exactly ``owner/name``). Returning the canonical slug means every
+    dispatch targets the same normalized form, and duplicates are refused on
+    that canonical key so a case-only repeat (``Lex-Fmt/vscode`` vs
+    ``lex-fmt/vscode``) is caught, not silently dispatched twice."""
     if not isinstance(value, list) or not all(isinstance(r, str) for r in value):
         raise ConfigError(f"{where}: must be a list of `owner/name` repo slugs")
     seen: set[str] = set()
+    canonical: list[str] = []
     for slug in value:
-        parts = slug.split("/")
-        if len(parts) != 2 or not parts[0] or not parts[1]:
+        try:
+            canon = repo_from_slug(slug).slug
+        except ValueError:
             raise ConfigError(
                 f"{where}: `{slug}` is not an `owner/name` repo slug "
                 f'(e.g. "lex-fmt/vscode")'
-            )
-        if slug in seen:
-            raise ConfigError(f"{where}: duplicate downstream `{slug}`")
-        seen.add(slug)
-    return tuple(value)
+            ) from None
+        if canon in seen:
+            raise ConfigError(f"{where}: duplicate downstream `{canon}`")
+        seen.add(canon)
+        canonical.append(canon)
+    return tuple(canonical)
 
 
 def _parse_platforms(where: str, value: object) -> tuple[str, ...]:
