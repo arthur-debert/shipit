@@ -14,10 +14,12 @@ terminal report is the renderer's (:mod:`shipit.verbs.install`).
 from __future__ import annotations
 
 import logging
+import stat
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import NamedTuple
 
 from .. import buildid, config, execrun, gh, git, pixienv
 from ..changelog import CHANGELOG_FILE
@@ -338,7 +340,7 @@ def _preclean_stale_hook_backups(root: Path) -> None:
             text = backup.read_text(encoding="utf-8", errors="replace")
         except OSError:
             logger.warning(
-                "skipping unreadable stale hook backup",
+                "skipping unreadable stale .old hook-backup file",
                 exc_info=True,
                 extra={"root": str(root), "backup": backup.name},
             )
@@ -349,13 +351,14 @@ def _preclean_stale_hook_backups(root: Path) -> None:
             backup.unlink()
         except OSError:
             logger.warning(
-                "could not remove stale lefthook hook backup",
+                "could not remove stale lefthook-generated .old hook-backup file",
                 exc_info=True,
                 extra={"root": str(root), "backup": backup.name},
             )
             continue
         logger.info(
-            "removed stale lefthook hook backup before activation (#777)",
+            "removed a stale lefthook-generated .old hook-backup file before "
+            "activation (#777 mode 2)",
             extra={"root": str(root), "backup": backup.name},
         )
 
@@ -376,11 +379,29 @@ def _snapshot_paths(plan: Plan) -> list[str]:
     return sorted(paths)
 
 
-def _snapshot_committing_writes(root: Path, plan: Plan) -> dict[str, bytes | None]:
-    """Capture the pre-write bytes of every :func:`_snapshot_paths` entry.
+class _SnapshotCell(NamedTuple):
+    """One path's pre-write state: its bytes AND its permission bits.
+
+    The mode is carried because a managed write can CHANGE it —
+    :func:`write_unit` ``chmod(0o755)``\\s an executable unit (``bin/shipit``),
+    and the rollback recreates retire-deleted files — so a bytes-only restore
+    would return the content but leave the mode dirty (the #838 review's major
+    finding). ``mode`` is the :func:`stat.S_IMODE` permission bits only, so the
+    restore reapplies exactly what the file carried before, executable bit
+    included.
+    """
+
+    data: bytes
+    mode: int
+
+
+def _snapshot_committing_writes(
+    root: Path, plan: Plan
+) -> dict[str, _SnapshotCell | None]:
+    """Capture the pre-write bytes+mode of every :func:`_snapshot_paths` entry.
 
     ``None`` marks a path absent before the writes (so the restore UNLINKS it
-    rather than resurrecting stale bytes). The map is the transaction the
+    rather than resurrecting stale state). The map is the transaction the
     committing modes roll back to on a failed self-cert (#777 mode 3): the
     fail-closed run had already applied the full managed set AND stamped
     ``.shipit.toml``, so a rerun saw matching hashes, reported "nothing to do",
@@ -388,32 +409,46 @@ def _snapshot_committing_writes(root: Path, plan: Plan) -> dict[str, bytes | Non
     only for committing modes; the default working-tree refresh publishes
     nothing and keeps its writes for the caller to review (``git diff``).
     """
-    return {rel: _read_bytes_or_none(root / rel) for rel in _snapshot_paths(plan)}
+    return {rel: _snapshot_cell(root / rel) for rel in _snapshot_paths(plan)}
 
 
-def _read_bytes_or_none(path: Path) -> bytes | None:
-    """The file's bytes, or ``None`` when it does not exist — the snapshot cell."""
-    return path.read_bytes() if path.is_file() else None
+def _snapshot_cell(path: Path) -> _SnapshotCell | None:
+    """The path's pre-write cell (bytes + permission bits), or ``None`` if absent."""
+    if not path.is_file():
+        return None
+    return _SnapshotCell(path.read_bytes(), stat.S_IMODE(path.stat().st_mode))
 
 
-def _restore_committing_writes(root: Path, snapshot: dict[str, bytes | None]) -> None:
+def _restore_committing_writes(
+    root: Path, snapshot: dict[str, _SnapshotCell | None]
+) -> None:
     """Roll the working tree back to ``snapshot`` — the #777 mode 3 rollback.
 
     Each cell is restored to exactly its pre-write state: bytes are rewritten
-    verbatim (a spliced block file returns to its original content, a stamped
-    ``.shipit.toml`` to its prior stamp), and a ``None`` cell (the path was
-    absent) is unlinked so a freshly-added managed file leaves no trace. Hook
-    activation is deliberately NOT rolled back: the ``lefthook install`` shims
-    are idempotent and sit outside the managed-set/manifest state that decides
+    verbatim AND the original permission bits reapplied (a spliced block file
+    returns to its original content, a stamped ``.shipit.toml`` to its prior
+    stamp, an executable-managed ``bin/shipit`` to both its old bytes and old
+    mode — never a mode-only dirty file after the content restore). A ``None``
+    cell (the path was absent) is unlinked so a freshly-added managed file
+    leaves no trace. Emptied parent directories are left in place — inert (git
+    does not track them, reconcile reads files) and cheaper than proving a dir
+    was created by this run rather than pre-existing. Hook activation is
+    deliberately NOT rolled back either: the ``lefthook install`` shims are
+    idempotent and sit outside the managed-set/manifest state that decides
     :attr:`Plan.nothing_to_do`, so a rerun re-activates them cleanly.
+
+    Raises :class:`OSError` if a restore write/chmod/unlink itself fails; the
+    caller wraps this so a rollback failure never masks the ``SelfCertError``
+    that triggered it.
     """
-    for rel, original in snapshot.items():
+    for rel, cell in snapshot.items():
         dest = root / rel
-        if original is None:
+        if cell is None:
             dest.unlink(missing_ok=True)
             continue
         dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(original)
+        dest.write_bytes(cell.data)
+        dest.chmod(cell.mode)
 
 
 def _restore_caller_branch(cwd: str, original_ref: str | None) -> None:
@@ -713,8 +748,18 @@ def apply(
         # only the (unreachable-here) missing-snapshot guard for MODE_TREE, which
         # never certifies. Otherwise the stamped manifest + written managed set
         # would make the next run read "nothing to do" over a half-applied tree.
+        # A rollback IO failure must not mask the SelfCertError (the real fault):
+        # log it and still raise the diagnostic that names every missed check.
         if committing_snapshot is not None:
-            _restore_committing_writes(root, committing_snapshot)
+            try:
+                _restore_committing_writes(root, committing_snapshot)
+            except OSError:
+                logger.warning(
+                    "could not fully roll the staged writes back after a failed "
+                    "self-cert — the working tree may retain partial managed state",
+                    exc_info=True,
+                    extra={"root": str(root)},
+                )
         logger.error(
             "install self-certification failed — failing closed (no commit, no "
             "PR); rolled the staged writes back",

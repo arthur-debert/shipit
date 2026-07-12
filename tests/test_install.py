@@ -3902,15 +3902,39 @@ def test_restore_caller_branch_skips_none_and_the_scratch_branch(tmp_path, rec):
 
 def test_restore_committing_writes_is_a_transaction(tmp_path):
     # Mode 3 primitive: an existing path is restored to its pre-write bytes
-    # verbatim; a path absent before the writes (snapshot cell None) is unlinked,
-    # dirs included — nothing half-applied survives.
+    # verbatim; a path absent before the writes (snapshot cell None) is unlinked.
+    # The now-empty parent dir is left behind — inert (git does not track empty
+    # dirs and reconcile reads files), which is why the rollback restores file
+    # state only.
     (tmp_path / "kept.txt").write_bytes(b"MUTATED\n")  # was b"before\n"
     (tmp_path / "sub").mkdir()
     (tmp_path / "sub" / "new.txt").write_text("added by the failed apply\n")
-    snapshot = {"kept.txt": b"before\n", "sub/new.txt": None}
+    snapshot = {
+        "kept.txt": iapply._SnapshotCell(b"before\n", 0o644),
+        "sub/new.txt": None,
+    }
     iapply._restore_committing_writes(tmp_path, snapshot)
     assert (tmp_path / "kept.txt").read_bytes() == b"before\n"
     assert not (tmp_path / "sub" / "new.txt").exists()
+
+
+def test_restore_committing_writes_restores_the_original_mode(tmp_path):
+    # #838 review (major): the snapshot carries permission bits, so a rollback
+    # returns BOTH content and mode — a write that flipped the executable bit
+    # (write_unit chmods managed executables to 0755) never leaves a mode-only
+    # dirty file after the content is restored.
+    victim = tmp_path / "bin" / "shipit"
+    victim.parent.mkdir(parents=True)
+    victim.write_bytes(b"consumer launcher\n")
+    victim.chmod(0o644)
+    cell = iapply._snapshot_cell(victim)
+    assert cell == iapply._SnapshotCell(b"consumer launcher\n", 0o644)
+    # Simulate the apply: new bytes AND the managed-executable chmod.
+    victim.write_bytes(b"MANAGED launcher\n")
+    victim.chmod(0o755)
+    iapply._restore_committing_writes(tmp_path, {"bin/shipit": cell})
+    assert victim.read_bytes() == b"consumer launcher\n"
+    assert stat.S_IMODE(victim.stat().st_mode) == 0o644
 
 
 def test_pr_selfcert_failure_rolls_the_staged_writes_back(tmp_path, rec):
@@ -3945,6 +3969,30 @@ def test_pr_selfcert_failure_rolls_the_staged_writes_back(tmp_path, rec):
     again = _plan(tmp_path)
     assert not again.nothing_to_do
     assert again.writes
+
+
+def test_pr_selfcert_failure_restores_an_executable_managed_files_mode(tmp_path, rec):
+    # #838 review (major), end-to-end: an existing `bin/shipit` that diverges
+    # from the managed launcher is an OVERRIDE — write_unit rewrites it AND
+    # chmods it 0755. A failed self-cert must roll back BOTH its content and its
+    # original mode, never leaving a mode-only dirty (executable) file.
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    launcher = tmp_path / "bin" / "shipit"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text("# the consumer's own launcher\n")
+    launcher.chmod(0o644)
+
+    def failing_cert(plan, root, **kw):
+        return selfcert.CertReport(
+            checks=(selfcert.CertCheck(name="planted", ok=False),)
+        )
+
+    with pytest.raises(SelfCertError):
+        _apply(tmp_path, iapply.MODE_PR, certify=failing_cert)
+
+    # Content AND mode are exactly as apply found them.
+    assert launcher.read_text() == "# the consumer's own launcher\n"
+    assert stat.S_IMODE(launcher.stat().st_mode) == 0o644
 
 
 def test_local_selfcert_failure_also_rolls_back(tmp_path, rec):
