@@ -1224,17 +1224,16 @@ def test_load_units_includes_the_agent_start_launcher():
     assert "unset SHIPIT_LOG_CTX_ROLE" in text
 
 
-def test_launchers_match_shipits_own_copies():
+def test_launcher_matches_shipits_own_copy():
     # The bootstrap dogfood guarantee (the bin/shipit pattern): shipit-self
     # commits a byte-identical, executable copy of the `agent-start` launcher
     # unit at the managed path, so its own Tree provisioning reconciles it to
     # NOOP instead of splicing drift.
     units = {u.key: u for u in iunits.load_units()}
-    root = Path(__file__).resolve().parents[1]
-    for key in (iunits.AGENT_LAUNCHER_FILE,):
-        own = root / units[key].dest
-        assert own.read_bytes() == units[key].content, key
-        assert os.access(own, os.X_OK), key
+    unit = units[iunits.AGENT_LAUNCHER_FILE]
+    own = Path(__file__).resolve().parents[1] / unit.dest
+    assert own.read_bytes() == unit.content
+    assert os.access(own, os.X_OK)
 
 
 def test_managed_settings_hooks_agree_with_shipits_own_settings():
@@ -2340,20 +2339,18 @@ def test_fresh_install_lays_down_the_session_bootstrap_set_idempotently(tmp_path
     assert (tmp_path / ".claude" / "settings.json").read_bytes() == settings_before
 
 
-def _lay_down_launchers(tmp_path: Path) -> dict[str, Path]:
-    """Write the shipped launcher unit into ``tmp_path``, executable.
+def _lay_down_launcher(tmp_path: Path) -> Path:
+    """Write the shipped ``agent-start`` launcher unit into ``tmp_path``,
+    executable, and return its path.
 
     The generic ``agent-start`` launcher carries the host strategy table, so
     behavior tests need it on disk — exactly what a real install lays down.
     """
-    units = {u.key: u for u in iunits.load_units()}
-    laid: dict[str, Path] = {}
-    for key in (iunits.AGENT_LAUNCHER_FILE,):
-        path = tmp_path / units[key].dest
-        path.write_bytes(units[key].content)
-        path.chmod(0o755)
-        laid[key] = path
-    return laid
+    unit = {u.key: u for u in iunits.load_units()}[iunits.AGENT_LAUNCHER_FILE]
+    path = tmp_path / unit.dest
+    path.write_bytes(unit.content)
+    path.chmod(0o755)
+    return path
 
 
 def _fake_cli(tmp_path: Path, name: str) -> dict[str, str]:
@@ -2370,12 +2367,12 @@ def _fake_cli(tmp_path: Path, name: str) -> dict[str, str]:
 def test_agent_start_claude_execs_claude_with_a_minted_session_id(tmp_path: Path):
     # The claude row of the strategy table: exec `claude --worktree <minted-id>`
     # forwarding the remaining args, with a fresh `sess-`-prefixed id per launch.
-    launchers = _lay_down_launchers(tmp_path)
+    agent_start = _lay_down_launcher(tmp_path)
     env = _fake_cli(tmp_path, "claude")
 
     def launch(*args: str) -> list[str]:
         proc = subprocess.run(
-            [str(launchers[iunits.AGENT_LAUNCHER_FILE]), "claude", *args],
+            [str(agent_start), "claude", *args],
             env=env,
             capture_output=True,
             text=True,
@@ -2397,7 +2394,7 @@ def test_agent_start_codex_execs_the_pinned_launcher(tmp_path: Path):
     # The codex row of the strategy table: exec `./bin/shipit session codex`,
     # forwarding the remaining args — never codex directly (codex has no
     # WorktreeCreate-style pre-launch seam; the pinned launcher provisions).
-    launchers = _lay_down_launchers(tmp_path)
+    agent_start = _lay_down_launcher(tmp_path)
     env = _fake_cli(tmp_path, "codex")
     bindir = tmp_path / "bin"
     bindir.mkdir()
@@ -2406,7 +2403,7 @@ def test_agent_start_codex_execs_the_pinned_launcher(tmp_path: Path):
     fake_shipit.chmod(0o755)
 
     proc = subprocess.run(
-        [str(launchers[iunits.AGENT_LAUNCHER_FILE]), "codex", "--model", "foo"],
+        [str(agent_start), "codex", "--model", "foo"],
         env=env,
         capture_output=True,
         text=True,
@@ -2428,7 +2425,7 @@ def test_agent_start_scrubs_the_inherited_worker_agent_identity_exports(
     # task-correlation key like PR still rides — it describes the work, not who
     # is doing it. The scrub lives in the common path, so one fake CLI (claude)
     # covers every host row.
-    launchers = _lay_down_launchers(tmp_path)
+    agent_start = _lay_down_launcher(tmp_path)
     env = _fake_cli(tmp_path, "claude")
     fake = tmp_path / "fakepath" / "claude"
     fake.write_text(
@@ -2440,7 +2437,7 @@ def test_agent_start_scrubs_the_inherited_worker_agent_identity_exports(
     )
 
     proc = subprocess.run(
-        [str(launchers[iunits.AGENT_LAUNCHER_FILE]), "claude"],
+        [str(agent_start), "claude"],
         env={
             **env,
             "SHIPIT_LOG_CTX_ROLE": "implementer",
@@ -2462,8 +2459,7 @@ def test_agent_start_scrubs_the_inherited_worker_agent_identity_exports(
 
 
 def test_agent_start_rejects_an_unknown_or_missing_agent(tmp_path: Path):
-    launchers = _lay_down_launchers(tmp_path)
-    agent_start = launchers[iunits.AGENT_LAUNCHER_FILE]
+    agent_start = _lay_down_launcher(tmp_path)
 
     proc = subprocess.run(
         [str(agent_start), "goose"], capture_output=True, text=True, timeout=10
@@ -2479,7 +2475,7 @@ def test_agent_start_rejects_an_unknown_or_missing_agent(tmp_path: Path):
 
 
 def test_agent_start_fails_loud_when_the_cli_is_not_on_path(tmp_path: Path):
-    launchers = _lay_down_launchers(tmp_path)
+    agent_start = _lay_down_launcher(tmp_path)
 
     # A minimal PATH carrying `bash` (the shebang's interpreter) and `dirname`
     # (the launcher's own repo-root probe needs it; without it, bash ≥5.2 turns
@@ -2495,7 +2491,7 @@ def test_agent_start_fails_loud_when_the_cli_is_not_on_path(tmp_path: Path):
         assert binary is not None
         (bindir / tool).symlink_to(binary)
     proc = subprocess.run(
-        [str(launchers[iunits.AGENT_LAUNCHER_FILE]), "claude"],
+        [str(agent_start), "claude"],
         env={"PATH": str(bindir)},
         capture_output=True,
         text=True,
@@ -3896,6 +3892,55 @@ def test_retired_manifest_carries_the_renamed_skill_history():
 
     for path, expected_hashes in RETIRED_SKILL_HASHES.items():
         assert retired[path].pristine_hashes == expected_hashes
+
+
+# The agent-specific launcher shims (#815): repo-root whole-file units shipit
+# used to distribute, retired now that all launch logic lives in `agent-start`.
+# The fixtures snapshot the last-shipped pristine bytes so the upgrade path —
+# an install shedding a stale shim while keeping a locally edited one — is
+# covered end-to-end.
+PRISTINE_CLAUDE_START = Path(__file__).parent / "data" / "claude-start-pristine"
+PRISTINE_CODEX_START = Path(__file__).parent / "data" / "codex-start-pristine"
+RETIRED_LAUNCHER_SHIMS = {
+    "claude-start": PRISTINE_CLAUDE_START,
+    "codex-start": PRISTINE_CODEX_START,
+}
+
+
+def test_retired_manifest_carries_the_launcher_shim_history():
+    # Both agent-specific shims are retired, each with its last-shipped pristine
+    # hash from this repo's git history (the fixtures snapshot those bytes).
+    retired = {r.path: r for r in irec.load_retired()}
+    for path, fixture in RETIRED_LAUNCHER_SHIMS.items():
+        entry = retired[path]
+        assert all(h.startswith("sha256:") for h in entry.pristine_hashes)
+        assert config.content_hash(fixture.read_bytes()) in entry.pristine_hashes
+
+
+@pytest.mark.parametrize("path", sorted(RETIRED_LAUNCHER_SHIMS))
+def test_install_deletes_a_pristine_retired_launcher_shim(tmp_path, rec, path):
+    # A consumer that already installed the shim sheds it on upgrade, while the
+    # surviving generic `agent-start` launcher is (re)installed.
+    victim = tmp_path / path
+    victim.write_bytes(RETIRED_LAUNCHER_SHIMS[path].read_bytes())
+
+    plan = _plan(tmp_path)
+    assert path in [d.retired.path for d in plan.retire_deletes]
+    _apply(tmp_path)
+    assert not victim.exists()
+    assert (tmp_path / iunits.AGENT_LAUNCHER_FILE).is_file()
+
+
+@pytest.mark.parametrize("path", sorted(RETIRED_LAUNCHER_SHIMS))
+def test_install_keeps_a_modified_retired_launcher_shim(tmp_path, rec, path):
+    # A locally edited shim is never destroyed: kept on disk, warned loudly.
+    victim = tmp_path / path
+    victim.write_bytes(RETIRED_LAUNCHER_SHIMS[path].read_bytes() + b"# local\n")
+
+    plan = _plan(tmp_path)
+    assert [d.retired.path for d in plan.retire_keeps] == [path]
+    _apply(tmp_path)
+    assert victim.exists()
 
 
 def test_install_deletes_a_pristine_retired_file(tmp_path, rec):
