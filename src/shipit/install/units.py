@@ -110,6 +110,24 @@ PIXI_ENVS_OPEN = "# >>> shipit-managed environments (do not edit; regenerate via
 PIXI_ENVS_CLOSE = "# <<< shipit-managed environments <<<"
 PIXI_ENVS_ANCHOR = "[environments]"
 
+# The UNCONDITIONAL launcher-deps block (#758, closed by TOL02-WS17 #794):
+# `uv` for the pinned ADR-0033 `bin/shipit` launcher, in the DEFAULT env's
+# [dependencies] — every workflow block (wf-checks and the wf-release family)
+# runs `pixi run --locked ./bin/shipit`, and hosted runners carry no uv, so
+# the launcher's one prerequisite must ride the managed pixi surface (the
+# #582 doctrine: provisioning lands in setup-pixi's lockfile-keyed cache,
+# never a run-time install). Unconditional — unlike the per-toolchain blocks
+# below, EVERY consumer's managed tasks resolve through `bin/shipit` — and
+# pinned in lockstep with Layer 0's UV_PIN (bin/setup-dev-env.sh), drift-
+# tested in tests/test_install.py. A consumer that already pins `uv` in its
+# own [dependencies] (the #758 consumer-side workaround) keeps its pin via
+# the PixiKeyConflict first-splice guard, exactly like the cargo-edit
+# precedent (#793) — their entry stays until their own reconcile.
+PIXI_LAUNCHER_DEPS_KEY = "pixi.toml#shipit-launcher-deps"
+PIXI_LAUNCHER_DEPS_OPEN = "# >>> shipit-managed launcher deps (do not edit; regenerate via `shipit install`) >>>"
+PIXI_LAUNCHER_DEPS_CLOSE = "# <<< shipit-managed launcher deps <<<"
+PIXI_LAUNCHER_DEPS_ANCHOR = "[dependencies]"
+
 # The CONDITIONAL per-toolchain dep blocks (#547 Layer 1): a consumer whose
 # tracked manifests signal a toolchain (a `Cargo.toml` anywhere → rust, `go.mod`
 # → go, `package.json` → node — the same per-manifest discovery that makes the
@@ -517,7 +535,10 @@ def load_units(*, toolchains: frozenset[str] = frozenset()) -> list[Unit]:
     blocks to include — any of :data:`TOOLCHAIN_RUST` / :data:`TOOLCHAIN_GO` /
     :data:`TOOLCHAIN_NODE`, as detected from the consumer's tracked manifests
     (:func:`shipit.install.reconcile.detect_toolchains`). The zero-arg call
-    returns the unconditional catalog, byte-identical to the pre-#547 one.
+    returns the unconditional catalog — which since #794 includes the
+    launcher-deps block (uv for the pinned ``bin/shipit``, #758): every
+    consumer's managed tasks resolve through the launcher, so its
+    prerequisite is signal-independent.
     """
     units: list[Unit] = []
 
@@ -665,12 +686,28 @@ def load_units(*, toolchains: frozenset[str] = frozenset()) -> list[Unit]:
         )
     )
 
-    # The conditional per-toolchain dep blocks (#547 Layer 1): appended only
-    # when the caller detected the signal, so a signal-less consumer's catalog
-    # (and every existing zero-arg call) is unchanged. rust/go splice under the
-    # same `[feature.lint.dependencies]` anchor as the managed lint-deps block
-    # — sibling marker blocks in one table (splice_block places each right
-    # after the anchor header; coexistence is fine).
+    # The unconditional launcher-deps block (#758, TOL02-WS17 #794): uv for
+    # the pinned bin/shipit launcher, in the default env — see the
+    # PIXI_LAUNCHER_DEPS_KEY comment above for the whole story.
+    units.append(
+        Unit(
+            key=PIXI_LAUNCHER_DEPS_KEY,
+            dest=PIXI_FILE,
+            kind="block",
+            content=data_bytes("pixi-launcher-deps-block.toml"),
+            open_marker=PIXI_LAUNCHER_DEPS_OPEN,
+            close_marker=PIXI_LAUNCHER_DEPS_CLOSE,
+            anchor=PIXI_LAUNCHER_DEPS_ANCHOR,
+        )
+    )
+
+    # The conditional per-toolchain dep blocks (#547 Layer 1): the ONLY
+    # signal-gated rows — appended only when the caller detected the signal.
+    # The unconditional catalog above (launcher-deps included) ships on every
+    # call regardless; these rows add only the toolchain-specific blocks.
+    # rust/go splice under the same `[feature.lint.dependencies]` anchor as the
+    # managed lint-deps block — sibling marker blocks in one table (splice_block
+    # places each right after the anchor header; coexistence is fine).
     for key, signal, open_marker, close_marker, anchor, data_file in TOOLCHAIN_UNITS:
         if signal in toolchains:
             units.append(
