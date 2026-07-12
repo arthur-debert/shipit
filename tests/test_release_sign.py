@@ -59,6 +59,17 @@ FIND_IDENTITY_OUT = f'  1) ABCDEF0123 "{IDENTITY}"\n     1 valid identities foun
 #: confined under the .app — no absolute or `..` paths).
 TAR_LISTING = "Phos.app/\nPhos.app/Contents/\nPhos.app/Contents/MacOS/phos\n"
 
+#: The same fixture as a `tar -tvzf` verbose listing — regular files/dirs plus
+#: the legit framework-style symlink (`Contents/Current -> MacOS`) a resealed
+#: .app carries; its target is relative and `..`-free, so the mac-app leg's
+#: link-target check passes untouched.
+TAR_VERBOSE_LISTING = (
+    "drwxr-xr-x  0 u  g       0 Jan  1 00:00 Phos.app/\n"
+    "drwxr-xr-x  0 u  g       0 Jan  1 00:00 Phos.app/Contents/\n"
+    "-rwxr-xr-x  0 u  g  123456 Jan  1 00:00 Phos.app/Contents/MacOS/phos\n"
+    "lrwxr-xr-x  0 u  g       0 Jan  1 00:00 Phos.app/Contents/Current -> MacOS\n"
+)
+
 
 # --------------------------------------------------------------------------
 # Pure assembly: secret names, credential resolution, flag construction
@@ -348,6 +359,8 @@ class SignRecorder:
         stdout = ""
         if argv[0] == "tar" and argv[1] == "-tzf":
             stdout = TAR_LISTING
+        elif argv[0] == "tar" and argv[1] == "-tvzf":
+            stdout = TAR_VERBOSE_LISTING
         elif argv[0] == "tar" and argv[1] == "-xzf":
             work = Path(argv[argv.index("-C") + 1])
             shutil.copytree(
@@ -474,6 +487,9 @@ def test_sign_bundle_full_recorded_sequence(tmp_path):
     ]
     expected = [
         ("tar", "-tzf", str(tmp_path / "dist" / "app.unsigned-app.tar.gz")),
+        # The mac-app leg allows the .app's framework symlinks but still takes a
+        # verbose listing to refuse any link whose TARGET escapes the root.
+        ("tar", "-tvzf", str(tmp_path / "dist" / "app.unsigned-app.tar.gz")),
         (
             "tar",
             "-xzf",
@@ -680,6 +696,36 @@ def test_non_regular_member_flags_links(listing, offender):
     assert sign_mod._non_regular_member(listing) == offender
 
 
+@pytest.mark.parametrize(
+    "listing,offender",
+    [
+        # Regular files/dirs carry no target — nothing to check.
+        ("drwxr-xr-x 0 u g 0 d pkg/\n-rw-r--r-- 0 u g 9 d pkg/bin\n", None),
+        # A framework-style symlink resolving IN-tree is fine (mac-app leg).
+        ("lrwxr-xr-x 0 u g 0 d App.app/Contents/Current -> MacOS\n", None),
+        ("lrwxr-xr-x 0 u g 0 d fw/Foo -> Versions/Current/Foo\n", None),
+        # A symlink target that climbs out with `..` escapes — refused.
+        (
+            "lrwxr-xr-x 0 u g 0 d App.app/e -> ../../x\n",
+            "lrwxr-xr-x 0 u g 0 d App.app/e -> ../../x",
+        ),
+        # An ABSOLUTE symlink target escapes — refused.
+        (
+            "lrwxr-xr-x 0 u g 0 d App.app/e -> /etc/passwd\n",
+            "lrwxr-xr-x 0 u g 0 d App.app/e -> /etc/passwd",
+        ),
+        # A hardlink whose target escapes (`link to`) — refused.
+        (
+            "hrw-r--r-- 0 u g 0 d App.app/h link to ../../../etc/x\n",
+            "hrw-r--r-- 0 u g 0 d App.app/h link to ../../../etc/x",
+        ),
+        ("\n\n", None),  # blank lines are ignored
+    ],
+)
+def test_escaping_link_target_flags_out_of_tree_targets(listing, offender):
+    assert sign_mod._escaping_link_target(listing) == offender
+
+
 def test_sign_bundle_rejects_a_payload_with_a_traversal_member(tmp_path):
     # A tampered/garbled payload whose members escape the extraction dir is
     # refused after listing (tar -tzf) and BEFORE extraction — nothing unpacked.
@@ -698,6 +744,62 @@ def test_sign_bundle_rejects_a_payload_with_a_traversal_member(tmp_path):
 
     recorder = SignRecorder(tmp_path, effects={"tar": evil_listing})
     with pytest.raises(ReleaseError, match="unsafe path in reseal payload"):
+        sign_mod.sign_bundle(_request(tmp_path, recorder))
+    assert not recorder.heads("tar", "-xzf")  # extraction never ran
+
+
+def test_sign_bundle_rejects_a_payload_symlink_escaping_through_its_target(tmp_path):
+    # The mac-app leg allows the .app's legit framework symlinks, but the NAME
+    # check confines only paths — a symlink escapes THROUGH its target. The
+    # verbose (`-tvzf`) listing refuses a link whose target leaves the root
+    # BEFORE extraction, without a blanket link refusal that would break a
+    # legit bundle.
+    _fixture_tree(tmp_path)
+
+    def escaping_symlink(argv):
+        if argv[:2] == ("tar", "-tvzf"):
+            # The member NAME looks safe; only the target escapes.
+            return execrun.ExecResult(
+                argv=argv,
+                rc=0,
+                stdout=(
+                    "drwxr-xr-x  0 u  g  0 Jan  1 00:00 Phos.app/\n"
+                    "lrwxr-xr-x  0 u  g  0 Jan  1 00:00 Phos.app/evil"
+                    " -> ../../../../etc\n"
+                ),
+                stderr="",
+                duration_ms=1,
+            )
+        return None
+
+    recorder = SignRecorder(tmp_path, effects={"tar": escaping_symlink})
+    with pytest.raises(ReleaseError, match="link escaping reseal payload"):
+        sign_mod.sign_bundle(_request(tmp_path, recorder))
+    assert not recorder.heads("tar", "-xzf")  # extraction never ran
+
+
+def test_sign_bundle_rejects_a_payload_hardlink_escaping_through_its_target(tmp_path):
+    # Same target-escape refusal for a hardlink (`h`, `link to <target>`) whose
+    # absolute target would land outside the extraction root.
+    _fixture_tree(tmp_path)
+
+    def escaping_hardlink(argv):
+        if argv[:2] == ("tar", "-tvzf"):
+            return execrun.ExecResult(
+                argv=argv,
+                rc=0,
+                stdout=(
+                    "drwxr-xr-x  0 u  g  0 Jan  1 00:00 Phos.app/\n"
+                    "hrw-r--r--  0 u  g  0 Jan  1 00:00 Phos.app/evil"
+                    " link to /etc/passwd\n"
+                ),
+                stderr="",
+                duration_ms=1,
+            )
+        return None
+
+    recorder = SignRecorder(tmp_path, effects={"tar": escaping_hardlink})
+    with pytest.raises(ReleaseError, match="link escaping reseal payload"):
         sign_mod.sign_bundle(_request(tmp_path, recorder))
     assert not recorder.heads("tar", "-xzf")  # extraction never ran
 

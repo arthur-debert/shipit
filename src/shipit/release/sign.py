@@ -676,6 +676,35 @@ def _non_regular_member(listing: str) -> str | None:
     return None
 
 
+def _escaping_link_target(listing: str) -> str | None:
+    """The first link member in a ``tar -tvzf`` verbose listing whose TARGET
+    would resolve OUTSIDE the extraction dir — an ABSOLUTE target or one with a
+    ``..`` segment — or ``None`` when every link's target stays confined.
+
+    A ``.app``/framework bundle legitimately carries symlinks (``Versions/
+    Current``, the framework's public-name links), so a blanket link refusal is
+    wrong for the mac-app leg — the danger is only a link whose TARGET escapes.
+    The member NAME is already confined by :func:`_unsafe_tar_member`, so a
+    relative target with no ``..`` can only resolve DEEPER beneath the confined
+    link and stays inside ``work``; an absolute target, or a relative one that
+    climbs out with ``..``, may land outside and is returned for a hard refusal.
+    A symlink (``l``) target follows ``-> `` in the verbose line, a hardlink
+    (``h``) target follows ``link to ``. Pure."""
+    for raw in listing.splitlines():
+        kind = raw[:1]
+        if kind == "l":
+            _, sep, target = raw.partition(" -> ")
+        elif kind == "h":
+            _, sep, target = raw.partition(" link to ")
+        else:
+            continue
+        if not sep:
+            continue
+        if target.startswith("/") or ".." in target.split("/"):
+            return raw
+    return None
+
+
 def _untar_validated(
     archive: Path,
     work: Path,
@@ -689,12 +718,19 @@ def _untar_validated(
     garbled ``what`` write OUTSIDE ``work`` (tar path traversal), so any such
     member is a hard refusal with nothing extracted.
 
-    With ``reject_links`` (the archive leg — a raw-CLI tarball has no business
-    carrying links), a verbose second listing additionally refuses any symlink
-    or hardlink member: the name check confines paths, but a link escapes
-    through its TARGET, so a non-regular member is refused before extraction
-    too. The mac-app leg leaves this OFF — a resealed ``.app`` legitimately
-    carries the framework symlinks Apple's bundle layout requires."""
+    A verbose second listing (``tar -tvzf``) then validates link members —
+    both legs take it, differing only in strictness, and either refusal fires
+    before extraction with nothing unpacked:
+
+    * With ``reject_links`` (the archive leg — a raw-CLI tarball has no business
+      carrying links), ANY symlink or hardlink member is refused: the name
+      check confines paths, but a link escapes through its TARGET.
+    * Without it (the mac-app leg — a resealed ``.app`` legitimately carries the
+      framework symlinks Apple's bundle layout requires), links are allowed but
+      each link's TARGET must resolve UNDER ``work``; an absolute or ``..``
+      target that would land outside is refused (:func:`_escaping_link_target`).
+      A confined name plus a no-``..`` relative target can only resolve deeper,
+      so legit bundle symlinks pass untouched."""
     work.mkdir(parents=True, exist_ok=True)
     listing = run_cmd(["tar", "-tzf", str(archive)], SIGN_CMD_TIMEOUT).stdout
     unsafe = _unsafe_tar_member(listing)
@@ -703,8 +739,8 @@ def _untar_validated(
             f"unsafe path in {what} {archive.name}: {unsafe!r} escapes "
             "the extraction dir (absolute or .. path) — refusing to extract"
         )
+    verbose = run_cmd(["tar", "-tvzf", str(archive)], SIGN_CMD_TIMEOUT).stdout
     if reject_links:
-        verbose = run_cmd(["tar", "-tvzf", str(archive)], SIGN_CMD_TIMEOUT).stdout
         link = _non_regular_member(verbose)
         if link is not None:
             raise ReleaseError(
@@ -712,6 +748,14 @@ def _untar_validated(
                 "symlink or hardlink escapes the extraction dir through its "
                 "target; a raw-CLI archive ships only files and dirs, refusing "
                 "to extract"
+            )
+    else:
+        escaping = _escaping_link_target(verbose)
+        if escaping is not None:
+            raise ReleaseError(
+                f"link escaping {what} {archive.name}: {escaping!r} — its "
+                "target resolves outside the extraction dir (absolute or .. "
+                "path); refusing to extract"
             )
     run_cmd(["tar", "-xzf", str(archive), "-C", str(work)], SIGN_CMD_TIMEOUT)
 
