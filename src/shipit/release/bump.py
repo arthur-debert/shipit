@@ -64,8 +64,10 @@ def explain_command_failure(argv: Sequence[str], stderr: str) -> str | None:
     """A remediation-bearing message for a KNOWN adapter-command failure. Pure.
 
     ``None`` means "not a shape this registry knows" — the caller re-raises the
-    original error untranslated. Today the one known shape is the rust
-    adapter's ``cargo set-version`` dying unprovisioned (issue #793, the
+    original error untranslated (after also consulting the missing-binary map,
+    :func:`shipit.release.provisioning.missing_tool_remedy`, which owns the
+    "tool absent outright" shapes — #801). This function's one shape is the
+    rust adapter's ``cargo set-version`` dying unprovisioned (issue #793, the
     #784-F2 failure class): cargo-edit rides the shipit-managed pixi surface
     for rust consumers (the ``pixi.toml#shipit-rust-release-deps`` block,
     conda-forge-pinned, cached by setup-pixi under the lockfile key — the #582

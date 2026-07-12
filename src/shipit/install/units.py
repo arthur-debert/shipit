@@ -130,22 +130,32 @@ PIXI_LAUNCHER_DEPS_ANCHOR = "[dependencies]"
 
 # The CONDITIONAL per-toolchain dep blocks (#547 Layer 1): a consumer whose
 # tracked manifests signal a toolchain (a `Cargo.toml` anywhere → rust, `go.mod`
-# → go, `package.json` → node — the same per-manifest discovery that makes the
-# corresponding `shipit lint` leg run, see shipit/lint.py) gets that toolchain
+# → go, `package.json` → node, a `pyproject.toml` → python — for the compiled
+# toolchains the same per-manifest discovery that makes the corresponding
+# `shipit lint` leg run, see shipit/lint.py) gets that toolchain
 # pinned through pixi/conda-forge, so the lint legs stop hard-failing (127)
 # wherever the host happens to lack cargo/go/node — the #526 "clippy is
 # local-only" CI gap. rust and go anchor under the lint feature (they provision
 # LINTER toolchains, siblings of the managed lint-deps block above); node
 # anchors under `[dependencies]` — it provisions the repo's OWN node/pnpm
-# runtime, not a linter. The rust signal delivers a SECOND block (#793, the
-# #784-F2 class): the release-side bump tool (cargo-edit, whose
-# `cargo set-version` is the rust bump adapter's projection command,
-# shipit/release/bump.py) — anchored under `[dependencies]` too, NOT the lint
-# feature, because wf-prepare executes shipit in the DEFAULT pixi env
-# (`pixi run --locked ./bin/shipit`) and the tool must be on THAT run's PATH.
+# runtime, not a linter. The rust signal delivers TWO more blocks in
+# `[dependencies]` (#793/#801, the #784-F2 class): the release-side bump tool
+# (cargo-edit, whose `cargo set-version` is the rust bump adapter's projection
+# command, shipit/release/bump.py) and the rust RELEASE toolchain itself
+# (`rust` — cargo for prepare/build/publish; hosted images no longer carry
+# Rust, and the lint-feature rust block is invisible to the release runs'
+# default env — TOL02-WS17 open hole 1, closed by #801). The python signal
+# delivers the release-side publish tool (twine, the pypi endpoint's uploader
+# — open hole 2, #801). All the release-side blocks anchor under
+# `[dependencies]`, NOT the lint feature, because the wf-release stages
+# execute shipit in the DEFAULT pixi env (`pixi run --locked ./bin/shipit`)
+# and the tools must be on THAT run's PATH. Each single-purpose block is
+# deliberately its OWN unit (never merged into a shared one) so the
+# key-conflict guard below can skip exactly the key a consumer already pins
+# without losing the sibling deliveries.
 # Provisioning rides pixi/conda-forge under setup-pixi's lockfile-keyed cache
-# (the #582 doctrine); `release prepare` itself never installs at run time —
-# it fails loudly naming this reconcile instead. Delivered only when
+# (the #582 doctrine); the release verbs never install at run time —
+# they fail loudly naming this reconcile instead. Delivered only when
 # :func:`load_units` is passed the
 # toolchain signal (`toolchains=`), so the zero-arg catalog is byte-identical
 # to the pre-#547 one. A consumer who ALREADY pins one of a block's keys in its
@@ -158,6 +168,7 @@ PIXI_LAUNCHER_DEPS_ANCHOR = "[dependencies]"
 TOOLCHAIN_RUST = "rust"
 TOOLCHAIN_GO = "go"
 TOOLCHAIN_NODE = "node"
+TOOLCHAIN_PYTHON = "python"
 PIXI_RUST_DEPS_KEY = "pixi.toml#shipit-rust-lint-toolchain"
 PIXI_RUST_DEPS_OPEN = "# >>> shipit-managed rust lint toolchain (do not edit; regenerate via `shipit install`) >>>"
 PIXI_RUST_DEPS_CLOSE = "# <<< shipit-managed rust lint toolchain <<<"
@@ -173,6 +184,12 @@ PIXI_NODE_DEPS_ANCHOR = "[dependencies]"
 PIXI_RUST_RELEASE_DEPS_KEY = "pixi.toml#shipit-rust-release-deps"
 PIXI_RUST_RELEASE_DEPS_OPEN = "# >>> shipit-managed rust release deps (do not edit; regenerate via `shipit install`) >>>"
 PIXI_RUST_RELEASE_DEPS_CLOSE = "# <<< shipit-managed rust release deps <<<"
+PIXI_RUST_RELEASE_TOOLCHAIN_KEY = "pixi.toml#shipit-rust-release-toolchain"
+PIXI_RUST_RELEASE_TOOLCHAIN_OPEN = "# >>> shipit-managed rust release toolchain (do not edit; regenerate via `shipit install`) >>>"
+PIXI_RUST_RELEASE_TOOLCHAIN_CLOSE = "# <<< shipit-managed rust release toolchain <<<"
+PIXI_PYTHON_RELEASE_DEPS_KEY = "pixi.toml#shipit-python-release-deps"
+PIXI_PYTHON_RELEASE_DEPS_OPEN = "# >>> shipit-managed python release deps (do not edit; regenerate via `shipit install`) >>>"
+PIXI_PYTHON_RELEASE_DEPS_CLOSE = "# <<< shipit-managed python release deps <<<"
 # (unit key, toolchain signal, open, close, anchor, packaged data file) — the
 # catalog rows :func:`load_units` appends per requested toolchain, in this order.
 TOOLCHAIN_UNITS = (
@@ -191,6 +208,22 @@ TOOLCHAIN_UNITS = (
         PIXI_RUST_RELEASE_DEPS_CLOSE,
         PIXI_NODE_DEPS_ANCHOR,
         "pixi-rust-release-deps-block.toml",
+    ),
+    (
+        PIXI_RUST_RELEASE_TOOLCHAIN_KEY,
+        TOOLCHAIN_RUST,
+        PIXI_RUST_RELEASE_TOOLCHAIN_OPEN,
+        PIXI_RUST_RELEASE_TOOLCHAIN_CLOSE,
+        PIXI_NODE_DEPS_ANCHOR,
+        "pixi-rust-release-toolchain-block.toml",
+    ),
+    (
+        PIXI_PYTHON_RELEASE_DEPS_KEY,
+        TOOLCHAIN_PYTHON,
+        PIXI_PYTHON_RELEASE_DEPS_OPEN,
+        PIXI_PYTHON_RELEASE_DEPS_CLOSE,
+        PIXI_NODE_DEPS_ANCHOR,
+        "pixi-python-release-deps-block.toml",
     ),
     (
         PIXI_GO_DEPS_KEY,
@@ -533,7 +566,8 @@ def load_units(*, toolchains: frozenset[str] = frozenset()) -> list[Unit]:
 
     ``toolchains`` (#547 Layer 1) names the conditional per-toolchain pixi dep
     blocks to include — any of :data:`TOOLCHAIN_RUST` / :data:`TOOLCHAIN_GO` /
-    :data:`TOOLCHAIN_NODE`, as detected from the consumer's tracked manifests
+    :data:`TOOLCHAIN_NODE` / :data:`TOOLCHAIN_PYTHON`, as detected from the
+    consumer's tracked manifests
     (:func:`shipit.install.reconcile.detect_toolchains`). The zero-arg call
     returns the unconditional catalog — which since #794 includes the
     launcher-deps block (uv for the pinned ``bin/shipit``, #758): every

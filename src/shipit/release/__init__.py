@@ -40,6 +40,10 @@ work streams land:
 - :mod:`.brew` — the brew formula render core (WS05): the shared formula
   template, the PascalCase class derivation, and the crate-metadata pull.
   Pure text; the effectful tap push is the brew adapter in :mod:`.publish`.
+- :mod:`.provisioning` — the missing-tool → reconcile-remedy translation
+  (#801): one map from a pixi-managed tool's argv head to the install
+  reconcile that provisions it, shared by the prepare and publish verbs so a
+  tool absent on the runner fails LOUDLY naming the fix, never as a raw 127.
 
 The effectful shells live in :mod:`shipit.verbs` (``shipit release prepare`` /
 ``preflight`` / ``bundle`` / ``assert-bundle`` / ``sign`` / ``publish`` are

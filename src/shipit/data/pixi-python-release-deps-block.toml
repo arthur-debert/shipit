@@ -1,0 +1,16 @@
+# The python RELEASE-side publish tool (#801, closing open hole 2 of the
+# TOL02-WS17 inventory): `shipit release publish`'s pypi endpoint uploads via
+# `twine`, which hosted runner images do not carry and nothing else
+# provisions — the upload died 127 on every stock pypi consumer. Delivered on
+# the python toolchain signal (a tracked pyproject.toml), anchored under
+# [dependencies] — the DEFAULT env — because wf-publish executes shipit via
+# bare `pixi run --locked ./bin/shipit`, and twine must be on THAT run's
+# PATH. Provisioned from conda-forge under setup-pixi's lockfile-keyed cache
+# (the #582 doctrine: the release run NEVER installs at run time — publish
+# fails loudly naming this reconcile instead). Pinned to the minor line; a
+# bump is one data edit, rolled out on each consumer's next `shipit install`
+# reconcile. If this repo no longer ships python (the last pyproject.toml is
+# gone), delete this block and its `pixi.toml#shipit-python-release-deps`
+# entry in .shipit.toml's [managed] table — a reconcile only ADDS toolchain
+# blocks, it never retires one.
+twine = "6.2.*"

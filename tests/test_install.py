@@ -353,12 +353,19 @@ def test_shipits_own_pixi_manifest_reconciles_to_noop():
     # otherwise every fresh Tree would splice a drift commit (or a duplicate
     # `lint` key under [environments]) into shipit's own manifest.
     root = Path(__file__).resolve().parents[1]
-    units = {u.key: u for u in iunits.load_units()}
+    # shipit's own tracked pyproject.toml signals the python toolchain (#801),
+    # so the real install's catalog includes the python release-deps block —
+    # dogfooded verbatim like every other managed pixi block.
+    units = {
+        u.key: u
+        for u in iunits.load_units(toolchains=frozenset({iunits.TOOLCHAIN_PYTHON}))
+    }
     for key in (
         iunits.PIXI_KEY,
         iunits.PIXI_LINT_DEPS_KEY,
         iunits.PIXI_ENVS_KEY,
         iunits.PIXI_LAUNCHER_DEPS_KEY,
+        iunits.PIXI_PYTHON_RELEASE_DEPS_KEY,
     ):
         unit = units[key]
         assert irec.consumer_hash(root, unit) == unit.desired_hash(), key
@@ -1807,9 +1814,15 @@ def test_load_units_toolchain_blocks_are_conditional():
     base = {u.key for u in iunits.load_units()}
     assert not (base & toolchain_keys)
 
-    # Per-signal: each signal adds exactly ITS blocks — one for go/node, TWO
-    # for rust (the lint toolchain + the release-side cargo-edit block, #793).
-    for signal in (iunits.TOOLCHAIN_RUST, iunits.TOOLCHAIN_GO, iunits.TOOLCHAIN_NODE):
+    # Per-signal: each signal adds exactly ITS blocks — one for go/node/python,
+    # THREE for rust (the lint toolchain + the release-side cargo-edit block
+    # #793 + the release toolchain block #801).
+    for signal in (
+        iunits.TOOLCHAIN_RUST,
+        iunits.TOOLCHAIN_GO,
+        iunits.TOOLCHAIN_NODE,
+        iunits.TOOLCHAIN_PYTHON,
+    ):
         expected = {key for key, sig, *_ in iunits.TOOLCHAIN_UNITS if sig == signal}
         keys = {u.key for u in iunits.load_units(toolchains=frozenset({signal}))}
         assert keys - base == expected, signal
@@ -1821,14 +1834,19 @@ def test_load_units_toolchain_blocks_are_conditional():
                 if sig == iunits.TOOLCHAIN_RUST
             }
         )
-        == 2
+        == 3
     )
 
     all_keys = {
         u.key
         for u in iunits.load_units(
             toolchains=frozenset(
-                {iunits.TOOLCHAIN_RUST, iunits.TOOLCHAIN_GO, iunits.TOOLCHAIN_NODE}
+                {
+                    iunits.TOOLCHAIN_RUST,
+                    iunits.TOOLCHAIN_GO,
+                    iunits.TOOLCHAIN_NODE,
+                    iunits.TOOLCHAIN_PYTHON,
+                }
             )
         )
     }
@@ -1840,7 +1858,12 @@ def test_toolchain_block_units_have_the_right_shape():
         u.key: u
         for u in iunits.load_units(
             toolchains=frozenset(
-                {iunits.TOOLCHAIN_RUST, iunits.TOOLCHAIN_GO, iunits.TOOLCHAIN_NODE}
+                {
+                    iunits.TOOLCHAIN_RUST,
+                    iunits.TOOLCHAIN_GO,
+                    iunits.TOOLCHAIN_NODE,
+                    iunits.TOOLCHAIN_PYTHON,
+                }
             )
         )
     }
@@ -1871,6 +1894,23 @@ def test_toolchain_block_units_have_the_right_shape():
     assert rust_release.anchor == "[dependencies]"
     assert tomllib.loads(rust_release.desired_inner()) == {"cargo-edit": "0.13.11.*"}
 
+    # The rust RELEASE toolchain (#801, TOL02-WS17 hole 1): cargo itself in
+    # the default env — a SINGLE-KEY block, deliberately separate from the
+    # cargo-edit block so a consumer-side `rust` pin conflicts alone (the
+    # PixiKeyConflict guard skips per block) without losing cargo-edit.
+    rust_toolchain = units[iunits.PIXI_RUST_RELEASE_TOOLCHAIN_KEY]
+    assert rust_toolchain.dest == "pixi.toml"
+    assert rust_toolchain.anchor == "[dependencies]"
+    assert tomllib.loads(rust_toolchain.desired_inner()) == {"rust": "1.96.*"}
+
+    # The python release-side publish tool (#801, TOL02-WS17 hole 2): twine
+    # for the pypi endpoint, in the default env — the PATH wf-publish's bare
+    # `pixi run --locked ./bin/shipit` resolves.
+    python_release = units[iunits.PIXI_PYTHON_RELEASE_DEPS_KEY]
+    assert python_release.dest == "pixi.toml"
+    assert python_release.anchor == "[dependencies]"
+    assert tomllib.loads(python_release.desired_inner()) == {"twine": "6.2.*"}
+
     # Sibling blocks in one consumer file: fences pairwise distinct, or
     # extract/splice would bleed across regions (the lint-env blocks' rule).
     fences = {
@@ -1879,11 +1919,26 @@ def test_toolchain_block_units_have_the_right_shape():
             iunits.PIXI_LINT_DEPS_KEY,
             iunits.PIXI_RUST_DEPS_KEY,
             iunits.PIXI_RUST_RELEASE_DEPS_KEY,
+            iunits.PIXI_RUST_RELEASE_TOOLCHAIN_KEY,
             iunits.PIXI_GO_DEPS_KEY,
             iunits.PIXI_NODE_DEPS_KEY,
+            iunits.PIXI_PYTHON_RELEASE_DEPS_KEY,
         )
     }
-    assert len(fences) == 5
+    assert len(fences) == 7
+
+
+def test_rust_release_toolchain_pin_agrees_with_the_rust_lint_block():
+    # One rust, two envs (#801): the default-env release toolchain and the
+    # lint-feature toolchain must pin the same line, or a consumer lints with
+    # a different rust than it releases with.
+    toolchain = tomllib.loads(
+        iunits.data_bytes("pixi-rust-release-toolchain-block.toml").decode("utf-8")
+    )
+    lint = tomllib.loads(
+        iunits.data_bytes("pixi-rust-lint-deps-block.toml").decode("utf-8")
+    )
+    assert toolchain == {"rust": lint["rust"]}
 
 
 def test_packaged_rust_pin_agrees_with_shipits_own_test_toolchain():
@@ -1991,9 +2046,10 @@ def test_detect_toolchains_reads_tracked_manifests(tmp_path):
     (root / "crates" / "core" / "deep" / "Cargo.toml").write_text("[package]\n")
     (root / "web").mkdir()
     (root / "web" / "package.json").write_text("{}\n")
+    (root / "pyproject.toml").write_text("[project]\n")
     subprocess.run(["git", "add", "."], cwd=root, check=True)
     assert irec.detect_toolchains(root) == frozenset(
-        {iunits.TOOLCHAIN_RUST, iunits.TOOLCHAIN_NODE}
+        {iunits.TOOLCHAIN_RUST, iunits.TOOLCHAIN_NODE, iunits.TOOLCHAIN_PYTHON}
     )
 
 
@@ -2127,6 +2183,32 @@ def test_key_conflict_guard_covers_the_nested_lint_feature_anchor(tmp_path):
             keys=("rust",),
         ),
     )
+
+
+def test_consumer_rust_pin_conflicts_the_toolchain_block_alone(tmp_path):
+    # THE design constraint the #801 rust promotion was shaped around (the
+    # TOL02-WS17 hole-1 blocker): a consumer already pinning `rust` in its own
+    # [dependencies] (padz/lex, the pre-#801 workaround) keeps its pin via the
+    # first-splice guard — and because the release toolchain is its OWN
+    # single-key block, ONLY that block is skipped: the cargo-edit release
+    # block still delivers. A shared block would have lost both.
+    (tmp_path / "pixi.toml").write_text(
+        '[workspace]\nchannels = ["conda-forge"]\nname = "acme"\n'
+        'platforms = ["linux-64"]\n\n[dependencies]\nrust = "1.90.*"\n'
+    )
+    plan = _plan_with_toolchains(tmp_path, frozenset({iunits.TOOLCHAIN_RUST}))
+
+    assert plan.pixi_key_conflicts == (
+        irec.PixiKeyConflict(
+            unit_key=iunits.PIXI_RUST_RELEASE_TOOLCHAIN_KEY,
+            anchor=iunits.PIXI_NODE_DEPS_ANCHOR,
+            keys=("rust",),
+        ),
+    )
+    keys = {d.unit.key for d in plan.decisions}
+    assert iunits.PIXI_RUST_RELEASE_TOOLCHAIN_KEY not in keys
+    assert iunits.PIXI_RUST_RELEASE_DEPS_KEY in keys  # cargo-edit still lands
+    assert iunits.PIXI_RUST_DEPS_KEY in keys  # so does the lint toolchain
 
 
 # --------------------------------------------------------------------------

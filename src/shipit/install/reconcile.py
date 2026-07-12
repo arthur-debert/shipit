@@ -112,6 +112,7 @@ from .units import (
     PIXI_FILE,
     TOOLCHAIN_GO,
     TOOLCHAIN_NODE,
+    TOOLCHAIN_PYTHON,
     TOOLCHAIN_RUST,
     Unit,
     data_bytes,
@@ -580,10 +581,14 @@ def _plan_lefthook_conflicts(
 #: leg discovery: a tracked ``Cargo.toml`` is exactly what makes the rust lint
 #: leg run (which hard-fails 127 without cargo — the gap the rust dep block
 #: closes, #526); ``go.mod`` and ``package.json`` are the go/node analogues.
+#: ``pyproject.toml`` joined in #801 (TOL02-WS17 open hole 2): the python
+#: signal delivers the release-side twine block — the same tracked-manifest
+#: read, feeding :data:`shipit.install.units.TOOLCHAIN_UNITS`' python rows.
 TOOLCHAIN_MANIFESTS = (
     ("Cargo.toml", TOOLCHAIN_RUST),
     ("go.mod", TOOLCHAIN_GO),
     ("package.json", TOOLCHAIN_NODE),
+    ("pyproject.toml", TOOLCHAIN_PYTHON),
 )
 
 
