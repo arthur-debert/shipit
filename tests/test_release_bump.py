@@ -177,7 +177,11 @@ def test_missing_cargo_set_version_gets_the_reconcile_remedy():
     )
     assert message is not None
     assert "cargo-edit" in message
-    assert "`shipit install`" in message
+    # A COMMITTING install, not plain tree-mode: only --pr/--local run the
+    # unlocked self-cert solve that regenerates and stages pixi.lock (#793
+    # review, codex); plain `shipit install` leaves the committed lock stale.
+    assert "`shipit install --pr`" in message
+    assert "`shipit install --local`" in message
     assert "pixi.toml#shipit-rust-release-deps" in message
     assert "pixi.lock" in message  # the reconcile commit must carry the lock
     assert "cargo install" not in message  # the superseded #795/#796 shape

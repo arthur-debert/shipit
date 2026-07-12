@@ -550,9 +550,10 @@ def test_unprovisioned_cargo_edit_aborts_with_the_reconcile_remedy(
 ):
     """The #784-F2 class, second instance (#793): `cargo set-version` dying
     with cargo's unknown-subcommand error aborts prepare BEFORE any git
-    mutation, and the error names the remediation — the install reconcile
-    (`shipit install`), never a run-time `cargo install` (the #582 cache
-    doctrine). The probe is the attempt itself: no which-gate ran first."""
+    mutation, and the error names the remediation — the COMMITTING install
+    reconcile (`shipit install --pr`, which regenerates and stages the lock),
+    never a run-time `cargo install` (the #582 cache doctrine). The probe is
+    the attempt itself: no which-gate ran first."""
     root = make_repo(tmp_path, monkeypatch, toml='[toolchains]\n"." = "rust"\n')
     fake = gitio_for(root)
 
@@ -566,7 +567,7 @@ def test_unprovisioned_cargo_edit_aborts_with_the_reconcile_remedy(
     err = capsys.readouterr().err
     assert err.startswith("error: ")
     assert "cargo-edit" in err
-    assert "`shipit install`" in err
+    assert "`shipit install --pr`" in err  # the committing reconcile (#793 review)
     assert "pixi.toml#shipit-rust-release-deps" in err
     # Nothing committed, tagged, or pushed — the barrier held (ADR-0009).
     assert fake.mutated() == []

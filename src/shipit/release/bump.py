@@ -82,9 +82,13 @@ def explain_command_failure(argv: Sequence[str], stderr: str) -> str | None:
             "pixi surface for rust repos (the "
             "`pixi.toml#shipit-rust-release-deps` block, pinned from "
             "conda-forge) and is never installed at release run time — this "
-            "repo's shipit pin/managed set is stale. Run the install "
-            "reconcile (`shipit install`), commit the reconciled pixi.toml "
-            "and pixi.lock, and re-run the release."
+            "repo's shipit pin/managed set is stale. Reconcile with a "
+            "COMMITTING install (`shipit install --pr` opens the reconcile "
+            "draft PR; `shipit install --local` commits on the current "
+            "branch) — only these regenerate and stage pixi.lock alongside "
+            "the pixi.toml block, so the committed lock stays coherent; plain "
+            "`shipit install` only refreshes the working tree and leaves the "
+            "lock stale. Merge/commit the reconcile, then re-run the release."
         )
     return None
 

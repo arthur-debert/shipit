@@ -5,7 +5,8 @@
 # [dependencies], not a feature — where that run's PATH resolves it (cargo
 # finds subcommands via $CARGO_HOME/bin then PATH, the #785 finding).
 # Provisioned from conda-forge under setup-pixi's lockfile-keyed cache (the
-# #582 doctrine: the release run NEVER `cargo install`s). Pinned exactly; a
+# #582 doctrine: the release run NEVER `cargo install`s). Pinned to the patch
+# line (`0.13.11.*` — conda match-spec, so any 0.13.11.x build resolves); a
 # bump is one data edit, rolled out on each consumer's next `shipit install`
 # reconcile. If this repo no longer ships rust (the last Cargo.toml is gone),
 # delete this block and its `pixi.toml#shipit-rust-release-deps` entry in
