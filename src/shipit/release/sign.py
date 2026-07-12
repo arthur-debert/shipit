@@ -658,11 +658,43 @@ def _unsafe_tar_member(listing: str) -> str | None:
     return None
 
 
-def _untar_validated(archive: Path, work: Path, run_cmd: RunCmd, what: str) -> None:
+def _non_regular_member(listing: str) -> str | None:
+    """The first member in a ``tar -tvzf`` verbose listing whose type is
+    NEITHER a regular file NOR a directory — the first character of its mode
+    column is not ``-`` or ``d`` (a symlink is ``l``, a hardlink ``h``,
+    devices/fifos their own letters). The ``tar -tzf`` NAME check confines
+    members by path, but a link escapes THROUGH its target instead: a symlink
+    entry pointing outside the extraction dir followed by a member written
+    through it lands outside ``work`` however innocent every name looks. A
+    raw-CLI archive ships only files and dirs, so the first non-regular member
+    is returned for a hard refusal; ``None`` when every member is a plain file
+    or directory. Pure."""
+    for raw in listing.splitlines():
+        mode = raw.split(maxsplit=1)
+        if mode and mode[0][:1] not in ("-", "d"):
+            return raw
+    return None
+
+
+def _untar_validated(
+    archive: Path,
+    work: Path,
+    run_cmd: RunCmd,
+    what: str,
+    *,
+    reject_links: bool = False,
+) -> None:
     """Untar ``archive`` into ``work``, listing and validating first: a
     member with an absolute path or a ``..`` segment would let a tampered or
     garbled ``what`` write OUTSIDE ``work`` (tar path traversal), so any such
-    member is a hard refusal with nothing extracted."""
+    member is a hard refusal with nothing extracted.
+
+    With ``reject_links`` (the archive leg — a raw-CLI tarball has no business
+    carrying links), a verbose second listing additionally refuses any symlink
+    or hardlink member: the name check confines paths, but a link escapes
+    through its TARGET, so a non-regular member is refused before extraction
+    too. The mac-app leg leaves this OFF — a resealed ``.app`` legitimately
+    carries the framework symlinks Apple's bundle layout requires."""
     work.mkdir(parents=True, exist_ok=True)
     listing = run_cmd(["tar", "-tzf", str(archive)], SIGN_CMD_TIMEOUT).stdout
     unsafe = _unsafe_tar_member(listing)
@@ -671,6 +703,16 @@ def _untar_validated(archive: Path, work: Path, run_cmd: RunCmd, what: str) -> N
             f"unsafe path in {what} {archive.name}: {unsafe!r} escapes "
             "the extraction dir (absolute or .. path) — refusing to extract"
         )
+    if reject_links:
+        verbose = run_cmd(["tar", "-tvzf", str(archive)], SIGN_CMD_TIMEOUT).stdout
+        link = _non_regular_member(verbose)
+        if link is not None:
+            raise ReleaseError(
+                f"non-regular member in {what} {archive.name}: {link!r} — a "
+                "symlink or hardlink escapes the extraction dir through its "
+                "target; a raw-CLI archive ships only files and dirs, refusing "
+                "to extract"
+            )
     run_cmd(["tar", "-xzf", str(archive), "-C", str(work)], SIGN_CMD_TIMEOUT)
 
 
@@ -952,8 +994,8 @@ def _notarize(
                 req.sleep(POLL_INTERVAL)
         raise ReleaseError(
             f"notarization unconfirmed after {req.timeout_minutes} min — "
-            f"submission {submission_id} last status {status}. "
-            f"{target.name} is signed but NOT notarized; re-run the sign "
+            f"submission {submission_id} last status {status}. Codesigning "
+            f"succeeded but notarization did NOT confirm; re-run the sign "
             f"stage (or check with `xcrun notarytool info {submission_id}`)"
         )
     finally:
@@ -1023,11 +1065,13 @@ def sign_archives(req: SignRequest) -> ArchiveSignResult:
     under its original filename. The legacy ``rust-cli.yml@v3`` sign +
     notarize steps are the parity contract:
 
-    1. every archive is unpacked (listed and validated first — the same tar
-       path-traversal refusal as the reseal payload) and its shipped
-       binaries found by CONTENT (:func:`is_macho`, never by name — the docs
-       beside the binary are not Mach-O); an archive with none is a hard
-       error, never a quiet pass;
+    1. every archive is unpacked (listed and validated first — the reseal
+       payload's tar path-traversal refusal, PLUS a symlink/hardlink refusal:
+       a raw-CLI tarball ships only files and dirs, and a link would escape
+       the extraction dir through its target) and its shipped binaries found
+       by CONTENT (:func:`is_macho`, never by name — the docs beside the
+       binary are not Mach-O); an archive with none is a hard error, never a
+       quiet pass;
     2. every binary across all archives signs in ONE
        :func:`_sign_paths` call — one temporary keychain, hardened runtime +
        secure timestamp, verify --strict per path (the legacy scar: the
@@ -1078,7 +1122,9 @@ def sign_archives(req: SignRequest) -> ArchiveSignResult:
     binaries: list[Path] = []
     for index, archive in enumerate(archives):
         work = req.scratch / f"archive-{index}"
-        _untar_validated(archive, work, req.run_cmd, "archive bundle")
+        _untar_validated(
+            archive, work, req.run_cmd, "archive bundle", reject_links=True
+        )
         machos = sorted(
             p
             for p in work.rglob("*")
@@ -1113,8 +1159,11 @@ def sign_archives(req: SignRequest) -> ArchiveSignResult:
         signed_tar = req.scratch / f"signed-{index}-{archive.name}"
         signed_tar.unlink(missing_ok=True)
         members = sorted(p.name for p in work.iterdir())
+        # `--` terminates option parsing: a member whose name begins with `-`
+        # (it came from an unpacked external bundle) is an operand, never a
+        # tar flag — no flag injection through a crafted filename.
         req.run_cmd(
-            ["tar", "-czf", str(signed_tar), "-C", str(work), *members],
+            ["tar", "-czf", str(signed_tar), "-C", str(work), "--", *members],
             SIGN_CMD_TIMEOUT,
         )
         # Stage under the ORIGINAL archive filename (the consumer's name

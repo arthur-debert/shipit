@@ -658,6 +658,28 @@ def test_unsafe_tar_member_flags_absolute_and_dotdot(listing, unsafe):
     assert sign_mod._unsafe_tar_member(listing) == unsafe
 
 
+@pytest.mark.parametrize(
+    "listing,offender",
+    [
+        # All regular files / dirs — nothing to refuse.
+        ("drwxr-xr-x 0 u g 0 d pkg/\n-rw-r--r-- 0 u g 9 d pkg/bin\n", None),
+        # A symlink (`l`) escapes through its target — refused.
+        (
+            "-rw-r--r-- 0 u g 9 d pkg/bin\nlrwxr-xr-x 0 u g 0 d pkg/e -> ../../x\n",
+            "lrwxr-xr-x 0 u g 0 d pkg/e -> ../../x",
+        ),
+        # A hardlink (`h`) likewise.
+        (
+            "hrw-r--r-- 0 u g 0 d pkg/h link to /etc/x\n",
+            "hrw-r--r-- 0 u g 0 d pkg/h link to /etc/x",
+        ),
+        ("\n\n", None),  # blank lines are ignored
+    ],
+)
+def test_non_regular_member_flags_links(listing, offender):
+    assert sign_mod._non_regular_member(listing) == offender
+
+
 def test_sign_bundle_rejects_a_payload_with_a_traversal_member(tmp_path):
     # A tampered/garbled payload whose members escape the extraction dir is
     # refused after listing (tar -tzf) and BEFORE extraction — nothing unpacked.
@@ -871,6 +893,14 @@ ARCHIVE_NAME = f"{ARCHIVE_STEM}.tar.gz"
 #: composition's staging layout: binary + docs under `<name>-<target>/`).
 ARCHIVE_LISTING = f"{ARCHIVE_STEM}/\n{ARCHIVE_STEM}/lex\n{ARCHIVE_STEM}/README.md\n"
 
+#: The same fixture as a `tar -tvzf` verbose listing — every member a regular
+#: file (`-`) or directory (`d`), so the archive leg's link refusal passes.
+ARCHIVE_VERBOSE_LISTING = (
+    f"drwxr-xr-x  0 u  g       0 Jan  1 00:00 {ARCHIVE_STEM}/\n"
+    f"-rwxr-xr-x  0 u  g  123456 Jan  1 00:00 {ARCHIVE_STEM}/lex\n"
+    f"-rw-r--r--  0 u  g      42 Jan  1 00:00 {ARCHIVE_STEM}/README.md\n"
+)
+
 
 class ArchiveRecorder(SignRecorder):
     """The archive leg's recorded seam: the tar fakes extract a staging
@@ -888,6 +918,14 @@ class ArchiveRecorder(SignRecorder):
         if argv[0] == "tar" and argv[1] == "-tzf":
             return execrun.ExecResult(
                 argv=argv, rc=0, stdout=ARCHIVE_LISTING, stderr="", duration_ms=1
+            )
+        if argv[0] == "tar" and argv[1] == "-tvzf":
+            return execrun.ExecResult(
+                argv=argv,
+                rc=0,
+                stdout=ARCHIVE_VERBOSE_LISTING,
+                stderr="",
+                duration_ms=1,
             )
         if argv[0] == "tar" and argv[1] == "-xzf":
             stage = Path(argv[argv.index("-C") + 1]) / ARCHIVE_STEM
@@ -1008,6 +1046,9 @@ def test_sign_archives_full_recorded_sequence(tmp_path):
     signed_tar = str(scratch / f"signed-0-{ARCHIVE_NAME}")
     expected = [
         ("tar", "-tzf", str(tree / ARCHIVE_NAME)),
+        # The archive leg additionally refuses link members (a raw-CLI tarball
+        # ships only files and dirs) via a verbose listing before extraction.
+        ("tar", "-tvzf", str(tree / ARCHIVE_NAME)),
         ("tar", "-xzf", str(tree / ARCHIVE_NAME), "-C", str(scratch / "archive-0")),
         *_keychain_setup(kc1, cert1),
         *_codesigns(binary, kc1),
@@ -1047,7 +1088,15 @@ def test_sign_archives_full_recorded_sequence(tmp_path):
         # The tarball is re-emitted from the signed staging tree AFTER the
         # notary verdict — and there is NO stapler call: a bare binary (and
         # its transport zip) has no staple target.
-        ("tar", "-czf", signed_tar, "-C", str(scratch / "archive-0"), ARCHIVE_STEM),
+        (
+            "tar",
+            "-czf",
+            signed_tar,
+            "-C",
+            str(scratch / "archive-0"),
+            "--",
+            ARCHIVE_STEM,
+        ),
     ]
     assert recorder.argvs == expected
 
@@ -1135,6 +1184,43 @@ def test_sign_archives_rejects_a_traversal_member(tmp_path):
     with pytest.raises(ReleaseError, match="unsafe path in archive bundle"):
         sign_mod.sign_archives(_request(tmp_path, recorder))
     assert not recorder.heads("tar", "-xzf")
+
+
+def test_sign_archives_rejects_a_symlink_member(tmp_path):
+    # The `tar -tzf` NAME check confines paths, but a symlink escapes THROUGH
+    # its target — so the archive leg additionally refuses any link member
+    # (verbose `-tvzf` listing) BEFORE extraction; a raw-CLI tarball ships
+    # only files and dirs.
+    _archive_tree(tmp_path)
+
+    def link_listing(argv):
+        if argv[:2] == ("tar", "-tzf"):
+            # Names alone look safe: no `..`, not absolute.
+            return execrun.ExecResult(
+                argv=argv,
+                rc=0,
+                stdout=f"{ARCHIVE_STEM}/\n{ARCHIVE_STEM}/evil\n",
+                stderr="",
+                duration_ms=1,
+            )
+        if argv[:2] == ("tar", "-tvzf"):
+            return execrun.ExecResult(
+                argv=argv,
+                rc=0,
+                stdout=(
+                    f"drwxr-xr-x  0 u  g  0 Jan  1 00:00 {ARCHIVE_STEM}/\n"
+                    f"lrwxr-xr-x  0 u  g  0 Jan  1 00:00 {ARCHIVE_STEM}/evil"
+                    " -> ../../../../etc\n"
+                ),
+                stderr="",
+                duration_ms=1,
+            )
+        return None
+
+    recorder = ArchiveRecorder(tmp_path, effects={"tar": link_listing})
+    with pytest.raises(ReleaseError, match="non-regular member in archive bundle"):
+        sign_mod.sign_archives(_request(tmp_path, recorder))
+    assert not recorder.heads("tar", "-xzf")  # extraction never ran
 
 
 def test_sign_archives_rejected_notarization_fails_before_any_reemit(tmp_path):
