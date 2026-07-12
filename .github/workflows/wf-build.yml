@@ -154,10 +154,19 @@ jobs:
       - name: Build
         env:
           VERSION: ${{ inputs.version || needs.plan.outputs.version }}
+          TARGET: ${{ matrix.target }}
         # The real builders (cargo/go/uv/npm — including the frontendDist
         # leg, `build npm`) run inside the consumer's pixi env; the version
-        # rides to the toolchains that stamp it.
-        run: pixi run --locked ./bin/shipit build --version "$VERSION"
+        # rides to the toolchains that stamp it. The matrix triple rides too
+        # (TOL02-WS11): `--target` cross-compiles the rust legs into
+        # target/<triple>/release/ — the ONE plumbing that reaches the cross
+        # platforms a native runner cannot build natively (darwin-x86_64 on the
+        # arm mac, linux-x86_64-musl on the gnu ubuntu). Passed on EVERY lane
+        # (native and cross) so the whole fan is uniform and bundle reads the
+        # same target/<triple>/ dir; the consumer's pixi env provisions the
+        # rustup target (and any musl toolchain) — pixi provisions, shipit
+        # composes (WS10 decision).
+        run: pixi run --locked ./bin/shipit build --version "$VERSION" --target "$TARGET"
       - name: Bundle
         # Plan-gated PER ENTRY (never re-derived): the bundle stage is a
         # plan-wide flag, but the fan includes every build-bearing artifact

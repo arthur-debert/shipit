@@ -223,6 +223,7 @@ def binary_location(
     entries: Sequence[config.ToolchainEntry],
     *,
     consumer: str = "e2e",
+    target_triple: str | None = None,
 ) -> BinaryLocation:
     """The expected location of ``artifact``'s built binary — pure, derived
     from the declaration alone (the local-build source verifies the file
@@ -234,7 +235,13 @@ def binary_location(
     release profile output under the leg's workspace), go →
     ``<basename(package)>`` (``go build ./cmd/padz`` writes ``padz`` in its
     cwd), or the artifact name when the target declares no package.
-    ``consumer`` names the binary-consuming stage in the refusal messages —
+    ``target_triple`` is the cross triple a ``shipit build --target <triple>``
+    redirected the rust build to (TOL02-WS11): given, the rust relpath is
+    ``target/<triple>/release/<bin>`` — the exact dir cargo wrote — so the
+    bundle consumer that cross-built reads where the binary really is; ``None``
+    keeps the native ``target/release/`` path. Only the rust branch honours it
+    (go/others do not cross-compile by ``--target``). ``consumer`` names the
+    binary-consuming stage in the refusal messages —
     ``"e2e"`` (this module's tool) or ``"bundle"`` (the release stage's
     archive composition, TOL02-WS03), which share exactly this derivation.
     Raises :class:`~shipit.config.ConfigError` when the artifact needs a
@@ -278,7 +285,14 @@ def binary_location(
             f"package {target.package!r} has no binary name — {hint}"
         )
     if target.toolchain == "rust":
-        relpath = f"target/release/{target.package or artifact.name}"
+        # A cross build (`--target <triple>`) redirects cargo to
+        # target/<triple>/release/; a native build keeps target/release/. The
+        # SAME triple threads from `shipit build` to here, so this reads
+        # exactly where the build wrote — never a native/cross guess.
+        release_dir = (
+            f"target/{target_triple}/release" if target_triple else "target/release"
+        )
+        relpath = f"{release_dir}/{target.package or artifact.name}"
     elif target.package is None:  # go, module root -> named by the artifact
         relpath = artifact.name
     else:  # go, an explicit package: the built binary is its basename

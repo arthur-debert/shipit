@@ -89,6 +89,32 @@ def test_bare_run_dispatches_every_step_narrowed_by_the_artifact_map(
     assert "BUILD: OK (2 steps)" in out
 
 
+def test_target_cross_compiles_the_rust_leg_and_leaves_npm_alone(tauri_repo):
+    # `--target <triple>` (TOL02-WS11) threads to the rust step alone: cargo
+    # gains --target (writes target/<triple>/release/), the npm leg is
+    # untouched (no per-target build). The wf-build fan passes its matrix
+    # triple here for the cross platforms a native runner cannot build.
+    rec = _Recorder()
+    rc = build_verb.run((), target="x86_64-unknown-linux-musl", run_step=rec)
+    assert rc == 0
+    assert rec.calls == [
+        (
+            (
+                "cargo",
+                "build",
+                "--release",
+                "-p",
+                "app",
+                "--target",
+                "x86_64-unknown-linux-musl",
+            ),
+            tauri_repo,
+            {},
+        ),
+        (("npm", "run", "build"), tauri_repo / "web", {}),
+    ]
+
+
 def test_pixi_is_never_the_build_backend(tauri_repo):
     # PRD story 9: the verb execs the real builder directly; pixi provisions,
     # never builds — no argv is `pixi run`-wrapped.

@@ -21,12 +21,15 @@ functions the entries carry:
   cargo-deb --version <pin> --locked``, pinned for a reproducible build)
   when absent from PATH: it is not on conda-forge, so no pixi env can carry
   it, and the wf-build runner arrives without it (issue #784 F2). cargo-deb
-  NEVER receives ``--target``: ``shipit build``
-  builds natively into ``target/release/`` (no ``--target`` plumbing —
-  :func:`shipit.tools.e2e.binary_location` is the same contract), so the
-  bundle triple is naming-only, and forwarding it would redirect cargo-deb
-  to the empty ``target/<triple>/release/`` (issue #784 F3: the one owner
-  of the triple-dir contract is the native build). Linux targets only.
+  receives ``--target <triple>`` EXACTLY when the build was cross-compiled
+  (``ComposeRequest.build_target`` set — TOL02-WS11): a native build writes
+  ``target/release/`` and cargo-deb reads it with no ``--target``, a cross
+  build writes ``target/<triple>/release/`` and cargo-deb is pointed there by
+  the SAME triple (which also derives the Debian arch). The triple-dir
+  contract's one owner is that threaded target — build, archive, and deb all
+  read where the build actually wrote (issue #785 deferral, resolved by #787;
+  :func:`shipit.tools.e2e.binary_location` shares the derivation). Linux
+  targets only.
 - **wheel** — ``uv build`` emitting BOTH the wheel and the sdist into the
   bundle output tree (the legacy ``python-pkg.yml`` build job: one build,
   consumed by multiple publish targets).
@@ -96,10 +99,17 @@ class ComposeRequest:
 
     ``out_dir`` is the ABSOLUTE bundle output tree — the only place a
     composition may write. ``target`` is the target triple naming the
-    platform composed for — NAMING-ONLY (``<name>-<target>`` naming, windows
-    detection, platform gating): builds are native (``shipit build`` has no
-    ``--target`` plumbing and writes ``target/release/``), so no composition
-    ever redirects a tool at a ``target/<triple>/`` dir (issue #784 F3).
+    platform composed for — used for ``<name>-<target>`` naming, windows
+    detection, and platform gating. ``build_target`` is the cross triple a
+    ``shipit build --target <triple>`` redirected the build to (TOL02-WS11):
+    when set, the built binary lives under ``target/<triple>/release/`` and the
+    compositions that read a build output (archive, deb) look there; ``None``
+    keeps the native ``target/release/`` (issue #784 F3's native contract).
+    The bundle verb sets ``build_target`` from an EXPLICIT ``--target`` (the
+    cross fan wf-build drives) and leaves it ``None`` for the host-derived
+    default (a native local bundle) — so build and bundle agree on the dir by
+    being handed the SAME triple, never a native/cross guess (the triple-dir
+    contract's single owner, issue #785 deferral resolved by #787).
     """
 
     artifact: config.Artifact
@@ -108,6 +118,7 @@ class ComposeRequest:
     out_dir: Path
     target: str
     run_cmd: RunCmd
+    build_target: str | None = None
 
 
 @dataclass(frozen=True)
@@ -153,7 +164,9 @@ def _compose_archive(req: ComposeRequest) -> Composed:
     """The tarball/zip contract: ``<name>-<target>/`` staging subdir (binary
     + docs), archived beside it. See the module docstring's archive entry."""
     windows = _is_windows(req.target)
-    loc = e2e_mod.binary_location(req.artifact, req.entries, consumer="bundle")
+    loc = e2e_mod.binary_location(
+        req.artifact, req.entries, consumer="bundle", target_triple=req.build_target
+    )
     binary = req.root / loc.leg_path / (loc.relpath + (".exe" if windows else ""))
     if not binary.is_file():
         raise ReleaseError(
@@ -226,11 +239,13 @@ def _emit_into_out(
 def _compose_deb(req: ComposeRequest) -> Composed:
     """cargo-deb over the pre-built release binary — no rebuild, no strip;
     a run that produces no ``.deb`` is a hard failure (legacy build-deb).
-    Self-provisions cargo-deb (a pinned version) when missing and NEVER
-    passes ``--target`` —
-    the build is native, so cargo-deb reads ``target/release/`` and derives
-    the Debian arch from the host toolchain (correct by construction on the
-    per-arch matrix runners). See the module docstring's deb entry."""
+    Self-provisions cargo-deb (a pinned version) when missing. Passes
+    ``--target <triple>`` ONLY on a cross build (``build_target`` set): cargo
+    then reads ``target/<triple>/release/`` where ``shipit build --target``
+    wrote the binary and derives the Debian arch from the triple; a native
+    build passes no ``--target`` and cargo-deb reads ``target/release/`` and
+    derives the arch from the host toolchain (TOL02-WS11). See the module
+    docstring's deb entry."""
     leg = _leg_for(req.artifact, req.entries, "rust", "deb")
     package = next(
         (t.package for t in req.artifact.build if t.toolchain == "rust" and t.package),
@@ -264,6 +279,14 @@ def _compose_deb(req: ComposeRequest) -> Composed:
     argv = ["cargo", "deb", "--no-build", "--no-strip"]
     if package is not None:
         argv += ["-p", package]
+    if req.build_target is not None:
+        # A cross build (`shipit build --target <triple>`) wrote the binary to
+        # target/<triple>/release/, so cargo-deb must read the SAME dir —
+        # `--target <triple>` points it there (and derives the Debian arch from
+        # the triple). The one owner of the triple-dir contract is the target
+        # threaded from build to here (issue #785 deferral, resolved by #787):
+        # native builds pass no --target and cargo-deb reads target/release/.
+        argv += ["--target", req.build_target]
     emitted = _emit_into_out(req, argv, "--output", req.root / leg.path)
     produced = [name for name in emitted if name.endswith(".deb")]
     if not produced:
