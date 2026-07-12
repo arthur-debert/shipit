@@ -365,6 +365,19 @@ def test_missing_head_branch_is_a_clean_failure(_faked):
     assert "head branch" in str(exc.value)
 
 
+def test_missing_head_branch_fails_with_a_preprovisioned_tree(_faked):
+    ctx = _ctx()
+    ctx.head_ref = ""
+    with pytest.raises(RuntimeError, match="head branch"):
+        producer.run_tree_review(
+            agent_backend.CODEX,
+            ctx,
+            tree_path="/trees/already-provisioned",
+            launcher=_faked["launcher"],
+        )
+    assert "cmd" not in _faked
+
+
 def test_resolve_repo_uses_the_view_slug_when_known(monkeypatch):
     """A resolved view's slug is the source of truth for the read-only Tree's
     identity — no `gh repo view` re-inference — parsed by the ONE canonical

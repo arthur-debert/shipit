@@ -28,6 +28,7 @@ from shipit.workenv import (
     ExecutionRouting,
     TreeProvenance,
     WorkEnv,
+    ci_lane_resolution_record,
     resolution_record,
     resolve_ambient_env,
     resolve_existing_pr_write_env,
@@ -348,3 +349,28 @@ def test_resolution_record_is_flat_redacted_and_uses_stable_field_names():
     assert "PATH" not in record
     assert "CONDA_PREFIX" not in record
     assert "pixi_run_id" not in record
+
+
+def test_ci_lane_resolution_record_uses_the_shared_projection_vocabulary():
+    record = ci_lane_resolution_record(
+        working_dir="/checkout",
+        repo="acme/widget",
+        lane="lint",
+        pixi_environment_name="lint",
+        ci_event="pr",
+        runner="ubuntu-latest",
+        required=True,
+    )
+
+    assert record == {
+        "work_env_boundary": "ci.lane-job",
+        "working_dir": "/checkout",
+        "working_dir_repo": "acme/widget",
+        "checkout_strategy": "direct-checkout",
+        "routing": "pixi-run",
+        "lane": "lint",
+        "pixi_environment_name": "lint",
+        "ci_event": "pr",
+        "runner": "ubuntu-latest",
+        "required": True,
+    }

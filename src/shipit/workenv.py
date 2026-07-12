@@ -161,6 +161,40 @@ def _repo_slug(repo: Repo) -> str:
         return f"{repo.owner}/{repo.name}"
 
 
+def _resolution_record(
+    *,
+    boundary: str,
+    working_dir: str,
+    working_dir_repo: str | None,
+    checkout_strategy: str,
+    routing: str,
+    working_dir_branch: str | None = None,
+    working_dir_commit: str | None = None,
+    role: str | None = None,
+    lane: str | None = None,
+    pixi_environment_name: str | None = None,
+    pixi_environment_lock_hash: str | None = None,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Project supplied resolution facts into the shared flat vocabulary."""
+    data: dict[str, Any] = {
+        "work_env_boundary": boundary,
+        "working_dir": working_dir,
+        "working_dir_repo": working_dir_repo,
+        "working_dir_branch": working_dir_branch,
+        "working_dir_commit": working_dir_commit,
+        "checkout_strategy": checkout_strategy,
+        "routing": routing,
+        "role": role,
+        "lane": lane,
+        "pixi_environment_name": pixi_environment_name,
+        "pixi_environment_lock_hash": pixi_environment_lock_hash,
+    }
+    if extra:
+        data.update(extra)
+    return {name: value for name, value in data.items() if value is not None}
+
+
 def resolution_record(
     work_env: WorkEnv,
     *,
@@ -179,38 +213,67 @@ def resolution_record(
     supplied environment name plus lock hash, never a fabricated run id.
     """
     revision = work_env.working_dir.revision
-    data: dict[str, Any] = {
-        "work_env_boundary": boundary,
-        "working_dir": work_env.working_dir.path,
-        "working_dir_repo": _repo_slug(work_env.working_dir.repo),
-        "working_dir_branch": revision.branch,
-        "working_dir_commit": str(revision.commit) if revision.commit else None,
-        "checkout_strategy": checkout_strategy_name(work_env.checkout),
-        "routing": work_env.routing.value,
-        "role": role,
-        "lane": lane,
-    }
+    boundary_extra: dict[str, Any] = {}
     if work_env.tree is not None:
-        data.update(
+        boundary_extra.update(
             {
                 "tree_branch": work_env.tree.branch,
                 "tree_base": work_env.tree.base,
             }
         )
-    if work_env.env_identity is not None:
-        data.update(
-            {
-                "pixi_environment_name": work_env.env_identity.environment_name,
-                "pixi_environment_lock_hash": (
-                    work_env.env_identity.environment_lock_file_hash
-                ),
-            }
-        )
     if work_env.activation is not None:
-        data["pixi_activation"] = "present"
+        boundary_extra["pixi_activation"] = "present"
     if extra:
-        data.update(extra)
-    return {name: value for name, value in data.items() if value is not None}
+        boundary_extra.update(extra)
+    return _resolution_record(
+        boundary=boundary,
+        working_dir=work_env.working_dir.path,
+        working_dir_repo=_repo_slug(work_env.working_dir.repo),
+        working_dir_branch=revision.branch,
+        working_dir_commit=str(revision.commit) if revision.commit else None,
+        checkout_strategy=checkout_strategy_name(work_env.checkout),
+        routing=work_env.routing.value,
+        role=role,
+        lane=lane,
+        pixi_environment_name=(
+            work_env.env_identity.environment_name if work_env.env_identity else None
+        ),
+        pixi_environment_lock_hash=(
+            work_env.env_identity.environment_lock_file_hash
+            if work_env.env_identity
+            else None
+        ),
+        extra=boundary_extra,
+    )
+
+
+def ci_lane_resolution_record(
+    *,
+    working_dir: str,
+    repo: str | None,
+    lane: str,
+    pixi_environment_name: str,
+    ci_event: str,
+    runner: str,
+    required: bool,
+) -> dict[str, Any]:
+    """Resolution evidence for a CI Lane planned in the existing checkout.
+
+    CI does not execute through a :class:`WorkEnv`, so this boundary supplies
+    the facts its planner already owns while reusing the common projection and
+    its absent-not-null contract. No synthetic Work Env or pixi run identity is
+    created merely to produce observability evidence.
+    """
+    return _resolution_record(
+        boundary="ci.lane-job",
+        working_dir=working_dir,
+        working_dir_repo=repo,
+        checkout_strategy="direct-checkout",
+        routing=ExecutionRouting.PIXI_RUN.value,
+        lane=lane,
+        pixi_environment_name=pixi_environment_name,
+        extra={"ci_event": ci_event, "runner": runner, "required": required},
+    )
 
 
 def _resolve_write_env(

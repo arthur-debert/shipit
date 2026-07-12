@@ -452,26 +452,24 @@ def run_tree_review(
             dimension=dimension,
         )
     adapter = spec.adapter_factory(model, timeout, reasoning)  # type: ignore[operator]
+    repo = _resolve_repo(ctx)
+    branch = (ctx.head_ref or "").strip()
+    if not branch:
+        raise RuntimeError(
+            f"cannot review PR #{ctx.number}: its head branch "
+            "(headRefName) is unknown, so the shared read-only Tree "
+            "cannot be provisioned."
+        )
 
     schema_path: str | None = None
     try:
         if dry_run:
-            repo = _resolve_repo(ctx)
-            branch = (ctx.head_ref or "").strip()
-            if not branch:
-                raise RuntimeError(
-                    f"cannot review PR #{ctx.number}: its head branch "
-                    "(headRefName) is unknown, so the shared read-only Tree "
-                    "cannot be provisioned."
-                )
             return _dry_run(agent, ctx, spec, adapter, task, repo, branch)
 
         if spec.native_schema:
             schema_path = _write_schema_tempfile()
 
         cwd = tree_path if tree_path is not None else provision_review_tree(ctx)
-        repo = _resolve_repo(ctx)
-        branch = (ctx.head_ref or "").strip()
         head = getattr(ctx, "head_sha", None)
         commit = head if isinstance(head, Sha) else None
         review_env = workenv.resolve_readonly_review_env(
