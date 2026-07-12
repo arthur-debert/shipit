@@ -31,11 +31,11 @@ most one ``.dmg``, one invocation:
    the notary rejects it; ``codesign --deep`` is not used — Apple discourages
    it for distribution and it mis-applies entitlements), applying entitlements
    PER CODE ROLE (:class:`EntitlementsPolicy`): an electron bundle — detected
-   structurally by its nested helper ``.app`` bundles — gets shipit's JIT
+   structurally by its ``Electron Framework.framework`` — gets shipit's JIT
    entitlements pair (``allow-jit`` on the top ``.app``, ``allow-jit`` +
    ``inherit`` on each helper) so V8 runs under hardened runtime instead of
    notarizing clean but crashing at launch; a mac-app / tauri / rust ``.app``
-   nests no helper and signs with NO entitlements (#829);
+   carries no Electron Framework and signs with NO entitlements (#829);
 4. reseals the ``.dmg`` FROM the signed ``.app`` via ``hdiutil`` (re-bundling
    would strip the signature), then codesigns the resealed ``.dmg``;
 5. ``notarytool`` submit / poll / staple against the signed ``.dmg``, and
@@ -619,8 +619,8 @@ def _electron_policy(scratch: Path) -> EntitlementsPolicy:
     scratch.mkdir(parents=True, exist_ok=True)
     app = scratch / "electron-app.entitlements.plist"
     helper = scratch / "electron-helper.entitlements.plist"
-    app.write_text(_plist(ELECTRON_APP_ENTITLEMENTS))
-    helper.write_text(_plist(ELECTRON_HELPER_ENTITLEMENTS))
+    app.write_text(_plist(ELECTRON_APP_ENTITLEMENTS), encoding="utf-8")
+    helper.write_text(_plist(ELECTRON_HELPER_ENTITLEMENTS), encoding="utf-8")
     return EntitlementsPolicy(app=app, helper=helper)
 
 
@@ -663,8 +663,9 @@ class SignRequest:
     tests pin.
 
     There is NO entitlements field: the mac-app leg derives its
-    :class:`EntitlementsPolicy` from the bundle's SHAPE (electron helper
-    ``.app`` bundles → the electron JIT pair; anything else → none), so
+    :class:`EntitlementsPolicy` from the bundle's SHAPE (the
+    ``Electron Framework.framework`` → the electron JIT pair; anything else →
+    none), so
     entitlements are shipit-provided and structurally keyed, never a
     caller-passed file (#829).
     """
@@ -1116,13 +1117,16 @@ def _sign_paths(
             if not path.exists():
                 raise ReleaseError(f"path to sign not found: {path}")
             # The role — and so the entitlements — is read off the path: the
-            # top-level .app is the LAST path (sign_order appends it); helper
-            # .app / .appex are matched by suffix; everything else gets none.
-            # Applying the app's entitlements to a nested framework/helper (or
-            # JIT to a sandboxed .appex) is the mis-application the notary
-            # rejects.
+            # top-level .app is the LAST path (sign_order appends it) AND is a
+            # .app (so the single-path dmg / archive-binary passes can never
+            # evaluate as the "top app"); helper .app / .appex are matched by
+            # suffix; everything else gets none. Applying the app's entitlements
+            # to a nested framework/helper (or JIT to a sandboxed .appex) is the
+            # mis-application the notary rejects.
             path_ent = entitlements_for(
-                path, is_top_app=index == len(paths) - 1, policy=policy
+                path,
+                is_top_app=index == len(paths) - 1 and path.suffix == ".app",
+                policy=policy,
             )
             run(codesign_argv(identity, path, path_ent, keychain), SIGN_CMD_TIMEOUT)
             run(["codesign", "--verify", "--strict", str(path)], SIGN_CMD_TIMEOUT)

@@ -1620,8 +1620,8 @@ def sign_cmd(
     most one .dmg. The unit unpacks the .app, codesigns every nested signable
     (Mach-O files and nested bundle roots) inner-first and the .app LAST
     (hardened runtime + timestamp). Entitlements are shipit-provided and keyed
-    on the bundle SHAPE (no flag): an electron bundle (detected by its nested
-    helper .app bundles) gets the JIT entitlements pair its Chromium/V8 needs
+    on the bundle SHAPE (no flag): an electron bundle (detected by its Electron
+    Framework) gets the JIT entitlements pair its Chromium/V8 needs
     to run under hardened runtime; a mac-app/tauri/rust .app gets none. It reseals
     the .dmg from the SIGNED .app via hdiutil, codesigns it, notarizes +
     staples, and stages the signed .dmg under the original dmg filename.
