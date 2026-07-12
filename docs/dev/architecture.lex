@@ -36,6 +36,13 @@ the durable code is one slim versioned package; and configuration is explicit.
     disputed artifact type, no cross-compilation, and even the escape hatch's
     output is structurally a conda archive.
 
+    What Work Env does NOT move out of pixi: activation, PATH calculation,
+    environment identity, and run wrapping. Work Env records which existing
+    mechanism a boundary selected (`pixi-run`, `activation-snapshot`, or
+    `ambient`) and the pixi-owned identity facts when available. Exec remains
+    the one external-process seam; Work Env is the shared description of where
+    work runs, not a new executor.
+
 2. The slow/fast split
 
     This is the central decision. shipit manages two very different kinds of

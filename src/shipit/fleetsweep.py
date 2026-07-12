@@ -62,7 +62,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import config, events, execrun, identity, pixienv
+from . import config, events, execrun, identity, pixienv, workenv
 from .changelog import CHANGELOG_DIR
 from .tree.create import Tree, create_from_source, new_agent_hash
 from .tree.layout import TreeSpec
@@ -344,10 +344,14 @@ class Cell:
     rc: int | None = None
     duration_ms: int | None = None
     output: str | None = None
+    work_env: Mapping[str, object] | None = None
 
     def to_dict(self) -> dict:
         """The cell's JSON shape — absent-not-null: a field appears exactly
-        when it is meaningful for this cell's status."""
+        when it is meaningful for this cell's status. Executed cells also carry
+        the Work Env resolution evidence for where the tool ran; that evidence
+        is a flat, redacted projection over facts the sweep already resolved,
+        not a new executor or pixi probe."""
         data: dict = {"status": self.status}
         if self.reason is not None:
             data["reason"] = self.reason
@@ -362,6 +366,8 @@ class Cell:
             data["duration_ms"] = self.duration_ms
         if self.output is not None:
             data["output"] = self.output
+        if self.work_env is not None:
+            data.update(self.work_env)
         return data
 
 
@@ -598,7 +604,7 @@ def _failed_row(
 def _run_cell(
     entry: PortfolioEntry,
     tool: str,
-    tree_root: Path,
+    tree: Tree,
     *,
     candidate: Path,
     run_tool: RunTool,
@@ -608,8 +614,8 @@ def _run_cell(
 
     A provisioned Tree's invocation is routed THROUGH its own pixi env
     (``pixi run --manifest-path <tree>/pixi.toml -- bin/shipit …`` — the
-    :func:`shipit.pixienv.run_argv` form, the same launch-path fix as
-    :func:`shipit.spawn.launch.pixi_wrap`, ``docs/dev/pixi.lex`` §7), gated on
+    :func:`shipit.pixienv.run_argv` form, the same launch-path mechanism consumed
+    by :func:`shipit.spawn.launch.route_argv`, ``docs/dev/pixi.lex`` §7), gated on
     :func:`shipit.pixienv.has_default_env` like every routing site. The leak
     this closes (the round-0 shipit self-row red): the swept tool's dispatched
     runners (``pytest``, ``cargo nextest``, …) resolve off PATH, and the
@@ -626,9 +632,23 @@ def _run_cell(
     argv is the wrapped form — the hermetic invocation a fix agent must
     reproduce with.
     """
+    tree_root = Path(tree.path)
     launcher = tree_root / "bin" / "shipit"
     argv: tuple[str, ...] = (str(launcher), *TOOL_ARGS[tool])
-    if pixienv.has_default_env(tree_root):
+    pixi_provisioned = pixienv.has_default_env(tree_root)
+    cell_work_env = workenv.resolve_write_run_env(
+        repo=identity.repo_from_slug(entry.repo),
+        tree_path=str(tree_root),
+        branch=tree.branch,
+        base=tree.base,
+        pixi_provisioned=pixi_provisioned,
+    )
+    work_env_record = workenv.resolution_record(
+        cell_work_env,
+        boundary="fleet-sweep.cell",
+        extra={"fleet_repo": entry.repo, "tool": tool},
+    )
+    if pixi_provisioned:
         argv = tuple(pixienv.run_argv(list(argv), tree_root))
     if not launcher.is_file():
         status, reason = cell_status(1, entry.expect_verify_fail)
@@ -638,6 +658,7 @@ def _run_cell(
             reason=reason,
             argv=argv,
             cwd=str(tree_root),
+            work_env=work_env_record,
             output=(
                 f"{launcher}: managed launcher missing — the repo is not "
                 "bootstrapped (run shipit install there; a shipit-side gap, "
@@ -659,6 +680,7 @@ def _run_cell(
             argv=argv,
             cwd=str(tree_root),
             rc=exc.rc,
+            work_env=work_env_record,
             output=str(exc),
         )
     status, reason = cell_status(result.rc, entry.expect_verify_fail)
@@ -671,6 +693,7 @@ def _run_cell(
         cwd=str(tree_root),
         rc=result.rc,
         duration_ms=result.duration_ms,
+        work_env=work_env_record,
         output=output,
     )
 
@@ -712,7 +735,7 @@ def _sweep_repo(
                 continue
             cells.append(
                 _run_cell(
-                    entry, plan.tool, tree_root, candidate=candidate, run_tool=run_tool
+                    entry, plan.tool, tree, candidate=candidate, run_tool=run_tool
                 )
             )
         return RepoResult(entry, tuple(cells))

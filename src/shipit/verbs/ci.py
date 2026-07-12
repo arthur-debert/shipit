@@ -39,7 +39,7 @@ from pathlib import Path
 
 import click
 
-from .. import config, git
+from .. import config, git, logcontext, workenv
 from ..tools import lanes as lanes_mod
 from ._errors import cli_errors
 
@@ -164,6 +164,21 @@ def run(
         task_cmds=task_cmds,
         toolchains=toolchains,
     )
+    bound = logcontext.bound()
+    for job in jobs:
+        logger.info(
+            "ci lane work env resolved — pixi-run routing for lane %s",
+            job.name,
+            extra=workenv.ci_lane_resolution_record(
+                working_dir=str(root),
+                repo=bound.get("repo"),
+                lane=job.name,
+                pixi_environment_name=job.envset,
+                ci_event=normalized,
+                runner=job.runner,
+                required=job.required,
+            ),
+        )
     print(json.dumps([job.as_matrix_entry() for job in jobs]))
     dropped = len(lanes) - len(jobs)
     names = ", ".join(job.name for job in jobs) if jobs else "none"

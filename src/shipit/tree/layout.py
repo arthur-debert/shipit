@@ -6,10 +6,11 @@ on disk, the **branch** to check out, and the **base** ref to cut it from — wi
 no I/O, so the truth table is unit-tested directly (Testing Decisions in the PRD).
 
 :func:`plan` resolves EVERY spec shape — ``--issue N [--session S] [--slug S]``,
-``--epic E --ws N [--slug S]``, freeform ``--branch NAME``, and the coordinator's
-``ephemeral`` session Tree (naming.lex §3; ADR-0027). :class:`TreeSpec` stays a
-single typed entry point: adding a shape is adding a field plus a branch in
-:func:`plan`, not reshaping callers.
+``--epic E --ws N [--slug S]``, freeform ``--branch NAME`` with an optional
+internal base override, and the coordinator's ``ephemeral`` session Tree
+(naming.lex §3; ADR-0027). :class:`TreeSpec` stays a single typed entry point:
+adding a shape is adding a field plus a branch in :func:`plan`, not reshaping
+callers.
 
 The three load-bearing invariants the tests pin (from the PRD):
 
@@ -370,7 +371,10 @@ class TreeSpec:
     ``session`` names the standalone-issue branch's leaf — ``issues/<id>/<session>``,
     default ``work`` — so a +1 session on the same issue (``issues/<id>/onboard``)
     coexists under the ``issues/<id>/`` ref directory (see :func:`_plan_issue`); it is
-    unused by the epic, freeform, and ephemeral shapes.
+    unused by the epic, freeform, and ephemeral shapes. ``base`` is an internal
+    override for the freeform shape only: normal freeform work still cuts from
+    ``origin/main``, while shepherd PR attachment cuts from ``origin/<head>`` so
+    the Tree starts at the current PR head.
 
     The four shapes :func:`plan` dispatches on (and validates as mutually
     exclusive):
@@ -389,6 +393,7 @@ class TreeSpec:
     epic: str | None = None
     ws: int | None = None
     branch: str | None = None
+    base: str | None = None
     ephemeral: str | None = None
     slug: str = ""
     session: str = "work"
@@ -511,8 +516,10 @@ def _plan_freeform(spec: TreeSpec) -> TreePlan:
     - **branch**: the freeform name verbatim — the caller owns its meaning, so the
       planner reflects the request rather than mangling it (naming.lex §3 lists the
       freeform name as a branch form in its own right).
-    - **base**: ``origin/main`` — freeform work, like a standalone issue, is cut
-      from the default branch.
+    - **base**: normally ``origin/main`` — freeform work, like a standalone issue,
+      is cut from the default branch. An internal caller may override this with
+      another explicit remote ref; shepherd PR attachment uses ``origin/<head>``
+      so an existing-PR write Tree starts from the PR head instead of from main.
     - **dir**: ``<root>/<org>/<repo>/branches/<sanitized-branch>-<agent-hash>`` —
       the freeform name is sanitized into one safe leaf (slashes and other
       separators collapse to ``-``) so an arbitrary branch like ``spike/foo`` maps
@@ -532,9 +539,15 @@ def _plan_freeform(spec: TreeSpec) -> TreePlan:
             f"leaf); got {branch!r}, which sanitizes to an empty name — a leaf of "
             "just '-<hash>' and an unusable empty branch."
         )
+    if spec.base is not None and not spec.base.strip():
+        raise ValueError(
+            "tree.layout.plan: freeform base override must not be empty; "
+            "omit it to use origin/main"
+        )
     leaf = f"{sanitized}-{spec.agent_hash}"
     directory = _repo_dir(spec) / "branches" / leaf
-    return TreePlan(dir=directory, branch=branch, base="origin/main")
+    base = spec.base.strip() if spec.base is not None else "origin/main"
+    return TreePlan(dir=directory, branch=branch, base=base)
 
 
 def _plan_issue(spec: TreeSpec) -> TreePlan:

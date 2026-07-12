@@ -27,11 +27,13 @@ a repo read returns a :class:`shipit.identity.Repo`, a PR-core read returns a
 through the ONE :func:`shipit.pr.core_from_node` boundary — never an
 adapter-shaped parallel snapshot type. The fleet reads' PR-lifecycle
 projection is this adapter's own small frozen value (:class:`HeadPr`, minted
-by :func:`pr_for_head`) — scan-shaped, not a parallel PR. Raw JSON survives
-only in the documented escapes: the field-list read :func:`pr_view` (whose
-extra fields — head branch name, base oid — feed richer views) and the
-engine-shaped node read :func:`pr_meta`. A data-shape failure on an Exec that
-succeeded
+by :func:`pr_for_head`) — scan-shaped, not a parallel PR. Existing-PR attachment
+uses the sibling :class:`PrAttachment`, minted by :func:`pr_for_number`, because
+the shepherd lifecycle needs the PR's head branch as well as its lifecycle
+fields. Raw JSON survives only in the documented escapes: the field-list read
+:func:`pr_view` (whose extra fields — head branch name, base oid — feed richer
+views) and the engine-shaped node read :func:`pr_meta`. A data-shape failure on
+an Exec that succeeded
 (unparseable/empty JSON, a malformed slug) raises :class:`ValueError` at this
 boundary, the same posture :func:`owner_kind` / :func:`default_branch`
 already take.
@@ -124,6 +126,27 @@ class HeadPr:
         return self.state
 
 
+@dataclass(frozen=True)
+class PrAttachment:
+    """The existing PR a write Run attaches to, including its current head branch.
+
+    Shepherd launch is keyed by PR number, not by an issue/work-stream branch. It
+    needs the same lifecycle/base fields as :class:`HeadPr`, plus ``head_ref`` and
+    writability indicators so the writable Tree can be cut from and pushed back
+    to the PR's current head. This remains a spawn-shaped projection, not a
+    parallel PR core: the PR-state engine's richer identity still lives in
+    :class:`shipit.pr.PR`.
+    """
+
+    number: int
+    state: str
+    is_draft: bool
+    base_ref: str
+    head_ref: str
+    is_cross_repository: bool
+    maintainer_can_modify: bool
+
+
 def _head_pr_from_json(data: dict) -> HeadPr:
     """Build the :class:`HeadPr` from a ``gh pr view --json`` payload — the ONE
     place this wire shape is read.
@@ -165,6 +188,38 @@ def _head_pr_from_json(data: dict) -> HeadPr:
         state=state.strip().upper(),
         is_draft=is_draft,
         base_ref=base_ref.strip(),
+    )
+
+
+def _pr_attachment_from_json(data: dict) -> PrAttachment:
+    """Build the typed existing-PR attachment snapshot from ``gh pr view`` JSON."""
+    head = _head_pr_from_json(data)
+    head_ref = data.get("headRefName")
+    if not isinstance(head_ref, str) or not head_ref.strip():
+        raise ValueError(
+            f"malformed `gh pr view` payload: headRefName must be a non-empty str, "
+            f"got {head_ref!r}"
+        )
+    is_cross_repository = data.get("isCrossRepository")
+    if not isinstance(is_cross_repository, bool):
+        raise ValueError(
+            "malformed `gh pr view` payload: isCrossRepository must be a bool, "
+            f"got {is_cross_repository!r}"
+        )
+    maintainer_can_modify = data.get("maintainerCanModify")
+    if not isinstance(maintainer_can_modify, bool):
+        raise ValueError(
+            "malformed `gh pr view` payload: maintainerCanModify must be a bool, "
+            f"got {maintainer_can_modify!r}"
+        )
+    return PrAttachment(
+        number=head.number,
+        state=head.state,
+        is_draft=head.is_draft,
+        base_ref=head.base_ref,
+        head_ref=head_ref.strip(),
+        is_cross_repository=is_cross_repository,
+        maintainer_can_modify=maintainer_can_modify,
     )
 
 
@@ -770,6 +825,30 @@ def pr_for_head(branch: str, *, cwd: str | None = None) -> HeadPr | None | Unkno
         # this never-crash scan read that means an undetermined state, the same
         # as malformed/non-JSON output above.
         return UNKNOWN
+
+
+def pr_for_number(number: int, *, repo: str | None = None) -> PrAttachment:
+    """The existing PR attachment snapshot for ``number``.
+
+    Unlike :func:`pr_for_head`, this is an explicit attachment read for a single
+    PR and therefore fails loud: a missing/unreadable PR propagates the GitHub
+    transport failure, and malformed JSON raises :class:`ValueError`. Callers
+    convert those into their own domain refusal before launching work.
+    """
+    data = pr_view(
+        str(number),
+        repo=repo,
+        json_fields=[
+            "number",
+            "state",
+            "isDraft",
+            "baseRefName",
+            "headRefName",
+            "isCrossRepository",
+            "maintainerCanModify",
+        ],
+    )
+    return _pr_attachment_from_json(data)
 
 
 #: ``gh`` exits non-zero with this message when a head simply has no associated

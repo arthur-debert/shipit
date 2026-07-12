@@ -44,7 +44,7 @@ from pathlib import Path
 
 import click
 
-from .. import execrun, git, identity, logcontext, logsetup
+from .. import execrun, git, identity, logcontext, logsetup, workenv
 from ..agent.backend import CLAUDE
 from ..session import bootstrap, resume
 from ..spawn.launch import scrub_tree_env
@@ -297,6 +297,23 @@ def run_codex(
     # pair to the codex launch in the flow log. (The Tree's own birth already
     # emitted `tree.created` with the session bound — ADR-0027/0032.)
     with logcontext.scoped(session=session_id, tree=tree.path):
+        session_env = workenv.resolve_session_env(
+            repo=spec.repo,
+            tree_path=tree.path,
+            branch=tree.branch,
+            base=tree.base,
+            activation=activation,
+        )
+        logger.info(
+            "session codex: work env resolved — %s routing for coordinator session",
+            session_env.routing.value,
+            extra=workenv.resolution_record(
+                session_env,
+                boundary="session.codex-launch",
+                role="coordinator",
+                extra={"backend": resume.CODEX_BACKEND},
+            ),
+        )
         logger.info(
             "launching codex coordinator session %s in %s",
             session_id,

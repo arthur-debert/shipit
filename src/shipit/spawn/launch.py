@@ -25,9 +25,12 @@ module holds everything that does NOT vary:
   carried) that the producer maps to its ``timed_out`` outcome. In exchange, every
   launch is an Exec like any other: one structured record with argv, cwd, rc, and
   ``duration_ms``.
-- :func:`write_task` / :func:`reviewer_task` — the English PR-contract prompts a Run is
-  handed. These are backend-agnostic: they convey *what work to do and how to report
-  it* (the PR is the result channel, ADR-0019 §6), not how any particular CLI is shaped.
+- :func:`write_task` / :func:`shepherd_task` — the English contracts handed to
+  writable Runs. The implementer contract opens one draft PR; the shepherd
+  contract attaches to an existing PR and pushes fixes back to that branch.
+  Reviewer prompts live in :mod:`shipit.review.prompt`, where the product review
+  service can capture structured output and post it through one App-authored
+  result channel.
 
 Rooting is the OS process ``cwd`` (ADR-0019 §1), NOT a ``cd`` — so the child's writes
 land in the Tree with no leak to the parent checkout, sidestepping the bash-cwd-reset
@@ -39,17 +42,18 @@ real :func:`_exec_runner`).
 the child's writes in the Tree but does NOT activate the Tree's pixi env, so the child
 would inherit the *coordinator's* (or system) env and its
 ``python``/``pytest``/``ruff``/``shipit`` would resolve to the WRONG ``.pixi`` env — the
-Tree is provisioned, then bypassed (``docs/dev/pixi.lex`` §7/§8). :func:`pixi_wrap` fixes
-this by re-expressing the backend argv as ``pixi run --manifest-path <tree>/pixi.toml --
-<argv>`` so the child lands in the Tree's OWN env — but ONLY when the Tree actually
-carries a provisioned env (``<tree>/.pixi/envs/default`` exists). A **reviewer's
-read-only Tree** (ADR-0018) and a **non-pixi repo** have none, so :func:`pixi_wrap`
-leaves their argv BARE — routing those through ``pixi run`` would force a solve into a
-chmod'd tree or fail outright. The pixi knowledge behind both halves — the
-provisioned-env sentinel and the wrapped argv — lives in the pixi adapter
+Tree is provisioned, then bypassed (``docs/dev/pixi.lex`` §7/§8). The spawn boundary
+fixes this by resolving a :class:`~shipit.workenv.WorkEnv`: a provisioned write Tree
+selects ``PIXI_RUN`` and a non-pixi Tree selects ``AMBIENT``. :func:`route_argv`
+consumes that carried decision, re-expressing the backend argv as ``pixi run
+--manifest-path <tree>/pixi.toml -- <argv>`` only for the provisioned shape. The pixi
+knowledge behind both halves — the provisioned-env sentinel and the wrapped argv —
+lives in the pixi adapter
 (:func:`shipit.pixienv.has_default_env` / :func:`shipit.pixienv.run_argv`,
 ADR-0028); this module keeps only the launch-side ROUTING DECISION and its
-narration. :func:`scrub_tree_env` mirrors the provisioning scrub
+narration. The reviewer service resolves its shared read-only Tree separately and
+launches with ambient tools; it does not pass through this writable-Run seam.
+:func:`scrub_tree_env` mirrors the provisioning scrub
 (:func:`shipit.tree.create.provision_env`) — both rely SOLELY on the adapter's shared
 predicate (:func:`shipit.pixienv.scrub_env` over
 :func:`shipit.pixienv.is_leaked_env_var`), so they cannot drift: on top of the
@@ -63,11 +67,12 @@ rc 127); the curated passthrough keeps ``HOME``/``PATH`` intact (spike, 2026-06-
 from __future__ import annotations
 
 import logging
+import shlex
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from .. import execrun, pixienv
+from .. import execrun, pixienv, workenv
 
 #: The spawn subsystem's logger (shared with the verb): launch MECHANICS narrate
 #: at DEBUG per the spray conventions (ADR-0029) — the pixi-routing decision and
@@ -192,43 +197,41 @@ def _exec_runner(
     )
 
 
-def pixi_wrap(argv: list[str], tree_path: str | Path) -> list[str]:
-    """Re-express ``argv`` to run THROUGH the Tree's pixi env — when the Tree has one.
+def route_argv(argv: list[str], work_env: workenv.WorkEnv) -> list[str]:
+    """Route ``argv`` per the resolved Work Env's execution-routing decision.
 
-    The launch bug (``docs/dev/pixi.lex`` §7, ADR-0019 amendment): ``cwd=<Tree>`` roots
-    the child's writes in the Tree but does not activate pixi, so the child inherits the
-    coordinator/system env and its tools resolve to the WRONG ``.pixi`` env. The fix is to
-    launch the backend child *through* pixi — the wrapped argv is built by the pixi
-    adapter (:func:`shipit.pixienv.run_argv`: explicit ``--manifest-path`` overrides
-    any leaked ``PIXI_PROJECT_MANIFEST``; ADR-0028 puts the argv in pixi's domain
-    home, this launcher keeps the routing decision).
-
-    The wrap is GATED on the Tree carrying a provisioned env
-    (:func:`shipit.pixienv.has_default_env`): a **write** Tree is ``pixi
-    install``-provisioned, so it is routed; a **reviewer's read-only** Tree
-    (ADR-0018, clone+checkout, no provision) and a **non-pixi repo** have no such
-    env, so their argv is returned UNCHANGED — routing them through ``pixi run``
-    would force a solve into a chmod'd tree or fail outright. Pure (a filesystem
-    ``exists`` probe only), so the gate is table-tested without pixi.
+    The Work Env CONSUMER on the launch path (RPE01-WS05): the decision was
+    made once, at the boundary that resolved ``work_env`` over supplied facts
+    (:func:`shipit.workenv.resolve_write_run_env`); this function only carries
+    it out — ``PIXI_RUN`` re-expresses the argv through the checkout's own
+    pixi env via the pixi adapter's builder (:func:`shipit.pixienv.run_argv`,
+    ADR-0028: the argv stays in pixi's domain home); ``AMBIENT`` leaves the
+    argv BARE (a non-pixi checkout keeps its existing launch behavior,
+    honestly unrouted). ``ACTIVATION_SNAPSHOT`` contexts do not launch through
+    this seam and are refused loudly rather than silently losing their
+    activation. No probe here: recomputing the gate is exactly the
+    duplication Work Env exists to end. Pure argv-in/argv-out; the routing
+    narration lands at DEBUG (ADR-0029 mechanics).
     """
-    tree = Path(tree_path)
-    if not pixienv.has_default_env(tree):
-        # Mechanics at DEBUG (ADR-0029): the routing DECISION is the diagnosis-
-        # relevant fact when a child resolves the wrong tools — record which way
-        # the gate went, and why.
+    root = work_env.working_dir.path
+    if work_env.routing is workenv.ExecutionRouting.PIXI_RUN:
         logger.debug(
-            "launch argv left bare: %s carries no provisioned pixi env "
-            "(read-only or non-pixi tree)",
-            tree,
+            "launch argv routed through the tree's pixi env at %s (work env)",
+            root,
+            extra={"pixi_wrapped": True},
+        )
+        return pixienv.run_argv(argv, root)
+    if work_env.routing is workenv.ExecutionRouting.AMBIENT:
+        logger.debug(
+            "launch argv left bare: the work env at %s routes ambient",
+            root,
             extra={"pixi_wrapped": False},
         )
         return argv
-    logger.debug(
-        "launch argv routed through the tree's pixi env at %s",
-        tree,
-        extra={"pixi_wrapped": True},
+    raise ValueError(
+        f"unsupported launch routing at this seam: {work_env.routing.value}; "
+        "activation-snapshot contexts require their activation consumer"
     )
-    return pixienv.run_argv(argv, tree)
 
 
 def scrub_tree_env(env: Mapping[str, str]) -> dict[str, str]:
@@ -244,8 +247,8 @@ def scrub_tree_env(env: Mapping[str, str]) -> dict[str, str]:
     AND the Conda activation-vs-installation carve-out cannot drift between the two paths.
     The predicate scrubs only the Conda **activation** vars (``CONDA_PREFIX`` and friends),
     KEEPING installation-level ``CONDA_EXE`` / ``CONDA_PYTHON_EXE`` so a Conda-managed
-    shell's ``pixi run`` is undisturbed. With explicit ``--manifest-path`` (see
-    :func:`pixi_wrap`) the scrub is belt-and-suspenders for the child's own activation, but
+    shell's ``pixi run`` is undisturbed. With :func:`route_argv`'s explicit
+    ``--manifest-path`` the scrub is belt-and-suspenders for the child's own activation, but
     it still cleans the env the agent's *own* ``pixi`` calls inherit. Returns a fresh dict
     (never the caller's).
     """
@@ -342,32 +345,30 @@ def write_task(
     )
 
 
-def reviewer_task(branch: str) -> str:
-    """The task a spawned **reviewer** Run performs (ADR-0018): read the diff, review.
+def shepherd_task(*, pr_number: int, branch: str, base_branch: str) -> str:
+    """The task a spawned shepherd performs: address one existing PR in place.
 
-    The reviewer runs in a SHARED read-only Tree already checked out on ``branch``
-    (the PR head), so its result is delivered THROUGH the PR (ADR-0017): it reads the
-    diff and the surrounding code, then posts exactly one review with ``gh pr review``
-    (approve / request-changes / comment) for the PR on this branch. It never edits,
-    builds, pushes, or merges — the ``chmod``'d read-only Tree is the load-bearing FS
-    guard across every backend (ADR-0018 / ADR-0020 §Decision 3), and each adapter adds
-    its own native read-only posture as best-effort defense-in-depth: ``claude`` narrows
-    to a read-only ``--tools`` allow-list, while ``codex`` / ``agy`` (no granular
-    allow-list) rely on a sandbox/permission posture (codex ``--sandbox`` + network
-    config; agy dropping ``--dangerously-skip-permissions``). The prompt states the
-    intent on top of that.
-
-    The diff is read with ``gh pr diff`` — NOT a hardcoded ``git diff origin/main…``:
-    a work stream / epic PR targets its umbrella branch, not ``main``, so a baked-in
-    base would compute the wrong range. ``gh pr diff`` uses the PR's own base/head, so
-    the reviewer sees exactly the PR's changes whatever the base is.
+    A shepherd is a writable Run, but its result channel is NOT the implementer's
+    draft-PR handshake. It attaches to the current head of an existing PR,
+    addresses review feedback, commits, and pushes fixes to that same head branch.
+    It must never open a replacement PR, run the initial PR-open handshake, flip
+    ready, wait for reviewers, or merge; the coordinator and PR engine still own
+    waits and readiness.
     """
+    push_refspec = shlex.quote(f"HEAD:refs/heads/{branch}")
     return (
-        "You are a spawned reviewer Run launched by `shipit spawn subagent`. You are "
-        f"in a shared READ-ONLY checkout of the PR head `{branch}`. Read the PR's diff "
-        "with `gh pr diff` (it uses the PR's actual base and head — do not assume the "
-        "base is `main`) and the code it touches, judge it against the issue it closes "
-        "and this repo's conventions, then post exactly ONE review through the PR with "
-        "`gh pr review` (approve, request-changes, or comment). Do not edit, build, "
-        "push, or merge — if a change is needed, say so in the review. Then stop."
+        "You are a spawned shepherd Run launched by `shipit spawn subagent`, "
+        f"attached to existing pull request #{pr_number} on branch {branch!r} "
+        f"(base {base_branch!r}). Work in this writable Tree and address the "
+        "currently open review feedback for that PR. Commit the fixes and push "
+        f"them back to the same branch with `git push origin {push_refspec}`. Do NOT "
+        "open a new pull request, do NOT run the implementer draft-PR handshake, "
+        "do NOT run `shipit pr next`, do NOT flip the PR ready, do NOT wait for "
+        "reviewers, and do NOT merge. If a review comment should not be changed, "
+        "leave a clear rationale on the existing PR and resolve the thread; "
+        "otherwise fix it and resolve it. Sweep the diff for other instances of "
+        "the same finding class before pushing. You are a HEADLESS Run: ending "
+        "your turn exits your process, and any background tasks still running "
+        "are killed with it. Run long work in the foreground or await it "
+        "synchronously; never end your turn while background work is in flight."
     )

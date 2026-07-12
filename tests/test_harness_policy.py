@@ -20,6 +20,7 @@ from shipit.harness.policy import (
     is_edit_tool,
 )
 from shipit.harness.role import Role
+from shipit.harness.roleprofile import delegates_code_authorship
 
 
 @pytest.mark.parametrize(
@@ -33,7 +34,8 @@ from shipit.harness.role import Role
         (Role.COORDINATOR, False, False, Permission.ALLOW),
         (Role.COORDINATOR, False, True, Permission.ALLOW),
         # Every non-coordinator role is allowed everywhere — code or not,
-        # break-glass or not. The guard turns on the coordinator role alone.
+        # break-glass or not. The guard turns on the coordinator's profile
+        # posture alone (it is the one role that delegates code authorship).
         (Role.IMPLEMENTER, True, False, Permission.ALLOW),
         (Role.IMPLEMENTER, True, True, Permission.ALLOW),
         (Role.IMPLEMENTER, False, False, Permission.ALLOW),
@@ -45,6 +47,30 @@ from shipit.harness.role import Role
 )
 def test_decide_matrix(role, is_code, break_glass, expected):
     assert decide(role, "any/path", is_code, break_glass).permission is expected
+
+
+def test_edit_guard_is_posture_derived_for_every_role():
+    """RPE01-WS02: the guard consumes capability-shaped profile posture, not a
+    role-name test. A code edit is DENIED for EXACTLY the roles whose posture
+    delegates code authorship (writable checkout that must not author code) — so a
+    Role added to the registry gets its verdict from its posture with no branch to
+    forget here. Read-only roles (checkout_mutation=False) are NOT caught: their
+    tools + read-only Tree are the load-bearing guard."""
+    for role in Role:
+        denied = (
+            decide(role, "src/x.py", is_code=True, break_glass=False).permission
+            is Permission.DENY
+        )
+        assert denied is delegates_code_authorship(role)
+
+
+def test_only_the_coordinator_delegates_code_authorship_today():
+    """The posture that fires the guard is exactly the coordinator's today — the
+    behavior-preserving pin: the migration to posture-derived enforcement changed
+    the MECHANISM, not which role blocks."""
+    assert delegates_code_authorship(Role.COORDINATOR)
+    for role in (Role.IMPLEMENTER, Role.SHEPHERD, Role.EXPLORER, Role.REVIEWER):
+        assert not delegates_code_authorship(role)
 
 
 def test_coordinator_deny_carries_the_redirect_reason():

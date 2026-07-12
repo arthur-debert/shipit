@@ -496,6 +496,17 @@ def _seam_a_reviewer_tree(monkeypatch, tmp_path, *, branch="TRE03/WS05"):
 
 def test_verify_reviewer_run_passes_on_healthy_seams(tmp_path, monkeypatch):
     cfg, _tree, _payload = _seam_a_reviewer_tree(monkeypatch, tmp_path)
+    argv_seen = []
+
+    def run_spawn(argv, *, cwd, env=None):
+        argv_seen.append(argv)
+        return dogfood.SpawnInvocation(
+            0,
+            "SPAWNED\n" + __import__("json").dumps(_payload),
+            "",
+        )
+
+    monkeypatch.setattr(dogfood, "_run_spawn", run_spawn)
     report = dogfood.Report()
     dogfood.verify_reviewer_run(report, cfg, {"pr": 42})
     assert report.passed, [c for c in report.checks if not c.passed]
@@ -504,6 +515,8 @@ def test_verify_reviewer_run_passes_on_healthy_seams(tmp_path, monkeypatch):
     assert "shared per (repo,branch)" in names
     assert "read-only Tree has no writable working file" in names
     assert "posted a NEW review" in names
+    assert argv_seen
+    assert all(argv[-2:] == ["--backend", "codex"] for argv in argv_seen)
 
 
 def test_verify_reviewer_run_detects_unshared_tree(tmp_path, monkeypatch):

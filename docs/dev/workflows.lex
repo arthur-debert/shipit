@@ -24,7 +24,8 @@ logic is thin YAML) is stated in [./architecture.lex#3].
     forward:
 
     Pipeline:
-        preflight -> prepare -> build[xOS] -> package[xOS] -> sign[mac] -> release
+        preflight -> prepare -> build(xOS) -> bundle(xOS) ->
+        assert-bundle(xOS) -> sign(mac) -> publish
 
     - preflight: resolve whether signing is requested (one switch, referenced
       everywhere downstream), validate that the changelog has content, and
@@ -34,14 +35,15 @@ logic is thin YAML) is stated in [./architecture.lex#3].
       push, and emit the release-notes artifact. For tauri this bumps THREE
       version files in lockstep (package.json + src-tauri/Cargo.toml +
       tauri.conf.json); they must stay in sync or the build breaks.
-    - build [per OS]: build the frontend, then COMPILE ONLY (no bundle). The
+    - build (per OS): build the frontend, then COMPILE ONLY (no bundle). The
       cross-job artifact is the ~tens-of-MB compiled binary + the built
       frontendDist — NOT the multi-GB target/ tree. This is the expensive,
       cache-warmed half (rust-cache + sccache).
-    - package [per OS]: download the compile artifact, bundle it UNSIGNED, and
-      assert the bundle's integrity before upload. Needs no rust toolchain.
-    - sign [mac, optional]: only when signing is requested. See [#3.1].
-    - release: publish the GitHub release from the notes + tag + bundles, with
+    - bundle (per OS): download the compile artifact and bundle it UNSIGNED.
+      Needs no rust toolchain.
+    - assert-bundle (per OS): assert the bundle's integrity before upload.
+    - sign (mac, optional): only when signing is requested. See [#3.1].
+    - publish: publish the GitHub release from the notes + tag + bundles, with
       partial-release prevention (see [#3.3]).
 
     Per-platform fan-out is a matrix; opting out of a platform drops its matrix
@@ -49,40 +51,52 @@ logic is thin YAML) is stated in [./architecture.lex#3].
 
 2. The producing / routing boundary, applied
 
-    Each producing step is a pixi task, runnable on a laptop or in local Docker
-    exactly as in CI:
+    Each producing step is a shipit verb behind a thin pixi task caller,
+    runnable on a laptop or in local Docker exactly as in CI:
 
-    Producing (pixi tasks):
-        - build-frontend — frontend/WASM build
-        - build — compile only
-        - bundle — bundle the compiled binary (unsigned)
-        - assert-bundle — the integrity guard ([#3.2])
-        - stage-assets — collect bundles for release
+    Producing (shipit verbs; pixi tasks are thin callers):
+        - build — frontend/WASM build plus compile
+        - release bundle — bundle the compiled binary (unsigned)
+        - release assert-bundle — the integrity guard ([#3.2])
+        - release sign — reopen, sign, and reseal macOS bundles
         - changelog — coalesce fragments ([#4])
-        - create-release — publish
+        - release publish — publish to the configured endpoints
 
     Routing (thin workflow YAML):
         - the per-OS matrix
         - cross-job artifact upload / download
+        - stage-assets collection
         - secret injection and presence checks
         - the macOS keychain import for signing
 
     These building blocks already exist in arthur-debert/release as
     bin-internal/*.sh scripts called by thin workflow steps, so the migration
-    is mechanical: each script becomes a pixi task; the routing stays in YAML.
+    is mechanical: each script becomes a shipit verb behind a thin pixi task;
+    the routing stays in YAML.
+
+    CI Lane Work Env:
+        A CI Lane job is a Main-checkout Work Env, not a Tree. GitHub Actions
+        provides the fresh checkout and runner; the Lane planner supplies the
+        lane name, event, runner, required/advisory bit, and pixi environment
+        name. Execution still happens through the workflow's existing
+        `pixi run --locked` caller and shipit verb; Work Env only records the
+        resolved `direct-checkout` / `pixi-run` evidence. Do not instantiate
+        local Tree objects in CI just to share terminology, and do not invent a
+        pixi Run id — pixi exposes environment metadata, not invocation
+        identity.
 
 3. Design invariants the pipeline learned the hard way
 
     These three are not style preferences — each is a scar. Treat them as
     invariants any reimplementation must preserve.
 
-    3.1. Sign and package are interleaved, not sequential
+    3.1. Sign and bundle are interleaved, not sequential
 
-        The intuitive order — "sign the binary, then package it" — is wrong on
+        The intuitive order — "sign the binary, then bundle it" — is wrong on
         macOS and the pipeline must not be built around it. tauri bundles the
         .app and .dmg together (coupled — they are not cleanly separable), and
-        the package stage produces them UNSIGNED. The signer then REOPENS the
-        package:
+        the bundle stage produces them UNSIGNED. The signer then REOPENS the
+        bundle:
 
         - codesign the .app, nested Mach-O inner-first and the .app LAST (a flat
           sign leaves nested executables unhardened and notarization rejects it);
@@ -91,8 +105,8 @@ logic is thin YAML) is stated in [./architecture.lex#3].
         - codesign the resealed .dmg;
         - notarize + staple.
 
-        So the model is *package(unsigned) -> sign-reopens-and-reseals*, never
-        *sign -> package*. The package stage must also emit the inner .app as a
+        So the model is *bundle(unsigned) -> sign-reopens-and-reseals*, never
+        *sign -> bundle*. The bundle stage must also emit the inner .app as a
         reseal payload, because artifact upload does not preserve a .app's
         symlinks and exec bits.
 
@@ -121,11 +135,11 @@ logic is thin YAML) is stated in [./architecture.lex#3].
 
     3.3. Partial-release prevention
 
-        The release job publishes ONLY when every LIVE upstream stage
+        The publish job publishes ONLY when every LIVE upstream stage
         succeeded and sign either succeeded (signed path) or was skipped
-        (unsigned path). A FAILED (or cancelled) stage blocks the release,
+        (unsigned path). A FAILED (or cancelled) stage blocks publish,
         always. This block cannot be a plain dependency — the default "a
-        skipped dependency skips the dependent" would wrongly skip release on
+        skipped dependency skips the dependent" would wrongly skip publish on
         the unsigned path — so it is an explicit result check in the publish
         verb, fed the stage results verbatim. Never ship a half-built set.
 
@@ -152,7 +166,7 @@ logic is thin YAML) is stated in [./architecture.lex#3].
 
     This is one pixi task with zero per-language logic — fragments are plain
     markdown regardless of Kind. It runs in the prepare stage and emits the
-    release-notes artifact the release stage consumes.
+    release-notes artifact the publish stage consumes.
 
 5. Frontend / WASM note
 
@@ -170,8 +184,8 @@ logic is thin YAML) is stated in [./architecture.lex#3].
     provided command (`pixi run build`, `pixi run test`) over a matrix. The
     hard 20% — signing, notarization, OS packaging, store distribution — does
     NOT generalize by parameter and must not be forced into a YAML config DSL.
-    It is expressed as composable, opt-in jobs (build -> package -> sign ->
-    release), each consuming the previous stage's artifacts. A consumer that
+    It is expressed as composable, opt-in jobs (build -> bundle -> sign ->
+    publish), each consuming the previous stage's artifacts. A consumer that
     needs signing wires in the sign job; one that does not, omits it and ships
     the unsigned bundles end-to-end with zero signing secrets.
 
