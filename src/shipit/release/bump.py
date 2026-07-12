@@ -19,6 +19,12 @@ of those projections, plus the artifact-declared bundle-config hook:
   never happens twice).
 - **python** — a PURE rewrite of ``pyproject.toml`` ``[project].version``,
   deliberately toolchain-free (the legacy ``prepare-release-python`` choice).
+  A prerelease version is NORMALIZED to PEP 440 in the manifest only
+  (:func:`to_pep440`, issue #807): the semver the tag names (``-release-rc``,
+  ``-rc.1``, …) is valid semver but not PEP 440, so writing it verbatim breaks
+  every ``pixi``/``uv`` source build at the tagged commit. The tag stays
+  authoritative in semver form (the RC guard keys off the TAG suffix,
+  unaffected); only the pyproject value is rewritten to its PEP 440 spelling.
 - **go** — the first-class ZERO-FILE adapter (PRD story 22, ADR-0041): the
   tag is the source of truth, the version is injected at build via
   ``-ldflags -X`` (:mod:`shipit.tools.build`). Not an exception — an entry
@@ -47,6 +53,7 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+from ..changelog import SEMVER_RE
 from . import ReleaseError
 
 #: The placeholder token in a command template the resolved version replaces
@@ -58,6 +65,34 @@ VERSION_TOKEN = "{version}"
 #: adapter's ``cargo set-version`` (issue #793). Matched as a substring so
 #: cargo's quoting style around the subcommand name never matters.
 CARGO_NO_SUCH_COMMAND = "no such command"
+
+#: The CLOSED map from a semver prerelease PHASE word to its PEP 440 spelling
+#: (issue #807). Semver admits any alphanumeric prerelease identifier; PEP 440
+#: admits exactly three prerelease phases — ``a`` (alpha), ``b`` (beta), ``rc``
+#: — with canonical single-form spellings. This table pins every semver phase
+#: shipit's tags can carry (the reserved ``release-rc`` live-fire suffix
+#: included; :data:`shipit.release.version.RELEASE_RC_PRE`) to its PEP 440 form;
+#: a phase OUTSIDE it has no clean mapping and is a loud refusal
+#: (:func:`to_pep440`), never a silent write. Keys are matched lower-cased.
+_PEP440_PHASE: dict[str, str] = {
+    "a": "a",
+    "alpha": "a",
+    "b": "b",
+    "beta": "b",
+    "c": "rc",
+    "rc": "rc",
+    "pre": "rc",
+    "preview": "rc",
+    "release-rc": "rc",
+}
+
+#: A single semver prerelease identifier split into its leading phase word and
+#: an OPTIONAL trailing number (``rc`` → ``rc``/None, ``rc1`` → ``rc``/``1``,
+#: ``release-rc`` → ``release-rc``/None). The phase admits internal hyphens so
+#: the reserved ``release-rc`` suffix parses as one word; a purely numeric
+#: identifier (``1``) never matches — it has no PEP 440 phase, so it falls
+#: through to the loud refusal.
+_SEMVER_PRE_PHASE_RE = re.compile(r"^(?P<phase>[A-Za-z][A-Za-z-]*?)(?P<num>[0-9]+)?$")
 
 
 def explain_command_failure(argv: Sequence[str], stderr: str) -> str | None:
@@ -202,15 +237,71 @@ def edit_for(adapter: BumpAdapter, text: str, version: str) -> str:
     return bump_pyproject(text, version)
 
 
+def to_pep440(version: str) -> str:
+    """``version`` in PEP 440 spelling for a python manifest. Pure.
+
+    The tag names the version in SEMVER (ADR-0041), but ``pyproject.toml``
+    ``[project].version`` must be PEP 440 — the two agree on stable versions
+    yet diverge on prereleases: ``X.Y.Z-rc.1`` is valid semver and invalid
+    PEP 440, so writing it verbatim breaks every ``pixi``/``uv`` source build
+    at the tagged commit (issue #807). This maps the semver prerelease to its
+    PEP 440 form and leaves stable versions IDENTICAL:
+
+    - ``X.Y.Z`` (no suffix) → unchanged.
+    - ``X.Y.Z-release-rc`` (the reserved live-fire suffix, no number) →
+      ``X.Y.Zrc0`` — a deterministic throwaway ``rc0`` for the rc-guard cut
+      (the tag keeps ``-release-rc``; the RC guard keys off the tag).
+    - ``X.Y.Z-<phase>.N`` / ``X.Y.Z-<phase>N`` where ``<phase>`` is a known
+      PEP 440 phase (:data:`_PEP440_PHASE`: alpha→a, beta→b, rc→rc, …) →
+      ``X.Y.Z<a|b|rc>N`` (``-rc.1`` → ``rc1``, ``-alpha.2`` → ``a2``,
+      ``-beta.3`` → ``b3``); a bare ``<phase>`` with no number → ``…<phase>0``.
+
+    Any suffix with no clean PEP 440 mapping — an unknown phase word
+    (``-snapshot.1``), a purely numeric prerelease (``-1``), or a multi-segment
+    run (``-rc.1.2``) — is a LOUD :class:`ReleaseError`, never a silent write.
+    """
+    match = SEMVER_RE.match(version)
+    if match is None:
+        raise ReleaseError(f"not a semver version to normalize to PEP 440: {version!r}")
+    pre = match.group("pre")
+    if pre is None:
+        return version  # stable — identical in both spellings
+    base = f"{match.group('major')}.{match.group('minor')}.{match.group('patch')}"
+    parts = pre.split(".")
+    refusal = ReleaseError(
+        f"prerelease suffix {pre!r} of {version!r} has no PEP 440 mapping — the "
+        "python manifest needs a PEP 440 version (issue #807). Use a phase "
+        "shipit can map (rc / alpha / beta, optionally .N) or a stable version."
+    )
+    if len(parts) == 1:
+        ident = _SEMVER_PRE_PHASE_RE.match(parts[0])
+        if ident is None:
+            raise refusal
+        phase_word, num = ident.group("phase"), ident.group("num")
+    elif len(parts) == 2 and parts[1].isdigit():
+        phase_word, num = parts[0], parts[1]
+    else:
+        raise refusal
+    phase = _PEP440_PHASE.get(phase_word.lower())
+    if phase is None:
+        raise refusal
+    return f"{base}{phase}{int(num) if num is not None else 0}"
+
+
 def bump_pyproject(text: str, version: str) -> str:
     """``pyproject.toml`` with ``[project].version`` set to ``version``. Pure.
 
     Deliberately toolchain-free (no build backend is invoked — the legacy
     python bump's contract): a targeted line rewrite that preserves the rest
-    of the file byte-for-byte. Raises :class:`ReleaseError` when the
-    ``[project]`` table carries no ``version`` line — a dynamic-version or
-    malformed manifest this projection cannot express.
+    of the file byte-for-byte. The written value is NORMALIZED to PEP 440
+    (:func:`to_pep440`, issue #807) — a prerelease semver the tag names
+    (``-release-rc``, ``-rc.1``) is not PEP 440 and would break the source
+    build at the tag; the tag itself stays semver. Raises
+    :class:`ReleaseError` when the ``[project]`` table carries no ``version``
+    line — a dynamic-version or malformed manifest this projection cannot
+    express — or when the version's prerelease suffix has no PEP 440 mapping.
     """
+    version = to_pep440(version)
     replaced = _PYPROJECT_VERSION_RE.subn(rf"\g<head>{version}\g<tail>", text, count=1)
     if replaced[1] == 0:
         raise ReleaseError(
