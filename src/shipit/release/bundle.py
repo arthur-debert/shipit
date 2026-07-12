@@ -17,7 +17,16 @@ functions the entries carry:
 - **deb** — cargo-deb against the PRE-BUILT release binary
   (``--no-build --no-strip``: the deb wraps the same binary the tarball
   ships — the legacy ``build-deb.yml`` contract), hard-failing when no
-  ``.deb`` appears. Linux targets only.
+  ``.deb`` appears. cargo-deb is SELF-PROVISIONED (``cargo install
+  cargo-deb --version <pin> --locked``, pinned for a reproducible build)
+  when absent from PATH: it is not on conda-forge, so no pixi env can carry
+  it, and the wf-build runner arrives without it (issue #784 F2). cargo-deb
+  NEVER receives ``--target``: ``shipit build``
+  builds natively into ``target/release/`` (no ``--target`` plumbing —
+  :func:`shipit.tools.e2e.binary_location` is the same contract), so the
+  bundle triple is naming-only, and forwarding it would redirect cargo-deb
+  to the empty ``target/<triple>/release/`` (issue #784 F3: the one owner
+  of the triple-dir contract is the native build). Linux targets only.
 - **wheel** — ``uv build`` emitting BOTH the wheel and the sdist into the
   bundle output tree (the legacy ``python-pkg.yml`` build job: one build,
   consumed by multiple publish targets).
@@ -57,6 +66,13 @@ from .. import config, execrun
 from ..tools import e2e as e2e_mod
 from . import ReleaseError
 
+#: The pinned cargo-deb version the deb composition self-provisions (issue
+#: #784 F2). A floating ``cargo install cargo-deb`` resolves the latest crate
+#: at compose time — irreproducible builds and a supply-chain window — so the
+#: version is PINNED, the same shape as lexd's ``--tag``-pinned self-provision
+#: (:mod:`shipit.provision.lexd`). Bump deliberately, in its own change.
+CARGO_DEB_VERSION = "3.7.0"
+
 #: The docs the archive composition ships beside the binary WHEN PRESENT —
 #: the legacy "Package binaries" step's set (README/CHANGELOG/LICENSE).
 DOC_FILES: tuple[str, ...] = (
@@ -80,10 +96,10 @@ class ComposeRequest:
 
     ``out_dir`` is the ABSOLUTE bundle output tree — the only place a
     composition may write. ``target`` is the target triple naming the
-    platform composed for (``<name>-<target>`` naming, windows detection);
-    ``target_declared`` says whether the caller supplied it explicitly
-    (``--target``), in which case cargo-deb receives it too — a derived
-    host triple is naming-only and never redirects cargo's target dir.
+    platform composed for — NAMING-ONLY (``<name>-<target>`` naming, windows
+    detection, platform gating): builds are native (``shipit build`` has no
+    ``--target`` plumbing and writes ``target/release/``), so no composition
+    ever redirects a tool at a ``target/<triple>/`` dir (issue #784 F3).
     """
 
     artifact: config.Artifact
@@ -92,7 +108,6 @@ class ComposeRequest:
     out_dir: Path
     target: str
     run_cmd: RunCmd
-    target_declared: bool = False
 
 
 @dataclass(frozen=True)
@@ -210,20 +225,45 @@ def _emit_into_out(
 
 def _compose_deb(req: ComposeRequest) -> Composed:
     """cargo-deb over the pre-built release binary — no rebuild, no strip;
-    a run that produces no ``.deb`` is a hard failure (legacy build-deb)."""
+    a run that produces no ``.deb`` is a hard failure (legacy build-deb).
+    Self-provisions cargo-deb (a pinned version) when missing and NEVER
+    passes ``--target`` —
+    the build is native, so cargo-deb reads ``target/release/`` and derives
+    the Debian arch from the host toolchain (correct by construction on the
+    per-arch matrix runners). See the module docstring's deb entry."""
     leg = _leg_for(req.artifact, req.entries, "rust", "deb")
     package = next(
         (t.package for t in req.artifact.build if t.toolchain == "rust" and t.package),
         None,
     )
+    if shutil.which("cargo-deb") is None:
+        # Self-provision (issue #784 F2): cargo-deb is not on conda-forge, so
+        # the consumer's pixi env cannot carry it, and the wf-build runner
+        # arrives without it — the leg would otherwise fail by construction.
+        # cargo itself is guaranteed present (it built the binary this deb
+        # wraps); a failing install raises through run_cmd, aborting the
+        # stage loudly (ADR-0009's barrier), never a quiet skip. The version
+        # is pinned (CARGO_DEB_VERSION) for a reproducible build.
+        #
+        # No post-install PATH re-check: cargo resolves a custom subcommand
+        # (`cargo deb`) by searching $CARGO_HOME/bin ITSELF, independent of the
+        # process PATH, so the just-installed cargo-deb is found even in an
+        # isolated env (pixi) where $CARGO_HOME/bin is off PATH — a shutil.which
+        # gate here would spuriously abort exactly that case (issue #784 F2).
+        req.run_cmd(
+            [
+                "cargo",
+                "install",
+                "cargo-deb",
+                "--version",
+                CARGO_DEB_VERSION,
+                "--locked",
+            ],
+            req.root,
+        )
     argv = ["cargo", "deb", "--no-build", "--no-strip"]
     if package is not None:
         argv += ["-p", package]
-    if req.target_declared:
-        # cargo-deb derives the Debian arch from --target (the legacy
-        # build-deb contract) — passed through only when the caller declared
-        # one, because it also redirects which target/ dir cargo-deb reads.
-        argv += ["--target", req.target]
     emitted = _emit_into_out(req, argv, "--output", req.root / leg.path)
     produced = [name for name in emitted if name.endswith(".deb")]
     if not produced:

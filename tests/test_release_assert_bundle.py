@@ -2,8 +2,9 @@
 
 The integrity guard (workflows.lex §3.2) is pure over a bundle tree, so the
 tests build real tmp-path fixtures: ``.app`` bundles (Info.plist +
-Contents/MacOS), reseal payloads (real tars, read in place), and loose-binary
-dist trees. Coverage pins each level of the expected-name fallback chain
+Contents/MacOS), reseal payloads (real tars, read in place), plain archives,
+``.deb`` packages (real ar containers, read in place — issue #784 F4), and
+loose-binary dist trees. Coverage pins each level of the expected-name fallback chain
 (mainBinaryName → productName → package name → artifact name) and reproduces
 the scar itself: the gen_fixtures incident — a dev tool shipped as the app's
 main executable, signing and notarizing cleanly — as the wrong-binary
@@ -11,6 +12,7 @@ fixture. The verb tests pin the uniform exit contract: 0 match, 1 mismatch
 with the verdict + expected/actual names on stderr, ``--json`` available.
 """
 
+import io
 import json
 import plistlib
 import shutil
@@ -323,6 +325,101 @@ def test_windows_zip_matches_the_exe_stem(tmp_path):
             zf.write(f, arcname=f"{stem}/{f.name}")
     shutil.rmtree(stage)
     assert integrity.check_tree(tmp_path, "lex").ok
+
+
+# --------------------------------------------------------------------------
+# check_tree — .deb packages, read in place (issue #784 F4)
+# --------------------------------------------------------------------------
+
+
+def _tar_bytes(entries, compression="xz"):
+    """An in-memory tar: (path, content, mode) triples, dirs as DIRTYPE."""
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode=f"w:{compression}") as tar:
+        for path, content, mode in entries:
+            info = tarfile.TarInfo(path)
+            info.mode = mode
+            if content is None:
+                info.type = tarfile.DIRTYPE
+                tar.addfile(info)
+            else:
+                info.size = len(content)
+                tar.addfile(info, io.BytesIO(content))
+    return buf.getvalue()
+
+
+def _ar_member(name, payload):
+    """One ar member: the 60-byte header + payload, padded to an even offset."""
+    header = (
+        f"{name:<16}{'0':<12}{'0':<6}{'0':<6}{'100644':<8}{len(payload):<10}".encode()
+        + b"`\n"
+    )
+    return header + payload + (b"\n" if len(payload) % 2 else b"")
+
+
+def _make_deb(
+    tmp_path, binaries=("phos",), name="phos_1.0.0-1_amd64.deb", compression="xz"
+):
+    """A real ``.deb`` in cargo-deb's shape — an ar container (debian-binary +
+    control.tar.gz + data.tar.<compression>) whose data.tar carries
+    ``usr/bin/<binary>`` at 0o755 (the exec bit in the INNER tar header, the
+    transport-proof bit) beside non-executable doc members and the usual
+    directory entries (0o755 dirs must never count as binary candidates)."""
+    entries = [
+        ("./usr", None, 0o755),
+        ("./usr/bin", None, 0o755),
+        *((f"./usr/bin/{binary}", b"\x7fELF", 0o755) for binary in binaries),
+        ("./usr/share/doc/phos/copyright", b"(c)", 0o644),
+    ]
+    deb = integrity._AR_MAGIC
+    deb += _ar_member("debian-binary", b"2.0\n")
+    deb += _ar_member(
+        "control.tar.gz", _tar_bytes([("./control", b"Package: phos\n", 0o644)], "gz")
+    )
+    deb += _ar_member(f"data.tar.{compression}", _tar_bytes(entries, compression))
+    (tmp_path / name).write_bytes(deb)
+    return tmp_path / name
+
+
+@pytest.mark.parametrize("compression", ["xz", "gz"])
+def test_deb_main_binary_passes_from_the_data_tar(tmp_path, compression):
+    # THE #784 F4 finding: a deb leg's bundle tree carries ONLY the .deb —
+    # opaque to every other tier — and hard-failed with "nothing to assert".
+    # The deb tier reads the data.tar member in place (xz is cargo-deb's
+    # default compression; gz stays legal).
+    _make_deb(tmp_path, compression=compression)
+    verdict = integrity.check_tree(tmp_path, "phos")
+    assert verdict.ok
+    assert verdict.actual == ("phos",)
+
+
+def test_deb_with_the_wrong_binary_fails(tmp_path):
+    _make_deb(tmp_path, binaries=("gen_fixtures",))
+    verdict = integrity.check_tree(tmp_path, "phos")
+    assert not verdict.ok
+    assert verdict.actual == ("gen_fixtures",)
+
+
+def test_deb_with_several_exec_members_is_undeterminable(tmp_path):
+    _make_deb(tmp_path, binaries=("phos", "gen_fixtures"))
+    verdict = integrity.check_tree(tmp_path, "phos")
+    assert not verdict.ok
+    assert "no determinable main binary" in verdict.problem
+
+
+def test_a_corrupt_deb_is_undeterminable_never_a_pass(tmp_path):
+    (tmp_path / "phos_1.0.0-1_amd64.deb").write_bytes(b"not an ar archive")
+    verdict = integrity.check_tree(tmp_path, "phos")
+    assert not verdict.ok
+    assert "no determinable main binary" in verdict.problem
+
+
+def test_deb_is_asserted_even_beside_loose_junk(tmp_path):
+    # The deb tier suppresses the loose scan exactly like the other archive
+    # tiers: a stray non-executable file beside the .deb changes nothing.
+    _make_deb(tmp_path)
+    (tmp_path / "README.md").write_text("readme")
+    assert integrity.check_tree(tmp_path, "phos").ok
 
 
 def test_an_app_takes_precedence_over_loose_executables(tmp_path):

@@ -133,8 +133,10 @@ DEFAULT_NOTES_FILE = "RELEASE_NOTES.md"
 _CHANGELOG_STAGE: tuple[str, ...] = ("CHANGELOG.md", "CHANGELOG/*")
 
 #: Each composition command Exec's stated timeout (ADR-0028): a declared mac
-#: bundler (``tauri build``) legitimately compiles cold, so the bound matches
-#: the build verbs' hour rather than the bump commands' minutes.
+#: bundler (``tauri build``) — and the deb composition's cargo-deb
+#: self-provision (``cargo install``, a cold compile) — legitimately runs
+#: long, so the bound matches the build verbs' hour rather than the bump
+#: commands' minutes.
 BUNDLE_TIMEOUT: float = 3600.0
 
 #: The bundle output tree when ``--out`` is omitted: repo-root-relative — the
@@ -707,10 +709,10 @@ def _run_compose(argv: Sequence[str], cwd: Path) -> execrun.ExecResult:
     """Run one composition command through the one Exec runner (ADR-0028).
 
     ``check=True``: a failing composition command (a bundler refusal, a
-    missing cargo-deb) raises :class:`~shipit.execrun.ExecError`, which the
-    shared error shell renders — the bundle stage aborts non-zero with later
-    artifacts untouched (ADR-0009's barrier for the callers that chain
-    stages).
+    failing cargo-deb self-provision) raises
+    :class:`~shipit.execrun.ExecError`, which the shared error shell renders
+    — the bundle stage aborts non-zero with later artifacts untouched
+    (ADR-0009's barrier for the callers that chain stages).
     """
     return execrun.run(list(argv), cwd=str(cwd), timeout=BUNDLE_TIMEOUT)
 
@@ -804,7 +806,6 @@ def run_bundle(
                     out_dir=out_dir,
                     target=resolved,
                     run_cmd=run_cmd,
-                    target_declared=target is not None,
                 )
             )
         )
@@ -1389,8 +1390,9 @@ def prepare_cmd(
     metavar="TRIPLE",
     help=(
         "The target triple the bundles are named for (<name>-<target>); "
-        "default: derived from this host. An explicit triple also rides "
-        "cargo-deb's --target."
+        "default: derived from this host. Naming-only: builds are native "
+        "(`shipit build` writes target/release/), so no composition reads "
+        "a target/<triple>/ dir."
     ),
 )
 @click.option(
