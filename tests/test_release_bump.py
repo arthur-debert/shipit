@@ -173,6 +173,24 @@ def test_to_pep440_refuses_unmappable_suffix_loudly(bad):
         bump.to_pep440(bad)
 
 
+@pytest.mark.parametrize(
+    "annotated",
+    [
+        "1.0.0+build.1",  # stable version with build metadata
+        "1.2.3-rc.1+build.1",  # prerelease with build metadata
+    ],
+)
+def test_to_pep440_refuses_build_metadata_loudly(annotated):
+    """Build metadata is forbidden across the release version flow
+    (parse_spec rejects it, version_tags disqualifies it), so a +-annotated
+    version never reaches a legitimate manifest write. to_pep440 refuses it
+    LOUDLY rather than silently dropping the +segment on prereleases (or
+    passing it through on stable versions) — the manifest value is exactly
+    what the tag names (ADR-0041)."""
+    with pytest.raises(ReleaseError, match="build metadata is not allowed"):
+        bump.to_pep440(annotated)
+
+
 def test_bump_pyproject_normalizes_a_prerelease_to_pep440():
     """The #807 root cause: a -release-rc semver written verbatim is valid
     semver but invalid PEP 440 and breaks the source build at the tag. The

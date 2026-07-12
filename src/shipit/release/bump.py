@@ -259,10 +259,23 @@ def to_pep440(version: str) -> str:
     Any suffix with no clean PEP 440 mapping — an unknown phase word
     (``-snapshot.1``), a purely numeric prerelease (``-1``), or a multi-segment
     run (``-rc.1.2``) — is a LOUD :class:`ReleaseError`, never a silent write.
+    Build metadata (``+…``) is likewise a LOUD refusal, not a silent drop: the
+    release version flow forbids it at the boundary
+    (:func:`shipit.release.version.parse_spec`) and disqualifies tags that
+    carry it (:func:`shipit.release.version.version_tags`), so a ``+``-annotated
+    version never reaches a legitimate manifest write — the manifest value is
+    exactly what the tag names (ADR-0041), never annotated. Refusing here keeps
+    this normalizer from silently emitting a version the tag does not name.
     """
     match = SEMVER_RE.match(version)
     if match is None:
         raise ReleaseError(f"not a semver version to normalize to PEP 440: {version!r}")
+    if "+" in version:
+        raise ReleaseError(
+            f"build metadata is not allowed in a release version (got: {version!r}); "
+            "the manifest version is exactly what the tag names (ADR-0041), never "
+            "annotated"
+        )
     pre = match.group("pre")
     if pre is None:
         return version  # stable — identical in both spellings
