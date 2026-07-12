@@ -1038,7 +1038,6 @@ def run_sign(
     tree: str,
     *,
     out: str | None = None,
-    entitlements: str | None = None,
     notary_timeout: int = sign_mod.DEFAULT_NOTARY_TIMEOUT_MIN,
     as_json: bool = False,
     run_cmd: sign_mod.RunCmd | None = None,
@@ -1079,7 +1078,6 @@ def run_sign(
             scratch=scratch,
             run_cmd=run_cmd,
             env=os.environ if env is None else env,
-            entitlements=Path(entitlements) if entitlements else None,
             timeout_minutes=notary_timeout,
             **seams,
         )
@@ -1600,17 +1598,6 @@ def assert_bundle_cmd(
     ),
 )
 @click.option(
-    "--entitlements",
-    type=click.Path(exists=True, dir_okay=False),
-    help=(
-        "Entitlements plist applied when codesigning the top-level .app ONLY "
-        "(never its nested frameworks/helpers — that mis-application is what "
-        "the notary rejects; mac apps with QL/Spotlight extensions usually "
-        "need one). mac-app leg only: refused for archive bundles (a raw CLI "
-        "binary carries none)."
-    ),
-)
-@click.option(
     "--notary-timeout",
     type=click.IntRange(min=1),
     default=sign_mod.DEFAULT_NOTARY_TIMEOUT_MIN,
@@ -1622,7 +1609,6 @@ def assert_bundle_cmd(
 def sign_cmd(
     tree: str,
     out: str | None,
-    entitlements: str | None,
     notary_timeout: int,
     as_json: bool,
 ) -> None:
@@ -1633,7 +1619,10 @@ def sign_cmd(
     the unsigned .app reseal payload (<name>.unsigned-app.tar.gz) and at
     most one .dmg. The unit unpacks the .app, codesigns every nested signable
     (Mach-O files and nested bundle roots) inner-first and the .app LAST
-    (hardened runtime + timestamp), reseals
+    (hardened runtime + timestamp). Entitlements are shipit-provided and keyed
+    on the bundle SHAPE (no flag): an electron bundle (detected by its Electron
+    Framework) gets the JIT entitlements pair its Chromium/V8 needs
+    to run under hardened runtime; a mac-app/tauri/rust .app gets none. It reseals
     the .dmg from the SIGNED .app via hdiutil, codesigns it, notarizes +
     staples, and stages the signed .dmg under the original dmg filename.
     The archive leg (TOL02-WS08 #779): TREE carries the archive
@@ -1651,7 +1640,6 @@ def sign_cmd(
         run_sign(
             tree,
             out=out,
-            entitlements=entitlements,
             notary_timeout=notary_timeout,
             as_json=as_json,
         )

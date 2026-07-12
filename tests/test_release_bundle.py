@@ -568,6 +568,43 @@ def test_mac_app_requires_exactly_one_coupled_pair(tmp_path):
         )
 
 
+def test_mac_app_counts_only_the_top_level_app(tmp_path):
+    # #830 (defense in depth): _stage_mac_pair counts only the TOP-LEVEL .app
+    # (reusing _electron_top_level_apps), so a bundler that ever nested a .app
+    # inside the main app (electron's Contents/Frameworks/*Helper.app shape)
+    # does not trip the exactly-one guard spuriously. mac-app never nests one
+    # today, but the shared helper stays robust if one ever did.
+    (artifact,) = _artifacts(MAC_APP_SPEC)
+
+    def nested_helper(argv, cwd):
+        _bundler_effect(tmp_path)(argv, cwd)
+        source = tmp_path / "src-tauri/target/release/bundle"
+        helper = (
+            source
+            / "macos"
+            / "Phos.app"
+            / "Contents"
+            / "Frameworks"
+            / "Phos Helper.app"
+            / "Contents"
+            / "MacOS"
+        )
+        _executable(helper / "Phos Helper")
+
+    recorder = RunRecorder({"npm": nested_helper, "tar": _tar_effect})
+    composed = bundle_mod.MAC_APP.compose(
+        _request(tmp_path, artifact, (), target=MAC, run_cmd=recorder)
+    )
+    # Exactly one top-level pair — the nested helper .app did not trip the guard.
+    assert composed == bundle_mod.Composed(
+        "app",
+        "mac-app",
+        ("Phos.app", "Phos_1.0.0_aarch64.dmg", "app.unsigned-app.tar.gz"),
+    )
+    # The nested helper rode into the staged .app tree intact.
+    assert (tmp_path / "dist" / "Phos.app/Contents/Frameworks/Phos Helper.app").is_dir()
+
+
 # --------------------------------------------------------------------------
 # tauri — one `tauri build`, the platform's bundles (TOL02-WS15 #791)
 # --------------------------------------------------------------------------

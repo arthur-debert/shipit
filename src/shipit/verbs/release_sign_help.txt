@@ -19,7 +19,12 @@ The mac-app leg, end to end:
    signed at their root);
 3. codesign inner-first with the .app LAST — hardened runtime + secure
    timestamp on every Mach-O (a flat sign leaves nested code unhardened and
-   the notary rejects it). The Developer ID .p12 is imported into a
+   the notary rejects it). Entitlements are shipit-provided and keyed on the
+   bundle SHAPE (there is no flag): an electron bundle — detected by its
+   Electron Framework — gets the JIT entitlements pair Chromium/V8 needs to
+   run under hardened runtime (allow-jit on the top .app, allow-jit + inherit
+   on each helper .app), applied PER CODE ROLE; a mac-app/tauri/rust .app and
+   a nested .appex never receive JIT. The Developer ID .p12 is imported into a
    per-invocation temporary keychain torn down on every exit, with unique
    keychain/cert paths per pass so the .app and .dmg passes cannot collide;
 4. reseal the .dmg FROM the signed .app via hdiutil (re-bundling would strip
@@ -40,8 +45,9 @@ The archive leg (the legacy rust-cli.yml sign steps' shipit equivalent):
    verifies the notarization online;
 4. re-emit each tarball from its signed tree and stage it under the
    original archive filename (--out, default: TREE itself).
-   --entitlements is refused on this leg: entitlements belong to a .app
-   root, never a raw CLI binary.
+   Entitlements never reach this leg: they are the mac-app leg's
+   per-code-role policy over an unpacked .app, and a raw CLI binary carries
+   none (legacy rust-cli parity).
 
 The unit makes zero tauri or electron assumptions: whatever bundler produced
 the unsigned input is the caller's business. It needs no git checkout and no

@@ -261,6 +261,64 @@ def test_sign_order_puts_nested_first_and_the_app_last():
 
 
 # --------------------------------------------------------------------------
+# Entitlements — the per-code-role signing policy (#829)
+# --------------------------------------------------------------------------
+
+
+def test_entitlements_policy_default_is_empty():
+    # The non-electron default assigns NO entitlements to any role — the
+    # notary-clean mac-app / tauri / rust behaviour.
+    policy = sign_mod.EntitlementsPolicy()
+    assert policy.is_empty
+    assert not sign_mod.EntitlementsPolicy(app=Path("/a.plist")).is_empty
+
+
+def test_entitlements_for_reads_the_role_off_the_path():
+    policy = sign_mod.EntitlementsPolicy(
+        app=Path("/app.plist"),
+        helper=Path("/helper.plist"),
+        appex=Path("/appex.plist"),
+    )
+    top = Path("/x/Lexed.app")
+    helper = Path("/x/Lexed.app/Contents/Frameworks/Lexed Helper.app")
+    appex = Path("/x/Lexed.app/Contents/PlugIns/QL.appex")
+    framework = Path("/x/Lexed.app/Contents/Frameworks/Electron Framework.framework")
+    dylib = Path("/x/Lexed.app/Contents/Frameworks/libnode.dylib")
+    # The top-level .app (is_top_app) gets the app entitlements; a nested helper
+    # .app the helper set; a .appex its OWN sandbox set (matched BEFORE .app, so
+    # it NEVER receives the app/helper JIT); everything else none.
+    assert sign_mod.entitlements_for(top, is_top_app=True, policy=policy) == Path(
+        "/app.plist"
+    )
+    assert sign_mod.entitlements_for(helper, is_top_app=False, policy=policy) == Path(
+        "/helper.plist"
+    )
+    assert sign_mod.entitlements_for(appex, is_top_app=False, policy=policy) == Path(
+        "/appex.plist"
+    )
+    assert sign_mod.entitlements_for(framework, is_top_app=False, policy=policy) is None
+    assert sign_mod.entitlements_for(dylib, is_top_app=False, policy=policy) is None
+
+
+def test_entitlements_for_empty_policy_never_selects_anything():
+    policy = sign_mod.EntitlementsPolicy()
+    top = Path("/x/App.app")
+    helper = Path("/x/App.app/Contents/Frameworks/Helper.app")
+    assert sign_mod.entitlements_for(top, is_top_app=True, policy=policy) is None
+    assert sign_mod.entitlements_for(helper, is_top_app=False, policy=policy) is None
+
+
+def test_is_electron_keys_on_the_electron_framework(tmp_path):
+    # A bundle with the Electron Framework is electron; one that merely nests a
+    # helper .app (a native app can) is NOT — the marker is electron's own
+    # framework name, never a consumer name.
+    electron = _electron_app(tmp_path / "e", name="Lexed.app")
+    assert sign_mod._is_electron(electron)
+    native = _fixture_app(tmp_path / "n")  # nests Helper.app, no Electron Framework
+    assert not sign_mod._is_electron(native)
+
+
+# --------------------------------------------------------------------------
 # Mach-O detection and the inner-first enumeration
 # --------------------------------------------------------------------------
 
@@ -977,25 +1035,134 @@ def test_sign_bundle_staple_failure_is_non_fatal(tmp_path):
     assert (tmp_path / "dist" / "Phos_1.0.0_aarch64.dmg").read_bytes() == b"signed-dmg"
 
 
-def test_sign_bundle_entitlements_apply_to_the_app_root_only(tmp_path):
+def test_sign_bundle_non_electron_applies_no_entitlements(tmp_path):
+    # A mac-app / tauri / rust .app carries no Electron Framework, so it signs
+    # with the empty policy: NO --entitlements on any pass (the notary-clean
+    # non-electron behaviour #823 shipped). The fixture app nests a Helper.app
+    # but no Electron Framework, so it is deliberately NOT treated as electron.
     _fixture_tree(tmp_path)
-    ent = tmp_path / "ent.plist"
-    ent.write_text("<plist/>")
     recorder = SignRecorder(tmp_path)
 
-    sign_mod.sign_bundle(_request(tmp_path, recorder, entitlements=ent))
+    sign_mod.sign_bundle(_request(tmp_path, recorder))
 
     signs = recorder.heads("codesign", "--force")
-    # sign_order signs the nested paths first, the .app root last, then the dmg
-    # pass runs last of all: entitlements ride ONLY the .app root — a nested
-    # framework/helper carrying the app's entitlements is what the notary
-    # rejects, and they are meaningless on the disk image.
-    app_root_pass = signs[-2]
-    nested_passes = signs[:-2]
+    assert signs  # it did sign
+    assert all("--entitlements" not in argv for argv in signs)
+
+
+def _electron_tree(tmp_path: Path, *, name: str = "Lexed") -> Path:
+    """The signer's input tree for an electron bundle: a REAL reseal payload of
+    an electron-shaped .app (Electron Framework + GPU/Renderer/Plugin helper
+    .apps, :func:`_electron_app`) plus its unsigned .dmg."""
+    app = _electron_app(tmp_path / "src", name=f"{name}.app")
+    tree = tmp_path / "dist"
+    tree.mkdir()
+    _make_targz(tree / f"{name}.unsigned-app.tar.gz", app.parent, [app.name])
+    (tree / f"{name}_1.2.3_aarch64.dmg").write_bytes(b"unsigned-dmg")
+    return tree
+
+
+def _ent_of(argv: tuple[str, ...]) -> str | None:
+    """The --entitlements plist path in a codesign argv, or None."""
+    if "--entitlements" not in argv:
+        return None
+    return argv[argv.index("--entitlements") + 1]
+
+
+def test_sign_bundle_electron_applies_role_keyed_jit_entitlements(tmp_path):
+    # #829: an electron bundle (detected structurally by its Electron Framework)
+    # gets shipit's JIT entitlements pair — allow-jit on the top .app, allow-jit
+    # + inherit on each GPU/Renderer/Plugin helper .app — so V8 runs under
+    # hardened runtime instead of notarizing clean but crashing at launch. The
+    # nested Electron Framework / loose Mach-O and the resealed .dmg carry NONE.
+    _electron_tree(tmp_path)
+    recorder = SignRecorder(tmp_path)
+
+    sign_mod.sign_bundle(_request(tmp_path, recorder))
+
+    signs = recorder.heads("codesign", "--force")
+    scratch = tmp_path / "scratch"
+    app_plist = str(scratch / "electron-app.entitlements.plist")
+    helper_plist = str(scratch / "electron-helper.entitlements.plist")
+    # The last codesign pass overall is the dmg (its own keychain); the one
+    # before it is the top-level .app.
     dmg_pass = signs[-1]
-    assert "--entitlements" in app_root_pass
-    assert all("--entitlements" not in argv for argv in nested_passes)
-    assert "--entitlements" not in dmg_pass
+    app_pass = signs[-2]
+    assert dmg_pass[-1].endswith("signed.dmg")
+    assert _ent_of(dmg_pass) is None  # entitlements never ride a disk image
+    assert app_pass[-1].endswith("Lexed.app")
+    assert _ent_of(app_pass) == app_plist  # top .app gets the app entitlements
+    # Every helper .app pass gets the helper (inherit) entitlements; the
+    # Electron Framework and loose Mach-O passes get none.
+    helper_passes = [
+        a for a in signs if a[-1].endswith(".app") and not a[-1].endswith("Lexed.app")
+    ]
+    assert len(helper_passes) == 4  # "", (GPU), (Renderer), (Plugin)
+    assert all(_ent_of(a) == helper_plist for a in helper_passes)
+    non_app = [
+        a for a in signs if not a[-1].endswith(".app") and not a[-1].endswith(".dmg")
+    ]
+    assert non_app  # the Electron Framework + helper inner Mach-O
+    assert all(_ent_of(a) is None for a in non_app)
+
+
+def test_sign_bundle_electron_entitlements_content_is_the_minimal_modern_set(tmp_path):
+    # The shipit-provided plists carry exactly the modern minimal set (#829's
+    # authoritative spec): allow-jit on the app; allow-jit + inherit on helpers.
+    # get-task-allow / allow-unsigned-executable-memory / disable-library-
+    # validation are deliberately absent. codesign consumes the .plist at sign
+    # time, so the file content is the load-bearing artifact.
+    _electron_tree(tmp_path)
+    recorder = SignRecorder(tmp_path)
+
+    captured: dict[str, str] = {}
+
+    def capture(argv):
+        # Snapshot the plist contents at sign time — scratch is torn down after.
+        if argv[0] == "codesign" and "--entitlements" in argv:
+            p = Path(argv[argv.index("--entitlements") + 1])
+            captured[p.name] = p.read_text()
+        return None
+
+    recorder = SignRecorder(tmp_path, effects={"codesign": capture})
+    sign_mod.sign_bundle(_request(tmp_path, recorder))
+
+    app_xml = captured["electron-app.entitlements.plist"]
+    helper_xml = captured["electron-helper.entitlements.plist"]
+    assert "com.apple.security.cs.allow-jit" in app_xml
+    assert "com.apple.security.inherit" not in app_xml
+    assert "com.apple.security.cs.allow-jit" in helper_xml
+    assert "com.apple.security.inherit" in helper_xml
+    for xml in (app_xml, helper_xml):
+        assert "get-task-allow" not in xml
+        assert "allow-unsigned-executable-memory" not in xml
+        assert "disable-library-validation" not in xml
+
+
+def test_sign_bundle_electron_appex_never_receives_jit(tmp_path):
+    # Decision boundary: a nested .appex app extension is its OWN sandboxed
+    # process and must NEVER receive electron's JIT entitlement just because it
+    # is nested. shipit ships no default .appex policy, so the extension signs
+    # with no entitlements — and crucially NOT the app/helper JIT plist.
+    app = _electron_app(tmp_path / "src", name="Lexed.app")
+    appex = app / "Contents" / "PlugIns" / "LexedQuickLook.appex" / "Contents" / "MacOS"
+    appex.mkdir(parents=True)
+    (appex / "LexedQuickLook").write_bytes(MACHO_64)
+    tree = tmp_path / "dist"
+    tree.mkdir()
+    _make_targz(tree / "Lexed.unsigned-app.tar.gz", app.parent, [app.name])
+    (tree / "Lexed_1.2.3_aarch64.dmg").write_bytes(b"unsigned-dmg")
+
+    recorder = SignRecorder(tmp_path)
+    sign_mod.sign_bundle(_request(tmp_path, recorder))
+
+    signs = recorder.heads("codesign", "--force")
+    appex_pass = next(a for a in signs if a[-1].endswith(".appex"))
+    scratch = tmp_path / "scratch"
+    app_plist = str(scratch / "electron-app.entitlements.plist")
+    helper_plist = str(scratch / "electron-helper.entitlements.plist")
+    assert _ent_of(appex_pass) not in (app_plist, helper_plist)
+    assert _ent_of(appex_pass) is None  # no default .appex policy → no JIT
 
 
 def test_sign_bundle_without_an_incoming_dmg_stages_under_the_app_name(tmp_path):
@@ -1283,16 +1450,16 @@ def test_sign_archives_missing_secrets_fails_before_any_work(tmp_path):
     assert recorder.calls == []
 
 
-def test_sign_archives_refuses_entitlements(tmp_path):
-    # Entitlements belong to the mac-app leg's .app root; a raw CLI binary
-    # carries none (legacy rust-cli parity) — refused before any command.
+def test_sign_archives_never_applies_entitlements(tmp_path):
+    # Entitlements are the mac-app leg's per-code-role policy over an unpacked
+    # .app (#829); a raw CLI binary carries none (legacy rust-cli parity). The
+    # archive leg signs with the empty default policy — no --entitlements ever.
     _archive_tree(tmp_path)
-    ent = tmp_path / "app.entitlements"
-    ent.write_text("<plist/>")
     recorder = ArchiveRecorder(tmp_path)
-    with pytest.raises(ReleaseError, match="entitlements apply to the mac-app leg"):
-        sign_mod.sign_archives(_request(tmp_path, recorder, entitlements=ent))
-    assert recorder.calls == []
+    sign_mod.sign_archives(_request(tmp_path, recorder))
+    signs = recorder.heads("codesign", "--force")
+    assert signs
+    assert all("--entitlements" not in argv for argv in signs)
 
 
 def test_sign_archives_no_macho_is_a_hard_fail(tmp_path):
