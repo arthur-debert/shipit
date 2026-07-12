@@ -21,15 +21,37 @@ functions the entries carry:
   cargo-deb --version <pin> --locked``, pinned for a reproducible build)
   when absent from PATH: it is not on conda-forge, so no pixi env can carry
   it, and the wf-build runner arrives without it (issue #784 F2). cargo-deb
-  NEVER receives ``--target``: ``shipit build``
-  builds natively into ``target/release/`` (no ``--target`` plumbing —
-  :func:`shipit.tools.e2e.binary_location` is the same contract), so the
-  bundle triple is naming-only, and forwarding it would redirect cargo-deb
-  to the empty ``target/<triple>/release/`` (issue #784 F3: the one owner
-  of the triple-dir contract is the native build). Linux targets only.
+  receives ``--target <triple>`` EXACTLY when the build was cross-compiled
+  (``ComposeRequest.build_target`` set — TOL02-WS11): a native build writes
+  ``target/release/`` and cargo-deb reads it with no ``--target``, a cross
+  build writes ``target/<triple>/release/`` and cargo-deb is pointed there by
+  the SAME triple (which also derives the Debian arch). The triple-dir
+  contract's one owner is that threaded target — build, archive, and deb all
+  read where the build actually wrote (issue #785 deferral, resolved by #787;
+  :func:`shipit.tools.e2e.binary_location` shares the derivation). Linux
+  targets only.
 - **wheel** — ``uv build`` emitting BOTH the wheel and the sdist into the
   bundle output tree (the legacy ``python-pkg.yml`` build job: one build,
   consumed by multiple publish targets).
+- **wasm-pack** — the wasm/npm leg (TOL02-WS12 #788, WS10 DECIDED #798:
+  bespoke ``wasm-pack`` composition, pixi provisions ``wasm-pack`` + the
+  wasm32 target, the npm tarball is the artifact). ``wasm-pack build`` the
+  rust leg's crate into a fresh ``pkg/`` npm package tree (wasm + JS glue +
+  ``package.json``, the version wasm-pack reads from the crate's ``Cargo.toml``
+  — bumped by ``release prepare``), then ``npm pack --ignore-scripts`` that
+  tree into the ONE ``<pkg>-<version>.tgz`` npm tarball staged under the bundle
+  output tree (``--ignore-scripts`` forecloses a package lifecycle script —
+  ``prepare``/``prepack``/``postpack`` — running arbitrary code as a SECOND
+  build path during bundle, the same guarantee the npm publish leg makes on the
+  prebuilt tarball, ``release/publish.py``).
+  That tarball is BOTH the gh-release asset and exactly what the npm endpoint
+  publishes (``release/publish.py`` — no rebuild), and the assert-bundle npm
+  tier reads its inner ``package.json`` ``name`` as the assertable identity.
+  The optional ``scope`` / ``wasm-target`` declarations are the only
+  consumer-specific parts (``@scope`` and wasm-pack's ``--target``, default
+  ``bundler``); every other flag is registry-assembled. The scratch ``pkg/``
+  tree is always removed — only the tarball survives (ADR-0009's barrier: a
+  composition writes only its declared artifact under ``out_dir``).
 - **mac-app** — the coupled UNSIGNED ``.app``/``.dmg`` pair (the declared
   bundler builds the .app inside the .dmg run; they are not cleanly
   separable) PLUS the inner ``.app`` re-emitted as the reseal payload
@@ -47,7 +69,8 @@ functions the entries carry:
   suffix), so every matrix leg composes the identical bytes.
 
 Every external command runs through the injected runner — the one Exec seam
-(ADR-0028); the ``cargo`` / ``uv`` / ``tar`` / ``zip`` argv literals below
+(ADR-0028); the ``cargo`` / ``uv`` / ``wasm-pack`` / ``npm`` / ``tar`` /
+``zip`` argv literals below
 are those tools' one BUNDLE-side assembly point, whitelisted in the
 mechanized argv sweep (``tests/test_tool_argv_sweep.py``). Compose functions
 write ONLY under the request's bundle output tree (ADR-0009's barrier: a
@@ -101,10 +124,17 @@ class ComposeRequest:
 
     ``out_dir`` is the ABSOLUTE bundle output tree — the only place a
     composition may write. ``target`` is the target triple naming the
-    platform composed for — NAMING-ONLY (``<name>-<target>`` naming, windows
-    detection, platform gating): builds are native (``shipit build`` has no
-    ``--target`` plumbing and writes ``target/release/``), so no composition
-    ever redirects a tool at a ``target/<triple>/`` dir (issue #784 F3).
+    platform composed for — used for ``<name>-<target>`` naming, windows
+    detection, and platform gating. ``build_target`` is the cross triple a
+    ``shipit build --target <triple>`` redirected the build to (TOL02-WS11):
+    when set, the built binary lives under ``target/<triple>/release/`` and the
+    compositions that read a build output (archive, deb) look there; ``None``
+    keeps the native ``target/release/`` (issue #784 F3's native contract).
+    The bundle verb sets ``build_target`` from an EXPLICIT ``--target`` (the
+    cross fan wf-build drives) and leaves it ``None`` for the host-derived
+    default (a native local bundle) — so build and bundle agree on the dir by
+    being handed the SAME triple, never a native/cross guess (the triple-dir
+    contract's single owner, issue #785 deferral resolved by #787).
     """
 
     artifact: config.Artifact
@@ -113,6 +143,7 @@ class ComposeRequest:
     out_dir: Path
     target: str
     run_cmd: RunCmd
+    build_target: str | None = None
 
 
 @dataclass(frozen=True)
@@ -158,7 +189,9 @@ def _compose_archive(req: ComposeRequest) -> Composed:
     """The tarball/zip contract: ``<name>-<target>/`` staging subdir (binary
     + docs), archived beside it. See the module docstring's archive entry."""
     windows = _is_windows(req.target)
-    loc = e2e_mod.binary_location(req.artifact, req.entries, consumer="bundle")
+    loc = e2e_mod.binary_location(
+        req.artifact, req.entries, consumer="bundle", target_triple=req.build_target
+    )
     binary = req.root / loc.leg_path / (loc.relpath + (".exe" if windows else ""))
     if not binary.is_file():
         raise ReleaseError(
@@ -231,11 +264,13 @@ def _emit_into_out(
 def _compose_deb(req: ComposeRequest) -> Composed:
     """cargo-deb over the pre-built release binary — no rebuild, no strip;
     a run that produces no ``.deb`` is a hard failure (legacy build-deb).
-    Self-provisions cargo-deb (a pinned version) when missing and NEVER
-    passes ``--target`` —
-    the build is native, so cargo-deb reads ``target/release/`` and derives
-    the Debian arch from the host toolchain (correct by construction on the
-    per-arch matrix runners). See the module docstring's deb entry."""
+    Self-provisions cargo-deb (a pinned version) when missing. Passes
+    ``--target <triple>`` ONLY on a cross build (``build_target`` set): cargo
+    then reads ``target/<triple>/release/`` where ``shipit build --target``
+    wrote the binary and derives the Debian arch from the triple; a native
+    build passes no ``--target`` and cargo-deb reads ``target/release/`` and
+    derives the arch from the host toolchain (TOL02-WS11). See the module
+    docstring's deb entry."""
     leg = _leg_for(req.artifact, req.entries, "rust", "deb")
     package = next(
         (t.package for t in req.artifact.build if t.toolchain == "rust" and t.package),
@@ -269,6 +304,14 @@ def _compose_deb(req: ComposeRequest) -> Composed:
     argv = ["cargo", "deb", "--no-build", "--no-strip"]
     if package is not None:
         argv += ["-p", package]
+    if req.build_target is not None:
+        # A cross build (`shipit build --target <triple>`) wrote the binary to
+        # target/<triple>/release/, so cargo-deb must read the SAME dir —
+        # `--target <triple>` points it there (and derives the Debian arch from
+        # the triple). The one owner of the triple-dir contract is the target
+        # threaded from build to here (issue #785 deferral, resolved by #787):
+        # native builds pass no --target and cargo-deb reads target/release/.
+        argv += ["--target", req.build_target]
     emitted = _emit_into_out(req, argv, "--output", req.root / leg.path)
     produced = [name for name in emitted if name.endswith(".deb")]
     if not produced:
@@ -351,6 +394,79 @@ def _compose_tarball(req: ComposeRequest) -> Composed:
     return Composed(req.artifact.name, "tarball", (archive,))
 
 
+#: wasm-pack's default output target when a wasm/npm artifact declares none —
+#: the ``bundler`` target (webpack/rollup/vite consumers), wasm-pack's own
+#: default. A consumer targeting ``web`` / ``nodejs`` / ``no-modules`` declares
+#: it via ``bundle.wasm-target``.
+WASM_PACK_DEFAULT_TARGET = "bundler"
+
+
+def _compose_wasm_pack(req: ComposeRequest) -> Composed:
+    """``wasm-pack build`` the rust leg's crate → a ``pkg/`` npm tree, then
+    ``npm pack`` it into the ONE npm tarball. See the module docstring's
+    wasm-pack entry.
+
+    The crate is the FIRST mapped ``[toolchains]`` rust leg (the deb tier's
+    rule): wasm-pack builds a rust crate, so the wasm/npm artifact maps its
+    crate as a rust leg and declares ``build = ["rust"]``. ``wasm-pack build``
+    writes a FRESH ``pkg/`` scratch tree under the output tree (wasm-pack
+    itself clears ``--out-dir``); ``npm pack --ignore-scripts`` then produces
+    the tarball, moved into ``out_dir`` (``--ignore-scripts`` keeps a generated
+    ``package.json`` lifecycle script from running a second build path during
+    bundle — the publish leg's ``--ignore-scripts`` guarantee, at the pack).
+    The scratch ``pkg/`` is always removed — only the tarball
+    is a declared artifact (ADR-0009's barrier). A build that leaves no
+    ``package.json``, or a pack that yields no single ``.tgz``, is a hard
+    bundle-stage failure, never a quiet pass.
+    """
+    leg = _leg_for(req.artifact, req.entries, "rust", "wasm-pack")
+    spec = req.artifact.bundle
+    assert spec is not None
+    target = spec.wasm_target or WASM_PACK_DEFAULT_TARGET
+    req.out_dir.mkdir(parents=True, exist_ok=True)
+    pkg = req.out_dir / f".pkg-{req.artifact.name}"
+    if pkg.exists():
+        # A rerun rebuilds pkg/ from scratch; wasm-pack clears its --out-dir,
+        # but removing it here keeps a failed prior run from leaking a stale
+        # tree into this one's npm pack.
+        shutil.rmtree(pkg)
+    crate = req.root / leg.path
+    argv = [
+        "wasm-pack",
+        "build",
+        "--release",
+        "--target",
+        target,
+        "--out-dir",
+        str(pkg),
+    ]
+    if spec.scope is not None:
+        argv += ["--scope", spec.scope]
+    try:
+        req.run_cmd(argv, crate)
+        if not (pkg / "package.json").is_file():
+            raise ReleaseError(
+                f"[artifacts.{req.artifact.name}] wasm-pack composition: "
+                f"`wasm-pack build` left no package.json under {pkg} — the npm "
+                f"package tree is the artifact; a build that produces none is a "
+                f"hard fail, never a quiet pass"
+            )
+        produced = _emit_into_out(
+            req, ["npm", "pack", "--ignore-scripts"], "--pack-destination", pkg
+        )
+    finally:
+        if pkg.exists():
+            shutil.rmtree(pkg)
+    tarballs = [name for name in produced if name.endswith(".tgz")]
+    if len(tarballs) != 1:
+        raise ReleaseError(
+            f"[artifacts.{req.artifact.name}] wasm-pack composition: `npm pack` "
+            f"produced {len(tarballs)} .tgz under {req.out_dir} (expected exactly "
+            f"one npm tarball — the artifact)"
+        )
+    return Composed(req.artifact.name, "wasm-pack", (tarballs[0],))
+
+
 def _compose_mac_app(req: ComposeRequest) -> Composed:
     """The coupled unsigned ``.app``/``.dmg`` pair + the reseal payload.
 
@@ -414,10 +530,11 @@ class Composition:
     the compositions whose output carries a MAIN BINARY the scar-#2 integrity
     guard checks (:mod:`shipit.release.integrity`, workflows.lex §3.2) —
     archive/deb/mac-app. A source/package composition (wheel's sdist+wheel,
-    tarball's generated C) has no binary to name, so the preflight planner
-    omits the ``assert-bundle`` stage for it (:func:`shipit.release.preflight.plan`):
-    running the guard over a source ``.tar.gz`` would hard-fail with "no main
-    binary" (the deb tier's #784-F4 lesson, inverted — nothing to assert).
+    tarball's generated C, wasm-pack's npm tgz) has no binary to name, so the
+    preflight planner omits the ``assert-bundle`` stage for it
+    (:func:`shipit.release.preflight.plan`): running the guard over a source
+    ``.tar.gz`` would hard-fail with "no main binary" (the deb tier's #784-F4
+    lesson, inverted — nothing to assert).
     ``platform_independent`` marks the compositions whose output carries NO
     ``-<target>`` qualifier — the tarball's generated C source is identical on
     every OS, so it emits one unqualified ``<name>.tar.gz`` (parity with legacy
@@ -427,6 +544,21 @@ class Composition:
     are not guaranteed identical across runners — mtimes/uid/gid), so the
     config boundary refuses such a composition declared with >1 ``platforms``
     (:func:`shipit.config._parse_artifact`): it must build on exactly one leg.
+    ``option_keys`` are the
+    EXTRA optional declaration keys a registry-assembled composition accepts
+    (wasm-pack's ``scope`` / ``wasm-target`` — the ``@scope`` and wasm-pack
+    ``--target``, the only consumer-specific parts); the config boundary
+    accepts them ONLY for the composition that names them and rejects them
+    everywhere else (:func:`shipit.config._parse_bundle`). ``provisions_signal``
+    names a toolchain SIGNAL a declared composition needs beyond its own leg —
+    wasm-pack's ``npm pack`` needs the node runtime (``npm`` rides ``nodejs``),
+    but wasm-pack rides the RUST signal and a rust-only wasm crate's npm
+    ``package.json`` is GENERATED into ``pkg/``, never tracked, so the node
+    manifest signal is absent (issue #788 review). ``shipit install`` unions
+    this signal into the detected toolchains off the declared composition
+    (:func:`shipit.verbs.install._composition_signals`), delivering the
+    node-deps block wherever the composition is declared; ``None`` (every
+    composition but wasm-pack) adds nothing.
     """
 
     name: str
@@ -436,6 +568,8 @@ class Composition:
     signable: bool = False
     asserts_binary: bool = True
     platform_independent: bool = False
+    option_keys: tuple[str, ...] = ()
+    provisions_signal: str | None = None
 
     def applies(self, target: str) -> bool:
         """Whether this composition runs for ``target`` (substring match on
@@ -449,6 +583,20 @@ DEB = Composition("deb", _compose_deb, platforms=("linux",))
 #: nothing to assert (its sdist IS a ``.tar.gz``, which the guard would
 #: otherwise misread as a binary archive and hard-fail).
 WHEEL = Composition("wheel", _compose_wheel, asserts_binary=False)
+#: wasm-pack: an npm ``.tgz`` (wasm/JS package) — like the wheel sdist and the
+#: tree-sitter tarball it carries no main binary, so the scar-#2 guard is
+#: skipped for it (``asserts_binary=False``); a source package built via
+#: ``npm pack`` has nothing for the integrity guard to assert.
+WASM_PACK = Composition(
+    "wasm-pack",
+    _compose_wasm_pack,
+    asserts_binary=False,
+    option_keys=("scope", "wasm-target"),
+    # `npm pack` at bundle needs the node runtime (npm); wasm-pack rides the
+    # rust signal and the crate's npm package.json is generated, never tracked,
+    # so install unions the node signal off this declaration (issue #788).
+    provisions_signal="node",
+)
 MAC_APP = Composition(
     "mac-app",
     _compose_mac_app,
@@ -469,7 +617,14 @@ TARBALL = Composition(
 
 #: The CLOSED registry, in a stable order. Adding a composition is adding an
 #: entry here (the toolchain registry's mirror) — never a kind switch.
-COMPOSITIONS: tuple[Composition, ...] = (ARCHIVE, DEB, WHEEL, MAC_APP, TARBALL)
+COMPOSITIONS: tuple[Composition, ...] = (
+    ARCHIVE,
+    DEB,
+    WHEEL,
+    WASM_PACK,
+    MAC_APP,
+    TARBALL,
+)
 
 
 def names() -> tuple[str, ...]:

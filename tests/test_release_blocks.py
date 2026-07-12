@@ -263,6 +263,20 @@ def test_build_block_never_ships_the_target_tree():
     assert "!dist/**/*.app/**" in path
 
 
+def test_build_block_cross_compiles_via_the_matrix_target():
+    # TOL02-WS11: the Build step passes the matrix triple as `--target` so the
+    # rust legs cross-compile the platforms a native runner cannot build
+    # natively (darwin-x86_64, musl) into target/<triple>/release/. Passed on
+    # EVERY lane so the fan is uniform and bundle reads the same dir; the
+    # bundle step already forwards the same triple (`--target "$TARGET"`).
+    steps = _steps("wf-build.yml", "build")
+    build = next(s for s in steps if "/shipit build" in s.get("run", ""))
+    assert '--target "$TARGET"' in build["run"]
+    assert build["env"]["TARGET"] == "${{ matrix.target }}"
+    bundle = next(s for s in steps if "release bundle" in s.get("run", ""))
+    assert bundle["env"]["TARGET"] == "${{ matrix.target }}"
+
+
 def test_build_block_bundles_only_its_matrix_entry_artifact():
     # The per-entry narrowing contract (TOL02-WS07's lex rc finding): the
     # matrix is one artifact × platform per entry, and wf-publish's assert

@@ -230,9 +230,19 @@ def test_cmd(args: tuple[str, ...]) -> None:
     "(go's -ldflags -X, ADR-0041). Supplied, never computed; absent keeps "
     "the embedded default.",
 )
+@click.option(
+    "--target",
+    "target",
+    metavar="TRIPLE",
+    default=None,
+    help="Cross-compile rust legs to TRIPLE (`cargo build --target TRIPLE`), "
+    "landing the binary in target/TRIPLE/release/ (TOL02-WS11). For the cross "
+    "platforms a native runner cannot build natively (darwin-x86_64, musl); "
+    "absent builds native into target/release/. No-op for go/python/npm.",
+)
 @click.argument("args", nargs=-1, type=click.UNPROCESSED)
-def build_cmd(version: str | None, args: tuple[str, ...]) -> None:
-    """Run this repo's build legs: `shipit build [--version VERSION] [LEG] [-- ARGS...]`.
+def build_cmd(version: str | None, target: str | None, args: tuple[str, ...]) -> None:
+    """Run this repo's build legs: `shipit build [--version VERSION] [--target TRIPLE] [LEG] [-- ARGS...]`.
 
     Walks the `.shipit.toml [toolchains]` path->toolchain map and dispatches
     each build leg to its REAL builder (cargo / go build / uv build / the npm
@@ -244,9 +254,11 @@ def build_cmd(version: str | None, args: tuple[str, ...]) -> None:
     (`shipit build npm -- --workspace web`) and require exactly one selected
     leg. `--version` supplies the release version injected where a go target
     declares its var (ADR-0041). Exit: 0 all steps build, 1 any step fails (a
-    missing builder hard-fails, never skips), 2 usage.
+    missing builder hard-fails, never skips), 2 usage. `--target` cross-compiles
+    rust legs to a triple (target/TRIPLE/release/) for the cross platforms a
+    native runner cannot build natively (TOL02-WS11).
     """
-    raise SystemExit(build_verb.run(list(args), version=version))
+    raise SystemExit(build_verb.run(list(args), version=version, target=target))
 
 
 @root.command(name="e2e", context_settings={"ignore_unknown_options": True})

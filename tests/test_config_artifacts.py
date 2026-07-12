@@ -356,7 +356,7 @@ def test_bundle_composition_names_the_closed_registry():
     # names the known set, mirroring endpoints/toolchains.
     with pytest.raises(config.ConfigError, match="unknown composition `rpm`") as exc:
         _load('[artifacts.x]\nbundle = { composition = "rpm" }\n')
-    assert "archive, deb, wheel, mac-app" in str(exc.value)
+    assert "archive, deb, wheel, wasm-pack, mac-app" in str(exc.value)
 
 
 def test_mac_app_requires_the_declared_bundler_command():
@@ -408,6 +408,53 @@ def test_registry_assembled_compositions_reject_declared_command(key, value):
     with pytest.raises(config.ConfigError, match=f"`{key}` applies only to"):
         _load(
             f'[artifacts.x]\nbundle = {{ composition = "archive", {key} = {value} }}\n'
+        )
+
+
+def test_wasm_pack_parses_scope_and_wasm_target(tmp_path):
+    # wasm-pack's optional consumer-specific parts (TOL02-WS12 #788): the npm
+    # @scope and wasm-pack's --target, declared on the bundle table.
+    (artifact,) = _load(
+        "[artifacts.wasm]\n"
+        'build = ["rust"]\n'
+        'bundle = { composition = "wasm-pack", scope = "lex-fmt", '
+        'wasm-target = "web" }\n'
+    )
+    assert artifact.bundle == config.BundleSpec(
+        composition="wasm-pack", scope="lex-fmt", wasm_target="web"
+    )
+
+
+def test_wasm_pack_scope_and_target_default_to_absent():
+    # Both are optional — an undeclared scope/target is None (the composition
+    # applies wasm-pack's own default target, `bundler`).
+    (artifact,) = _load(
+        '[artifacts.wasm]\nbuild = ["rust"]\nbundle = { composition = "wasm-pack" }\n'
+    )
+    assert artifact.bundle == config.BundleSpec(
+        composition="wasm-pack", scope=None, wasm_target=None
+    )
+
+
+@pytest.mark.parametrize("key", ["scope", "wasm-target"])
+def test_wasm_pack_options_must_be_non_empty_strings(key):
+    with pytest.raises(config.ConfigError, match=f"{key} must be a non-empty string"):
+        _load(
+            "[artifacts.wasm]\n"
+            'build = ["rust"]\n'
+            f'bundle = {{ composition = "wasm-pack", {key} = "" }}\n'
+        )
+
+
+@pytest.mark.parametrize("key", ["scope", "wasm-target"])
+def test_wasm_pack_options_are_rejected_on_other_compositions(key):
+    # scope/wasm-target are wasm-pack's ONLY (option_keys) — an unknown key on
+    # a composition that does not name them, so a typo dies at parse.
+    with pytest.raises(config.ConfigError, match=f"unknown key `{key}`"):
+        _load(
+            "[artifacts.x]\n"
+            'build = ["rust"]\n'
+            f'bundle = {{ composition = "archive", {key} = "web" }}\n'
         )
 
 

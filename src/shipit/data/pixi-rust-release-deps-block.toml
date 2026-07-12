@@ -13,3 +13,15 @@
 # .shipit.toml's [managed] table — a reconcile only ADDS toolchain blocks, it
 # never retires one.
 cargo-edit = "0.13.11.*"
+# The wasm/npm bundle composition's builder (TOL02-WS12 #788, WS10 DECIDED
+# #798): `shipit release bundle`'s wasm-pack composition runs `wasm-pack build`
+# to turn a rust crate into an npm package tree, then `npm pack`s the tarball
+# — the artifact. wasm-pack is on conda-forge, so it anchors HERE (the rust
+# release-deps block, rust signal) beside cargo-edit rather than
+# self-provisioning (the cargo-deb #785 exception is for tools conda-forge does
+# NOT carry). conda-forge's wasm-pack pulls the wasm32-unknown-unknown target
+# std it needs, so pixi provisions BOTH under setup-pixi's lockfile-keyed cache
+# (the #582 doctrine: the release run NEVER installs at run time). Pinned to the
+# minor line (`0.13.*` — conda match-spec); a bump is one data edit, rolled out
+# on each consumer's next `shipit install` reconcile.
+wasm-pack = "0.13.*"

@@ -433,6 +433,89 @@ def test_an_app_takes_precedence_over_loose_executables(tmp_path):
 
 
 # --------------------------------------------------------------------------
+# check_tree — npm tarballs, read in place (TOL02-WS12 #788)
+# --------------------------------------------------------------------------
+
+
+def _make_npm_tarball(
+    tmp_path, *, name="@lex-fmt/lex-wasm", filename=None, manifest=None
+):
+    """Stage a `.tgz` npm tarball: everything under a top-level `package/` dir,
+    the manifest at `package/package.json` (the npm pack layout)."""
+    filename = filename or f"{name.lstrip('@').replace('/', '-')}-1.2.3.tgz"
+    body = json.dumps(
+        {"name": name, "version": "1.2.3"} if manifest is None else manifest
+    )
+    tarball = tmp_path / filename
+    with tarfile.open(tarball, "w:gz") as tar:
+        for member, content in (
+            ("package/package.json", body.encode()),
+            ("package/lex_wasm_bg.wasm", b"\x00asm"),
+            ("package/lex_wasm.js", b"export {}"),
+        ):
+            info = tarfile.TarInfo(member)
+            info.size = len(content)
+            tar.addfile(info, io.BytesIO(content))
+    return tarball
+
+
+def test_npm_tarball_identity_passes_from_the_package_json_name(tmp_path):
+    # A wasm/npm artifact has NO executable main binary; its identity is the
+    # npm package name in package/package.json — read in place, like the deb
+    # tier reads its data.tar (a .tgz is opaque to every other tier).
+    _make_npm_tarball(tmp_path)
+    verdict = integrity.check_tree(tmp_path, "@lex-fmt/lex-wasm")
+    assert verdict.ok
+    assert verdict.actual == ("@lex-fmt/lex-wasm",)
+
+
+def test_npm_tarball_with_the_wrong_package_name_fails(tmp_path):
+    _make_npm_tarball(
+        tmp_path, name="@evil/other", filename="lex-fmt-lex-wasm-1.2.3.tgz"
+    )
+    verdict = integrity.check_tree(tmp_path, "@lex-fmt/lex-wasm")
+    assert not verdict.ok
+    assert verdict.actual == ("@evil/other",)
+
+
+def test_npm_tarball_without_a_package_json_is_undeterminable(tmp_path):
+    tarball = tmp_path / "lex-fmt-lex-wasm-1.2.3.tgz"
+    with tarfile.open(tarball, "w:gz") as tar:
+        info = tarfile.TarInfo("package/lex_wasm.js")
+        info.size = 2
+        tar.addfile(info, io.BytesIO(b"{}"))
+    verdict = integrity.check_tree(tmp_path, "@lex-fmt/lex-wasm")
+    assert not verdict.ok
+    assert "no determinable package name" in verdict.problem
+
+
+def test_npm_tarball_ignores_a_nested_dependency_manifest(tmp_path):
+    # A bundled dependency's package.json (deeper than package/package.json) is
+    # NOT the identity — only the top-level manifest names the package.
+    tarball = tmp_path / "lex-fmt-lex-wasm-1.2.3.tgz"
+    with tarfile.open(tarball, "w:gz") as tar:
+        for member, body in (
+            ("package/package.json", json.dumps({"name": "@lex-fmt/lex-wasm"})),
+            ("package/node_modules/dep/package.json", json.dumps({"name": "dep"})),
+        ):
+            info = tarfile.TarInfo(member)
+            data = body.encode()
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    verdict = integrity.check_tree(tmp_path, "@lex-fmt/lex-wasm")
+    assert verdict.ok
+    assert verdict.actual == ("@lex-fmt/lex-wasm",)
+
+
+def test_npm_tarball_is_asserted_even_beside_loose_junk(tmp_path):
+    # The .tgz tier suppresses the loose scan like the deb tier: a stray file
+    # beside the tarball never turns into a phantom main binary.
+    _make_npm_tarball(tmp_path)
+    (tmp_path / "README.md").write_text("readme")
+    assert integrity.check_tree(tmp_path, "@lex-fmt/lex-wasm").ok
+
+
+# --------------------------------------------------------------------------
 # The verb: exit contract, stderr diagnosis, --json, artifact resolution
 # --------------------------------------------------------------------------
 

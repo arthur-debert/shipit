@@ -19,8 +19,9 @@ Two halves:
 - :func:`check_tree` — the check itself, over a bundle tree: every main
   binary the tree carries (a ``.app``'s ``CFBundleExecutable``, a reseal
   payload's inner ``.app``, a plain ``.tar.gz``/``.zip`` archive's inner
-  executable, a ``.deb``'s inner executable, or — when the tree bundles none
-  of those — its loose executables) must be named exactly the expected name.
+  executable, a ``.deb``'s inner executable, a ``.tgz`` npm tarball's
+  ``package.json`` name, or — when the tree bundles none of those — its loose
+  executables) must be named exactly the expected name.
   A tree with NO discoverable main binary fails loudly: "nothing to assert"
   is a wrong bundle, never a pass.
 
@@ -51,6 +52,7 @@ available), so the WS06 blocks call it with no extra plumbing.
 from __future__ import annotations
 
 import io
+import json
 import plistlib
 import tarfile
 import zipfile
@@ -72,6 +74,13 @@ PLAIN_ARCHIVE_SUFFIXES = (".tar.gz", ".zip")
 #: The suffix the deb composition emits (:mod:`shipit.release.bundle`) —
 #: inspected here in place, like every other archive-shaped tier.
 DEB_SUFFIX = ".deb"
+
+#: The suffix the wasm-pack composition's npm tarball carries (TOL02-WS12
+#: #788) — `npm pack`'s ``.tgz`` (NOT ``.tar.gz``, so the plain-archive tier
+#: never sees it). Its identity is the inner ``package/package.json`` ``name``
+#: (the scar-#2 check for an npm package: an empty/wrong tree fails loudly),
+#: read in place like every other archive-shaped tier.
+NPM_TARBALL_SUFFIX = ".tgz"
 
 #: The ar container's global magic — a ``.deb`` IS an ar archive
 #: (``debian-binary`` + ``control.tar.*`` + ``data.tar.*``).
@@ -295,6 +304,37 @@ def _deb_main_binary(deb: Path) -> str | None:
     return None
 
 
+def _npm_tarball_main_binary(tarball: Path) -> str | None:
+    """The npm package IDENTITY of a ``.tgz`` — its inner
+    ``package/package.json`` ``name`` (``@scope/pkg`` for a scoped package),
+    read WITHOUT extraction. ``None`` when undeterminable: an unreadable
+    container, no ``package.json`` member, unparseable JSON, or a missing/
+    non-string ``name``. An npm tarball packs everything under a top-level
+    ``package/`` dir, so the manifest is ``package/package.json``."""
+    try:
+        with tarfile.open(tarball, mode="r:gz") as tar:
+            for member in tar:
+                parts = PurePosixPath(member.name).parts
+                if parts[-1:] != ("package.json",) or not member.isfile():
+                    continue
+                # The manifest is the top-level package/package.json; a nested
+                # bundled dependency's package.json (deeper) is not the identity.
+                if len(parts) != 2 or parts[0] != "package":
+                    continue
+                extracted = tar.extractfile(member)
+                if extracted is None:
+                    return None
+                try:
+                    manifest = json.loads(extracted.read())
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    return None
+                name = manifest.get("name") if isinstance(manifest, dict) else None
+                return name if isinstance(name, str) and name else None
+    except (tarfile.TarError, OSError):
+        return None
+    return None
+
+
 def _is_executable(path: Path) -> bool:
     """Whether ``path`` is a loose main-binary candidate: an executable
     regular file (or a ``.exe`` — windows carries no exec bit through)."""
@@ -304,7 +344,7 @@ def _is_executable(path: Path) -> bool:
         return True
     # Archives ride the bundle tree too (the tarball the archive composition
     # wrote); an exec bit on one would misread it as a binary.
-    if path.name.endswith((".tar.gz", ".zip", ".dmg", ".deb", ".whl")):
+    if path.name.endswith((".tar.gz", ".tgz", ".zip", ".dmg", ".deb", ".whl")):
         return False
     return bool(path.stat().st_mode & 0o111)
 
@@ -322,7 +362,11 @@ def check_tree(tree: Path, expected: str) -> BundleVerdict:
        survives artifact transport where the loose file's does not;
     4. every ``*.deb``, read in place (:func:`_deb_main_binary`) — its
        ``data.tar`` member's sole executable, same transport-proof shape;
-    5. only when the tree carries none of the above: every loose executable
+    5. every ``*.tgz`` npm tarball, read in place
+       (:func:`_npm_tarball_main_binary`) — its ``package/package.json``
+       ``name`` is the assertable identity (a wasm/npm artifact has no
+       executable main binary; its identity is the npm package name);
+    6. only when the tree carries none of the above: every loose executable
        file (``.exe`` counted by suffix, its stem compared).
 
     The verdict is ``ok`` exactly when at least one main binary was found
@@ -341,6 +385,7 @@ def check_tree(tree: Path, expected: str) -> BundleVerdict:
         if p.is_file() and _is_plain_archive(p)
     )
     debs = sorted(p for p in tree.rglob(f"*{DEB_SUFFIX}") if p.is_file())
+    tarballs = sorted(p for p in tree.rglob(f"*{NPM_TARBALL_SUFFIX}") if p.is_file())
     for app in apps:
         name = _app_main_binary(app)
         if name is None:
@@ -365,7 +410,15 @@ def check_tree(tree: Path, expected: str) -> BundleVerdict:
             problems.append(f"{deb.relative_to(tree)}: no determinable main binary")
         else:
             actual.append(name)
-    if not apps and not payloads and not archives and not debs:
+    for tarball in tarballs:
+        name = _npm_tarball_main_binary(tarball)
+        if name is None:
+            problems.append(
+                f"{tarball.relative_to(tree)}: no determinable package name"
+            )
+        else:
+            actual.append(name)
+    if not apps and not payloads and not archives and not debs and not tarballs:
         for path in sorted(tree.rglob("*")):
             if _is_executable(path):
                 actual.append(path.stem if path.suffix == ".exe" else path.name)

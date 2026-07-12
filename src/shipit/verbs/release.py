@@ -778,7 +778,12 @@ def run_bundle(
     exactly that artifact's outputs: a whole-map tree would put every
     artifact's binary in every entry's tree and fail wf-publish's
     per-artifact assert-bundle on any multi-artifact repo); an unknown name
-    is a loud refusal naming the declared set. ``run_cmd`` injects the Exec
+    is a loud refusal naming the declared set. An EXPLICIT ``target``
+    (TOL02-WS11) doubles as the cross signal: the build was ``shipit build
+    --target <triple>``, so the archive/deb compositions read the binary from
+    ``target/<triple>/release/``; a host-derived default reads the native
+    ``target/release/`` (the same triple must reach build and bundle, which
+    wf-build guarantees by passing it to both). ``run_cmd`` injects the Exec
     boundary — the recorded-invocation surface the tests drive; ``gitio``
     the git adapter.
 
@@ -814,6 +819,12 @@ def run_bundle(
             f"cannot derive a target triple for this host "
             f"({platform.system()}/{platform.machine()}) — pass --target"
         )
+    # An EXPLICIT --target is the cross signal (TOL02-WS11): the build was
+    # `shipit build --target <triple>`, so the binary lives under
+    # target/<triple>/release/ and the compositions read there. A host-derived
+    # default means a native build (target/release/) — build and bundle agree
+    # because wf-build passes the SAME --target to both (or neither, locally).
+    build_target = target
     out_arg = Path(out) if out else Path(DEFAULT_BUNDLE_DIR)
     # A relative --out anchors to the repo root, exactly like the default, so
     # the output tree never depends on which subdirectory bundle is run from.
@@ -844,6 +855,7 @@ def run_bundle(
                     out_dir=out_dir,
                     target=resolved,
                     run_cmd=run_cmd,
+                    build_target=build_target,
                 )
             )
         )
@@ -1505,9 +1517,11 @@ def prepare_cmd(
     metavar="TRIPLE",
     help=(
         "The target triple the bundles are named for (<name>-<target>); "
-        "default: derived from this host. Naming-only: builds are native "
-        "(`shipit build` writes target/release/), so no composition reads "
-        "a target/<triple>/ dir."
+        "default: derived from this host. An EXPLICIT --target is also the "
+        "cross signal (TOL02-WS11): the build was `shipit build --target "
+        "<triple>`, so archive/deb read the binary from target/<triple>/"
+        "release/. Omitted (host default) reads the native target/release/. "
+        "Pass the SAME triple to build and bundle."
     ),
 )
 @click.option(

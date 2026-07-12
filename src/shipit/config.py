@@ -549,11 +549,20 @@ class BundleSpec:
     bundler leaves the coupled ``.app``/``.dmg`` pair under. Both are
     REQUIRED by ``mac-app`` and rejected for every other composition (their
     commands are registry-assembled, never declared).
+
+    ``scope`` / ``wasm_target`` are the ``wasm-pack`` composition's optional
+    consumer-specific parts (TOL02-WS12 #788): the npm ``@scope`` (``--scope``,
+    ``None`` for an unscoped package) and wasm-pack's ``--target`` (``None`` =
+    the registry default, ``bundler``). Both are accepted ONLY for
+    ``wasm-pack`` (:attr:`shipit.release.bundle.Composition.option_keys`) and
+    rejected for every other composition.
     """
 
     composition: str
     command: tuple[str, ...] | None = None
     source: str | None = None
+    scope: str | None = None
+    wasm_target: str | None = None
 
 
 @dataclass(frozen=True)
@@ -758,7 +767,6 @@ def _parse_bundle(where: str, spec: object) -> BundleSpec:
             f"{where}.bundle: must be a table, e.g. "
             f'{{ composition = "archive" }}; got {spec!r}'
         )
-    _reject_unknown_keys(f"{where}.bundle", spec, ("composition", "command", "source"))
     composition = spec.get("composition")
     if not isinstance(composition, str) or not composition:
         raise ConfigError(
@@ -772,6 +780,16 @@ def _parse_bundle(where: str, spec: object) -> BundleSpec:
             f"{where}.bundle: unknown composition `{composition}`; "
             f"known compositions: {known}"
         )
+    # The accepted key set is composition-specific: only wasm-pack names
+    # scope/wasm-target (option_keys), so a `scope` on archive is a loud
+    # unknown-key here. command/source stay in the set for EVERY composition so
+    # a registry-assembled composition rejects them with the specific "applies
+    # only to a declared bundler" message below (not a generic unknown-key).
+    _reject_unknown_keys(
+        f"{where}.bundle",
+        spec,
+        ("composition", "command", "source", *entry.option_keys),
+    )
     command = spec.get("command")
     source = spec.get("source")
     if entry.declared_command:
@@ -796,9 +814,9 @@ def _parse_bundle(where: str, spec: object) -> BundleSpec:
             command=_parse_argv(f"{where}.bundle.command", command),
             source=str(PurePosixPath(source)),
         )
-    # Registry-assembled compositions (archive, deb, wheel): their commands
-    # are the registry's one assembly point (ADR-0028) — a declared argv or
-    # source dir would be a second one, refused loudly.
+    # Registry-assembled compositions (archive, deb, wheel, wasm-pack): their
+    # commands are the registry's one assembly point (ADR-0028) — a declared
+    # argv or source dir would be a second one, refused loudly.
     for key in ("command", "source"):
         if key in spec:
             raise ConfigError(
@@ -806,7 +824,21 @@ def _parse_bundle(where: str, spec: object) -> BundleSpec:
                 f"run a declared bundler (mac-app); composition "
                 f"`{composition}` assembles its own commands"
             )
-    return BundleSpec(composition=composition)
+    # wasm-pack's optional scope/wasm-target — non-empty strings when present
+    # (already gated to this composition by the option_keys unknown-key check).
+    scope = spec.get("scope")
+    if scope is not None and (not isinstance(scope, str) or not scope):
+        raise ConfigError(f"{where}.bundle: scope must be a non-empty string")
+    wasm_target = spec.get("wasm-target")
+    if wasm_target is not None and (
+        not isinstance(wasm_target, str) or not wasm_target
+    ):
+        raise ConfigError(f"{where}.bundle: wasm-target must be a non-empty string")
+    return BundleSpec(
+        composition=composition,
+        scope=scope,
+        wasm_target=wasm_target,
+    )
 
 
 def _parse_e2e(where: str, spec: object) -> E2eSpec:
