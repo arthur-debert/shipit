@@ -14,9 +14,9 @@ The issue tracker and triage label vocabulary should have been provided to you -
 
 2. Sketch out the major modules you will need to build or modify to complete the implementation. Actively look for opportunities to extract deep modules that can be tested in isolation.
 
-A deep module (as opposed to a shallow module) is one which encapsulates a lot of functionality in a simple, testable interface which rarely changes.
+   A deep module (as opposed to a shallow module) is one which encapsulates a lot of functionality in a simple, testable interface which rarely changes.
 
-Check with the user that these modules match their expectations. Check with the user which modules they want tests written for.
+   Check with the user that these modules match their expectations. Check with the user which modules they want tests written for.
 
 3. Write the Spec using the template below. **The Spec is the authoritative feature definition** - the *what & why*. It is a file, not an issue body:
 

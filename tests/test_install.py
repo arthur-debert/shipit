@@ -751,11 +751,13 @@ def test_managed_yamllint_config_extends_default_with_three_relaxations():
 
 
 def test_managed_markdownlintignore_covers_managed_paths_and_testdata():
-    """The ignore file excludes the managed/vendored markdown (skills/, AGENTS.md)
-    plus the test-data conventions (#500) — never other consumer-authored prose
-    (a consumer's README.md is theirs; shipit's own README is skipped only
-    because it is a lex projection, which `shipit lint` routes to the lexd leg
-    with no ignore entry — tested in test_lint.py). The test-data globs match
+    """The ignore file excludes the managed AGENTS.md block plus the test-data
+    conventions (#500) — never other consumer-authored prose (a consumer's
+    README.md is theirs; shipit's own README is skipped only because it is a lex
+    projection, which `shipit lint` routes to the lexd leg with no ignore entry —
+    tested in test_lint.py). The managed skills/ tree is deliberately NOT exempt
+    (#777): it is shipped content that must pass the delivered markdownlint gate,
+    so self-cert and this repo lint it at source. The test-data globs match
     lint.PROTECTED_TESTDATA_GLOBS: the fixer refuses to auto-rewrite them AND
     check mode skips these deliberately-malformed fixtures too."""
     from shipit import lint
@@ -765,7 +767,8 @@ def test_managed_markdownlintignore_covers_managed_paths_and_testdata():
         for line in iunits.data_bytes("markdownlintignore").decode().splitlines()
         if line and not line.startswith("#")
     ]
-    assert entries == ["skills/", "AGENTS.md", *lint.PROTECTED_TESTDATA_GLOBS]
+    assert "skills/" not in entries  # #777 — shipped skills are gated, not exempt
+    assert entries == ["AGENTS.md", *lint.PROTECTED_TESTDATA_GLOBS]
 
 
 def test_shipits_own_lint_configs_reconcile_to_noop():
