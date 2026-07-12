@@ -28,6 +28,7 @@ from shipit.workenv import (
     ExecutionRouting,
     TreeProvenance,
     WorkEnv,
+    resolution_record,
     resolve_ambient_env,
     resolve_existing_pr_write_env,
     resolve_readonly_review_env,
@@ -314,3 +315,36 @@ def test_routing_vocabulary_is_closed_and_names_existing_mechanisms():
         "activation-snapshot",
         "ambient",
     }
+
+
+def test_resolution_record_is_flat_redacted_and_uses_stable_field_names():
+    env = resolve_session_env(
+        repo=_REPO,
+        tree_path="/trees/acme/widget/ephemeral/sess-1",
+        branch="ephemeral/sess-1",
+        base="origin/main",
+        activation=_ACTIVATION,
+        env_identity=_ENV_IDENTITY,
+    )
+
+    record = resolution_record(env, boundary="session.codex-launch", role="coordinator")
+
+    assert record == {
+        "work_env_boundary": "session.codex-launch",
+        "working_dir": "/trees/acme/widget/ephemeral/sess-1",
+        "working_dir_repo": "acme/widget",
+        "working_dir_branch": "ephemeral/sess-1",
+        "checkout_strategy": "session-tree",
+        "routing": "activation-snapshot",
+        "role": "coordinator",
+        "tree_branch": "ephemeral/sess-1",
+        "tree_base": "origin/main",
+        "pixi_environment_name": "default",
+        "pixi_environment_lock_hash": "99f00798db0ea80c",
+        "pixi_activation": "present",
+    }
+    assert "working_dir_commit" not in record
+    assert "environment_variables" not in record
+    assert "PATH" not in record
+    assert "CONDA_PREFIX" not in record
+    assert "pixi_run_id" not in record

@@ -51,7 +51,7 @@ from typing import TextIO
 
 import click
 
-from ... import git, identity
+from ... import git, identity, workenv
 from ...harness import worktree_adapter
 from ...tree.create import create_from_source, new_agent_hash
 from ...tree.layout import TreeSpec, sanitize_slug
@@ -273,4 +273,21 @@ def _create_tree(*, branch: str | None = None, ephemeral: str | None = None) -> 
         ephemeral=ephemeral,
     )
     tree = create_from_source(spec, source_repo=root)
+    if ephemeral is not None:
+        session_env = workenv.resolve_session_env(
+            repo=spec.repo,
+            tree_path=tree.path,
+            branch=tree.branch,
+            base=tree.base,
+            activation=None,
+        )
+        logger.info(
+            "worktreecreate: work env resolved — %s routing for coordinator session tree",
+            session_env.routing.value,
+            extra=workenv.resolution_record(
+                session_env,
+                boundary="session.worktreecreate",
+                role="coordinator",
+            ),
+        )
     return tree.path

@@ -458,10 +458,19 @@ def test_provisioned_write_spawn_launches_through_its_work_env(
     assert "PIXI_PROJECT_MANIFEST" not in calls["env"]
     # The resolution record (spec §Observability): routing decision, checkout
     # strategy, and the BORROWED pixi env name — never a fabricated run id.
-    record = next(r for r in caplog.records if getattr(r, "routing", None))
+    record = next(
+        r
+        for r in caplog.records
+        if getattr(r, "work_env_boundary", None) == "spawn.write-run"
+    )
     assert record.routing == "pixi-run"
-    assert record.checkout == "NewWriteTree"
-    assert record.pixi_env == "default"
+    assert record.checkout_strategy == "new-write-tree"
+    assert record.pixi_environment_name == "default"
+    assert record.pixi_environment_lock_hash == "99f00798db0ea80c"
+    assert record.working_dir_repo == "acme/widget"
+    assert record.tree_branch == "TRE03/WS01"
+    assert record.tree_base == "origin/TRE03/umbrella"
+    assert not hasattr(record, "pixi_run_id")
 
 
 @pytest.mark.parametrize("invalid_identity", ["not json", "[]", "{}", "null"])
@@ -490,9 +499,13 @@ def test_provisioned_write_spawn_tolerates_invalid_optional_env_identity(
         r for r in caplog.records if "pixi env identity unreadable" in r.message
     )
     assert warning.levelno == logging.WARNING
-    record = next(r for r in caplog.records if getattr(r, "routing", None))
+    record = next(
+        r
+        for r in caplog.records
+        if getattr(r, "work_env_boundary", None) == "spawn.write-run"
+    )
     assert record.routing == "pixi-run"
-    assert not hasattr(record, "pixi_env")
+    assert not hasattr(record, "pixi_environment_name")
 
 
 def test_non_pixi_write_spawn_resolves_ambient_and_launches_bare(tmp_path, caplog):
@@ -507,11 +520,15 @@ def test_non_pixi_write_spawn_resolves_ambient_and_launches_bare(tmp_path, caplo
 
     assert calls["cmd"][0] != "pixi"  # bare backend argv, unrouted
     assert calls["cmd"][calls["cmd"].index("--agent") + 1] == "implementer"
-    record = next(r for r in caplog.records if getattr(r, "routing", None))
+    record = next(
+        r
+        for r in caplog.records
+        if getattr(r, "work_env_boundary", None) == "spawn.write-run"
+    )
     assert record.routing == "ambient"
-    assert record.checkout == "NewWriteTree"
-    # Absent-not-null: no pixi env ⇒ no pixi_env extra on the record at all.
-    assert not hasattr(record, "pixi_env")
+    assert record.checkout_strategy == "new-write-tree"
+    # Absent-not-null: no pixi env ⇒ no pixi identity extra on the record at all.
+    assert not hasattr(record, "pixi_environment_name")
 
 
 def test_write_spawn_checks_the_epic_umbrella_on_the_remote(tmp_path):
@@ -644,18 +661,28 @@ def test_unsupported_backend_is_refused_before_any_io(tmp_path):
     assert not calls
 
 
-def test_unknown_role_is_refused_before_any_io(tmp_path):
+def test_unknown_role_is_refused_before_any_io(tmp_path, caplog):
     # RPE01-WS01: an arbitrary role string fails the Role Profile registry's
     # spawn preflight — before repo resolution, Tree provisioning, or launch —
     # naming the role and the requested (detached) context.
     def untouchable():
         raise AssertionError("the role preflight must fire before any I/O")
 
+    caplog.set_level(logging.ERROR, logger="shipit.spawn")
     b, calls = bounds(tmp_path)
     with pytest.raises(SpawnError, match="unknown role 'wizard'") as exc:
         spawn_subagent(spec(role="wizard"), replace(b, repo_root=untouchable))
     assert "detached" in str(exc.value)  # the refusal names the context
     assert not calls  # no boundary touched: nothing created, nothing launched
+    refusal = next(
+        record
+        for record in caplog.records
+        if record.levelno == logging.ERROR
+        and getattr(record, "refusal_reason", None) == "role-profile-validation"
+    )
+    assert refusal.requested_role == "wizard"
+    assert refusal.launch_context == "detached"
+    assert "SHIPIT_" not in refusal.getMessage()
 
 
 @pytest.mark.parametrize("role", ["explorer", "coordinator"])
