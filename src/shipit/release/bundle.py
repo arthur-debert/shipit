@@ -33,6 +33,25 @@ functions the entries carry:
 - **wheel** — ``uv build`` emitting BOTH the wheel and the sdist into the
   bundle output tree (the legacy ``python-pkg.yml`` build job: one build,
   consumed by multiple publish targets).
+- **wasm-pack** — the wasm/npm leg (TOL02-WS12 #788, WS10 DECIDED #798:
+  bespoke ``wasm-pack`` composition, pixi provisions ``wasm-pack`` + the
+  wasm32 target, the npm tarball is the artifact). ``wasm-pack build`` the
+  rust leg's crate into a fresh ``pkg/`` npm package tree (wasm + JS glue +
+  ``package.json``, the version wasm-pack reads from the crate's ``Cargo.toml``
+  — bumped by ``release prepare``), then ``npm pack --ignore-scripts`` that
+  tree into the ONE ``<pkg>-<version>.tgz`` npm tarball staged under the bundle
+  output tree (``--ignore-scripts`` forecloses a package lifecycle script —
+  ``prepare``/``prepack``/``postpack`` — running arbitrary code as a SECOND
+  build path during bundle, the same guarantee the npm publish leg makes on the
+  prebuilt tarball, ``release/publish.py``).
+  That tarball is BOTH the gh-release asset and exactly what the npm endpoint
+  publishes (``release/publish.py`` — no rebuild), and the assert-bundle npm
+  tier reads its inner ``package.json`` ``name`` as the assertable identity.
+  The optional ``scope`` / ``wasm-target`` declarations are the only
+  consumer-specific parts (``@scope`` and wasm-pack's ``--target``, default
+  ``bundler``); every other flag is registry-assembled. The scratch ``pkg/``
+  tree is always removed — only the tarball survives (ADR-0009's barrier: a
+  composition writes only its declared artifact under ``out_dir``).
 - **mac-app** — the coupled UNSIGNED ``.app``/``.dmg`` pair (the declared
   bundler builds the .app inside the .dmg run; they are not cleanly
   separable) PLUS the inner ``.app`` re-emitted as the reseal payload
@@ -45,7 +64,8 @@ functions the entries carry:
   surprise. Mac targets only.
 
 Every external command runs through the injected runner — the one Exec seam
-(ADR-0028); the ``cargo`` / ``uv`` / ``tar`` / ``zip`` argv literals below
+(ADR-0028); the ``cargo`` / ``uv`` / ``wasm-pack`` / ``npm`` / ``tar`` /
+``zip`` argv literals below
 are those tools' one BUNDLE-side assembly point, whitelisted in the
 mechanized argv sweep (``tests/test_tool_argv_sweep.py``). Compose functions
 write ONLY under the request's bundle output tree (ADR-0009's barrier: a
@@ -314,6 +334,79 @@ def _compose_wheel(req: ComposeRequest) -> Composed:
     return Composed(req.artifact.name, "wheel", (*wheels, *sdists))
 
 
+#: wasm-pack's default output target when a wasm/npm artifact declares none —
+#: the ``bundler`` target (webpack/rollup/vite consumers), wasm-pack's own
+#: default. A consumer targeting ``web`` / ``nodejs`` / ``no-modules`` declares
+#: it via ``bundle.wasm-target``.
+WASM_PACK_DEFAULT_TARGET = "bundler"
+
+
+def _compose_wasm_pack(req: ComposeRequest) -> Composed:
+    """``wasm-pack build`` the rust leg's crate → a ``pkg/`` npm tree, then
+    ``npm pack`` it into the ONE npm tarball. See the module docstring's
+    wasm-pack entry.
+
+    The crate is the FIRST mapped ``[toolchains]`` rust leg (the deb tier's
+    rule): wasm-pack builds a rust crate, so the wasm/npm artifact maps its
+    crate as a rust leg and declares ``build = ["rust"]``. ``wasm-pack build``
+    writes a FRESH ``pkg/`` scratch tree under the output tree (wasm-pack
+    itself clears ``--out-dir``); ``npm pack --ignore-scripts`` then produces
+    the tarball, moved into ``out_dir`` (``--ignore-scripts`` keeps a generated
+    ``package.json`` lifecycle script from running a second build path during
+    bundle — the publish leg's ``--ignore-scripts`` guarantee, at the pack).
+    The scratch ``pkg/`` is always removed — only the tarball
+    is a declared artifact (ADR-0009's barrier). A build that leaves no
+    ``package.json``, or a pack that yields no single ``.tgz``, is a hard
+    bundle-stage failure, never a quiet pass.
+    """
+    leg = _leg_for(req.artifact, req.entries, "rust", "wasm-pack")
+    spec = req.artifact.bundle
+    assert spec is not None
+    target = spec.wasm_target or WASM_PACK_DEFAULT_TARGET
+    req.out_dir.mkdir(parents=True, exist_ok=True)
+    pkg = req.out_dir / f".pkg-{req.artifact.name}"
+    if pkg.exists():
+        # A rerun rebuilds pkg/ from scratch; wasm-pack clears its --out-dir,
+        # but removing it here keeps a failed prior run from leaking a stale
+        # tree into this one's npm pack.
+        shutil.rmtree(pkg)
+    crate = req.root / leg.path
+    argv = [
+        "wasm-pack",
+        "build",
+        "--release",
+        "--target",
+        target,
+        "--out-dir",
+        str(pkg),
+    ]
+    if spec.scope is not None:
+        argv += ["--scope", spec.scope]
+    try:
+        req.run_cmd(argv, crate)
+        if not (pkg / "package.json").is_file():
+            raise ReleaseError(
+                f"[artifacts.{req.artifact.name}] wasm-pack composition: "
+                f"`wasm-pack build` left no package.json under {pkg} — the npm "
+                f"package tree is the artifact; a build that produces none is a "
+                f"hard fail, never a quiet pass"
+            )
+        produced = _emit_into_out(
+            req, ["npm", "pack", "--ignore-scripts"], "--pack-destination", pkg
+        )
+    finally:
+        if pkg.exists():
+            shutil.rmtree(pkg)
+    tarballs = [name for name in produced if name.endswith(".tgz")]
+    if len(tarballs) != 1:
+        raise ReleaseError(
+            f"[artifacts.{req.artifact.name}] wasm-pack composition: `npm pack` "
+            f"produced {len(tarballs)} .tgz under {req.out_dir} (expected exactly "
+            f"one npm tarball — the artifact)"
+        )
+    return Composed(req.artifact.name, "wasm-pack", (tarballs[0],))
+
+
 def _compose_mac_app(req: ComposeRequest) -> Composed:
     """The coupled unsigned ``.app``/``.dmg`` pair + the reseal payload.
 
@@ -373,7 +466,21 @@ class Composition:
     (:mod:`shipit.release.sign` — the mac-app leg's reseal payload, the
     archive leg's tarball, TOL02-WS08 #779): the config boundary refuses
     ``sign = true`` on any other composition, so a sign declaration can
-    never route to a signer leg that does not exist.
+    never route to a signer leg that does not exist. ``option_keys`` are the
+    EXTRA optional declaration keys a registry-assembled composition accepts
+    (wasm-pack's ``scope`` / ``wasm-target`` — the ``@scope`` and wasm-pack
+    ``--target``, the only consumer-specific parts); the config boundary
+    accepts them ONLY for the composition that names them and rejects them
+    everywhere else (:func:`shipit.config._parse_bundle`). ``provisions_signal``
+    names a toolchain SIGNAL a declared composition needs beyond its own leg —
+    wasm-pack's ``npm pack`` needs the node runtime (``npm`` rides ``nodejs``),
+    but wasm-pack rides the RUST signal and a rust-only wasm crate's npm
+    ``package.json`` is GENERATED into ``pkg/``, never tracked, so the node
+    manifest signal is absent (issue #788 review). ``shipit install`` unions
+    this signal into the detected toolchains off the declared composition
+    (:func:`shipit.verbs.install._composition_signals`), delivering the
+    node-deps block wherever the composition is declared; ``None`` (every
+    composition but wasm-pack) adds nothing.
     """
 
     name: str
@@ -381,6 +488,8 @@ class Composition:
     platforms: tuple[str, ...] = ()
     declared_command: bool = False
     signable: bool = False
+    option_keys: tuple[str, ...] = ()
+    provisions_signal: str | None = None
 
     def applies(self, target: str) -> bool:
         """Whether this composition runs for ``target`` (substring match on
@@ -391,6 +500,15 @@ class Composition:
 ARCHIVE = Composition("archive", _compose_archive, signable=True)
 DEB = Composition("deb", _compose_deb, platforms=("linux",))
 WHEEL = Composition("wheel", _compose_wheel)
+WASM_PACK = Composition(
+    "wasm-pack",
+    _compose_wasm_pack,
+    option_keys=("scope", "wasm-target"),
+    # `npm pack` at bundle needs the node runtime (npm); wasm-pack rides the
+    # rust signal and the crate's npm package.json is generated, never tracked,
+    # so install unions the node signal off this declaration (issue #788).
+    provisions_signal="node",
+)
 MAC_APP = Composition(
     "mac-app",
     _compose_mac_app,
@@ -401,7 +519,7 @@ MAC_APP = Composition(
 
 #: The CLOSED registry, in a stable order. Adding a composition is adding an
 #: entry here (the toolchain registry's mirror) — never a kind switch.
-COMPOSITIONS: tuple[Composition, ...] = (ARCHIVE, DEB, WHEEL, MAC_APP)
+COMPOSITIONS: tuple[Composition, ...] = (ARCHIVE, DEB, WHEEL, WASM_PACK, MAC_APP)
 
 
 def names() -> tuple[str, ...]:
