@@ -261,7 +261,7 @@ def test_shepherd_spawn_attaches_to_existing_pr_head_without_new_pr(tmp_path):
     assert calls["cmd"][calls["cmd"].index("--agent") + 1] == "shepherd"
     task = calls["cmd"][calls["cmd"].index("-p") + 1]
     assert "pull request #321" in task
-    assert "git push origin TRE03/WS04" in task
+    assert "git push origin HEAD:refs/heads/TRE03/WS04" in task
     assert "gh pr create" not in task
     assert "shipit pr next" in task and "do NOT run `shipit pr next`" in task
     assert result.to_dict() == {
@@ -365,7 +365,8 @@ def test_shepherd_existing_pr_does_not_require_draft_handshake(tmp_path):
     assert result.pr_is_draft is False
 
 
-def test_shepherd_non_writable_fork_pr_is_refused_before_tree(tmp_path):
+@pytest.mark.parametrize("maintainer_can_modify", [False, True])
+def test_shepherd_fork_pr_is_refused_before_tree(tmp_path, maintainer_can_modify):
     attached = gh.PrAttachment(
         number=321,
         state="OPEN",
@@ -373,11 +374,11 @@ def test_shepherd_non_writable_fork_pr_is_refused_before_tree(tmp_path):
         base_ref="TRE03/umbrella",
         head_ref="contributor/branch",
         is_cross_repository=True,
-        maintainer_can_modify=False,
+        maintainer_can_modify=maintainer_can_modify,
     )
     b, calls = bounds(tmp_path, attached_pr=attached)
 
-    with pytest.raises(SpawnError, match="not writable"):
+    with pytest.raises(SpawnError, match="fork-head fetching and pushing"):
         spawn_subagent(shepherd_spec(), b)
 
     assert "spec" not in calls and "cmd" not in calls

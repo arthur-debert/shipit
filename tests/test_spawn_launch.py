@@ -21,6 +21,16 @@ from shipit.identity import repo_from_slug
 from shipit.spawn import launch
 
 
+def test_shepherd_task_shell_quotes_the_untrusted_head_ref():
+    task = launch.shepherd_task(
+        pr_number=321,
+        branch="topic;echo-pwned",
+        base_branch="main",
+    )
+
+    assert "git push origin 'HEAD:refs/heads/topic;echo-pwned'" in task
+
+
 def test_write_task_forbids_ending_the_turn_with_background_work_in_flight():
     # #663: a headless Run that ends its turn EXITS — its background children die
     # with it (interactive sessions get re-invoked when harness-tracked background

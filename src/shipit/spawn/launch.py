@@ -72,6 +72,7 @@ rc 127); the curated passthrough keeps ``HOME``/``PATH`` intact (spike, 2026-06-
 from __future__ import annotations
 
 import logging
+import shlex
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -404,12 +405,13 @@ def shepherd_task(*, pr_number: int, branch: str, base_branch: str) -> str:
     ready, wait for reviewers, or merge; the coordinator and PR engine still own
     waits and readiness.
     """
+    push_refspec = shlex.quote(f"HEAD:refs/heads/{branch}")
     return (
         "You are a spawned shepherd Run launched by `shipit spawn subagent`, "
         f"attached to existing pull request #{pr_number} on branch {branch!r} "
         f"(base {base_branch!r}). Work in this writable Tree and address the "
         "currently open review feedback for that PR. Commit the fixes and push "
-        f"them back to the same branch with `git push origin {branch}`. Do NOT "
+        f"them back to the same branch with `git push origin {push_refspec}`. Do NOT "
         "open a new pull request, do NOT run the implementer draft-PR handshake, "
         "do NOT run `shipit pr next`, do NOT flip the PR ready, do NOT wait for "
         "reviewers, and do NOT merge. If a review comment should not be changed, "

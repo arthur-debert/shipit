@@ -214,9 +214,7 @@ class Boundaries:
     remote_branch_exists: Callable[..., bool] = git.remote_branch_exists
     create_tree: Callable[..., Tree] = create
     pr_for_head: Callable[..., gh.HeadPr | gh.UnknownPr | None] = gh.pr_for_head
-    pr_for_number: Callable[..., gh.PrAttachment | gh.UnknownPr | None] = (
-        gh.pr_for_number
-    )
+    pr_for_number: Callable[..., gh.PrAttachment] = gh.pr_for_number
     status_porcelain: Callable[..., list[str]] = git.status_porcelain
     refresh_attached_tree: Callable[..., None] = lambda path, branch: (
         _refresh_attached_tree(path, branch)
@@ -1043,18 +1041,6 @@ def _resolve_pr_attachment(
             exc=exc,
             pr=pr_number,
         ) from exc
-    if pr is None:
-        raise _refusal(
-            f"pull request #{pr_number} does not exist or is not visible; refused "
-            "before launching a shepherd.",
-            pr=pr_number,
-        )
-    if pr is gh.UNKNOWN:
-        raise _refusal(
-            f"could not determine pull request #{pr_number}; refused before "
-            "launching a shepherd.",
-            pr=pr_number,
-        )
     if pr.state != "OPEN":
         raise _refusal(
             f"pull request #{pr.number} is {pr.state}, not OPEN; refused before "
@@ -1062,11 +1048,11 @@ def _resolve_pr_attachment(
             pr=pr.number,
             pr_state=pr.state,
         )
-    if pr.is_cross_repository and not pr.maintainer_can_modify:
+    if pr.is_cross_repository:
         raise _refusal(
-            f"pull request #{pr.number} is from a fork and maintainers cannot modify "
-            "its head branch; refused before launching a shepherd because the "
-            "attachment is not writable.",
+            f"pull request #{pr.number} is from a fork; refused before launching a "
+            "shepherd because fork-head fetching and pushing are not supported by "
+            "the existing-PR attachment.",
             pr=pr.number,
         )
     return pr
