@@ -316,6 +316,52 @@ def test_unsupported_backend_is_refused_before_any_io(tmp_path):
     assert not calls
 
 
+def test_unknown_role_is_refused_before_any_io(tmp_path):
+    # RPE01-WS01: an arbitrary role string fails the Role Profile registry's
+    # spawn preflight — before repo resolution, Tree provisioning, or launch —
+    # naming the role and the requested (detached) context.
+    def untouchable():
+        raise AssertionError("the role preflight must fire before any I/O")
+
+    b, calls = bounds(tmp_path)
+    with pytest.raises(SpawnError, match="unknown role 'wizard'") as exc:
+        spawn_subagent(spec(role="wizard"), replace(b, repo_root=untouchable))
+    assert "detached" in str(exc.value)  # the refusal names the context
+    assert not calls  # no boundary touched: nothing created, nothing launched
+
+
+@pytest.mark.parametrize("role", ["explorer", "coordinator", "shepherd"])
+def test_detached_spawn_of_non_detachable_roles_is_refused(tmp_path, role):
+    # RPE01-WS01: a KNOWN role whose profile does not support a detached launch
+    # refuses before a Tree can be minted — the explorer is ambient (a detached
+    # spawn would hand it a write Tree it must never have), the coordinator is
+    # the host session itself, and the shepherd's existing-PR attachment
+    # lifecycle is a later WS (until then a detached shepherd would ride the
+    # implementer's new-branch/draft-PR handshake, the exact invalid combo).
+    b, calls = bounds(tmp_path)
+    with pytest.raises(SpawnError) as exc:
+        spawn_subagent(spec(role=role), b)
+    message = str(exc.value)
+    assert role in message and "detached" in message  # role + context named
+    assert not calls  # refused pre-provisioning, pre-launch
+
+
+def test_role_input_is_normalized_through_the_registry(tmp_path):
+    # The registry parse (strip/lower) is what the pipeline DISPATCHES on, so a
+    # cased '--role Reviewer' rides the read-only reviewer tail — it can never
+    # slip past the dispatch into the write path — and a cased write role
+    # reaches its launch argv normalized.
+    b, calls = bounds(tmp_path)
+    result = spawn_subagent(spec(role="  Reviewer ", ws=3, issue=None), b)
+    assert result.role == "reviewer"
+    assert "plan" in calls and "spec" not in calls  # read-only path, not write
+
+    b2, calls2 = bounds(tmp_path)
+    result2 = spawn_subagent(spec(role="IMPLEMENTER"), b2)
+    assert result2.role == "implementer"
+    assert calls2["cmd"][calls2["cmd"].index("--agent") + 1] == "implementer"
+
+
 def test_non_positive_ws_is_refused(tmp_path):
     b, _ = bounds(tmp_path)
     with pytest.raises(SpawnError, match="--ws must be a positive integer"):
