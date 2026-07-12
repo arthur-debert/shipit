@@ -230,7 +230,7 @@ def test_bundle_composition_names_the_closed_registry():
     # names the known set, mirroring endpoints/toolchains.
     with pytest.raises(config.ConfigError, match="unknown composition `rpm`") as exc:
         _load('[artifacts.x]\nbundle = { composition = "rpm" }\n')
-    assert "archive, deb, wheel, mac-app" in str(exc.value)
+    assert "archive, deb, wheel, mac-app, electron" in str(exc.value)
 
 
 def test_mac_app_requires_the_declared_bundler_command():
@@ -261,6 +261,47 @@ def test_mac_app_parses_command_and_source():
         # Normalized to canonical form, like bundle-config.
         source="src-tauri/target/release/bundle",
     )
+
+
+def test_electron_parses_command_and_source_like_a_declared_bundler():
+    # electron is a declared-command composition (its `electron-builder` argv
+    # is the one consumer-specific part, issue #790), so command + source are
+    # REQUIRED and parsed exactly like mac-app's.
+    (artifact,) = _load(
+        "[artifacts.app]\n"
+        'build = ["npm"]\n'
+        'bundle = { composition = "electron", command = ["npm", "run", "dist"],'
+        ' source = "./release" }\n'
+    )
+    assert artifact.bundle == config.BundleSpec(
+        composition="electron",
+        command=("npm", "run", "dist"),
+        source="release",
+    )
+
+
+def test_electron_requires_the_declared_bundler_command():
+    with pytest.raises(config.ConfigError, match="declare its argv"):
+        _load('[artifacts.x]\nbuild = ["npm"]\nbundle = { composition = "electron" }\n')
+
+
+def test_sign_with_electron_is_refused_electron_self_signs():
+    # electron self-signs and notarizes INSIDE the bundler (CSC + notarize),
+    # so it is NOT in the signer's leg set — `sign = true` over it would route
+    # to a reopen→reseal leg that does not exist. Refused at parse (issue #790).
+    with pytest.raises(
+        config.ConfigError,
+        match=r"sign = true requires a bundle composition the signer can "
+        r"reopen \(archive, mac-app\); got composition `electron`",
+    ):
+        _load(
+            "[artifacts.app]\n"
+            'build = ["npm"]\n'
+            'platforms = ["darwin-arm64"]\n'
+            'bundle = { composition = "electron", command = ["npm", "run", "dist"],'
+            ' source = "release" }\n'
+            "sign = true\n"
+        )
 
 
 def test_bundle_command_must_be_an_argv_list():

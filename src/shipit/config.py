@@ -527,16 +527,18 @@ class BundleSpec:
     word is bundle).
 
     ``composition`` names an entry of the CLOSED composition registry
-    (:mod:`shipit.release.bundle` — archive, deb, wheel, mac-app), the
-    ADR-0007 shape: the bundle step is declared per artifact, keyed off the
-    map, never a project-Kind switch. ``command`` is the declared bundler
-    argv the ``mac-app`` composition runs (``tauri build``,
-    ``electron-builder`` — the only consumer-specific part of the mac path,
-    workflows.lex §3.1), through the one exec seam like every producing
-    command (ADR-0028); ``source`` is the repo-relative directory that
-    bundler leaves the coupled ``.app``/``.dmg`` pair under. Both are
-    REQUIRED by ``mac-app`` and rejected for every other composition (their
-    commands are registry-assembled, never declared).
+    (:mod:`shipit.release.bundle` — archive, deb, wheel, mac-app, electron),
+    the ADR-0007 shape: the bundle step is declared per artifact, keyed off
+    the map, never a project-Kind switch. ``command`` is the declared bundler
+    argv the DECLARED-COMMAND compositions run (``mac-app``'s ``tauri build``,
+    ``electron``'s ``electron-builder`` — the one consumer-specific part of
+    each, workflows.lex §3.1), through the one exec seam like every producing
+    command (ADR-0028); ``source`` is the repo-relative directory that bundler
+    leaves its distributables under (mac-app's coupled ``.app``/``.dmg`` pair,
+    electron's per-platform ``.dmg``/``.AppImage``/``.exe`` set). Both are
+    REQUIRED by every declared-command composition (``mac-app``, ``electron``)
+    and rejected for the registry-assembled ones (archive, deb, wheel — their
+    commands are assembled, never declared).
     """
 
     composition: str

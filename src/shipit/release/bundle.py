@@ -43,6 +43,17 @@ functions the entries carry:
   sign-then-bundle). The declared ``command`` is the only consumer-specific
   part; a missing payload is a bundle-stage failure, never a signer
   surprise. Mac targets only.
+- **electron** — electron-builder's per-platform distributable set (the
+  darwin ``.dmg`` + ``.dmg.blockmap`` sidecar + the signed ``.app``, the
+  linux ``.AppImage``, the windows ``.exe`` + ``.exe.blockmap``), collected
+  from the declared ``source`` output tree after the declared bundler runs.
+  UNLIKE mac-app, electron self-signs AND notarizes on macOS INSIDE the
+  bundler run (electron-builder's ``CSC_*`` + ``notarize`` path), so the
+  composition is NOT signable — its darwin distributable ships already-signed
+  and never routes to shipit's reopen→reseal signer (TOL02-WS14 #790). The
+  signed ``.app`` is copied in as the assert-bundle integrity anchor. Mac/
+  linux/windows targets only (the windows leg's integrity + endpoint land
+  with WS11).
 
 Every external command runs through the injected runner — the one Exec seam
 (ADR-0028); the ``cargo`` / ``uv`` / ``tar`` / ``zip`` argv literals below
@@ -359,6 +370,100 @@ def _compose_mac_app(req: ComposeRequest) -> Composed:
     return Composed(req.artifact.name, "mac-app", (app.name, dmg.name, payload))
 
 
+#: The electron-builder distributable set per platform: a target-triple
+#: substring, the PRIMARY distributable suffix (hard-required — a leg that
+#: emits none is a bundle-stage failure, never a quiet pass), and the
+#: companion suffixes shipped beside it WHEN PRESENT (electron-builder's
+#: incremental-update ``.blockmap`` sidecars). electron-builder targets
+#: exactly this OS set; the composition gates on ``target`` and reads only the
+#: matching platform's set, so a darwin leg never scoops a stray linux
+#: ``.AppImage`` a shared source tree might carry.
+_ELECTRON_TARGETS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ("apple-darwin", ".dmg", (".dmg.blockmap",)),
+    ("linux", ".AppImage", (".AppImage.blockmap",)),
+    ("windows", ".exe", (".exe.blockmap",)),
+)
+
+
+def _electron_target(target: str) -> tuple[str, tuple[str, ...]]:
+    """The ``(primary_suffix, sidecar_suffixes)`` electron-builder emits for
+    ``target`` — the first :data:`_ELECTRON_TARGETS` whose substring matches.
+    Raises when no platform matches (the ``platforms`` gate keeps the verb
+    from reaching here for one, but the compose function refuses loudly rather
+    than compose an empty set). Pure."""
+    for needle, primary, sidecars in _ELECTRON_TARGETS:
+        if needle in target:
+            return primary, sidecars
+    raise ReleaseError(
+        f"electron composition: target `{target}` is not a darwin/linux/"
+        f"windows triple — electron-builder emits no distributable for it"
+    )
+
+
+def _compose_electron(req: ComposeRequest) -> Composed:
+    """electron-builder's declared bundle → the platform distributable set.
+
+    Runs the DECLARED bundler (``electron-builder`` — the one consumer-
+    specific part, like mac-app's) and collects the platform-appropriate
+    distributables from the declared ``source`` output tree: the darwin
+    ``.dmg`` (plus its ``.dmg.blockmap`` sidecar and the signed ``.app``
+    beside it), the linux ``.AppImage``, or the windows ``.exe`` — each
+    PRIMARY distributable hard-required (a leg producing none is a
+    bundle-stage failure), its ``.blockmap`` sidecar shipped when present.
+
+    Unlike mac-app, electron self-signs AND notarizes on macOS INSIDE the
+    bundler run (electron-builder's ``CSC_*`` + ``notarize`` path, driven by
+    the Apple secrets in the environment), so the composition is NOT
+    ``signable`` — it emits the ALREADY-signed distributable and never routes
+    to shipit's reopen→reseal signer (workflows.lex §3.1's reopen model is the
+    tauri/raw-binary path; electron's darwin leg is signed where it is built).
+    The signed darwin ``.app`` is copied into the bundle tree as the
+    assert-bundle integrity anchor — its ``CFBundleExecutable`` is the
+    authoritative main binary the scar-#2 guard reads
+    (:mod:`shipit.release.integrity`), and the opaque ``.dmg``/``.AppImage``
+    get that guard's name tiers. Mac/linux/windows targets only; the windows
+    leg's integrity + endpoint land with WS11 (issue #790 acceptance).
+    """
+    spec = req.artifact.bundle
+    assert spec is not None and spec.command is not None and spec.source is not None
+    req.run_cmd(list(spec.command), req.root)
+    source = req.root / spec.source
+    primary, sidecars = _electron_target(req.target)
+    dists = sorted(p for p in source.rglob(f"*{primary}") if p.is_file())
+    if not dists:
+        raise ReleaseError(
+            f"[artifacts.{req.artifact.name}] electron composition: the "
+            f"bundler produced no {primary} under {source} — hard fail, never "
+            f"a quiet pass (an electron leg must emit its distributable)"
+        )
+    req.out_dir.mkdir(parents=True, exist_ok=True)
+    outputs: list[str] = []
+    for dist in dists:
+        dest = req.out_dir / dist.name
+        if dest.exists():
+            dest.unlink()
+        shutil.copy2(dist, dest)
+        outputs.append(dist.name)
+    for sidecar in sidecars:
+        for side in sorted(source.rglob(f"*{sidecar}")):
+            if side.is_file():
+                dest = req.out_dir / side.name
+                if dest.exists():
+                    dest.unlink()
+                shutil.copy2(side, dest)
+                outputs.append(side.name)
+    # The signed .app is the darwin integrity anchor (assert-bundle reads its
+    # CFBundleExecutable); copytree(symlinks=True) preserves the symlinks and
+    # exec bits a bare copy — and cross-job artifact transport — would drop.
+    for app in sorted(p for p in source.rglob("*.app") if p.is_dir()):
+        app_dest = req.out_dir / app.name
+        if app_dest.exists():
+            shutil.rmtree(app_dest)
+        shutil.copytree(app, app_dest, symlinks=True)
+        outputs.append(app.name)
+    return Composed(req.artifact.name, "electron", tuple(sorted(outputs)))
+
+
 @dataclass(frozen=True)
 class Composition:
     """One registry entry: a composition name, the compose function it runs,
@@ -398,10 +503,22 @@ MAC_APP = Composition(
     declared_command=True,
     signable=True,
 )
+ELECTRON = Composition(
+    "electron",
+    _compose_electron,
+    platforms=("apple-darwin", "linux", "windows"),
+    declared_command=True,
+    # NOT signable: electron self-signs and notarizes on macOS inside the
+    # bundler run, so its darwin distributable ships already-signed and never
+    # routes to shipit's reopen→reseal signer (unlike mac-app/archive). The
+    # config boundary therefore refuses `sign = true` on an electron artifact
+    # — electron's darwin signing is declared in the bundler, not the plan.
+    signable=False,
+)
 
 #: The CLOSED registry, in a stable order. Adding a composition is adding an
 #: entry here (the toolchain registry's mirror) — never a kind switch.
-COMPOSITIONS: tuple[Composition, ...] = (ARCHIVE, DEB, WHEEL, MAC_APP)
+COMPOSITIONS: tuple[Composition, ...] = (ARCHIVE, DEB, WHEEL, MAC_APP, ELECTRON)
 
 
 def names() -> tuple[str, ...]:

@@ -433,6 +433,68 @@ def test_an_app_takes_precedence_over_loose_executables(tmp_path):
 
 
 # --------------------------------------------------------------------------
+# check_tree — electron .dmg / .AppImage, asserted by the declared filename
+# --------------------------------------------------------------------------
+
+
+def test_dmg_asserts_the_product_name_from_the_filename(tmp_path):
+    # The .dmg is opaque to pure reads (issue #790), so the tier asserts the
+    # product name electron-builder stamped into `<product>-<version>-<arch>`.
+    (tmp_path / "Phos-1.2.3-arm64.dmg").write_bytes(b"udif")
+    verdict = integrity.check_tree(tmp_path, "Phos")
+    assert verdict.ok
+    assert verdict.actual == ("Phos",)
+
+
+def test_dmg_with_the_wrong_product_name_fails(tmp_path):
+    (tmp_path / "gen_fixtures-1.2.3-arm64.dmg").write_bytes(b"udif")
+    verdict = integrity.check_tree(tmp_path, "Phos")
+    assert not verdict.ok
+    assert verdict.actual == ("gen_fixtures",)
+
+
+def test_dmg_with_a_hyphenated_product_name_keeps_the_whole_name(tmp_path):
+    # The version boundary is the first `-<digit>`, so a hyphen in the product
+    # name (before the version) survives.
+    (tmp_path / "Simple-Gal-UI-0.4.0-arm64.dmg").write_bytes(b"udif")
+    assert integrity.check_tree(tmp_path, "Simple-Gal-UI").ok
+
+
+def test_appimage_asserts_the_product_name_and_is_not_a_loose_binary(tmp_path):
+    # An .AppImage is an executable ELF; without its tier the loose scan would
+    # misread it as a main binary named `Phos-1.2.3.AppImage`. The tier asserts
+    # the product segment instead, and the .blockmap sidecar is inert.
+    appimage = tmp_path / "Phos-1.2.3.AppImage"
+    appimage.write_bytes(b"\x7fELF")
+    appimage.chmod(0o755)
+    (tmp_path / "Phos-1.2.3.AppImage.blockmap").write_bytes(b"blockmap")
+    verdict = integrity.check_tree(tmp_path, "Phos")
+    assert verdict.ok
+    assert verdict.actual == ("Phos",)
+
+
+def test_darwin_electron_tree_asserts_via_both_the_app_and_the_dmg(tmp_path):
+    # The electron composition ships the signed .app beside the .dmg, so the
+    # authoritative CFBundleExecutable check (tier 1) and the .dmg name tier
+    # both fire — both must equal the expected name.
+    _make_app(tmp_path, app="Phos.app", executable="Phos")
+    (tmp_path / "Phos-1.2.3-arm64.dmg").write_bytes(b"udif")
+    (tmp_path / "Phos-1.2.3-arm64.dmg.blockmap").write_bytes(b"blockmap")
+    verdict = integrity.check_tree(tmp_path, "Phos")
+    assert verdict.ok
+    assert verdict.actual == ("Phos",)
+
+
+def test_dmg_without_a_version_boundary_is_undeterminable(tmp_path):
+    # A name the tier cannot split into product/version fails loudly with the
+    # diagnosis — never a silent pass.
+    (tmp_path / "installer.dmg").write_bytes(b"udif")
+    verdict = integrity.check_tree(tmp_path, "Phos")
+    assert not verdict.ok
+    assert "no determinable main binary" in verdict.problem
+
+
+# --------------------------------------------------------------------------
 # The verb: exit contract, stderr diagnosis, --json, artifact resolution
 # --------------------------------------------------------------------------
 

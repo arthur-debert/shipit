@@ -1545,7 +1545,7 @@ def bundle_cmd(
     """Compose build outputs into the unsigned Artifacts.
 
     Walks the [artifacts] map and runs each artifact's declared bundle
-    composition (archive, deb, wheel, mac-app) for the current target;
+    composition (archive, deb, wheel, mac-app, electron) for the current target;
     artifacts with no bundle declaration pass through untouched, and
     compositions for other platforms are skipped (the per-OS matrix runs
     them on theirs). --artifact narrows the walk to one declared artifact

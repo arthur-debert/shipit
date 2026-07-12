@@ -19,8 +19,9 @@ Two halves:
 - :func:`check_tree` — the check itself, over a bundle tree: every main
   binary the tree carries (a ``.app``'s ``CFBundleExecutable``, a reseal
   payload's inner ``.app``, a plain ``.tar.gz``/``.zip`` archive's inner
-  executable, a ``.deb``'s inner executable, or — when the tree bundles none
-  of those — its loose executables) must be named exactly the expected name.
+  executable, a ``.deb``'s inner executable, an electron ``.dmg``/
+  ``.AppImage``'s declared product name, or — when the tree bundles none of
+  those — its loose executables) must be named exactly the expected name.
   A tree with NO discoverable main binary fails loudly: "nothing to assert"
   is a wrong bundle, never a pass.
 
@@ -43,6 +44,18 @@ without this tier wf-publish's assert fan hard-failed every deb leg with
 rides the inner tar's headers, transport-proof — is the assertable main
 binary.
 
+The electron tier (issue #790) is the exception to "crack the container": a
+``.dmg`` (Apple UDIF disk image) and an ``.AppImage`` (ELF runtime + squashfs)
+are OPAQUE to pure reads — no stdlib cracks them and this guard shells out to
+nothing — so the tier asserts the product name electron-builder stamped into
+the FILENAME (``<product>-<version>[-<arch>].dmg``) instead of an inner
+binary. On the darwin leg the electron composition also copies the signed
+``.app`` beside the ``.dmg``, so the ``.app`` tier's authoritative
+``CFBundleExecutable`` check still runs; the linux ``.AppImage`` leg has only
+the name tier. (electron's darwin distributable self-signs inside the bundler,
+so it never reaches ``wf-sign-mac`` — this guard runs on ``wf-publish``'s
+unsigned path for it.)
+
 Pure over the filesystem (reads only); rendered by the verb with uniform
 exit codes (0 pass, 1 fail — verdict + expected/actual on stderr, ``--json``
 available), so the WS06 blocks call it with no extra plumbing.
@@ -52,6 +65,7 @@ from __future__ import annotations
 
 import io
 import plistlib
+import re
 import tarfile
 import zipfile
 from dataclasses import dataclass
@@ -76,6 +90,32 @@ DEB_SUFFIX = ".deb"
 #: The ar container's global magic — a ``.deb`` IS an ar archive
 #: (``debian-binary`` + ``control.tar.*`` + ``data.tar.*``).
 _AR_MAGIC = b"!<arch>\n"
+
+#: The electron composition's darwin/linux distributable suffixes
+#: (:mod:`shipit.release.bundle`). UNLIKE every other tier — which cracks its
+#: container in place (a ``.tar``/``.zip``/``.deb``/``.app``) — a ``.dmg``
+#: (Apple UDIF disk image) and an ``.AppImage`` (ELF runtime + squashfs) are
+#: OPAQUE to pure reads, so these tiers assert the DECLARED name
+#: electron-builder stamped into the filename from ``productName`` rather than
+#: the inner executable. The darwin leg also ships the signed ``.app`` beside
+#: the ``.dmg`` (the electron composition copies it in), so its authoritative
+#: ``CFBundleExecutable`` is asserted by the ``.app`` tier too; the AppImage
+#: leg has only this name tier.
+DMG_SUFFIX = ".dmg"
+APPIMAGE_SUFFIX = ".AppImage"
+
+#: electron-builder's incremental-update sidecar suffix (``.dmg.blockmap``,
+#: ``.exe.blockmap``, ``.AppImage.blockmap``) — inert data beside a
+#: distributable, never a main-binary candidate.
+BLOCKMAP_SUFFIX = ".blockmap"
+
+#: The version-boundary in an electron-builder distributable filename
+#: (``<product>-<version>[-<arch>]<suffix>``): the first ``-`` immediately
+#: followed by a digit. Everything before it is the product-name segment the
+#: electron name tiers assert. (Heuristic — a productName whose own text
+#: carries a ``-<digit>`` before the version would truncate early; the
+#: assert then fails loudly rather than silently passing a wrong name.)
+_ELECTRON_VERSION_BOUNDARY = re.compile(r"-\d")
 
 
 def expected_main_binary(artifact: config.Artifact) -> str:
@@ -295,6 +335,22 @@ def _deb_main_binary(deb: Path) -> str | None:
     return None
 
 
+def _container_product_name(path: Path, suffix: str) -> str | None:
+    """The product-name segment of an electron-builder distributable filename
+    (``<product>-<version>[-<arch>]<suffix>``) — everything before the version
+    boundary (:data:`_ELECTRON_VERSION_BOUNDARY`). ``None`` when the name
+    carries no version boundary (unparseable): the guard reports it as an
+    undeterminable container rather than asserting a garbled name. Pure,
+    name-only — the ``.dmg``/``.AppImage`` container itself is opaque to pure
+    reads (see :data:`DMG_SUFFIX`)."""
+    stem = path.name[: -len(suffix)]
+    match = _ELECTRON_VERSION_BOUNDARY.search(stem)
+    if match is None:
+        return None
+    product = stem[: match.start()]
+    return product or None
+
+
 def _is_executable(path: Path) -> bool:
     """Whether ``path`` is a loose main-binary candidate: an executable
     regular file (or a ``.exe`` — windows carries no exec bit through)."""
@@ -302,9 +358,14 @@ def _is_executable(path: Path) -> bool:
         return False
     if path.suffix == ".exe":
         return True
-    # Archives ride the bundle tree too (the tarball the archive composition
-    # wrote); an exec bit on one would misread it as a binary.
-    if path.name.endswith((".tar.gz", ".zip", ".dmg", ".deb", ".whl")):
+    # Archives and opaque distributables ride the bundle tree too (the tarball
+    # the archive composition wrote; electron's .dmg/.AppImage, whose own
+    # tiers assert them, and the .blockmap sidecars beside them). An .AppImage
+    # is an executable ELF, so without excluding it the loose scan would
+    # misread it as a main binary named `<product>-<version>.AppImage`.
+    if path.name.endswith(
+        (".tar.gz", ".zip", ".dmg", ".deb", ".whl", ".AppImage", ".blockmap")
+    ):
         return False
     return bool(path.stat().st_mode & 0o111)
 
@@ -322,7 +383,13 @@ def check_tree(tree: Path, expected: str) -> BundleVerdict:
        survives artifact transport where the loose file's does not;
     4. every ``*.deb``, read in place (:func:`_deb_main_binary`) — its
        ``data.tar`` member's sole executable, same transport-proof shape;
-    5. only when the tree carries none of the above: every loose executable
+    5. every ``*.dmg`` and ``*.AppImage`` (electron distributables), asserted
+       by the product-name segment of the filename
+       (:func:`_container_product_name`) — the container is opaque to pure
+       reads, so the tier asserts the DECLARED name, not the inner binary;
+       the darwin ``.app`` beside a ``.dmg`` still gives tier 1 the
+       authoritative ``CFBundleExecutable`` check;
+    6. only when the tree carries none of the above: every loose executable
        file (``.exe`` counted by suffix, its stem compared).
 
     The verdict is ``ok`` exactly when at least one main binary was found
@@ -341,6 +408,8 @@ def check_tree(tree: Path, expected: str) -> BundleVerdict:
         if p.is_file() and _is_plain_archive(p)
     )
     debs = sorted(p for p in tree.rglob(f"*{DEB_SUFFIX}") if p.is_file())
+    dmgs = sorted(p for p in tree.rglob(f"*{DMG_SUFFIX}") if p.is_file())
+    appimages = sorted(p for p in tree.rglob(f"*{APPIMAGE_SUFFIX}") if p.is_file())
     for app in apps:
         name = _app_main_binary(app)
         if name is None:
@@ -365,7 +434,21 @@ def check_tree(tree: Path, expected: str) -> BundleVerdict:
             problems.append(f"{deb.relative_to(tree)}: no determinable main binary")
         else:
             actual.append(name)
-    if not apps and not payloads and not archives and not debs:
+    for dmg in dmgs:
+        name = _container_product_name(dmg, DMG_SUFFIX)
+        if name is None:
+            problems.append(f"{dmg.relative_to(tree)}: no determinable main binary")
+        else:
+            actual.append(name)
+    for appimage in appimages:
+        name = _container_product_name(appimage, APPIMAGE_SUFFIX)
+        if name is None:
+            problems.append(
+                f"{appimage.relative_to(tree)}: no determinable main binary"
+            )
+        else:
+            actual.append(name)
+    if not (apps or payloads or archives or debs or dmgs or appimages):
         for path in sorted(tree.rglob("*")):
             if _is_executable(path):
                 actual.append(path.stem if path.suffix == ".exe" else path.name)
