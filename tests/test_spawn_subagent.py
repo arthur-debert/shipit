@@ -13,6 +13,7 @@ the error shell, the byte-stable SPAWNED render) is the thin smoke layer in
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import replace
 from pathlib import Path
@@ -193,6 +194,76 @@ def test_write_spawn_links_pr_from_the_tree_branch(tmp_path):
     assert calls["pr_branch"] == "TRE03/WS02"  # link resolved from the Tree branch
     assert calls["pr_cwd"] == str(tmp_path / "tree")  # ...read from inside the Tree
     assert result.pr == 321
+
+
+def test_provisioned_write_spawn_launches_through_its_work_env(
+    tmp_path, monkeypatch, caplog
+):
+    # Acceptance (RPE01-WS05): a PROVISIONED implementer write Run resolves a
+    # Work Env and launches through the EXISTING pixi-run wrapping and
+    # environment scrub — the spawn seam supplies the facts (the provisioned-env
+    # sentinel, the on-disk env identity read through the pixi adapter), the
+    # resolver decides purely, and the launch consumes the carried decision.
+    monkeypatch.setenv("PIXI_PROJECT_MANIFEST", "/parent/pixi.toml")
+    b, calls = bounds(tmp_path)
+    tree_dir = tmp_path / "tree"
+    meta = tree_dir / ".pixi" / "envs" / "default" / "conda-meta"
+    meta.mkdir(parents=True)
+    (meta / "pixi").write_text(
+        json.dumps(
+            {
+                "manifest_path": str(tree_dir / "pixi.toml"),
+                "environment_name": "default",
+                "pixi_version": "0.63.2",
+                "environment_lock_file_hash": "99f00798db0ea80c",
+                "resolved_platform": {"subdir": "osx-arm64", "virtual_packages": []},
+            }
+        )
+    )
+
+    with caplog.at_level(logging.INFO, logger="shipit.spawn"):
+        spawn_subagent(spec(), b)
+
+    # The backend argv was re-expressed through the Tree's OWN pixi env — the
+    # same wrapped shape the pixi adapter builds (`pixi run --manifest-path
+    # <tree>/pixi.toml -- <backend argv>`).
+    assert calls["cmd"][:4] == [
+        "pixi",
+        "run",
+        "--manifest-path",
+        str(tree_dir / "pixi.toml"),
+    ]
+    child_argv = calls["cmd"][calls["cmd"].index("--") + 1 :]
+    assert child_argv[child_argv.index("--agent") + 1] == "implementer"
+    # The existing environment scrub still applies on top: the parent's leaked
+    # project pointer never reaches the child (Work Env changed WHO decides the
+    # routing, not what the launch does).
+    assert "PIXI_PROJECT_MANIFEST" not in calls["env"]
+    # The resolution record (spec §Observability): routing decision, checkout
+    # strategy, and the BORROWED pixi env name — never a fabricated run id.
+    record = next(r for r in caplog.records if getattr(r, "routing", None))
+    assert record.routing == "pixi-run"
+    assert record.checkout == "NewWriteTree"
+    assert record.pixi_env == "default"
+
+
+def test_non_pixi_write_spawn_resolves_ambient_and_launches_bare(tmp_path, caplog):
+    # Acceptance (RPE01-WS05): a NON-pixi write Run represents absent pixi
+    # activation honestly — the Work Env resolves AMBIENT (no activation, no
+    # env identity extra on the record) — and the existing launch behavior is
+    # preserved: the backend argv stays bare, exactly as before.
+    b, calls = bounds(tmp_path)  # the fake tree dir carries no .pixi env
+
+    with caplog.at_level(logging.INFO, logger="shipit.spawn"):
+        spawn_subagent(spec(), b)
+
+    assert calls["cmd"][0] != "pixi"  # bare backend argv, unrouted
+    assert calls["cmd"][calls["cmd"].index("--agent") + 1] == "implementer"
+    record = next(r for r in caplog.records if getattr(r, "routing", None))
+    assert record.routing == "ambient"
+    assert record.checkout == "NewWriteTree"
+    # Absent-not-null: no pixi env ⇒ no pixi_env extra on the record at all.
+    assert not hasattr(record, "pixi_env")
 
 
 def test_write_spawn_checks_the_epic_umbrella_on_the_remote(tmp_path):

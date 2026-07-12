@@ -49,7 +49,13 @@ chmod'd tree or fail outright. The pixi knowledge behind both halves — the
 provisioned-env sentinel and the wrapped argv — lives in the pixi adapter
 (:func:`shipit.pixienv.has_default_env` / :func:`shipit.pixienv.run_argv`,
 ADR-0028); this module keeps only the launch-side ROUTING DECISION and its
-narration. :func:`scrub_tree_env` mirrors the provisioning scrub
+narration. The WRITE tail now carries that decision on its resolved
+:class:`~shipit.workenv.WorkEnv` (RPE01-WS05): the spawn boundary probes the
+sentinel once, resolves the Work Env, and :func:`route_argv` CONSUMES its
+``routing`` field — same gate, decided once and described. :func:`pixi_wrap`
+(probe + wrap fused) remains the read-only/reviewer tail's router until the
+remaining boundaries resolve Work Envs too (RPE01-WS06).
+:func:`scrub_tree_env` mirrors the provisioning scrub
 (:func:`shipit.tree.create.provision_env`) — both rely SOLELY on the adapter's shared
 predicate (:func:`shipit.pixienv.scrub_env` over
 :func:`shipit.pixienv.is_leaked_env_var`), so they cannot drift: on top of the
@@ -67,7 +73,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from .. import execrun, pixienv
+from .. import execrun, pixienv, workenv
 
 #: The spawn subsystem's logger (shared with the verb): launch MECHANICS narrate
 #: at DEBUG per the spray conventions (ADR-0029) — the pixi-routing decision and
@@ -210,6 +216,12 @@ def pixi_wrap(argv: list[str], tree_path: str | Path) -> list[str]:
     env, so their argv is returned UNCHANGED — routing them through ``pixi run``
     would force a solve into a chmod'd tree or fail outright. Pure (a filesystem
     ``exists`` probe only), so the gate is table-tested without pixi.
+
+    This probe-and-wrap fusion now serves only the READ-ONLY/reviewer tail
+    (RPE01-WS05): the write tail probes the same sentinel once at the spawn
+    seam, resolves a :class:`~shipit.workenv.WorkEnv`, and routes through
+    :func:`route_argv` — the decision carried, not recalculated. The remaining
+    callers converge on Work Env in RPE01-WS06.
     """
     tree = Path(tree_path)
     if not pixienv.has_default_env(tree):
@@ -229,6 +241,38 @@ def pixi_wrap(argv: list[str], tree_path: str | Path) -> list[str]:
         extra={"pixi_wrapped": True},
     )
     return pixienv.run_argv(argv, tree)
+
+
+def route_argv(argv: list[str], work_env: workenv.WorkEnv) -> list[str]:
+    """Route ``argv`` per the resolved Work Env's execution-routing decision.
+
+    The Work Env CONSUMER on the launch path (RPE01-WS05): the decision was
+    made once, at the boundary that resolved ``work_env`` over supplied facts
+    (:func:`shipit.workenv.resolve_write_run_env`); this function only carries
+    it out — ``PIXI_RUN`` re-expresses the argv through the checkout's own
+    pixi env via the pixi adapter's builder (:func:`shipit.pixienv.run_argv`,
+    ADR-0028: the argv stays in pixi's domain home), anything else leaves the
+    argv BARE (``AMBIENT`` — a non-pixi checkout keeps its existing launch
+    behavior, honestly unrouted; ``ACTIVATION_SNAPSHOT`` contexts do not launch
+    through this seam). No probe here: recomputing the gate is exactly the
+    duplication Work Env exists to end. Pure argv-in/argv-out; the routing
+    narration lands at DEBUG like :func:`pixi_wrap`'s (ADR-0029 mechanics).
+    """
+    root = work_env.working_dir.path
+    if work_env.routing is workenv.ExecutionRouting.PIXI_RUN:
+        logger.debug(
+            "launch argv routed through the tree's pixi env at %s (work env)",
+            root,
+            extra={"pixi_wrapped": True},
+        )
+        return pixienv.run_argv(argv, root)
+    logger.debug(
+        "launch argv left bare: the work env at %s routes %s, not pixi-run",
+        root,
+        work_env.routing.value,
+        extra={"pixi_wrapped": False},
+    )
+    return argv
 
 
 def scrub_tree_env(env: Mapping[str, str]) -> dict[str, str]:
