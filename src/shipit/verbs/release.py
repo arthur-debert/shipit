@@ -111,6 +111,7 @@ from ..release import bump as bump_mod
 from ..release import bundle as bundle_mod
 from ..release import integrity as integrity_mod
 from ..release import preflight as preflight_mod
+from ..release import provisioning as provisioning_mod
 from ..release import publish as publish_mod
 from ..release import sign as sign_mod
 from ..release import version as version_mod
@@ -333,9 +334,11 @@ def _run_bump(argv: Sequence[str], cwd: Path) -> None:
     ``check=True``: a failing bump command (an ``npm version`` refusal, a
     broken manifest) raises :class:`~shipit.execrun.ExecError`, which the
     shared error shell renders — prepare aborts with nothing committed. The
-    KNOWN failure shapes (an unprovisioned ``cargo set-version``, issue #793)
-    are translated at the adapter loop in :func:`run_prepare` via
-    :func:`shipit.release.bump.explain_command_failure` into a
+    KNOWN failure shapes — a pixi-managed tool absent outright (#801,
+    :func:`shipit.release.provisioning.missing_tool_remedy`) or an
+    unprovisioned ``cargo set-version`` (issue #793,
+    :func:`shipit.release.bump.explain_command_failure`) — are translated at
+    the adapter loop in :func:`run_prepare` into a
     :class:`~shipit.release.ReleaseError` that names the remediation.
     """
     execrun.run(list(argv), cwd=str(cwd), timeout=BUMP_TIMEOUT)
@@ -528,13 +531,17 @@ def run_prepare(
             try:
                 run_cmd(argv, leg_dir)
             except execrun.ExecError as exc:
-                # Translate the KNOWN failure shapes (an unprovisioned
-                # `cargo set-version`, issue #793) into a ReleaseError naming
-                # the remediation — the reconcile, never a run-time install
-                # (the #582 cache doctrine). The probe IS this attempt: no
-                # `shutil.which` pre-gate (issue #785's cargo-resolution
+                # Translate the KNOWN failure shapes into a ReleaseError
+                # naming the remediation — the reconcile, never a run-time
+                # install (the #582 cache doctrine): a pixi-managed tool
+                # absent outright (`cargo`/`npm` missing-binary, #801 holes
+                # 1/3) or an unprovisioned `cargo set-version` (cargo present,
+                # cargo-edit absent — issue #793). The probe IS this attempt:
+                # no `shutil.which` pre-gate (issue #785's cargo-resolution
                 # finding). An unknown failure re-raises untranslated.
-                remedy = bump_mod.explain_command_failure(argv, exc.stderr)
+                remedy = provisioning_mod.missing_tool_remedy(
+                    argv, exc.cause
+                ) or bump_mod.explain_command_failure(argv, exc.stderr)
                 if remedy is None:
                     raise
                 raise ReleaseError(remedy) from exc
@@ -1307,27 +1314,42 @@ def run_publish(
                 (dispatch.artifact.name, dispatch.adapter.name, dispatch.skip)
             )
             continue
-        published.append(
-            dispatch.adapter.publish(
-                publish_mod.PublishRequest(
-                    artifact=dispatch.artifact,
-                    entries=entries,
-                    root=root,
-                    assets_dir=assets_dir,
-                    version=version,
-                    tag=tag,
-                    prerelease=prerelease,
-                    notes_path=notes_path,
-                    env=env_map,
-                    run_cmd=run_cmd,
-                    probe=probe,
-                    ghio=ghio,
-                    gitio=gitio,
-                    repo=repo,
-                    testpypi=testpypi,
+        try:
+            published.append(
+                dispatch.adapter.publish(
+                    publish_mod.PublishRequest(
+                        artifact=dispatch.artifact,
+                        entries=entries,
+                        root=root,
+                        assets_dir=assets_dir,
+                        version=version,
+                        tag=tag,
+                        prerelease=prerelease,
+                        notes_path=notes_path,
+                        env=env_map,
+                        run_cmd=run_cmd,
+                        probe=probe,
+                        ghio=ghio,
+                        gitio=gitio,
+                        repo=repo,
+                        testpypi=testpypi,
+                    )
                 )
             )
-        )
+        except execrun.ExecError as exc:
+            # A pixi-managed endpoint tool absent from the runner (`twine`,
+            # `npm`, `cargo` — #801 holes 1–3) fails LOUDLY naming the
+            # install reconcile that provisions it, never as a raw 127 —
+            # the prepare-side bump loop's exact translation, publish-side.
+            # Any other Exec failure re-raises untranslated (rendered by
+            # the shared error shell; a re-run converges, ADR-0009).
+            remedy = provisioning_mod.missing_tool_remedy(exc.argv, exc.cause)
+            if remedy is None:
+                raise
+            raise ReleaseError(
+                f"[artifacts.{dispatch.artifact.name}] "
+                f"{dispatch.adapter.name}: {remedy}"
+            ) from exc
 
     result = PublishResult(
         version=version,

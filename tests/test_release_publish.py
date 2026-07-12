@@ -1349,6 +1349,101 @@ build = ["rust"]
     assert "no endpoints declared" in capsys.readouterr().out
 
 
+# --------------------------------------------------------------------------
+# Missing pixi-managed endpoint tools (#801, TOL02-WS17 holes 1–3) — the
+# publish-side loud reconcile remediation
+# --------------------------------------------------------------------------
+
+
+def _raise_missing_binary(argv, cwd, env=None):
+    """An Exec seam whose tool is absent from the runner: what execrun raises
+    when argv[0] resolves to nothing (cause=missing-binary, no rc)."""
+    raise execrun.ExecError(
+        [str(a) for a in argv],
+        rc=None,
+        stderr=f"[Errno 2] No such file or directory: {argv[0]!r}",
+        cause=execrun.CAUSE_MISSING_BINARY,
+    )
+
+
+def test_missing_twine_gets_the_reconcile_remedy(tmp_path, monkeypatch, capsys):
+    """TOL02-WS17 open hole 2, closed by #801: the pypi endpoint dying on a
+    missing `twine` names the python-release-deps block's COMMITTING install
+    reconcile — never a run-time install (#582), never a raw 127."""
+    _publish_repo(
+        tmp_path,
+        monkeypatch,
+        toml="""
+[toolchains]
+"." = "python"
+
+[artifacts.pkg]
+endpoints = ["pypi"]
+""",
+        assets=["pkg-1.2.3-py3-none-any.whl", "pkg-1.2.3.tar.gz"],
+    )
+    _pyproject(tmp_path, "pkg")
+
+    rc = release_verb.run_publish(
+        _spec("1.2.3"),
+        build_result="success",
+        bundle_result="success",
+        sign_result="skipped",
+        run_cmd=_raise_missing_binary,
+        probe=SeamRecorder(),
+        ghio=FakeGh(),
+        gitio=FakeGit(root=tmp_path),
+        env={"PYPI_TOKEN": "tok"},
+    )
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert err.startswith("error: ")
+    assert "[artifacts.pkg] pypi:" in err
+    assert "pixi.toml#shipit-python-release-deps" in err
+    assert "`shipit install --pr`" in err
+    assert "`shipit install --local`" in err
+    assert "pixi.lock" in err
+
+
+def test_publish_missing_npm_binary_gets_the_reconcile_remedy(
+    tmp_path, monkeypatch, capsys
+):
+    """The npm endpoint's probe dying on a missing `npm` (the node-deps block
+    absent from the runner) translates at the dispatch loop exactly like the
+    run_cmd seam — the missing-binary launch failure raises through
+    check=False probes too (execrun's OSError path)."""
+    _publish_repo(
+        tmp_path,
+        monkeypatch,
+        toml="""
+[toolchains]
+"." = "npm"
+
+[artifacts.pkg]
+endpoints = ["npm"]
+""",
+    )
+
+    rc = release_verb.run_publish(
+        _spec("1.2.3"),
+        build_result="success",
+        bundle_result="success",
+        sign_result="skipped",
+        run_cmd=SeamRecorder(),
+        probe=_raise_missing_binary,
+        ghio=FakeGh(),
+        gitio=FakeGit(root=tmp_path),
+        env={"NPM_TOKEN": "tok"},
+    )
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "[artifacts.pkg] npm:" in err
+    assert "pixi.toml#shipit-node-deps" in err
+    assert "`shipit install --pr`" in err
+
+
 def test_publish_refuses_outside_a_git_checkout(tmp_path, monkeypatch, capsys):
     (tmp_path / ".shipit.toml").write_text("", encoding="utf-8")
     monkeypatch.chdir(tmp_path)

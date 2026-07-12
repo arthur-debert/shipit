@@ -597,3 +597,96 @@ def test_an_unknown_bump_failure_stays_the_untranslated_exec_error(
     assert "failed to parse manifest" in err
     assert "shipit install" not in err
     assert fake.mutated() == []
+
+
+# --------------------------------------------------------------------------
+# Missing pixi-managed tools (#801, TOL02-WS17 holes 1/3) — the loud
+# reconcile remediation for a tool absent from the runner outright
+# --------------------------------------------------------------------------
+
+
+def _missing_binary(argv):
+    """The Exec seam's missing-binary failure for ``argv`` — what a runner
+    without the tool actually raises (execrun normalizes FileNotFoundError)."""
+    return execrun.ExecError(
+        list(argv),
+        rc=None,
+        stderr=f"[Errno 2] No such file or directory: {argv[0]!r}",
+        cause=execrun.CAUSE_MISSING_BINARY,
+    )
+
+
+def test_missing_cargo_binary_gets_the_reconcile_remedy(tmp_path, monkeypatch, capsys):
+    """TOL02-WS17 open hole 1, closed by #801: `cargo` itself absent (hosted
+    images no longer carry Rust) aborts prepare BEFORE any git mutation, and
+    the error names the rust release-toolchain block's COMMITTING install
+    reconcile — never a run-time install (#582). The probe is the attempt
+    itself: no which-gate ran first (#785)."""
+    root = make_repo(tmp_path, monkeypatch, toml='[toolchains]\n"." = "rust"\n')
+    fake = gitio_for(root)
+
+    def run_cmd(argv, cwd):
+        raise _missing_binary(argv)
+
+    rc = release_verb.run_prepare(spec("0.2.0"), gitio=fake, run_cmd=run_cmd)
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert err.startswith("error: ")
+    assert "pixi.toml#shipit-rust-release-toolchain" in err
+    assert "`shipit install --pr`" in err
+    assert "`shipit install --local`" in err
+    assert "pixi.lock" in err
+    assert "cargo install" not in err  # the superseded #795/#796 shape
+    assert fake.mutated() == []
+
+
+def test_missing_npm_gets_the_reconcile_remedy(tmp_path, monkeypatch, capsys):
+    """TOL02-WS17 open hole 3, closed by #801: the npm bump dying on a missing
+    `npm` binary (the node-deps block absent from the runner) translates to
+    the reconcile remedy instead of degrading to a raw ExecError — the
+    cargo-edit precedent (#793), generalized to the missing-binary cause."""
+    root = make_repo(
+        tmp_path,
+        monkeypatch,
+        toml='[toolchains]\n"." = "npm"\n',
+        files=[("package.json", '{"name": "demo", "version": "0.1.0"}\n')],
+    )
+    fake = gitio_for(root)
+
+    def run_cmd(argv, cwd):
+        raise _missing_binary(argv)
+
+    rc = release_verb.run_prepare(spec("0.2.0"), gitio=fake, run_cmd=run_cmd)
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert err.startswith("error: ")
+    assert "pixi.toml#shipit-node-deps" in err
+    assert "`shipit install --pr`" in err
+    assert "`shipit install --local`" in err
+    assert "pixi.lock" in err
+    assert fake.mutated() == []
+
+
+def test_a_non_missing_binary_launch_failure_stays_untranslated(
+    tmp_path, monkeypatch, capsys
+):
+    """The translation is scoped to the missing-binary cause: any other
+    launch-level failure of a managed head (a bad cwd, permissions —
+    ``cause=os-error``) is NOT the provisioning gap and re-raises as the
+    untranslated ExecError, remediation-free."""
+    root = make_repo(tmp_path, monkeypatch, toml='[toolchains]\n"." = "rust"\n')
+    fake = gitio_for(root)
+
+    def run_cmd(argv, cwd):
+        raise execrun.ExecError(
+            list(argv),
+            rc=None,
+            stderr="[Errno 13] Permission denied",
+            cause=execrun.CAUSE_OS,
+        )
+
+    rc = release_verb.run_prepare(spec("0.2.0"), gitio=fake, run_cmd=run_cmd)
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "shipit install" not in err
+    assert fake.mutated() == []

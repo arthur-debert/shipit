@@ -36,6 +36,7 @@ from test_tool_argv_sweep import _ADAPTER_HOMES
 
 from shipit.install import units as iunits
 from shipit.release import bundle as release_bundle
+from shipit.release import provisioning
 
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 _SRC_ROOT = _REPO_ROOT / "src" / "shipit"
@@ -122,11 +123,14 @@ PROVISIONING: dict[str, tuple[Provisioned, ...]] = {
     "cargo": (
         Provisioned(
             "cargo",
-            CONSUMER_OWNED,
-            hole=True,
-            note="hosted images no longer carry Rust; rust consumers pin "
-            "`rust` in their own [dependencies] today — open hole 1, "
-            "docs/dev/release-tool-provisioning.md",
+            PIXI_MANAGED,
+            pin="1.96.*",
+            test="test_missing_cargo_binary_gets_the_reconcile_remedy",
+            note="hosted images no longer carry Rust; the rust release "
+            "toolchain block (`pixi.toml#shipit-rust-release-toolchain`, "
+            "its own single-key block so a consumer-side `rust` pin "
+            "conflicts alone — #801 closes hole 1) puts cargo in the "
+            "default env",
         ),
         Provisioned(
             "cargo-edit",
@@ -160,8 +164,9 @@ PROVISIONING: dict[str, tuple[Provisioned, ...]] = {
             "nodejs",
             PIXI_MANAGED,
             pin="26.*",
-            note="npm rides the nodejs package (node-deps block); no "
-            "absent-provisioning probe yet — open hole 3",
+            test="test_missing_npm_gets_the_reconcile_remedy",
+            note="npm rides the nodejs package (node-deps block); absent "
+            "npm fails loudly naming the reconcile (#801 closes hole 3)",
         ),
         Provisioned("pnpm", PIXI_MANAGED, pin="11.*", note="node-deps block"),
     ),
@@ -202,10 +207,12 @@ PROVISIONING: dict[str, tuple[Provisioned, ...]] = {
     "twine": (
         Provisioned(
             "twine",
-            CONSUMER_OWNED,
-            hole=True,
-            note="nothing provisions the pypi endpoint's uploader — open "
-            "hole 2 (direction: python-signal managed block)",
+            PIXI_MANAGED,
+            pin="6.2.*",
+            test="test_missing_twine_gets_the_reconcile_remedy",
+            note="the pypi endpoint's uploader — python-signal managed "
+            "block (`pixi.toml#shipit-python-release-deps`, #801 closes "
+            "hole 2)",
         ),
     ),
     "ruby": (
@@ -394,11 +401,30 @@ def test_pins_agree_with_their_one_authority():
     assert _row("cargo", "cargo-deb").pin == release_bundle.CARGO_DEB_VERSION
     rust_release = _block_toml("pixi-rust-release-deps-block.toml")
     assert _row("cargo", "cargo-edit").pin == rust_release["cargo-edit"]
+    rust_toolchain = _block_toml("pixi-rust-release-toolchain-block.toml")
+    assert _row("cargo", "cargo").pin == rust_toolchain["rust"]
+    # ...and the two managed rust surfaces (release default-env toolchain,
+    # lint-feature toolchain) move in lockstep — one rust, two envs (#801).
+    rust_lint = _block_toml("pixi-rust-lint-deps-block.toml")
+    assert rust_toolchain["rust"] == rust_lint["rust"]
+    python_release = _block_toml("pixi-python-release-deps-block.toml")
+    assert _row("twine", "twine").pin == python_release["twine"]
     launcher = _block_toml("pixi-launcher-deps-block.toml")
     assert _row("uv", "uv").pin == launcher["uv"]
     node = _block_toml("pixi-node-deps-block.toml")
     assert _row("npm", "nodejs").pin == node["nodejs"]
     assert _row("npm", "pnpm").pin == node["pnpm"]
+
+
+def test_remedy_map_agrees_with_the_managed_units():
+    # The #801 missing-tool translation names managed block keys in operator
+    # remediation text; each must be a real catalog unit key riding the named
+    # toolchain signal, or the remedy sends the operator to a block that the
+    # reconcile will never deliver.
+    for head, (_need, block, signal) in provisioning._MANAGED_TOOLS.items():
+        assert head in PROVISIONING, head
+        rows = {key: sig for key, sig, *_ in iunits.TOOLCHAIN_UNITS}
+        assert rows.get(block) == signal, (head, block, signal)
 
 
 def test_wf_release_family_pixi_pin_agrees_with_registry():

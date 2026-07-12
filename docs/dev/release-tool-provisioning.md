@@ -41,13 +41,13 @@ the runner its block pins; the DEFAULT pixi env is the PATH that run sees):
 | `gh` | prepare reads; publish gh-release (adapter `shipit/gh.py`) | runner image + ambient `GITHUB_TOKEN` | floats | — (image contract) |
 | `pixi` | every stage (the blocks' setup-pixi step; adapter `pixienv/`) | setup-pixi action | `v0.71.0` = Layer 0 `PIXI_PIN` | `test_setup_dev_env_pixi_pin_agrees_with_ci`; wf-release family pinned by the guard |
 | `uv` | every stage (`bin/shipit` launcher, ADR-0033); build/bundle for python (`uv build`) | pixi-managed (`pixi.toml#shipit-launcher-deps`, closes #758) | `0.11.*` = Layer 0 `UV_PIN` minor line | `test_launcher_deps_uv_pin_agrees_with_layer0_uv_pin`, `test_load_units_includes_the_launcher_deps_block` |
-| `cargo` (the binary itself) | prepare (subcommand dispatch), build (`cargo build`), publish (`cargo publish`, `cargo metadata`) | **consumer-owned — OPEN HOLE** | consumer's (`rust = "1.96.*"` where closed consumer-side) | none |
+| `cargo` (the binary itself) | prepare (subcommand dispatch), build (`cargo build`), publish (`cargo publish`, `cargo metadata`) | pixi-managed (`pixi.toml#shipit-rust-release-toolchain`, #801 — its own single-key block, see closed hole 1) | `rust` `1.96.*` (lockstep with the rust lint block) | `test_missing_cargo_binary_gets_the_reconcile_remedy` |
 | cargo-edit (`cargo set-version` / `cargo update`) | prepare (rust bump) | pixi-managed (`pixi.toml#shipit-rust-release-deps`, #793/#797) | `0.13.11.*` | `test_missing_cargo_set_version_gets_the_reconcile_remedy` |
 | `cargo-deb` (`cargo deb`) | bundle (deb composition) | self-provisioned (`cargo install`, #784/#785 — not on conda-forge) | `CARGO_DEB_VERSION = 3.7.0` | `test_deb_self_provisions_cargo_deb_when_missing` |
-| `npm` (`nodejs`) | prepare (`npm version`), build (`npm run build`), publish (`npm publish`) | pixi-managed (`pixi.toml#shipit-node-deps`) | `nodejs` `26.*`, `pnpm` `11.*` | block-delivery tests only — no loud-fail probe (see holes) |
+| `npm` (`nodejs`) | prepare (`npm version`), build (`npm run build`), publish (`npm publish`) | pixi-managed (`pixi.toml#shipit-node-deps`) | `nodejs` `26.*`, `pnpm` `11.*` | `test_missing_npm_gets_the_reconcile_remedy` (#801, closed hole 3) |
 | `go` | build (`go build`) | runner image (ubuntu images still carry Go) | floats | none (see holes) |
 | `pytest` | test lane (not a release stage) | consumer env | consumer's | — |
-| `twine` | publish (pypi endpoint) | **nothing — OPEN HOLE** | — | none |
+| `twine` | publish (pypi endpoint) | pixi-managed (`pixi.toml#shipit-python-release-deps`, #801 — the python toolchain signal, closed hole 2) | `6.2.*` | `test_missing_twine_gets_the_reconcile_remedy` |
 | `ruby` | publish (brew formula `ruby -c` syntax check) | runner image (ubuntu) | floats | — |
 | `tar` | bundle (archive composition), sign (reseal payload) | runner image (ubuntu + macos) | floats | — |
 | `zip` | bundle (zip archive legs) | runner image (ubuntu + macos; ABSENT on windows runners) | floats | — (windows legs out of contract, see holes) |
@@ -72,28 +72,27 @@ ADR-0028 whitelist (they never run on a release runner):
 
 ## Open holes (each closes via its own per-tool fix PR, #785/#797 precedent)
 
-1. **`cargo`/`rust` on release runners (rust consumers).** Hosted images no
-   longer carry Rust; the managed rust block (`rust = "1.96.*"`) anchors in
-   the LINT feature, which the release runs' default env does not resolve.
-   Today every rust consumer closes this consumer-side (padz/lex pin `rust`
-   in their own `[dependencies]`) — exactly the knowledge-doesn't-travel
-   disease #793 named. Direction: promote `rust` into a default-env managed
-   block. Blocker to design around: consumers already pinning `rust`
-   consumer-side would trip the `PixiKeyConflict` first-splice guard and be
-   skipped as a whole block, so the promotion must not share a block with
-   `cargo-edit` (which those consumers receive today) — a separate
-   single-key block, or key-level splice handling.
-2. **`twine` on wf-publish (pypi consumers).** Nothing provisions it and
-   hosted images do not carry it; the pypi endpoint fails at upload today.
-   Direction: a python-toolchain-signal managed block (twine is on
-   conda-forge), the #797 template — new `pyproject.toml` signal in
-   `TOOLCHAIN_MANIFESTS` + a pinned block, plus a publish-side loud-fail
-   probe naming the reconcile remedy.
-3. **`npm` absent-provisioning probe.** The node runtime is pixi-managed and
-   pinned, but no test fails when the block is missing on the runner (the
-   cargo-edit precedent has `explain_command_failure`; npm's bump/publish
-   adapters degrade to a raw ExecError). Direction: extend the bump/publish
-   failure translation to name the reconcile remedy for `npm`.
+Holes 1–3 of the original WS17 sweep are CLOSED by #801 — kept here (struck
+to one line each) so the guard notes' numbering stays stable:
+
+1. **CLOSED (#801): `cargo`/`rust` on release runners.** Promoted into the
+   default-env `pixi.toml#shipit-rust-release-toolchain` block — deliberately
+   a SINGLE-KEY block separate from `cargo-edit`'s, so a consumer already
+   pinning `rust` consumer-side (padz/lex, the pre-#801 workaround) trips the
+   `PixiKeyConflict` first-splice guard on exactly that block and keeps both
+   its pin AND its cargo-edit delivery. A missing `cargo` at prepare/publish
+   fails loudly naming the reconcile
+   (`shipit.release.provisioning.missing_tool_remedy`).
+2. **CLOSED (#801): `twine` on wf-publish.** The python toolchain signal
+   (`pyproject.toml` joins `TOOLCHAIN_MANIFESTS`) delivers the
+   `pixi.toml#shipit-python-release-deps` block (twine from conda-forge, the
+   #797 template), and the publish dispatch loop's loud-fail translation
+   names the reconcile remedy when twine is absent.
+3. **CLOSED (#801): `npm` absent-provisioning probe.** The bump AND publish
+   failure translations now name the reconcile remedy for a missing `npm`
+   (the same `missing_tool_remedy` map; the cargo-edit
+   `explain_command_failure` precedent, generalized to the missing-binary
+   Exec cause).
 4. **`go` release consumers.** Build-stage go rides the runner image
    unpinned; no fleet go consumer releases through the pipeline yet. When
    one onboards, promote go into a default-env managed block (the rust
@@ -102,6 +101,13 @@ ADR-0028 whitelist (they never run on a release runner):
    windows runner, which ships no `zip`. Windows legs are out of contract
    fleet-wide today (#785: cross-compile lanes out of contract); the drift
    guard row records it so a windows onboarding cannot miss it.
+
+With holes 1–3 closed, a stock consumer needs ZERO consumer-side
+provisioning to traverse prepare → publish: every release-stage tool is
+runner-image, setup-pixi, pixi-managed, or the recorded cargo-deb
+self-provision exception. The proof is the #801 canary rc — a shipit-canary
+`-release-rc` cut on stock managed blocks only — run after the canary repo's
+install reconcile picks these blocks up.
 
 Future composition tools (WS12–WS16: `wasm-pack`, `vsce`, `electron-builder`,
 `tauri`, `tree-sitter`; notary tooling beyond `xcrun notarytool`) are not
