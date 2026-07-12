@@ -115,19 +115,25 @@ def test_reviewer_spawn_narrates_the_lifecycle_at_info(tmp_path, caplog):
 
     with caplog.at_level(logging.DEBUG, logger="shipit.spawn"):
         rc = spawn_verb.run(
-            repo="widget", epic="TRE03", ws=3, role="reviewer", bounds=b
+            repo="widget",
+            epic="TRE03",
+            ws=3,
+            role="reviewer",
+            backend="codex",
+            bounds=b,
         )
     assert rc == 0
     infos = _spawn_records(caplog, logging.INFO)
 
-    # Tree assignment (the shared read-only Tree) is timed like the write one.
-    assigned = [r for r in infos if hasattr(r, "base") and hasattr(r, "duration_ms")]
-    assert len(assigned) == 1
-    assert assigned[0].branch == "TRE03/WS03"
-    assert isinstance(assigned[0].duration_ms, int)
+    # Delegation carries the planned shared Tree branch and typed existing PR.
+    delegated = [r for r in infos if hasattr(r, "base") and hasattr(r, "pr")]
+    assert len(delegated) == 1
+    assert delegated[0].branch == "TRE03/WS03"
+    assert delegated[0].pr == 321
 
-    # Launch + child exit, as on the write path.
-    assert [r for r in infos if hasattr(r, "cwd")]
+    # Service launch + settle preserve the common Run lifecycle events.
+    launched = [r for r in infos if hasattr(r, "cwd")]
+    assert len(launched) == 1 and launched[0].backend == "codex"
     exited = [r for r in infos if hasattr(r, "rc")]
     assert len(exited) == 1 and exited[0].rc == 0
 
@@ -346,7 +352,12 @@ def test_reviewer_spawn_tags_agent_spawned_and_agent_done(tmp_path, caplog):
     b, _calls = bounds(tmp_path)
     with caplog.at_level(logging.INFO, logger="shipit.spawn"):
         rc = spawn_verb.run(
-            repo="widget", epic="TRE03", ws=3, role="reviewer", bounds=b
+            repo="widget",
+            epic="TRE03",
+            ws=3,
+            role="reviewer",
+            backend="codex",
+            bounds=b,
         )
     assert rc == 0
     assert _event_tags(caplog) == [

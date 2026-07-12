@@ -14,16 +14,32 @@ Every effectful edge rides the injectable :class:`Boundaries` value (git/gh
 reads, Tree creation, the subprocess runner), so each stage is testable
 typed-in/typed-out without a network, a clone, or a real backend child.
 
-The pipeline itself is unchanged in behavior (a mechanical ADR-0030 promotion),
-plus the RPE01-WS01 registry preflight:
+The pipeline rides the Role Profile registry (RPE01-WS01/WS03):
 
 - **Registry-driven role preflight** (RPE01-WS01): the shape gate runs
   :func:`shipit.harness.roleprofile.validate_spawn` for the DETACHED launch
   context, so an unknown role string, a detached explorer (ambient — no Tree,
   ever), a detached coordinator (the host session), or a detached shepherd
   (existing-PR attachment is RPE01-WS04) refuses BEFORE any Tree provisioning
-  or backend launch, naming the role and the requested context. Reviewer
-  dispatch keys off the registry-parsed :class:`~shipit.harness.role.Role`.
+  or backend launch, naming the role and the requested context.
+- **Checkout-strategy dispatch** (RPE01-WS03): the pipeline routes on the
+  profile's CHECKOUT STRATEGY, never a literal role-name test — a
+  :class:`~shipit.harness.roleprofile.NewWriteTree` profile takes the write
+  tail (new write Tree + branch + draft-PR handshake), a
+  :class:`~shipit.harness.roleprofile.SharedReadOnlyTree` profile takes the
+  reviewer tail, and a checkout shape with no detached tail (a later WS's
+  profile arriving before its lifecycle) refuses loud rather than falling
+  into the write path.
+- **One reviewer result contract** (RPE01-WS03, spec §"Role launch and result
+  contracts are explicit"): the reviewer tail DELEGATES to the product review
+  pipeline — the review service resolves the PR, launches the funnel backend
+  in the shared read-only Tree under its bounded read-only posture, CAPTURES
+  the structured review, and posts it via the service's App-identity path.
+  The historical generic self-posting reviewer task (the agent posting its
+  own ``gh pr review``) is retired, so one Role cannot mean two reporting
+  contracts. A backend with no review-funnel identity (``claude``) cannot
+  ride the captured contract and is refused pre-I/O; a review branch with no
+  OPEN PR refuses before the Tree exists.
 - **Fail-closed** (ADR-0017/0019): a Tree-creation error fails the spawn loud —
   NEVER a silent fallback to a native ``git worktree``. The launcher is reached
   only after a Tree exists, so a failed create can never launch a Run against
@@ -52,8 +68,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from .. import events, execrun, gh, git, identity, logcontext
+from ..agent import backend as agent_backend
 from ..harness import roleprofile
-from ..harness.role import Role
+from ..pr import PrId
+from ..review import service as review_service
 from ..tree.create import Tree, create, new_agent_hash
 from ..tree.layout import (
     TreeSpec,
@@ -61,7 +79,7 @@ from ..tree.layout import (
     issue_branch,
     work_stream_branch,
 )
-from ..tree.readonly import create_readonly, readonly_plan
+from ..tree.readonly import readonly_plan
 from . import backends, launch
 
 #: The spawn subsystem's logger — a child of the package ``shipit`` logger, so its
@@ -80,13 +98,6 @@ logger = logging.getLogger("shipit.spawn")
 #: entry is guarded too.
 SUPPORTED_BACKENDS = backends.supported_backends()
 
-#: The role that gets a shared **read-only Tree** + a **Reviewer Run** (ADR-0018)
-#: instead of the per-Run write Tree every other spawnable role gets. The pipeline
-#: now DISPATCHES on the Role Profile registry's parsed :class:`Role` (RPE01-WS01),
-#: so this string constant only labels the reviewer tail's records/results; the
-#: duplicated-constant cleanup is a later workstream (RPE01-WS08).
-REVIEWER_ROLE = "reviewer"
-
 
 class SpawnError(RuntimeError):
     """A spawn pipeline refusal — a clean runtime failure, never a traceback.
@@ -104,9 +115,11 @@ class SpawnError(RuntimeError):
 class SubagentSpec:
     """The typed request for one subagent Run — what the CLI options parse into.
 
-    Two axes decide the Tree. **Role** picks write vs read-only: every role but
-    ``reviewer`` gets a per-Run write Tree; ``reviewer`` (ADR-0018) gets the
-    shared read-only Tree on the existing PR head. **Shape** picks branch/base:
+    Two axes decide the Tree. **Role** selects the profile's CHECKOUT STRATEGY
+    from the Role Profile registry (RPE01-WS03): a ``NewWriteTree`` profile
+    (implementer) gets a per-Run write Tree; a ``SharedReadOnlyTree`` profile
+    (reviewer, ADR-0018) gets the shared read-only Tree on the existing PR
+    head. **Shape** picks branch/base:
     ``epic``+``ws`` (branch ``E/WSnn`` cut from ``origin/E/umbrella``) or a
     standalone ``issue`` (branch ``issues/<id>/<session>`` cut from
     ``origin/main``). Deliberately NOT validated at construction: the pipeline's
@@ -181,10 +194,10 @@ class Boundaries:
     remote_url: Callable[..., str] = git.remote_url
     remote_branch_exists: Callable[..., bool] = git.remote_branch_exists
     create_tree: Callable[..., Tree] = create
-    create_readonly_tree: Callable[..., Tree] = create_readonly
     pr_for_head: Callable[..., gh.HeadPr | gh.UnknownPr | None] = gh.pr_for_head
     status_porcelain: Callable[..., list[str]] = git.status_porcelain
     runner: launch.Runner | None = None
+    run_review: Callable[..., dict] = review_service.run_detached_review
 
 
 #: The production boundary set — one shared instance, since it is frozen.
@@ -310,14 +323,12 @@ def spawn_subagent(spec: SubagentSpec, bounds: Boundaries | None = None) -> Spaw
 
     root, repo_identity, url = resolve_spawn_identity(spec, bounds)
 
-    # Reviewer Run (ADR-0018): a shared READ-ONLY Tree on the existing PR head, not a
-    # per-Run write Tree. Its target branch follows the SHAPE — the epic work-stream head
-    # E/WSnn, or a standalone-issue head issues/<id>/<session> — built from the same
-    # grammar helpers the write planner uses so a reviewer pins exactly the branch a
-    # write Run pushed. Dispatched before the write path so the two never share
-    # provisioning — on the registry-parsed Role (RPE01-WS01), so an oddly cased
-    # role input can never slip past the reviewer dispatch into the write tail.
-    if profile.role is Role.REVIEWER:
+    # RPE01-WS03: dispatch on the profile's checkout STRATEGY, not a role-name
+    # special case. The read-only tail delegates capture + posting to the product
+    # review service; the write tail preserves the implementer's existing Tree/PR
+    # handshake unchanged.
+    checkout = profile.checkout
+    if isinstance(checkout, roleprofile.SharedReadOnlyTree):
         try:
             review_branch = (
                 work_stream_branch(spec.epic, spec.ws)
@@ -334,22 +345,26 @@ def spawn_subagent(spec: SubagentSpec, bounds: Boundaries | None = None) -> Spaw
             repo=repo_identity,
             branch=review_branch,
             source_repo=root,
-            github_url=url,
+            role=profile.role.value,
             adapter=adapter,
             bounds=bounds,
         )
-
-    # WRITE Run: build the shape's TreeSpec, then hand off to the shared launch tail.
-    tree_spec = plan_write_spec(spec, repo_identity, root, bounds)
-    return _launch_write(
-        tree_spec,
-        source_repo=root,
-        github_url=url,
+    if isinstance(checkout, roleprofile.NewWriteTree):
+        tree_spec = plan_write_spec(spec, repo_identity, root, bounds)
+        return _launch_write(
+            tree_spec,
+            source_repo=root,
+            github_url=url,
+            role=profile.role.value,
+            issue=spec.issue,
+            backend=spec.backend,
+            adapter=adapter,
+            bounds=bounds,
+        )
+    raise _refusal(
+        f"role {profile.role.value!r} has checkout strategy "
+        f"{type(checkout).__name__!r}, which has no detached launch tail.",
         role=profile.role.value,
-        issue=spec.issue,
-        backend=spec.backend,
-        adapter=adapter,
-        bounds=bounds,
     )
 
 
@@ -394,6 +409,20 @@ def validate(
     except roleprofile.RoleValidationError as exc:
         raise _refusal(str(exc), exc=exc, role=spec.role) from exc
 
+    if isinstance(profile.checkout, roleprofile.SharedReadOnlyTree):
+        review_backend = agent_backend.by_name(adapter.name)
+        if not review_backend.has_funnel_identity:
+            supported = ", ".join(
+                backend.name for backend in agent_backend.funnel_backends()
+            )
+            raise _refusal(
+                f"backend {adapter.name!r} has no captured review-service identity "
+                f"(supported reviewer backends: {supported}); refused before any "
+                "Tree is provisioned or a backend launched.",
+                role=profile.role.value,
+                backend=adapter.name,
+            )
+
     if spec.has_epic_shape and (spec.epic is None or spec.ws is None):
         raise _refusal(
             "the epic shape needs both --epic and --ws "
@@ -408,7 +437,9 @@ def validate(
             epic=spec.epic,
             ws=spec.ws,
         )
-    if profile.role is not Role.REVIEWER and (spec.issue is None or spec.issue < 1):
+    if isinstance(profile.checkout, roleprofile.NewWriteTree) and (
+        spec.issue is None or spec.issue < 1
+    ):
         # ``--issue`` rides the task prompt and the draft PR's issue link (#649:
         # ``closes #<issue>`` for the standalone shape, so the merge auto-closes it;
         # ``for #<issue>`` for the epic shape, non-closing — the umbrella PR closes
@@ -421,7 +452,11 @@ def validate(
         raise _refusal(
             f"--issue must be a positive integer (got {spec.issue})", role=spec.role
         )
-    if not spec.has_epic_shape and spec.issue is None:
+    if (
+        isinstance(profile.checkout, roleprofile.SharedReadOnlyTree)
+        and not spec.has_epic_shape
+        and spec.issue is None
+    ):
         # Reachable only for a reviewer (a write role already required --issue above):
         # with neither an epic shape nor an issue there is no branch to resolve a head
         # from. Refuse it loud with a clear, reviewer-specific message HERE — otherwise
@@ -842,89 +877,108 @@ def _launch_reviewer(
     repo: identity.Repo,
     branch: str,
     source_repo: str,
-    github_url: str,
+    role: str,
     adapter: backends.BackendAdapter,
     bounds: Boundaries,
 ) -> SpawnResult:
-    """Stages 4–5, reviewer tail: the shared read-only Tree, then launch + observe.
+    """Reviewer tail: resolve the PR, then delegate capture + post to the service.
 
-    The ADR-0018 reviewer path: resolve the shared per-``(repo, branch)``
-    read-only Tree (a second reviewer on the same head REUSES the clone), then
-    launch the backend child rooted in it with the adapter's **read-only
-    posture** (``read_only=True`` — for ``claude`` the read-only ``--tools``
-    allow-list; for ``codex`` / ``agy``, which have no allow-list, the
-    least-privilege posture that still lets the agent self-post via ``gh pr
-    review``, with read-only enforced by the chmod'd Tree, ADR-0020 §Decision 3)
-    and the reviewer task — which reads the diff and posts a review THROUGH the
-    PR. Unlike the write tail there is no Run↔PR linkage to audit: the Run
-    reports out-of-band (the review lands in the existing PR), so success is
-    the child's clean exit. Fail-closed mirrors the write path — a
-    read-only-Tree error refuses loud, never a fallback.
+    The product review service owns the ONE reviewer result contract: it resolves
+    the PR view, provisions/reuses ADR-0018's shared read-only Tree, launches the
+    funnel backend with its bounded defense-in-depth posture, captures structured
+    output, and posts through the backend's App identity. This spawn boundary only
+    proves that ``branch`` has an OPEN PR and hands its typed identity to that
+    service. The retired generic child task never asks an agent to self-post.
     """
     plan = readonly_plan(repo=repo, branch=branch)
-    create_start = time.monotonic()
     events.emit(
         logger,
         "agent.phase",
-        "spawn subagent: phase read_only_tree for reviewer run",
+        "spawn subagent: phase review_service for reviewer run",
         extra={
-            "phase": "read_only_tree",
-            "role": REVIEWER_ROLE,
+            "phase": "review_service",
+            "role": role,
             "backend": adapter.name,
         },
     )
-    try:
-        tree = bounds.create_readonly_tree(
-            plan, source_repo=source_repo, github_url=github_url
-        )
-    except (ValueError, execrun.ExecError, OSError) as exc:
-        # Fail-closed (ADR-0017/0018): a read-only-Tree error fails the spawn LOUD;
-        # the launcher below is unreachable unless a real Tree exists.
+    pr = bounds.pr_for_head(branch, cwd=source_repo)
+    if pr is None:
         raise _refusal(
-            f"read-only tree creation failed: {exc}",
-            exc=exc,
-            duration_ms=_elapsed_ms(create_start),
-        ) from exc
+            f"review branch {branch!r} has no pull request; refused before Tree "
+            "provisioning or backend launch.",
+            branch=branch,
+        )
+    if isinstance(pr, gh.UnknownPr):
+        raise _refusal(
+            f"could not determine the pull request for review branch {branch!r}; "
+            "refused before Tree provisioning or backend launch.",
+            branch=branch,
+        )
+    if pr.state != "OPEN":
+        raise _refusal(
+            f"pull request #{pr.number} on review branch {branch!r} is {pr.state}, "
+            "not OPEN; refused before Tree provisioning or backend launch.",
+            branch=branch,
+            pr=pr.number,
+        )
 
-    # SPAWN SEAM (ADR-0029/0032), mirroring the write path: the shared read-only
-    # Tree's identity binds here, plus a freshly-minted `agent` spawn id — the
-    # Tree is SHARED per (repo, branch) so it carries no per-Run hash of its
-    # own, but the Run still needs its own identity for `shipit logs --agent`.
-    logcontext.bind(tree=tree.path, agent=new_agent_hash())
-    create_ms = _elapsed_ms(create_start)
+    # The service provisions exactly this deterministic shared Tree plan. Bind its
+    # identity before delegation so the capture/post records retain the spawn story.
+    tree_path = str(plan.dir)
+    logcontext.bind(
+        tree=tree_path, agent=new_agent_hash(), pr=pr.number, repo=repo.slug
+    )
     logger.info(
-        "spawn subagent: read-only review tree assigned on %s in %dms",
-        tree.branch,
-        create_ms,
-        extra={"branch": tree.branch, "base": tree.base, "duration_ms": create_ms},
+        "spawn subagent: delegating reviewer run on %s to the captured review service",
+        branch,
+        extra={"branch": branch, "base": f"origin/{branch}", "pr": pr.number},
     )
 
-    # The reviewer posture (ADR-0020 §Decision 3): `read_only=True` builds the
-    # backend's reviewer argv (claude → read-only --tools; codex →
-    # workspace-write+network, NOT the write bypass; agy → drop
-    # --dangerously-skip-permissions). `cwd=tree.path` is required by the agy adapter
-    # (it ignores the process cwd and roots ONLY via `--add-dir <Tree>`) and ignored
-    # by the rest. The chmod'd read-only Tree is the load-bearing FS guard whatever
-    # the backend's native posture. `pixi_wrap` is a no-op here by design: a
-    # reviewer's read-only Tree is clone+checkout with NO provisioned
-    # `.pixi/envs/default`, so it stays BARE (routing a chmod'd tree through
-    # `pixi run` would force a solve / fail). The gate, not the call site, decides.
-    cmd = launch.pixi_wrap(
-        adapter.build_command(
-            launch.reviewer_task(branch),
-            REVIEWER_ROLE,
-            read_only=True,
-            cwd=tree.path,
-        ),
-        tree.path,
+    review_backend = agent_backend.by_name(adapter.name)
+    events.emit(
+        logger,
+        "agent.spawned",
+        "spawn subagent: launching %s captured reviewer in the review service",
+        adapter.name,
+        extra={"backend": adapter.name, "role": role, "cwd": tree_path},
     )
-    _run_child(cmd, tree=tree, adapter=adapter, bounds=bounds, role=REVIEWER_ROLE)
+    events.emit(
+        logger,
+        "agent.phase",
+        "spawn subagent: phase agent_running for %s run",
+        role,
+        extra={"phase": "agent_running", "backend": adapter.name, "role": role},
+    )
+    review_start = time.monotonic()
+    try:
+        bounds.run_review(
+            review_backend,
+            PrId(repo=repo, number=pr.number),
+            run_id=None,
+        )
+    except Exception as exc:  # noqa: BLE001 - normalize the product boundary
+        raise _refusal(
+            f"captured review service failed for PR #{pr.number}: {exc}",
+            exc=exc,
+            branch=branch,
+            pr=pr.number,
+            backend=adapter.name,
+        ) from exc
+    review_ms = _elapsed_ms(review_start)
+    events.emit(
+        logger,
+        "agent.done",
+        "spawn subagent: %s captured reviewer settled in %dms",
+        adapter.name,
+        review_ms,
+        extra={"backend": adapter.name, "rc": 0, "duration_ms": review_ms},
+    )
 
     result = SpawnResult(
-        tree=tree.path,
-        branch=tree.branch,
-        base=tree.base,
-        role=REVIEWER_ROLE,
+        tree=tree_path,
+        branch=branch,
+        base=f"origin/{branch}",
+        role=role,
         backend=adapter.name,
     )
     _log_spawned(result)
