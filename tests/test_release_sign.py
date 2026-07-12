@@ -79,19 +79,29 @@ def _link_member(name: str, target: str, *, hard: bool = False) -> tarfile.TarIn
     return info
 
 
+def _special_member(name: str) -> tarfile.TarInfo:
+    """A crafted FIFO member named ``name`` — a non-regular, non-dir, non-link
+    entry a signable bundle never carries and the validator must refuse on both
+    legs (a raw device node from ``extractall`` is a footgun)."""
+    info = tarfile.TarInfo(name)
+    info.type = tarfile.FIFOTYPE
+    return info
+
+
 def _make_targz_members(
-    dest: Path, files: dict[str, bytes], links: list[tarfile.TarInfo]
+    dest: Path, files: dict[str, bytes], members: list[tarfile.TarInfo]
 ) -> None:
     """Write a gzip tarball at ``dest`` from explicit ``files`` (name → bytes)
-    and crafted ``links`` (:func:`_link_member`) — the escape-attempt fixtures
-    the validator is asserted to refuse before extracting anything."""
+    and crafted ``members`` (:func:`_link_member` / :func:`_special_member`) —
+    the escape-attempt fixtures the validator is asserted to refuse before
+    extracting anything."""
     with tarfile.open(dest, "w:gz") as tar:
         for name, data in files.items():
             info = tarfile.TarInfo(name)
             info.size = len(data)
             tar.addfile(info, io.BytesIO(data))
-        for link in links:
-            tar.addfile(link)
+        for member in members:
+            tar.addfile(member)
 
 
 # --------------------------------------------------------------------------
@@ -721,6 +731,23 @@ def test_untar_validated_extracts_a_confined_bundle(tmp_path):
             [_link_member("Phos.app/a -> b", "../../../etc/passwd")],
             "link escaping reseal payload",
         ),
+        # SYMLINK TRAVERSAL (#802 round-2 critical): an in-tree symlink whose
+        # target is confined, plus a later member whose NAME climbs `..` THROUGH
+        # it. Lexically the name resolves in-tree and would be approved, but at
+        # write time the OS follows the symlink and escapes — so a `..` in ANY
+        # member name is refused outright, never resolved lexically.
+        (
+            {"Phos.app/foo/../escaped": b"x"},
+            [_link_member("Phos.app/foo", ".")],
+            "unsafe path in reseal payload",
+        ),
+        # A special member (FIFO/device) is refused on the mac-app leg too — a
+        # signable bundle carries only files, dirs, and links.
+        (
+            {},
+            [_special_member("Phos.app/dev")],
+            "non-regular member in reseal payload",
+        ),
     ],
 )
 def test_untar_validated_mac_leg_refuses_escapes(tmp_path, files, links, match):
@@ -753,6 +780,9 @@ def test_untar_validated_mac_leg_refuses_escapes(tmp_path, files, links, match):
         ),
         # A traversal NAME is still an unsafe-path refusal, not a link one.
         ({"../../etc/evil": b"x"}, [], "unsafe path in archive bundle"),
+        # A special member (FIFO/device) is refused — not a file or dir, and the
+        # structured check must not silently pass it through to extractall.
+        ({}, [_special_member("pkg/dev")], "non-regular member in archive bundle"),
     ],
 )
 def test_untar_validated_archive_leg_refuses_links_and_escapes(
@@ -764,6 +794,17 @@ def test_untar_validated_archive_leg_refuses_links_and_escapes(
     with pytest.raises(ReleaseError, match=match):
         sign_mod._untar_validated(archive, work, "archive bundle", reject_links=True)
     assert list(work.iterdir()) == []
+
+
+def test_untar_validated_wraps_a_corrupt_archive_as_a_domain_error(tmp_path):
+    # A non-gzip / corrupt tarball surfaces as the domain ReleaseError naming
+    # the archive — never a raw tarfile/OS traceback the CLI's one-line error
+    # contract (`run_sign` maps only ReleaseError/ExecError) can't render.
+    archive = tmp_path / "payload.tar.gz"
+    archive.write_bytes(b"this is not a gzip stream")
+    work = tmp_path / "unpacked"
+    with pytest.raises(ReleaseError, match="cannot unpack reseal payload"):
+        sign_mod._untar_validated(archive, work, "reseal payload")
 
 
 def test_sign_bundle_refuses_a_malicious_payload_before_signing(tmp_path):
