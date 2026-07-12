@@ -160,6 +160,17 @@ PROVISIONING: dict[str, tuple[Provisioned, ...]] = {
     "pytest": (
         Provisioned("pytest", CONSUMER_ENV, note="test lane, never a release stage"),
     ),
+    "tree-sitter": (
+        Provisioned(
+            "tree-sitter",
+            CONSUMER_OWNED,
+            hole=True,
+            note="tree-sitter CLI drives generate/corpus/tarball (#792); not "
+            "on conda-forge (a WS12–WS16 composition tool), so the "
+            "consumer's own env provides it — open hole until a fleet "
+            "tree-sitter release consumer pins it (ADP02 rc proof)",
+        ),
+    ),
     "npm": (
         Provisioned(
             "nodejs",
@@ -229,6 +240,29 @@ PROVISIONING: dict[str, tuple[Provisioned, ...]] = {
     "ruby": (
         Provisioned("ruby", RUNNER_IMAGE, note="brew formula `ruby -c` check only"),
     ),
+    "vsce": (
+        Provisioned(
+            "vsce",
+            CONSUMER_OWNED,
+            hole=True,
+            note="the VS Code extension repo's @vscode/vsce devDependency "
+            "(npm ci → node_modules/.bin), used by the vsix composition "
+            "(`vsce package`) and the vscode-marketplace endpoint "
+            "(`vsce publish`); no fleet-managed block — the consumer's node "
+            "manifest owns it, proven on the consumer rc when ADP02 resumes "
+            "(#789, open hole 6)",
+        ),
+    ),
+    "ovsx": (
+        Provisioned(
+            "ovsx",
+            CONSUMER_OWNED,
+            hole=True,
+            note="the extension repo's ovsx devDependency, used by the "
+            "open-vsx endpoint (`ovsx publish`); wired-but-off until the "
+            "consumer's OVSX_PAT verifies (#789, open hole 6)",
+        ),
+    ),
     "bin/check-e2e": (
         Provisioned("bin/check-e2e", REPO_LOCAL, note="committed harness script"),
     ),
@@ -292,6 +326,7 @@ _NON_ARGV_LITERALS = frozenset(
         "release",
         "rust",
         "scope",
+        "src",
         "success",
         "v",
         "windows",

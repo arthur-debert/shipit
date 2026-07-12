@@ -10,8 +10,20 @@ from shipit.tools import registry
 
 
 def test_registry_is_the_closed_prd_set_in_stable_order():
-    # PRD story 3 + ADR-0039: rust / go / python / npm, an entry each.
-    assert registry.names() == ("rust", "go", "python", "npm")
+    # PRD story 3 + ADR-0039: rust / go / python / npm, an entry each; plus
+    # tree-sitter, the bespoke generated-parser toolchain (TOL02-WS16 #792).
+    assert registry.names() == ("rust", "go", "python", "npm", "tree-sitter")
+
+
+def test_tree_sitter_slots_are_generate_and_corpus_test():
+    # TOL02-WS16 #792 / legacy tree-sitter.yml@v3: build = `tree-sitter
+    # generate` (regenerate the parser from grammar.js — the whole-leg build a
+    # tarball bundles), test = `tree-sitter test` (the corpus assertions a
+    # corpus lane runs).
+    ts = registry.toolchain("tree-sitter")
+    assert ts is not None
+    assert ts.build == ("tree-sitter", "generate")
+    assert ts.test == ("tree-sitter", "test")
 
 
 def test_default_test_commands_are_the_blessed_runners():

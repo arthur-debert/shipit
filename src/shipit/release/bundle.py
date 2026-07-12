@@ -52,6 +52,23 @@ functions the entries carry:
   ``bundler``); every other flag is registry-assembled. The scratch ``pkg/``
   tree is always removed — only the tarball survives (ADR-0009's barrier: a
   composition writes only its declared artifact under ``out_dir``).
+- **vsix** — a per-target VS Code extension ``.vsix`` via ``npm exec -- vsce
+  package --target <vsce-target> --out <name>-<vsce-target>.vsix`` (the legacy
+  ``vscode-ext.yml@v3`` per-platform packaging: one ``.vsix`` per platform,
+  each carrying that platform's prebuilt native binary). The declared platform
+  triple picks the vsce target string (:data:`VSCE_TARGETS`; darwin-arm64 /
+  darwin-x64 / linux-x64 / linux-arm64 / alpine-x64 / win32-x64), a triple with
+  no vsce target being a loud refusal. Runs ``vsce`` through ``npm exec`` in the
+  ``npm`` leg (the extension is a node package) — vsce is the consumer's
+  ``@vscode/vsce`` devDependency under ``node_modules/.bin``, never a
+  fleet-provisioned PATH binary, so the local package context resolves it. A
+  ``.vsix`` is a zip package with no reopenable main binary, so — like wheel,
+  wasm-pack, and tarball — it is NOT binary-asserting (``asserts_binary=False``,
+  the scar-#2 guard is skipped). The per-target binary it bundles is produced
+  by the build stage — for ``win32-x64`` that binary comes from the
+  cross-target build (TOL02-WS11 #787, the windows leg's stated dependency, not
+  hidden), which writes ``target/<triple>/release/`` for the extension's
+  prepackage step to stage.
 - **mac-app** — the coupled UNSIGNED ``.app``/``.dmg`` pair (the declared
   bundler builds the .app inside the .dmg run; they are not cleanly
   separable) PLUS the inner ``.app`` re-emitted as the reseal payload
@@ -97,11 +114,16 @@ functions the entries carry:
   bundle-stage failure, never a quiet pass (ADR-0009's barrier); so is a
   format subdir holding more than one primary bundle (a stale prior output —
   never a nondeterministic pick).
+- **tarball** — the generated-parser ``<name>.tar.gz`` (TOL02-WS16 #792,
+  legacy ``tree-sitter.yml@v3``): the tree-sitter leg's generated ``src/``
+  tree plus the grammar/queries/bindings that are present. Platform-
+  independent (generated C source, no per-OS variant — no ``-<target>``
+  suffix), so every matrix leg composes the identical bytes.
 
 Every external command runs through the injected runner — the one Exec seam
 (ADR-0028); the ``cargo`` / ``uv`` / ``wasm-pack`` / ``npm`` / ``tar`` /
-``zip`` argv literals below
-are those tools' one BUNDLE-side assembly point, whitelisted in the
+``zip`` / ``vsce`` argv literals below are those tools' one BUNDLE-side
+assembly point, whitelisted in the
 mechanized argv sweep (``tests/test_tool_argv_sweep.py``). Compose functions
 write ONLY under the request's bundle output tree (ADR-0009's barrier: a
 failing composition exits with nothing half-written outside it); uploading
@@ -130,6 +152,23 @@ from . import ReleaseError
 #: version is PINNED, the same shape as lexd's ``--tag``-pinned self-provision
 #: (:mod:`shipit.provision.lexd`). Bump deliberately, in its own change.
 CARGO_DEB_VERSION = "3.7.0"
+
+#: Target triple → VS Code ``vsce``/``ovsx`` target string (the vsix
+#: composition's per-platform ``--target``). vsce names platforms in its own
+#: ``<os>-<arch>`` vocabulary — distinct from the rust triples the rest of the
+#: release lane speaks — so the composition maps once, here (the four the issue
+#: ships plus the two neighbours a rust triple already covers). A triple with
+#: no entry is a loud refusal (:func:`vsce_target`): the vsix leg never guesses
+#: a marketplace platform. windows-x86_64's binary rides the cross-target build
+#: (TOL02-WS11 #787) — the win32-x64 leg's stated dependency.
+VSCE_TARGETS: dict[str, str] = {
+    "aarch64-apple-darwin": "darwin-arm64",
+    "x86_64-apple-darwin": "darwin-x64",
+    "x86_64-unknown-linux-gnu": "linux-x64",
+    "aarch64-unknown-linux-gnu": "linux-arm64",
+    "x86_64-unknown-linux-musl": "alpine-x64",
+    "x86_64-pc-windows-msvc": "win32-x64",
+}
 
 #: The docs the archive composition ships beside the binary WHEN PRESENT —
 #: the legacy "Package binaries" step's set (README/CHANGELOG/LICENSE).
@@ -369,6 +408,61 @@ def _compose_wheel(req: ComposeRequest) -> Composed:
     return Composed(req.artifact.name, "wheel", (*wheels, *sdists))
 
 
+#: The generated-parser payload the ``tarball`` composition ships — tree-sitter's
+#: conventional layout under the tree-sitter leg's path. ``src`` (the
+#: ``tree-sitter generate`` output: ``parser.c``, the ``tree_sitter/``
+#: headers, ``node-types.json``, ``grammar.json``) is the REQUIRED core — its
+#: absence means the parser was never generated. The rest ride WHEN PRESENT
+#: (the :data:`DOC_FILES` "when present" shape): a grammar declares queries
+#: and bindings or it does not, and an absent one ships nothing rather than an
+#: empty dir. This is the legacy ``tree-sitter.yml@v3`` tarball contract
+#: (generated parser + grammar + queries), assembled shipit-side.
+TREE_SITTER_PAYLOAD: tuple[str, ...] = (
+    "src",
+    "queries",
+    "grammar.js",
+    "package.json",
+    "binding.gyp",
+    "bindings",
+)
+
+
+def _compose_tarball(req: ComposeRequest) -> Composed:
+    """The generated-parser tarball: ``<name>.tar.gz`` of the tree-sitter
+    leg's :data:`TREE_SITTER_PAYLOAD` (the ``tree-sitter generate`` output
+    plus the grammar/queries/bindings, when present). See the module
+    docstring's tarball entry.
+
+    A generated parser is platform-independent C source — no per-OS variant —
+    so the archive carries NO ``-<target>`` suffix: every matrix leg that runs
+    it composes the identical bytes under the one name (parity with legacy
+    ``tree-sitter.tar.gz``). ``src`` is required — its absence is a bundle-
+    stage failure (``shipit build`` runs ``tree-sitter generate`` first),
+    never a quiet empty archive.
+    """
+    leg = _leg_for(req.artifact, req.entries, "tree-sitter", "tarball")
+    leg_dir = req.root if leg.path in (".", "") else req.root / leg.path
+    if not (leg_dir / "src").is_dir():
+        raise ReleaseError(
+            f"[artifacts.{req.artifact.name}] tarball composition: no generated "
+            f"parser at {leg_dir / 'src'} — the tarball ships the "
+            f"`tree-sitter generate` output; run `shipit build` first"
+        )
+    present = [name for name in TREE_SITTER_PAYLOAD if (leg_dir / name).exists()]
+    archive = f"{req.artifact.name}.tar.gz"
+    archive_path = req.out_dir / archive
+    req.out_dir.mkdir(parents=True, exist_ok=True)
+    if archive_path.exists():
+        # tar -czf truncates, but an unlink keeps the rerun's artifact exactly
+        # the fresh tree (the archive/mac-app recreate-from-clean contract).
+        archive_path.unlink()
+    req.run_cmd(
+        ["tar", "-czf", str(archive_path), "-C", str(leg_dir), *present],
+        req.root,
+    )
+    return Composed(req.artifact.name, "tarball", (archive,))
+
+
 #: wasm-pack's default output target when a wasm/npm artifact declares none —
 #: the ``bundler`` target (webpack/rollup/vite consumers), wasm-pack's own
 #: default. A consumer targeting ``web`` / ``nodejs`` / ``no-modules`` declares
@@ -574,6 +668,67 @@ def _compose_tauri(req: ComposeRequest) -> Composed:
     return Composed(req.artifact.name, "tauri", tuple(sorted(produced)))
 
 
+def vsce_target(target: str) -> str:
+    """The VS Code marketplace target string for a rust target triple
+    (:data:`VSCE_TARGETS`), or a loud :class:`ReleaseError` naming the mapped
+    set. Pure. The vsix leg never packages an unmapped platform — a triple with
+    no vsce target is a declaration the marketplace cannot ship."""
+    vt = VSCE_TARGETS.get(target)
+    if vt is None:
+        known = ", ".join(sorted(VSCE_TARGETS))
+        raise ReleaseError(
+            f"vsix composition: target triple `{target}` has no VS Code "
+            f"marketplace target — the mapped rust triples are: {known}"
+        )
+    return vt
+
+
+def _compose_vsix(req: ComposeRequest) -> Composed:
+    """Package the per-target ``.vsix`` via ``npm exec -- vsce package
+    --target``. See the module docstring's vsix entry.
+
+    Runs ``vsce`` through ``npm exec`` in the ``npm`` leg (the extension
+    package): vsce is the consumer's ``@vscode/vsce`` devDependency under
+    ``node_modules/.bin``, so ``npm exec`` resolves it from the local package
+    context — a bare ``vsce`` would not be on ``PATH`` under ``pixi run
+    ./bin/shipit``. Writes the single ``<name>-<vsce-target>.vsix`` straight
+    into the bundle output tree; the ``vsce`` output path is stated so a rerun
+    overwrites in place (vsce replaces, never appends). The native binary vsce
+    bundles for this target is the build stage's output — for ``win32-x64`` the
+    cross-target build's (TOL02-WS11 #787). A run that leaves no ``.vsix`` is a
+    hard failure, never a quiet pass (the legacy ``vscode-ext.yml@v3``
+    per-target contract).
+    """
+    leg = _leg_for(req.artifact, req.entries, "npm", "vsix")
+    vt = vsce_target(req.target)
+    out_name = f"{req.artifact.name}-{vt}.vsix"
+    req.out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = req.out_dir / out_name
+    if out_path.exists():
+        out_path.unlink()
+    req.run_cmd(
+        [
+            "npm",
+            "exec",
+            "--",
+            "vsce",
+            "package",
+            "--target",
+            vt,
+            "--out",
+            str(out_path),
+        ],
+        req.root / leg.path,
+    )
+    if not out_path.is_file():
+        raise ReleaseError(
+            f"[artifacts.{req.artifact.name}] vsix composition: vsce package "
+            f"completed but produced no {out_name} under {req.out_dir} — hard "
+            f"fail, never a quiet pass (legacy vscode-ext per-target contract)"
+        )
+    return Composed(req.artifact.name, "vsix", (out_name,))
+
+
 @dataclass(frozen=True)
 class Composition:
     """One registry entry: a composition name, the compose function it runs,
@@ -588,7 +743,25 @@ class Composition:
     (:mod:`shipit.release.sign` — the mac-app leg's reseal payload, the
     archive leg's tarball, TOL02-WS08 #779): the config boundary refuses
     ``sign = true`` on any other composition, so a sign declaration can
-    never route to a signer leg that does not exist. ``option_keys`` are the
+    never route to a signer leg that does not exist. ``asserts_binary`` marks
+    the compositions whose output carries a MAIN BINARY the scar-#2 integrity
+    guard checks (:mod:`shipit.release.integrity`, workflows.lex §3.2) —
+    archive/deb/mac-app. A source/package composition (wheel's sdist+wheel,
+    tarball's generated C, wasm-pack's npm tgz) has no binary to name, so the
+    preflight planner omits the ``assert-bundle`` stage for it
+    (:func:`shipit.release.preflight.plan`): running the guard over a source
+    ``.tar.gz`` would hard-fail with "no main binary" (the deb tier's #784-F4
+    lesson, inverted — nothing to assert).
+    ``platform_independent`` marks the compositions whose output carries NO
+    ``-<target>`` qualifier — the tarball's generated C source is identical on
+    every OS, so it emits one unqualified ``<name>.tar.gz`` (parity with legacy
+    ``tree-sitter.tar.gz``). Because ``wf-publish.yml`` merges every leg's
+    ``dist/`` into one flat tree (``merge-multiple``), an unqualified name
+    built on more than one leg would COLLIDE (last writer wins, and tar bytes
+    are not guaranteed identical across runners — mtimes/uid/gid), so the
+    config boundary refuses such a composition declared with >1 ``platforms``
+    (:func:`shipit.config._parse_artifact`): it must build on exactly one leg.
+    ``option_keys`` are the
     EXTRA optional declaration keys a registry-assembled composition accepts
     (wasm-pack's ``scope`` / ``wasm-target`` — the ``@scope`` and wasm-pack
     ``--target``, the only consumer-specific parts); the config boundary
@@ -610,6 +783,8 @@ class Composition:
     platforms: tuple[str, ...] = ()
     declared_command: bool = False
     signable: bool = False
+    asserts_binary: bool = True
+    platform_independent: bool = False
     option_keys: tuple[str, ...] = ()
     provisions_signal: str | None = None
 
@@ -621,15 +796,34 @@ class Composition:
 
 ARCHIVE = Composition("archive", _compose_archive, signable=True)
 DEB = Composition("deb", _compose_deb, platforms=("linux",))
-WHEEL = Composition("wheel", _compose_wheel)
+#: wheel: a python sdist+wheel — no native binary, so the scar-#2 guard has
+#: nothing to assert (its sdist IS a ``.tar.gz``, which the guard would
+#: otherwise misread as a binary archive and hard-fail).
+WHEEL = Composition("wheel", _compose_wheel, asserts_binary=False)
+#: wasm-pack: an npm ``.tgz`` (wasm/JS package) — like the wheel sdist and the
+#: tree-sitter tarball it carries no main binary, so the scar-#2 guard is
+#: skipped for it (``asserts_binary=False``); a source package built via
+#: ``npm pack`` has nothing for the integrity guard to assert.
 WASM_PACK = Composition(
     "wasm-pack",
     _compose_wasm_pack,
+    asserts_binary=False,
     option_keys=("scope", "wasm-target"),
     # `npm pack` at bundle needs the node runtime (npm); wasm-pack rides the
     # rust signal and the crate's npm package.json is generated, never tracked,
     # so install unions the node signal off this declaration (issue #788).
     provisions_signal="node",
+)
+#: vsix: a per-target VS Code extension ``.vsix`` (a zip package) — no
+#: reopenable main binary, so like wheel/wasm-pack/tarball the scar-#2 guard is
+#: skipped (``asserts_binary=False``): preflight never routes the vsix leg
+#: through assert-bundle, which would hard-fail "no main binary" on a tree
+#: carrying only the per-target ``<name>-<vsce-target>.vsix``.
+VSIX = Composition(
+    "vsix",
+    _compose_vsix,
+    platforms=("apple-darwin", "linux", "windows"),
+    asserts_binary=False,
 )
 MAC_APP = Composition(
     "mac-app",
@@ -650,6 +844,16 @@ TAURI = Composition(
     # over a tauri app routes to the mac signer's existing mac-app leg.
     signable=True,
 )
+#: tree-sitter's generated-parser tarball (TOL02-WS16 #792) — platform-
+#: independent (the same generated C source on every leg, emitted as one
+#: unqualified ``<name>.tar.gz``), NOT signable (a source tarball has no binary
+#: the mac signer reopens), and NOT binary-asserting (a source ``.tar.gz`` has
+#: no main binary — the scar-#2 guard is skipped for it, like the wheel's
+#: sdist). ``platform_independent`` makes the config boundary refuse it with
+#: >1 ``platforms`` (the unqualified name would collide across legs).
+TARBALL = Composition(
+    "tarball", _compose_tarball, asserts_binary=False, platform_independent=True
+)
 
 #: The CLOSED registry, in a stable order. Adding a composition is adding an
 #: entry here (the toolchain registry's mirror) — never a kind switch.
@@ -658,8 +862,10 @@ COMPOSITIONS: tuple[Composition, ...] = (
     DEB,
     WHEEL,
     WASM_PACK,
+    VSIX,
     MAC_APP,
     TAURI,
+    TARBALL,
 )
 
 
@@ -674,6 +880,14 @@ def signable_names() -> tuple[str, ...]:
     the config boundary's ``sign = true`` refusal message
     (:func:`shipit.config._parse_artifact`)."""
     return tuple(c.name for c in COMPOSITIONS if c.signable)
+
+
+def platform_independent_names() -> tuple[str, ...]:
+    """The composition names whose output is unqualified (no ``-<target>``
+    suffix), registry order — for the config boundary's >1-``platforms``
+    refusal message (:func:`shipit.config._parse_artifact`). An unqualified
+    archive built on more than one leg would collide in the merged ``dist/``."""
+    return tuple(c.name for c in COMPOSITIONS if c.platform_independent)
 
 
 def composition(name: str) -> Composition | None:

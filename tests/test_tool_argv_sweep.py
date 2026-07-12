@@ -52,8 +52,9 @@ def _parsed(path: pathlib.Path) -> ast.Module:
 #:   ``os_probe``): the OS process table has exactly one reader.
 #: - ``curl`` — the lexd release fetch (:mod:`shipit.provision.lexd`): the one
 #:   external download shipit performs (ADP00-WS03).
-#: - ``cargo`` / ``go`` / ``pytest`` / ``npm`` / ``uv`` — the Tool verbs'
-#:   default producing commands (TOL01-WS01/WS02): assembled ONLY in the
+#: - ``cargo`` / ``go`` / ``pytest`` / ``npm`` / ``uv`` / ``tree-sitter`` —
+#:   the Tool verbs' default producing commands (TOL01-WS01/WS02,
+#:   ``tree-sitter`` TOL02-WS16): assembled ONLY in the
 #:   closed toolchain registry (:mod:`shipit.tools.registry`); a per-path
 #:   ``.shipit.toml`` override is consumer DATA, never a second assembly
 #:   point. ``npm`` has a second sanctioned home: the Tree provisioner's
@@ -101,6 +102,11 @@ _ADAPTER_HOMES: dict[str, tuple[str, ...]] = {
     ),
     "go": ("tools/registry.py",),
     "pytest": ("tools/registry.py",),
+    # tree-sitter (TOL02-WS16 #792): the generated-parser toolchain's
+    # generate/corpus commands, assembled ONLY in the closed registry. The
+    # tarball composition's payload is bytes, not a tree-sitter argv — the
+    # tar invocation stays under `tar`'s bundle home.
+    "tree-sitter": ("tools/registry.py",),
     "npm": (
         "tools/registry.py",
         "tree/create.py",
@@ -125,6 +131,17 @@ _ADAPTER_HOMES: dict[str, tuple[str, ...]] = {
     # `npm publish` extend those tools' home lists above.
     "twine": ("release/publish.py",),
     "ruby": ("release/publish.py",),
+    # The VS Code marketplace path (TOL02-WS13 #789): vsce/ovsx are the
+    # consumer's node_modules/.bin devDependencies, never PATH binaries, so
+    # they ride `npm exec -- vsce/ovsx ...` — the argv HEAD is `npm` (covered by
+    # npm's homes above: `release/bundle.py` for `vsce package`,
+    # `release/publish.py` for `vsce/ovsx publish`), so the sweep never sees a
+    # bare vsce/ovsx head. These entries still pin the ONLY files that may
+    # assemble those tools' argv AND keep the provisioning bijection
+    # (test_tool_provisioning_guard) — vsce/ovsx are provisioned tools whether
+    # or not they front their own argv.
+    "vsce": ("release/bundle.py", "release/publish.py"),
+    "ovsx": ("release/publish.py",),
     "bin/check-e2e": ("tools/e2e.py",),
     # The act harness (TOL01-WS04): `shipit wf test` is the one place that
     # drives act, and its docker probes/builds live beside it.

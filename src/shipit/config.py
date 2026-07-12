@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 
-from .identity import Sha
+from .identity import Sha, repo_from_slug
 
 CONFIG_NAME = ".shipit.toml"
 
@@ -456,15 +456,32 @@ def load_toolchains(cfg: dict) -> tuple[ToolchainEntry, ...]:
 
 
 #: The CLOSED distribution-endpoint registry names an ``endpoints`` list may
-#: use (PRD: one adapter per endpoint; gh-release, crates, pypi, npm, brew).
-#: Adding an endpoint is an adapter plus an entry here plus its
-#: secret-requirement declaration
+#: use (PRD: one adapter per endpoint; gh-release, crates, pypi, npm,
+#: vscode-marketplace, open-vsx, brew, notify-downstreams — the two VS Code
+#: marketplace endpoints land with the ``.vsix`` composition (TOL02-WS13 #789),
+#: notify-downstreams the tree-sitter cascade (TOL02-WS16 #792)). Adding an
+#: endpoint is an adapter plus an entry here plus its secret-requirement
+#: declaration
 #: (:data:`shipit.release.secretreq.ENDPOINT_SECRETS`); consumed by the
 #: release planner (``release preflight``, WS02) and by the publish stage's
 #: adapter registry (:mod:`shipit.release.publish`, TOL02-WS05), whose entries
 #: mirror this set one-to-one (asserted in its tests, so the two can never
-#: drift).
-ENDPOINTS: tuple[str, ...] = ("gh-release", "crates", "pypi", "npm", "brew")
+#: drift). ``notify-downstreams`` is the cascade endpoint (TOL02-WS16 #792): a
+#: derived, stable-only dispatch that fires ``repository_dispatch`` at the
+#: artifact's declared :attr:`Artifact.downstreams` on a real (non-rc, non-
+#: prerelease) release — the legacy ``tree-sitter.yml`` notify hook, modeled
+#: as a publish-stage action rather than a consumer post-release block so the
+#: rc/prerelease gate is the ONE the release stages already enforce.
+ENDPOINTS: tuple[str, ...] = (
+    "gh-release",
+    "crates",
+    "pypi",
+    "npm",
+    "vscode-marketplace",
+    "open-vsx",
+    "brew",
+    "notify-downstreams",
+)
 
 #: The CLOSED OS×arch platform registry a ``platforms`` list may use — the
 #: release-side build/fan-out axis (TOL02-WS02, the lane planner's release
@@ -587,7 +604,12 @@ class Artifact:
     ``main_binary`` / ``product_name`` by ``shipit release assert-bundle``'s
     expected-name fallback chain (workflows.lex §3.2: mainBinaryName →
     productName → package name — the scar-#2 integrity guard's inputs); and
-    ``sign`` also by the sign stage — that later.
+    ``sign`` also by the sign stage — that later. ``downstreams`` is the
+    ``owner/name`` repos the ``notify-downstreams`` endpoint fires
+    ``repository_dispatch`` at on a real release (TOL02-WS16 #792) — REQUIRED
+    by that endpoint and refused without it (a notify with no target is a
+    no-op declaration), and refused WITHOUT the endpoint (a downstreams list
+    that nothing fires is dead config).
 
     ``sign = true`` requires at least one build target, at least one darwin
     platform (signing signs a build output, and runs on macOS only), AND a
@@ -608,6 +630,7 @@ class Artifact:
     main_binary: str | None = None
     product_name: str | None = None
     endpoints: tuple[str, ...] = ()
+    downstreams: tuple[str, ...] = ()
     e2e: E2eSpec | None = None
     sign: bool = False
 
@@ -691,6 +714,35 @@ def _parse_endpoints(where: str, value: object) -> tuple[str, ...]:
                 f"{where}: unknown endpoint `{endpoint}`; known endpoints: {known}"
             )
     return tuple(value)
+
+
+def _parse_downstreams(where: str, value: object) -> tuple[str, ...]:
+    """The ``downstreams`` list — the ``owner/name`` repos the
+    ``notify-downstreams`` endpoint fires ``repository_dispatch`` at
+    (TOL02-WS16 #792). Each entry is normalized through the canonical slug
+    parser (:func:`identity.repo_from_slug`): lowercased to its GitHub
+    identity (owner and name are case-insensitive) and rejected if malformed
+    (not exactly ``owner/name``). Returning the canonical slug means every
+    dispatch targets the same normalized form, and duplicates are refused on
+    that canonical key so a case-only repeat (``Lex-Fmt/vscode`` vs
+    ``lex-fmt/vscode``) is caught, not silently dispatched twice."""
+    if not isinstance(value, list) or not all(isinstance(r, str) for r in value):
+        raise ConfigError(f"{where}: must be a list of `owner/name` repo slugs")
+    seen: set[str] = set()
+    canonical: list[str] = []
+    for slug in value:
+        try:
+            canon = repo_from_slug(slug).slug
+        except ValueError:
+            raise ConfigError(
+                f"{where}: `{slug}` is not an `owner/name` repo slug "
+                f'(e.g. "lex-fmt/vscode")'
+            ) from None
+        if canon in seen:
+            raise ConfigError(f"{where}: duplicate downstream `{canon}`")
+        seen.add(canon)
+        canonical.append(canon)
+    return tuple(canonical)
 
 
 def _parse_platforms(where: str, value: object) -> tuple[str, ...]:
@@ -835,6 +887,7 @@ def _parse_artifact(name: str, spec: object) -> Artifact:
             "bundle",
             "bundle-config",
             "endpoints",
+            "downstreams",
             "e2e",
             "main-binary",
             "product-name",
@@ -928,6 +981,45 @@ def _parse_artifact(name: str, spec: object) -> Artifact:
                 f"{where}: sign = true requires a bundle composition the "
                 f"signer can reopen ({', '.join(signable)}); got {got}"
             )
+    if bundle is not None and len(platforms) > 1:
+        # A platform-independent composition (tarball's generated C source)
+        # emits ONE unqualified `<name>.tar.gz`; `wf-publish.yml` merges every
+        # leg's dist/ into one flat tree (merge-multiple), so the same
+        # unqualified name built on >1 leg would collide (last writer wins, and
+        # tar bytes are not identical across runners). Refuse it here — it must
+        # build on exactly one leg — rather than silently publishing a
+        # nondeterministic asset (TOL02-WS16 #792).
+        from .release import bundle as bundle_registry  # lazy, like _parse_bundle
+
+        if bundle.composition in bundle_registry.platform_independent_names():
+            raise ConfigError(
+                f"{where}: composition `{bundle.composition}` is platform-"
+                f"independent — it emits one unqualified archive, so declaring "
+                f"more than one platform would build colliding assets; declare "
+                f"at most one platform (or none — it defaults to a single lane)"
+            )
+    endpoints = _parse_endpoints(f"{where}.endpoints", spec.get("endpoints", []))
+    downstreams = _parse_downstreams(
+        f"{where}.downstreams", spec.get("downstreams", [])
+    )
+    # The notify-downstreams endpoint and the downstreams list are mutual
+    # preconditions (TOL02-WS16 #792): the endpoint fires repository_dispatch
+    # at the list, so an endpoint with no list is a no-op declaration and a
+    # list with no endpoint is dead config nothing fires. Refuse either gap
+    # here, at parse, so the publish adapter never reaches an under-declared
+    # notify.
+    if "notify-downstreams" in endpoints and not downstreams:
+        raise ConfigError(
+            f"{where}: the notify-downstreams endpoint needs a `downstreams` "
+            f"list — the `owner/name` repos it fires repository_dispatch at "
+            f'(e.g. downstreams = ["lex-fmt/vscode", "lex-fmt/nvim"])'
+        )
+    if downstreams and "notify-downstreams" not in endpoints:
+        raise ConfigError(
+            f"{where}: `downstreams` is declared but the notify-downstreams "
+            f"endpoint is not — add it to `endpoints`, or drop `downstreams` "
+            f"(a list nothing fires is dead config)"
+        )
     return Artifact(
         name=name,
         build=build,
@@ -936,7 +1028,8 @@ def _parse_artifact(name: str, spec: object) -> Artifact:
         bundle_config=bundle_config,
         main_binary=names["main-binary"],
         product_name=names["product-name"],
-        endpoints=_parse_endpoints(f"{where}.endpoints", spec.get("endpoints", [])),
+        endpoints=endpoints,
+        downstreams=downstreams,
         e2e=_parse_e2e(where, spec["e2e"]) if "e2e" in spec else None,
         sign=sign,
     )

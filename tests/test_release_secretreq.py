@@ -103,6 +103,14 @@ def test_gh_release_endpoint_requires_nothing_beyond_prepare():
     assert secretreq.required_names(arts) == ("RELEASE_TOKEN",)
 
 
+def test_marketplace_endpoints_derive_their_pat_tokens():
+    # TOL02-WS13 #789: the two VS Code marketplace endpoints require their PATs.
+    arts = _artifacts(
+        '[artifacts.ext]\nendpoints = ["vscode-marketplace", "open-vsx"]\n'
+    )
+    assert secretreq.required_names(arts) == ("RELEASE_TOKEN", "VSCE_PAT", "OVSX_PAT")
+
+
 def test_no_endpoints_means_nothing_required():
     # A repo that never releases has nothing required of it — gh-setup on a
     # docs-only repo must not demand a push token.
