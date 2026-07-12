@@ -1,4 +1,4 @@
-# The fleet-pinned lint toolchain (docs/legacy-prd/adoption.md: the managed set owns
+# The fleet-pinned lint toolchain (arthur-debert/shipit docs/legacy-prd/adoption.md: the managed set owns
 # the consumer environment). Canonical versions live HERE — a bump is one data
 # edit, rolled fleet-wide on each consumer's next `shipit install` reconcile.
 ruff = "0.15.*"

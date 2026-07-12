@@ -59,7 +59,7 @@ Iterate until the user approves the breakdown. Before publishing, confirm the hu
 
 Work one epic at a time. For each approved epic:
 
-**a. Create the epic umbrella issue first.** This is the **execution tracker**, not the spec — use the epic template below. Title: `<REPO>-<EPIC>: Epic: <Epic Name>`. It carries a summary of the Spec, pointers to the authoritative Spec (`docs/spec/...`) and the relevant ADRs, and the WS list/topology. Apply the correct triage label unless instructed otherwise. Once the umbrella issue exists, record it in the dev-cycle log (best-effort — ADR-0032; continue on error):
+**a. Create the epic umbrella issue first.** This is the **execution tracker**, not the spec — use the epic template below. Title: `<REPO>-<EPIC>: Epic: <Epic Name>`. It carries a summary of the Spec, pointers to the authoritative Spec (`docs/spec/<feature-slug>.md`) and the relevant ADRs, and the WS list/topology. Apply the correct triage label unless instructed otherwise. Once the umbrella issue exists, record it in the dev-cycle log (best-effort — ADR-0032; continue on error):
 
 ```sh
 shipit log event planning.epic.minted --about "<EPIC>: <Epic Name> (#<issue>)"
