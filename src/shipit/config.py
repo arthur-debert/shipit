@@ -543,19 +543,21 @@ class BundleSpec:
     ``shipit release bundle`` (TOL02-WS03; "package" is retired — the stage
     word is bundle).
 
+    ``composition`` names an entry of the CLOSED composition registry
     (:mod:`shipit.release.bundle` — archive, deb, wheel, wasm-pack, vsix,
-    mac-app, electron, tarball), the ADR-0007 shape: the bundle step is
+    mac-app, tauri, electron, tarball), the ADR-0007 shape: the bundle step is
     declared per artifact, keyed off the map, never a project-Kind switch.
     ``command`` is the declared bundler argv the DECLARED-COMMAND compositions
-    run (``mac-app``'s ``tauri build``, ``electron``'s ``electron-builder`` —
-    the one consumer-specific part of each, workflows.lex §3.1), through the
-    one exec seam like every producing command (ADR-0028); ``source`` is the
-    repo-relative directory that bundler leaves its distributables under
-    (mac-app's coupled ``.app``/``.dmg`` pair, electron's per-platform
-    ``.dmg``/``.AppImage``/``.exe`` set). Both are REQUIRED by every
-    declared-command composition (``mac-app``, ``electron``) and rejected for
-    the registry-assembled ones (archive, deb, wheel, … — their commands are
-    assembled, never declared).
+    run (``mac-app``'s / ``tauri``'s ``tauri build``, ``electron``'s
+    ``electron-builder`` — the one consumer-specific part of each,
+    workflows.lex §3.1), through the one exec seam like every producing command
+    (ADR-0028); ``source`` is the repo-relative directory that bundler leaves
+    its distributables under (mac-app's coupled ``.app``/``.dmg`` pair, tauri's
+    ``.app``/``.dmg`` on darwin + ``.AppImage``/``.deb`` on linux, electron's
+    per-platform ``.dmg``/``.AppImage``/``.exe`` set). Both are REQUIRED by
+    every declared-command composition (``mac-app``, ``tauri``, ``electron``)
+    and rejected for the registry-assembled ones (archive, deb, wheel, … —
+    their commands are assembled, never declared).
 
     ``scope`` / ``wasm_target`` are the ``wasm-pack`` composition's optional
     consumer-specific parts (TOL02-WS12 #788): the npm ``@scope`` (``--scope``,
@@ -800,9 +802,10 @@ def _parse_bundle(where: str, spec: object) -> BundleSpec:
     command = spec.get("command")
     source = spec.get("source")
     if entry.declared_command:
-        # mac-app: the bundler that produces the coupled .app/.dmg pair is the
-        # one consumer-specific part of the mac path (workflows.lex §3.1), so
-        # the declaration must carry it — and say where the pair lands.
+        # mac-app/tauri: the bundler that produces the platform's bundles (the
+        # mac .app/.dmg pair, tauri's linux .AppImage/.deb) is the one
+        # consumer-specific part (workflows.lex §3.1), so the declaration must
+        # carry it — and say where the bundles land.
         if command is None:
             raise ConfigError(
                 f"{where}.bundle: composition `{composition}` runs the "
@@ -812,14 +815,27 @@ def _parse_bundle(where: str, spec: object) -> BundleSpec:
         if not isinstance(source, str) or not source:
             raise ConfigError(
                 f"{where}.bundle: composition `{composition}` needs `source` — "
-                f"the repo-relative directory the bundler leaves the "
-                f'.app/.dmg pair under, e.g. "src-tauri/target/release/bundle"'
+                f"the repo-relative directory the bundler leaves its bundles "
+                f"under (the mac .app/.dmg pair, tauri linux .AppImage/.deb), "
+                f'e.g. "src-tauri/target/release/bundle"'
             )
         _reject_path_escape(f"{where}.bundle.source", source)
+        normalized = str(PurePosixPath(source))
+        if normalized == ".":
+            # A DEDICATED build-output subdir, never the checkout root: the
+            # bundler writes there and the composition reads it, so a repo-root
+            # `source` is a config mistake — refused loudly here so it can never
+            # reach the compose step (defence in depth beside the non-destructive
+            # collector, which deletes nothing under `source` regardless).
+            raise ConfigError(
+                f"{where}.bundle.source: composition `{composition}` needs a "
+                f"dedicated bundle output subdirectory, not the repo root "
+                f'(`.`) — e.g. "src-tauri/target/release/bundle"'
+            )
         return BundleSpec(
             composition=composition,
             command=_parse_argv(f"{where}.bundle.command", command),
-            source=str(PurePosixPath(source)),
+            source=normalized,
         )
     # Registry-assembled compositions (archive, deb, wheel, wasm-pack): their
     # commands are the registry's one assembly point (ADR-0028) — a declared
@@ -828,7 +844,7 @@ def _parse_bundle(where: str, spec: object) -> BundleSpec:
         if key in spec:
             raise ConfigError(
                 f"{where}.bundle: `{key}` applies only to compositions that "
-                f"run a declared bundler (mac-app); composition "
+                f"run a declared bundler (mac-app, tauri); composition "
                 f"`{composition}` assembles its own commands"
             )
     # wasm-pack's optional scope/wasm-target — non-empty strings when present

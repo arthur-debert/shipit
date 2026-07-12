@@ -296,16 +296,19 @@ _RELEASE_SURFACE = (
 
 #: String literals the discovery sweep finds heading a list/tuple in the
 #: release surface that are NOT tool invocations (result vocabularies,
-#: platform names, template keys, manifest filenames, version prefixes).
-#: Every entry must still be discovered (no stale rows) and must not collide
-#: with a PROVISIONING head. A REAL tool never belongs here.
+#: platform names, template keys, manifest filenames, version prefixes, tauri
+#: bundle-format subdir names). Every entry must still be discovered (no stale
+#: rows) and must not collide with a PROVISIONING head. A REAL tool never
+#: belongs here.
 _NON_ARGV_LITERALS = frozenset(
     {
         "aarch64",
+        "appimage",  # tauri linux bundle-format subdir (_TAURI_LINUX_FORMATS)
         "apple-darwin",
         "build",
         "bundle",
         "darwin",
+        "deb",  # tauri linux bundle-format subdir (_TAURI_LINUX_FORMATS)
         "description",
         "dispatch",
         "gh-release",

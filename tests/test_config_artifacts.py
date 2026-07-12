@@ -358,8 +358,9 @@ def test_bundle_composition_names_the_closed_registry():
     # names the known set, mirroring endpoints/toolchains.
     with pytest.raises(config.ConfigError, match="unknown composition `rpm`") as exc:
         _load('[artifacts.x]\nbundle = { composition = "rpm" }\n')
-    assert "archive, deb, wheel, wasm-pack, vsix, mac-app, electron, tarball" in str(
-        exc.value
+    assert (
+        "archive, deb, wheel, wasm-pack, vsix, mac-app, tauri, electron, tarball"
+        in str(exc.value)
     )
 
 
@@ -391,6 +392,62 @@ def test_mac_app_parses_command_and_source():
         # Normalized to canonical form, like bundle-config.
         source="src-tauri/target/release/bundle",
     )
+
+
+def test_tauri_parses_command_and_source_like_a_declared_bundler():
+    # tauri is a declared-command composition too (its `tauri build` is the one
+    # consumer-specific part), so it carries command + source like mac-app.
+    (artifact,) = _load(
+        "[artifacts.app]\n"
+        'build = ["rust", "npm"]\n'
+        'bundle = { composition = "tauri", command = ["npm", "run", "tauri", '
+        '"build"], source = "src-tauri/target/release/bundle" }\n'
+    )
+    assert artifact.bundle == config.BundleSpec(
+        composition="tauri",
+        command=("npm", "run", "tauri", "build"),
+        source="src-tauri/target/release/bundle",
+    )
+
+
+def test_tauri_needs_command_and_source():
+    with pytest.raises(
+        config.ConfigError, match=r"composition `tauri` runs the artifact's own"
+    ):
+        _load('[artifacts.x]\nbundle = { composition = "tauri" }\n')
+
+
+@pytest.mark.parametrize("bad", ['"."', '"./"'])
+def test_declared_command_source_refuses_the_repo_root(bad):
+    # A declared bundler writes into a dedicated output subdir the composition
+    # then reads; the repo root (`.`) is a config mistake — refused loudly at
+    # parse so it can never reach the compose step (defence in depth: the tauri
+    # collector deletes nothing under `source`, but a repo-root source is still
+    # wrong for every declared-command composition).
+    with pytest.raises(
+        config.ConfigError, match=r"dedicated bundle output subdirectory"
+    ):
+        _load(
+            "[artifacts.x]\n"
+            'bundle = { composition = "tauri", command = ["npm", "run", "tauri", '
+            f'"build"], source = {bad} }}\n'
+        )
+
+
+def test_sign_with_a_tauri_bundle_parses():
+    # `sign = true` over a tauri app routes to the mac signer's mac-app leg
+    # (the darwin leg emits the same reseal payload), so it is a signable
+    # composition — accepted at parse, like mac-app.
+    (artifact,) = _load(
+        "[artifacts.app]\n"
+        'build = ["rust", "npm"]\n'
+        'platforms = ["darwin-arm64", "linux-x86_64"]\n'
+        'bundle = { composition = "tauri", command = ["npm", "run", "tauri", '
+        '"build"], source = "src-tauri/target/release/bundle" }\n'
+        "sign = true\n"
+    )
+    assert artifact.sign is True
+    assert artifact.bundle.composition == "tauri"
 
 
 def test_electron_parses_command_and_source_like_a_declared_bundler():
@@ -543,7 +600,7 @@ def test_sign_without_a_bundle_is_refused():
     with pytest.raises(
         config.ConfigError,
         match=r"sign = true requires a bundle composition the signer can "
-        r"reopen \(archive, mac-app, electron\); got no bundle",
+        r"reopen \(archive, mac-app, tauri, electron\); got no bundle",
     ):
         _load(
             "[artifacts.x]\n"
@@ -560,7 +617,7 @@ def test_sign_with_an_unsignable_composition_is_refused():
     with pytest.raises(
         config.ConfigError,
         match=r"sign = true requires a bundle composition the signer can "
-        r"reopen \(archive, mac-app, electron\); got composition `wheel`",
+        r"reopen \(archive, mac-app, tauri, electron\); got composition `wheel`",
     ):
         _load(
             "[artifacts.x]\n"

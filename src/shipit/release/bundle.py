@@ -79,6 +79,41 @@ functions the entries carry:
   sign-then-bundle). The declared ``command`` is the only consumer-specific
   part; a missing payload is a bundle-stage failure, never a signer
   surprise. Mac targets only.
+- **tauri** — the tauri app bundler as a DECLARED-command composition, the
+  mac-app shape (TOL02-WS15 #791, WS10 DECIDED #798: bespoke composition,
+  "same naked-.app/.dmg sign-path argument as electron"). ONE declared
+  ``tauri build`` (the consumer's own — e.g. ``npm run tauri build`` against
+  the consumer's ``@tauri-apps/cli``, the one consumer-specific part, exactly
+  like mac-app/electron-builder's declared bundler) leaves the platform's
+  bundles under the declared ``source`` dir, and the composition collects
+  whatever that platform produces. Because the bundler is DECLARED (not a
+  registry-assembled argv), the tauri CLI is CONSUMER-OWNED — the consumer's
+  manifest provisions it, NOT a shipit-managed pixi block: a declared command
+  is the consumer's to provision, so tauri never becomes a release Exec tool
+  and takes no provisioning-guard row (only registry-ASSEMBLED builders like
+  wasm-pack ride pixi provisioning — docs/dev/release-tool-provisioning.md).
+  Collection is NON-DESTRUCTIVE (it never deletes under the consumer's
+  declared ``source`` — a config typo must never cost a file) and reads only
+  the tool-CONTROLLED per-format subdirs tauri writes, never a name-blind
+  recursive sweep of ``source``:
+
+  - on **darwin** — the coupled ``.app``/``.dmg`` pair PLUS the reseal payload,
+    the EXACT mac-app shape (the shared :func:`_stage_mac_pair`): the mac
+    signer is consumer-agnostic and keys off the ``*.unsigned-app.tar.gz``
+    payload, not the composition (workflows.lex §3.1 — "the only tauri-specific
+    part is the bundler"), so a tauri darwin bundle rides the same sign path as
+    electron with zero signer changes;
+  - on **linux** — each format's ONE primary output from its subdir of the
+    bundle dir (:data:`_TAURI_LINUX_FORMATS`: ``appimage/*.AppImage``,
+    ``deb/*.deb``), staged into the output tree.
+
+  Windows is out of scope (the legacy ``tauri-app.yml`` ships no
+  ``icon.ico``, #791), so the composition is gated to darwin+linux targets and
+  a windows leg is a clean skip, never a surprise. A darwin bundle missing its
+  pair, or a linux bundle producing no ``.AppImage``/``.deb``, is a hard
+  bundle-stage failure, never a quiet pass (ADR-0009's barrier); so is a
+  format subdir holding more than one primary bundle (a stale prior output —
+  never a nondeterministic pick).
 - **electron** — electron-builder's per-platform distributable set (the
   darwin ``.dmg`` + ``.dmg.blockmap`` sidecar, the linux ``.AppImage``, the
   windows ``.exe`` + ``.exe.blockmap``), collected from the declared
@@ -517,24 +552,24 @@ def _compose_wasm_pack(req: ComposeRequest) -> Composed:
     return Composed(req.artifact.name, "wasm-pack", (tarballs[0],))
 
 
-def _compose_mac_app(req: ComposeRequest) -> Composed:
-    """The coupled unsigned ``.app``/``.dmg`` pair + the reseal payload.
+def _stage_mac_pair(req: ComposeRequest, source: Path, composition: str) -> Composed:
+    """Stage the coupled unsigned ``.app``/``.dmg`` pair from ``source`` and
+    re-emit the inner ``.app`` as ``<name>.unsigned-app.tar.gz`` — the
+    symlink/exec-bit-preserving tar the signer reseals from (workflows.lex
+    §3.1). A missing payload is a bundle-stage failure, never a signer
+    surprise.
 
-    Runs the DECLARED bundler (the one consumer-specific part), collects the
-    exactly-one pair from the declared ``source`` dir, and re-emits the inner
-    ``.app`` as ``<name>.unsigned-app.tar.gz`` — the symlink/exec-bit-
-    preserving tar the signer reseals from (workflows.lex §3.1). A missing
-    payload is THIS stage's failure, never a signer surprise.
+    Shared by the mac-app and tauri darwin compositions: both leave a single
+    ``.app``/``.dmg`` pair a declared darwin bundler produced, and the mac
+    signer is consumer-agnostic — it keys off the reseal payload, not the
+    composition that made it (:func:`shipit.release.sign.detect_shape`). Zero
+    or multiple pairs is a hard error (never a nondeterministic pick).
     """
-    spec = req.artifact.bundle
-    assert spec is not None and spec.command is not None and spec.source is not None
-    req.run_cmd(list(spec.command), req.root)
-    source = req.root / spec.source
     apps = sorted(p for p in source.rglob("*.app") if p.is_dir())
     dmgs = sorted(p for p in source.rglob("*.dmg") if p.is_file())
     if len(apps) != 1 or len(dmgs) != 1:
         raise ReleaseError(
-            f"[artifacts.{req.artifact.name}] mac-app composition needs "
+            f"[artifacts.{req.artifact.name}] {composition} composition needs "
             f"exactly one coupled .app/.dmg pair under {source}; found "
             f"{len(apps)} .app and {len(dmgs)} .dmg"
         )
@@ -554,12 +589,99 @@ def _compose_mac_app(req: ComposeRequest) -> Composed:
     )
     if not (req.out_dir / payload).is_file():
         raise ReleaseError(
-            f"[artifacts.{req.artifact.name}] mac bundle emitted no reseal "
-            f"payload ({payload}) — the signer reseals the .dmg from the "
-            f"SIGNED .app (workflows.lex §3.1), so a mac bundle without it is "
-            f"a bundle-stage failure"
+            f"[artifacts.{req.artifact.name}] {composition} composition emitted "
+            f"no reseal payload ({payload}) — the signer reseals the .dmg from "
+            f"the SIGNED .app (workflows.lex §3.1), so a darwin bundle without "
+            f"it is a bundle-stage failure"
         )
-    return Composed(req.artifact.name, "mac-app", (app.name, dmg.name, payload))
+    return Composed(req.artifact.name, composition, (app.name, dmg.name, payload))
+
+
+def _compose_mac_app(req: ComposeRequest) -> Composed:
+    """The coupled unsigned ``.app``/``.dmg`` pair + the reseal payload.
+
+    Runs the DECLARED bundler (the one consumer-specific part), then stages the
+    exactly-one pair from the declared ``source`` dir via the shared
+    :func:`_stage_mac_pair`. See the module docstring's mac-app entry.
+    """
+    spec = req.artifact.bundle
+    assert spec is not None and spec.command is not None and spec.source is not None
+    req.run_cmd(list(spec.command), req.root)
+    return _stage_mac_pair(req, req.root / spec.source, "mac-app")
+
+
+#: The tauri linux bundle layout the composition collects: each format subdir
+#: ``tauri build`` writes under the declared bundle dir → the glob for its ONE
+#: primary output (``bundle/appimage/*.AppImage``, ``bundle/deb/*.deb``). This
+#: is the tool-CONTROLLED layout tauri owns and the release pipeline resolves
+#: the same way (arthur-debert/release ``resolve-tauri-bundles.sh``). Collecting
+#: from the named subdirs — never a recursive sweep of the consumer's declared
+#: ``source`` — is what keeps a stray file elsewhere under ``source`` out of the
+#: release. Windows is out of scope (the legacy ``tauri-app.yml`` ships no
+#: ``icon.ico``, #791), so the composition is darwin+linux-gated and never
+#: looks for a ``.msi``/``.exe``.
+_TAURI_LINUX_FORMATS: tuple[tuple[str, str], ...] = (
+    ("appimage", "*.AppImage"),
+    ("deb", "*.deb"),
+)
+
+
+def _compose_tauri(req: ComposeRequest) -> Composed:
+    """``tauri build`` the app, collect the current platform's bundles.
+
+    Runs the DECLARED ``tauri build`` (the consumer's own bundler — the one
+    consumer-specific part), then, on a darwin target, stages the coupled
+    ``.app``/``.dmg`` pair + reseal payload (the shared :func:`_stage_mac_pair`
+    — the same sign path as mac-app/electron); on a linux target collects each
+    format's ONE primary output from its tool-controlled subdir of the declared
+    bundle dir (:data:`_TAURI_LINUX_FORMATS`). See the module docstring's tauri
+    entry. The composition is gated to darwin+linux (:data:`TAURI`), so a
+    windows leg never reaches here.
+
+    Collection is NON-DESTRUCTIVE — it never deletes under the consumer's
+    declared ``source`` (a config typo must never cost a file). Instead of a
+    name-blind recursive sweep, it reads only the named per-format subdirs and
+    requires EXACTLY ONE primary file in each present one: a second, stale
+    differently-named bundle a prior build left there is a HARD FAIL, never a
+    silent stale-artifact release (the same "exactly one, never a
+    nondeterministic pick" contract :func:`_stage_mac_pair` holds for the
+    darwin pair). A rerun overwrites its one file in place, so it stays one.
+    """
+    spec = req.artifact.bundle
+    assert spec is not None and spec.command is not None and spec.source is not None
+    req.run_cmd(list(spec.command), req.root)
+    source = req.root / spec.source
+    if "apple-darwin" in req.target:
+        return _stage_mac_pair(req, source, "tauri")
+    req.out_dir.mkdir(parents=True, exist_ok=True)
+    produced: list[str] = []
+    for subdir, pattern in _TAURI_LINUX_FORMATS:
+        fmt_dir = source / subdir
+        if not fmt_dir.is_dir():
+            continue  # a format the consumer's tauri.conf did not request
+        matches = sorted(p for p in fmt_dir.glob(pattern) if p.is_file())
+        if len(matches) > 1:
+            raise ReleaseError(
+                f"[artifacts.{req.artifact.name}] tauri composition: {fmt_dir} "
+                f"holds {len(matches)} {pattern} files, expected exactly one — "
+                f"a stale bundle from a prior build is still there; clean it "
+                f"and rebuild (never a nondeterministic pick or a silent stale "
+                f"release)"
+            )
+        for path in matches:
+            dest = req.out_dir / path.name
+            if dest.exists():
+                dest.unlink()
+            shutil.copy2(path, dest)
+            produced.append(path.name)
+    if not produced:
+        globs = "/".join(pattern for _, pattern in _TAURI_LINUX_FORMATS)
+        raise ReleaseError(
+            f"[artifacts.{req.artifact.name}] tauri composition: `tauri build` "
+            f"left no {globs} bundle under {source} — a linux tauri build that "
+            f"produces none is a hard fail, never a quiet pass"
+        )
+    return Composed(req.artifact.name, "tauri", tuple(sorted(produced)))
 
 
 #: The electron-builder distributable set per platform: a target-triple
@@ -914,6 +1036,18 @@ MAC_APP = Composition(
     declared_command=True,
     signable=True,
 )
+TAURI = Composition(
+    "tauri",
+    _compose_tauri,
+    # darwin (.app/.dmg + reseal payload) AND linux (.AppImage/.deb); windows
+    # is out of scope (no icon.ico, #791) so it is NOT listed — a windows leg
+    # is a clean skip.
+    platforms=("apple-darwin", "linux"),
+    declared_command=True,
+    # The darwin leg emits the same reseal payload as mac-app, so `sign = true`
+    # over a tauri app routes to the mac signer's existing mac-app leg.
+    signable=True,
+)
 ELECTRON = Composition(
     "electron",
     _compose_electron,
@@ -947,6 +1081,7 @@ COMPOSITIONS: tuple[Composition, ...] = (
     WASM_PACK,
     VSIX,
     MAC_APP,
+    TAURI,
     ELECTRON,
     TARBALL,
 )
