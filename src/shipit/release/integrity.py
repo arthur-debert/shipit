@@ -236,13 +236,16 @@ def _archive_main_binary(archive: Path) -> str | None:
 
 
 def _deb_data_tar(deb: Path) -> bytes | None:
-    """The raw bytes of the deb's ``data.tar.*`` member, read from the ar
-    container in place. An ar archive is the global magic followed by 60-byte
-    member headers (name 16, mtime 12, uid 6, gid 6, mode 8, size 10, magic
-    2) each fronting ``size`` data bytes padded to an even offset; a ``.deb``
-    carries ``debian-binary``, ``control.tar.*`` and ``data.tar.*`` members.
-    ``None`` when the file is not a well-formed ar archive, the data member
-    is missing, or it is truncated."""
+    """The raw bytes of the deb's ``data.tar.*`` member, sliced out of the ar
+    container WITHOUT extraction (we walk the container's own headers rather
+    than shelling out to ``dpkg-deb``/``ar``) — the whole file is read into
+    memory, which is bounded here because a shipit ``.deb`` wraps a single
+    pre-built CLI binary (single-digit MB), not an arbitrary payload. An ar
+    archive is the global magic followed by 60-byte member headers (name 16,
+    mtime 12, uid 6, gid 6, mode 8, size 10, magic 2) each fronting ``size``
+    data bytes padded to an even offset; a ``.deb`` carries ``debian-binary``,
+    ``control.tar.*`` and ``data.tar.*`` members. ``None`` when the file is not
+    a well-formed ar archive, the data member is missing, or it is truncated."""
     try:
         raw = deb.read_bytes()
     except OSError:

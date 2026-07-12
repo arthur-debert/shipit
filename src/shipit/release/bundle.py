@@ -244,6 +244,12 @@ def _compose_deb(req: ComposeRequest) -> Composed:
         # wraps); a failing install raises through run_cmd, aborting the
         # stage loudly (ADR-0009's barrier), never a quiet skip. The version
         # is pinned (CARGO_DEB_VERSION) for a reproducible build.
+        #
+        # No post-install PATH re-check: cargo resolves a custom subcommand
+        # (`cargo deb`) by searching $CARGO_HOME/bin ITSELF, independent of the
+        # process PATH, so the just-installed cargo-deb is found even in an
+        # isolated env (pixi) where $CARGO_HOME/bin is off PATH — a shutil.which
+        # gate here would spuriously abort exactly that case (issue #784 F2).
         req.run_cmd(
             [
                 "cargo",
@@ -255,17 +261,6 @@ def _compose_deb(req: ComposeRequest) -> Composed:
             ],
             req.root,
         )
-        # `cargo install` writes into $CARGO_HOME/bin, which is NOT guaranteed
-        # on PATH when cargo itself arrives via a pixi/isolated env — a green
-        # install whose binary is then undiscoverable would fail the next step
-        # (`cargo deb`) as an opaque "no such subcommand". Re-check and abort
-        # loudly with the remediation instead (ADR-0009's loud barrier).
-        if shutil.which("cargo-deb") is None:
-            raise ReleaseError(
-                f"[artifacts.{req.artifact.name}] deb composition: "
-                f"self-provisioned cargo-deb but it is still not on PATH — "
-                f"ensure $CARGO_HOME/bin (default ~/.cargo/bin) is on PATH"
-            )
     argv = ["cargo", "deb", "--no-build", "--no-strip"]
     if package is not None:
         argv += ["-p", package]
