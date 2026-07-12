@@ -24,16 +24,22 @@ name: wf-sign-mac
 # — through the composed wf-release.yml or directly (PRD story 38).
 #
 # Check-name contract (PRD story 42, consumed by ADP02): this block's
-# stable jobs are `plan` (skipped whenever the caller supplies the sign
-# projection — every composed-chain run) and `sign`, surfacing per leg as
-# `<caller-job> / sign (<artifact>, <platform>)`. Never renamed casually.
+# stable jobs are `plan` and `sign` (surfacing per leg as
+# `<caller-job> / sign (<artifact>, <platform>)`), plus the standalone-only
+# `carry-bundles` (per bundle leg) and `carry-notes`. `plan` and the carry
+# jobs are skipped no-ops on every composed-chain run (the caller supplies
+# the sign projection and shares one run), so existing required checks are
+# untouched. Never renamed casually.
 #
 # Per-stage dispatch (TOL02-WS09 #780): the standalone contract is `tag` +
 # `run-id` — omit `sign-matrix` and the `plan` job re-derives the sign
 # projection at the tag (`release preflight --plan-only`); `run-id` points
 # the bundle download at the SOURCE run whose unsigned trees this dispatch
-# re-signs. The signed-* artifacts land in THIS run — a follow-up publish
-# dispatch must name THIS run as its source (single-source-run rule,
+# re-signs. The signed-* artifacts land in THIS run, and the `carry-bundles`
+# / `carry-notes` jobs re-upload the base families (every `bundle-*` tree
+# and `release-notes`) from the source run so THIS run is a COMPLETE publish
+# source — a follow-up publish dispatch names THIS run as its single source
+# and finds all three artifact families here (single-source-run rule,
 # workflows.lex §8).
 #
 # act hole (PRD story 41): this block's signer leg is on the printed
@@ -110,6 +116,13 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       sign-matrix: ${{ steps.plan.outputs.sign-matrix }}
+      # The full bundle-bearing projection (per-stage dispatch, #780): the
+      # carry-forward jobs re-upload every one of these from the source run
+      # so THIS run becomes a complete publish source (single-source-run
+      # rule, workflows.lex §8). Derived only on the standalone path (this
+      # job runs only when the caller omitted the facts); the composed
+      # chain never carries — its artifacts already share one run.
+      bundle-matrix: ${{ steps.plan.outputs.bundle-matrix }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -130,7 +143,10 @@ jobs:
           # ADR-0041: the tag is the version authority (v<version>).
           version="${TAG#v}"
           plan="$(pixi run --locked ./bin/shipit release preflight "$version" --json --plan-only | jq -c .)"
-          printf 'sign-matrix=%s\n' "$(jq -c '[.matrix[] | select(.sign)]' <<<"$plan")" >> "$GITHUB_OUTPUT"
+          {
+            printf 'sign-matrix=%s\n' "$(jq -c '[.matrix[] | select(.sign)]' <<<"$plan")"
+            printf 'bundle-matrix=%s\n' "$(jq -c '[.matrix[] | select(.bundle)]' <<<"$plan")"
+          } >> "$GITHUB_OUTPUT"
 
   sign:
     needs: plan
@@ -213,4 +229,78 @@ jobs:
           # (same filenames — the signed .dmg / .tar.gz replaces the
           # unsigned one).
           path: dist-signed/*
+          if-no-files-found: error
+
+  # Carry-forward (per-stage dispatch, #780): make THIS sign run a COMPLETE
+  # publish source. A standalone publish names ONE run as its `run-id` and
+  # downloads ALL THREE artifact families from it — `release-notes`,
+  # `bundle-*`, `signed-*` (workflows.lex §8, single-source-run rule). The
+  # sign legs produce signed-* but consume-and-drop the bundles and never
+  # fetch release-notes, so without carry-forward a follow-up publish naming
+  # this run would fail its first cross-run download. These two jobs
+  # re-upload the base families from the SOURCE run under their original
+  # names, so the sign run mirrors what publish expects. Standalone ONLY:
+  # `run-id == ''` (the composed chain — one shared run, nothing to carry)
+  # skips both, so existing required checks are untouched (like `plan`).
+  carry-bundles:
+    needs: plan
+    # Every bundle-bearing tree (signed AND unsigned entries): publish
+    # stages `pattern: bundle-*` and asserts each unsigned leg by exact
+    # name, so the mirror must be the full projection, not just the signed
+    # legs. `!cancelled()` + plan-result checks: the plan job is where the
+    # projection comes from on this path.
+    if: >-
+      ${{ !cancelled() && inputs.run-id != ''
+      && needs.plan.result != 'failure' && needs.plan.result != 'cancelled'
+      && needs.plan.outputs.bundle-matrix != ''
+      && needs.plan.outputs.bundle-matrix != '[]' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.plan.outputs.bundle-matrix) }}
+    name: carry-bundles (${{ matrix.artifact }}, ${{ matrix.platform }})
+    runs-on: ubuntu-latest
+    steps:
+      # Cross-run only (there is nothing to carry within a shared run):
+      # `run-id`/`github-token` flip download-artifact onto the REST API,
+      # which needs the `actions: read` a standalone dispatch caller grants.
+      - name: Download the unsigned bundle (from the source run)
+        if: inputs.run-id != ''
+        uses: actions/download-artifact@v8
+        with:
+          name: bundle-${{ matrix.artifact }}-${{ matrix.platform }}
+          path: bundle
+          run-id: ${{ inputs.run-id }}
+          github-token: ${{ github.token }}
+      - name: Re-upload the unsigned bundle into this run
+        uses: actions/upload-artifact@v7
+        with:
+          name: bundle-${{ matrix.artifact }}-${{ matrix.platform }}
+          path: bundle/*
+          if-no-files-found: error
+
+  carry-notes:
+    needs: plan
+    # The release-notes family (single artifact, no fan). The sign legs
+    # never fetch it, so a standalone sign run would otherwise lack it and
+    # the follow-up publish's first download would fail.
+    if: >-
+      ${{ !cancelled() && inputs.run-id != ''
+      && needs.plan.result != 'failure'
+      && needs.plan.result != 'cancelled' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download the release notes (from the source run)
+        if: inputs.run-id != ''
+        uses: actions/download-artifact@v8
+        with:
+          name: release-notes
+          path: notes
+          run-id: ${{ inputs.run-id }}
+          github-token: ${{ github.token }}
+      - name: Re-upload the release notes into this run
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-notes
+          path: notes/*
           if-no-files-found: error

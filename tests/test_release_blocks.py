@@ -43,11 +43,14 @@ COMPOSED = "wf-release.yml"
 #: these — a rename here is a breaking change, and this pin makes it loud.
 #: The `plan` jobs joined in TOL02-WS09 (#780): the standalone
 #: re-derivation, a skipped no-op on every fact-supplied (composed-chain)
-#: run — additive, so existing required checks were untouched.
+#: run — additive, so existing required checks were untouched. The
+#: `carry-bundles`/`carry-notes` jobs joined too (#780): standalone-only
+#: base-artifact carry-forward, likewise skipped no-ops on the composed
+#: chain, so likewise additive.
 STABLE_JOBS = {
     "wf-prepare.yml": ["prepare"],
     "wf-build.yml": ["plan", "build"],
-    "wf-sign-mac.yml": ["plan", "sign"],
+    "wf-sign-mac.yml": ["plan", "sign", "carry-bundles", "carry-notes"],
     "wf-publish.yml": ["plan", "assert", "publish"],
     "wf-release.yml": ["prepare", "build", "sign", "publish"],
 }
@@ -477,6 +480,67 @@ def test_artifact_downloading_blocks_declare_no_permissions_key():
     assert _load("wf-prepare.yml")["permissions"] == {"contents": "write"}
 
 
+def test_publish_enumerates_the_signed_claim_per_entry_before_overlay():
+    # The standalone sign-result=success CLAIM is derived from plan liveness,
+    # but the wildcard signed-* overlay passes on ANY match — a source run
+    # that signed some legs then failed would publish a MIXED tree under a
+    # success claim. A verify step enumerates the expected
+    # signed-<artifact>-<platform> set from the plan matrix and fails on any
+    # the source run is missing, BEFORE the cp overlay. Standalone only
+    # (composed callers grant no actions:read, and scar #3 already blocks a
+    # real partial sign failure — its sign-result is FAILURE, never success).
+    steps = _load("wf-publish.yml")["jobs"]["publish"]["steps"]
+    verify = next(
+        s
+        for s in steps
+        if s.get("name") == "Verify the source run signed every claimed entry"
+    )
+    cond = verify["if"]
+    assert "sign-result || needs.plan.outputs.sign-result) == 'success'" in cond
+    assert "inputs.run-id != ''" in cond
+    script = verify["run"]
+    assert "select(.sign)" in script  # the expected set is the sign projection
+    assert "actions/runs/${RUN_ID}/artifacts" in script  # against the source run
+    assert "exit 1" in script  # a missing entry is fatal
+    # Strictly ORDERED before the overlay: a partial set is refused, never
+    # applied.
+    order = [s.get("name", "") for s in steps]
+    assert order.index(
+        "Verify the source run signed every claimed entry"
+    ) < order.index("Apply the signed overlay")
+
+
+def test_standalone_sign_run_carries_base_artifacts_as_a_publish_source():
+    # A standalone sign run must be a COMPLETE publish source: publish names
+    # ONE run-id and downloads release-notes, bundle-*, signed-* from it. The
+    # sign legs produce only signed-* (and drop the bundles they consumed,
+    # never fetch release-notes), so carry-bundles (per bundle-bearing leg)
+    # and carry-notes re-upload the base families from the SOURCE run under
+    # their original names. Both standalone-only (run-id != ''), skipped
+    # no-ops on the composed chain (one shared run — nothing to carry).
+    doc = _load("wf-sign-mac.yml")
+    # The plan feeds the FULL bundle projection to the carry fan (publish
+    # stages every bundle-* and asserts each unsigned leg by name).
+    assert "bundle-matrix" in doc["jobs"]["plan"]["outputs"]
+    assert "select(.bundle)" in _runs(doc["jobs"]["plan"]["steps"])
+
+    carry_bundles = doc["jobs"]["carry-bundles"]
+    assert "inputs.run-id != ''" in carry_bundles["if"]
+    assert (
+        carry_bundles["strategy"]["matrix"]["include"]
+        == "${{ fromJson(needs.plan.outputs.bundle-matrix) }}"
+    )
+    up = next(
+        s for s in carry_bundles["steps"] if "upload-artifact" in s.get("uses", "")
+    )
+    assert up["with"]["name"] == "bundle-${{ matrix.artifact }}-${{ matrix.platform }}"
+
+    carry_notes = doc["jobs"]["carry-notes"]
+    assert "inputs.run-id != ''" in carry_notes["if"]
+    up = next(s for s in carry_notes["steps"] if "upload-artifact" in s.get("uses", ""))
+    assert up["with"]["name"] == "release-notes"
+
+
 # --------------------------------------------------------------------------
 # act dry-run smokes (story 41)
 # --------------------------------------------------------------------------
@@ -511,8 +575,15 @@ _SMOKES: dict[str, dict] = {
     },
     # The crafted entry rides an act-mapped ubuntu label: the smoke walks
     # the block's routing; the REAL mac leg (macos runner, keychain,
-    # codesign/notarytool) is the printed untestable hole.
-    "wf-sign-mac.yml": {"inputs": ("tag=v1.2.3", f"sign-matrix={_ENTRY}")},
+    # codesign/notarytool) is the printed untestable hole. Scoped to the
+    # `sign` job: the standalone-only `carry-bundles` fan rides a plan OUTPUT
+    # matrix (`needs.plan.outputs.bundle-matrix`) that only exists at runtime,
+    # so an unscoped walk fatals evaluating it against the empty expression —
+    # the same workflow_call-fidelity hole the other fan smokes scope around.
+    "wf-sign-mac.yml": {
+        "inputs": ("tag=v1.2.3", f"sign-matrix={_ENTRY}"),
+        "job": "sign",
+    },
     "wf-publish.yml": {
         "inputs": (
             "version=1.2.3",

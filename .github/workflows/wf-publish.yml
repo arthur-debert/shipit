@@ -381,6 +381,46 @@ jobs:
           merge-multiple: true
           run-id: ${{ inputs.run-id }}
           github-token: ${{ github.token }}
+      - name: Verify the source run signed every claimed entry
+        # Makes the standalone sign-result=success claim REAL (ADR-0054's
+        # "enforced, not trusted"): the claim is derived from plan liveness
+        # (sign projection non-empty → success), but the wildcard signed-*
+        # overlay above passes as long as ONE signed artifact exists — a
+        # source run that signed some legs then failed would overlay only
+        # those, leave the rest as their unsigned bundle files in dist, and
+        # publish a MIXED tree under a success claim. Enumerate the expected
+        # signed-<artifact>-<platform> set from the plan's sign projection
+        # and fail loudly on any the source run is missing, BEFORE the
+        # overlay. Standalone only: the composed chain never reaches a
+        # success claim with a partial set (a real partial sign failure
+        # makes sign-result FAILURE and scar #3 blocks), and its callers
+        # grant no `actions: read` for this REST listing.
+        if: >-
+          ${{ (inputs.sign-result || needs.plan.outputs.sign-result) == 'success'
+          && inputs.run-id != '' }}
+        env:
+          MATRIX: ${{ inputs.matrix || needs.plan.outputs.matrix }}
+          RUN_ID: ${{ inputs.run-id }}
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          expected="$(jq -r '[.[] | select(.sign)
+            | "signed-\(.artifact)-\(.platform)"] | .[]' <<<"$MATRIX")"
+          present="$(gh api --paginate \
+            "repos/${REPO}/actions/runs/${RUN_ID}/artifacts" \
+            --jq '.artifacts[].name')"
+          missing=()
+          while IFS= read -r name; do
+            [ -z "$name" ] && continue
+            grep -qxF "$name" <<<"$present" || missing+=("$name")
+          done <<<"$expected"
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "FATAL: source run ${RUN_ID} claims a signed path but is" \
+              "missing signed artifacts for:" >&2
+            printf '  %s\n' "${missing[@]}" >&2
+            exit 1
+          fi
       - name: Apply the signed overlay
         if: (inputs.sign-result || needs.plan.outputs.sign-result) == 'success'
         run: cp -f dist-signed/* dist/

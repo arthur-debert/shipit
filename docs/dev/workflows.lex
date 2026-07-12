@@ -220,8 +220,11 @@ logic is thin YAML) is stated in [./architecture.lex#3].
       (live -> success, plan-proven non-live -> skipped): the honest
       statement of a re-dispatch — the operator asserts the source run
       completed its live stages — enforced by the source-run downloads
-      failing loudly on any missing artifact, then by the verb's scar-#3
-      gate, unchanged ([#3.3]).
+      failing loudly on any missing artifact, and a signed CLAIM checked PER
+      sign-projection entry (a wildcard signed-* download passes on any
+      match, so `signed-<artifact>-<platform>` is enumerated from the plan
+      and a partially-signed source run is refused, never published mixed),
+      then by the verb's scar-#3 gate, unchanged ([#3.3]).
 
     The blessed consumer surface is the routing-only `stage` choice caller
     (the ADP02-WS06 interim shape, now fully wireable): one workflow_dispatch
@@ -237,10 +240,15 @@ logic is thin YAML) is stated in [./architecture.lex#3].
     - Facts travel all-or-none: supplying `stages` while omitting
       `unsigned-matrix` fails loudly at expression evaluation, never
       publishes against a mixed plan.
-    - ONE source run per dispatch: a standalone sign re-dispatch lands its
-      signed-* artifacts in ITS OWN run, so the follow-up publish dispatch
-      names THAT run as `run-id`. Multi-run stitching is unsupported; the
-      escape hatch is the full re-dispatch, which converges (ADR-0009).
+    - ONE source run per dispatch: a standalone sign re-dispatch makes its
+      OWN run a complete publish source — it lands its signed-* artifacts AND
+      re-uploads the base families it did not itself produce (every bundle-*
+      tree plus release-notes, carried from its source run by the
+      `carry-bundles` / `carry-notes` jobs), so the follow-up publish
+      dispatch names THAT run as `run-id` and finds all three artifact
+      families there. Multi-run stitching is unsupported; the escape hatch is
+      the full re-dispatch, which converges (ADR-0009). The carried
+      duplication is accepted.
     - An --unsigned source run re-publishes with `unsigned: true`, or the
       re-derived plan claims a signed path and the signed-* download fails
       loudly.

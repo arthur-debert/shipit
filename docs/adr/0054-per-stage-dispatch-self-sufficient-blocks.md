@@ -38,9 +38,14 @@ dispatch surface.
   re-dispatch — the operator asserts the source run completed its live
   stages. The claims are enforced, not trusted: every implied artifact
   (release-notes, bundle-\*, signed-\*) downloads from the source run and a
-  missing one fails loudly, then the verb's scar-#3 gate runs unchanged. On
-  any path with real results (composed chain, direct composition) they ride
-  verbatim and nothing is translated.
+  missing one fails loudly — and because a wildcard `signed-*` download
+  passes on ANY match, a signed CLAIM is additionally checked PER
+  sign-projection entry (`signed-${artifact}-${platform}` enumerated from
+  the plan, refused if the source run is missing any), so a partially-signed
+  source run can never publish a mixed tree under a success claim. Then the
+  verb's scar-#3 gate runs unchanged. On any path with real results
+  (composed chain, direct composition) they ride verbatim and nothing is
+  translated.
 
 ### Alternatives rejected
 
@@ -64,10 +69,15 @@ dispatch surface.
   cross-run downloads (which ride the REST API). The composed chain and
   existing direct callers are unchanged — a block declaration could never
   elevate, so callers always had to grant what the stage needs.
-- ONE source run per dispatch: a standalone sign re-dispatch lands signed-\*
-  in ITS OWN run, and the follow-up publish names THAT run. Multi-run
-  stitching is unsupported; the converging escape hatch stays the full
-  re-dispatch (ADR-0009).
+- ONE source run per dispatch: a standalone sign re-dispatch makes ITS OWN
+  run a complete publish source — it lands signed-\* AND re-uploads the base
+  families it did not itself produce (every bundle-\* tree plus
+  release-notes, carried from its source run by the `carry-bundles` /
+  `carry-notes` jobs), so the follow-up publish names THAT run as its single
+  source and finds all three artifact families there. Multi-run stitching is
+  unsupported; the converging escape hatch stays the full re-dispatch
+  (ADR-0009). The carried duplication (the source run's bundles/notes now
+  also live in the sign run) is accepted.
 - An `--unsigned` source run re-publishes with `unsigned: true`, or the
   re-derived plan claims a signed path and the signed-\* download fails
   loudly.
