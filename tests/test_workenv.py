@@ -51,10 +51,12 @@ _ENV_IDENTITY = pixienv.env_identity_from_dict(
     }
 )
 
+# Deliberately checkout-neutral: each session case supplies its own Tree path,
+# while this value stands only for a previously captured shell-hook snapshot.
 _ACTIVATION = pixienv.Activation(
     environment_variables={
-        "PATH": "/trees/acme/widget/ephemeral/sess/.pixi/envs/default/bin:/usr/bin",
-        "CONDA_PREFIX": "/trees/acme/widget/ephemeral/sess/.pixi/envs/default",
+        "PATH": "/captured/pixi-env/bin:/usr/bin",
+        "CONDA_PREFIX": "/captured/pixi-env",
     },
     activation_scripts=(),
 )
