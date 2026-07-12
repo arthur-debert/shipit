@@ -98,6 +98,35 @@ pristine = [
   "sha256:f05abecbc2534600fa58c453f73d819e45213f8eab1ccdf624558a67d4062590",
 ]
 
+[[retired]]
+# The `./claude-start` launcher shim (#815): a repo-root whole-file bootstrap
+# unit shipit used to distribute (SES01 Layer D; a compatibility shim over the
+# generic `./agent-start` since #627). The agent-specific shims are gone — all
+# launch logic lives in `agent-start` — but a repo that already installed the
+# shim keeps a stale pristine copy once the unit leaves the catalog, so it
+# retires here to get the clean delete (a locally edited copy is kept, warned).
+# Hashes are every version from arthur-debert/shipit git history:
+#   d543da0… — initial launcher
+#   8a658d5… — pre-shim revision
+#   2968662… — last shipped, the `./agent-start claude` delegating shim (#627)
+path = "claude-start"
+pristine = [
+  "sha256:d543da07faa93302a87bd601adeae63ff8393d028c02964fcd1c18f8bed64f7d",
+  "sha256:8a658d5d88269a0444e9843d5cddbf133e4ac9fb2e6862701980991bbd4d379c",
+  "sha256:29686623ac9b3a23b31930eb1306ed268e517e79ae28a52dc16906d40c77e4c7",
+]
+
+[[retired]]
+# The `./codex-start` launcher shim (#815): the Codex sibling of the
+# `claude-start` shim above (CDX01 #604; a compatibility shim over
+# `./agent-start codex` since #627), retired the same way for the same reason.
+# Hashes are every version from arthur-debert/shipit git history:
+#   587438f… — last (and only) shipped, the `./agent-start codex` shim (#627)
+path = "codex-start"
+pristine = [
+  "sha256:587438fb75447ae974d3c7fbc0d1d9deddbd6488a6ead6880fccc8bf4777f4fd",
+]
+
 # Retired HOOK ENTRIES (#619) — consumer-local entries in a hooks-event array
 # that `shipit install` removes fleet-wide (the retired-files idea, extended to
 # entries inside a file shipit does not own outright). An entry is identified
