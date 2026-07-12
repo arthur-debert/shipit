@@ -43,8 +43,8 @@ the runner its block pins; the DEFAULT pixi env is the PATH that run sees):
 | `uv` | every stage (`bin/shipit` launcher, ADR-0033); build/bundle for python (`uv build`) | pixi-managed (`pixi.toml#shipit-launcher-deps`, closes #758) | `0.11.*` = Layer 0 `UV_PIN` minor line | `test_launcher_deps_uv_pin_agrees_with_layer0_uv_pin`, `test_load_units_includes_the_launcher_deps_block` |
 | `cargo` (the binary itself) | prepare (subcommand dispatch), build (`cargo build`), publish (`cargo publish`, `cargo metadata`) | **consumer-owned — OPEN HOLE** | consumer's (`rust = "1.96.*"` where closed consumer-side) | none |
 | cargo-edit (`cargo set-version` / `cargo update`) | prepare (rust bump) | pixi-managed (`pixi.toml#shipit-rust-release-deps`, #793/#797) | `0.13.11.*` | `test_missing_cargo_set_version_gets_the_reconcile_remedy` |
-| cargo-deb (`cargo deb`) | bundle (deb composition) | self-provisioned (`cargo install`, #784/#785 — not on conda-forge) | `CARGO_DEB_VERSION = 3.7.0` | `test_deb_self_provisions_cargo_deb_when_missing` |
-| `npm` (nodejs) | prepare (`npm version`), build (`npm run build`), publish (`npm publish`) | pixi-managed (`pixi.toml#shipit-node-deps`) | nodejs `26.*`, pnpm `11.*` | block-delivery tests only — no loud-fail probe (see holes) |
+| `cargo-deb` (`cargo deb`) | bundle (deb composition) | self-provisioned (`cargo install`, #784/#785 — not on conda-forge) | `CARGO_DEB_VERSION = 3.7.0` | `test_deb_self_provisions_cargo_deb_when_missing` |
+| `npm` (`nodejs`) | prepare (`npm version`), build (`npm run build`), publish (`npm publish`) | pixi-managed (`pixi.toml#shipit-node-deps`) | `nodejs` `26.*`, `pnpm` `11.*` | block-delivery tests only — no loud-fail probe (see holes) |
 | `go` | build (`go build`) | runner image (ubuntu images still carry Go) | floats | none (see holes) |
 | `pytest` | test lane (not a release stage) | consumer env | consumer's | — |
 | `twine` | publish (pypi endpoint) | **nothing — OPEN HOLE** | — | none |

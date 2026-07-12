@@ -286,7 +286,9 @@ def _release_surface_files() -> list[pathlib.Path]:
     for entry in _RELEASE_SURFACE:
         path = _SRC_ROOT / entry
         if path.is_dir():
-            files.extend(sorted(path.glob("*.py")))
+            # rglob, not glob: a future subpackage under release/ must not slip
+            # past the discovery tripwire because the sweep stayed top-level.
+            files.extend(sorted(path.rglob("*.py")))
         else:
             files.append(path)
     return files
@@ -363,10 +365,22 @@ def test_sources_are_valid_and_pinned_sources_carry_pins():
                 assert row.source in {CONSUMER_OWNED, RUNNER_IMAGE}, (
                     f"{head}/{row.tool}: a provisioned source contradicts hole=True"
                 )
+            if row.source == CONSUMER_OWNED:
+                # The converse: CONSUMER_OWNED is DEFINED as a hole this
+                # inventory tracks (see the source vocabulary), so a
+                # consumer-owned tool cannot land without its hole=True story.
+                assert row.hole, (
+                    f"{head}/{row.tool}: CONSUMER_OWNED is a hole — mark hole=True"
+                )
 
 
 def _row(head: str, tool: str) -> Provisioned:
-    return next(r for r in PROVISIONING[head] if r.tool == tool)
+    try:
+        return next(r for r in PROVISIONING[head] if r.tool == tool)
+    except StopIteration:
+        raise AssertionError(
+            f"no provisioning row for tool {tool!r} under head {head!r}"
+        ) from None
 
 
 def _block_toml(data_file: str) -> dict:
@@ -415,20 +429,25 @@ def test_wf_release_family_pixi_pin_agrees_with_registry():
 
 def test_inventory_doc_names_every_tool():
     # Direction 4: the human-readable inventory and this registry move
-    # together — every head and every concrete tool is named in the doc.
+    # together — every head and every concrete tool is named in the doc, as a
+    # backticked token so a short name (`go`, `ps`, `tar`) cannot pass on a
+    # stray substring (e.g. head `go` inside the doc's "go/no-go" prose) and
+    # mask a genuinely missing row.
     doc = _INVENTORY_DOC.read_text(encoding="utf-8")
     for head, rows in PROVISIONING.items():
-        assert head in doc, f"inventory doc misses argv head {head!r}"
+        assert f"`{head}`" in doc, f"inventory doc misses argv head {head!r}"
         for row in rows:
-            assert row.tool in doc, f"inventory doc misses tool {row.tool!r}"
+            assert f"`{row.tool}`" in doc, f"inventory doc misses tool {row.tool!r}"
 
 
 def test_named_fails_when_absent_tests_exist():
     # A registry row naming a test that no longer exists is the inventory
     # lying about its coverage — the (c) column of the #794 sweep.
+    # rglob, not glob: a future test subdirectory must not make this check
+    # silently pass by hiding the file that defines a named absent-test.
     suite = "\n".join(
         p.read_text(encoding="utf-8")
-        for p in sorted((_REPO_ROOT / "tests").glob("test_*.py"))
+        for p in sorted((_REPO_ROOT / "tests").rglob("test_*.py"))
     )
     for rows in PROVISIONING.values():
         for row in rows:

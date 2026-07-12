@@ -46,7 +46,7 @@ uv tool install 'shipit[review] @ git+https://github.com/arthur-debert/shipit'
 
 ### Prerequisites, wherever a pin first resolves — launcher and bootstrap alike:
 
-- `uv` on the machine (`brew install uv` on laptops; on runners the managed `pixi.toml#shipit-launcher-deps` block carries `uv` in the default pixi env — \#758/\#794 — resolved by every workflow block's \`pixi run --locked\`). \`bin/shipit\` fails loud (exit 127) when \`uv\` is absent.
+- `uv` on the machine (`brew install uv` on laptops; on runners the managed `pixi.toml#shipit-launcher-deps` block carries `uv` in the default pixi env — `#758`/`#794` — resolved by every workflow block's `pixi run --locked`). `bin/shipit` fails loud (exit 127) when `uv` is absent.
 - git credentials for the private repo — uv shells out to git, so whatever lets `git clone https://github.com/arthur-debert/shipit` work is enough (`gh auth login` + `gh auth setup-git` on laptops; on runners a token-bearing credential, wired when ADP02 builds the CI leg).
 
 The development override is `SHIPIT_EXEC`. Setting `SHIPIT_EXEC=/path/to/build` makes `bin/shipit` exec THAT build instead of resolving the pin — the one sanctioned override (ADR-0033), honored and ANNOUNCED (launcher stderr plus a durable flow-log twin), never silent. It refuses to point back at the launcher itself (the exec-loop guard). It formalizes what shipit's own checkout does with its working-tree build; a consumer session never sets it.

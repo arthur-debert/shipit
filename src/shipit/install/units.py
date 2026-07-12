@@ -701,12 +701,13 @@ def load_units(*, toolchains: frozenset[str] = frozenset()) -> list[Unit]:
         )
     )
 
-    # The conditional per-toolchain dep blocks (#547 Layer 1): appended only
-    # when the caller detected the signal, so a signal-less consumer's catalog
-    # (and every existing zero-arg call) is unchanged. rust/go splice under the
-    # same `[feature.lint.dependencies]` anchor as the managed lint-deps block
-    # — sibling marker blocks in one table (splice_block places each right
-    # after the anchor header; coexistence is fine).
+    # The conditional per-toolchain dep blocks (#547 Layer 1): the ONLY
+    # signal-gated rows — appended only when the caller detected the signal.
+    # The unconditional catalog above (launcher-deps included) ships on every
+    # call regardless; these rows add only the toolchain-specific blocks.
+    # rust/go splice under the same `[feature.lint.dependencies]` anchor as the
+    # managed lint-deps block — sibling marker blocks in one table (splice_block
+    # places each right after the anchor header; coexistence is fine).
     for key, signal, open_marker, close_marker, anchor, data_file in TOOLCHAIN_UNITS:
         if signal in toolchains:
             units.append(

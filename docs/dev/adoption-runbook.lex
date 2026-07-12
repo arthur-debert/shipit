@@ -79,7 +79,7 @@ paraphrase.
 
     Prerequisites, wherever a pin first resolves — launcher and bootstrap alike:
 
-        - `uv` on the machine (`brew install uv` on laptops; on runners the managed `pixi.toml#shipit-launcher-deps` block carries `uv` in the default pixi env — #758/#794 — resolved by every workflow block's `pixi run --locked`). `bin/shipit` fails loud (exit 127) when `uv` is absent.
+        - `uv` on the machine (`brew install uv` on laptops; on runners the managed `pixi.toml#shipit-launcher-deps` block carries `uv` in the default pixi env — `#758`/`#794` — resolved by every workflow block's `pixi run --locked`). `bin/shipit` fails loud (exit 127) when `uv` is absent.
         - git credentials for the private repo — uv shells out to git, so whatever lets `git clone https://github.com/arthur-debert/shipit` work is enough (`gh auth login` + `gh auth setup-git` on laptops; on runners a token-bearing credential, wired when ADP02 builds the CI leg).
 
     The development override is `SHIPIT_EXEC`. Setting
