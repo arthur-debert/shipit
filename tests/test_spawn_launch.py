@@ -11,9 +11,13 @@ directly, and the Exec seam by faking ``execrun.run`` / injecting a fake runner.
 
 from __future__ import annotations
 
+import logging
+from dataclasses import replace
+
 import pytest
 
-from shipit import execrun
+from shipit import execrun, workenv
+from shipit.identity import repo_from_slug
 from shipit.spawn import launch
 
 
@@ -276,6 +280,70 @@ def test_pixi_wrap_accepts_a_str_tree_path(tmp_path):
         "--manifest-path",
         str(tmp_path / "pixi.toml"),
     ]
+
+
+def _write_env(*, pixi_provisioned: bool):
+    """A resolved write-Run Work Env over a NONEXISTENT path — the point: routing
+    consumes the carried decision and never re-probes the filesystem."""
+    return workenv.resolve_write_run_env(
+        repo=repo_from_slug("acme/widget"),
+        tree_path="/nonexistent/trees/acme/widget/E/WS01-abc123",
+        branch="E/WS01",
+        base="origin/E/umbrella",
+        pixi_provisioned=pixi_provisioned,
+    )
+
+
+def test_route_argv_carries_out_the_pixi_run_decision():
+    # RPE01-WS05: the Work Env CARRIES the routing decision the spawn boundary
+    # made; route_argv only executes it — through the pixi adapter's builder
+    # (ADR-0028), yielding EXACTLY the wrapped argv pixi_wrap produces for a
+    # provisioned tree. The path deliberately does not exist: no re-probe.
+    argv = ["claude", "-p", "do the thing", "--agent", "implementer"]
+
+    routed = launch.route_argv(argv, _write_env(pixi_provisioned=True))
+
+    assert routed == [
+        "pixi",
+        "run",
+        "--manifest-path",
+        "/nonexistent/trees/acme/widget/E/WS01-abc123/pixi.toml",
+        "--",
+        *argv,
+    ]
+
+
+def test_route_argv_leaves_an_ambient_work_env_bare():
+    # A non-pixi write Run resolves AMBIENT (absent activation, honestly) and
+    # keeps the existing bare-launch behavior — argv unchanged, same object
+    # semantics as pixi_wrap's unprovisioned branch.
+    argv = ["claude", "-p", "do the thing"]
+
+    assert launch.route_argv(argv, _write_env(pixi_provisioned=False)) == argv
+
+
+def test_route_argv_refuses_an_activation_snapshot_context():
+    # This consumer does not apply activation snapshots. Treating one as ambient
+    # would silently launch with the wrong tools, so misuse fails at the seam.
+    env = replace(
+        _write_env(pixi_provisioned=False),
+        routing=workenv.ExecutionRouting.ACTIVATION_SNAPSHOT,
+    )
+
+    with pytest.raises(ValueError, match="activation-snapshot"):
+        launch.route_argv(["claude"], env)
+
+
+def test_route_argv_records_its_routing_decision_at_debug(caplog):
+    # The routing narration matches pixi_wrap's (ADR-0029 mechanics at DEBUG,
+    # `pixi_wrapped` as the greppable extra) so a mis-rooted child diagnoses
+    # identically whichever seam routed it.
+    with caplog.at_level(logging.DEBUG, logger="shipit.spawn"):
+        launch.route_argv(["claude"], _write_env(pixi_provisioned=True))
+        launch.route_argv(["claude"], _write_env(pixi_provisioned=False))
+
+    decisions = [r.pixi_wrapped for r in caplog.records if hasattr(r, "pixi_wrapped")]
+    assert decisions == [True, False]
 
 
 def test_scrub_tree_env_drops_leaked_pixi_and_conda_activation_keeps_the_rest():

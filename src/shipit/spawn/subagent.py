@@ -24,6 +24,15 @@ plus the RPE01-WS01 registry preflight:
   (existing-PR attachment is RPE01-WS04) refuses BEFORE any Tree provisioning
   or backend launch, naming the role and the requested context. Reviewer
   dispatch keys off the registry-parsed :class:`~shipit.harness.role.Role`.
+- **Work Env resolution for the write Run** (RPE01-WS05): once the Tree
+  exists, the write tail supplies the facts it already owns — the Tree's
+  coordinates plus the pixi provisioned-env sentinel and on-disk env identity,
+  borrowed through the pixi adapter (ADR-0022) — and resolves ONE
+  :class:`~shipit.workenv.WorkEnv` purely over them. The launch then CONSUMES
+  its routing decision (:func:`shipit.spawn.launch.route_argv`): a provisioned
+  Tree routes through the existing pixi-run wrapping, a non-pixi Tree is
+  honestly AMBIENT and launches bare — same behavior, decided once and
+  described. Exec stays the one external-process seam (ADR-0028).
 - **Fail-closed** (ADR-0017/0019): a Tree-creation error fails the spawn loud —
   NEVER a silent fallback to a native ``git worktree``. The launcher is reached
   only after a Tree exists, so a failed create can never launch a Run against
@@ -50,8 +59,9 @@ import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 
-from .. import events, execrun, gh, git, identity, logcontext
+from .. import events, execrun, gh, git, identity, logcontext, pixienv, workenv
 from ..harness import roleprofile
 from ..harness.role import Role
 from ..tree.create import Tree, create, new_agent_hash
@@ -567,6 +577,26 @@ def salvage_note(tree_path: str, bounds: Boundaries) -> str | None:
     )
 
 
+def _read_optional_env_identity(env_prefix: Path) -> pixienv.EnvIdentity | None:
+    """Best-effort pixi identity for Work Env observability.
+
+    The provisioned-env sentinel is the authoritative routing fact.  Pixi's
+    ``conda-meta/pixi`` record only enriches the resolved Work Env, so an
+    unreadable or schema-incompatible record must not prevent an otherwise
+    launchable write Run from routing through pixi.
+    """
+    try:
+        return pixienv.read_env_identity(env_prefix)
+    except Exception:  # noqa: BLE001 - optional metadata must never block launch.
+        logger.warning(
+            "spawn subagent: pixi env identity unreadable at %s; "
+            "continuing without optional identity metadata",
+            env_prefix,
+            exc_info=True,
+        )
+        return None
+
+
 def audit_handshake(
     pr: gh.HeadPr | gh.UnknownPr | None, *, branch: str, base_branch: str
 ) -> gh.HeadPr:
@@ -721,7 +751,11 @@ def _launch_write(
     shape produced the spec, since ``tree.base``/``tree.branch`` already encode
     it. Fail-closed (ADR-0017/0019): a Tree-creation error refuses LOUD with no
     native-worktree fallback (the launcher is unreachable unless a real Tree
-    exists).
+    exists). Between Tree and launch the tail resolves the Run's
+    :class:`~shipit.workenv.WorkEnv` (RPE01-WS05) — pure over the facts this
+    boundary supplies — and the launch routes by ITS decision
+    (:func:`shipit.spawn.launch.route_argv`) instead of re-probing at the call
+    site.
     """
     create_start = time.monotonic()
     events.emit(
@@ -778,17 +812,62 @@ def _launch_write(
         base_branch=base_branch,
         closes=spec.epic is None,
     )
+    # Resolve the Run's WORK ENV (RPE01-WS05): the spawn seam is the effectful
+    # boundary that already owns the Tree, so it supplies the facts — the pixi
+    # provisioned-env sentinel (the SAME gate `pixi_wrap` keyed on, ADR-0019
+    # amendment) and the env's on-disk identity, both borrowed through the pixi
+    # adapter (ADR-0022: `has_default_env` / `read_env_identity`, never
+    # re-derived) — and `resolve_write_run_env` composes them PURELY into the
+    # one resolved value: WorkingDir + Tree provenance + checkout strategy +
+    # optional pixi identity + the execution-routing decision. A non-pixi repo
+    # resolves honestly AMBIENT (no activation, no identity) and launches bare,
+    # exactly as before.
+    pixi_provisioned = pixienv.has_default_env(tree.path)
+    env_prefix = Path(tree.path).joinpath(*pixienv.DEFAULT_ENV_DIR)
+    work_env = workenv.resolve_write_run_env(
+        repo=spec.repo,
+        tree_path=tree.path,
+        branch=tree.branch,
+        base=tree.base,
+        pixi_provisioned=pixi_provisioned,
+        env_identity=(
+            _read_optional_env_identity(env_prefix) if pixi_provisioned else None
+        ),
+    )
+    # The resolution record (spec §Observability): the routing decision and the
+    # pixi env identity WHEN PRESENT (name — never a fabricated run id or a
+    # secret-bearing env snapshot), on the existing structured pipeline with
+    # the bound tree/agent/role keys riding along. Absent-not-null extras.
+    logger.info(
+        "spawn subagent: work env resolved — %s routing for the write tree",
+        work_env.routing.value,
+        extra={
+            name: value
+            for name, value in {
+                "routing": work_env.routing.value,
+                "checkout": type(work_env.checkout).__name__,
+                "pixi_env": (
+                    work_env.env_identity.environment_name
+                    if work_env.env_identity is not None
+                    else None
+                ),
+            }.items()
+            if value is not None
+        },
+    )
     # Launch the backend child rooted in the Tree through its adapter (ADR-0020): the
     # cwd IS the Tree, the adapter's child_env scrubs the backend's auth-shadowing vars
     # (for claude, ANTHROPIC_API_KEY), and build_command conveys the role (for claude,
     # --agent <role>, so the guard allows the Run's own edits). The task tells the Run
     # to implement the issue and open a draft PR from this branch (the result channel —
-    # ADR-0019 §6). Route the write Run THROUGH the Tree's pixi env (ADR-0019
-    # amendment): a provisioned write Tree carries `.pixi/envs/default`, so `pixi_wrap`
-    # re-expresses the argv as `pixi run --manifest-path <tree>/pixi.toml -- <argv>`
-    # and the child's tools resolve to its OWN env (docs/dev/pixi.lex §7);
-    # `scrub_tree_env` drops leaked PIXI_*/CONDA_* on top of the adapter's auth scrub.
-    cmd = launch.pixi_wrap(adapter.build_command(task, role, cwd=tree.path), tree.path)
+    # ADR-0019 §6). Routing CONSUMES the Work Env's decision (`route_argv`): a
+    # PIXI_RUN Work Env re-expresses the argv as `pixi run --manifest-path
+    # <tree>/pixi.toml -- <argv>` through the pixi adapter's builder so the
+    # child's tools resolve to its OWN env (docs/dev/pixi.lex §7); an AMBIENT
+    # one launches bare. `scrub_tree_env` still drops leaked PIXI_*/CONDA_* on
+    # top of the adapter's auth scrub — Work Env changed WHO decides, not what
+    # runs (Exec stays the one seam, ADR-0028).
+    cmd = launch.route_argv(adapter.build_command(task, role, cwd=tree.path), work_env)
     try:
         _run_child(cmd, tree=tree, adapter=adapter, bounds=bounds, role=role)
 
