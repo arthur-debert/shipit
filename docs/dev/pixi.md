@@ -38,9 +38,11 @@ What pixi does NOT own (carried [from](./architecture.lex)): building and signin
 
 ### What Work Env adds above pixi:
 
-Work Env is shipit's resolved WHERE/ACTIVATION value over existing owners. It may carry pixi's `Activation` or `EnvIdentity`, but it never computes PATH, shells out to activate, invents an environment id, or becomes a runner. The routing decision says which existing mechanism the caller uses:
+Work Env is shipit's resolved WHERE/ACTIVATION value over existing owners. It may carry pixi's `Activation` or `EnvIdentity`, but it never computes PATH, shells out to activate, invents an environment id, or becomes a runner. The routing decision says which existing mechanism the caller uses. `pixi-run` routes provisioned write Trees, CI Lane jobs, and provisioned fleet-sweep cells.
 
-\- `pixi-run` for provisioned write Trees, CI Lane jobs, and provisioned fleet-sweep cells; - `activation-snapshot` for coordinator session Trees that borrowed `pixi shell-hook --json`; and - `ambient` for reviewers, explorers, Main checkouts without a supplied activation, and non-pixi Trees.
+`activation-snapshot` routes coordinator session Trees that borrowed `pixi shell-hook --json`.
+
+`ambient` routes reviewers, explorers, Main checkouts without a supplied activation, and non-pixi Trees.
 
 Pixi owns activation and environment identity. Exec remains the process seam. Work Env exists so spawn, session, review, CI, and fleet evidence all use the same vocabulary without sharing one universal executor.
 

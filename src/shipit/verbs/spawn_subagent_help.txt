@@ -1,8 +1,9 @@
 `shipit spawn subagent` creates a Tree and launches a backend-agent Run.
 
-Standalone issue runs are cut from `origin/main`; epic workstream runs are cut
-from the epic umbrella branch and target that branch. The Run works in its Tree,
-opens a draft PR, and reports linkage for the coordinator to drive.
+Standalone issue implementer runs are cut from `origin/main`; epic workstream
+implementer runs are cut from the epic umbrella branch and target that branch.
+The implementer works in its Tree, opens a draft PR, and reports linkage for the
+coordinator to drive.
 
 The role is validated through the fixed Role Profile registry before any Tree is
 provisioned or backend launched. Implementers get new write Trees and a draft-PR

@@ -4,5 +4,6 @@ Trees are independent clones used by agent work so concurrent runs do not
 collide in one checkout. Use `create` to provision one, `list` to inspect the
 fleet, `remove` to delete one Tree, and `gc` to reclaim provably safe old Trees.
 Role Profiles decide which roles receive Trees: coordinators use session Trees,
-implementers new write Trees, shepherds existing-PR write Trees, reviewers shared
-read-only Trees, and explorers ambient WorkingDirs with no Tree.
+implementers receive new write Trees, shepherds receive existing-PR write Trees,
+reviewers receive shared read-only Trees, and explorers use ambient WorkingDirs
+with no Tree.
