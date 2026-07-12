@@ -929,6 +929,23 @@ def _parse_artifact(name: str, spec: object) -> Artifact:
                 f"{where}: sign = true requires a bundle composition the "
                 f"signer can reopen ({', '.join(signable)}); got {got}"
             )
+    if bundle is not None and len(platforms) > 1:
+        # A platform-independent composition (tarball's generated C source)
+        # emits ONE unqualified `<name>.tar.gz`; `wf-publish.yml` merges every
+        # leg's dist/ into one flat tree (merge-multiple), so the same
+        # unqualified name built on >1 leg would collide (last writer wins, and
+        # tar bytes are not identical across runners). Refuse it here — it must
+        # build on exactly one leg — rather than silently publishing a
+        # nondeterministic asset (TOL02-WS16 #792).
+        from .release import bundle as bundle_registry  # lazy, like _parse_bundle
+
+        if bundle.composition in bundle_registry.platform_independent_names():
+            raise ConfigError(
+                f"{where}: composition `{bundle.composition}` is platform-"
+                f"independent — it emits one unqualified archive, so declaring "
+                f"more than one platform would build colliding assets; declare "
+                f"at most one platform (or none — it defaults to a single lane)"
+            )
     endpoints = _parse_endpoints(f"{where}.endpoints", spec.get("endpoints", []))
     downstreams = _parse_downstreams(
         f"{where}.downstreams", spec.get("downstreams", [])

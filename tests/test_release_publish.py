@@ -1006,6 +1006,16 @@ def test_brew_without_archives_refuses(tmp_path):
         publish_mod._publish_brew(req)
 
 
+def test_brew_refuses_an_unresolved_source_repo(tmp_path):
+    """The verb resolves the source slug for a live needs_repo dispatch; a
+    direct caller that omits it gets a loud ReleaseError (not a strippable
+    assert) — the formula's asset URLs need the `owner/name`."""
+    artifact = _artifacts({"lex": {"endpoints": ["brew"]}})[0]
+    req = _request(tmp_path, artifact, env={"HOMEBREW_TAP_TOKEN": "tok"}, repo=None)
+    with pytest.raises(ReleaseError, match="no source repo resolved"):
+        publish_mod._publish_brew(req)
+
+
 def test_brew_render_core():
     text = brew_mod.render(
         binary="lex-cli",
@@ -1609,6 +1619,26 @@ def test_notify_downstreams_fires_one_dispatch_per_downstream(tmp_path):
         "dispatched upstream-release to lex-fmt/vscode",
         "dispatched upstream-release to lex-fmt/nvim",
     )
+
+
+def test_notify_downstreams_refuses_an_unresolved_source_repo(tmp_path):
+    """The verb resolves the source slug for a live needs_repo dispatch; a
+    direct caller that omits it gets a loud ReleaseError (not a strippable
+    assert, not a null-repo payload) — the payload names the upstream the
+    downstreams rebuild against."""
+    artifact = _notify_artifacts()[0]
+    ghio = FakeGh()
+    req = _request(
+        tmp_path,
+        artifact,
+        version="1.2.3",
+        env={publish_mod.NOTIFY_SECRET: "pat-xyz"},
+        ghio=ghio,
+        repo=None,
+    )
+    with pytest.raises(ReleaseError, match="no source repo resolved"):
+        publish_mod._publish_notify_downstreams(req)
+    assert not [c for c in ghio.calls if c[0] == "dispatch"]
 
 
 def test_notify_downstreams_refuses_without_the_cross_repo_token(tmp_path):

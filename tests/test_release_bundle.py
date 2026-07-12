@@ -645,6 +645,15 @@ def test_source_compositions_do_not_assert_a_binary():
     assert not bundle_mod.TARBALL.asserts_binary
 
 
+def test_registry_marks_the_platform_independent_compositions():
+    # tarball emits one unqualified `<name>.tar.gz` (identical generated C on
+    # every leg), so the config boundary refuses it with >1 platform — an
+    # unqualified name built on multiple legs would collide in the merged dist/.
+    assert bundle_mod.platform_independent_names() == ("tarball",)
+    assert bundle_mod.TARBALL.platform_independent
+    assert not bundle_mod.ARCHIVE.platform_independent
+
+
 def test_registry_marks_the_signer_reopenable_compositions():
     # The signable set IS the signer's leg set (TOL02-WS08 #779): mac-app
     # (the reseal payload leg) and archive (the raw-binary tarball leg).

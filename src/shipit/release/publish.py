@@ -911,7 +911,17 @@ def _publish_brew(req: PublishRequest) -> Published:
     computed over the exact staged bytes. Idempotent: an UNCHANGED formula
     in the tap clone is a no-op (nothing committed, nothing pushed).
     """
-    assert req.repo is not None  # the verb resolves the slug for a planned brew
+    if req.repo is None:
+        # Belt for direct (test/library) callers — the verb resolves the source
+        # slug for any live needs_repo dispatch (brew among them), so a real
+        # release never reaches here without it. A loud ReleaseError (not a
+        # strippable `assert`) matches the publish stage's error handling.
+        raise ReleaseError(
+            f"[artifacts.{req.artifact.name}] brew: no source repo resolved — "
+            f"the formula's asset URLs point at "
+            f"github.com/<owner/name>/releases/…, so an unresolved repo is a "
+            f"hard error"
+        )
     token = _require_token(req, "brew", TAP_SECRET)
     archives = brew_archives(req.artifact.name, _asset_names(req.assets_dir))
     if not archives:
@@ -1006,9 +1016,18 @@ def _publish_notify_downstreams(req: PublishRequest) -> Published:
     cross-repo PAT (``DOWNSTREAM_DISPATCH_TOKEN``) is required — the ambient
     ``GITHUB_TOKEN`` cannot dispatch into another repo.
     """
-    # The verb resolves the slug for a planned notify (needs_repo=True), so the
-    # payload always names a real source repo — never a silent empty string.
-    assert req.repo is not None
+    if req.repo is None:
+        # Belt for direct (test/library) callers — the verb resolves the source
+        # slug for any live needs_repo dispatch (notify-downstreams among them),
+        # so a real release never reaches here without it. A loud ReleaseError
+        # (not a strippable `assert`) matches the publish stage's error handling
+        # and keeps a null-repo payload from ever reaching a downstream.
+        raise ReleaseError(
+            f"[artifacts.{req.artifact.name}] notify-downstreams: no source "
+            f"repo resolved — the dispatch payload names the upstream "
+            f"`owner/name` the downstreams rebuild against, so an unresolved "
+            f"repo is a hard error, never a null payload"
+        )
     token = _require_token(req, "notify-downstreams", NOTIFY_SECRET)
     if not req.artifact.downstreams:
         # Belt for direct (test/library) callers — the config boundary already

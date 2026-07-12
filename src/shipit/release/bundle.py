@@ -418,6 +418,15 @@ class Composition:
     omits the ``assert-bundle`` stage for it (:func:`shipit.release.preflight.plan`):
     running the guard over a source ``.tar.gz`` would hard-fail with "no main
     binary" (the deb tier's #784-F4 lesson, inverted — nothing to assert).
+    ``platform_independent`` marks the compositions whose output carries NO
+    ``-<target>`` qualifier — the tarball's generated C source is identical on
+    every OS, so it emits one unqualified ``<name>.tar.gz`` (parity with legacy
+    ``tree-sitter.tar.gz``). Because ``wf-publish.yml`` merges every leg's
+    ``dist/`` into one flat tree (``merge-multiple``), an unqualified name
+    built on more than one leg would COLLIDE (last writer wins, and tar bytes
+    are not guaranteed identical across runners — mtimes/uid/gid), so the
+    config boundary refuses such a composition declared with >1 ``platforms``
+    (:func:`shipit.config._parse_artifact`): it must build on exactly one leg.
     """
 
     name: str
@@ -426,6 +435,7 @@ class Composition:
     declared_command: bool = False
     signable: bool = False
     asserts_binary: bool = True
+    platform_independent: bool = False
 
     def applies(self, target: str) -> bool:
         """Whether this composition runs for ``target`` (substring match on
@@ -447,11 +457,15 @@ MAC_APP = Composition(
     signable=True,
 )
 #: tree-sitter's generated-parser tarball (TOL02-WS16 #792) — platform-
-#: independent (empty ``platforms``: the same generated C source on every
-#: leg), NOT signable (a source tarball has no binary the mac signer reopens),
-#: and NOT binary-asserting (a source ``.tar.gz`` has no main binary — the
-#: scar-#2 guard is skipped for it, like the wheel's sdist).
-TARBALL = Composition("tarball", _compose_tarball, asserts_binary=False)
+#: independent (the same generated C source on every leg, emitted as one
+#: unqualified ``<name>.tar.gz``), NOT signable (a source tarball has no binary
+#: the mac signer reopens), and NOT binary-asserting (a source ``.tar.gz`` has
+#: no main binary — the scar-#2 guard is skipped for it, like the wheel's
+#: sdist). ``platform_independent`` makes the config boundary refuse it with
+#: >1 ``platforms`` (the unqualified name would collide across legs).
+TARBALL = Composition(
+    "tarball", _compose_tarball, asserts_binary=False, platform_independent=True
+)
 
 #: The CLOSED registry, in a stable order. Adding a composition is adding an
 #: entry here (the toolchain registry's mirror) — never a kind switch.
@@ -469,6 +483,14 @@ def signable_names() -> tuple[str, ...]:
     the config boundary's ``sign = true`` refusal message
     (:func:`shipit.config._parse_artifact`)."""
     return tuple(c.name for c in COMPOSITIONS if c.signable)
+
+
+def platform_independent_names() -> tuple[str, ...]:
+    """The composition names whose output is unqualified (no ``-<target>``
+    suffix), registry order — for the config boundary's >1-``platforms``
+    refusal message (:func:`shipit.config._parse_artifact`). An unqualified
+    archive built on more than one leg would collide in the merged ``dist/``."""
+    return tuple(c.name for c in COMPOSITIONS if c.platform_independent)
 
 
 def composition(name: str) -> Composition | None:

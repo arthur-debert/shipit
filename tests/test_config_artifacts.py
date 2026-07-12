@@ -229,6 +229,52 @@ def test_case_only_duplicate_downstream_is_refused():
         )
 
 
+def test_tarball_with_multiple_platforms_is_refused():
+    # A platform-independent composition emits one unqualified archive; >1
+    # platform would build colliding assets in the merged dist/ — refused (#792).
+    with pytest.raises(config.ConfigError, match="is platform-independent"):
+        _load(
+            "[artifacts.parser]\n"
+            'build = ["tree-sitter"]\n'
+            'bundle = { composition = "tarball" }\n'
+            'platforms = ["linux-x86_64", "darwin-arm64"]\n'
+        )
+
+
+def test_tarball_with_a_single_platform_is_allowed():
+    # Exactly one lane is fine — one leg, one unqualified archive, no collision.
+    (artifact,) = _load(
+        "[artifacts.parser]\n"
+        'build = ["tree-sitter"]\n'
+        'bundle = { composition = "tarball" }\n'
+        'platforms = ["linux-x86_64"]\n'
+    )
+    assert artifact.platforms == ("linux-x86_64",)
+
+
+def test_tarball_with_no_platforms_is_allowed():
+    # No declaration defaults to a single lane, so the unqualified archive still
+    # builds on exactly one leg.
+    (artifact,) = _load(
+        "[artifacts.parser]\n"
+        'build = ["tree-sitter"]\n'
+        'bundle = { composition = "tarball" }\n'
+    )
+    assert artifact.platforms == ()
+
+
+def test_multi_platform_archive_is_still_allowed():
+    # The guard is scoped to platform-independent compositions: archive emits
+    # target-qualified names, so multiple platforms never collide.
+    (artifact,) = _load(
+        "[artifacts.lex]\n"
+        'build = ["rust"]\n'
+        'bundle = { composition = "archive" }\n'
+        'platforms = ["linux-x86_64", "darwin-arm64"]\n'
+    )
+    assert artifact.platforms == ("linux-x86_64", "darwin-arm64")
+
+
 def test_unknown_platform_names_the_closed_registry():
     with pytest.raises(config.ConfigError, match="unknown platform `darwin`") as exc:
         _load('[artifacts.x]\nplatforms = ["darwin"]\n')
