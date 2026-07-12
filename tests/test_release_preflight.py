@@ -146,62 +146,34 @@ def test_mac_app_shape_plans_bundle_and_sign():
     assert plan.secret_alternatives == (secretreq.NOTARY_SECRETS,)
 
 
-ELECTRON = _artifacts(
+ELECTRON_SIGNED = _artifacts(
     """
 [artifacts.app]
 build = ["npm"]
 platforms = ["darwin-arm64", "linux-x86_64"]
 bundle = { composition = "electron", command = ["npm", "run", "dist"], source = "release" }
 endpoints = ["gh-release"]
+sign = true
 """
 )
 
 
-def test_electron_shape_demands_the_apple_creds_without_a_sign_stage():
-    # electron self-signs + notarizes its darwin leg INSIDE the bundler (#790),
-    # so there is NO `sign` stage — but the plan STILL demands the cert pair and
-    # the notary alternative, so a repo cannot pass preflight and then bundle an
-    # unsigned darwin app. The requirement is keyed on the composition
-    # (electron refuses `sign = true`), darwin-conditioned by `platforms`.
-    plan = preflight.plan(ELECTRON, _resolved("1.0.0"))
-    assert "sign" not in plan.stages
-    assert plan.stages == (
-        "preflight",
-        "prepare",
-        "bundle",
-        "assert-bundle",
-        "publish",
-    )
+def test_signed_electron_plans_the_sign_stage_and_apple_creds_via_the_standard_path():
+    # WS14 #790: electron is signable, so a `sign = true` electron artifact
+    # rides the SAME sign stage + Apple cert/notary derivation as mac-app — no
+    # composition-keyed build-time secret. The darwin leg signs, the linux leg
+    # does not.
+    plan = preflight.plan(ELECTRON_SIGNED, _resolved("1.0.0"))
+    assert [(e.platform, e.sign) for e in plan.matrix] == [
+        ("darwin-arm64", True),
+        ("linux-x86_64", False),
+    ]
+    assert "sign" in plan.stages
     assert plan.secrets == ("RELEASE_TOKEN", *secretreq.SIGN_MAC_CERT_SECRETS)
     assert plan.secret_alternatives == (secretreq.NOTARY_SECRETS,)
-
-
-def test_electron_preflight_hard_fails_loud_when_the_creds_are_absent():
-    # The loud, named failure the sign-mac path gives: the cert pair by name and
-    # ONE notary-gap diagnostic — never a silent pass to an unsigned bundle.
-    plan = preflight.plan(ELECTRON, _resolved("1.0.0"))
+    # The loud missing-secret contract still holds (nothing electron-specific).
     missing = preflight.missing_secrets(plan, {"RELEASE_TOKEN": "t"})
     assert "APPLE_CERTIFICATE" in missing
-    assert "APPLE_CERTIFICATE_PASSWORD" in missing
-    assert any(m.startswith("notary credentials: one complete set") for m in missing)
-    # Either provisioned trio clears it (the cert pair present too).
-    ok_env = {"RELEASE_TOKEN": "t", **_SIGNING_BASE_ENV, **_APPLE_ID_ENV}
-    assert preflight.missing_secrets(plan, ok_env) == ()
-
-
-def test_electron_without_a_darwin_leg_plans_no_apple_creds():
-    arts = _artifacts(
-        """
-[artifacts.app]
-build = ["npm"]
-platforms = ["linux-x86_64"]
-bundle = { composition = "electron", command = ["npm", "run", "dist"], source = "release" }
-endpoints = ["gh-release"]
-"""
-    )
-    plan = preflight.plan(arts, _resolved("1.0.0"))
-    assert plan.secrets == ("RELEASE_TOKEN",)
-    assert plan.secret_alternatives == ()
 
 
 def test_mixed_map_flags_bundle_per_entry_so_build_only_legs_skip_bundling():

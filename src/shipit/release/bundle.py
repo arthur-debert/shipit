@@ -46,17 +46,19 @@ functions the entries carry:
 - **electron** — electron-builder's per-platform distributable set (the
   darwin ``.dmg`` + ``.dmg.blockmap`` sidecar, the linux ``.AppImage``, the
   windows ``.exe`` + ``.exe.blockmap``), collected from the declared
-  ``source`` output tree after the declared bundler runs. UNLIKE mac-app,
-  electron self-signs AND notarizes on macOS INSIDE the bundler run
-  (electron-builder's ``CSC_*`` + ``notarize`` path), so the composition is
-  NOT signable — its darwin distributable ships already-signed and never
-  routes to shipit's reopen→reseal signer (TOL02-WS14 #790). Only the
-  distributables and their sidecars are collected, not electron-builder's
-  intermediate naked ``.app`` (which the bundle upload strips — an ``.app``'s
-  symlinks/exec bits do not cross the artifact boundary); ``wf-publish``
-  asserts the darwin distributable by the transport-proof ``.dmg`` NAME tier
-  (:mod:`shipit.release.integrity`). Mac/linux/windows targets only (the
-  windows leg's integrity + endpoint land with WS11).
+  ``source`` output tree after the declared bundler runs. LIKE mac-app,
+  electron is SIGNABLE through the standalone macOS sign stage: the bundler's
+  own signing stays OFF, the darwin ``.app`` ships UNSIGNED and is re-emitted
+  as the ``<name>.unsigned-app.tar.gz`` reseal payload the signer reopens →
+  resigns → reseals → notarizes (ADR-0040, TOL02-WS14 #790). So a ``sign =
+  true`` electron artifact derives its Apple creds through the standard
+  sign-stage path, no build-time secret. The one nuance vs mac-app: electron's
+  darwin ``.app`` NESTS helper ``.app`` bundles, so the TOP-LEVEL ``.app`` is
+  the one staged. The reseal payload carries it across the artifact boundary
+  (upload strips a ``.app``'s symlinks/exec bits); assert-bundle reads its
+  ``CFBundleExecutable`` as the darwin anchor. Linux/windows legs ship unsigned.
+  Mac/linux/windows targets only (the windows leg's integrity + endpoint land
+  with WS11).
 
 Every external command runs through the injected runner — the one Exec seam
 (ADR-0028); the ``cargo`` / ``uv`` / ``tar`` / ``zip`` argv literals below
@@ -414,22 +416,28 @@ def _compose_electron(req: ComposeRequest) -> Composed:
     producing none is a bundle-stage failure), its ``.blockmap`` sidecar
     shipped when present.
 
-    Unlike mac-app, electron self-signs AND notarizes on macOS INSIDE the
-    bundler run (electron-builder's ``CSC_*`` + ``notarize`` path, driven by
-    the Apple secrets in the environment), so the composition is NOT
-    ``signable`` — it emits the ALREADY-signed distributable and never routes
-    to shipit's reopen→reseal signer (workflows.lex §3.1's reopen model is the
-    tauri/raw-binary path; electron's darwin leg is signed where it is built).
+    Like mac-app, electron is SIGNABLE through the standalone macOS sign stage
+    (:mod:`shipit.release.sign`, ADR-0040): electron-builder does NOT sign at
+    build (its own CSC/notarize stay OFF), the darwin ``.app`` ships UNSIGNED,
+    and the composition re-emits it as the ``<name>.unsigned-app.tar.gz``
+    reseal payload the signer reopens — the same bundle(unsigned) →
+    sign-reopens-and-reseals model as a tauri ``.app`` (workflows.lex §3.1).
+    The signer codesigns the ``.app`` inner-first and reseals the ``.dmg`` from
+    it. The ONE electron nuance vs mac-app: the darwin ``.app`` NESTS helper
+    ``.app`` bundles (the Electron Framework, the GPU/Renderer/Plugin helpers)
+    under ``Contents/Frameworks``, so the composition selects the TOP-LEVEL
+    ``.app`` (:func:`_stage_electron_reseal_payload`) rather than mac-app's
+    sole-``.app`` assumption; the reseal payload carries the whole tree and the
+    signer's inner-first walk (:func:`shipit.release.sign.nested_signable`)
+    reaches the helpers.
 
-    Only the distributables (``.dmg``/``.AppImage``/``.exe``) and their
-    ``.blockmap`` sidecars are collected — NOT electron-builder's intermediate
-    naked ``.app``. That ``.app`` would not survive the bundle upload anyway
-    (``wf-build`` excludes ``*.app/`` directories: the symlinks and exec bits
-    an ``.app`` carries do not cross the artifact boundary), so ``wf-publish``
-    asserts the darwin distributable by the ``.dmg`` NAME tier
-    (:mod:`shipit.release.integrity`), which is transport-proof (a filename).
-    Mac/linux/windows targets only; the windows leg's integrity + endpoint
-    land with WS11 (issue #790 acceptance).
+    The naked ``.app`` rides the bundle tree, but the reseal payload is what
+    crosses the artifact boundary (upload strips a ``.app``'s symlinks/exec
+    bits), so assert-bundle reads the payload's ``CFBundleExecutable`` as the
+    darwin main-binary anchor (:mod:`shipit.release.integrity`), the opaque
+    ``.dmg``/``.AppImage`` NAME tiers being the fallback. Linux/windows legs
+    ship unsigned (not signable). Mac/linux/windows targets only; the windows
+    leg's integrity + endpoint land with WS11 (issue #790 acceptance).
     """
     spec = req.artifact.bundle
     assert spec is not None and spec.command is not None and spec.source is not None
@@ -475,7 +483,68 @@ def _compose_electron(req: ComposeRequest) -> Composed:
                     dest.unlink()
                 shutil.copy2(side, dest)
                 outputs.append(side.name)
+    # The darwin leg additionally stages the unsigned .app + reseal payload the
+    # standalone mac signer reopens (electron routes through the sign stage, it
+    # does not self-sign). Linux/windows legs ship the distributable alone.
+    if "apple-darwin" in req.target:
+        outputs.extend(_stage_electron_reseal_payload(req, source))
     return Composed(req.artifact.name, "electron", tuple(sorted(outputs)))
+
+
+def _electron_top_level_apps(source: Path) -> list[Path]:
+    """The TOP-LEVEL ``.app`` bundles under ``source`` — a ``.app`` not itself
+    nested inside another ``.app``. electron-builder's darwin output nests
+    helper ``.app`` bundles (the GPU/Renderer/Plugin helpers) under a main
+    app's ``Contents/Frameworks``, so a bare ``rglob('*.app')`` (mac-app's
+    sole-app assumption) would scoop every helper; this keeps only the outer
+    app the signer reopens. Pure."""
+    return [
+        p
+        for p in sorted(source.rglob("*.app"))
+        if p.is_dir()
+        and not any(part.endswith(".app") for part in p.relative_to(source).parts[:-1])
+    ]
+
+
+def _stage_electron_reseal_payload(req: ComposeRequest, source: Path) -> list[str]:
+    """Stage the darwin ``.app`` + the ``<name>.unsigned-app.tar.gz`` reseal
+    payload the standalone mac signer reopens (:mod:`shipit.release.sign`).
+
+    electron ships its darwin ``.app`` UNSIGNED through the ADR-0040 sign seam
+    (like mac-app): copy the ``.app`` into the bundle tree (symlinks preserved)
+    and re-emit it as the tar the signer reopens — artifact upload strips a
+    ``.app``'s symlinks/exec bits, so the payload, not the raw ``.app``, is
+    what crosses jobs. EXACTLY one top-level ``.app`` is required
+    (:func:`_electron_top_level_apps`); a missing or ambiguous one is a
+    bundle-stage failure (the bundler must leave the naked ``.app`` with its
+    own signing OFF), never a signer surprise.
+    """
+    apps = _electron_top_level_apps(source)
+    if len(apps) != 1:
+        raise ReleaseError(
+            f"[artifacts.{req.artifact.name}] electron composition: the darwin "
+            f"leg needs exactly one top-level .app to sign under {source}; found "
+            f"{len(apps)} — electron-builder must leave the naked .app (its own "
+            f"signing OFF) so the standalone signer reopens it"
+        )
+    app = apps[0]
+    app_dest = req.out_dir / app.name
+    if app_dest.exists():
+        shutil.rmtree(app_dest)
+    shutil.copytree(app, app_dest, symlinks=True)
+    payload = f"{req.artifact.name}.unsigned-app.tar.gz"
+    req.run_cmd(
+        ["tar", "-czf", str(req.out_dir / payload), "-C", str(app.parent), app.name],
+        req.root,
+    )
+    if not (req.out_dir / payload).is_file():
+        raise ReleaseError(
+            f"[artifacts.{req.artifact.name}] electron darwin leg emitted no "
+            f"reseal payload ({payload}) — the signer reopens the unsigned .app "
+            f"from it (workflows.lex §3.1), so its absence is a bundle-stage "
+            f"failure"
+        )
+    return [app.name, payload]
 
 
 @dataclass(frozen=True)
@@ -492,14 +561,7 @@ class Composition:
     (:mod:`shipit.release.sign` — the mac-app leg's reseal payload, the
     archive leg's tarball, TOL02-WS08 #779): the config boundary refuses
     ``sign = true`` on any other composition, so a sign declaration can
-    never route to a signer leg that does not exist. ``self_signs_mac`` marks
-    the compositions that sign AND notarize their OWN macOS output at BUNDLE
-    time (electron-builder's CSC + notarize path, TOL02-WS14 #790) — the
-    opposite of ``signable``: they never route to shipit's reopen→reseal
-    signer, but their darwin leg still NEEDS the Apple signing credentials in
-    the bundle stage's environment. The plan derives that Apple requirement
-    from this flag (:func:`artifact_self_signs_mac` → secretreq/preflight),
-    keyed on the composition since these compositions refuse ``sign = true``.
+    never route to a signer leg that does not exist.
     """
 
     name: str
@@ -507,7 +569,6 @@ class Composition:
     platforms: tuple[str, ...] = ()
     declared_command: bool = False
     signable: bool = False
-    self_signs_mac: bool = False
 
     def applies(self, target: str) -> bool:
         """Whether this composition runs for ``target`` (substring match on
@@ -530,17 +591,13 @@ ELECTRON = Composition(
     _compose_electron,
     platforms=("apple-darwin", "linux", "windows"),
     declared_command=True,
-    # NOT signable: electron self-signs and notarizes on macOS inside the
-    # bundler run, so its darwin distributable ships already-signed and never
-    # routes to shipit's reopen→reseal signer (unlike mac-app/archive). The
-    # config boundary therefore refuses `sign = true` on an electron artifact
-    # — electron's darwin signing is declared in the bundler, not the plan.
-    signable=False,
-    # But the darwin leg STILL needs the Apple signing creds at bundle time
-    # (electron-builder's CSC + notarize): the plan derives that requirement
-    # from this flag (secretreq/preflight), keyed on the composition since
-    # `sign = true` is refused above (TOL02-WS14 #790).
-    self_signs_mac=True,
+    # SIGNABLE, like mac-app: electron-builder does NOT sign at build; the
+    # darwin `.app` ships unsigned as the `<name>.unsigned-app.tar.gz` reseal
+    # payload, and the standalone mac sign stage (ADR-0040) reopens → resigns →
+    # reseals → notarizes it. So a `sign = true` electron artifact derives the
+    # Apple cert/notary requirement through the STANDARD sign-stage path — no
+    # composition-keyed build-time secret (TOL02-WS14 #790).
+    signable=True,
 )
 
 #: The CLOSED registry, in a stable order. Adding a composition is adding an
@@ -559,27 +616,6 @@ def signable_names() -> tuple[str, ...]:
     the config boundary's ``sign = true`` refusal message
     (:func:`shipit.config._parse_artifact`)."""
     return tuple(c.name for c in COMPOSITIONS if c.signable)
-
-
-def artifact_self_signs_mac(artifact: config.Artifact) -> bool:
-    """Whether ``artifact`` signs its OWN macOS output at bundle time AND has a
-    darwin leg to sign — so the bundle stage needs the Apple signing
-    credentials in its environment (:data:`Composition.self_signs_mac`, today
-    only electron). Pure.
-
-    Darwin-conditioned on the declared ``platforms`` (a darwin-<arch> entry):
-    an electron artifact built for linux/windows only self-signs nothing, so it
-    demands no Apple creds — the same darwin gate the rust mac-sign path applies
-    to ``sign = true``. An artifact with no ``platforms`` builds on the fleet
-    default (linux), so it is not darwin-bearing here. This is the plan's ONE
-    reader of the flag: secretreq derives the Apple requirement from it, and
-    preflight demands + the caller forwards it (TOL02-WS14 #790)."""
-    if artifact.bundle is None:
-        return False
-    comp = composition(artifact.bundle.composition)
-    if comp is None or not comp.self_signs_mac:
-        return False
-    return any(platform.startswith("darwin") for platform in artifact.platforms)
 
 
 def composition(name: str) -> Composition | None:

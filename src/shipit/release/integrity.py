@@ -55,14 +55,14 @@ the tree carries no authoritative binary tier (``.app``/reseal-payload/
 archive/deb). This is what keeps a NON-electron ``.dmg`` — a tauri mac-app's
 own ``Product_1.0.0_arch.dmg``, which rides beside its authoritative ``.app``
 and reseal payload — from being misread as a second, unparseable "main
-binary" and failing a bundle its ``.app`` already asserts correctly. On the
-electron darwin leg the ``.dmg`` name tier is the assert that runs, because
-the signed ``.app`` electron-builder emits does NOT survive artifact transport
-(``wf-build`` excludes ``*.app/`` directories from the bundle upload — the
-symlinks and exec bits an ``.app`` carries do not cross the upload boundary),
-so ``wf-publish``'s tree carries the ``.dmg`` but not the ``.app``. (electron's
-darwin distributable self-signs inside the bundler, so it never reaches
-``wf-sign-mac`` — this guard runs on ``wf-publish``'s unsigned path for it.)
+binary" and failing a bundle its ``.app`` already asserts correctly. The
+electron DARWIN leg is signable like mac-app (electron-builder does not sign at
+build): it ships the unsigned ``.app`` as a ``<name>.unsigned-app.tar.gz``
+reseal payload, so this guard — running at ``wf-sign-mac``'s entry — reads the
+payload's authoritative ``CFBundleExecutable`` and the opaque ``.dmg`` name
+tier stays the fallback. Only the electron LINUX leg (an ``.AppImage`` with no
+reseal payload, not signable) leans on the container name tier as its sole
+assert.
 
 Pure over the filesystem (reads only); rendered by the verb with uniform
 exit codes (0 pass, 1 fail — verdict + expected/actual on stderr, ``--json``

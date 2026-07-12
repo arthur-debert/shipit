@@ -588,12 +588,12 @@ ELECTRON_SPEC = {
 
 
 def _electron_darwin_effect(root, product="Lexed", exe="lexed", ver="1.2.3"):
-    """Simulate electron-builder's darwin output: the signed .dmg + its
-    .blockmap sidecar, plus electron-builder's intermediate naked .app
-    (carrying a symlink) in the `mac-arm64/` subdir. The composition must
-    collect the .dmg/.blockmap and IGNORE the .app — the .app does not survive
-    the bundle upload (wf-build strips `*.app/`), so it is never the integrity
-    anchor; the transport-proof .dmg NAME tier is."""
+    """Simulate electron-builder's darwin output: the UNSIGNED .dmg + its
+    .blockmap, plus the naked .app in the `mac-arm64/` subdir (carrying a
+    symlink, the thing artifact upload destroys) — which NESTS a helper .app
+    under Contents/Frameworks, the electron shape. The composition stages the
+    top-level .app + the `<name>.unsigned-app.tar.gz` reseal payload the mac
+    signer reopens; electron-builder does NOT sign at build."""
 
     def effect(argv, cwd):
         rel = root / "release"
@@ -603,6 +603,10 @@ def _electron_darwin_effect(root, product="Lexed", exe="lexed", ver="1.2.3"):
         app = rel / "mac-arm64" / f"{product}.app"
         _executable(app / "Contents" / "MacOS" / exe)
         (app / "Contents" / "Current").symlink_to("MacOS")
+        # A nested helper .app (Electron's GPU/Renderer/Plugin shape) — proves
+        # the top-level filter picks the outer .app, not each helper.
+        helper = app / "Contents" / "Frameworks" / f"{product} Helper.app"
+        _executable(helper / "Contents" / "MacOS" / f"{product} Helper")
 
     return effect
 
@@ -622,33 +626,72 @@ def _electron_linux_effect(root, product="Lexed", ver="1.2.3"):
     return effect
 
 
-def test_electron_darwin_collects_the_dmg_and_blockmap_ignoring_the_app(tmp_path):
+def test_electron_darwin_stages_the_dmg_app_and_reseal_payload(tmp_path):
     (artifact,) = _artifacts(ELECTRON_SPEC)
-    recorder = RunRecorder({"npm": _electron_darwin_effect(tmp_path)})
+    recorder = RunRecorder(
+        {"npm": _electron_darwin_effect(tmp_path), "tar": _tar_effect}
+    )
 
     composed = bundle_mod.ELECTRON.compose(
         _request(tmp_path, artifact, (), target=MAC, run_cmd=recorder)
     )
 
     out = tmp_path / "dist"
-    # ONLY the declared bundler ran — no reseal tar, no codesign: electron
-    # self-signs and notarizes inside `npm run dist` (workflows.lex §3.1's
-    # reopen model is the tauri/raw-binary path, not electron's).
-    assert recorder.calls == [(("npm", "run", "dist"), tmp_path)]
+    source = tmp_path / "release"
+    # electron routes through the standalone sign stage: the bundler runs, then
+    # the composition tars the UNSIGNED top-level .app as the reseal payload the
+    # signer reopens (no codesign here — that is the sign stage's job).
+    # The reseal payload is named for the ARTIFACT (`app`), not the product.
+    assert recorder.calls == [
+        (("npm", "run", "dist"), tmp_path),
+        (
+            (
+                "tar",
+                "-czf",
+                str(out / "app.unsigned-app.tar.gz"),
+                "-C",
+                str(source / "mac-arm64"),
+                "Lexed.app",
+            ),
+            tmp_path,
+        ),
+    ]
     assert (out / "Lexed-1.2.3-arm64.dmg").is_file()
     assert (out / "Lexed-1.2.3-arm64.dmg.blockmap").is_file()
-    # electron-builder's intermediate .app is NOT collected — it would not
-    # survive the bundle upload (wf-build strips `*.app/`), so the .dmg NAME
-    # tier is the darwin integrity anchor, not a copied-in .app.
-    assert not (out / "Lexed.app").exists()
+    # The top-level .app is staged (symlink + nested helper intact) beside the
+    # reseal payload — the helper .app is NOT collected separately, it rides
+    # inside the top-level .app the payload carries.
+    assert (out / "Lexed.app/Contents/MacOS/lexed").is_file()
+    assert (out / "Lexed.app/Contents/Current").is_symlink()
+    assert (out / "Lexed.app/Contents/Frameworks/Lexed Helper.app").is_dir()
     assert composed == bundle_mod.Composed(
         "app",
         "electron",
         (
             "Lexed-1.2.3-arm64.dmg",
             "Lexed-1.2.3-arm64.dmg.blockmap",
+            "Lexed.app",
+            "app.unsigned-app.tar.gz",
         ),
     )
+
+
+def test_electron_darwin_without_a_top_level_app_is_a_bundle_failure(tmp_path):
+    # The signer reopens the unsigned .app from the reseal payload; a darwin
+    # leg that emits a .dmg but no naked .app cannot build it — hard fail HERE,
+    # never a signer surprise (electron-builder must leave the .app).
+    (artifact,) = _artifacts(ELECTRON_SPEC)
+
+    def effect(argv, cwd):
+        rel = tmp_path / "release"
+        rel.mkdir(parents=True, exist_ok=True)
+        (rel / "Lexed-1.2.3-arm64.dmg").write_bytes(b"dmg")
+
+    recorder = RunRecorder({"npm": effect, "tar": _tar_effect})
+    with pytest.raises(ReleaseError, match="exactly one top-level .app"):
+        bundle_mod.ELECTRON.compose(
+            _request(tmp_path, artifact, (), target=MAC, run_cmd=recorder)
+        )
 
 
 def test_electron_linux_collects_the_appimage_and_no_app(tmp_path):
@@ -708,26 +751,27 @@ def test_electron_missing_the_primary_distributable_is_a_bundle_failure(tmp_path
 
 def test_electron_skips_a_stale_blockmap_with_no_matching_distributable(tmp_path):
     # A `<primary>.blockmap` whose primary was NOT collected is a leftover in
-    # the source tree — it must not ride into the output set (copilot rd2).
+    # the source tree — it must not ride into the output set (copilot rd2). The
+    # linux leg (no reseal payload) isolates the blockmap-filter behaviour.
     (artifact,) = _artifacts(ELECTRON_SPEC)
 
     def effect(argv, cwd):
         rel = tmp_path / "release"
         rel.mkdir(parents=True, exist_ok=True)
-        (rel / "Lexed-1.2.3-arm64.dmg").write_bytes(b"dmg")
-        (rel / "Lexed-1.2.3-arm64.dmg.blockmap").write_bytes(b"map")  # matches
-        (rel / "Stale-0.9.0.dmg.blockmap").write_bytes(b"stale")  # no primary
+        (rel / "Lexed-1.2.3.AppImage").write_bytes(b"img")
+        (rel / "Lexed-1.2.3.AppImage.blockmap").write_bytes(b"map")  # matches
+        (rel / "Stale-0.9.0.AppImage.blockmap").write_bytes(b"stale")  # no primary
 
     composed = bundle_mod.ELECTRON.compose(
         _request(
-            tmp_path, artifact, (), target=MAC, run_cmd=RunRecorder({"npm": effect})
+            tmp_path, artifact, (), target=LINUX, run_cmd=RunRecorder({"npm": effect})
         )
     )
     assert composed.outputs == (
-        "Lexed-1.2.3-arm64.dmg",
-        "Lexed-1.2.3-arm64.dmg.blockmap",
+        "Lexed-1.2.3.AppImage",
+        "Lexed-1.2.3.AppImage.blockmap",
     )
-    assert not (tmp_path / "dist" / "Stale-0.9.0.dmg.blockmap").exists()
+    assert not (tmp_path / "dist" / "Stale-0.9.0.AppImage.blockmap").exists()
 
 
 def test_electron_refuses_a_source_that_is_the_bundle_output_tree(tmp_path):
@@ -783,71 +827,13 @@ def test_registry_is_closed_and_platform_scoped():
 
 
 def test_registry_marks_the_signer_reopenable_compositions():
-    # The signable set IS the signer's leg set (TOL02-WS08 #779): mac-app
-    # (the reseal payload leg) and archive (the raw-binary tarball leg).
-    # The config boundary refuses `sign = true` on anything else, so a sign
-    # declaration can never route to a signer leg that does not exist —
-    # electron is DELIBERATELY absent: it self-signs inside the bundler.
-    assert bundle_mod.signable_names() == ("archive", "mac-app")
-
-
-def test_registry_marks_electron_as_the_lone_self_signing_composition():
-    # electron self-signs + notarizes its darwin leg at bundle time (#790); the
-    # plan derives the Apple requirement from THIS flag (electron refuses
-    # `sign = true`). No other composition self-signs its own output.
-    assert bundle_mod.ELECTRON.self_signs_mac
-    assert [c.name for c in bundle_mod.COMPOSITIONS if c.self_signs_mac] == ["electron"]
-
-
-def _electron_artifact(platforms):
-    (artifact,) = _artifacts(
-        {
-            "app": {
-                "build": ["npm"],
-                "platforms": platforms,
-                "bundle": {
-                    "composition": "electron",
-                    "command": ["npm", "run", "dist"],
-                    "source": "release",
-                },
-            }
-        }
-    )
-    return artifact
-
-
-def test_artifact_self_signs_mac_needs_electron_and_a_darwin_leg():
-    # The plan's ONE reader of the flag (secretreq/preflight demand the Apple
-    # creds off it). Darwin-conditioned: only an electron artifact WITH a darwin
-    # platform self-signs a mac app.
-    assert bundle_mod.artifact_self_signs_mac(
-        _electron_artifact(["darwin-arm64", "linux-x86_64"])
-    )
-    # linux/windows-only electron self-signs nothing.
-    assert not bundle_mod.artifact_self_signs_mac(_electron_artifact(["linux-x86_64"]))
-    # no platforms → the fleet default (linux), not darwin-bearing.
-    assert not bundle_mod.artifact_self_signs_mac(_electron_artifact([]))
-    # a non-electron darwin bundle (mac-app) routes to the reopen→reseal signer
-    # instead — it is not self-signing.
-    (macapp,) = _artifacts(
-        {
-            "app": {
-                "build": ["npm"],
-                "platforms": ["darwin-arm64"],
-                "bundle": {
-                    "composition": "mac-app",
-                    "command": ["tauri", "build"],
-                    "source": "src-tauri/target/release/bundle",
-                },
-            }
-        }
-    )
-    assert not bundle_mod.artifact_self_signs_mac(macapp)
-    # an artifact with no bundle declaration at all.
-    (plain,) = _artifacts(
-        {"app": {"build": [{"toolchain": "rust"}], "platforms": ["darwin-arm64"]}}
-    )
-    assert not bundle_mod.artifact_self_signs_mac(plain)
+    # The signable set IS the signer's leg set: mac-app + archive (TOL02-WS08
+    # #779) plus electron (WS14 #790). electron ships its darwin .app UNSIGNED
+    # as the `<name>.unsigned-app.tar.gz` reseal payload and routes through the
+    # SAME standalone mac sign stage (electron-builder does not sign at build),
+    # so it is signable like mac-app. The config boundary allows `sign = true`
+    # on exactly these, refusing it on deb/wheel.
+    assert bundle_mod.signable_names() == ("archive", "mac-app", "electron")
 
 
 @pytest.mark.parametrize(

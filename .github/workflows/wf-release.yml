@@ -125,19 +125,6 @@ jobs:
       tag: ${{ needs.prepare.outputs.tag }}
       matrix: ${{ needs.prepare.outputs.matrix }}
       stages: ${{ needs.prepare.outputs.stages }}
-    # The Apple creds an ELECTRON composition needs at BUNDLE time (#790):
-    # electron-builder self-signs + notarizes its darwin leg inside wf-build's
-    # Bundle step, so the chain forwards the same trio-set it forwards to
-    # wf-sign-mac (all optional; wf-build consumes them only on an electron leg).
-    secrets:
-      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-      ASC_API_KEY_BASE64: ${{ secrets.ASC_API_KEY_BASE64 }}
-      ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
-      ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
-      APPLE_ID: ${{ secrets.APPLE_ID }}
-      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
 
   sign:
     needs: [prepare, build]

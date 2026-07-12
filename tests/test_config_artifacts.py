@@ -285,23 +285,21 @@ def test_electron_requires_the_declared_bundler_command():
         _load('[artifacts.x]\nbuild = ["npm"]\nbundle = { composition = "electron" }\n')
 
 
-def test_sign_with_electron_is_refused_electron_self_signs():
-    # electron self-signs and notarizes INSIDE the bundler (CSC + notarize),
-    # so it is NOT in the signer's leg set — `sign = true` over it would route
-    # to a reopen→reseal leg that does not exist. Refused at parse (issue #790).
-    with pytest.raises(
-        config.ConfigError,
-        match=r"sign = true requires a bundle composition the signer can "
-        r"reopen \(archive, mac-app\); got composition `electron`",
-    ):
-        _load(
-            "[artifacts.app]\n"
-            'build = ["npm"]\n'
-            'platforms = ["darwin-arm64"]\n'
-            'bundle = { composition = "electron", command = ["npm", "run", "dist"],'
-            ' source = "release" }\n'
-            "sign = true\n"
-        )
+def test_sign_with_electron_is_accepted_it_routes_through_the_sign_stage():
+    # electron is SIGNABLE (WS14 #790): its darwin .app ships UNSIGNED as the
+    # reseal payload the standalone mac sign stage reopens — electron-builder
+    # does not sign at build. So `sign = true` over electron is ACCEPTED and
+    # routes through the same signer leg as mac-app.
+    (artifact,) = _load(
+        "[artifacts.app]\n"
+        'build = ["npm"]\n'
+        'platforms = ["darwin-arm64"]\n'
+        'bundle = { composition = "electron", command = ["npm", "run", "dist"],'
+        ' source = "release" }\n'
+        "sign = true\n"
+    )
+    assert artifact.sign is True
+    assert artifact.bundle.composition == "electron"
 
 
 def test_bundle_command_must_be_an_argv_list():
@@ -368,7 +366,7 @@ def test_sign_without_a_bundle_is_refused():
     with pytest.raises(
         config.ConfigError,
         match=r"sign = true requires a bundle composition the signer can "
-        r"reopen \(archive, mac-app\); got no bundle",
+        r"reopen \(archive, mac-app, electron\); got no bundle",
     ):
         _load(
             "[artifacts.x]\n"
@@ -379,13 +377,13 @@ def test_sign_without_a_bundle_is_refused():
 
 
 def test_sign_with_an_unsignable_composition_is_refused():
-    # The signer has legs for the mac-app payload and the archive tarball
-    # only; `sign = true` over a wheel (or deb) composition routes nowhere —
-    # refused at parse, naming the signable set.
+    # The signer has legs for the mac-app/electron payload and the archive
+    # tarball only; `sign = true` over a wheel (or deb) composition routes
+    # nowhere — refused at parse, naming the signable set.
     with pytest.raises(
         config.ConfigError,
         match=r"sign = true requires a bundle composition the signer can "
-        r"reopen \(archive, mac-app\); got composition `wheel`",
+        r"reopen \(archive, mac-app, electron\); got composition `wheel`",
     ):
         _load(
             "[artifacts.x]\n"

@@ -327,21 +327,11 @@ def plan(
     )
 
     sign_stage = "sign" in stages
-    # An electron bundle self-signs + notarizes its darwin leg INSIDE the
-    # bundler (electron-builder's CSC + notarize path, #790) — no `sign` stage,
-    # but the bundle stage's environment still needs the Apple creds. Demand
-    # them here so a repo can never pass preflight and then bundle an UNSIGNED
-    # darwin app; independent of `--unsigned` (that break-glass skips the rust
-    # reopen→reseal stage, which electron never routes through) and of the RC
-    # guard (build-time signing runs on every channel).
-    electron_signs = any(bundle.artifact_self_signs_mac(a) for a in artifacts)
-    mac_signs = sign_stage or electron_signs
-    secrets = _plan_secrets(endpoints, sign=mac_signs)
+    secrets = _plan_secrets(endpoints, sign=sign_stage)
     # The plan's either-satisfies requirements (#746): with a live sign
-    # stage OR an electron self-sign leg, the notary credentials — either
-    # complete trio passes presence validation; an unsigned or non-darwin
-    # plan with no electron self-sign carries none.
-    secret_alternatives = (secretreq.NOTARY_SECRETS,) if mac_signs else ()
+    # stage, the notary credentials — either complete trio passes presence
+    # validation; an unsigned or non-darwin plan carries none.
+    secret_alternatives = (secretreq.NOTARY_SECRETS,) if sign_stage else ()
     return ReleasePlan(
         version=resolved.version,
         tag=resolved.tag,
@@ -419,10 +409,8 @@ def _plan_secrets(endpoints: Sequence[str], *, sign: bool) -> tuple[str, ...]:
     """The plan-scoped required names, from the SAME requirement registries
     gh-setup syncs (:mod:`shipit.release.secretreq` — one definition of every
     name): prepare's push, each live endpoint's declaration, and the sign-mac
-    CERT PAIR only when the plan signs a mac leg (``sign`` — the rust sign
-    stage is live OR an electron bundle self-signs its darwin leg). The notary
-    credentials are not names here but the plan's alternative-set requirement
-    (#746)."""
+    CERT PAIR only when the sign stage is live — the notary credentials are
+    not names here but the plan's alternative-set requirement (#746)."""
     seen: dict[str, None] = {}
     for name in secretreq.PREPARE_SECRETS:
         seen[name] = None

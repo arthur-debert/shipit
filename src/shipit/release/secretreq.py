@@ -7,13 +7,10 @@ they require (this module's closed tables); the repo's ``.shipit.toml
 secret name mapped to one doppler/env/prompt source — architecture.lex §6, the
 resolution pipeline in :mod:`shipit.secretsrc` unchanged). Deriving the
 required set is a pure traversal of the repo's declarations — the artifact
-map's endpoints, its ``sign`` declarations AND its self-signing bundle
-compositions (electron self-signs its darwin leg inside the bundler, so it
-demands the SAME Apple cert pair + notary trio as ``sign = true`` — keyed on
-the composition since electron refuses ``sign``, #790), the prepare stage's
-push, and (a third derivation input, #740) the ``[reviewers]`` declarations,
-whose funnel backends contribute their GitHub-App credential pair off the
-Backend registry — consumed identically by:
+map's endpoints, its ``sign`` declarations, the prepare stage's push, and (a
+third derivation input, #740) the ``[reviewers]`` declarations, whose funnel
+backends contribute their GitHub-App credential pair off the Backend registry
+— consumed identically by:
 
 1. ``gh-setup``'s secrets sync (:mod:`shipit.ghsetup`): a required name with
    no declared source is a SYNC-TIME error naming the requiring entry (story
@@ -70,7 +67,6 @@ from dataclasses import dataclass
 
 from ..agent import backend as _backend
 from ..config import Artifact, SecretSource
-from . import bundle
 
 #: The prepare stage's requirement: its bump commit + tag push must pass the
 #: branch ruleset, so every shipit-released repo needs the push token
@@ -298,24 +294,12 @@ def requirements(
         # required — this cannot demand Apple secrets a plan would then skip.
         # Only the CERT PAIR is an unconditional requirement: the notary
         # credentials are an either-trio-satisfies alternative set (#746),
-        # derived separately by :func:`alternative_requirements`. An electron
-        # bundle self-signs its darwin output at BUNDLE time (electron-builder's
-        # CSC path) — the SAME cert pair, keyed on the composition instead of
-        # `sign = true` (which electron refuses); mutually exclusive with it
-        # (:func:`shipit.release.bundle.artifact_self_signs_mac`, #790).
+        # derived separately by :func:`alternative_requirements`.
         if artifact.sign:
             reqs.extend(
                 Requirement(
                     name=name,
                     required_by=f"sign-mac stage (artifact {artifact.name})",
-                )
-                for name in SIGN_MAC_CERT_SECRETS
-            )
-        elif bundle.artifact_self_signs_mac(artifact):
-            reqs.extend(
-                Requirement(
-                    name=name,
-                    required_by=f"electron bundle self-sign (artifact {artifact.name})",
                 )
                 for name in SIGN_MAC_CERT_SECRETS
             )
@@ -347,32 +331,18 @@ def alternative_requirements(
     artifacts: Sequence[Artifact],
 ) -> tuple[AlternativeRequirement, ...]:
     """The either-satisfies requirements the declarations contribute (#746):
-    one :data:`NOTARY_SECRETS` entry per SIGNING artifact, declaration order
-    — today's ONE alternative-shaped requirement (the notary trios). A signing
-    artifact is one that declares ``sign = true`` (the rust reopen→reseal path)
-    OR whose bundle composition self-signs its own darwin output
-    (electron-builder's notarize path — :func:`shipit.release.bundle.artifact_self_signs_mac`,
-    TOL02-WS14 #790): both notarize a darwin ``.dmg``, so both need the notary
-    trio. Consumed beside :func:`requirements` by gh-setup's sync (either
-    sourced trio satisfies it) and preflight's presence validation (either env
-    trio)."""
-    out: list[AlternativeRequirement] = []
-    for artifact in artifacts:
-        if artifact.sign:
-            out.append(
-                AlternativeRequirement(
-                    sets=NOTARY_SECRETS,
-                    required_by=f"sign-mac stage (artifact {artifact.name})",
-                )
-            )
-        elif bundle.artifact_self_signs_mac(artifact):
-            out.append(
-                AlternativeRequirement(
-                    sets=NOTARY_SECRETS,
-                    required_by=f"electron bundle self-sign (artifact {artifact.name})",
-                )
-            )
-    return tuple(out)
+    one :data:`NOTARY_SECRETS` entry per signing artifact, declaration order
+    — today's ONE alternative-shaped requirement (the notary trios). Consumed
+    beside :func:`requirements` by gh-setup's sync (either sourced trio
+    satisfies it) and preflight's presence validation (either env trio)."""
+    return tuple(
+        AlternativeRequirement(
+            sets=NOTARY_SECRETS,
+            required_by=f"sign-mac stage (artifact {artifact.name})",
+        )
+        for artifact in artifacts
+        if artifact.sign
+    )
 
 
 def accepted_names(
