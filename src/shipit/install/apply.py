@@ -77,6 +77,21 @@ HOOK_ACTIVATE_ARGV = ["install"]
 #: is left dirty with an untracked ``pixi.lock`` after an install lands.
 PIXI_LOCK = "pixi.lock"
 
+#: The suffix ``lefthook install`` renames a pre-existing hook to before it
+#: writes its own shim, and the markers that positively identify a
+#: lefthook-generated shim (#777 mode 2). A stale ``.git/hooks/pre-commit.old``
+#: left by a prior (release-era) ``lefthook install`` makes the next
+#: activation's rename fail ("can't rename pre-commit to pre-commit.old — file
+#: already exists"), which absorbs into a failed ``hooks`` postcondition and
+#: fails self-cert CLOSED. Pre-cleaning that stale backup unblocks activation.
+#: The markers are lefthook's OWN generated content — the ``LEFTHOOK`` env
+#: guards and the ``call_lefthook`` dispatch function every shim it writes
+#: carries, at every version/size — so requiring BOTH positively identifies a
+#: tool-authored shim and never a hand-written consumer hook (the conservative
+#: bar the issue sets: only remove backups you can prove are release-managed).
+HOOK_BACKUP_SUFFIX = ".old"
+LEFTHOOK_SHIM_MARKERS = ("LEFTHOOK", "call_lefthook")
+
 #: The PR-body renderer apply calls at the boundary moment (``MODE_PR`` only):
 #: ``(override_before, hooks_activated, rerendered, stamped_pin, lint_debt) ->
 #: body``. Injected by the verb so the body's sections stay a pure renderer
@@ -295,6 +310,138 @@ def _activate(
     return False, _activation_output(activation)
 
 
+def _preclean_stale_hook_backups(root: Path) -> None:
+    """Remove stale lefthook-shim ``.old`` hook backups before ``lefthook
+    install`` re-runs — the #777 mode 2 fix.
+
+    ``lefthook install`` renames any pre-existing ``.git/hooks/<hook>`` to
+    ``<hook>.old`` before writing its own shim; when a prior (release-era)
+    activation already left a ``<hook>.old`` behind, that rename collides
+    ("can't rename pre-commit to pre-commit.old — file already exists"), the
+    activation fails, and self-cert fails CLOSED on the ``hooks`` postcondition.
+    The fleet is full of ex-release repos carrying exactly this leftover.
+
+    Conservative by construction (the issue's bar — only remove backups
+    positively identifiable as tool-managed): a ``.old`` file is removed only
+    when its content carries BOTH :data:`LEFTHOOK_SHIM_MARKERS`, which lefthook
+    bakes into every shim it generates and a hand-written consumer hook would
+    not. A backup that is not a lefthook shim is left untouched. Best-effort:
+    an unreadable/unremovable backup is logged and skipped, never fatal — the
+    worst case is the pre-existing collision, which the activation degrades on
+    as before.
+    """
+    hooks_dir = root / ".git" / "hooks"
+    if not hooks_dir.is_dir():
+        return
+    for backup in sorted(hooks_dir.glob(f"*{HOOK_BACKUP_SUFFIX}")):
+        try:
+            text = backup.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            logger.warning(
+                "skipping unreadable stale hook backup",
+                exc_info=True,
+                extra={"root": str(root), "backup": backup.name},
+            )
+            continue
+        if not all(marker in text for marker in LEFTHOOK_SHIM_MARKERS):
+            continue
+        try:
+            backup.unlink()
+        except OSError:
+            logger.warning(
+                "could not remove stale lefthook hook backup",
+                exc_info=True,
+                extra={"root": str(root), "backup": backup.name},
+            )
+            continue
+        logger.info(
+            "removed stale lefthook hook backup before activation (#777)",
+            extra={"root": str(root), "backup": backup.name},
+        )
+
+
+def _snapshot_paths(plan: Plan) -> list[str]:
+    """Every consumer path a committing apply may write, delete, or stamp — the
+    superset of :attr:`Plan.changed_paths` plus the two generated files it does
+    not track (:data:`PIXI_LOCK`, and the seeded :data:`~shipit.install.units.PIXI_FILE`).
+
+    The roll-back set for the #777 mode 3 transaction (see
+    :func:`_snapshot_committing_writes`): capturing these before the writes and
+    restoring them on a failed self-cert leaves NOTHING half-applied.
+    """
+    paths = set(plan.changed_paths)
+    if plan.seed_pixi_manifest:
+        paths.add(PIXI_FILE)
+    paths.add(PIXI_LOCK)
+    return sorted(paths)
+
+
+def _snapshot_committing_writes(root: Path, plan: Plan) -> dict[str, bytes | None]:
+    """Capture the pre-write bytes of every :func:`_snapshot_paths` entry.
+
+    ``None`` marks a path absent before the writes (so the restore UNLINKS it
+    rather than resurrecting stale bytes). The map is the transaction the
+    committing modes roll back to on a failed self-cert (#777 mode 3): the
+    fail-closed run had already applied the full managed set AND stamped
+    ``.shipit.toml``, so a rerun saw matching hashes, reported "nothing to do",
+    and exited 0 — the half-applied state was unrecoverable by the tool. Taken
+    only for committing modes; the default working-tree refresh publishes
+    nothing and keeps its writes for the caller to review (``git diff``).
+    """
+    return {rel: _read_bytes_or_none(root / rel) for rel in _snapshot_paths(plan)}
+
+
+def _read_bytes_or_none(path: Path) -> bytes | None:
+    """The file's bytes, or ``None`` when it does not exist — the snapshot cell."""
+    return path.read_bytes() if path.is_file() else None
+
+
+def _restore_committing_writes(root: Path, snapshot: dict[str, bytes | None]) -> None:
+    """Roll the working tree back to ``snapshot`` — the #777 mode 3 rollback.
+
+    Each cell is restored to exactly its pre-write state: bytes are rewritten
+    verbatim (a spliced block file returns to its original content, a stamped
+    ``.shipit.toml`` to its prior stamp), and a ``None`` cell (the path was
+    absent) is unlinked so a freshly-added managed file leaves no trace. Hook
+    activation is deliberately NOT rolled back: the ``lefthook install`` shims
+    are idempotent and sit outside the managed-set/manifest state that decides
+    :attr:`Plan.nothing_to_do`, so a rerun re-activates them cleanly.
+    """
+    for rel, original in snapshot.items():
+        dest = root / rel
+        if original is None:
+            dest.unlink(missing_ok=True)
+            continue
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(original)
+
+
+def _restore_caller_branch(cwd: str, original_ref: str | None) -> None:
+    """Switch the caller's checkout back to ``original_ref`` after the MODE_PR
+    flow — the #777 mode 1 fix.
+
+    MODE_PR switches onto the ``shipit/install`` scratch branch to stage its
+    commit; without this the operator is silently left off their own branch.
+    Best-effort and no-op when there is nothing to restore to — a detached HEAD
+    (``original_ref`` is ``None``) or a checkout already sitting on the scratch
+    branch (a prior run that itself failed to restore). A restore that cannot
+    run is logged, never raised: it must not mask the real apply outcome (or a
+    git/gh error already unwinding through the ``finally`` that calls this).
+    """
+    if original_ref is None or original_ref == INSTALL_BRANCH:
+        return
+    try:
+        git.switch(original_ref, cwd=cwd)
+    except execrun.ExecError:
+        logger.warning(
+            "could not restore the caller's branch after the install PR flow — "
+            "the checkout is left on %s",
+            INSTALL_BRANCH,
+            exc_info=True,
+            extra={"root": cwd, "branch": original_ref},
+        )
+
+
 def reject_lefthook_conflicts(plan: Plan, mode: str) -> None:
     """Fail closed on a #544 lefthook merge conflict BEFORE any write or git
     side effect — the single guard shared by :func:`apply` and the verb's
@@ -359,14 +506,21 @@ def apply(
     Every COMMITTING mode (``local``/``push``/``pr``) self-certifies after
     staging and BEFORE any git side effect (ADR-0033): a missed postcondition
     raises :class:`SelfCertError` — fail closed, no commit, no PR, the loud
-    diagnostic naming each miss. The default working-tree refresh does not
-    certify: nothing is being published, `git diff` is the caller's review
-    surface, and the caller's own commit rides the repo's hooks. Install's OWN
-    git operations — the reconcile commit AND its push — bypass the repo's
-    hooks (``--no-verify``, #477): the whole-tree gate is the REPO'S bar, this
-    very run just armed it (pre-push lints the whole tree, not the staged
+    diagnostic naming each miss. The fail-closed is TRANSACTIONAL (#777 mode 3):
+    a committing mode snapshots every path its writes will touch before the
+    first write and rolls them back on a failed self-cert, so a fail-closed run
+    leaves NOTHING half-applied — otherwise the stamped manifest and written
+    managed set make the next run read "nothing to do" and exit 0 over an
+    unrecoverable partial state. The default working-tree refresh does not
+    certify (nor snapshot): nothing is being published, `git diff` is the
+    caller's review surface, and the caller's own commit rides the repo's hooks.
+    Install's OWN git operations — the reconcile commit AND its push — bypass the
+    repo's hooks (``--no-verify``, #477): the whole-tree gate is the REPO'S bar,
+    this very run just armed it (pre-push lints the whole tree, not the staged
     managed set), and pre-existing consumer debt is reported in the PR body,
-    never a blocker.
+    never a blocker. ``MODE_PR`` stages onto the ``shipit/install`` scratch
+    branch and, in a ``finally``, always restores the caller's original checkout
+    (#777 mode 1 — never strand the operator off their own branch).
 
     Raises :class:`InstallError` on a domain refusal (``local``/``push`` in
     detached HEAD, a failed self-certification, a lefthook merge conflict with
@@ -393,6 +547,17 @@ def apply(
         {d.unit.key: consumer_snapshot(root, d.unit) for d in plan.overrides}
         if mode == MODE_PR
         else {}
+    )
+
+    # Snapshot every path the committing writes below will touch BEFORE the
+    # first write (#777 mode 3): a committing mode self-certifies AFTER staging,
+    # and a failed self-cert must roll the tree back to leave NOTHING
+    # half-applied — otherwise the stamped manifest + written managed set make a
+    # rerun read "nothing to do" and exit 0 over an unrecoverable partial state.
+    # The default working-tree refresh keeps its writes (its whole point), so it
+    # takes no snapshot.
+    committing_snapshot = (
+        _snapshot_committing_writes(root, plan) if mode != MODE_TREE else None
     )
 
     # Seed the minimal valid pixi manifest BEFORE the unit writes (#432): the
@@ -486,6 +651,11 @@ def apply(
     hooks_activated: bool | None = None
     hooks_detail = ""
     if plan.writes and plan.activates_hooks:
+        # Clear any stale lefthook `.old` backup first (#777 mode 2) so the
+        # rename `lefthook install` performs never collides — a collision fails
+        # the whole activation, which then fails self-cert closed on a virgin
+        # ex-release consumer.
+        _preclean_stale_hook_backups(root)
         hooks_activated, hooks_detail = _activate(root, activate)
         if not hooks_activated:
             # Degraded-but-continuing: the config shipped, only local activation
@@ -538,8 +708,16 @@ def apply(
     )
     if not cert_report.ok:
         message = selfcert.format_failure(cert_report)
+        # Roll the staged writes back BEFORE raising (#777 mode 3): fail-closed
+        # must be fully closed, leaving the tree exactly as apply found it. Skip
+        # only the (unreachable-here) missing-snapshot guard for MODE_TREE, which
+        # never certifies. Otherwise the stamped manifest + written managed set
+        # would make the next run read "nothing to do" over a half-applied tree.
+        if committing_snapshot is not None:
+            _restore_committing_writes(root, committing_snapshot)
         logger.error(
-            "install self-certification failed — failing closed (no commit, no PR)",
+            "install self-certification failed — failing closed (no commit, no "
+            "PR); rolled the staged writes back",
             extra={
                 "root": str(root),
                 "mode": mode,
@@ -607,50 +785,62 @@ def apply(
 
         # MODE_PR: stage onto the install branch, push it, open a DRAFT PR — the
         # standalone consumer-onboarding/reconcile flow, explicit opt-in only.
+        # Capture the caller's branch first so the `finally` returns their
+        # checkout to it (#777 mode 1): `shipit/install` is a shipit-owned
+        # scratch ref, and leaving the operator sitting on it — off their own
+        # branch, with no notice — is the surprise the issue reports.
+        original_ref = git.current_branch(cwd=cwd)
         git.switch_create(INSTALL_BRANCH, cwd=cwd)
-        git.add(changed_paths, cwd=cwd)
-        git.commit(COMMIT_MESSAGE, changed_paths, cwd=cwd, no_verify=True)
-        # The install branch is regenerated from HEAD each run; force so a re-run
-        # with an open install PR updates it rather than failing non-fast-forward.
-        git.push(INSTALL_BRANCH, cwd=cwd, force=True, no_verify=True)
-        existing = gh.pr_url_for_head(INSTALL_BRANCH, cwd=cwd)
-        if existing:
-            # The force-push already refreshed the open PR's diff.
+        try:
+            git.add(changed_paths, cwd=cwd)
+            git.commit(COMMIT_MESSAGE, changed_paths, cwd=cwd, no_verify=True)
+            # The install branch is regenerated from HEAD each run; force so a
+            # re-run with an open install PR updates it rather than failing
+            # non-fast-forward.
+            git.push(INSTALL_BRANCH, cwd=cwd, force=True, no_verify=True)
+            existing = gh.pr_url_for_head(INSTALL_BRANCH, cwd=cwd)
+            if existing:
+                # The force-push already refreshed the open PR's diff.
+                logger.info(
+                    "install draft PR updated",
+                    extra={
+                        "root": str(root),
+                        "branch": INSTALL_BRANCH,
+                        "url": existing,
+                        "duration_ms": _elapsed(),
+                    },
+                )
+                return replace(
+                    result, branch=INSTALL_BRANCH, pr_url=existing, pr_updated=True
+                )
+            url = gh.pr_create(
+                head=INSTALL_BRANCH,
+                title="shipit: install/update the managed set",
+                body=pr_body(
+                    override_before,
+                    hooks_activated,
+                    rerendered,
+                    stamped_version,
+                    result.lint_debt,
+                ),
+                draft=True,
+                cwd=cwd,
+            )
             logger.info(
-                "install draft PR updated",
+                "install draft PR opened",
                 extra={
                     "root": str(root),
                     "branch": INSTALL_BRANCH,
-                    "url": existing,
+                    "url": url,
                     "duration_ms": _elapsed(),
                 },
             )
-            return replace(
-                result, branch=INSTALL_BRANCH, pr_url=existing, pr_updated=True
-            )
-        url = gh.pr_create(
-            head=INSTALL_BRANCH,
-            title="shipit: install/update the managed set",
-            body=pr_body(
-                override_before,
-                hooks_activated,
-                rerendered,
-                stamped_version,
-                result.lint_debt,
-            ),
-            draft=True,
-            cwd=cwd,
-        )
-        logger.info(
-            "install draft PR opened",
-            extra={
-                "root": str(root),
-                "branch": INSTALL_BRANCH,
-                "url": url,
-                "duration_ms": _elapsed(),
-            },
-        )
-        return replace(result, branch=INSTALL_BRANCH, pr_url=url)
+            return replace(result, branch=INSTALL_BRANCH, pr_url=url)
+        finally:
+            # Success or failure, restore the caller's checkout: the operator
+            # never asked to move off their branch, and a git/gh failure mid-flow
+            # would otherwise strand them on the scratch branch too.
+            _restore_caller_branch(cwd, original_ref)
     except execrun.ExecError:
         # The failure propagates to the CLI error shell (clean `error: …` +
         # exit 1); it is recorded here at ERROR with the exception attached so

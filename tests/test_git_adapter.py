@@ -117,6 +117,21 @@ def test_push_default_does_not_bypass_hooks(monkeypatch):
     assert seen["args"] == ["push", "origin", "main"]
 
 
+def test_switch_moves_to_an_existing_branch_without_force(monkeypatch):
+    # #777 mode 1: the MODE_PR caller-branch restore switches to a branch that
+    # already exists (the caller's own) — a plain `git switch`, never `-C`, so it
+    # only ever moves HEAD and never creates a ref.
+    seen = {}
+
+    def fake(args, *, cwd, timeout=None):
+        seen["args"] = args
+        return ""
+
+    monkeypatch.setattr(git, "_git", fake)
+    git.switch("main", cwd="/x")
+    assert seen["args"] == ["switch", "main"]
+
+
 def test_submodule_update_init_syncs_then_recursively_inits_on_the_network_bound(
     monkeypatch,
 ):

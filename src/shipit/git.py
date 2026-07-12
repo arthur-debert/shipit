@@ -649,6 +649,19 @@ def switch_create(branch: str, *, cwd: str) -> None:
     _git(["switch", "-C", branch], cwd=cwd)
 
 
+def switch(branch: str, *, cwd: str) -> None:
+    """``git switch <branch>`` — switch to an EXISTING branch (no ``-C``).
+
+    The restore counterpart of :func:`switch_create`: the ``pr`` install flow
+    switches onto its ``shipit/install`` scratch branch to stage the commit and
+    must return the caller's checkout to the branch it started on afterwards
+    (#777 mode 1 — leaving the operator on the staging branch with no notice is
+    the surprise the issue reports). A plain ``switch`` (never ``-C``) so this
+    only ever moves HEAD to a ref that already exists and never creates one.
+    """
+    _git(["switch", branch], cwd=cwd)
+
+
 def add(paths: list[str], *, cwd: str) -> None:
     """``git add -f -- <paths>`` — stage ONLY these pathspecs, never ``-A``.
 
