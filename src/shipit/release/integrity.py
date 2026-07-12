@@ -49,12 +49,20 @@ The electron tier (issue #790) is the exception to "crack the container": a
 are OPAQUE to pure reads — no stdlib cracks them and this guard shells out to
 nothing — so the tier asserts the product name electron-builder stamped into
 the FILENAME (``<product>-<version>[-<arch>].dmg``) instead of an inner
-binary. On the darwin leg the electron composition also copies the signed
-``.app`` beside the ``.dmg``, so the ``.app`` tier's authoritative
-``CFBundleExecutable`` check still runs; the linux ``.AppImage`` leg has only
-the name tier. (electron's darwin distributable self-signs inside the bundler,
-so it never reaches ``wf-sign-mac`` — this guard runs on ``wf-publish``'s
-unsigned path for it.)
+binary. Because that name assertion is a HEURISTIC (a filename, not a cracked
+binary), it is a FALLBACK: the ``.dmg``/``.AppImage`` tiers assert only when
+the tree carries no authoritative binary tier (``.app``/reseal-payload/
+archive/deb). This is what keeps a NON-electron ``.dmg`` — a tauri mac-app's
+own ``Product_1.0.0_arch.dmg``, which rides beside its authoritative ``.app``
+and reseal payload — from being misread as a second, unparseable "main
+binary" and failing a bundle its ``.app`` already asserts correctly. On the
+electron darwin leg the ``.dmg`` name tier is the assert that runs, because
+the signed ``.app`` electron-builder emits does NOT survive artifact transport
+(``wf-build`` excludes ``*.app/`` directories from the bundle upload — the
+symlinks and exec bits an ``.app`` carries do not cross the upload boundary),
+so ``wf-publish``'s tree carries the ``.dmg`` but not the ``.app``. (electron's
+darwin distributable self-signs inside the bundler, so it never reaches
+``wf-sign-mac`` — this guard runs on ``wf-publish``'s unsigned path for it.)
 
 Pure over the filesystem (reads only); rendered by the verb with uniform
 exit codes (0 pass, 1 fail — verdict + expected/actual on stderr, ``--json``
@@ -97,10 +105,11 @@ _AR_MAGIC = b"!<arch>\n"
 #: (Apple UDIF disk image) and an ``.AppImage`` (ELF runtime + squashfs) are
 #: OPAQUE to pure reads, so these tiers assert the DECLARED name
 #: electron-builder stamped into the filename from ``productName`` rather than
-#: the inner executable. The darwin leg also ships the signed ``.app`` beside
-#: the ``.dmg`` (the electron composition copies it in), so its authoritative
-#: ``CFBundleExecutable`` is asserted by the ``.app`` tier too; the AppImage
-#: leg has only this name tier.
+#: the inner executable. Because the assert is name-only (a heuristic), it is a
+#: FALLBACK — it runs only when the tree carries no authoritative binary tier
+#: (see :func:`check_tree`): a tauri mac-app's own ``.dmg`` rides beside its
+#: ``.app``/reseal payload, which assert the real binary, so the opaque ``.dmg``
+#: is not (mis)read as a second, unparseable main binary.
 DMG_SUFFIX = ".dmg"
 APPIMAGE_SUFFIX = ".AppImage"
 
@@ -339,10 +348,11 @@ def _container_product_name(path: Path, suffix: str) -> str | None:
     """The product-name segment of an electron-builder distributable filename
     (``<product>-<version>[-<arch>]<suffix>``) — everything before the version
     boundary (:data:`_ELECTRON_VERSION_BOUNDARY`). ``None`` when the name
-    carries no version boundary (unparseable): the guard reports it as an
-    undeterminable container rather than asserting a garbled name. Pure,
-    name-only — the ``.dmg``/``.AppImage`` container itself is opaque to pure
-    reads (see :data:`DMG_SUFFIX`)."""
+    carries no version boundary (unparseable) — which, in the fallback tier
+    that calls this (:func:`check_tree`, no authoritative binary present), the
+    guard reports as an undeterminable container rather than asserting a
+    garbled name. Pure, name-only — the ``.dmg``/``.AppImage`` container itself
+    is opaque to pure reads (see :data:`DMG_SUFFIX`)."""
     stem = path.name[: -len(suffix)]
     match = _ELECTRON_VERSION_BOUNDARY.search(stem)
     if match is None:
@@ -383,12 +393,18 @@ def check_tree(tree: Path, expected: str) -> BundleVerdict:
        survives artifact transport where the loose file's does not;
     4. every ``*.deb``, read in place (:func:`_deb_main_binary`) — its
        ``data.tar`` member's sole executable, same transport-proof shape;
-    5. every ``*.dmg`` and ``*.AppImage`` (electron distributables), asserted
-       by the product-name segment of the filename
-       (:func:`_container_product_name`) — the container is opaque to pure
-       reads, so the tier asserts the DECLARED name, not the inner binary;
-       the darwin ``.app`` beside a ``.dmg`` still gives tier 1 the
-       authoritative ``CFBundleExecutable`` check;
+    5. only when tiers 1–4 found NO authoritative binary: every ``*.dmg`` and
+       ``*.AppImage`` (electron distributables), asserted by the product-name
+       segment of the filename (:func:`_container_product_name`) — the
+       container is opaque to pure reads, so the tier asserts the DECLARED
+       name, not the inner binary. This tier is a FALLBACK precisely BECAUSE
+       it is a filename heuristic: a tauri mac-app ships its own ``.dmg``
+       beside the ``.app``/reseal payload that authoritatively assert its
+       binary, so that non-electron ``.dmg`` (often ``Product_1.0.0_arch``,
+       which the tier cannot even split) must NOT escalate to a failure the
+       ``.app`` already cleared. An electron darwin tree carries the ``.dmg``
+       alone (its ``.app`` does not survive the bundle upload), so the tier is
+       the assert that runs there;
     6. only when the tree carries none of the above: every loose executable
        file (``.exe`` counted by suffix, its stem compared).
 
@@ -434,20 +450,26 @@ def check_tree(tree: Path, expected: str) -> BundleVerdict:
             problems.append(f"{deb.relative_to(tree)}: no determinable main binary")
         else:
             actual.append(name)
-    for dmg in dmgs:
-        name = _container_product_name(dmg, DMG_SUFFIX)
-        if name is None:
-            problems.append(f"{dmg.relative_to(tree)}: no determinable main binary")
-        else:
-            actual.append(name)
-    for appimage in appimages:
-        name = _container_product_name(appimage, APPIMAGE_SUFFIX)
-        if name is None:
-            problems.append(
-                f"{appimage.relative_to(tree)}: no determinable main binary"
-            )
-        else:
-            actual.append(name)
+    # The opaque-container tiers are a name-only FALLBACK: they assert only
+    # when tiers 1–4 found no authoritative binary. A tauri mac-app's own
+    # `.dmg` rides beside its `.app`/reseal payload, so gating on those keeps
+    # that non-electron container (which the name heuristic cannot parse) from
+    # escalating to a failure the `.app` already cleared.
+    if not (apps or payloads or archives or debs):
+        for dmg in dmgs:
+            name = _container_product_name(dmg, DMG_SUFFIX)
+            if name is None:
+                problems.append(f"{dmg.relative_to(tree)}: no determinable main binary")
+            else:
+                actual.append(name)
+        for appimage in appimages:
+            name = _container_product_name(appimage, APPIMAGE_SUFFIX)
+            if name is None:
+                problems.append(
+                    f"{appimage.relative_to(tree)}: no determinable main binary"
+                )
+            else:
+                actual.append(name)
     if not (apps or payloads or archives or debs or dmgs or appimages):
         for path in sorted(tree.rglob("*")):
             if _is_executable(path):

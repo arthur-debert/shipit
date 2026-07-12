@@ -589,8 +589,11 @@ ELECTRON_SPEC = {
 
 def _electron_darwin_effect(root, product="Lexed", exe="lexed", ver="1.2.3"):
     """Simulate electron-builder's darwin output: the signed .dmg + its
-    .blockmap sidecar, and the signed .app (carrying a symlink — the thing
-    artifact upload destroys) in electron-builder's `mac-arm64/` subdir."""
+    .blockmap sidecar, plus electron-builder's intermediate naked .app
+    (carrying a symlink) in the `mac-arm64/` subdir. The composition must
+    collect the .dmg/.blockmap and IGNORE the .app — the .app does not survive
+    the bundle upload (wf-build strips `*.app/`), so it is never the integrity
+    anchor; the transport-proof .dmg NAME tier is."""
 
     def effect(argv, cwd):
         rel = root / "release"
@@ -605,16 +608,21 @@ def _electron_darwin_effect(root, product="Lexed", exe="lexed", ver="1.2.3"):
 
 
 def _electron_linux_effect(root, product="Lexed", ver="1.2.3"):
+    """Simulate electron-builder's linux output: the .AppImage + its .blockmap.
+    A stray .app rides the shared source tree (a darwin leftover), which the
+    linux leg must NOT scoop — the composition collects .app on no leg."""
+
     def effect(argv, cwd):
         rel = root / "release"
         rel.mkdir(parents=True, exist_ok=True)
         (rel / f"{product}-{ver}.AppImage").write_bytes(b"appimage")
         (rel / f"{product}-{ver}.AppImage.blockmap").write_bytes(b"blockmap")
+        _executable(rel / "mac-arm64" / f"{product}.app" / "Contents" / "MacOS" / "x")
 
     return effect
 
 
-def test_electron_darwin_collects_dmg_blockmap_and_the_signed_app(tmp_path):
+def test_electron_darwin_collects_the_dmg_and_blockmap_ignoring_the_app(tmp_path):
     (artifact,) = _artifacts(ELECTRON_SPEC)
     recorder = RunRecorder({"npm": _electron_darwin_effect(tmp_path)})
 
@@ -629,16 +637,16 @@ def test_electron_darwin_collects_dmg_blockmap_and_the_signed_app(tmp_path):
     assert recorder.calls == [(("npm", "run", "dist"), tmp_path)]
     assert (out / "Lexed-1.2.3-arm64.dmg").is_file()
     assert (out / "Lexed-1.2.3-arm64.dmg.blockmap").is_file()
-    # The signed .app is copied in as the integrity anchor, symlink intact.
-    assert (out / "Lexed.app/Contents/MacOS/lexed").is_file()
-    assert (out / "Lexed.app/Contents/Current").is_symlink()
+    # electron-builder's intermediate .app is NOT collected — it would not
+    # survive the bundle upload (wf-build strips `*.app/`), so the .dmg NAME
+    # tier is the darwin integrity anchor, not a copied-in .app.
+    assert not (out / "Lexed.app").exists()
     assert composed == bundle_mod.Composed(
         "app",
         "electron",
         (
             "Lexed-1.2.3-arm64.dmg",
             "Lexed-1.2.3-arm64.dmg.blockmap",
-            "Lexed.app",
         ),
     )
 
@@ -654,6 +662,8 @@ def test_electron_linux_collects_the_appimage_and_no_app(tmp_path):
     out = tmp_path / "dist"
     assert (out / "Lexed-1.2.3.AppImage").is_file()
     assert (out / "Lexed-1.2.3.AppImage.blockmap").is_file()
+    # The stray .app in the shared source tree is not scooped into the bundle.
+    assert not (out / "Lexed.app").exists()
     assert composed == bundle_mod.Composed(
         "app",
         "electron",

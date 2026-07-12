@@ -473,10 +473,12 @@ def test_appimage_asserts_the_product_name_and_is_not_a_loose_binary(tmp_path):
     assert verdict.actual == ("Phos",)
 
 
-def test_darwin_electron_tree_asserts_via_both_the_app_and_the_dmg(tmp_path):
-    # The electron composition ships the signed .app beside the .dmg, so the
-    # authoritative CFBundleExecutable check (tier 1) and the .dmg name tier
-    # both fire — both must equal the expected name.
+def test_an_authoritative_app_takes_precedence_over_the_dmg_name_tier(tmp_path):
+    # The .dmg/.AppImage name tiers are a FALLBACK: when an authoritative
+    # binary tier is present (here a .app), it asserts and the opaque .dmg name
+    # tier is skipped. The verdict still passes off the .app's authoritative
+    # CFBundleExecutable — the transport-fragile .app just does not reach
+    # wf-publish, where the .dmg name tier is what runs.
     _make_app(tmp_path, app="Phos.app", executable="Phos")
     (tmp_path / "Phos-1.2.3-arm64.dmg").write_bytes(b"udif")
     (tmp_path / "Phos-1.2.3-arm64.dmg.blockmap").write_bytes(b"blockmap")
@@ -485,9 +487,25 @@ def test_darwin_electron_tree_asserts_via_both_the_app_and_the_dmg(tmp_path):
     assert verdict.actual == ("Phos",)
 
 
+def test_a_mac_app_dmg_does_not_fail_the_tree_its_app_asserts(tmp_path):
+    # Regression: a tauri mac-app ships its OWN .dmg beside the .app and reseal
+    # payload — and tauri names it `Product_1.0.0_arch.dmg` (underscores), which
+    # the electron name tier cannot split into product/version. The .dmg tier
+    # must NOT escalate that non-electron container to a failure the .app and
+    # payload already cleared: it is a fallback, gated off the authoritative
+    # tiers being present.
+    _make_app(tmp_path, app="Phos.app", executable="phos")
+    _make_payload(tmp_path, executable="phos")
+    (tmp_path / "Phos_1.0.0_aarch64.dmg").write_bytes(b"udif")
+    verdict = integrity.check_tree(tmp_path, "phos")
+    assert verdict.ok
+    assert verdict.actual == ("phos",)
+
+
 def test_dmg_without_a_version_boundary_is_undeterminable(tmp_path):
     # A name the tier cannot split into product/version fails loudly with the
-    # diagnosis — never a silent pass.
+    # diagnosis — never a silent pass. (No authoritative tier present, so the
+    # .dmg fallback tier runs and reports the undeterminable container.)
     (tmp_path / "installer.dmg").write_bytes(b"udif")
     verdict = integrity.check_tree(tmp_path, "Phos")
     assert not verdict.ok

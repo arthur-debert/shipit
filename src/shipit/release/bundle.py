@@ -44,16 +44,19 @@ functions the entries carry:
   part; a missing payload is a bundle-stage failure, never a signer
   surprise. Mac targets only.
 - **electron** — electron-builder's per-platform distributable set (the
-  darwin ``.dmg`` + ``.dmg.blockmap`` sidecar + the signed ``.app``, the
-  linux ``.AppImage``, the windows ``.exe`` + ``.exe.blockmap``), collected
-  from the declared ``source`` output tree after the declared bundler runs.
-  UNLIKE mac-app, electron self-signs AND notarizes on macOS INSIDE the
-  bundler run (electron-builder's ``CSC_*`` + ``notarize`` path), so the
-  composition is NOT signable — its darwin distributable ships already-signed
-  and never routes to shipit's reopen→reseal signer (TOL02-WS14 #790). The
-  signed ``.app`` is copied in as the assert-bundle integrity anchor. Mac/
-  linux/windows targets only (the windows leg's integrity + endpoint land
-  with WS11).
+  darwin ``.dmg`` + ``.dmg.blockmap`` sidecar, the linux ``.AppImage``, the
+  windows ``.exe`` + ``.exe.blockmap``), collected from the declared
+  ``source`` output tree after the declared bundler runs. UNLIKE mac-app,
+  electron self-signs AND notarizes on macOS INSIDE the bundler run
+  (electron-builder's ``CSC_*`` + ``notarize`` path), so the composition is
+  NOT signable — its darwin distributable ships already-signed and never
+  routes to shipit's reopen→reseal signer (TOL02-WS14 #790). Only the
+  distributables and their sidecars are collected, not electron-builder's
+  intermediate naked ``.app`` (which the bundle upload strips — an ``.app``'s
+  symlinks/exec bits do not cross the artifact boundary); ``wf-publish``
+  asserts the darwin distributable by the transport-proof ``.dmg`` NAME tier
+  (:mod:`shipit.release.integrity`). Mac/linux/windows targets only (the
+  windows leg's integrity + endpoint land with WS11).
 
 Every external command runs through the injected runner — the one Exec seam
 (ADR-0028); the ``cargo`` / ``uv`` / ``tar`` / ``zip`` argv literals below
@@ -405,11 +408,11 @@ def _compose_electron(req: ComposeRequest) -> Composed:
 
     Runs the DECLARED bundler (``electron-builder`` — the one consumer-
     specific part, like mac-app's) and collects the platform-appropriate
-    distributables from the declared ``source`` output tree: the darwin
-    ``.dmg`` (plus its ``.dmg.blockmap`` sidecar and the signed ``.app``
-    beside it), the linux ``.AppImage``, or the windows ``.exe`` — each
-    PRIMARY distributable hard-required (a leg producing none is a
-    bundle-stage failure), its ``.blockmap`` sidecar shipped when present.
+    DISTRIBUTABLES from the declared ``source`` output tree: the darwin
+    ``.dmg`` (plus its ``.dmg.blockmap`` sidecar), the linux ``.AppImage``, or
+    the windows ``.exe`` — each PRIMARY distributable hard-required (a leg
+    producing none is a bundle-stage failure), its ``.blockmap`` sidecar
+    shipped when present.
 
     Unlike mac-app, electron self-signs AND notarizes on macOS INSIDE the
     bundler run (electron-builder's ``CSC_*`` + ``notarize`` path, driven by
@@ -417,12 +420,16 @@ def _compose_electron(req: ComposeRequest) -> Composed:
     ``signable`` — it emits the ALREADY-signed distributable and never routes
     to shipit's reopen→reseal signer (workflows.lex §3.1's reopen model is the
     tauri/raw-binary path; electron's darwin leg is signed where it is built).
-    The signed darwin ``.app`` is copied into the bundle tree as the
-    assert-bundle integrity anchor — its ``CFBundleExecutable`` is the
-    authoritative main binary the scar-#2 guard reads
-    (:mod:`shipit.release.integrity`), and the opaque ``.dmg``/``.AppImage``
-    get that guard's name tiers. Mac/linux/windows targets only; the windows
-    leg's integrity + endpoint land with WS11 (issue #790 acceptance).
+
+    Only the distributables (``.dmg``/``.AppImage``/``.exe``) and their
+    ``.blockmap`` sidecars are collected — NOT electron-builder's intermediate
+    naked ``.app``. That ``.app`` would not survive the bundle upload anyway
+    (``wf-build`` excludes ``*.app/`` directories: the symlinks and exec bits
+    an ``.app`` carries do not cross the artifact boundary), so ``wf-publish``
+    asserts the darwin distributable by the ``.dmg`` NAME tier
+    (:mod:`shipit.release.integrity`), which is transport-proof (a filename).
+    Mac/linux/windows targets only; the windows leg's integrity + endpoint
+    land with WS11 (issue #790 acceptance).
     """
     spec = req.artifact.bundle
     assert spec is not None and spec.command is not None and spec.source is not None
@@ -452,15 +459,6 @@ def _compose_electron(req: ComposeRequest) -> Composed:
                     dest.unlink()
                 shutil.copy2(side, dest)
                 outputs.append(side.name)
-    # The signed .app is the darwin integrity anchor (assert-bundle reads its
-    # CFBundleExecutable); copytree(symlinks=True) preserves the symlinks and
-    # exec bits a bare copy — and cross-job artifact transport — would drop.
-    for app in sorted(p for p in source.rglob("*.app") if p.is_dir()):
-        app_dest = req.out_dir / app.name
-        if app_dest.exists():
-            shutil.rmtree(app_dest)
-        shutil.copytree(app, app_dest, symlinks=True)
-        outputs.append(app.name)
     return Composed(req.artifact.name, "electron", tuple(sorted(outputs)))
 
 
