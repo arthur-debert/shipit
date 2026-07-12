@@ -109,6 +109,7 @@ import os
 import re
 import secrets as pysecrets
 import shutil
+import tarfile
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -643,84 +644,184 @@ def detect_shape(tree: Path) -> str:
     )
 
 
-def _unsafe_tar_member(listing: str) -> str | None:
-    """The first archive member (from ``tar -tzf`` output) that would escape
-    the extraction dir — an ABSOLUTE path or one with a ``..`` segment (classic
-    tar path traversal) — or ``None`` when every member is confined. Pure."""
-    for raw in listing.splitlines():
-        # Validate the EXACT member `tar` would extract — no `.strip()`, which
-        # would rewrite a legitimately-named `..<space>` dir to `..` and block
-        # it. ``splitlines`` already drops the line endings.
-        if not raw:
-            continue
-        if raw.startswith("/") or ".." in raw.split("/"):
-            return raw
-    return None
+def _leaves_root(root: Path, base: Path, path: str) -> bool:
+    """Whether a link TARGET ``path`` lands OUTSIDE ``root`` once resolved
+    against ``base`` (used when ``path`` is relative). An absolute target always
+    leaves; ``..`` segments resolve LEXICALLY (a textual ``normpath``). Lexical
+    is sound HERE because it checks the link's OWN stored destination, not a
+    later member's path — member NAMES refuse ``..`` outright (:func:`_name_escapes`),
+    so no name traverses this link at write time. Pure."""
+    if os.path.isabs(path):
+        return True
+    resolved = os.path.normpath(os.path.join(str(base), path))
+    root_str = os.path.normpath(str(root))
+    return resolved != root_str and not resolved.startswith(root_str + os.sep)
 
 
-def _non_regular_member(listing: str) -> str | None:
-    """The first member in a ``tar -tvzf`` verbose listing whose type is
-    NEITHER a regular file NOR a directory — the first character of its mode
-    column is not ``-`` or ``d`` (a symlink is ``l``, a hardlink ``h``,
-    devices/fifos their own letters). The ``tar -tzf`` NAME check confines
-    members by path, but a link escapes THROUGH its target instead: a symlink
-    entry pointing outside the extraction dir followed by a member written
-    through it lands outside ``work`` however innocent every name looks. A
-    raw-CLI archive ships only files and dirs, so the first non-regular member
-    is returned for a hard refusal; ``None`` when every member is a plain file
-    or directory. Pure."""
-    for raw in listing.splitlines():
-        mode = raw.split(maxsplit=1)
-        if mode and mode[0][:1] not in ("-", "d"):
-            return raw
-    return None
+def _name_escapes(member: tarfile.TarInfo) -> bool:
+    """Whether ``member``'s archive path is unsafe to extract — an ABSOLUTE name
+    or one carrying a ``..`` path COMPONENT.
+
+    A ``..`` is refused OUTRIGHT, never resolved lexically: a later member whose
+    name traverses ``..`` THROUGH an already-extracted in-tree symlink escapes
+    the root at write time even though the name resolves in-tree on paper — the
+    classic tar symlink-traversal. Refusing the component matches tarfile's
+    ``data`` filter and the prior ``tar -tzf`` NAME check, and never touches a
+    legit bundle (its ``..`` live in symlink TARGETS, never in a member name).
+    The EXACT stored components are compared, so a literal like ``.. ``
+    (dot-dot-space) is the confined child it names, not a ``..``. Pure."""
+    name = member.name.replace("\\", "/")
+    return os.path.isabs(name) or ".." in name.split("/")
+
+
+def _is_special(member: tarfile.TarInfo) -> bool:
+    """Whether ``member`` is a special entry that is NEITHER a regular file, a
+    directory, a symlink, nor a hardlink — a character/block device, FIFO, or
+    other non-regular type. A signable bundle (either leg) never carries one,
+    and ``extractall`` should never materialise a device node, so it is a hard
+    refusal on both legs. Pure."""
+    return not (member.isfile() or member.isdir() or member.issym() or member.islnk())
+
+
+def _target_escapes(root: Path, member: tarfile.TarInfo) -> bool:
+    """Whether a link ``member``'s TARGET resolves OUTSIDE ``root``. The target
+    is read from the archive's STRUCTURED metadata (``member.linkname``), so a
+    member name OR target that itself contains the display delimiters
+    (``" -> "`` for a symlink, ``" link to "`` for a hardlink) cannot skew the
+    parse the way a ``tar -tvzf`` text listing could. A symlink target resolves
+    against the link's OWN directory; a hardlink target against the archive
+    root. Pure."""
+    base = root / Path(member.name).parent if member.issym() else root
+    return _leaves_root(root, base, member.linkname)
+
+
+def _is_confined(root: Path, member: tarfile.TarInfo, *, reject_links: bool) -> bool:
+    """Whether ``member`` is safe to extract under ``root``: a confined name, a
+    regular file/dir/link type (never a device/FIFO), AND — for a link — either
+    links rejected outright (``reject_links``, the archive leg) or a target that
+    also stays in tree (the mac-app leg). The per-member gate the extraction
+    filter re-asserts after the scan. Pure."""
+    if _name_escapes(member) or _is_special(member):
+        return False
+    if member.issym() or member.islnk():
+        if reject_links:
+            return False
+        if _target_escapes(root, member):
+            return False
+    return True
+
+
+def _confining_filter(
+    root: Path, *, reject_links: bool
+) -> Callable[[tarfile.TarInfo, str], tarfile.TarInfo]:
+    """An ``extractall`` filter that re-asserts each member is confined to
+    ``root`` before it is written — the pre-extraction scan already refused any
+    escaper, so this only ever fires on a race — and otherwise preserves the
+    bundle's rwx modes and symlinks (unlike tarfile's fully sanitising ``data``
+    filter, which a re-signed ``.app`` cannot survive). Only the setuid/setgid/
+    sticky high bits are cleared: a signable bundle never needs them and the
+    notary rejects a setuid Mach-O, so extracting them from a hostile payload
+    would be a needless footgun."""
+
+    def _filter(member: tarfile.TarInfo, dest: str) -> tarfile.TarInfo:
+        if not _is_confined(root, member, reject_links=reject_links):
+            raise ReleaseError(
+                f"member {member.name!r} escaped the extraction dir mid-unpack"
+                " — refusing"
+            )
+        member.mode &= ~0o7000  # strip setuid/setgid/sticky; keep rwx
+        return member
+
+    return _filter
 
 
 def _untar_validated(
     archive: Path,
     work: Path,
-    run_cmd: RunCmd,
     what: str,
     *,
     reject_links: bool = False,
 ) -> None:
-    """Untar ``archive`` into ``work``, listing and validating first: a
-    member with an absolute path or a ``..`` segment would let a tampered or
-    garbled ``what`` write OUTSIDE ``work`` (tar path traversal), so any such
-    member is a hard refusal with nothing extracted.
+    """Untar ``archive`` into ``work`` in a SINGLE structured pass: open the
+    archive once, validate every member against its ``tarfile`` metadata, then
+    extract from that SAME handle — the check and the extraction see one
+    identical member set (nothing on disk is re-listed or re-opened between
+    them), and a large payload is decompressed once, not three times.
 
-    With ``reject_links`` (the archive leg — a raw-CLI tarball has no business
-    carrying links), a verbose second listing additionally refuses any symlink
-    or hardlink member: the name check confines paths, but a link escapes
-    through its TARGET, so a non-regular member is refused before extraction
-    too. The mac-app leg leaves this OFF — a resealed ``.app`` legitimately
-    carries the framework symlinks Apple's bundle layout requires."""
+    THREE refusals fire BEFORE anything is unpacked:
+
+    * A member NAME that is absolute or carries a ``..`` component would let a
+      tampered or garbled ``what`` write OUTSIDE ``work`` — directly (tar path
+      traversal) or by climbing ``..`` THROUGH an already-extracted in-tree
+      symlink at write time (symlink traversal); ``..`` is refused outright,
+      never resolved lexically.
+    * A special member — a character/block device, FIFO, or other non-regular,
+      non-dir, non-link type — is refused on BOTH legs: a signable bundle never
+      carries one, and ``extractall`` must never materialise a device node.
+    * A link member escapes through its TARGET even when its name is confined.
+      With ``reject_links`` (the archive leg — a raw-CLI tarball has no business
+      carrying links) ANY symlink or hardlink is refused. Without it (the
+      mac-app leg — a resealed ``.app`` legitimately carries the framework
+      symlinks Apple's bundle layout requires) a link is allowed only while its
+      TARGET resolves UNDER ``work``; an absolute or ``..`` target is refused.
+
+    Targets come from structured ``linkname`` metadata, never a parsed text
+    listing, so a member name or target that itself contains ``" -> "`` /
+    ``" link to "`` cannot smuggle an escaping link past the check. The
+    extraction re-asserts the same confinement per member
+    (:func:`_confining_filter`) and otherwise keeps every member faithfully
+    intact. A corrupt or non-gzip archive raises the domain
+    :class:`ReleaseError` naming it, never a raw ``tarfile``/OS error the CLI's
+    one-line contract would leak as a traceback."""
     work.mkdir(parents=True, exist_ok=True)
-    listing = run_cmd(["tar", "-tzf", str(archive)], SIGN_CMD_TIMEOUT).stdout
-    unsafe = _unsafe_tar_member(listing)
-    if unsafe is not None:
-        raise ReleaseError(
-            f"unsafe path in {what} {archive.name}: {unsafe!r} escapes "
-            "the extraction dir (absolute or .. path) — refusing to extract"
-        )
-    if reject_links:
-        verbose = run_cmd(["tar", "-tvzf", str(archive)], SIGN_CMD_TIMEOUT).stdout
-        link = _non_regular_member(verbose)
-        if link is not None:
-            raise ReleaseError(
-                f"non-regular member in {what} {archive.name}: {link!r} — a "
-                "symlink or hardlink escapes the extraction dir through its "
-                "target; a raw-CLI archive ships only files and dirs, refusing "
-                "to extract"
+    root = work.resolve()
+    try:
+        with tarfile.open(archive, "r:gz") as tar:
+            members = tar.getmembers()
+            for member in members:
+                if _name_escapes(member):
+                    raise ReleaseError(
+                        f"unsafe path in {what} {archive.name}: {member.name!r} "
+                        "escapes the extraction dir (absolute or .. path) — "
+                        "refusing to extract"
+                    )
+                if _is_special(member):
+                    raise ReleaseError(
+                        f"non-regular member in {what} {archive.name}: "
+                        f"{member.name!r} — a character/block device, FIFO, or "
+                        "other special entry; a signable bundle ships only "
+                        "files, dirs, and links, refusing to extract"
+                    )
+                if member.issym() or member.islnk():
+                    if reject_links:
+                        raise ReleaseError(
+                            f"non-regular member in {what} {archive.name}: "
+                            f"{member.name!r} — a symlink or hardlink escapes "
+                            "the extraction dir through its target; a raw-CLI "
+                            "archive ships only files and dirs, refusing to "
+                            "extract"
+                        )
+                    if _target_escapes(root, member):
+                        raise ReleaseError(
+                            f"link escaping {what} {archive.name}: "
+                            f"{member.name!r} -> {member.linkname!r} — its "
+                            "target resolves outside the extraction dir "
+                            "(absolute or .. target); refusing to extract"
+                        )
+            tar.extractall(
+                work,
+                members=members,
+                filter=_confining_filter(root, reject_links=reject_links),
             )
-    run_cmd(["tar", "-xzf", str(archive), "-C", str(work)], SIGN_CMD_TIMEOUT)
+    except (tarfile.TarError, OSError) as exc:
+        raise ReleaseError(f"cannot unpack {what} {archive.name}: {exc}") from exc
 
 
-def _unpack(payload: Path, work: Path, run_cmd: RunCmd) -> Path:
-    """Untar the reseal payload into ``work`` (listed and validated first —
+def _unpack(payload: Path, work: Path) -> Path:
+    """Untar the reseal payload into ``work`` (validated first —
     :func:`_untar_validated`) and return the ONE extracted ``.app``; zero or
     multiple is a hard error."""
-    _untar_validated(payload, work, run_cmd, "reseal payload")
+    _untar_validated(payload, work, "reseal payload")
     apps = sorted(p for p in work.iterdir() if p.is_dir() and p.suffix == ".app")
     if len(apps) != 1:
         names = ", ".join(p.name for p in apps) or "none"
@@ -1026,7 +1127,7 @@ def sign_bundle(req: SignRequest) -> SignResult:
     payload = _find_payload(req.tree)
     original_dmg = _find_dmg(req.tree)
 
-    app = _unpack(payload, req.scratch / "unpacked", req.run_cmd)
+    app = _unpack(payload, req.scratch / "unpacked")
     nested = nested_signable(app)
     identity = _sign_paths(
         sign_order(nested, app), signing, req, entitlements=req.entitlements
@@ -1122,9 +1223,7 @@ def sign_archives(req: SignRequest) -> ArchiveSignResult:
     binaries: list[Path] = []
     for index, archive in enumerate(archives):
         work = req.scratch / f"archive-{index}"
-        _untar_validated(
-            archive, work, req.run_cmd, "archive bundle", reject_links=True
-        )
+        _untar_validated(archive, work, "archive bundle", reject_links=True)
         machos = sorted(
             p
             for p in work.rglob("*")
