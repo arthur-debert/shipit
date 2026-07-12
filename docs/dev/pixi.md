@@ -36,6 +36,16 @@ The reviewer (read-only) agent session. A reviewer Tree is clone+checkout with t
 
 What pixi does NOT own (carried [from](./architecture.lex)): building and signing distributable artifacts. `pixi build` is preview-grade and emits conda packages. shipit keeps the real builders and uses pixi to PROVISION and RUN them.
 
+### What Work Env adds above pixi:
+
+Work Env is shipit's resolved WHERE/ACTIVATION value over existing owners. It may carry pixi's `Activation` or `EnvIdentity`, but it never computes PATH, shells out to activate, invents an environment id, or becomes a runner. The routing decision says which existing mechanism the caller uses. `pixi-run` routes provisioned write Trees, CI Lane jobs, and provisioned fleet-sweep cells.
+
+`activation-snapshot` routes coordinator session Trees that borrowed `pixi shell-hook --json`.
+
+`ambient` routes reviewers, explorers, Main checkouts without a supplied activation, and non-pixi Trees.
+
+Pixi owns activation and environment identity. Exec remains the process seam. Work Env exists so spawn, session, review, CI, and fleet evidence all use the same vocabulary without sharing one universal executor.
+
 ## 2. What pixi persists — the data model
 
 pixi exposes rich STATIC environment metadata but almost no DYNAMIC run state. Environments are keyed by NAME (`default`, `lint`, `review`, `dogfood`), never by a UUID.
@@ -80,7 +90,7 @@ pixi offers NO plugin API, NO backend SPI, NO event/config hook a tool can live 
 
 `[activation]` in pixi.toml
 
-: The one place to inject env/scripts pixi runs on EVERY activation — `[activation] scripts = [...]` and `[activation.env] KEY = "val"`, per feature/environment. Fires on every `pixi run`/`pixi shell`/ `shell-hook`. shipit currently declares none (`pixi shell-hook --json` shows `activation_scripts: []`). This is where shipit-owned env (e.g. the sccache build env) BELONGS — but it only fires when execution goes through pixi.
+: The one place to inject env/scripts pixi runs on EVERY activation — `[activation] scripts = [...]` and `[activation.env] KEY = "val"`, per feature/environment. Fires on every `pixi run`/`pixi shell`/ `shell-hook`. Shipit now declares build environment values such as `CARGO_TARGET_DIR`, `SCCACHE_BASEDIRS`, and `CARGO_INCREMENTAL` in `[activation.env]`; `activation_scripts` may still be empty. This is where shipit-owned env belongs — but it only fires when execution goes through pixi or borrows pixi's shell-hook snapshot.
 
 Task fields (`depends-on`, `inputs`/`outputs`, `args`, `env`, `cwd`, `clean-env`)
 
@@ -111,6 +121,10 @@ Coordinator activation — `shipit hook sessionstart` (ADR-0027, Layer A)
 Agent launch — `src/shipit/spawn/launch.py` + `src/shipit/spawn/subagent.py`
 
 : The per-backend `BackendAdapter` (`spawn/backends/`) builds the argv (`claude -p ... --output-format json`, or the codex/antigravity equivalents). For a provisioned write Tree, `pixi_wrap()` re-expresses it as `pixi run --manifest-path <tree>/pixi.toml -- <argv>` (gated on `<tree>/.pixi/envs/default` existing), and `scrub_tree_env()` drops the API key plus leaked `PIXI_*`/`CONDA_*` vars. The launch and provisioning scrubs share ONE predicate — `pixienv.is_leaked_env_var`, in the pixi adapter since PROC02-WS02 (the wrapped argv and the sentinel gate live there too, as `pixienv.run_argv` / `pixienv.has_default_env`) — so they cannot drift. For a reviewer read-only Tree `pixi_wrap` is a deliberate no-op (no env to route into) — that launch stays bare (see [\#7](#7)).
+
+Work Env observability
+
+: Every boundary that resolves a Work Env records a flat, absent-not-null projection instead of an environment dump. The stable vocabulary is `work_env_boundary`, `working_dir`, `working_dir_repo`, `working_dir_branch`, `working_dir_commit`, `checkout_strategy`, `routing`, `role`, `lane`, `tree_branch`, `tree_base`, `pixi_activation`, `pixi_environment_name`, and `pixi_environment_lock_hash`, plus boundary-specific fields such as `ci_event`, `runner`, `required`, `fleet_repo`, and `tool`. The projection never includes secret values, full env snapshots, or a fabricated `pixi_run_id` — pixi has no such id.
 
 ## 7. Gotchas and known bugs
 
