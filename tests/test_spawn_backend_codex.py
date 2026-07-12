@@ -82,11 +82,11 @@ def test_build_command_has_no_tools_flag_either_posture():
 
 
 def test_reviewer_build_command_is_network_capable_non_bypass_sandbox():
-    # WS04a probe: a reviewer self-posts via `gh pr review` (needs the network), and
-    # codex --sandbox read-only BLOCKS the network — so the reviewer posture is the
-    # least-privilege sandbox that still grants network: workspace-write + the
-    # network_access override, NOT the write Run's bypass flag. The chmod'd Tree
-    # (ADR-0018) is the load-bearing FS read-only guard.
+    # WS04a probe: codex --sandbox read-only BLOCKS the network a captured reviewer
+    # needs to fetch PR context, so the reviewer posture is the least-privilege sandbox
+    # that still grants network: workspace-write + the network_access override, NOT the
+    # write Run's bypass flag. The chmod'd Tree (ADR-0018) is the load-bearing FS
+    # read-only guard.
     cmd = CODEX.build_command("review it", "reviewer", read_only=True)
     assert cmd[:3] == ["codex", "exec", "--skip-git-repo-check"]
     assert "--ephemeral" in cmd
@@ -140,7 +140,7 @@ def test_reviewer_output_schema_adds_the_native_schema_flag():
     assert cmd[cmd.index("--output-schema") + 1] == "/tmp/schema.json"
     # It rides the reviewer posture, before the model + prompt.
     assert cmd.index("--output-schema") < cmd.index("--model")
-    # The self-posting spawn-surface reviewer (no schema) omits it entirely.
+    # A reviewer with no native schema file omits it entirely.
     assert "--output-schema" not in CODEX.build_command("t", "reviewer", read_only=True)
 
 

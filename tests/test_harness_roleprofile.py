@@ -114,6 +114,17 @@ def test_checkout_axes_encode_allocation_and_attachment_not_one_flag():
     assert coordinator.tree_backed and coordinator.writable  # session lifetime
 
 
+def test_checkout_strategy_inverse_lookup_is_registry_derived():
+    """Lifecycle-family call sites can ask the registry instead of restating roles."""
+    assert roleprofile.roles_with_checkout_strategy(ExistingPrWriteTree) == (
+        Role.SHEPHERD,
+    )
+    assert roleprofile.roles_with_checkout_strategy(NewWriteTree) == (Role.IMPLEMENTER,)
+    assert roleprofile.roles_with_checkout_strategy(SharedReadOnlyTree) == (
+        Role.REVIEWER,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Enforcement posture — capability-shaped, never a mutation boolean
 # ---------------------------------------------------------------------------

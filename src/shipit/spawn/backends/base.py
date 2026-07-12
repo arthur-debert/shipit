@@ -21,10 +21,11 @@ ABC is that boundary:
   the Run can commit + push + open a PR); ``read_only=True`` builds the **reviewer**
   argv, and what that means is the adapter's private business: ``claude`` narrows to its
   read-only ``--tools`` allow-list; ``codex`` / ``agy`` have no granular allow-list, so
-  their reviewer posture is *whatever lets the agent post its review through the PR while
-  the chmod'd Tree remains the load-bearing FS guard* (ADR-0020 §Decision 3 — the native
-  sandbox is best-effort defense-in-depth on top of the chmod, never the guarantee). The
-  flag, not a tool tuple, is the signal **because a tool allow-list does not generalize**
+  their reviewer posture is whatever lets the captured reviewer fetch PR context and emit
+  structured output while the chmod'd Tree remains the load-bearing FS guard (ADR-0020
+  §Decision 3 — the native sandbox is best-effort defense-in-depth on top of the chmod,
+  never the guarantee). The flag, not a tool tuple, is the signal **because a tool
+  allow-list does not generalize**
   — codex/agy have none, so "non-``None`` ``tools``" could not distinguish a reviewer
   from a write Run for them.
 - **:meth:`child_env`** — the backend's auth-env transform. Every backend has its own
@@ -107,11 +108,10 @@ class BackendAdapter(ABC):
         - ``read_only=True`` — the **reviewer** argv. What it constrains is the
           adapter's private business: ``claude`` narrows to its read-only ``--tools``
           allow-list; ``codex`` / ``agy``, having no allow-list, instead build the
-          *least-privilege posture that still lets the agent post its review through the
-          PR* (`gh pr review` needs the network — see the per-adapter docstrings for the
-          probed posture). The load-bearing read-only guarantee is ALWAYS the chmod'd
-          shared Tree (ADR-0018), at the FS layer; the backend's native restriction is
-          best-effort defense-in-depth on top, never the guarantee.
+          least-privilege posture that still lets the agent fetch the PR context it must
+          review (``gh pr diff`` needs the network). The load-bearing read-only guarantee
+          is ALWAYS the chmod'd shared Tree (ADR-0018), at the FS layer; the backend's
+          native restriction is best-effort defense-in-depth on top, never the guarantee.
 
         ``cwd`` is the **Tree path** the child is rooted in. Most backends honour the
         OS process ``cwd`` (which :func:`shipit.spawn.launch.launch` sets) and so
@@ -123,10 +123,9 @@ class BackendAdapter(ABC):
 
         ``output_schema_path`` is the path to a JSON-schema file a **capture
         reviewer** (the review funnel, TRE05-WS04b) wants the backend to enforce its
-        structured output against. It is meaningful ONLY for a reviewer whose result
-        is *captured* (shipit reads the agent's stdout and posts it via the
-        ``review:`` check-run gate), NOT for the self-posting spawn-surface reviewer
-        (which leaves it ``None``). Only ``codex`` has a native schema flag
+        structured output against. It is meaningful for the reviewer result channel
+        where shipit reads the agent's stdout and posts through the review service.
+        Only ``codex`` has a native schema flag
         (``--output-schema``) to honour it; ``claude`` / ``agy`` have no native schema
         enforcement and IGNORE it (``agy`` instead carries the schema in its prompt
         prose, ``claude`` is never a funnel backend). The load-bearing constraint

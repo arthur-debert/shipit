@@ -109,6 +109,21 @@ def test_real_role_prompts_read_as_their_role():
     assert "You are a REVIEWER" in rendered.role_prompts[Role.REVIEWER]
 
 
+def test_reviewer_prompt_uses_the_captured_review_service_contract():
+    """The reviewer role must not resurrect the retired self-posting contract.
+
+    The prompt aligns with the product review service: the agent emits one
+    structured review result, and shipit posts it. A reviewer never runs
+    ``gh pr review`` or comments on GitHub directly.
+    """
+    prompt = render(load_role_defs()).role_prompts[Role.REVIEWER]
+
+    assert "structured review result" in prompt
+    assert "shipit captures it and posts" in prompt
+    assert "Do not run `gh pr review`" in prompt
+    assert "Post exactly one review through the PR" not in prompt
+
+
 # --- shepherd-per-PR (ADR-0035): the fragments say the revised design --------
 
 
