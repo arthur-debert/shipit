@@ -29,7 +29,13 @@ most one ``.dmg``, one invocation:
 3. codesigns inner-first with the ``.app`` LAST, hardened runtime + secure
    timestamp on every Mach-O (a flat sign leaves nested code unhardened and
    the notary rejects it; ``codesign --deep`` is not used — Apple discourages
-   it for distribution and it mis-applies entitlements);
+   it for distribution and it mis-applies entitlements), applying entitlements
+   PER CODE ROLE (:class:`EntitlementsPolicy`): an electron bundle — detected
+   structurally by its nested helper ``.app`` bundles — gets shipit's JIT
+   entitlements pair (``allow-jit`` on the top ``.app``, ``allow-jit`` +
+   ``inherit`` on each helper) so V8 runs under hardened runtime instead of
+   notarizing clean but crashing at launch; a mac-app / tauri / rust ``.app``
+   nests no helper and signs with NO entitlements (#829);
 4. reseals the ``.dmg`` FROM the signed ``.app`` via ``hdiutil`` (re-bundling
    would strip the signature), then codesigns the resealed ``.dmg``;
 5. ``notarytool`` submit / poll / staple against the signed ``.dmg``, and
@@ -85,8 +91,9 @@ macOS runner and real Apple credentials, so no act smoke exists for it.
 Remote verification is the TOL02-WS07 lex rc (and the full ``.app``/``.dmg``
 leg with phos-app in ADP02). What CAN be tested locally, and is
 (``tests/test_release_sign.py``): the pure argument assembly (sign-order
-construction, credential-set resolution, notary flag trio selection) as
-fixture tests, and the full recorded command-line sequence — including the
+construction, credential-set resolution, notary flag trio selection, and the
+per-code-role entitlements selection) as fixture tests, and the full recorded
+command-line sequence — including the electron JIT entitlements pass and the
 hard-fail refusals — through the one Exec seam (ADR-0028): every external
 command runs through the injected runner, and the ``codesign`` /
 ``security`` / ``xcrun`` / ``hdiutil`` / ``tar`` argv literals below are
@@ -460,6 +467,164 @@ def nested_signable(
 
 
 # --------------------------------------------------------------------------
+# Entitlements — the per-code-role signing policy (electron JIT, #829)
+# --------------------------------------------------------------------------
+#
+# #823 routed electron through this standalone leg but applied entitlements
+# ONLY to the top-level ``.app`` (a single top-level file). That is INSUFFICIENT
+# for the electron shape: Chromium/V8's JIT needs ``com.apple.security.cs.
+# allow-jit`` under hardened runtime or the app NOTARIZES cleanly but CRASHES at
+# launch, and the nested GPU/Renderer/Plugin helper ``.app`` bundles are their
+# OWN processes that each need the entitlement too. Different nested code roles
+# need DIFFERENT entitlements — and a nested ``.appex`` app extension is a
+# SEPARATE sandboxed process that must NEVER inherit electron's JIT. So the leg
+# carries a per-code-role :class:`EntitlementsPolicy` (the ``@electron/osx-sign``
+# ``optionsForFile`` idea, native to this unit's one Exec seam), and
+# :func:`entitlements_for` selects the plist per path in the inner-first walk.
+
+
+def _plist(entries: Mapping[str, bool]) -> str:
+    """A minimal codesign entitlements ``.plist`` XML for boolean ``entries``
+    (``key`` -> ``<true/>``/``<false/>``), insertion order preserved. Pure —
+    ``codesign --entitlements`` reads exactly this shape."""
+    body = "".join(
+        f"\t<key>{key}</key>\n\t<{'true' if value else 'false'}/>\n"
+        for key, value in entries.items()
+    )
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
+        '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+        '<plist version="1.0">\n<dict>\n'
+        f"{body}"
+        "</dict>\n</plist>\n"
+    )
+
+
+#: The top-level electron ``.app`` entitlements shipit provides — the MINIMAL
+#: modern Developer ID hardened-runtime set (issue #829's authoritative spec):
+#: ``allow-jit`` alone, the one entitlement V8 needs to start under hardened
+#: runtime. The legacy ``allow-unsigned-executable-memory`` /
+#: ``disable-library-validation`` are DELIBERATELY omitted (not needed for
+#: modern electron), and ``get-task-allow`` MUST stay off in a notarized
+#: release. Without ``allow-jit`` the app notarizes but crashes at launch.
+ELECTRON_APP_ENTITLEMENTS: Mapping[str, bool] = {
+    "com.apple.security.cs.allow-jit": True,
+}
+
+#: The nested electron helper ``.app`` entitlements shipit provides: each
+#: GPU/Renderer/Plugin helper is its OWN process the main app launches, so it
+#: declares ``allow-jit`` (V8 runs in the renderers too) AND ``inherit`` (it
+#: inherits the parent's entitlements) — the ``@electron/osx-sign`` inherit
+#: default, trimmed to the modern minimal set. NEVER applied to a ``.appex``
+#: (:func:`entitlements_for` routes an app extension away from this): a
+#: sandboxed extension is not an electron helper and must not receive JIT.
+ELECTRON_HELPER_ENTITLEMENTS: Mapping[str, bool] = {
+    "com.apple.security.cs.allow-jit": True,
+    "com.apple.security.inherit": True,
+}
+
+
+@dataclass(frozen=True)
+class EntitlementsPolicy:
+    """The per-code-role entitlements assignment for one mac-app sign pass.
+
+    Each field is the entitlements ``.plist`` a code role receives, or ``None``
+    for no entitlements on that role:
+
+    - ``app`` — the TOP-LEVEL ``.app`` (signed LAST): electron's ``allow-jit``;
+    - ``helper`` — a nested electron helper ``.app`` (GPU/Renderer/Plugin):
+      ``allow-jit`` + ``inherit``;
+    - ``appex`` — a nested ``.appex`` app extension: its OWN sandbox
+      entitlements, and it must NEVER receive the app/helper JIT (a separate
+      sandboxed process).
+
+    The default (all ``None``) is the non-electron policy: mac-app / tauri /
+    rust ``.app`` bundles need NO entitlements (system WebView / no JIT), and
+    signing them with the empty policy preserves the notary-clean behaviour
+    #823 shipped. :func:`entitlements_for` reads the role off each path.
+    """
+
+    app: Path | None = None
+    helper: Path | None = None
+    appex: Path | None = None
+
+    @property
+    def is_empty(self) -> bool:
+        """Whether the policy assigns NO entitlements to any role — the
+        non-electron default. Pure."""
+        return self.app is None and self.helper is None and self.appex is None
+
+
+#: The shared no-entitlements policy — the non-electron / dmg / archive default
+#: (a frozen singleton so it can be a safe default argument).
+NO_ENTITLEMENTS = EntitlementsPolicy()
+
+
+def entitlements_for(
+    path: Path, *, is_top_app: bool, policy: EntitlementsPolicy
+) -> Path | None:
+    """The entitlements ``.plist`` for ``path`` given its role in the bundle,
+    or ``None`` for no entitlements.
+
+    The role is read off the path, never off a consumer name (the signer stays
+    consumer-agnostic): the top-level ``.app`` (``is_top_app`` — the LAST path
+    :func:`sign_order` appends) gets ``policy.app``; a nested ``.appex`` app
+    extension its OWN ``policy.appex`` (a separate sandboxed process — it must
+    NEVER receive the app's JIT entitlement, so it is matched BEFORE the ``.app``
+    branch); a nested helper ``.app`` ``policy.helper``; every other path
+    (frameworks, loose Mach-O, plugin/bundle roots, and the resealed ``.dmg``)
+    ``None``. This is the per-code-role discipline that replaces #823's single
+    top-level file — the mis-application ``codesign --deep`` causes and the
+    notary rejects. Pure.
+    """
+    if is_top_app:
+        return policy.app
+    if path.suffix == ".appex":
+        return policy.appex
+    if path.suffix == ".app":
+        return policy.helper
+    return None
+
+
+#: Electron's signature framework — every electron app bundles it under
+#: ``Contents/Frameworks`` (it IS the Chromium/V8 runtime), and nothing else
+#: does. Its presence is the structurally reliable electron marker, keyed on
+#: electron's OWN framework name, never a consumer name.
+_ELECTRON_FRAMEWORK = "Electron Framework.framework"
+
+
+def _is_electron(app: Path) -> bool:
+    """Whether ``app`` is an electron bundle — detected STRUCTURALLY by its
+    signature ``Electron Framework.framework`` (:data:`_ELECTRON_FRAMEWORK`).
+    Every electron app bundles Chromium/V8 as that framework; a tauri (system
+    WebView), rust, or native mac-app never does — so a bundle that merely
+    nests some helper ``.app`` is NOT treated as electron unless the framework
+    is present. This is how the consumer-agnostic signer keys the electron
+    entitlements off the COMPOSITION without knowing a consumer name. Pure."""
+    return any(
+        p.is_dir() and p.name == _ELECTRON_FRAMEWORK
+        for p in app.rglob(_ELECTRON_FRAMEWORK)
+    )
+
+
+def _electron_policy(scratch: Path) -> EntitlementsPolicy:
+    """Materialise shipit's electron entitlements pair under ``scratch`` and
+    return the policy pointing at them (:data:`ELECTRON_APP_ENTITLEMENTS`,
+    :data:`ELECTRON_HELPER_ENTITLEMENTS`). shipit PROVIDES these (it does not
+    read them from the consumer's build): electron routes through this
+    standalone leg, so the leg supplies the electron-standard entitlements the
+    build no longer generates. ``codesign --entitlements`` places them into
+    each executable's signature at sign time."""
+    scratch.mkdir(parents=True, exist_ok=True)
+    app = scratch / "electron-app.entitlements.plist"
+    helper = scratch / "electron-helper.entitlements.plist"
+    app.write_text(_plist(ELECTRON_APP_ENTITLEMENTS))
+    helper.write_text(_plist(ELECTRON_HELPER_ENTITLEMENTS))
+    return EntitlementsPolicy(app=app, helper=helper)
+
+
+# --------------------------------------------------------------------------
 # The runner seam and the request/result values
 # --------------------------------------------------------------------------
 
@@ -496,6 +661,12 @@ class SignRequest:
     ``env`` is the secrets source (injected; ``os.environ`` in production).
     ``uniq`` / ``mint_pass`` / ``sleep`` are the nondeterminism seams the
     tests pin.
+
+    There is NO entitlements field: the mac-app leg derives its
+    :class:`EntitlementsPolicy` from the bundle's SHAPE (electron helper
+    ``.app`` bundles → the electron JIT pair; anything else → none), so
+    entitlements are shipit-provided and structurally keyed, never a
+    caller-passed file (#829).
     """
 
     tree: Path
@@ -503,7 +674,6 @@ class SignRequest:
     scratch: Path
     run_cmd: RunCmd
     env: Mapping[str, str]
-    entitlements: Path | None = None
     timeout_minutes: int = DEFAULT_NOTARY_TIMEOUT_MIN
     uniq: Callable[[], str] = _default_uniq
     mint_pass: Callable[[], str] = _default_pass
@@ -859,7 +1029,7 @@ def _sign_paths(
     signing: SigningIdentitySource,
     req: SignRequest,
     *,
-    entitlements: Path | None = None,
+    policy: EntitlementsPolicy = NO_ENTITLEMENTS,
 ) -> str:
     """Codesign ``paths`` in order through a per-call temporary keychain.
 
@@ -871,12 +1041,16 @@ def _sign_paths(
     ``codesign`` via ``--keychain`` rather than prepended to the user's global
     keychain search list: a search-list mutation outlives a ``SIGKILL`` (or a
     power loss) that skips the ``finally`` teardown and would then permanently
-    pollute a release engineer's laptop. Entitlements ride ONLY the final path
-    (the top-level ``.app``); a nested framework or helper must never carry the
-    app's entitlements — that mis-application is exactly what the notary
-    rejects (and why ``codesign --deep`` is shunned). The ``finally`` tears the
-    keychain down and unlinks the decoded ``.p12`` on every exit path — success
-    or failure.
+    pollute a release engineer's laptop. Entitlements are assigned PER CODE ROLE
+    by ``policy`` (:func:`entitlements_for`): the top-level ``.app`` (the LAST
+    path) gets the app entitlements, a nested electron helper ``.app`` its own,
+    a nested ``.appex`` its own sandbox set — never JIT — and every other path
+    (frameworks, loose Mach-O, the resealed ``.dmg``) none. A nested framework
+    or helper carrying the app's entitlements is exactly what the notary rejects
+    (and why ``codesign --deep`` is shunned); the empty default policy signs
+    every path with no entitlements (the mac-app/tauri/rust and dmg passes). The
+    ``finally`` tears the keychain down and unlinks the decoded ``.p12`` on
+    every exit path — success or failure.
     """
     uniq = req.uniq()
     keychain = req.scratch / f"signing-{uniq}.keychain-db"
@@ -941,10 +1115,15 @@ def _sign_paths(
         for index, path in enumerate(paths):
             if not path.exists():
                 raise ReleaseError(f"path to sign not found: {path}")
-            # Entitlements belong ONLY on the top-level .app — the LAST path
-            # (sign_order appends it). Applying them to nested frameworks and
-            # helper Mach-O is the mis-application the notary rejects.
-            path_ent = entitlements if index == len(paths) - 1 else None
+            # The role — and so the entitlements — is read off the path: the
+            # top-level .app is the LAST path (sign_order appends it); helper
+            # .app / .appex are matched by suffix; everything else gets none.
+            # Applying the app's entitlements to a nested framework/helper (or
+            # JIT to a sandboxed .appex) is the mis-application the notary
+            # rejects.
+            path_ent = entitlements_for(
+                path, is_top_app=index == len(paths) - 1, policy=policy
+            )
             run(codesign_argv(identity, path, path_ent, keychain), SIGN_CMD_TIMEOUT)
             run(["codesign", "--verify", "--strict", str(path)], SIGN_CMD_TIMEOUT)
         return identity
@@ -1129,14 +1308,25 @@ def sign_bundle(req: SignRequest) -> SignResult:
 
     app = _unpack(payload, req.scratch / "unpacked")
     nested = nested_signable(app)
-    identity = _sign_paths(
-        sign_order(nested, app), signing, req, entitlements=req.entitlements
-    )
+    # The entitlements policy is keyed on the bundle SHAPE, not a consumer name
+    # (#829): the Electron Framework is the structurally reliable electron
+    # signal, so shipit supplies the electron JIT pair (app + helper); a
+    # mac-app / tauri / rust .app carries no Electron Framework and signs with
+    # the empty policy — no entitlements, the notary-clean non-electron
+    # behaviour.
+    policy = _electron_policy(req.scratch) if _is_electron(app) else NO_ENTITLEMENTS
+    if not policy.is_empty:
+        logger.info(
+            "electron app detected — applying shipit's JIT entitlements pair",
+            extra={"app": app.name, "helpers": sum(p.suffix == ".app" for p in nested)},
+        )
+    identity = _sign_paths(sign_order(nested, app), signing, req, policy=policy)
 
     signed_dmg = req.scratch / "signed.dmg"
     _reseal(app, signed_dmg, req)
     # The dmg pass runs through its OWN temporary keychain (unique paths —
-    # the legacy exit-48 scar). Entitlements never apply to a disk image.
+    # the legacy exit-48 scar). Entitlements never apply to a disk image, so
+    # the empty default policy signs it with none.
     _sign_paths([signed_dmg], signing, req)
 
     submission_id, stapled = _notarize(signed_dmg, notary, req)
@@ -1192,9 +1382,10 @@ def sign_archives(req: SignRequest) -> ArchiveSignResult:
     Credentials resolve FIRST — a missing secret hard-fails with zero
     commands run, exactly like the mac-app leg (the legacy notarize step's
     warn-and-skip on a missing ASC key is deliberately gone, and either
-    notary trio is accepted). ``req.entitlements`` is REFUSED on this leg:
-    entitlements belong to the mac-app leg's ``.app`` root, never a raw CLI
-    binary (the legacy rust-cli sign step passed none).
+    notary trio is accepted). Entitlements never reach this leg: they are the
+    mac-app leg's per-code-role policy over an unpacked ``.app`` (#829), and a
+    raw CLI binary carries none — :func:`_sign_paths` here runs with the empty
+    default policy (legacy rust-cli parity: the sign step passed none).
     """
     signing = resolve_signing(req.env)
     notary = resolve_notary(req.env)
@@ -1203,12 +1394,6 @@ def sign_archives(req: SignRequest) -> ArchiveSignResult:
             f"notary timeout must be at least 1 minute, got "
             f"{req.timeout_minutes} — a non-positive window would sign and "
             "submit, then never poll for the verdict"
-        )
-    if req.entitlements is not None:
-        raise ReleaseError(
-            "entitlements apply to the mac-app leg's .app root only — a raw "
-            "CLI binary carries none (legacy rust-cli parity); drop "
-            "--entitlements for archive bundles"
         )
 
     archives = _find_archives(req.tree)

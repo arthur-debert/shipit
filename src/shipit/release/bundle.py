@@ -564,8 +564,15 @@ def _stage_mac_pair(req: ComposeRequest, source: Path, composition: str) -> Comp
     signer is consumer-agnostic — it keys off the reseal payload, not the
     composition that made it (:func:`shipit.release.sign.detect_shape`). Zero
     or multiple pairs is a hard error (never a nondeterministic pick).
+
+    Only the TOP-LEVEL ``.app`` is counted (:func:`_electron_top_level_apps`,
+    reused rather than duplicated — #830): mac-app/tauri never nest a ``.app``
+    today, but a bundler that ever nested one (electron's
+    ``Contents/Frameworks/*Helper.app`` shape) would trip the exactly-one guard
+    spuriously; filtering to the outer app keeps the shared helper robust as
+    defense in depth.
     """
-    apps = sorted(p for p in source.rglob("*.app") if p.is_dir())
+    apps = _electron_top_level_apps(source)
     dmgs = sorted(p for p in source.rglob("*.dmg") if p.is_file())
     if len(apps) != 1 or len(dmgs) != 1:
         raise ReleaseError(
