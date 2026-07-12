@@ -5,9 +5,9 @@ the activation *lines* that make the coordinator's environment active for every
 Bash tool call. The hook writes these lines into the file named by
 ``CLAUDE_ENV_FILE``, which Claude Code sources as a preamble before each Bash
 command — so the coordinator's own Tree resolves ``shipit``/``python`` without a
-``pixi run`` prefix. This is the coordinator-side twin of ADR-0019's
-:func:`shipit.spawn.launch.pixi_wrap` (which routes *spawned* children through
-pixi); both are ADDITIVE — the committed ``pixi run shipit hook …`` lines keep
+``pixi run`` prefix. This is the coordinator-side twin of ADR-0019's spawned-child
+Work Env routing through :func:`shipit.spawn.launch.route_argv`; both are ADDITIVE —
+the committed ``pixi run shipit hook …`` lines keep
 their prefix, so hook correctness never depends on activation having succeeded.
 
 The mapping is **toolchain-aware, extensible per toolchain** (ADR-0027): a pixi
@@ -37,7 +37,7 @@ preamble would double-apply them (and re-admit the non-preamble-safe constructs
 the ``--json`` form exists to avoid).
 
 Everything here is pure (the manifest probe is a filesystem ``is_file`` only,
-table-testable against a tmp dir — the same discipline as ``pixi_wrap``'s gate);
+table-testable against a tmp dir — the same discipline as Work Env resolution);
 the I/O — read stdin, shell out to ``pixi shell-hook --json``, write the env
 file — lives in :mod:`shipit.verbs.hook.sessionstart`.
 """

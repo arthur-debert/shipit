@@ -42,22 +42,17 @@ real :func:`_exec_runner`).
 the child's writes in the Tree but does NOT activate the Tree's pixi env, so the child
 would inherit the *coordinator's* (or system) env and its
 ``python``/``pytest``/``ruff``/``shipit`` would resolve to the WRONG ``.pixi`` env — the
-Tree is provisioned, then bypassed (``docs/dev/pixi.lex`` §7/§8). :func:`pixi_wrap` fixes
-this by re-expressing the backend argv as ``pixi run --manifest-path <tree>/pixi.toml --
-<argv>`` so the child lands in the Tree's OWN env — but ONLY when the Tree actually
-carries a provisioned env (``<tree>/.pixi/envs/default`` exists). A **reviewer's
-read-only Tree** (ADR-0018) and a **non-pixi repo** have none, so :func:`pixi_wrap`
-leaves their argv BARE — routing those through ``pixi run`` would force a solve into a
-chmod'd tree or fail outright. The pixi knowledge behind both halves — the
-provisioned-env sentinel and the wrapped argv — lives in the pixi adapter
+Tree is provisioned, then bypassed (``docs/dev/pixi.lex`` §7/§8). The spawn boundary
+fixes this by resolving a :class:`~shipit.workenv.WorkEnv`: a provisioned write Tree
+selects ``PIXI_RUN`` and a non-pixi Tree selects ``AMBIENT``. :func:`route_argv`
+consumes that carried decision, re-expressing the backend argv as ``pixi run
+--manifest-path <tree>/pixi.toml -- <argv>`` only for the provisioned shape. The pixi
+knowledge behind both halves — the provisioned-env sentinel and the wrapped argv —
+lives in the pixi adapter
 (:func:`shipit.pixienv.has_default_env` / :func:`shipit.pixienv.run_argv`,
 ADR-0028); this module keeps only the launch-side ROUTING DECISION and its
-narration. The WRITE tail now carries that decision on its resolved
-:class:`~shipit.workenv.WorkEnv` (RPE01-WS05): the spawn boundary probes the
-sentinel once, resolves the Work Env, and :func:`route_argv` CONSUMES its
-``routing`` field — same gate, decided once and described. :func:`pixi_wrap`
-(probe + wrap fused) remains the read-only/reviewer tail's router until the
-remaining boundaries resolve Work Envs too (RPE01-WS06).
+narration. The reviewer service resolves its shared read-only Tree separately and
+launches with ambient tools; it does not pass through this writable-Run seam.
 :func:`scrub_tree_env` mirrors the provisioning scrub
 (:func:`shipit.tree.create.provision_env`) — both rely SOLELY on the adapter's shared
 predicate (:func:`shipit.pixienv.scrub_env` over
@@ -202,51 +197,6 @@ def _exec_runner(
     )
 
 
-def pixi_wrap(argv: list[str], tree_path: str | Path) -> list[str]:
-    """Re-express ``argv`` to run THROUGH the Tree's pixi env — when the Tree has one.
-
-    The launch bug (``docs/dev/pixi.lex`` §7, ADR-0019 amendment): ``cwd=<Tree>`` roots
-    the child's writes in the Tree but does not activate pixi, so the child inherits the
-    coordinator/system env and its tools resolve to the WRONG ``.pixi`` env. The fix is to
-    launch the backend child *through* pixi — the wrapped argv is built by the pixi
-    adapter (:func:`shipit.pixienv.run_argv`: explicit ``--manifest-path`` overrides
-    any leaked ``PIXI_PROJECT_MANIFEST``; ADR-0028 puts the argv in pixi's domain
-    home, this launcher keeps the routing decision).
-
-    The wrap is GATED on the Tree carrying a provisioned env
-    (:func:`shipit.pixienv.has_default_env`): a **write** Tree is ``pixi
-    install``-provisioned, so it is routed; a **reviewer's read-only** Tree
-    (ADR-0018, clone+checkout, no provision) and a **non-pixi repo** have no such
-    env, so their argv is returned UNCHANGED — routing them through ``pixi run``
-    would force a solve into a chmod'd tree or fail outright. Pure (a filesystem
-    ``exists`` probe only), so the gate is table-tested without pixi.
-
-    This probe-and-wrap fusion now serves only the READ-ONLY/reviewer tail
-    (RPE01-WS05): the write tail probes the same sentinel once at the spawn
-    seam, resolves a :class:`~shipit.workenv.WorkEnv`, and routes through
-    :func:`route_argv` — the decision carried, not recalculated. The remaining
-    callers converge on Work Env in RPE01-WS06.
-    """
-    tree = Path(tree_path)
-    if not pixienv.has_default_env(tree):
-        # Mechanics at DEBUG (ADR-0029): the routing DECISION is the diagnosis-
-        # relevant fact when a child resolves the wrong tools — record which way
-        # the gate went, and why.
-        logger.debug(
-            "launch argv left bare: %s carries no provisioned pixi env "
-            "(read-only or non-pixi tree)",
-            tree,
-            extra={"pixi_wrapped": False},
-        )
-        return argv
-    logger.debug(
-        "launch argv routed through the tree's pixi env at %s",
-        tree,
-        extra={"pixi_wrapped": True},
-    )
-    return pixienv.run_argv(argv, tree)
-
-
 def route_argv(argv: list[str], work_env: workenv.WorkEnv) -> list[str]:
     """Route ``argv`` per the resolved Work Env's execution-routing decision.
 
@@ -261,7 +211,7 @@ def route_argv(argv: list[str], work_env: workenv.WorkEnv) -> list[str]:
     this seam and are refused loudly rather than silently losing their
     activation. No probe here: recomputing the gate is exactly the
     duplication Work Env exists to end. Pure argv-in/argv-out; the routing
-    narration lands at DEBUG like :func:`pixi_wrap`'s (ADR-0029 mechanics).
+    narration lands at DEBUG (ADR-0029 mechanics).
     """
     root = work_env.working_dir.path
     if work_env.routing is workenv.ExecutionRouting.PIXI_RUN:
@@ -297,8 +247,8 @@ def scrub_tree_env(env: Mapping[str, str]) -> dict[str, str]:
     AND the Conda activation-vs-installation carve-out cannot drift between the two paths.
     The predicate scrubs only the Conda **activation** vars (``CONDA_PREFIX`` and friends),
     KEEPING installation-level ``CONDA_EXE`` / ``CONDA_PYTHON_EXE`` so a Conda-managed
-    shell's ``pixi run`` is undisturbed. With explicit ``--manifest-path`` (see
-    :func:`pixi_wrap`) the scrub is belt-and-suspenders for the child's own activation, but
+    shell's ``pixi run`` is undisturbed. With :func:`route_argv`'s explicit
+    ``--manifest-path`` the scrub is belt-and-suspenders for the child's own activation, but
     it still cleans the env the agent's *own* ``pixi`` calls inherit. Returns a fresh dict
     (never the caller's).
     """

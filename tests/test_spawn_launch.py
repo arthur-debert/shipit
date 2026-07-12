@@ -228,53 +228,6 @@ def test_exec_runner_emits_the_exec_record_with_duration(monkeypatch, caplog):
     assert "ms" in message  # the duration rides the record
 
 
-def test_pixi_wrap_routes_through_pixi_for_a_provisioned_tree(tmp_path):
-    # A WRITE Tree is `pixi install`-provisioned → it carries `.pixi/envs/default`, so the
-    # backend argv is re-expressed to run THROUGH the Tree's pixi env (ADR-0019 amendment):
-    # `pixi run --manifest-path <tree>/pixi.toml -- <argv>`. The `--` separates pixi's args
-    # from the child argv, and the manifest path is the Tree's own pixi.toml.
-    (tmp_path / ".pixi" / "envs" / "default").mkdir(parents=True)
-    argv = ["claude", "-p", "do the thing", "--agent", "implementer"]
-
-    wrapped = launch.pixi_wrap(argv, tmp_path)
-
-    assert wrapped == [
-        "pixi",
-        "run",
-        "--manifest-path",
-        str(tmp_path / "pixi.toml"),
-        "--",
-        "claude",
-        "-p",
-        "do the thing",
-        "--agent",
-        "implementer",
-    ]
-
-
-def test_pixi_wrap_stays_bare_for_an_unprovisioned_tree(tmp_path):
-    # A reviewer's READ-ONLY Tree (ADR-0018, clone+checkout, no provision) and a non-pixi
-    # repo carry no `.pixi/envs/default`, so the argv is returned UNCHANGED — routing those
-    # through `pixi run` would force a solve into a chmod'd tree or fail outright.
-    argv = ["claude", "-p", "review", "--agent", "reviewer"]
-
-    assert launch.pixi_wrap(argv, tmp_path) == argv
-
-
-def test_pixi_wrap_accepts_a_str_tree_path(tmp_path):
-    # The call site passes `tree.path` (a str); the gate probe must work on a str too.
-    (tmp_path / ".pixi" / "envs" / "default").mkdir(parents=True)
-
-    wrapped = launch.pixi_wrap(["claude"], str(tmp_path))
-
-    assert wrapped[:4] == [
-        "pixi",
-        "run",
-        "--manifest-path",
-        str(tmp_path / "pixi.toml"),
-    ]
-
-
 def _write_env(*, pixi_provisioned: bool):
     """A resolved write-Run Work Env over a NONEXISTENT path — the point: routing
     consumes the carried decision and never re-probes the filesystem."""
@@ -290,8 +243,7 @@ def _write_env(*, pixi_provisioned: bool):
 def test_route_argv_carries_out_the_pixi_run_decision():
     # RPE01-WS05: the Work Env CARRIES the routing decision the spawn boundary
     # made; route_argv only executes it — through the pixi adapter's builder
-    # (ADR-0028), yielding EXACTLY the wrapped argv pixi_wrap produces for a
-    # provisioned tree. The path deliberately does not exist: no re-probe.
+    # (ADR-0028). The path deliberately does not exist: no re-probe.
     argv = ["claude", "-p", "do the thing", "--agent", "implementer"]
 
     routed = launch.route_argv(argv, _write_env(pixi_provisioned=True))
@@ -309,7 +261,7 @@ def test_route_argv_carries_out_the_pixi_run_decision():
 def test_route_argv_leaves_an_ambient_routed_work_env_bare():
     # A non-pixi write Run resolves AMBIENT (absent activation, honestly) and
     # keeps the existing bare-launch behavior — argv unchanged, same object
-    # semantics as pixi_wrap's unprovisioned branch.
+    # semantics as the historical unprovisioned branch.
     argv = ["claude", "-p", "do the thing"]
 
     assert launch.route_argv(argv, _write_env(pixi_provisioned=False)) == argv
@@ -328,9 +280,8 @@ def test_route_argv_refuses_an_activation_snapshot_context():
 
 
 def test_route_argv_records_its_routing_decision_at_debug(caplog):
-    # The routing narration matches pixi_wrap's (ADR-0029 mechanics at DEBUG,
-    # `pixi_wrapped` as the greppable extra) so a mis-rooted child diagnoses
-    # identically whichever seam routed it.
+    # Routing mechanics land at DEBUG with `pixi_wrapped` as the greppable
+    # extra, so a mis-rooted child retains the established diagnosis surface.
     with caplog.at_level(logging.DEBUG, logger="shipit.spawn"):
         launch.route_argv(["claude"], _write_env(pixi_provisioned=True))
         launch.route_argv(["claude"], _write_env(pixi_provisioned=False))
@@ -370,7 +321,7 @@ def test_scrub_tree_env_drops_leaked_pixi_and_conda_activation_keeps_the_rest():
 
 def test_scrub_tree_env_drops_leaked_build_env_keeps_sccache_backend_vars():
     # agy ERROR: the launch env feeds a child that runs `cargo` via the Tree's own pixi
-    # activation (pixi_wrap → `pixi run`). A leaked PARENT CARGO_TARGET_DIR / SCCACHE_BASEDIRS
+    # activation (`route_argv` → `pixi run`). A leaked PARENT CARGO_TARGET_DIR / SCCACHE_BASEDIRS
     # would shadow the Tree's own `[activation.env]` value, so the child writes artifacts to
     # the PARENT Tree. Scrub the three per-Tree build vars; KEEP the sccache binary pointer
     # and cache credential (not per-Tree; the child needs them to reach the shared cache).

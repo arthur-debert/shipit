@@ -520,7 +520,8 @@ def test_sweep_provisioned_tree_routes_through_its_own_pixi_env(tmp_path):
 def test_sweep_unprovisioned_tree_keeps_the_bare_launcher_argv(tmp_path):
     # A Tree with no provisioned pixi env (a non-pixi repo) is NOT wrapped:
     # its toolchains never resolved through pixi, and routing it through
-    # `pixi run` would fail outright — same gate as spawn's pixi_wrap.
+    # `pixi run` would fail outright — the same sentinel spawn resolves into
+    # its Work Env routing decision.
     _, exec_fake, _ = _sweep([_ENTRY], tmp_path, tools=("test",))
     ((argv, cwd, _),) = exec_fake.calls
     assert argv == (str(cwd / "bin" / "shipit"), "test")

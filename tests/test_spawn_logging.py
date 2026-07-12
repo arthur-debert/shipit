@@ -23,7 +23,6 @@ from dataclasses import replace
 # under assertion are identical, the monkeypatch stack is gone.
 from test_spawn_subagent import _PR, bounds
 
-from shipit import pixienv
 from shipit.execrun import ExecError
 from shipit.spawn import launch
 from shipit.verbs import spawn as spawn_verb
@@ -272,24 +271,6 @@ def test_the_request_is_recorded_even_when_refused(caplog):
 # ---------------------------------------------------------------------------
 # Launch mechanics at DEBUG
 # ---------------------------------------------------------------------------
-
-
-def test_pixi_wrap_records_its_routing_decision_at_debug(tmp_path, caplog):
-    with caplog.at_level(logging.DEBUG, logger="shipit.spawn"):
-        launch.pixi_wrap(["claude", "-p"], tmp_path)  # no provisioned env → bare
-    bare = [
-        r for r in _spawn_records(caplog, logging.DEBUG) if hasattr(r, "pixi_wrapped")
-    ]
-    assert len(bare) == 1 and bare[0].pixi_wrapped is False
-
-    caplog.clear()
-    tmp_path.joinpath(*pixienv.DEFAULT_ENV_DIR).mkdir(parents=True)
-    with caplog.at_level(logging.DEBUG, logger="shipit.spawn"):
-        launch.pixi_wrap(["claude", "-p"], tmp_path)
-    wrapped = [
-        r for r in _spawn_records(caplog, logging.DEBUG) if hasattr(r, "pixi_wrapped")
-    ]
-    assert len(wrapped) == 1 and wrapped[0].pixi_wrapped is True
 
 
 def test_scrub_tree_env_records_the_drop_at_debug_names_only(caplog):

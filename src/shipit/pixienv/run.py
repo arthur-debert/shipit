@@ -14,7 +14,7 @@ outside this package is a review defect (ADR-0028). Three pieces:
   the project's OWN env (explicit ``--manifest-path`` overrides any leaked
   ``PIXI_PROJECT_MANIFEST``; the ``--`` separates pixi's args from the child's).
   ``run_argv`` is the pure builder (for launchers that execute through their own
-  seam, e.g. :func:`shipit.spawn.launch.pixi_wrap`); ``run_in_env`` executes it.
+  seam, e.g. :func:`shipit.spawn.launch.route_argv`); ``run_in_env`` executes it.
 - :func:`cache_dir` / :func:`has_default_env` — pixi's on-disk knowledge: where
   the package cache lives and whether a checkout carries a provisioned default
   env (the sentinel the launch-routing gate keys on).

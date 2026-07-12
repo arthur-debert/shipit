@@ -914,8 +914,8 @@ def _launch_write(
     )
     # Resolve the Run's WORK ENV (RPE01-WS05): the spawn seam is the effectful
     # boundary that already owns the Tree, so it supplies the facts — the pixi
-    # provisioned-env sentinel (the SAME gate `pixi_wrap` keyed on, ADR-0019
-    # amendment) and the env's on-disk identity, both borrowed through the pixi
+    # provisioned-env sentinel (ADR-0019 amendment) and the env's on-disk
+    # identity, both borrowed through the pixi
     # adapter (ADR-0022: `has_default_env` / `read_env_identity`, never
     # re-derived) — and `resolve_write_run_env` composes them PURELY into the
     # one resolved value: WorkingDir + Tree provenance + checkout strategy +

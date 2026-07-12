@@ -614,8 +614,8 @@ def _run_cell(
 
     A provisioned Tree's invocation is routed THROUGH its own pixi env
     (``pixi run --manifest-path <tree>/pixi.toml -- bin/shipit …`` — the
-    :func:`shipit.pixienv.run_argv` form, the same launch-path fix as
-    :func:`shipit.spawn.launch.pixi_wrap`, ``docs/dev/pixi.lex`` §7), gated on
+    :func:`shipit.pixienv.run_argv` form, the same launch-path mechanism consumed
+    by :func:`shipit.spawn.launch.route_argv`, ``docs/dev/pixi.lex`` §7), gated on
     :func:`shipit.pixienv.has_default_env` like every routing site. The leak
     this closes (the round-0 shipit self-row red): the swept tool's dispatched
     runners (``pytest``, ``cargo nextest``, …) resolve off PATH, and the
