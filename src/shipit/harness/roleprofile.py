@@ -189,6 +189,14 @@ class EnforcementPosture:
     github_mutation: bool
     #: May the Run write temporary or artifact output outside the checkout?
     scratch_writes: bool
+    #: May the Run AUTHOR code changes itself (edit code paths), or must it
+    #: delegate implementation? Orthogonal to ``checkout_mutation`` on purpose:
+    #: the coordinator mutates its checkout (it commits docs, planning, config)
+    #: yet must NOT author code (ADR-0012) — one mutation flag cannot say both,
+    #: which is exactly why posture is capability-shaped. The harness edit guard
+    #: (:mod:`shipit.harness.policy`) reads this pairing via
+    #: :func:`delegates_code_authorship` instead of naming a role.
+    code_authorship: bool
 
 
 @dataclass(frozen=True)
@@ -198,8 +206,8 @@ class RoleProfile:
     References the Role it profiles; the Lex Role definition (composed by
     :mod:`shipit.harness.prompts`) stays the sole source of behavioral
     content. ``generates_agent_def`` / ``has_brief_template`` declare the
-    generated and brief SURFACES; the generators themselves migrate onto
-    these flags in a later workstream (RPE01-WS02).
+    generated and brief SURFACES consumed by prompt and brief generation;
+    behavioral prose remains in the Role definitions (RPE01-WS02).
     """
 
     role: Role
@@ -211,13 +219,28 @@ class RoleProfile:
     result_channel: ResultChannel
 
 
-#: A full-trust write posture — the coordinator and both write roles.
+#: A full-trust write posture — the implementer and the shepherd, the two roles
+#: that AUTHOR code (``code_authorship=True``).
 _WRITE_POSTURE = EnforcementPosture(
     checkout_mutation=True,
     command_execution=True,
     network_access=True,
     github_mutation=True,
     scratch_writes=True,
+    code_authorship=True,
+)
+
+#: The coordinator's posture: full write EXCEPT code authorship. It mutates its
+#: checkout (commits docs, planning, config) and drives GitHub, but delegates
+#: CODE changes rather than implementing them (ADR-0012) — the one posture whose
+#: ``checkout_mutation and not code_authorship`` pairing the edit guard fires on.
+_ORCHESTRATOR_POSTURE = EnforcementPosture(
+    checkout_mutation=True,
+    command_execution=True,
+    network_access=True,
+    github_mutation=True,
+    scratch_writes=True,
+    code_authorship=False,
 )
 
 #: The registry — TOTAL over the closed Role vocabulary, one profile per
@@ -229,7 +252,7 @@ PROFILES: Mapping[Role, RoleProfile] = MappingProxyType(
         Role.COORDINATOR: RoleProfile(
             role=Role.COORDINATOR,
             checkout=SessionTree(),
-            enforcement=_WRITE_POSTURE,
+            enforcement=_ORCHESTRATOR_POSTURE,
             # The coordinator is the top-level session: no agent-def, no
             # brief — its prompt rides the injected context + deny reason.
             generates_agent_def=False,
@@ -271,6 +294,8 @@ PROFILES: Mapping[Role, RoleProfile] = MappingProxyType(
                 network_access=False,
                 github_mutation=False,
                 scratch_writes=False,
+                # Read-only investigation: never authors code.
+                code_authorship=False,
             ),
             generates_agent_def=True,
             has_brief_template=False,
@@ -291,6 +316,8 @@ PROFILES: Mapping[Role, RoleProfile] = MappingProxyType(
                 network_access=True,
                 github_mutation=True,
                 scratch_writes=True,
+                # The review posts through GitHub, but never authors code.
+                code_authorship=False,
             ),
             generates_agent_def=True,
             has_brief_template=False,
@@ -324,6 +351,24 @@ def _known_roles() -> str:
 def profile_for(role: Role) -> RoleProfile:
     """The profile lookup — total over :class:`Role`, pure, deterministic."""
     return PROFILES[role]
+
+
+def delegates_code_authorship(role: Role) -> bool:
+    """True iff ``role`` may mutate its checkout but must NOT author code itself.
+
+    The capability-shaped form of the ADR-0012 edit guard (spec §"Enforcement
+    posture is capability-shaped, not a mutation flag"): a role with a WRITABLE
+    checkout — it commits docs, planning, config — that still delegates CODE
+    changes rather than implementing them. Derived from posture
+    (``checkout_mutation and not code_authorship``), so the harness edit guard
+    (:mod:`shipit.harness.policy`) consumes profile posture instead of naming the
+    coordinator. It is exactly the coordinator today; any future role with the
+    same posture is guarded with no edit to the policy module, and a read-only
+    role (whose checkout cannot mutate at all) is NOT caught here — its tools and
+    read-only Tree are the load-bearing guard, as the spec requires. Pure.
+    """
+    posture = PROFILES[role].enforcement
+    return posture.checkout_mutation and not posture.code_authorship
 
 
 def parse_role(name: str) -> Role:

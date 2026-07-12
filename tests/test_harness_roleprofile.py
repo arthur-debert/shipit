@@ -137,6 +137,30 @@ def test_write_roles_carry_the_full_write_posture():
         assert posture.github_mutation
 
 
+def test_code_authorship_is_orthogonal_to_checkout_mutation():
+    """The capability a single mutation flag could not express (RPE01-WS02): the
+    coordinator MUTATES its checkout (it commits docs/planning) yet must NOT author
+    code (ADR-0012), so checkout_mutation and code_authorship are independent axes.
+    Only the two implementing roles author code; the coordinator and both read-only
+    roles do not."""
+    assert profile_for(Role.COORDINATOR).enforcement.checkout_mutation
+    assert not profile_for(Role.COORDINATOR).enforcement.code_authorship
+    for role in (Role.IMPLEMENTER, Role.SHEPHERD):
+        assert profile_for(role).enforcement.code_authorship
+    for role in (Role.EXPLORER, Role.REVIEWER):
+        assert not profile_for(role).enforcement.code_authorship
+
+
+def test_delegates_code_authorship_is_the_capability_shaped_edit_guard():
+    """The posture the harness edit guard reads instead of naming a role: a
+    writable checkout that must not author code. Exactly the coordinator today,
+    and NEVER a read-only role (whose checkout cannot mutate at all — its tools and
+    read-only Tree are the guard, per the spec)."""
+    assert roleprofile.delegates_code_authorship(Role.COORDINATOR)
+    for role in (Role.IMPLEMENTER, Role.SHEPHERD, Role.EXPLORER, Role.REVIEWER):
+        assert not roleprofile.delegates_code_authorship(role)
+
+
 def test_explorer_posture_is_read_scoped():
     """Ambient reading through Bash without becoming a write Run: command
     execution only — no checkout, GitHub, network, or artifact effects."""

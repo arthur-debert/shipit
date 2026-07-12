@@ -486,6 +486,12 @@ def test_freeform_base_is_origin_main():
     assert plan(_freeform_spec()).base == "origin/main"
 
 
+@pytest.mark.parametrize("base", ["", "   "])
+def test_freeform_explicit_blank_base_is_refused(base):
+    with pytest.raises(ValueError, match="base override must not be empty"):
+        plan(_freeform_spec(base=base))
+
+
 def test_freeform_dir_is_branches_kind_with_sanitized_leaf():
     p = plan(_freeform_spec(branch="spike/foo"))
     assert p.dir == ROOT / "acme" / "widget" / "branches" / "spike-foo-deadbeef"

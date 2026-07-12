@@ -1002,9 +1002,31 @@ def _launch_write(
 
 
 def _refresh_attached_tree(path: str, branch: str) -> None:
-    """Refresh a reused shepherd Tree to the current remote PR head."""
+    """Refresh a clean, fully-pushed shepherd Tree to the remote PR head.
+
+    A reused attachment may contain work from an interrupted prior round. Refuse
+    rather than letting checkout/reset hide uncommitted changes or discard the
+    branch pointer that makes local-only commits recoverable.
+    """
+    dirty = git.status_porcelain(cwd=path)
+    if dirty:
+        raise ValueError(
+            f"refused to refresh shepherd attachment {path}: "
+            f"{len(dirty)} uncommitted path(s) would be overwritten"
+        )
     git.fetch(cwd=path)
     git.checkout(branch, cwd=path)
+    unpushed = git.unpushed_shas(cwd=path)
+    if unpushed is None:
+        raise ValueError(
+            f"refused to refresh shepherd attachment {path}: could not determine "
+            "whether the attached branch has local-only commits"
+        )
+    if unpushed:
+        raise ValueError(
+            f"refused to refresh shepherd attachment {path}: "
+            f"{len(unpushed)} local-only commit(s) would be discarded"
+        )
     git.reset_hard(f"origin/{branch}", cwd=path)
     git.submodule_update_init(cwd=path)
 

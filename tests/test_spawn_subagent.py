@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from shipit import events, execrun, gh, logcontext
+from shipit import events, execrun, gh, git, logcontext
 from shipit.execrun import ExecError
 from shipit.identity import repo_from_slug
 from shipit.spawn import launch
@@ -28,6 +28,7 @@ from shipit.spawn.subagent import (
     Boundaries,
     SpawnError,
     SubagentSpec,
+    _refresh_attached_tree,
     audit_handshake,
     spawn_subagent,
 )
@@ -308,6 +309,34 @@ def test_shepherd_resume_reuses_stable_tree_and_refreshes_current_head(
     assert calls["refresh_branch"] == "TRE03/WS04"
     assert result.tree == str(planned.dir)
     assert result.branch == "TRE03/WS04"
+
+
+def test_shepherd_refresh_refuses_uncommitted_work_before_mutating(monkeypatch):
+    monkeypatch.setattr(git, "status_porcelain", lambda *, cwd: [" M work.py"])
+    monkeypatch.setattr(
+        git,
+        "fetch",
+        lambda **kwargs: pytest.fail("dirty attachment must not be fetched"),
+    )
+
+    with pytest.raises(ValueError, match="1 uncommitted path"):
+        _refresh_attached_tree("/tree", "TRE03/WS04")
+
+
+@pytest.mark.parametrize("unpushed", [None, ("a" * 40,)])
+def test_shepherd_refresh_refuses_unknown_or_local_only_commits(monkeypatch, unpushed):
+    monkeypatch.setattr(git, "status_porcelain", lambda *, cwd: [])
+    monkeypatch.setattr(git, "fetch", lambda *, cwd: None)
+    monkeypatch.setattr(git, "checkout", lambda branch, *, cwd: None)
+    monkeypatch.setattr(git, "unpushed_shas", lambda *, cwd: unpushed)
+    monkeypatch.setattr(
+        git,
+        "reset_hard",
+        lambda *args, **kwargs: pytest.fail("unsafe attachment must not be reset"),
+    )
+
+    with pytest.raises(ValueError, match="could not determine|local-only commit"):
+        _refresh_attached_tree("/tree", "TRE03/WS04")
 
 
 def test_shepherd_wrong_head_pr_is_refused_before_launch(tmp_path):

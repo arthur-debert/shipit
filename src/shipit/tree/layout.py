@@ -539,9 +539,15 @@ def _plan_freeform(spec: TreeSpec) -> TreePlan:
             f"leaf); got {branch!r}, which sanitizes to an empty name — a leaf of "
             "just '-<hash>' and an unusable empty branch."
         )
+    if spec.base is not None and not spec.base.strip():
+        raise ValueError(
+            "tree.layout.plan: freeform base override must not be empty; "
+            "omit it to use origin/main"
+        )
     leaf = f"{sanitized}-{spec.agent_hash}"
     directory = _repo_dir(spec) / "branches" / leaf
-    return TreePlan(dir=directory, branch=branch, base=spec.base or "origin/main")
+    base = spec.base if spec.base is not None else "origin/main"
+    return TreePlan(dir=directory, branch=branch, base=base)
 
 
 def _plan_issue(spec: TreeSpec) -> TreePlan:
