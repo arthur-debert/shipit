@@ -217,20 +217,12 @@ def test_final_cut_end_to_end(python_repo, capsys):
     assert notes == tag[2]
 
 
-@pytest.fixture
-def cargo_set_version_on_path(monkeypatch):
-    """cargo-set-version present on PATH — the rust-leg tests' default, so
-    the recorded calls are the bump's alone regardless of the host machine
-    (the self-provisioning path is pinned by its own test)."""
-    monkeypatch.setattr(bump_mod.shutil, "which", lambda name: f"/stub/{name}")
-
-
-def test_recorded_adapter_command_lines_per_leg(
-    tmp_path, monkeypatch, cargo_set_version_on_path
-):
-    """Exact command lines, exact leg cwds — rust workspace bump + lock
-    refresh at the rust leg, npm version at the npm leg (PRD Testing
-    Decisions). A prerelease cut, so the changelog only extracts."""
+def test_recorded_adapter_command_lines_per_leg(tmp_path, monkeypatch):
+    """Exact command lines, exact leg cwds — the rust leg's cargo-edit
+    self-provision (issue #793, unconditional: cargo's own idempotency guards
+    the already-installed case) then its workspace bump + lock refresh, then
+    npm version at the npm leg (PRD Testing Decisions). A prerelease cut, so
+    the changelog only extracts."""
     root = make_repo(
         tmp_path,
         monkeypatch,
@@ -249,6 +241,17 @@ def test_recorded_adapter_command_lines_per_leg(
     rc = release_verb.run_prepare(spec("1.0.0-rc.1"), gitio=fake, run_cmd=recorder)
     assert rc == 0
     assert recorder.calls == [
+        (
+            (
+                "cargo",
+                "install",
+                "cargo-edit",
+                "--version",
+                bump_mod.CARGO_EDIT_VERSION,
+                "--locked",
+            ),
+            root,
+        ),
         (("cargo", "set-version", "--workspace", "1.0.0-rc.1"), root),
         (("cargo", "update", "--workspace"), root),
         (("npm", "version", "1.0.0-rc.1", "--no-git-tag-version"), root / "web"),
@@ -261,13 +264,13 @@ def test_recorded_adapter_command_lines_per_leg(
     assert "CHANGELOG.md" not in add[1]  # nothing rolled on a prerelease
 
 
-def test_prepare_self_provisions_cargo_edit_when_missing(tmp_path, monkeypatch):
+def test_prepare_self_provisions_cargo_edit(tmp_path, monkeypatch):
     """Issue #793: the wf-prepare runner arrives without cargo-edit (`cargo
     set-version` unavailable) — prepare installs the PINNED cargo-edit through
     the same recorded Exec seam, at the rust leg's cwd, BEFORE the bump
-    commands run. A failing install raises through the seam, aborting prepare
-    with nothing committed (ADR-0009)."""
-    monkeypatch.setattr(bump_mod.shutil, "which", lambda name: None)
+    commands run. The install is unconditional (cargo's own idempotency
+    short-circuits an already-present exact pin), and a failing install raises
+    through the seam, aborting prepare with nothing committed (ADR-0009)."""
     root = make_repo(
         tmp_path,
         monkeypatch,

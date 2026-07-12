@@ -138,8 +138,10 @@ _CHANGELOG_STAGE: tuple[str, ...] = ("CHANGELOG.md", "CHANGELOG/*")
 #: Each composition command Exec's stated timeout (ADR-0028): a declared mac
 #: bundler (``tauri build``) — and the deb composition's cargo-deb
 #: self-provision (``cargo install``, a cold compile) — legitimately runs
-#: long, so the bound matches the build verbs' hour rather than the bump
-#: commands' minutes.
+#: long, so the bound is the build verbs' hour. :data:`BUMP_TIMEOUT` now
+#: carries the same hour for the same reason (the rust adapter's cargo-edit
+#: self-provision is an identical cold compile), so the two are deliberately
+#: equal.
 BUNDLE_TIMEOUT: float = 3600.0
 
 #: The bundle output tree when ``--out`` is omitted: repo-root-relative — the

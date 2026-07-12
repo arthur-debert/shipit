@@ -43,7 +43,6 @@ from __future__ import annotations
 
 import json
 import re
-import shutil
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -139,8 +138,8 @@ def adapter_for(toolchain: str) -> BumpAdapter:
 def provision(
     adapter: BumpAdapter, run_cmd: Callable[[Sequence[str], Path], Any], cwd: Path
 ) -> None:
-    """Self-provision ``adapter``'s external tool when it is missing (issue
-    #793 — the #785 cargo-deb shape at the bump seam).
+    """Self-provision ``adapter``'s external tool (issue #793 — the #785
+    cargo-deb shape at the bump seam).
 
     Today only rust needs one: ``cargo set-version`` is cargo-edit's
     subcommand, and nothing shipit-side provisions cargo-edit on the
@@ -154,18 +153,25 @@ def provision(
     (ADR-0009's barrier), never a quiet skip. The version is pinned
     (:data:`CARGO_EDIT_VERSION`) for a reproducible run.
 
-    No post-install PATH re-check: cargo resolves a custom subcommand
-    (``cargo set-version``) by searching ``$CARGO_HOME/bin`` ITSELF,
-    independent of the process PATH, so the just-installed cargo-edit is
-    found even in an isolated env (pixi) where ``$CARGO_HOME/bin`` is off
-    PATH — a ``shutil.which`` gate here would spuriously abort exactly that
-    case (the #785 rounds 1–2 finding, empirically settled). Every other
-    adapter's tools ride the toolchain itself (npm) or none at all
-    (python/go) — a no-op here.
+    UNCONDITIONAL — no PATH pre-check gates the install, because ``cargo
+    install`` is itself the idempotency guard. A request for the exact pinned
+    version that is already installed short-circuits from cargo's OWN install
+    metadata (``Ignored package `cargo-edit vX` is already installed``) in a
+    fraction of a second, touching neither the network nor a compile
+    (empirically ~0.06s on cargo 1.94.1); a DIFFERENT installed version is
+    corrected UP/DOWN to the pin. A ``shutil.which("cargo-set-version")`` gate
+    would be strictly worse on both counts: it is version-BLIND — any
+    cargo-set-version on PATH, even a stale one, satisfies it and silently
+    defeats the pin (issue #793 review) — and, because cargo resolves a custom
+    subcommand by searching ``$CARGO_HOME/bin`` ITSELF independent of the
+    process PATH, it false-negatives in an isolated env (pixi) where
+    ``$CARGO_HOME/bin`` is off PATH, forcing exactly the redundant install its
+    absence lets the cargo fast-path skip (the #785 rounds 1–2 empirical
+    finding — the same subcommand-resolution fact). Every other adapter's
+    tools ride the toolchain itself (npm) or none at all (python/go) — a no-op
+    here.
     """
     if adapter.toolchain != "rust":
-        return
-    if shutil.which("cargo-set-version") is not None:
         return
     run_cmd(
         (

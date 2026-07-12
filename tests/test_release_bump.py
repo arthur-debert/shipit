@@ -87,11 +87,10 @@ class RunRecorder:
         self.calls.append((tuple(argv), cwd))
 
 
-def test_provision_installs_cargo_edit_when_set_version_missing(tmp_path, monkeypatch):
-    """Issue #793 (the #784-F2 class, second instance): the wf-prepare runner
-    arrives without cargo-edit — the rust adapter installs it itself, PINNED,
-    through the same recorded Exec seam, before any bump command runs."""
-    monkeypatch.setattr(bump.shutil, "which", lambda name: None)
+def test_provision_installs_pinned_cargo_edit_for_rust(tmp_path):
+    """Issue #793 (the #784-F2 class, second instance): the rust adapter
+    installs cargo-edit itself, PINNED, through the same recorded Exec seam,
+    before any bump command runs."""
     recorder = RunRecorder()
 
     bump.provision(bump.adapter_for("rust"), recorder, tmp_path)
@@ -111,21 +110,26 @@ def test_provision_installs_cargo_edit_when_set_version_missing(tmp_path, monkey
     ]
 
 
-def test_provision_noops_when_set_version_is_available(tmp_path, monkeypatch):
-    """cargo-set-version already on PATH → nothing installed, nothing run."""
-    monkeypatch.setattr(bump.shutil, "which", lambda name: f"/stub/{name}")
+def test_provision_does_not_gate_the_install_on_path(tmp_path):
+    """The install is UNCONDITIONAL — provision consults neither PATH nor
+    ``shutil.which`` to decide whether to run it (regression guard for the
+    #793 review: a ``which("cargo-set-version")`` gate is version-BLIND, so a
+    stale cargo-edit on PATH would silently defeat the pin). ``cargo install``
+    is the idempotency guard — an already-installed exact pin short-circuits in
+    cargo itself — so provision always records the install and lets cargo
+    decide. If a gate is ever re-added, this fails."""
     recorder = RunRecorder()
 
     bump.provision(bump.adapter_for("rust"), recorder, tmp_path)
 
-    assert recorder.calls == []
+    assert len(recorder.calls) == 1
+    assert recorder.calls[0][0][:3] == ("cargo", "install", "cargo-edit")
 
 
 @pytest.mark.parametrize("toolchain", ["npm", "python", "go"])
-def test_provision_noops_for_every_other_adapter(tmp_path, monkeypatch, toolchain):
+def test_provision_noops_for_every_other_adapter(tmp_path, toolchain):
     """Only rust carries an external bump tool: npm's rides the toolchain
     itself, python/go project without commands — provision never runs."""
-    monkeypatch.setattr(bump.shutil, "which", lambda name: None)
     recorder = RunRecorder()
 
     bump.provision(bump.adapter_for(toolchain), recorder, tmp_path)
