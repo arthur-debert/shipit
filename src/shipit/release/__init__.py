@@ -20,9 +20,11 @@ work streams land:
   cross-org caller's ``secrets:`` block lists. Pure.
 - :mod:`.bundle` — the closed bundle-composition registry (WS03): how a
   declared artifact composes build outputs into its distributable — unsigned
-  for the reopen→reseal legs (archive, deb, wheel, mac-app), already-signed
-  for electron (which self-signs inside its bundler, WS14). Command literals
-  + compose functions, effectful only through the injected exec seam.
+  for the reopen→reseal legs (archive, deb, wheel, mac-app); electron's DARWIN
+  leg ships already-signed (electron-builder self-signs + notarizes it inside
+  the bundler, WS14), its linux/windows legs are unsigned like any other.
+  Command literals + compose functions, effectful only through the injected
+  exec seam.
 - :mod:`.integrity` — the assert-bundle pure core (WS03, workflows.lex
   §3.2): the expected-main-binary fallback chain and the bundle-tree check
   behind ``shipit release assert-bundle``.

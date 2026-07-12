@@ -706,6 +706,59 @@ def test_electron_missing_the_primary_distributable_is_a_bundle_failure(tmp_path
         )
 
 
+def test_electron_skips_a_stale_blockmap_with_no_matching_distributable(tmp_path):
+    # A `<primary>.blockmap` whose primary was NOT collected is a leftover in
+    # the source tree — it must not ride into the output set (copilot rd2).
+    (artifact,) = _artifacts(ELECTRON_SPEC)
+
+    def effect(argv, cwd):
+        rel = tmp_path / "release"
+        rel.mkdir(parents=True, exist_ok=True)
+        (rel / "Lexed-1.2.3-arm64.dmg").write_bytes(b"dmg")
+        (rel / "Lexed-1.2.3-arm64.dmg.blockmap").write_bytes(b"map")  # matches
+        (rel / "Stale-0.9.0.dmg.blockmap").write_bytes(b"stale")  # no primary
+
+    composed = bundle_mod.ELECTRON.compose(
+        _request(
+            tmp_path, artifact, (), target=MAC, run_cmd=RunRecorder({"npm": effect})
+        )
+    )
+    assert composed.outputs == (
+        "Lexed-1.2.3-arm64.dmg",
+        "Lexed-1.2.3-arm64.dmg.blockmap",
+    )
+    assert not (tmp_path / "dist" / "Stale-0.9.0.dmg.blockmap").exists()
+
+
+def test_electron_refuses_a_source_that_is_the_bundle_output_tree(tmp_path):
+    # source == out_dir would copy a distributable onto itself (SameFileError);
+    # the composition refuses it up front with the fix (copilot rd2). out_dir is
+    # `<root>/dist`, so a `source = "dist"` collides.
+    (artifact,) = _artifacts(
+        {
+            "app": {
+                "build": ["npm"],
+                "bundle": {
+                    "composition": "electron",
+                    "command": ["npm", "run", "dist"],
+                    "source": "dist",
+                },
+            }
+        }
+    )
+
+    def effect(argv, cwd):
+        (tmp_path / "dist").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "dist" / "Lexed-1.2.3-arm64.dmg").write_bytes(b"dmg")
+
+    with pytest.raises(ReleaseError, match=r"resolves to the bundle output tree"):
+        bundle_mod.ELECTRON.compose(
+            _request(
+                tmp_path, artifact, (), target=MAC, run_cmd=RunRecorder({"npm": effect})
+            )
+        )
+
+
 # --------------------------------------------------------------------------
 # The registry and the host-target derivation
 # --------------------------------------------------------------------------

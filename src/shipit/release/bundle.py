@@ -435,6 +435,17 @@ def _compose_electron(req: ComposeRequest) -> Composed:
     assert spec is not None and spec.command is not None and spec.source is not None
     req.run_cmd(list(spec.command), req.root)
     source = req.root / spec.source
+    if source.resolve() == req.out_dir.resolve():
+        # The composition copies the bundler's distributables OUT of `source`
+        # INTO the bundle tree, so the two must differ — a `source` that
+        # resolves to the output dir would copy a file onto itself (a cryptic
+        # shutil.SameFileError); refuse it up front with the fix.
+        raise ReleaseError(
+            f"[artifacts.{req.artifact.name}] electron composition: bundle "
+            f"`source` ({spec.source}) resolves to the bundle output tree — "
+            f"point `source` at electron-builder's own output dir, distinct "
+            f"from the bundle tree the composition copies its distributables into"
+        )
     primary, sidecars = _electron_target(req.target)
     dists = sorted(p for p in source.rglob(f"*{primary}") if p.is_file())
     if not dists:
@@ -451,9 +462,14 @@ def _compose_electron(req: ComposeRequest) -> Composed:
             dest.unlink()
         shutil.copy2(dist, dest)
         outputs.append(dist.name)
+    # The .blockmap sidecars (electron-builder's incremental-update maps), each
+    # collected ONLY when its primary distributable was: a `<primary>.blockmap`
+    # whose `<primary>` is not among the copied distributables is a stale
+    # leftover in the source tree, never scooped into the output set (copilot).
+    collected = set(outputs)
     for sidecar in sidecars:
         for side in sorted(source.rglob(f"*{sidecar}")):
-            if side.is_file():
+            if side.is_file() and side.name.removesuffix(".blockmap") in collected:
                 dest = req.out_dir / side.name
                 if dest.exists():
                     dest.unlink()
