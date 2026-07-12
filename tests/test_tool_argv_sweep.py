@@ -69,8 +69,10 @@ def _parsed(path: pathlib.Path) -> ast.Module:
 #: - ``tar`` / ``zip`` — the archiver invocations of the bundle compositions
 #:   (TOL02-WS03): assembled ONLY in the composition registry
 #:   (:mod:`shipit.release.bundle`) — the tarball/zip contract and the mac
-#:   reseal payload. ``tar`` gains the signer unit
-#:   (:mod:`shipit.release.sign`, TOL02-WS04): the reseal payload's unpack.
+#:   reseal payload. Both gain the signer unit (:mod:`shipit.release.sign`):
+#:   ``tar`` for the reseal payload's unpack (TOL02-WS04) and the archive
+#:   leg's reopen/re-emit, ``zip`` for the archive leg's per-binary notary
+#:   container (TOL02-WS08 #779).
 #: - ``codesign`` / ``security`` / ``xcrun`` / ``hdiutil`` — the mac signer
 #:   unit's tools (TOL02-WS04): assembled ONLY in
 #:   :mod:`shipit.release.sign` — keychain lifecycle, inner-first codesign,
@@ -101,7 +103,7 @@ _ADAPTER_HOMES: dict[str, tuple[str, ...]] = {
     ),
     "uv": ("tools/registry.py", "release/bundle.py"),
     "tar": ("release/bundle.py", "release/sign.py"),
-    "zip": ("release/bundle.py",),
+    "zip": ("release/bundle.py", "release/sign.py"),
     "codesign": ("release/sign.py",),
     "security": ("release/sign.py",),
     "xcrun": ("release/sign.py",),

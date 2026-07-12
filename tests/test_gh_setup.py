@@ -613,13 +613,15 @@ def test_sync_secrets_required_source_cannot_be_optional_skipped(fake_gh, monkey
 
 
 def _signing_artifacts():
-    """A minimal signing artifact map (sign = true on a darwin lane)."""
+    """A minimal signing artifact map (sign = true on a darwin lane, over a
+    signable archive composition)."""
     return config.load_artifacts(
         {
             "artifacts": {
                 "app": {
                     "build": [{"toolchain": "rust", "package": "app-cli"}],
                     "platforms": ["darwin-arm64"],
+                    "bundle": {"composition": "archive"},
                     "endpoints": ["gh-release"],
                     "sign": True,
                 }

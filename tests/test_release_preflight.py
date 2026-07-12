@@ -33,6 +33,7 @@ RUST_CLI = _artifacts(
 [artifacts.lex]
 build = [{ toolchain = "rust", package = "lex-cli" }]
 platforms = ["darwin-arm64", "linux-x86_64", "linux-x86_64-musl", "windows-x86_64"]
+bundle = { composition = "archive" }
 endpoints = ["gh-release", "crates", "brew"]
 sign = true
 """
@@ -84,7 +85,7 @@ def test_rust_cli_shape_plans_matrix_stages_endpoints_secrets():
         "target": "aarch64-apple-darwin",
         "runner": "macos-latest",
         "sign": True,  # declared signing meets a darwin platform
-        "bundle": False,  # RUST_CLI declares no composition
+        "bundle": True,  # the archive composition applies everywhere
         "ext_archive": ".tar.gz",
         "ext_bin": "",
         "package_arch": "arm64",
@@ -95,13 +96,22 @@ def test_rust_cli_shape_plans_matrix_stages_endpoints_secrets():
         "target": "x86_64-pc-windows-msvc",
         "runner": "windows-latest",
         "sign": False,  # sign is darwin-only, resolved once per entry
-        "bundle": False,  # RUST_CLI declares no composition
+        "bundle": True,  # the archive composition applies everywhere
         "ext_archive": ".zip",
         "ext_bin": ".exe",
         "package_arch": "amd64",
     }
-    # No bundle step declared → the bundle stages are absent, not skipped.
-    assert plan.stages == ("preflight", "prepare", "sign", "publish")
+    # The archive composition bundles on every leg → the bundle stages are
+    # live, and the darwin leg's sign routes the signer's archive leg
+    # (TOL02-WS08 #779: sign = true now requires a signable composition).
+    assert plan.stages == (
+        "preflight",
+        "prepare",
+        "bundle",
+        "assert-bundle",
+        "sign",
+        "publish",
+    )
     assert plan.endpoints == ("gh-release", "crates", "brew")
     # The demanded conjunction carries the cert pair only; the notary trios
     # ride the plan's either-satisfies requirement (#746).
@@ -526,6 +536,7 @@ def test_run_preflight_unsigned_records_the_break_glass_event(repo, capsys, capl
         "[artifacts.app]\n"
         'build = ["rust"]\n'
         'platforms = ["darwin-arm64"]\n'
+        'bundle = { composition = "archive" }\n'
         'endpoints = ["gh-release"]\n'
         "sign = true\n",
         encoding="utf-8",

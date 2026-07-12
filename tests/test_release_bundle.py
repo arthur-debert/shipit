@@ -528,6 +528,14 @@ def test_registry_is_closed_and_platform_scoped():
     assert bundle_mod.WHEEL.applies(WIN)
 
 
+def test_registry_marks_the_signer_reopenable_compositions():
+    # The signable set IS the signer's leg set (TOL02-WS08 #779): mac-app
+    # (the reseal payload leg) and archive (the raw-binary tarball leg).
+    # The config boundary refuses `sign = true` on anything else, so a sign
+    # declaration can never route to a signer leg that does not exist.
+    assert bundle_mod.signable_names() == ("archive", "mac-app")
+
+
 @pytest.mark.parametrize(
     "system,machine,expected",
     [

@@ -1,10 +1,14 @@
 name: wf-sign-mac
 
 # The release SIGN stage block (ADR-0010/0040, TOL02-WS06). Routing ONLY
-# around ONE producing verb: `shipit release sign` does the whole reopen →
-# codesign (nested inner-first, .app last) → hdiutil reseal → notarize →
-# staple pass, including the temporary-keychain import (workflows.lex §3.1
-# — package(unsigned) -> sign-reopens-and-reseals, never sign -> package).
+# around ONE producing verb: `shipit release sign` dispatches on the bundle
+# tree's shape (workflows.lex §3.1 — package(unsigned) ->
+# sign-reopens-and-reseals, never sign -> package): a mac-app tree gets the
+# reopen → codesign (nested inner-first, .app last) → hdiutil reseal →
+# notarize → staple pass; an archive tree (TOL02-WS08 #779) gets the raw
+# darwin CLI binaries codesigned, notarized (zip submit, no staple target on
+# a bare binary), and the tarball re-emitted — both including the
+# temporary-keychain import.
 # The fan is the plan's sign projection (`sign-matrix` — the entries whose
 # preflight sign flag is true), so this block signs exactly what the plan
 # decided, nothing re-derived.
@@ -111,15 +115,21 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        # One verb invocation: temporary keychain, reopen the payload, sign
-        # nested-inner-first/.app-last, reseal the dmg, notarize + staple;
-        # the signed .dmg is staged in place under the original filename.
-        run: pixi run --locked ./bin/shipit release sign dist
+        # One verb invocation, shape-dispatched: temporary keychain, reopen
+        # the payload (mac-app: sign nested-inner-first/.app-last, reseal the
+        # dmg, notarize + staple) or the archive tarballs (codesign each
+        # Mach-O, notarize each as a zip — no staple on a bare binary —
+        # re-emit the tarball). The signed outputs stage into dist-signed
+        # under their ORIGINAL filenames — exactly the files wf-publish
+        # overlays onto the unsigned tree, whatever the leg produced.
+        run: pixi run --locked ./bin/shipit release sign dist --out dist-signed
       - name: Upload the signed artifact
         uses: actions/upload-artifact@v7
         with:
           name: signed-${{ matrix.artifact }}-${{ matrix.platform }}
-          # Only the signed .dmg: wf-publish overlays it onto the unsigned
-          # tree (same filename — the signed dmg replaces the unsigned one).
-          path: dist/*.dmg
+          # Only the signed outputs (the staged-out dir, never the whole
+          # unsigned tree): wf-publish overlays them onto the unsigned tree
+          # (same filenames — the signed .dmg / .tar.gz replaces the
+          # unsigned one).
+          path: dist-signed/*
           if-no-files-found: error

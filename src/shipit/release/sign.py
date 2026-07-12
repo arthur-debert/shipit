@@ -2,7 +2,21 @@
 
 ``shipit release sign`` is the consumer-agnostic macOS signer behind the
 scar-#1 invariant (workflows.lex §3.1): the model is **bundle(unsigned) →
-sign-reopens-and-reseals**, never sign → bundle. Given a bundle tree carrying
+sign-reopens-and-reseals**, never sign → bundle. The unit carries TWO legs,
+one per signable bundle shape, dispatched by what the tree carries
+(:func:`detect_shape`):
+
+- the **mac-app leg** (:func:`sign_bundle`, TOL02-WS04) — the coupled
+  ``.app``/``.dmg`` pair, reopened from the reseal payload;
+- the **archive leg** (:func:`sign_archives`, TOL02-WS08 #779) — the archive
+  composition's raw darwin CLI binaries, reopened from the ``.tar.gz``
+  bundles. The legacy ``rust-cli.yml@v3`` sign + notarize steps are the
+  parity contract: codesign each shipped Mach-O with the Developer ID cert,
+  notarytool-submit each binary as a zip (a bare binary has NO staple
+  target), then re-emit the tarball so the distributable carries the signed
+  binary (artifact transport strips loose exec bits; the tar preserves them).
+
+The mac-app leg: given a bundle tree carrying
 an unsigned ``.app`` reseal payload (``<name>.unsigned-app.tar.gz`` — a tar
 because artifact upload destroys a ``.app``'s symlinks and exec bits) and at
 most one ``.dmg``, one invocation:
@@ -23,7 +37,9 @@ most one ``.dmg``, one invocation:
 
 Fork-by-copy per ADR-0001/ADR-0010 from the legacy ``sign-notarize-mac.yml``
 reusable workflow and its composites (``sign-mac``, ``notarize-mac``,
-``unpack-unsigned-app``, ``enumerate-macho``, ``reseal-mac-dmg``): bash stayed
+``unpack-unsigned-app``, ``enumerate-macho``, ``reseal-mac-dmg``) — and, for
+the archive leg, from ``rust-cli.yml@v3``'s "Sign macOS binaries" /
+"Notarize signed binaries" steps: bash stayed
 where bash was right — ``codesign`` / ``security`` / ``hdiutil`` / ``xcrun``
 remain the tools — but as ONE shipit-owned, locally-runnable unit: a release
 engineer with a mac and the certs runs the whole
@@ -53,7 +69,10 @@ names they need, the required set is derived from what the repo ships):
   credential material (``.p12``, ``.p8``) is wiped on any exit.
 
 One deliberate behaviour change from the legacy composites (PRD tol01 stories
-28–29): the warn-and-skip on missing cert/notary credentials is GONE. The
+28–29), on BOTH legs: the warn-and-skip on missing cert/notary credentials is
+GONE (the legacy rust-cli notarize step skipped with a warning when the ASC
+key was absent, and knew only the ASC trio — the archive leg hard-fails like
+the mac-app leg and accepts either notary trio). The
 unit HARD-FAILS when invoked without its secrets, naming the missing names —
 missing-secrets detection belongs to ``preflight``, and the only unsigned
 path is the explicit ``--unsigned`` break-glass decided upstream, never an
@@ -520,17 +539,51 @@ class SignResult:
         }
 
 
+@dataclass(frozen=True)
+class ArchiveSignResult:
+    """The archive leg's uniform, typed output (ADR-0030).
+
+    ``archives`` are the ABSOLUTE staged paths of the re-emitted tarballs
+    (each under its original filename); ``binaries`` the signed Mach-O
+    names, discovery order; ``submission_ids`` one notary submission per
+    signed binary, same order. There is no ``stapled`` field on purpose: a
+    bare binary (and the zip it is submitted in) has no staple target —
+    Gatekeeper verifies the notarization online.
+    """
+
+    archives: tuple[str, ...]
+    binaries: tuple[str, ...]
+    identity: str
+    submission_ids: tuple[str, ...]
+
+    def to_dict(self) -> dict:
+        """The ``--json`` field set — exactly the declared outputs."""
+        return {
+            "archives": list(self.archives),
+            "binaries": list(self.binaries),
+            "identity": self.identity,
+            "submission_ids": list(self.submission_ids),
+        }
+
+
 # --------------------------------------------------------------------------
 # The stages
 # --------------------------------------------------------------------------
 
 
+#: The reseal-payload suffix the mac-app composition emits — the mac-app
+#: leg's dispatch signal (:func:`detect_shape`), and the exclusion that keeps
+#: the archive leg from misreading a payload as a plain archive (the same
+#: split :mod:`shipit.release.integrity` draws).
+RESEAL_SUFFIX = ".unsigned-app.tar.gz"
+
+
 def _find_payload(tree: Path) -> Path:
     """The tree's ONE reseal payload; zero or multiple is a hard error."""
-    payloads = sorted(p for p in tree.rglob("*.unsigned-app.tar.gz") if p.is_file())
+    payloads = sorted(p for p in tree.rglob(f"*{RESEAL_SUFFIX}") if p.is_file())
     if not payloads:
         raise ReleaseError(
-            f"no *.unsigned-app.tar.gz under {tree} — the signer reopens a "
+            f"no *{RESEAL_SUFFIX} under {tree} — the signer reopens a "
             "bundle tree carrying the reseal payload the mac-app composition "
             "emits (workflows.lex §3.1); was this an unsigned mac bundle?"
         )
@@ -558,6 +611,38 @@ def _find_dmg(tree: Path) -> Path | None:
     return dmgs[0] if dmgs else None
 
 
+def _find_archives(tree: Path) -> list[Path]:
+    """The tree's plain archive tarballs — the archive composition's darwin
+    outputs: every ``.tar.gz`` that is NOT a reseal payload, sorted. The
+    composition's windows ``.zip`` twin never reaches the signer (``sign``
+    is darwin-only by declaration), so only tarballs are archive-leg inputs.
+    Pure reads."""
+    return sorted(
+        p
+        for p in tree.rglob("*.tar.gz")
+        if p.is_file() and not p.name.endswith(RESEAL_SUFFIX)
+    )
+
+
+def detect_shape(tree: Path) -> str:
+    """Which signer leg ``tree`` routes to: ``"mac-app"`` when it carries a
+    reseal payload (the payload is the explicit mac-app signal, so it wins
+    if both shapes ever appear), ``"archive"`` when it carries plain
+    ``.tar.gz`` archive bundles, and a hard refusal naming both shapes
+    otherwise — the signer reopens what the bundle stage composed, never
+    guesses. Pure reads; the verb dispatches on the answer."""
+    if any(p.is_file() for p in tree.rglob(f"*{RESEAL_SUFFIX}")):
+        return "mac-app"
+    if _find_archives(tree):
+        return "archive"
+    raise ReleaseError(
+        f"nothing signable under {tree}: no *{RESEAL_SUFFIX} reseal payload "
+        "(the mac-app leg) and no plain .tar.gz archive bundle (the archive "
+        "leg) — the signer reopens what the bundle stage composed "
+        "(workflows.lex §3.1); was this tree bundled?"
+    )
+
+
 def _unsafe_tar_member(listing: str) -> str | None:
     """The first archive member (from ``tar -tzf`` output) that would escape
     the extraction dir — an ABSOLUTE path or one with a ``..`` segment (classic
@@ -573,23 +658,69 @@ def _unsafe_tar_member(listing: str) -> str | None:
     return None
 
 
-def _unpack(payload: Path, work: Path, run_cmd: RunCmd) -> Path:
-    """Untar the reseal payload into ``work`` and return the ONE extracted
-    ``.app``; zero or multiple is a hard error.
+def _non_regular_member(listing: str) -> str | None:
+    """The first member in a ``tar -tvzf`` verbose listing whose type is
+    NEITHER a regular file NOR a directory — the first character of its mode
+    column is not ``-`` or ``d`` (a symlink is ``l``, a hardlink ``h``,
+    devices/fifos their own letters). The ``tar -tzf`` NAME check confines
+    members by path, but a link escapes THROUGH its target instead: a symlink
+    entry pointing outside the extraction dir followed by a member written
+    through it lands outside ``work`` however innocent every name looks. A
+    raw-CLI archive ships only files and dirs, so the first non-regular member
+    is returned for a hard refusal; ``None`` when every member is a plain file
+    or directory. Pure."""
+    for raw in listing.splitlines():
+        mode = raw.split(maxsplit=1)
+        if mode and mode[0][:1] not in ("-", "d"):
+            return raw
+    return None
 
-    The archive is LISTED and validated before extraction: a member with an
-    absolute path or a ``..`` segment would let a tampered or garbled payload
-    write OUTSIDE ``work`` (tar path traversal), so any such member is a hard
-    refusal with nothing extracted."""
+
+def _untar_validated(
+    archive: Path,
+    work: Path,
+    run_cmd: RunCmd,
+    what: str,
+    *,
+    reject_links: bool = False,
+) -> None:
+    """Untar ``archive`` into ``work``, listing and validating first: a
+    member with an absolute path or a ``..`` segment would let a tampered or
+    garbled ``what`` write OUTSIDE ``work`` (tar path traversal), so any such
+    member is a hard refusal with nothing extracted.
+
+    With ``reject_links`` (the archive leg — a raw-CLI tarball has no business
+    carrying links), a verbose second listing additionally refuses any symlink
+    or hardlink member: the name check confines paths, but a link escapes
+    through its TARGET, so a non-regular member is refused before extraction
+    too. The mac-app leg leaves this OFF — a resealed ``.app`` legitimately
+    carries the framework symlinks Apple's bundle layout requires."""
     work.mkdir(parents=True, exist_ok=True)
-    listing = run_cmd(["tar", "-tzf", str(payload)], SIGN_CMD_TIMEOUT).stdout
+    listing = run_cmd(["tar", "-tzf", str(archive)], SIGN_CMD_TIMEOUT).stdout
     unsafe = _unsafe_tar_member(listing)
     if unsafe is not None:
         raise ReleaseError(
-            f"unsafe path in reseal payload {payload.name}: {unsafe!r} escapes "
+            f"unsafe path in {what} {archive.name}: {unsafe!r} escapes "
             "the extraction dir (absolute or .. path) — refusing to extract"
         )
-    run_cmd(["tar", "-xzf", str(payload), "-C", str(work)], SIGN_CMD_TIMEOUT)
+    if reject_links:
+        verbose = run_cmd(["tar", "-tvzf", str(archive)], SIGN_CMD_TIMEOUT).stdout
+        link = _non_regular_member(verbose)
+        if link is not None:
+            raise ReleaseError(
+                f"non-regular member in {what} {archive.name}: {link!r} — a "
+                "symlink or hardlink escapes the extraction dir through its "
+                "target; a raw-CLI archive ships only files and dirs, refusing "
+                "to extract"
+            )
+    run_cmd(["tar", "-xzf", str(archive), "-C", str(work)], SIGN_CMD_TIMEOUT)
+
+
+def _unpack(payload: Path, work: Path, run_cmd: RunCmd) -> Path:
+    """Untar the reseal payload into ``work`` (listed and validated first —
+    :func:`_untar_validated`) and return the ONE extracted ``.app``; zero or
+    multiple is a hard error."""
+    _untar_validated(payload, work, run_cmd, "reseal payload")
     apps = sorted(p for p in work.iterdir() if p.is_dir() and p.suffix == ".app")
     if len(apps) != 1:
         names = ", ".join(p.name for p in apps) or "none"
@@ -756,21 +887,24 @@ def _reseal(app: Path, dmg_out: Path, req: SignRequest) -> None:
 
 
 def _notarize(
-    dmg: Path, creds: NotaryCredentials, req: SignRequest
+    target: Path, creds: NotaryCredentials, req: SignRequest, *, staple: bool = True
 ) -> tuple[str, bool]:
-    """``notarytool`` submit → poll → staple against ``dmg``.
+    """``notarytool`` submit → poll (→ staple) against ``target``.
 
     Returns ``(submission_id, stapled)``. Submit is ``--no-wait`` + a poll
     loop cadenced at :data:`POLL_INTERVAL` (the poll count derives from it,
     never a hard-coded factor); ``req.timeout_minutes`` is >= 1 by the time
-    this runs (:func:`sign_bundle` refuses a non-positive window up front, so
+    this runs (the leg entries refuse a non-positive window up front, so
     the loop always polls at least once). A transient ``info`` failure counts
     as one ``Unknown`` poll, never an abort. ``Invalid``/``Rejected`` fetches
     the notary log and hard-fails; so does poll exhaustion (the legacy
     timed-out soft-pass is gone — an unconfirmed notarization is a failure,
-    resumable by re-running the stage). A staple failure is NON-fatal:
-    online Gatekeeper still verifies. The decoded ``.p8`` is wiped on any
-    exit.
+    resumable by re-running the stage). With ``staple`` (the mac-app leg's
+    ``.dmg``), ``Accepted`` staples the ticket; a staple failure is NON-fatal
+    — online Gatekeeper still verifies. The archive leg passes
+    ``staple=False``: its submission is a zip around a bare binary, and
+    neither is a staple target (the legacy rust-cli contract). The decoded
+    ``.p8`` is wiped on any exit.
     """
     key_path: Path | None = None
     try:
@@ -783,7 +917,7 @@ def _notarize(
                 "xcrun",
                 "notarytool",
                 "submit",
-                str(dmg),
+                str(target),
                 *auth,
                 "--output-format",
                 "json",
@@ -799,7 +933,7 @@ def _notarize(
             ) from exc
         logger.info(
             "notary submission accepted for polling",
-            extra={"submission_id": submission_id, "dmg": str(dmg)},
+            extra={"submission_id": submission_id, "target": str(target)},
         )
 
         # Poll count derives from POLL_INTERVAL (never a hard-coded factor):
@@ -825,10 +959,12 @@ def _notarize(
                 # One flaky poll is not a verdict — keep polling.
                 status = "Unknown"
             if status == "Accepted":
+                if not staple:
+                    return submission_id, False
                 stapled = True
                 try:
                     req.run_cmd(
-                        ["xcrun", "stapler", "staple", str(dmg)], STAPLE_TIMEOUT
+                        ["xcrun", "stapler", "staple", str(target)], STAPLE_TIMEOUT
                     )
                 except execrun.ExecError:
                     stapled = False
@@ -858,9 +994,9 @@ def _notarize(
                 req.sleep(POLL_INTERVAL)
         raise ReleaseError(
             f"notarization unconfirmed after {req.timeout_minutes} min — "
-            f"submission {submission_id} last status {status}. The .dmg is "
-            "signed but NOT notarized; re-run the sign stage (or check with "
-            f"`xcrun notarytool info {submission_id}`)"
+            f"submission {submission_id} last status {status}. Codesigning "
+            f"succeeded but notarization did NOT confirm; re-run the sign "
+            f"stage (or check with `xcrun notarytool info {submission_id}`)"
         )
     finally:
         if key_path is not None:
@@ -919,4 +1055,135 @@ def sign_bundle(req: SignRequest) -> SignResult:
         submission_id=submission_id,
         stapled=stapled,
         nested_signed=len(nested),
+    )
+
+
+def sign_archives(req: SignRequest) -> ArchiveSignResult:
+    """One archive-leg invocation (TOL02-WS08 #779): reopen every plain
+    ``.tar.gz`` archive bundle under ``req.tree``, codesign the Mach-O
+    binaries inside, notarize each, re-emit each tarball into ``req.out_dir``
+    under its original filename. The legacy ``rust-cli.yml@v3`` sign +
+    notarize steps are the parity contract:
+
+    1. every archive is unpacked (listed and validated first — the reseal
+       payload's tar path-traversal refusal, PLUS a symlink/hardlink refusal:
+       a raw-CLI tarball ships only files and dirs, and a link would escape
+       the extraction dir through its target) and its shipped binaries found
+       by CONTENT (:func:`is_macho`, never by name — the docs beside the
+       binary are not Mach-O); an archive with none is a hard error, never a
+       quiet pass;
+    2. every binary across all archives signs in ONE
+       :func:`_sign_paths` call — one temporary keychain, hardened runtime +
+       secure timestamp, verify --strict per path (the legacy scar: the
+       identity lives in a per-call keychain, so all paths must go through a
+       single call);
+    3. each signed binary is zipped (``notarytool`` needs a container) and
+       submitted → polled; NO staple — a bare binary has no staple target,
+       Gatekeeper verifies online. Rejection or an unconfirmed verdict is a
+       hard fail (ADR-0009), and it lands BEFORE any tarball is re-emitted,
+       so a failed run leaves the unsigned tarballs untouched — never a
+       half-signed distributable;
+    4. each tarball is re-emitted from its unpacked (now signed) tree and
+       staged under the original filename — the archive is the distributable
+       (loose exec bits do not survive artifact transport; the tar's headers
+       do).
+
+    Credentials resolve FIRST — a missing secret hard-fails with zero
+    commands run, exactly like the mac-app leg (the legacy notarize step's
+    warn-and-skip on a missing ASC key is deliberately gone, and either
+    notary trio is accepted). ``req.entitlements`` is REFUSED on this leg:
+    entitlements belong to the mac-app leg's ``.app`` root, never a raw CLI
+    binary (the legacy rust-cli sign step passed none).
+    """
+    signing = resolve_signing(req.env)
+    notary = resolve_notary(req.env)
+    if req.timeout_minutes < 1:
+        raise ReleaseError(
+            f"notary timeout must be at least 1 minute, got "
+            f"{req.timeout_minutes} — a non-positive window would sign and "
+            "submit, then never poll for the verdict"
+        )
+    if req.entitlements is not None:
+        raise ReleaseError(
+            "entitlements apply to the mac-app leg's .app root only — a raw "
+            "CLI binary carries none (legacy rust-cli parity); drop "
+            "--entitlements for archive bundles"
+        )
+
+    archives = _find_archives(req.tree)
+    if not archives:
+        raise ReleaseError(
+            f"no plain .tar.gz archive bundle under {req.tree} — the archive "
+            "leg reopens the archive composition's darwin tarballs; was this "
+            "tree bundled?"
+        )
+
+    unpacked: list[tuple[Path, Path]] = []
+    binaries: list[Path] = []
+    for index, archive in enumerate(archives):
+        work = req.scratch / f"archive-{index}"
+        _untar_validated(
+            archive, work, req.run_cmd, "archive bundle", reject_links=True
+        )
+        machos = sorted(
+            p
+            for p in work.rglob("*")
+            if p.is_file() and not p.is_symlink() and is_macho(p)
+        )
+        if not machos:
+            raise ReleaseError(
+                f"no Mach-O binary inside {archive.name} — the archive leg "
+                "signs the archive composition's shipped darwin binaries "
+                "(detected by content, never by name); is this a darwin "
+                "bundle?"
+            )
+        unpacked.append((archive, work))
+        binaries.extend(machos)
+
+    identity = _sign_paths(binaries, signing, req)
+
+    submission_ids: list[str] = []
+    for binary in binaries:
+        zip_path = req.scratch / f"{binary.name}-notarize.zip"
+        zip_path.unlink(missing_ok=True)
+        # -j junks the path: the zip carries the bare binary name — the
+        # legacy `cd <dir> && zip <bin>-notarize.zip <bin>` layout.
+        req.run_cmd(["zip", "-j", str(zip_path), str(binary)], SIGN_CMD_TIMEOUT)
+        submission_id, _ = _notarize(zip_path, notary, req, staple=False)
+        submission_ids.append(submission_id)
+        zip_path.unlink(missing_ok=True)
+
+    staged: list[str] = []
+    req.out_dir.mkdir(parents=True, exist_ok=True)
+    for index, (archive, work) in enumerate(unpacked):
+        signed_tar = req.scratch / f"signed-{index}-{archive.name}"
+        signed_tar.unlink(missing_ok=True)
+        members = sorted(p.name for p in work.iterdir())
+        # `--` terminates option parsing: a member whose name begins with `-`
+        # (it came from an unpacked external bundle) is an operand, never a
+        # tar flag — no flag injection through a crafted filename.
+        req.run_cmd(
+            ["tar", "-czf", str(signed_tar), "-C", str(work), "--", *members],
+            SIGN_CMD_TIMEOUT,
+        )
+        # Stage under the ORIGINAL archive filename (the consumer's name
+        # survives the round-trip; with out_dir == tree this replaces the
+        # unsigned tarball in place — the laptop-run shape). Copy into a temp
+        # path in the DESTINATION dir, then atomically rename over dest: a
+        # copy failure leaves the unsigned tarball untouched (ADR-0009), and
+        # `os.replace` is atomic only within one filesystem, so the temp must
+        # be beside dest, never the scratch-dir signed_tar (a possibly cross-
+        # device rename).
+        dest = req.out_dir / archive.name
+        tmp_dest = dest.with_name(f"{dest.name}.signing-tmp")
+        tmp_dest.unlink(missing_ok=True)
+        shutil.copy2(signed_tar, tmp_dest)
+        os.replace(tmp_dest, dest)
+        staged.append(str(dest.absolute()))
+
+    return ArchiveSignResult(
+        archives=tuple(staged),
+        binaries=tuple(binary.name for binary in binaries),
+        identity=identity,
+        submission_ids=tuple(submission_ids),
     )
