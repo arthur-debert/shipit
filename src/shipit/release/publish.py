@@ -19,9 +19,24 @@ switch), one adapter per name of :data:`shipit.config.ENDPOINTS`:
   token presence is validated before any upload. The upload is SCOPED to the
   artifact's own distribution (its ``pyproject`` ``[project].name``), so a
   multi-artifact bundle tree never leaks a sibling's wheel to the index.
-- **npm** — publishes the prebuilt package tree (wasm-pack output style)
-  without rebuilding (``--ignore-scripts``); publish-over-existing is
+- **npm** — publishes the staged npm tarball (the wasm-pack composition's
+  ``<pkg>-<version>.tgz`` artifact, WS10 #798 — the SAME file the gh-release
+  ships) without rebuilding (``--ignore-scripts``), scoped to THIS artifact's
+  package name (the assert-bundle identity chain); publish-over-existing is
   SUCCESS.
+- **vscode-marketplace** — ``npm exec -- vsce publish --packagePath`` of this
+  artifact's staged per-target ``.vsix`` (the vsix composition's output),
+  run from the ``npm`` leg dir (vsce is the extension's ``node_modules/.bin``
+  devDependency and reads the leg's ``package.json``), the token riding the
+  ``VSCE_PAT`` env vsce reads; publish-over-existing is SUCCESS (idempotent
+  resume). An external endpoint the RC guard skips — a ``-release-rc`` cut
+  never touches the marketplace (rc = gh-release only).
+- **open-vsx** — ``npm exec -- ovsx publish`` of this artifact's same staged
+  ``.vsix`` set to the Open VSX registry (``OVSX_PAT``), run from the ``npm``
+  leg dir; publish-over-existing is SUCCESS.
+  Also external / RC-guarded. Declarable now; a consumer wires it on only
+  once its ``OVSX_PAT`` verifies (the lex-fmt/vscode repo's open-vsx leg is
+  wired-but-off pending a working PAT — issue #789).
 - **brew** (the one *derived* endpoint) — renders the shared formula
   template (:mod:`shipit.release.brew`) against the FINAL release-asset
   URLs/sha256s and the crate's metadata, includes the private-repo download
@@ -29,6 +44,16 @@ switch), one adapter per name of :data:`shipit.config.ENDPOINTS`:
   output, and pushes it to the :data:`HOMEBREW_TAP` — where an UNCHANGED
   formula is a no-op push. Stable-channel only: prereleases never move the
   tap formula (the plan skips it, :func:`plan`).
+- **notify-downstreams** (a *derived*, stable-only endpoint, TOL02-WS16
+  #792) — the generated-parser release's cross-repo cascade (legacy
+  ``tree-sitter.yml`` notify hook): fires ONE ``repository_dispatch``
+  (:data:`NOTIFY_EVENT_TYPE`) at each declared
+  :attr:`shipit.config.Artifact.downstreams` repo, carrying the source
+  repo/tag/version in its client payload, through a cross-repo PAT
+  (``DOWNSTREAM_DISPATCH_TOKEN`` — the ambient token cannot dispatch
+  cross-repo). Fires on REAL releases only: the plan skips it on any
+  prerelease (and the RC guard on a live-fire cut), so an rc/beta notifies
+  no one.
 
 The stage-wide invariants live HERE as pure cores, so they hold identically
 for the WS06 ``wf-publish`` block and a laptop invocation (ADR-0040):
@@ -60,8 +85,9 @@ create becomes edit, an unchanged formula pushes nothing.
 
 Effects run through the request's injected seams: ``run_cmd``/``probe`` are
 the one Exec runner (ADR-0028 — the ``cargo publish`` / ``twine`` /
-``npm publish`` / ``ruby -c`` argv literals below are those tools' one
-publish-side assembly point, whitelisted in ``tests/test_tool_argv_sweep.py``),
+``npm publish`` / ``npm exec -- vsce publish`` / ``npm exec -- ovsx publish`` /
+``ruby -c`` argv literals below are those tools' one publish-side assembly
+point, whitelisted in ``tests/test_tool_argv_sweep.py``),
 ``ghio`` the gh Tool adapter (:mod:`shipit.gh` — the gh-release REST/CLI
 calls), ``gitio`` the git adapter (the tap clone/commit/push). Each adapter's
 required secret NAME comes from the one derivation authority
@@ -94,6 +120,7 @@ from ..changelog import SEMVER_RE
 from . import ReleaseError, secretreq
 from . import brew as brew_mod
 from . import integrity as integrity_mod
+from .bundle import VSCE_TARGETS
 from .version import RELEASE_RC_PRE
 
 #: The upstream stage results a publish invocation states (GH Actions job
@@ -128,7 +155,17 @@ CRATES_SECRET = secretreq.ENDPOINT_SECRETS["crates"][0]
 PYPI_SECRET = secretreq.ENDPOINT_SECRETS["pypi"][0]
 TESTPYPI_SECRET = secretreq.TESTPYPI_SECRET
 NPM_SECRET = secretreq.ENDPOINT_SECRETS["npm"][0]
+VSCE_SECRET = secretreq.ENDPOINT_SECRETS["vscode-marketplace"][0]
+OVSX_SECRET = secretreq.ENDPOINT_SECRETS["open-vsx"][0]
 TAP_SECRET = secretreq.ENDPOINT_SECRETS["brew"][0]
+NOTIFY_SECRET = secretreq.ENDPOINT_SECRETS["notify-downstreams"][0]
+
+#: The ``repository_dispatch`` event type the notify-downstreams cascade fires
+#: (TOL02-WS16 #792). A downstream repo (lex-fmt/vscode, nvim, lexed) wires
+#: ``on.repository_dispatch.types: [upstream-release]`` to rebuild against the
+#: freshly-released grammar. ONE stable type across the fleet so a downstream
+#: filters on a single name; the source repo/tag rides the client payload.
+NOTIFY_EVENT_TYPE = "upstream-release"
 
 #: The child-process env var each tool READS the token under — the runtime
 #: feed, tool-specific and distinct from the secret NAME the token is
@@ -137,6 +174,22 @@ TAP_SECRET = secretreq.ENDPOINT_SECRETS["brew"][0]
 #: twine reads ``TWINE_USERNAME``/``TWINE_PASSWORD`` (inline in the adapter).
 CARGO_TOKEN_ENV = "CARGO_REGISTRY_TOKEN"
 NPM_AUTH_ENV = "NODE_AUTH_TOKEN"
+
+#: The env var vsce/ovsx READ their personal access token under — the same
+#: string as each endpoint's secret NAME (:data:`VSCE_SECRET` /
+#: :data:`OVSX_SECRET`): both tools take ``VSCE_PAT`` / ``OVSX_PAT`` from the
+#: environment (or ``-p``), so provision-name and tool-read-name coincide here
+#: (unlike cargo/npm, whose read var differs from the secret name).
+VSCE_PAT_ENV = "VSCE_PAT"
+OVSX_PAT_ENV = "OVSX_PAT"
+
+#: The vsce/ovsx target strings (:data:`shipit.release.bundle.VSCE_TARGETS`
+#: values) — the closed suffix set the vsix composition names its per-target
+#: outputs with (``<artifact>-<vsce-target>.vsix``). Publish scopes an
+#: artifact's ``.vsix`` uploads by exactly this suffix set so a sibling
+#: extension's ``.vsix`` in the coalesced assets tree is never shipped under
+#: this artifact's endpoint/token (:func:`vsix_uploads`).
+VSIX_TARGET_STRINGS: frozenset[str] = frozenset(VSCE_TARGETS.values())
 
 #: cargo's already-published stderr signatures (lowercased match): the
 #: idempotent-resume contract — an already-uploaded crate version is SUCCESS
@@ -151,6 +204,16 @@ CRATE_ALREADY_PUBLISHED_MARKERS: tuple[str, ...] = (
 NPM_ALREADY_PUBLISHED_MARKERS: tuple[str, ...] = (
     "previously published",
     "cannot publish over",
+)
+
+#: vsce/ovsx's already-published stderr signatures (lowercased match): the
+#: same already-published-is-success resume contract for the two VS Code
+#: marketplaces — re-running the terminal stage over an already-shipped
+#: version converges (ADR-0009 phase 2), never a spurious failure.
+VSIX_ALREADY_PUBLISHED_MARKERS: tuple[str, ...] = (
+    "already exists",
+    "already published",
+    "is already published",
 )
 
 #: The runner seams an adapter executes through — ``(argv, cwd, env) ->
@@ -175,7 +238,8 @@ class PublishRequest:
     plus the signer's outputs on a signed run); ``notes_path`` the ONE
     coalesced notes text prepare wrote (story 26); ``repo`` the source
     repo's ``owner/name`` slug (resolved by the verb only when a planned
-    endpoint needs it — brew's asset URLs). ``env`` is the token lookup
+    ``needs_repo`` endpoint needs it — brew's asset URLs, notify-downstreams'
+    dispatch payload). ``env`` is the token lookup
     surface (validated by the verb before any dispatch); ``testpypi``
     reroutes the pypi adapter to the staging index.
     """
@@ -341,6 +405,9 @@ def is_live_fire(version: str) -> bool:
 #: testable without dispatching anything.
 SKIP_RC_GUARD = "rc-guard: -release-rc publishes to the GH release only"
 SKIP_STABLE_ONLY = "stable-channel only: a prerelease never moves the tap formula"
+SKIP_NOTIFY_PRERELEASE = (
+    "notify-downstreams fires on real releases only: a prerelease notifies no one"
+)
 
 
 @dataclass(frozen=True)
@@ -366,16 +433,22 @@ def plan(
     brew's formula renders against the FINAL release-asset URLs/SHAs, so
     gh-release's asset upload must complete first. Skips are decided here,
     centrally: a live-fire cut keeps ONLY gh-release (the RC guard, story
-    33 — every external endpoint skipped); any prerelease skips brew (the
-    tap is the stable channel). An endpoint name outside the closed registry
-    is a hard :class:`ReleaseError` naming the known set.
+    33 — every external endpoint skipped); any prerelease skips the
+    ``stable_only`` endpoints — brew (the tap is the stable channel) and
+    notify-downstreams (a prerelease notifies no one, TOL02-WS16 #792). An
+    endpoint name outside the closed registry is a hard
+    :class:`ReleaseError` naming the known set.
 
-    Cross-endpoint invariant: an unskipped brew dispatch REQUIRES an unskipped
-    gh-release in the same plan — the formula points at
+    Cross-endpoint invariant: an unskipped brew OR notify-downstreams dispatch
+    REQUIRES an unskipped gh-release in the same plan. brew's formula points at
     ``releases/download/<tag>/…`` assets that only gh-release creates and
     uploads, so brew alone would push a tap formula referencing a release this
-    run never produced. gh-release is itself idempotent-resumable, so a
-    tap-repair run simply lists both.
+    run never produced; notify-downstreams tells the downstream repos to
+    rebuild against this release, so notifying without a landed gh-release
+    points them at a release that never existed. Both derived endpoints are
+    checked against the UNSKIPPED set (a prerelease that skips them never trips
+    the invariant). gh-release is itself idempotent-resumable, so a repair run
+    simply lists it alongside the derived endpoint.
     """
     dispatches: list[Dispatch] = []
     for stage in ("release", "derived"):
@@ -393,8 +466,8 @@ def plan(
                 skip = None
                 if live_fire and adapter.external:
                     skip = SKIP_RC_GUARD
-                elif prerelease and adapter.name == "brew":
-                    skip = SKIP_STABLE_ONLY
+                elif prerelease and adapter.stable_only:
+                    skip = adapter.stable_skip_reason
                 dispatches.append(Dispatch(artifact, adapter, skip))
     live = [d.adapter.name for d in dispatches if d.skip is None]
     if "brew" in live and "gh-release" not in live:
@@ -403,6 +476,14 @@ def plan(
             "at gh-release assets (`releases/download/<tag>/…`), but no unskipped "
             "gh-release endpoint is planned: declare `gh-release` so the release "
             "the formula targets is created and its assets uploaded (both "
+            "endpoints are idempotent — a resume converges, nothing is duplicated)"
+        )
+    if "notify-downstreams" in live and "gh-release" not in live:
+        raise ReleaseError(
+            "publish plan invalid — notify-downstreams tells the downstream "
+            "repos to rebuild against this release, but no unskipped gh-release "
+            "endpoint is planned: declare `gh-release` so the release the "
+            "downstreams target lands on GitHub before they are notified (both "
             "endpoints are idempotent — a resume converges, nothing is duplicated)"
         )
     return tuple(dispatches)
@@ -800,35 +881,200 @@ def npm_already_published(stderr: str) -> bool:
     return any(marker in lowered for marker in NPM_ALREADY_PUBLISHED_MARKERS)
 
 
-def _publish_npm(req: PublishRequest) -> Published:
-    """Publish the prebuilt npm package tree — no rebuild. See the module
-    docstring's npm entry.
+def npm_tarball_name(pkg_name: str, version: str) -> str:
+    """The ``npm pack`` filename for package ``pkg_name`` at ``version``. Pure.
 
-    ``--ignore-scripts`` is the no-rebuild contract: the tree (a wasm-pack
-    ``pkg/``, a prepared package dir) was produced by the build/bundle
-    stages, and a lifecycle script re-running a build here would be a second
-    build path. The token is looked up under its secret name
-    (:data:`NPM_SECRET`) and rides the child env under the var npm reads (the
-    setup-node ``NODE_AUTH_TOKEN`` convention, :data:`NPM_AUTH_ENV`), never argv.
+    ``npm pack`` names its tarball ``<pkg>-<version>.tgz`` with the package
+    name FLATTENED: a leading ``@`` is dropped and the ``/`` scope separator
+    becomes ``-`` (``@lex-fmt/lex-wasm`` → ``lex-fmt-lex-wasm-1.2.3.tgz``).
+    This is the deterministic name the wasm-pack composition
+    (:mod:`shipit.release.bundle`) stages, so publish locates THIS artifact's
+    tarball without scanning package.json out of every ``.tgz`` in the tree.
     """
-    leg = _leg_for(req.artifact, req.entries, "npm", "npm")
+    stem = pkg_name.lstrip("@").replace("/", "-")
+    return f"{stem}-{version}.tgz"
+
+
+def _publish_npm(req: PublishRequest) -> Published:
+    """Publish the staged npm tarball — the wasm-pack composition's artifact,
+    no rebuild. See the module docstring's npm entry.
+
+    The tarball IS the artifact (WS10 #798): the wasm-pack bundle composition
+    (:mod:`shipit.release.bundle`) `npm pack`s the wasm/npm package into
+    ``<pkg>-<version>.tgz`` and stages it beside every other release asset, so
+    the SAME file the gh-release ships is what npm publishes — never a second
+    build path (``--ignore-scripts`` on the prebuilt tarball forecloses one).
+    The upload is SCOPED to THIS artifact's tarball via the declared npm
+    package name (the assert-bundle identity chain,
+    :func:`shipit.release.integrity.expected_main_binary` — the artifact's
+    ``main-binary``/``product-name``): ONE declaration names the package for
+    both the assert tier and this scoping, so a multi-artifact tree never
+    leaks a sibling's tarball to the registry (npm publishes are irreversible).
+    The token is looked up under its secret name (:data:`NPM_SECRET`) and rides
+    the child env under the var npm reads (the setup-node ``NODE_AUTH_TOKEN``
+    convention, :data:`NPM_AUTH_ENV`), never argv.
+    """
     token = _require_token(req, "npm", NPM_SECRET)
-    pkg_dir = _leg_dir(req.root, leg)
+    pkg_name = integrity_mod.expected_main_binary(req.artifact)
+    tarball = npm_tarball_name(pkg_name, req.version)
+    path = req.assets_dir / tarball
+    if not path.is_file():
+        raise ReleaseError(
+            f"[artifacts.{req.artifact.name}] npm: no tarball `{tarball}` for "
+            f"package `{pkg_name}` under {req.assets_dir} — the wasm-pack bundle "
+            f"composition produces it; run `shipit release bundle` first"
+        )
     result = req.probe(
-        ["npm", "publish", "--ignore-scripts"],
-        pkg_dir,
+        ["npm", "publish", str(path), "--ignore-scripts"],
+        req.root,
         {NPM_AUTH_ENV: token},
     )
     if result.rc == 0:
-        action = f"published {req.version} from {leg.path or '.'}"
+        action = f"published {pkg_name} {req.version} ({tarball})"
     elif npm_already_published(result.stderr):
-        action = f"{req.version} already published — resumed"
+        action = f"{pkg_name} {req.version} already published — resumed"
     else:
         raise ReleaseError(
             f"[artifacts.{req.artifact.name}] npm: `npm publish` failed:\n"
             f"{_tail(result.stderr)}"
         )
     return Published(req.artifact.name, "npm", (action,))
+
+
+# --------------------------------------------------------------------------
+# vscode-marketplace / open-vsx — per-target .vsix publish (external, RC-guarded)
+# --------------------------------------------------------------------------
+
+
+def vsix_uploads(names: Sequence[str], artifact: str) -> tuple[str, ...]:
+    """This ARTIFACT's staged per-target ``.vsix`` files, sorted. Pure over the
+    asset listing.
+
+    Scoped to ``artifact`` exactly as pypi scopes to its distribution
+    (:func:`_pypi_dist_name`): the vsix composition names every output
+    ``<artifact>-<vsce-target>.vsix``
+    (:func:`shipit.release.bundle._compose_vsix`), so a name counts only when
+    its ``<artifact>-`` prefix AND its ``<vsce-target>`` middle
+    (:data:`VSIX_TARGET_STRINGS`) both match. A sibling extension's ``.vsix``
+    sharing the coalesced ``assets_dir`` — or one whose name merely starts with
+    this artifact's — is never shipped under this artifact's endpoint/token.
+    """
+    prefix = f"{artifact}-"
+    return tuple(
+        sorted(
+            n
+            for n in names
+            if n.endswith(".vsix")
+            and n.startswith(prefix)
+            and n[len(prefix) : -len(".vsix")] in VSIX_TARGET_STRINGS
+        )
+    )
+
+
+def vsix_already_published(stderr: str) -> bool:
+    """Whether a failed ``vsce``/``ovsx`` publish is the already-published
+    resume case (:data:`VSIX_ALREADY_PUBLISHED_MARKERS`). Pure."""
+    lowered = stderr.lower()
+    return any(marker in lowered for marker in VSIX_ALREADY_PUBLISHED_MARKERS)
+
+
+def _publish_vsix_marketplace(
+    req: PublishRequest,
+    endpoint: str,
+    argv_head: Sequence[str],
+    secret: str,
+    token_env: str,
+) -> Published:
+    """Publish this artifact's staged ``.vsix`` files to a VS Code marketplace
+    via ``argv_head`` (``npm exec -- vsce publish --packagePath`` / ``npm exec
+    -- ovsx publish``). Shared body of the two marketplace adapters — same
+    per-artifact vsix set, same idempotent-resume rule, differing only in the
+    tool head, the ``secret`` NAME the token is looked up under, and the
+    ``token_env`` var the tool reads it from.
+
+    Runs from the ``npm`` leg directory (:func:`_leg_for`), like ``_publish_npm``
+    / ``_publish_pypi``: vsce/ovsx are the extension's ``node_modules/.bin``
+    devDependencies, so ``npm exec`` resolves them there, and ``vsce publish``
+    reads the leg's ``package.json`` from its cwd (from ``req.root`` it would
+    fail ``Manifest not found``). The uploaded set is scoped to THIS artifact
+    (:func:`vsix_uploads`), so a multi-artifact release never ships a sibling
+    extension's ``.vsix`` under this endpoint/token.
+
+    Each ``.vsix`` publishes through the PROBE seam: a nonzero exit whose stderr
+    says already-published is SUCCESS (the resume contract, ADR-0009 phase 2);
+    anything else aborts with the stderr tail. The token rides the child env
+    under the var the tool reads (``token_env``), never argv. A run with no
+    staged ``.vsix`` is a loud refusal — the vsix composition
+    (:func:`shipit.release.bundle._compose_vsix`) produces the assets these
+    endpoints ship, so their absence is a bundle gap, never a silent skip.
+    """
+    token = _require_token(req, endpoint, secret)
+    leg = _leg_for(req.artifact, req.entries, "npm", endpoint)
+    pkg_dir = _leg_dir(req.root, leg)
+    vsixes = vsix_uploads(_asset_names(req.assets_dir), req.artifact.name)
+    if not vsixes:
+        raise ReleaseError(
+            f"[artifacts.{req.artifact.name}] {endpoint}: no .vsix under "
+            f"{req.assets_dir} — the vsix composition produces the per-target "
+            f"packages these endpoints publish; run `shipit release bundle` first"
+        )
+    actions = []
+    for vsix in vsixes:
+        result = req.probe(
+            [*argv_head, str(req.assets_dir / vsix)], pkg_dir, {token_env: token}
+        )
+        if result.rc == 0:
+            actions.append(f"published {vsix}")
+        elif vsix_already_published(result.stderr):
+            actions.append(f"{vsix} already published — resumed")
+        else:
+            raise ReleaseError(
+                f"[artifacts.{req.artifact.name}] {endpoint}: publishing {vsix} "
+                f"failed:\n{_tail(result.stderr)}"
+            )
+    return Published(req.artifact.name, endpoint, tuple(actions))
+
+
+def _publish_vscode_marketplace(req: PublishRequest) -> Published:
+    """``npm exec -- vsce publish --packagePath`` of this artifact's staged
+    ``.vsix`` files. See the module docstring's vscode-marketplace entry.
+    External / RC-guarded: a live-fire cut skips this endpoint (:func:`plan`),
+    so rc = gh-release only.
+
+    vsce runs through ``npm exec`` from the ``npm`` leg dir (the ``@vscode/vsce``
+    devDependency, and the leg's ``package.json`` manifest ``vsce publish``
+    reads). The token is looked up under its secret name (:data:`VSCE_SECRET`)
+    and rides the child env under the var vsce reads (:data:`VSCE_PAT_ENV` — the
+    same string), never argv. ``--packagePath`` publishes the prebuilt
+    per-target package (no repackage here — the bundle stage built it).
+    """
+    return _publish_vsix_marketplace(
+        req,
+        "vscode-marketplace",
+        ["npm", "exec", "--", "vsce", "publish", "--packagePath"],
+        VSCE_SECRET,
+        VSCE_PAT_ENV,
+    )
+
+
+def _publish_open_vsx(req: PublishRequest) -> Published:
+    """``npm exec -- ovsx publish`` of this artifact's staged ``.vsix`` files to
+    Open VSX. See the module docstring's open-vsx entry. External / RC-guarded
+    like vscode-marketplace.
+
+    ovsx runs through ``npm exec`` from the ``npm`` leg dir (the ``ovsx``
+    devDependency). The token is looked up under its secret name
+    (:data:`OVSX_SECRET`) and rides the child env under the var ovsx reads
+    (:data:`OVSX_PAT_ENV`), never argv. ``ovsx publish <file>`` takes the
+    prebuilt ``.vsix`` positionally.
+    """
+    return _publish_vsix_marketplace(
+        req,
+        "open-vsx",
+        ["npm", "exec", "--", "ovsx", "publish"],
+        OVSX_SECRET,
+        OVSX_PAT_ENV,
+    )
 
 
 # --------------------------------------------------------------------------
@@ -875,7 +1121,17 @@ def _publish_brew(req: PublishRequest) -> Published:
     computed over the exact staged bytes. Idempotent: an UNCHANGED formula
     in the tap clone is a no-op (nothing committed, nothing pushed).
     """
-    assert req.repo is not None  # the verb resolves the slug for a planned brew
+    if req.repo is None:
+        # Belt for direct (test/library) callers — the verb resolves the source
+        # slug for any live needs_repo dispatch (brew among them), so a real
+        # release never reaches here without it. A loud ReleaseError (not a
+        # strippable `assert`) matches the publish stage's error handling.
+        raise ReleaseError(
+            f"[artifacts.{req.artifact.name}] brew: no source repo resolved — "
+            f"the formula's asset URLs point at "
+            f"github.com/<owner/name>/releases/…, so an unresolved repo is a "
+            f"hard error"
+        )
     token = _require_token(req, "brew", TAP_SECRET)
     archives = brew_archives(req.artifact.name, _asset_names(req.assets_dir))
     if not archives:
@@ -952,6 +1208,62 @@ def _publish_brew(req: PublishRequest) -> Published:
 
 
 # --------------------------------------------------------------------------
+# notify-downstreams
+# --------------------------------------------------------------------------
+
+
+def _publish_notify_downstreams(req: PublishRequest) -> Published:
+    """Fire ``repository_dispatch`` at each declared downstream repo — the
+    cascade a generated-parser release triggers (TOL02-WS16 #792, legacy
+    ``tree-sitter.yml`` notify hook). See the module docstring's
+    notify-downstreams entry.
+
+    A derived, stable-only endpoint (the plan skips it on any prerelease and
+    the RC guard skips it on a live-fire cut), so it is reached ONLY for a
+    real release. Each downstream gets ONE ``upstream-release`` dispatch
+    carrying the source repo/tag/version/artifact in its client payload; a
+    failed dispatch raises loudly (never a silent partial notify). The
+    cross-repo PAT (``DOWNSTREAM_DISPATCH_TOKEN``) is required — the ambient
+    ``GITHUB_TOKEN`` cannot dispatch into another repo.
+    """
+    if req.repo is None:
+        # Belt for direct (test/library) callers — the verb resolves the source
+        # slug for any live needs_repo dispatch (notify-downstreams among them),
+        # so a real release never reaches here without it. A loud ReleaseError
+        # (not a strippable `assert`) matches the publish stage's error handling
+        # and keeps a null-repo payload from ever reaching a downstream.
+        raise ReleaseError(
+            f"[artifacts.{req.artifact.name}] notify-downstreams: no source "
+            f"repo resolved — the dispatch payload names the upstream "
+            f"`owner/name` the downstreams rebuild against, so an unresolved "
+            f"repo is a hard error, never a null payload"
+        )
+    token = _require_token(req, "notify-downstreams", NOTIFY_SECRET)
+    if not req.artifact.downstreams:
+        # Belt for direct (test/library) callers — the config boundary already
+        # refuses a notify-downstreams endpoint with no downstreams list, so
+        # the verb never reaches here empty.
+        raise ReleaseError(
+            f"[artifacts.{req.artifact.name}] notify-downstreams: no "
+            f"`downstreams` declared — the endpoint fires repository_dispatch "
+            f"at the artifact's downstream repos, and there are none"
+        )
+    payload = {
+        "repo": req.repo,
+        "tag": req.tag,
+        "version": req.version,
+        "artifact": req.artifact.name,
+    }
+    actions = []
+    for slug in req.artifact.downstreams:
+        req.ghio.repository_dispatch(
+            slug, event_type=NOTIFY_EVENT_TYPE, payload=payload, token=token
+        )
+        actions.append(f"dispatched {NOTIFY_EVENT_TYPE} to {slug}")
+    return Published(req.artifact.name, "notify-downstreams", tuple(actions))
+
+
+# --------------------------------------------------------------------------
 # The closed registry
 # --------------------------------------------------------------------------
 
@@ -963,10 +1275,19 @@ class EndpointAdapter:
 
     ``stage`` is ``"release"`` or ``"derived"`` (PRD story 35 ordering);
     ``external`` marks the endpoints the RC guard skips on a live-fire cut
-    (everything but gh-release — story 33). ``secrets`` MIRRORS the endpoint's
-    :data:`secretreq.ENDPOINT_SECRETS` entry (the one derivation authority
-    gh-setup/preflight traverse, WS02, stories 43–45) rather than re-declaring
-    the names; the runtime validation set is :func:`required_env_keys`.
+    (everything but gh-release — story 33). ``stable_only`` marks the
+    endpoints :func:`plan` skips on ANY prerelease (brew's tap is the stable
+    channel; notify-downstreams fires on real releases only) with
+    ``stable_skip_reason`` as the stated cause. ``needs_repo`` marks the
+    endpoints whose publish reads the source ``owner/name`` slug
+    (:attr:`PublishRequest.repo`) — brew's asset URLs, notify-downstreams'
+    dispatch payload — so the verb resolves it (one gh round-trip) ONLY when a
+    live dispatch declares the need, keeping a laptop RC cut offline.
+    ``secrets`` MIRRORS the
+    endpoint's :data:`secretreq.ENDPOINT_SECRETS` entry (the one derivation
+    authority gh-setup/preflight traverse, WS02, stories 43–45) rather than
+    re-declaring the names; the runtime validation set is
+    :func:`required_env_keys`.
     """
 
     name: str
@@ -974,6 +1295,9 @@ class EndpointAdapter:
     publish: Callable[[PublishRequest], Published]
     secrets: tuple[str, ...] = ()
     external: bool = True
+    stable_only: bool = False
+    stable_skip_reason: str = SKIP_STABLE_ONLY
+    needs_repo: bool = False
 
 
 GH_RELEASE = EndpointAdapter(
@@ -988,17 +1312,55 @@ PYPI = EndpointAdapter(
 NPM = EndpointAdapter(
     "npm", "release", _publish_npm, secrets=secretreq.ENDPOINT_SECRETS["npm"]
 )
+VSCODE_MARKETPLACE = EndpointAdapter(
+    "vscode-marketplace",
+    "release",
+    _publish_vscode_marketplace,
+    secrets=secretreq.ENDPOINT_SECRETS["vscode-marketplace"],
+)
+OPEN_VSX = EndpointAdapter(
+    "open-vsx",
+    "release",
+    _publish_open_vsx,
+    secrets=secretreq.ENDPOINT_SECRETS["open-vsx"],
+)
 BREW = EndpointAdapter(
-    "brew", "derived", _publish_brew, secrets=secretreq.ENDPOINT_SECRETS["brew"]
+    "brew",
+    "derived",
+    _publish_brew,
+    secrets=secretreq.ENDPOINT_SECRETS["brew"],
+    stable_only=True,
+    needs_repo=True,
+)
+NOTIFY_DOWNSTREAMS = EndpointAdapter(
+    "notify-downstreams",
+    "derived",
+    _publish_notify_downstreams,
+    secrets=secretreq.ENDPOINT_SECRETS["notify-downstreams"],
+    stable_only=True,
+    stable_skip_reason=SKIP_NOTIFY_PRERELEASE,
+    needs_repo=True,
 )
 
 #: The CLOSED registry, in a stable order (the config boundary's
 #: :data:`shipit.config.ENDPOINTS` names exactly this set — asserted in the
 #: tests, so the two can never drift). Adding an endpoint is adding an entry
-#: here plus the config name — never a switch. Marketplace-class adapters
-#: (VS Marketplace, Open VSX, Zed, tree-sitter) are deliberately ABSENT
-#: (PRD Out of Scope): their entries land when their repos migrate.
-ADAPTERS: tuple[EndpointAdapter, ...] = (GH_RELEASE, CRATES, PYPI, NPM, BREW)
+#: here plus the config name — never a switch. The two VS Code marketplace
+#: adapters (vscode-marketplace, open-vsx) publish the vsix composition's
+#: per-target ``.vsix`` and are external / RC-guarded (TOL02-WS13 #789);
+#: notify-downstreams (TOL02-WS16 #792) is present too — not a marketplace
+#: publisher but the generated-parser release's cross-repo cascade. Other
+#: marketplace-class adapters (Zed) stay ABSENT until their repos migrate.
+ADAPTERS: tuple[EndpointAdapter, ...] = (
+    GH_RELEASE,
+    CRATES,
+    PYPI,
+    NPM,
+    VSCODE_MARKETPLACE,
+    OPEN_VSX,
+    BREW,
+    NOTIFY_DOWNSTREAMS,
+)
 
 
 def names() -> tuple[str, ...]:

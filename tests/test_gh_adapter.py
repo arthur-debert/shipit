@@ -154,6 +154,41 @@ def test_repo_canonical_returns_the_typed_repo(monkeypatch):
     ]
 
 
+def test_repository_dispatch_posts_the_event_and_payload(monkeypatch):
+    """The notify-downstreams cascade's one write (#792): a POST to the
+    downstream's dispatches endpoint carrying event_type + client_payload,
+    authenticated by the cross-repo PAT the body is piped to `gh api`."""
+    captured = {}
+
+    def fake_run(args, **kwargs):
+        captured["args"] = list(args)
+        captured["input_text"] = kwargs.get("input_text")
+        captured["token"] = kwargs.get("token")
+        return ""
+
+    monkeypatch.setattr(gh, "_run", fake_run)
+    gh.repository_dispatch(
+        "lex-fmt/vscode",
+        event_type="upstream-release",
+        payload={"tag": "v1.2.3", "repo": "lex-fmt/tree-sitter-lex"},
+        token="pat-xyz",
+    )
+    assert captured["args"] == [
+        "gh",
+        "api",
+        "repos/lex-fmt/vscode/dispatches",
+        "--method",
+        "POST",
+        "--input",
+        "-",
+    ]
+    assert captured["token"] == "pat-xyz"
+    assert json.loads(captured["input_text"]) == {
+        "event_type": "upstream-release",
+        "client_payload": {"tag": "v1.2.3", "repo": "lex-fmt/tree-sitter-lex"},
+    }
+
+
 def test_pr_view_returns_the_parsed_object(monkeypatch):
     """The adapter owns the JSON parse (PROC03): callers receive the object,
     never a raw string to re-parse."""

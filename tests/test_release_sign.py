@@ -19,8 +19,9 @@ Decisions:
 Prior art: the bundle stage's recorder tests (``test_release_bundle.py``).
 """
 
+import io
 import json
-import shutil
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -55,9 +56,52 @@ IDENTITY = "Developer ID Application: Phos (TEAM123)"
 
 FIND_IDENTITY_OUT = f'  1) ABCDEF0123 "{IDENTITY}"\n     1 valid identities found\n'
 
-#: A safe `tar -tzf` member listing for the fixture payload (all members
-#: confined under the .app — no absolute or `..` paths).
-TAR_LISTING = "Phos.app/\nPhos.app/Contents/\nPhos.app/Contents/MacOS/phos\n"
+
+def _make_targz(dest: Path, base: Path, names: list[str]) -> None:
+    """Write a real gzip tarball at ``dest`` whose members are ``names`` taken
+    from under ``base`` (symlinks preserved, ``arcname`` = the bare name so the
+    archive is rooted exactly like the signer's payloads). The signer now opens
+    the tarball with :mod:`tarfile`, so fixtures ship REAL archives, not marker
+    bytes a fake tar intercepts."""
+    with tarfile.open(dest, "w:gz") as tar:
+        for name in names:
+            tar.add(base / name, arcname=name)
+
+
+def _link_member(name: str, target: str, *, hard: bool = False) -> tarfile.TarInfo:
+    """A crafted symlink (default) or hardlink member named ``name`` pointing at
+    ``target`` — used to build the malicious archives the traversal checks must
+    refuse, including targets/names that carry the display delimiters a text
+    listing would mis-split."""
+    info = tarfile.TarInfo(name)
+    info.type = tarfile.LNKTYPE if hard else tarfile.SYMTYPE
+    info.linkname = target
+    return info
+
+
+def _special_member(name: str) -> tarfile.TarInfo:
+    """A crafted FIFO member named ``name`` — a non-regular, non-dir, non-link
+    entry a signable bundle never carries and the validator must refuse on both
+    legs (a raw device node from ``extractall`` is a footgun)."""
+    info = tarfile.TarInfo(name)
+    info.type = tarfile.FIFOTYPE
+    return info
+
+
+def _make_targz_members(
+    dest: Path, files: dict[str, bytes], members: list[tarfile.TarInfo]
+) -> None:
+    """Write a gzip tarball at ``dest`` from explicit ``files`` (name → bytes)
+    and crafted ``members`` (:func:`_link_member` / :func:`_special_member`) —
+    the escape-attempt fixtures the validator is asserted to refuse before
+    extracting anything."""
+    with tarfile.open(dest, "w:gz") as tar:
+        for name, data in files.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+        for member in members:
+            tar.addfile(member)
 
 
 # --------------------------------------------------------------------------
@@ -382,15 +426,11 @@ class SignRecorder:
         return self._respond(argv)
 
     def _respond(self, argv):
+        # The reseal payload is a REAL `.tar.gz` now — the signer opens and
+        # extracts it with :mod:`tarfile`, so no tar read command reaches this
+        # seam. Only codesign/notary/hdiutil boundaries are recorded + faked.
         stdout = ""
-        if argv[0] == "tar" and argv[1] == "-tzf":
-            stdout = TAR_LISTING
-        elif argv[0] == "tar" and argv[1] == "-xzf":
-            work = Path(argv[argv.index("-C") + 1])
-            shutil.copytree(
-                self.tmp_path / "src" / "Phos.app", work / "Phos.app", symlinks=True
-            )
-        elif argv[0] == "security" and argv[1] == "find-identity":
+        if argv[0] == "security" and argv[1] == "find-identity":
             stdout = FIND_IDENTITY_OUT
         elif argv[0] == "hdiutil":
             Path(argv[-1]).write_bytes(b"signed-dmg")
@@ -414,13 +454,13 @@ class SignRecorder:
 
 
 def _fixture_tree(tmp_path: Path) -> Path:
-    """The signer's input tree: the reseal payload (a marker file — the
-    recorder's tar fake extracts the REAL fixture .app prepared under src/)
-    plus the unsigned .dmg whose NAME must survive the round-trip."""
-    _fixture_app(tmp_path / "src")
+    """The signer's input tree: a REAL reseal payload (`app.unsigned-app.tar.gz`
+    of the fixture .app, its `Contents/Current -> MacOS` framework symlink
+    intact) plus the unsigned .dmg whose NAME must survive the round-trip."""
+    app = _fixture_app(tmp_path / "src")
     tree = tmp_path / "dist"
     tree.mkdir()
-    (tree / "app.unsigned-app.tar.gz").write_bytes(b"tarball")
+    _make_targz(tree / "app.unsigned-app.tar.gz", app.parent, [app.name])
     (tree / "Phos_1.0.0_aarch64.dmg").write_bytes(b"unsigned-dmg")
     return tree
 
@@ -509,15 +549,9 @@ def test_sign_bundle_full_recorded_sequence(tmp_path):
         app / "Contents/MacOS/phos",
         app,  # the .app signs LAST
     ]
+    # The payload is validated + extracted in one in-process `tarfile` pass
+    # (no tar subprocess), so the recorded seam opens straight at the keychain.
     expected = [
-        ("tar", "-tzf", str(tmp_path / "dist" / "app.unsigned-app.tar.gz")),
-        (
-            "tar",
-            "-xzf",
-            str(tmp_path / "dist" / "app.unsigned-app.tar.gz"),
-            "-C",
-            str(scratch / "unpacked"),
-        ),
         *keychain_setup(kc1, cert1),
         *[argv for path in inner_first for argv in signs(path, kc1)],
         ("security", "delete-keychain", kc1),
@@ -662,81 +696,189 @@ def test_sign_bundle_refuses_multiple_dmgs(tmp_path):
 
 
 def test_sign_bundle_refuses_a_payload_with_two_apps(tmp_path):
-    _fixture_tree(tmp_path)
-    _fixture_app(tmp_path / "src", name="Other.app")
+    tree = _fixture_tree(tmp_path)
+    src = tmp_path / "src"
+    _fixture_app(src, name="Other.app")
+    # A payload carrying TWO .app bundles is ambiguous — re-emit the real
+    # tarball with both and expect the count refusal.
+    _make_targz(tree / "app.unsigned-app.tar.gz", src, ["Phos.app", "Other.app"])
 
-    def two_apps(argv):
-        if argv[1] != "-xzf":
-            return None
-        work = Path(argv[argv.index("-C") + 1])
-        for name in ("Phos.app", "Other.app"):
-            shutil.copytree(tmp_path / "src" / name, work / name, symlinks=True)
-        return execrun.ExecResult(argv=argv, rc=0, stdout="", stderr="", duration_ms=1)
-
-    recorder = SignRecorder(tmp_path, effects={"tar": two_apps})
+    recorder = SignRecorder(tmp_path)
     with pytest.raises(ReleaseError, match=r"exactly one \.app .* found 2"):
         sign_mod.sign_bundle(_request(tmp_path, recorder))
 
 
-@pytest.mark.parametrize(
-    "listing,unsafe",
-    [
-        ("App.app/\nApp.app/Contents/MacOS/app\n", None),
-        ("App.app/\n/etc/passwd\n", "/etc/passwd"),
-        ("App.app/\n../../evil\n", "../../evil"),
-        ("App.app/../escape\n", "App.app/../escape"),
-        ("\n\n", None),  # blank lines are ignored
-        # `.. ` (dot-dot-space) is a legitimate literal name that does NOT
-        # traverse — the exact member is validated, never a `.strip()`ed copy.
-        (".. \nApp.app/a.. b\n", None),
-    ],
-)
-def test_unsafe_tar_member_flags_absolute_and_dotdot(listing, unsafe):
-    assert sign_mod._unsafe_tar_member(listing) == unsafe
+def test_untar_validated_extracts_a_confined_bundle(tmp_path):
+    # The mac-app leg unpacks a legit .app faithfully: the framework symlink
+    # (`Contents/Current -> MacOS`, relative + in-tree) survives, and literal
+    # names that merely LOOK like traversal (`.. ` dot-dot-space, `a.. b`) are
+    # the confined children they name — never a stripped `..`.
+    app = _fixture_app(tmp_path / "src")
+    archive = tmp_path / "payload.tar.gz"
+    with tarfile.open(archive, "w:gz") as tar:
+        tar.add(app.parent / app.name, arcname="Phos.app")
+        # A benign symlink target that itself carries the display delimiter
+        # stays in-tree — structured linkname parsing is not fooled into
+        # escaping it (`Contents/Current -> MacOS` already rides the .app).
+        tar.addfile(_link_member("Phos.app/weird", "sub -> dir"))
+        dotted = tarfile.TarInfo(".. ")  # dot-dot-space: a real, confined name
+        dotted.size = 0
+        tar.addfile(dotted, io.BytesIO(b""))
+
+    work = tmp_path / "unpacked"
+    sign_mod._untar_validated(archive, work, "reseal payload")
+
+    assert (work / "Phos.app" / "Contents" / "Current").is_symlink()
+    assert (work / ".. ").exists()
 
 
 @pytest.mark.parametrize(
-    "listing,offender",
+    "files,links,match",
     [
-        # All regular files / dirs — nothing to refuse.
-        ("drwxr-xr-x 0 u g 0 d pkg/\n-rw-r--r-- 0 u g 9 d pkg/bin\n", None),
-        # A symlink (`l`) escapes through its target — refused.
+        # An ABSOLUTE member name escapes the extraction dir.
+        ({"/etc/evil": b"x"}, [], "unsafe path in reseal payload"),
+        # A `..` climb in the member NAME escapes.
+        ({"../../etc/evil": b"x"}, [], "unsafe path in reseal payload"),
+        # A symlink whose relative target climbs OUT with `..` escapes.
         (
-            "-rw-r--r-- 0 u g 9 d pkg/bin\nlrwxr-xr-x 0 u g 0 d pkg/e -> ../../x\n",
-            "lrwxr-xr-x 0 u g 0 d pkg/e -> ../../x",
+            {},
+            [_link_member("Phos.app/e", "../../../../etc")],
+            "link escaping reseal payload",
         ),
-        # A hardlink (`h`) likewise.
+        # An ABSOLUTE symlink target escapes.
+        ({}, [_link_member("Phos.app/e", "/etc/passwd")], "link escaping reseal"),
+        # A hardlink whose target escapes.
         (
-            "hrw-r--r-- 0 u g 0 d pkg/h link to /etc/x\n",
-            "hrw-r--r-- 0 u g 0 d pkg/h link to /etc/x",
+            {},
+            [_link_member("Phos.app/h", "/etc/passwd", hard=True)],
+            "link escaping reseal payload",
         ),
-        ("\n\n", None),  # blank lines are ignored
+        # THE EXPLOIT (#802 round-1 critical): a symlink whose NAME carries the
+        # display delimiter " -> ". A text-listing parser split on the FIRST
+        # " -> " and validated a bogus in-tree target; structured `linkname`
+        # sees the REAL absolute target and refuses.
+        (
+            {},
+            [_link_member("Phos.app/safe -> bypass", "/etc/passwd")],
+            "link escaping reseal payload",
+        ),
+        # Same exploit with a `..`-climbing real target behind a delimiter name.
+        (
+            {},
+            [_link_member("Phos.app/a -> b", "../../../etc/passwd")],
+            "link escaping reseal payload",
+        ),
+        # SYMLINK TRAVERSAL (#802 round-2 critical): an in-tree symlink whose
+        # target is confined, plus a later member whose NAME climbs `..` THROUGH
+        # it. Lexically the name resolves in-tree and would be approved, but at
+        # write time the OS follows the symlink and escapes — so a `..` in ANY
+        # member name is refused outright, never resolved lexically.
+        (
+            {"Phos.app/foo/../escaped": b"x"},
+            [_link_member("Phos.app/foo", ".")],
+            "unsafe path in reseal payload",
+        ),
+        # A special member (FIFO/device) is refused on the mac-app leg too — a
+        # signable bundle carries only files, dirs, and links.
+        (
+            {},
+            [_special_member("Phos.app/dev")],
+            "non-regular member in reseal payload",
+        ),
     ],
 )
-def test_non_regular_member_flags_links(listing, offender):
-    assert sign_mod._non_regular_member(listing) == offender
+def test_untar_validated_mac_leg_refuses_escapes(tmp_path, files, links, match):
+    # The mac-app leg (reject_links=False) allows in-tree links but refuses any
+    # name OR link target that leaves the root — validated from structured
+    # metadata BEFORE anything is unpacked.
+    archive = tmp_path / "payload.tar.gz"
+    _make_targz_members(archive, files, links)
+    work = tmp_path / "unpacked"
+    with pytest.raises(ReleaseError, match=match):
+        sign_mod._untar_validated(archive, work, "reseal payload")
+    assert list(work.iterdir()) == []  # refused before extracting anything
 
 
-def test_sign_bundle_rejects_a_payload_with_a_traversal_member(tmp_path):
-    # A tampered/garbled payload whose members escape the extraction dir is
-    # refused after listing (tar -tzf) and BEFORE extraction — nothing unpacked.
+@pytest.mark.parametrize(
+    "files,links,match",
+    [
+        # The archive leg refuses ANY link, even a legit in-tree one — a raw-CLI
+        # tarball ships only files and dirs.
+        (
+            {},
+            [_link_member("pkg/Current", "bin")],
+            "non-regular member in archive bundle",
+        ),
+        # The delimiter-name exploit is refused here too (blanket link refusal).
+        (
+            {},
+            [_link_member("pkg/safe -> bypass", "/etc/passwd")],
+            "non-regular member in archive bundle",
+        ),
+        # A traversal NAME is still an unsafe-path refusal, not a link one.
+        ({"../../etc/evil": b"x"}, [], "unsafe path in archive bundle"),
+        # A special member (FIFO/device) is refused — not a file or dir, and the
+        # structured check must not silently pass it through to extractall.
+        ({}, [_special_member("pkg/dev")], "non-regular member in archive bundle"),
+    ],
+)
+def test_untar_validated_archive_leg_refuses_links_and_escapes(
+    tmp_path, files, links, match
+):
+    archive = tmp_path / "bundle.tar.gz"
+    _make_targz_members(archive, files, links)
+    work = tmp_path / "unpacked"
+    with pytest.raises(ReleaseError, match=match):
+        sign_mod._untar_validated(archive, work, "archive bundle", reject_links=True)
+    assert list(work.iterdir()) == []
+
+
+def test_untar_validated_wraps_a_corrupt_archive_as_a_domain_error(tmp_path):
+    # A non-gzip / corrupt tarball surfaces as the domain ReleaseError naming
+    # the archive — never a raw tarfile/OS traceback the CLI's one-line error
+    # contract (`run_sign` maps only ReleaseError/ExecError) can't render.
+    archive = tmp_path / "payload.tar.gz"
+    archive.write_bytes(b"this is not a gzip stream")
+    work = tmp_path / "unpacked"
+    with pytest.raises(ReleaseError, match="cannot unpack reseal payload"):
+        sign_mod._untar_validated(archive, work, "reseal payload")
+
+
+def test_untar_validated_strips_setuid_and_setgid_bits(tmp_path):
+    # A signable bundle never needs setuid/setgid, and the notary rejects a
+    # setuid Mach-O — so the passthrough extraction filter clears the high bits
+    # a hostile payload might carry while KEEPING the rwx modes a codesign pass
+    # relies on.
+    archive = tmp_path / "payload.tar.gz"
+    with tarfile.open(archive, "w:gz") as tar:
+        info = tarfile.TarInfo("Phos.app/Contents/MacOS/tool")
+        info.mode = 0o6755  # setuid + setgid + rwxr-xr-x
+        info.size = 3
+        tar.addfile(info, io.BytesIO(b"bin"))
+
+    work = tmp_path / "unpacked"
+    sign_mod._untar_validated(archive, work, "reseal payload")
+
+    mode = (work / "Phos.app" / "Contents" / "MacOS" / "tool").stat().st_mode
+    assert mode & 0o7000 == 0  # setuid/setgid/sticky cleared
+    assert mode & 0o0777 == 0o755  # rwx preserved
+
+
+def test_sign_bundle_refuses_a_malicious_payload_before_signing(tmp_path):
+    # End-to-end: the headline exploit archive (a symlink NAME carrying " -> "
+    # and an absolute real target) is refused as the payload is unpacked, so the
+    # verb never reaches the keychain or codesign.
     _fixture_tree(tmp_path)
+    payload = tmp_path / "dist" / "app.unsigned-app.tar.gz"
+    _make_targz_members(
+        payload, {}, [_link_member("Phos.app/safe -> bypass", "/etc/passwd")]
+    )
 
-    def evil_listing(argv):
-        if argv[:2] == ("tar", "-tzf"):
-            return execrun.ExecResult(
-                argv=argv,
-                rc=0,
-                stdout="Phos.app/\n../../etc/evil\n",
-                stderr="",
-                duration_ms=1,
-            )
-        return None
-
-    recorder = SignRecorder(tmp_path, effects={"tar": evil_listing})
-    with pytest.raises(ReleaseError, match="unsafe path in reseal payload"):
+    recorder = SignRecorder(tmp_path)
+    with pytest.raises(ReleaseError, match="link escaping reseal payload"):
         sign_mod.sign_bundle(_request(tmp_path, recorder))
-    assert not recorder.heads("tar", "-xzf")  # extraction never ran
+    assert not recorder.heads("security")  # no keychain, no signing
+    assert not recorder.heads("codesign")
 
 
 def test_sign_bundle_no_identity_still_tears_the_keychain_down(tmp_path):
@@ -926,53 +1068,14 @@ def test_run_sign_stages_into_out_dir_when_given(tmp_path, capsys):
 ARCHIVE_STEM = "lex-aarch64-apple-darwin"
 ARCHIVE_NAME = f"{ARCHIVE_STEM}.tar.gz"
 
-#: A safe `tar -tzf` member listing for the fixture archive (the archive
-#: composition's staging layout: binary + docs under `<name>-<target>/`).
-ARCHIVE_LISTING = f"{ARCHIVE_STEM}/\n{ARCHIVE_STEM}/lex\n{ARCHIVE_STEM}/README.md\n"
-
-#: The same fixture as a `tar -tvzf` verbose listing — every member a regular
-#: file (`-`) or directory (`d`), so the archive leg's link refusal passes.
-ARCHIVE_VERBOSE_LISTING = (
-    f"drwxr-xr-x  0 u  g       0 Jan  1 00:00 {ARCHIVE_STEM}/\n"
-    f"-rwxr-xr-x  0 u  g  123456 Jan  1 00:00 {ARCHIVE_STEM}/lex\n"
-    f"-rw-r--r--  0 u  g      42 Jan  1 00:00 {ARCHIVE_STEM}/README.md\n"
-)
-
 
 class ArchiveRecorder(SignRecorder):
-    """The archive leg's recorded seam: the tar fakes extract a staging
-    subdir carrying REAL Mach-O bytes (the leg finds binaries by content,
-    never by name) beside a non-Mach-O doc, and ``tar -czf`` writes the
-    re-emitted tarball."""
-
-    def __init__(
-        self, tmp_path: Path, *, binaries=("lex",), statuses=("Accepted",), effects=None
-    ):
-        super().__init__(tmp_path, statuses=statuses, effects=effects)
-        self.binaries = binaries
+    """The archive leg's recorded seam: the tarball is a REAL `.tar.gz` the
+    signer opens with :mod:`tarfile` (binaries found by content, never by
+    name), so only the ``tar -czf`` RE-EMIT — the one tar subprocess the leg
+    still shells out to — is faked here."""
 
     def _respond(self, argv):
-        if argv[0] == "tar" and argv[1] == "-tzf":
-            return execrun.ExecResult(
-                argv=argv, rc=0, stdout=ARCHIVE_LISTING, stderr="", duration_ms=1
-            )
-        if argv[0] == "tar" and argv[1] == "-tvzf":
-            return execrun.ExecResult(
-                argv=argv,
-                rc=0,
-                stdout=ARCHIVE_VERBOSE_LISTING,
-                stderr="",
-                duration_ms=1,
-            )
-        if argv[0] == "tar" and argv[1] == "-xzf":
-            stage = Path(argv[argv.index("-C") + 1]) / ARCHIVE_STEM
-            stage.mkdir(parents=True, exist_ok=True)
-            for name in self.binaries:
-                (stage / name).write_bytes(MACHO_64)
-            (stage / "README.md").write_text("docs, not Mach-O")
-            return execrun.ExecResult(
-                argv=argv, rc=0, stdout="", stderr="", duration_ms=1
-            )
         if argv[0] == "tar" and argv[1] == "-czf":
             Path(argv[2]).write_bytes(b"signed-tar")
             return execrun.ExecResult(
@@ -981,15 +1084,20 @@ class ArchiveRecorder(SignRecorder):
         return super()._respond(argv)
 
 
-def _archive_tree(tmp_path: Path) -> Path:
-    """The archive leg's input tree: the unsigned tarball (a marker file —
-    the recorder's tar fake extracts the staging layout) plus the loose
-    staging dir the bundle stage leaves beside it (which the leg must ignore:
-    the TARBALL is what it reopens — loose exec bits do not survive artifact
-    transport)."""
+def _archive_tree(tmp_path: Path, *, binaries=("lex",)) -> Path:
+    """The archive leg's input tree: a REAL unsigned tarball carrying Mach-O
+    ``binaries`` (detected by content) beside a non-Mach-O doc, all rooted under
+    ``<stem>/``, plus the loose staging dir the bundle stage leaves beside it
+    (which the leg must ignore: the TARBALL is what it reopens — loose exec bits
+    do not survive artifact transport)."""
     tree = tmp_path / "dist"
     tree.mkdir(parents=True)
-    (tree / ARCHIVE_NAME).write_bytes(b"unsigned-tar")
+    stage = tmp_path / "stage" / ARCHIVE_STEM
+    stage.mkdir(parents=True)
+    for name in binaries:
+        (stage / name).write_bytes(MACHO_64)
+    (stage / "README.md").write_text("docs, not Mach-O")
+    _make_targz(tree / ARCHIVE_NAME, stage.parent, [ARCHIVE_STEM])
     loose = tree / ARCHIVE_STEM
     loose.mkdir()
     (loose / "lex").write_bytes(MACHO_64)
@@ -1081,12 +1189,10 @@ def test_sign_archives_full_recorded_sequence(tmp_path):
     binary = str(scratch / "archive-0" / ARCHIVE_STEM / "lex")
     zip_path = str(scratch / "lex-notarize.zip")
     signed_tar = str(scratch / f"signed-0-{ARCHIVE_NAME}")
+    # The tarball is validated + extracted in one in-process `tarfile` pass
+    # (no tar subprocess on the read side), so the recorded seam opens at the
+    # keychain; only the `tar -czf` re-emit is a tar subprocess (see the tail).
     expected = [
-        ("tar", "-tzf", str(tree / ARCHIVE_NAME)),
-        # The archive leg additionally refuses link members (a raw-CLI tarball
-        # ships only files and dirs) via a verbose listing before extraction.
-        ("tar", "-tvzf", str(tree / ARCHIVE_NAME)),
-        ("tar", "-xzf", str(tree / ARCHIVE_NAME), "-C", str(scratch / "archive-0")),
         *_keychain_setup(kc1, cert1),
         *_codesigns(binary, kc1),
         ("security", "delete-keychain", kc1),
@@ -1155,10 +1261,8 @@ def test_sign_archives_signs_every_binary_in_one_keychain_pass(tmp_path):
     # The legacy scar: the identity lives in a per-call temporary keychain,
     # so EVERY binary must go through a single sign-mac call — one keychain,
     # then one notary submission per binary.
-    _archive_tree(tmp_path)
-    recorder = ArchiveRecorder(
-        tmp_path, binaries=("lex", "lexd"), statuses=("Accepted", "Accepted")
-    )
+    _archive_tree(tmp_path, binaries=("lex", "lexd"))
+    recorder = ArchiveRecorder(tmp_path, statuses=("Accepted", "Accepted"))
 
     result = sign_mod.sign_archives(_request(tmp_path, recorder))
 
@@ -1194,81 +1298,50 @@ def test_sign_archives_refuses_entitlements(tmp_path):
 def test_sign_archives_no_macho_is_a_hard_fail(tmp_path):
     # The docs beside the binary are not Mach-O; an archive with NO Mach-O at
     # all is a wrong bundle, never a quiet pass (the leg detects by content).
-    _archive_tree(tmp_path)
-    recorder = ArchiveRecorder(tmp_path, binaries=())
+    _archive_tree(tmp_path, binaries=())
+    recorder = ArchiveRecorder(tmp_path)
     with pytest.raises(ReleaseError, match="no Mach-O binary inside"):
         sign_mod.sign_archives(_request(tmp_path, recorder))
     assert not recorder.heads("security")  # no keychain was ever created
 
 
 def test_sign_archives_rejects_a_traversal_member(tmp_path):
-    # The same tar path-traversal refusal as the reseal payload: listed,
-    # validated, and refused BEFORE extraction.
-    _archive_tree(tmp_path)
+    # The same tar path-traversal refusal as the reseal payload: a `..`-climbing
+    # member NAME is refused as the tarball is validated, before any signing.
+    tree = _archive_tree(tmp_path)
+    _make_targz_members(tree / ARCHIVE_NAME, {"../../etc/evil": b"x"}, [])
 
-    def evil_listing(argv):
-        if argv[:2] == ("tar", "-tzf"):
-            return execrun.ExecResult(
-                argv=argv,
-                rc=0,
-                stdout=f"{ARCHIVE_STEM}/\n../../etc/evil\n",
-                stderr="",
-                duration_ms=1,
-            )
-        return None
-
-    recorder = ArchiveRecorder(tmp_path, effects={"tar": evil_listing})
+    recorder = ArchiveRecorder(tmp_path)
     with pytest.raises(ReleaseError, match="unsafe path in archive bundle"):
         sign_mod.sign_archives(_request(tmp_path, recorder))
-    assert not recorder.heads("tar", "-xzf")
+    assert not recorder.heads("security")  # never reached the keychain
 
 
 def test_sign_archives_rejects_a_symlink_member(tmp_path):
-    # The `tar -tzf` NAME check confines paths, but a symlink escapes THROUGH
-    # its target — so the archive leg additionally refuses any link member
-    # (verbose `-tvzf` listing) BEFORE extraction; a raw-CLI tarball ships
-    # only files and dirs.
-    _archive_tree(tmp_path)
+    # A raw-CLI tarball ships only files and dirs, so the archive leg refuses
+    # ANY link — even one whose name looks safe — before extraction; the escape
+    # rides the link's TARGET, structurally read from `linkname`.
+    tree = _archive_tree(tmp_path)
+    _make_targz_members(
+        tree / ARCHIVE_NAME, {}, [_link_member(f"{ARCHIVE_STEM}/evil", "../../../etc")]
+    )
 
-    def link_listing(argv):
-        if argv[:2] == ("tar", "-tzf"):
-            # Names alone look safe: no `..`, not absolute.
-            return execrun.ExecResult(
-                argv=argv,
-                rc=0,
-                stdout=f"{ARCHIVE_STEM}/\n{ARCHIVE_STEM}/evil\n",
-                stderr="",
-                duration_ms=1,
-            )
-        if argv[:2] == ("tar", "-tvzf"):
-            return execrun.ExecResult(
-                argv=argv,
-                rc=0,
-                stdout=(
-                    f"drwxr-xr-x  0 u  g  0 Jan  1 00:00 {ARCHIVE_STEM}/\n"
-                    f"lrwxr-xr-x  0 u  g  0 Jan  1 00:00 {ARCHIVE_STEM}/evil"
-                    " -> ../../../../etc\n"
-                ),
-                stderr="",
-                duration_ms=1,
-            )
-        return None
-
-    recorder = ArchiveRecorder(tmp_path, effects={"tar": link_listing})
+    recorder = ArchiveRecorder(tmp_path)
     with pytest.raises(ReleaseError, match="non-regular member in archive bundle"):
         sign_mod.sign_archives(_request(tmp_path, recorder))
-    assert not recorder.heads("tar", "-xzf")  # extraction never ran
+    assert not recorder.heads("security")  # never reached the keychain
 
 
 def test_sign_archives_rejected_notarization_fails_before_any_reemit(tmp_path):
     # ADR-0009's barrier: the notary verdict lands BEFORE any tarball is
     # re-emitted, so a rejected binary leaves the unsigned tarball untouched.
     tree = _archive_tree(tmp_path)
+    original = (tree / ARCHIVE_NAME).read_bytes()
     recorder = ArchiveRecorder(tmp_path, statuses=("Invalid",))
     with pytest.raises(ReleaseError, match="notarization Invalid"):
         sign_mod.sign_archives(_request(tmp_path, recorder))
     assert not recorder.heads("tar", "-czf")
-    assert (tree / ARCHIVE_NAME).read_bytes() == b"unsigned-tar"
+    assert (tree / ARCHIVE_NAME).read_bytes() == original
 
 
 def test_sign_archives_reemit_copy_failure_leaves_the_unsigned_tarball_intact(
@@ -1280,6 +1353,7 @@ def test_sign_archives_reemit_copy_failure_leaves_the_unsigned_tarball_intact(
     # only an atomic rename replaces it, so a mid-copy OSError leaves the
     # original untouched.
     tree = _archive_tree(tmp_path)
+    original = (tree / ARCHIVE_NAME).read_bytes()
     recorder = ArchiveRecorder(tmp_path)
 
     def boom(src, dst):
@@ -1288,7 +1362,7 @@ def test_sign_archives_reemit_copy_failure_leaves_the_unsigned_tarball_intact(
     monkeypatch.setattr(sign_mod.shutil, "copy2", boom)
     with pytest.raises(OSError, match="disk full"):
         sign_mod.sign_archives(_request(tmp_path, recorder))
-    assert (tree / ARCHIVE_NAME).read_bytes() == b"unsigned-tar"
+    assert (tree / ARCHIVE_NAME).read_bytes() == original
 
 
 def test_run_sign_dispatches_the_archive_tree_and_emits_the_typed_result(
@@ -1313,6 +1387,7 @@ def test_run_sign_dispatches_the_archive_tree_and_emits_the_typed_result(
 
 def test_run_sign_archive_stages_into_out_dir_when_given(tmp_path, capsys):
     tree = _archive_tree(tmp_path)
+    original = (tree / ARCHIVE_NAME).read_bytes()
     out = tmp_path / "dist-signed"
     recorder = ArchiveRecorder(tmp_path)
 
@@ -1323,7 +1398,7 @@ def test_run_sign_archive_stages_into_out_dir_when_given(tmp_path, capsys):
     # as the signed-* overlay; the tree's unsigned tarball stays untouched.
     assert [p.name for p in sorted(out.iterdir())] == [ARCHIVE_NAME]
     assert (out / ARCHIVE_NAME).read_bytes() == b"signed-tar"
-    assert (tree / ARCHIVE_NAME).read_bytes() == b"unsigned-tar"
+    assert (tree / ARCHIVE_NAME).read_bytes() == original
     assert "signed + notarized 1 binary" in capsys.readouterr().out
 
 

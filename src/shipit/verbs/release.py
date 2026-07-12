@@ -1322,10 +1322,11 @@ def run_publish(
         for key in publish_mod.required_env_keys(dispatch.adapter, testpypi=testpypi):
             redact.register_secret(env_map[key])
 
-    # The repo slug is resolved only when a planned dispatch needs it (brew's
-    # asset URLs) — a laptop RC cut must not require a gh round-trip.
+    # The repo slug is resolved only when a planned dispatch declares it needs
+    # it (`needs_repo` — brew's asset URLs, notify-downstreams' dispatch
+    # payload) — a laptop RC cut must not require a gh round-trip.
     repo: str | None = None
-    if any(d.skip is None and d.adapter.name == "brew" for d in dispatches):
+    if any(d.skip is None and d.adapter.needs_repo for d in dispatches):
         repo = ghio.current_repo(cwd=str(root)).slug
 
     published: list[publish_mod.Published] = []

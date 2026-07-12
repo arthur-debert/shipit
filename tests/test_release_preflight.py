@@ -214,6 +214,27 @@ endpoints = ["gh-release"]
     assert [e.artifact for e in unsigned_assert] == ["tool"]
 
 
+def test_tarball_bundles_but_does_not_assert_a_binary():
+    # TOL02-WS16 #792: a generated-parser tarball is a SOURCE composition — it
+    # bundles (the stage is live) but has no main binary, so the scar-#2
+    # assert-bundle guard is NOT live for it (running it over the source
+    # `.tar.gz` would hard-fail with "no main binary").
+    arts = _artifacts(
+        """
+[artifacts.parser]
+build = ["tree-sitter"]
+platforms = ["linux-x86_64"]
+bundle = { composition = "tarball" }
+endpoints = ["gh-release", "notify-downstreams"]
+downstreams = ["lex-fmt/vscode"]
+"""
+    )
+    plan = preflight.plan(arts, _resolved("1.0.0"))
+    assert "bundle" in plan.stages
+    assert "assert-bundle" not in plan.stages
+    assert [(e.artifact, e.bundle) for e in plan.matrix] == [("parser", True)]
+
+
 def test_bundle_flag_is_platform_aware_for_a_platform_specific_composition():
     # Umbrella second-look (codex): ONE artifact whose composition is
     # platform-specific (deb → linux only) but which spans several platforms.

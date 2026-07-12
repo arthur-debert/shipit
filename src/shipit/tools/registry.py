@@ -1,7 +1,7 @@
 """The closed toolchain registry — the Tool verbs' dispatch axis (ADR-0007/0039).
 
 A **Toolchain** names the build/test ecosystem of one path in a repo (rust,
-go, python, npm) and carries the DEFAULT producing command per **tool slot**
+go, python, npm, tree-sitter) and carries the DEFAULT producing command per **tool slot**
 (``test`` from WS01, ``build`` from WS02). The registry is CLOSED, the
 lint ``Lang`` set's mirror: adding a toolchain is adding an entry here,
 nothing downstream changes — and a toolchain is never a project-Kind switch
@@ -119,10 +119,30 @@ PYTHON = Toolchain("python", test=("pytest",), build=("uv", "build"))
 #: ``package.json``, so the registry defers to that declaration rather than
 #: picking one for the fleet.
 NPM = Toolchain("npm", test=("npm", "test"), build=("npm", "run", "build"))
+#: tree-sitter: the bespoke generated-parser toolchain (TOL02-WS16 #792;
+#: WS10 NO-GO on pixi-build, #798). The build slot is ``tree-sitter
+#: generate`` — regenerates ``src/parser.c`` (and the ``src/tree_sitter/``
+#: headers, ``node-types.json``) from ``grammar.js``, the whole-leg build a
+#: generated-parser artifact bundles into its tarball (no per-artifact
+#: package narrowing — like ``uv build``, ``tree-sitter generate`` produces
+#: the parser whole, so :mod:`shipit.tools.build` leaves its argv untouched).
+#: The test slot is ``tree-sitter test`` — the CORPUS tests (the
+#: ``test/corpus/`` s-expression assertions), the check a corpus lane runs
+#: (``run = "test tree-sitter"``) to keep the grammar honest against its
+#: fixtures. Legacy ``tree-sitter.yml@v3`` ran the same two commands (npm
+#: publish OFF, corpus tests ON); this is that composition, shipit-side. The
+#: ``tree-sitter`` CLI is consumer-provisioned (not on conda-forge — a
+#: documented hole in the provisioning inventory), the same posture as every
+#: WS12–WS16 composition tool.
+TREE_SITTER = Toolchain(
+    "tree-sitter",
+    test=("tree-sitter", "test"),
+    build=("tree-sitter", "generate"),
+)
 
 #: The closed registry, in a stable order. Adding a toolchain is adding an
 #: entry here (mirror of the lint ``LANGS`` tuple).
-TOOLCHAINS: tuple[Toolchain, ...] = (RUST, GO, PYTHON, NPM)
+TOOLCHAINS: tuple[Toolchain, ...] = (RUST, GO, PYTHON, NPM, TREE_SITTER)
 
 
 def names() -> tuple[str, ...]:

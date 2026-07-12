@@ -209,6 +209,33 @@ def test_publish_block_feeds_results_to_the_verb_not_yaml():
     assert 'args+=(--matrix "$MATRIX")' in script
 
 
+def test_publish_block_declares_feeds_and_forwards_every_endpoint_token():
+    # ADR-0040 routing: the publish block passes each endpoint's token to the
+    # verb, which validates the plan-required subset. The token set IS
+    # secretreq.ENDPOINT_SECRETS (gh-release declares none — ambient token), so
+    # a new endpoint (notify-downstreams #792) cannot land its adapter without
+    # wiring its token here, in the block AND the composed chain's forward.
+    from shipit.release import secretreq
+
+    endpoint_tokens = {
+        name for names in secretreq.ENDPOINT_SECRETS.values() for name in names
+    }
+    assert "DOWNSTREAM_DISPATCH_TOKEN" in endpoint_tokens  # the #792 addition
+
+    declared = _load("wf-publish.yml")["on"]["workflow_call"]["secrets"]
+    assert endpoint_tokens <= set(declared)
+    assert all(not declared[name].get("required", False) for name in endpoint_tokens)
+    # The publish step reads each as a same-named env var …
+    publish = _load("wf-publish.yml")["jobs"]["publish"]
+    step = next(s for s in publish["steps"] if "release publish" in s.get("run", ""))
+    for name in sorted(endpoint_tokens):
+        assert step["env"][name] == f"${{{{ secrets.{name} }}}}"
+    # … and the composed chain forwards each to the publish job.
+    forwarded = _load(COMPOSED)["jobs"]["publish"]["secrets"]
+    for name in sorted(endpoint_tokens):
+        assert forwarded[name] == f"${{{{ secrets.{name} }}}}"
+
+
 def test_prepare_pipeline_steps_set_pipefail():
     # The plan and prepare steps pipe a shipit invocation into jq. The default
     # step shell is `bash -e` WITHOUT pipefail, so a failed producer would be
@@ -320,6 +347,53 @@ def test_sign_chain_declares_and_forwards_both_notary_trios():
         forwarded = jobs[job_id]["secrets"]
         for name in sorted(mac_names):
             assert forwarded[name] == f"${{{{ secrets.{name} }}}}", job_id
+
+
+def test_endpoint_tokens_are_declared_forwarded_and_mapped_everywhere():
+    # The closed endpoint token surface (shipit.release.secretreq
+    # ENDPOINT_SECRETS) must ride the reusable workflow contract end to end,
+    # or a consumer declaring the endpoint passes preflight token validation
+    # while the called workflow never exposes the secret into the job env —
+    # the marketplace path fails before it can publish (TOL02-WS13 #789).
+    # Derived from the registry so the NEXT endpoint adapter's token is
+    # guarded here automatically, never a hand-maintained mirror. All optional:
+    # WHICH tokens must be non-empty is the plan's/verb's call, never YAML's.
+    from shipit.release import secretreq
+
+    endpoint_tokens = {
+        name for names in secretreq.ENDPOINT_SECRETS.values() for name in names
+    }
+
+    # Declared optional in every block that mirrors the surface …
+    for block in ("wf-prepare.yml", "wf-publish.yml", "wf-release.yml"):
+        declared = _load(block)["on"]["workflow_call"]["secrets"]
+        assert endpoint_tokens <= set(declared), block
+        assert all(
+            not spec.get("required", False)
+            for name, spec in declared.items()
+            if name in endpoint_tokens
+        ), block
+
+    # … wf-prepare injects them for preflight's presence validation …
+    plan_step = next(
+        s for s in _steps("wf-prepare.yml", "prepare") if s.get("id") == "plan"
+    )
+    for name in sorted(endpoint_tokens):
+        assert plan_step["env"][name] == f"${{{{ secrets.{name} }}}}", name
+
+    # … wf-publish's Publish step reads each as a same-named env var …
+    publish_step = next(
+        s for s in _steps("wf-publish.yml", "publish") if s.get("name") == "Publish"
+    )
+    for name in sorted(endpoint_tokens):
+        assert publish_step["env"][name] == f"${{{{ secrets.{name} }}}}", name
+
+    # … and the composed chain forwards them to prepare and publish.
+    jobs = _load(COMPOSED)["jobs"]
+    for job_id in ("prepare", "publish"):
+        forwarded = jobs[job_id]["secrets"]
+        for name in sorted(endpoint_tokens):
+            assert forwarded[name] == f"${{{{ secrets.{name} }}}}", (job_id, name)
 
 
 def test_pixi_pin_is_lockstep_across_all_blocks():
