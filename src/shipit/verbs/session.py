@@ -19,9 +19,8 @@ posture, with the session-identity env exports riding along.
 The verb is thin (ADR-0030): the launch contract — id grammar, argv posture, env
 scrubs/exports — is the pure core in :mod:`shipit.session.bootstrap`; this module
 holds click glue, the effectful seams (Tree creation, ``chdir``/``exec``), and the
-exit mapping. The managed ``./agent-start codex`` launcher (and its
-``./codex-start`` compatibility shim, both laid down by ``shipit install``)
-is a thin alias onto this verb.
+exit mapping. The managed ``./agent-start codex`` launcher (laid down by
+``shipit install``) is a thin alias onto this verb.
 
 The backend-neutral ``shipit session resume`` surface sits alongside those
 launch paths. It resolves a human-facing shipit session id, backend-native id, or
