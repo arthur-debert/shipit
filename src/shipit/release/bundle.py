@@ -75,10 +75,10 @@ functions the entries carry:
   is the consumer's to provision, so tauri never becomes a release Exec tool
   and takes no provisioning-guard row (only registry-ASSEMBLED builders like
   wasm-pack ride pixi provisioning — docs/dev/release-tool-provisioning.md).
-  Each run is ISOLATED first: the declared bundle ``source`` dir is cleared
-  before ``tauri build`` so the post-build tree is exactly THIS build's
-  output, never a stale differently-named ``.AppImage``/``.deb``/pair from a
-  prior version left under the persistent ``target`` tree:
+  Collection is NON-DESTRUCTIVE (it never deletes under the consumer's
+  declared ``source`` — a config typo must never cost a file) and reads only
+  the tool-CONTROLLED per-format subdirs tauri writes, never a name-blind
+  recursive sweep of ``source``:
 
   - on **darwin** — the coupled ``.app``/``.dmg`` pair PLUS the reseal payload,
     the EXACT mac-app shape (the shared :func:`_stage_mac_pair`): the mac
@@ -86,14 +86,17 @@ functions the entries carry:
     payload, not the composition (workflows.lex §3.1 — "the only tauri-specific
     part is the bundler"), so a tauri darwin bundle rides the same sign path as
     electron with zero signer changes;
-  - on **linux** — the ``.AppImage`` and ``.deb`` tauri build leaves
-    (:data:`_TAURI_LINUX_GLOBS`), staged into the output tree.
+  - on **linux** — each format's ONE primary output from its subdir of the
+    bundle dir (:data:`_TAURI_LINUX_FORMATS`: ``appimage/*.AppImage``,
+    ``deb/*.deb``), staged into the output tree.
 
   Windows is out of scope (the legacy ``tauri-app.yml`` ships no
   ``icon.ico``, #791), so the composition is gated to darwin+linux targets and
   a windows leg is a clean skip, never a surprise. A darwin bundle missing its
   pair, or a linux bundle producing no ``.AppImage``/``.deb``, is a hard
-  bundle-stage failure, never a quiet pass (ADR-0009's barrier).
+  bundle-stage failure, never a quiet pass (ADR-0009's barrier); so is a
+  format subdir holding more than one primary bundle (a stale prior output —
+  never a nondeterministic pick).
 
 Every external command runs through the injected runner — the one Exec seam
 (ADR-0028); the ``cargo`` / ``uv`` / ``wasm-pack`` / ``npm`` / ``tar`` /
@@ -497,60 +500,72 @@ def _compose_mac_app(req: ComposeRequest) -> Composed:
     return _stage_mac_pair(req, req.root / spec.source, "mac-app")
 
 
-#: The tauri linux bundle globs the tauri composition collects — the
-#: ``.AppImage`` and ``.deb`` ``tauri build`` leaves under its bundle dir.
-#: Windows is out of scope (the legacy ``tauri-app.yml`` ships no ``icon.ico``,
-#: #791), so the composition is darwin+linux-gated and never looks for a
-#: ``.msi``/``.exe``.
-_TAURI_LINUX_GLOBS: tuple[str, ...] = ("*.AppImage", "*.deb")
+#: The tauri linux bundle layout the composition collects: each format subdir
+#: ``tauri build`` writes under the declared bundle dir → the glob for its ONE
+#: primary output (``bundle/appimage/*.AppImage``, ``bundle/deb/*.deb``). This
+#: is the tool-CONTROLLED layout tauri owns and the release pipeline resolves
+#: the same way (arthur-debert/release ``resolve-tauri-bundles.sh``). Collecting
+#: from the named subdirs — never a recursive sweep of the consumer's declared
+#: ``source`` — is what keeps a stray file elsewhere under ``source`` out of the
+#: release. Windows is out of scope (the legacy ``tauri-app.yml`` ships no
+#: ``icon.ico``, #791), so the composition is darwin+linux-gated and never
+#: looks for a ``.msi``/``.exe``.
+_TAURI_LINUX_FORMATS: tuple[tuple[str, str], ...] = (
+    ("appimage", "*.AppImage"),
+    ("deb", "*.deb"),
+)
 
 
 def _compose_tauri(req: ComposeRequest) -> Composed:
     """``tauri build`` the app, collect the current platform's bundles.
 
-    Isolates the run FIRST: clears the declared bundle ``source`` dir before
-    the build so the post-build tree holds ONLY what this ``tauri build``
-    produced. ``source`` (``target/.../bundle``) persists across builds, and
-    the name-blind collectors below (``rglob``, and ``_stage_mac_pair``'s
-    exactly-one check) would otherwise sweep in a stale differently-named
-    ``.AppImage``/``.deb`` or ``.app``/``.dmg`` pair a prior version left there
-    — a stale-artifact release, or a spurious multi-pair hard fail. Then runs
-    the DECLARED ``tauri build`` (the consumer's own bundler — the one
-    consumer-specific part) and, on a darwin target, stages the coupled
+    Runs the DECLARED ``tauri build`` (the consumer's own bundler — the one
+    consumer-specific part), then, on a darwin target, stages the coupled
     ``.app``/``.dmg`` pair + reseal payload (the shared :func:`_stage_mac_pair`
-    — the same sign path as mac-app/electron); on a linux target collects the
-    ``.AppImage`` and ``.deb`` (:data:`_TAURI_LINUX_GLOBS`) into the output
-    tree. See the module docstring's tauri entry. The composition is gated to
-    darwin+linux (:data:`TAURI`), so a windows leg never reaches here.
+    — the same sign path as mac-app/electron); on a linux target collects each
+    format's ONE primary output from its tool-controlled subdir of the declared
+    bundle dir (:data:`_TAURI_LINUX_FORMATS`). See the module docstring's tauri
+    entry. The composition is gated to darwin+linux (:data:`TAURI`), so a
+    windows leg never reaches here.
+
+    Collection is NON-DESTRUCTIVE — it never deletes under the consumer's
+    declared ``source`` (a config typo must never cost a file). Instead of a
+    name-blind recursive sweep, it reads only the named per-format subdirs and
+    requires EXACTLY ONE primary file in each present one: a second, stale
+    differently-named bundle a prior build left there is a HARD FAIL, never a
+    silent stale-artifact release (the same "exactly one, never a
+    nondeterministic pick" contract :func:`_stage_mac_pair` holds for the
+    darwin pair). A rerun overwrites its one file in place, so it stays one.
     """
     spec = req.artifact.bundle
     assert spec is not None and spec.command is not None and spec.source is not None
-    source = req.root / spec.source
-    if source.exists():
-        # Clean-run isolation, not a rebuild: tauri regenerates its bundle dir,
-        # and the compiled binaries live ABOVE it (``target/release``), so
-        # clearing only ``bundle`` costs nothing but forecloses stale outputs.
-        shutil.rmtree(source)
     req.run_cmd(list(spec.command), req.root)
+    source = req.root / spec.source
     if "apple-darwin" in req.target:
         return _stage_mac_pair(req, source, "tauri")
     req.out_dir.mkdir(parents=True, exist_ok=True)
     produced: list[str] = []
-    for pattern in _TAURI_LINUX_GLOBS:
-        for path in sorted(source.rglob(pattern)):
-            if not path.is_file():
-                continue
+    for subdir, pattern in _TAURI_LINUX_FORMATS:
+        fmt_dir = source / subdir
+        if not fmt_dir.is_dir():
+            continue  # a format the consumer's tauri.conf did not request
+        matches = sorted(p for p in fmt_dir.glob(pattern) if p.is_file())
+        if len(matches) > 1:
+            raise ReleaseError(
+                f"[artifacts.{req.artifact.name}] tauri composition: {fmt_dir} "
+                f"holds {len(matches)} {pattern} files, expected exactly one — "
+                f"a stale bundle from a prior build is still there; clean it "
+                f"and rebuild (never a nondeterministic pick or a silent stale "
+                f"release)"
+            )
+        for path in matches:
             dest = req.out_dir / path.name
             if dest.exists():
                 dest.unlink()
             shutil.copy2(path, dest)
-            # Dedup: a same-named match in two subdirs collapses to one staged
-            # file, so its name is recorded once (Composed.outputs stays a set
-            # of the files actually preserved in out_dir).
-            if path.name not in produced:
-                produced.append(path.name)
+            produced.append(path.name)
     if not produced:
-        globs = "/".join(_TAURI_LINUX_GLOBS)
+        globs = "/".join(pattern for _, pattern in _TAURI_LINUX_FORMATS)
         raise ReleaseError(
             f"[artifacts.{req.artifact.name}] tauri composition: `tauri build` "
             f"left no {globs} bundle under {source} — a linux tauri build that "

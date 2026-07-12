@@ -286,6 +286,23 @@ def test_tauri_needs_command_and_source():
         _load('[artifacts.x]\nbundle = { composition = "tauri" }\n')
 
 
+@pytest.mark.parametrize("bad", ['"."', '"./"'])
+def test_declared_command_source_refuses_the_repo_root(bad):
+    # A declared bundler writes into a dedicated output subdir the composition
+    # then reads; the repo root (`.`) is a config mistake — refused loudly at
+    # parse so it can never reach the compose step (defence in depth: the tauri
+    # collector deletes nothing under `source`, but a repo-root source is still
+    # wrong for every declared-command composition).
+    with pytest.raises(
+        config.ConfigError, match=r"dedicated bundle output subdirectory"
+    ):
+        _load(
+            "[artifacts.x]\n"
+            'bundle = { composition = "tauri", command = ["npm", "run", "tauri", '
+            f'"build"], source = {bad} }}\n'
+        )
+
+
 def test_sign_with_a_tauri_bundle_parses():
     # `sign = true` over a tauri app routes to the mac signer's mac-app leg
     # (the darwin leg emits the same reseal payload), so it is a signable

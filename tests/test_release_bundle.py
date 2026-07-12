@@ -682,21 +682,17 @@ def test_tauri_linux_rerun_overwrites_existing_same_named_bundles(tmp_path):
     )
 
 
-def test_tauri_linux_isolates_the_run_dropping_stale_prior_bundles(tmp_path):
-    # `target/.../bundle` persists across builds, so a prior version's
-    # differently-named .AppImage/.deb still sits under it. The run clears the
-    # declared bundle dir before `tauri build`, so the name-blind collector
-    # sees ONLY this build's outputs — the stale set never rides along, even
-    # the one buried in a stray nested subdir rglob would otherwise sweep in
-    # (codex #515: no stale-artifact release).
+def test_tauri_linux_does_not_delete_under_source_and_ignores_stray_files(tmp_path):
+    # Collection is NON-DESTRUCTIVE and reads only the tool-controlled per-format
+    # subdirs: a stray file elsewhere under the consumer's declared `source` is
+    # neither collected nor deleted (a config typo must never cost a file).
     (artifact,) = _artifacts(TAURI_SPEC)
     source = tmp_path / "src-tauri/target/release/bundle"
-    (source / "appimage").mkdir(parents=True)
-    (source / "appimage" / "Phos_0.9.0_amd64.AppImage").write_bytes(b"stale")
-    (source / "deb").mkdir(parents=True)
-    (source / "deb" / "Phos_0.9.0_amd64.deb").write_bytes(b"stale")
-    (source / "old" / "nested").mkdir(parents=True)
-    (source / "old" / "nested" / "Phos_0.8.0_amd64.AppImage").write_bytes(b"stale")
+    # A tracked-looking file the recursive sweep would once have grabbed, in a
+    # non-format subdir — it must survive untouched and stay out of the release.
+    (source / "src").mkdir(parents=True)
+    stray = source / "src" / "keep_me.AppImage"
+    stray.write_bytes(b"not a bundle")
 
     recorder = RunRecorder({"npm": _tauri_linux_effect(tmp_path)})
     composed = bundle_mod.TAURI.compose(
@@ -708,32 +704,51 @@ def test_tauri_linux_isolates_the_run_dropping_stale_prior_bundles(tmp_path):
         "Phos_1.0.0_amd64.AppImage",
         "Phos_1.0.0_amd64.deb",
     )
-    assert not (out / "Phos_0.9.0_amd64.AppImage").exists()
-    assert not (out / "Phos_0.9.0_amd64.deb").exists()
-    assert not (out / "Phos_0.8.0_amd64.AppImage").exists()
+    assert stray.read_bytes() == b"not a bundle"  # untouched, never deleted
+    assert not (out / "keep_me.AppImage").exists()  # never collected
 
 
-def test_tauri_darwin_isolation_drops_a_stale_prior_pair(tmp_path):
-    # The same clean-run isolation on darwin (codex #515, class sweep): a stale
-    # prior .app/.dmg under the persistent bundle dir would otherwise trip
-    # _stage_mac_pair's exactly-one guard as a spurious multi-pair hard fail.
-    # The pre-build clear forecloses it — only the fresh pair is staged.
+def test_tauri_linux_hard_fails_on_a_stale_prior_bundle(tmp_path):
+    # `target/.../bundle/appimage` persists across builds, so a prior version's
+    # differently-named .AppImage can still sit beside this build's. Two primary
+    # files in a format subdir is a HARD FAIL — never a nondeterministic pick or
+    # a silent stale-artifact release, and never resolved by deleting anything
+    # (codex #515 + agy: the safe, non-destructive resolution).
     (artifact,) = _artifacts(TAURI_SPEC)
     source = tmp_path / "src-tauri/target/release/bundle"
-    (source / "macos" / "Stale.app").mkdir(parents=True)
-    (source / "dmg").mkdir(parents=True)
-    (source / "dmg" / "Stale_0.9.0_aarch64.dmg").write_bytes(b"stale")
 
-    recorder = RunRecorder({"npm": _bundler_effect(tmp_path), "tar": _tar_effect})
-    composed = bundle_mod.TAURI.compose(
-        _request(tmp_path, artifact, (), target=MAC, run_cmd=recorder)
-    )
+    def stale_then_fresh(argv, cwd):
+        _tauri_linux_effect(tmp_path)(argv, cwd)  # this build's Phos_1.0.0.*
+        (source / "appimage" / "Phos_0.9.0_amd64.AppImage").write_bytes(b"stale")
 
-    assert composed == bundle_mod.Composed(
-        "app",
-        "tauri",
-        ("Phos.app", "Phos_1.0.0_aarch64.dmg", "app.unsigned-app.tar.gz"),
-    )
+    recorder = RunRecorder({"npm": stale_then_fresh})
+    with pytest.raises(ReleaseError, match=r"expected exactly one"):
+        bundle_mod.TAURI.compose(
+            _request(tmp_path, artifact, (), target=LINUX, run_cmd=recorder)
+        )
+    # Nothing under source was deleted by the failure.
+    assert (source / "appimage" / "Phos_0.9.0_amd64.AppImage").exists()
+    assert (source / "appimage" / "Phos_1.0.0_amd64.AppImage").exists()
+
+
+def test_tauri_darwin_hard_fails_on_a_stale_prior_pair(tmp_path):
+    # The darwin leg's safety is _stage_mac_pair's exactly-one guard: a stale
+    # prior .app/.dmg beside this build's is a loud multi-pair fail, never a
+    # silent wrong-artifact pick and never a deletion under source.
+    (artifact,) = _artifacts(TAURI_SPEC)
+    source = tmp_path / "src-tauri/target/release/bundle"
+
+    def stale_then_fresh(argv, cwd):
+        _bundler_effect(tmp_path)(argv, cwd)  # this build's Phos.app/.dmg
+        (source / "macos" / "Stale.app").mkdir(parents=True)
+        (source / "dmg" / "Stale_0.9.0_aarch64.dmg").write_bytes(b"stale")
+
+    recorder = RunRecorder({"npm": stale_then_fresh, "tar": _tar_effect})
+    with pytest.raises(ReleaseError, match=r"exactly one coupled \.app/\.dmg pair"):
+        bundle_mod.TAURI.compose(
+            _request(tmp_path, artifact, (), target=MAC, run_cmd=recorder)
+        )
+    assert (source / "macos" / "Stale.app").exists()  # untouched, never deleted
 
 
 def test_tauri_darwin_requires_exactly_one_coupled_pair(tmp_path):

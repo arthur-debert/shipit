@@ -760,14 +760,27 @@ def _parse_bundle(where: str, spec: object) -> BundleSpec:
         if not isinstance(source, str) or not source:
             raise ConfigError(
                 f"{where}.bundle: composition `{composition}` needs `source` — "
-                f"the repo-relative directory the bundler leaves the "
-                f'.app/.dmg pair under, e.g. "src-tauri/target/release/bundle"'
+                f"the repo-relative directory the bundler leaves its bundles "
+                f"under (the mac .app/.dmg pair, tauri linux .AppImage/.deb), "
+                f'e.g. "src-tauri/target/release/bundle"'
             )
         _reject_path_escape(f"{where}.bundle.source", source)
+        normalized = str(PurePosixPath(source))
+        if normalized == ".":
+            # A DEDICATED build-output subdir, never the checkout root: the
+            # bundler writes there and the composition reads it, so a repo-root
+            # `source` is a config mistake — refused loudly here so it can never
+            # reach the compose step (defence in depth beside the non-destructive
+            # collector, which deletes nothing under `source` regardless).
+            raise ConfigError(
+                f"{where}.bundle.source: composition `{composition}` needs a "
+                f"dedicated bundle output subdirectory, not the repo root "
+                f'(`.`) — e.g. "src-tauri/target/release/bundle"'
+            )
         return BundleSpec(
             composition=composition,
             command=_parse_argv(f"{where}.bundle.command", command),
-            source=str(PurePosixPath(source)),
+            source=normalized,
         )
     # Registry-assembled compositions (archive, deb, wheel, wasm-pack): their
     # commands are the registry's one assembly point (ADR-0028) — a declared
