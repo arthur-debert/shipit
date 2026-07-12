@@ -601,7 +601,10 @@ def _compose_electron(req: ComposeRequest) -> Composed:
     ``.dmg`` (plus its ``.dmg.blockmap`` sidecar), the linux ``.AppImage``, or
     the windows ``.exe`` — each PRIMARY distributable hard-required (a leg
     producing none is a bundle-stage failure), its ``.blockmap`` sidecar
-    shipped when present.
+    shipped when present. The darwin leg additionally requires EXACTLY ONE
+    ``.dmg`` (the signer reseals one, from the signed ``.app`` — several is a
+    stale/multi-arch leftover, failed here not at the signer); the linux/
+    windows sets stay open (no reseal step gates their count).
 
     Like mac-app, electron is SIGNABLE through the standalone macOS sign stage
     (:mod:`shipit.release.sign`, ADR-0040): electron-builder does NOT sign at
@@ -648,6 +651,19 @@ def _compose_electron(req: ComposeRequest) -> Composed:
             f"[artifacts.{req.artifact.name}] electron composition: the "
             f"bundler produced no {primary} under {source} — hard fail, never "
             f"a quiet pass (an electron leg must emit its distributable)"
+        )
+    # The darwin .dmg is what the standalone signer reseals from the signed
+    # .app (workflows.lex §3.1) — the signer reseals exactly one, so a darwin
+    # tree with several .dmg (a stale or multi-arch leftover in a shared source
+    # tree) is an ambiguity resolved loudly HERE, never a signer surprise — the
+    # same exactly-one contract mac-app enforces on its coupled pair. Linux
+    # .AppImage / windows .exe carry no such reseal step, so their set is open.
+    if "apple-darwin" in req.target and len(dists) != 1:
+        raise ReleaseError(
+            f"[artifacts.{req.artifact.name}] electron composition: the darwin "
+            f"leg needs exactly one {primary} to reseal under {source}; found "
+            f"{len(dists)} — electron-builder emits one per arch lane, so several "
+            f"is a stale/multi-arch leftover, resolved here, never at the signer"
         )
     req.out_dir.mkdir(parents=True, exist_ok=True)
     outputs: list[str] = []

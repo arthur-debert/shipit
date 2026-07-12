@@ -694,6 +694,26 @@ def test_electron_darwin_without_a_top_level_app_is_a_bundle_failure(tmp_path):
         )
 
 
+def test_electron_darwin_with_several_dmgs_is_a_bundle_failure(tmp_path):
+    # The signer reseals exactly one .dmg from the signed .app; a darwin tree
+    # carrying several (a stale or multi-arch leftover in a shared source tree)
+    # is an ambiguity resolved loudly HERE, never a signer surprise — the same
+    # exactly-one contract mac-app enforces on its coupled pair.
+    (artifact,) = _artifacts(ELECTRON_SPEC)
+
+    def effect(argv, cwd):
+        rel = tmp_path / "release"
+        rel.mkdir(parents=True, exist_ok=True)
+        (rel / "Lexed-1.2.3-arm64.dmg").write_bytes(b"dmg")
+        (rel / "Lexed-1.2.3-x64.dmg").write_bytes(b"dmg")  # a stale/other-arch leftover
+
+    recorder = RunRecorder({"npm": effect, "tar": _tar_effect})
+    with pytest.raises(ReleaseError, match=r"needs exactly one \.dmg to reseal"):
+        bundle_mod.ELECTRON.compose(
+            _request(tmp_path, artifact, (), target=MAC, run_cmd=recorder)
+        )
+
+
 def test_electron_linux_collects_the_appimage_and_no_app(tmp_path):
     (artifact,) = _artifacts(ELECTRON_SPEC)
     recorder = RunRecorder({"npm": _electron_linux_effect(tmp_path)})

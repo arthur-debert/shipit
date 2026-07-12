@@ -447,9 +447,13 @@ def check_tree(tree: Path, expected: str) -> BundleVerdict:
        beside the ``.app``/reseal payload that authoritatively assert its
        binary, so that non-electron ``.dmg`` (often ``Product_1.0.0_arch``,
        which the tier cannot even split) must NOT escalate to a failure the
-       ``.app`` already cleared. An electron darwin tree carries the ``.dmg``
-       alone (its ``.app`` does not survive the bundle upload), so the tier is
-       the assert that runs there;
+       ``.app`` already cleared. An electron darwin BUNDLE tree carries the
+       ``.dmg`` beside the reseal payload (``*.unsigned-app.tar.gz``), so tier
+       2 authoritatively asserts the payload's inner ``.app`` there and this
+       fallback is skipped; the ``.dmg`` name tier is the assert that runs only
+       over a payload-less tree — the signed publish leg, where the resealed
+       ``.dmg`` crosses the artifact boundary but the fragile ``.app``/payload
+       do not;
     7. only when the tree carries none of the above: every loose executable
        file (``.exe`` counted by suffix, its stem compared).
 
