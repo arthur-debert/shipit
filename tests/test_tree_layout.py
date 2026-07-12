@@ -156,6 +156,12 @@ def test_freeform_branch_can_override_base_for_pr_attachment():
     assert p.dir == ROOT / "acme" / "widget" / "branches" / "rpe01-ws04-pr321"
 
 
+def test_freeform_branch_normalizes_base_override_for_pr_attachment():
+    p = plan(_freeform_spec(base="  origin/RPE01/WS04  "))
+
+    assert p.base == "origin/RPE01/WS04"
+
+
 # --------------------------------------------------------------------------
 # slug sanitization (lives in layout)
 # --------------------------------------------------------------------------

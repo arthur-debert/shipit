@@ -218,10 +218,7 @@ def test_launch_contracts_match_the_current_dev_cycle():
         LaunchContext.NATIVE_SUBAGENT,
     }
     assert contexts[Role.EXPLORER] == {LaunchContext.NATIVE_SUBAGENT}
-    assert contexts[Role.REVIEWER] == {
-        LaunchContext.DETACHED,
-        LaunchContext.NATIVE_SUBAGENT,
-    }
+    assert contexts[Role.REVIEWER] == {LaunchContext.DETACHED}
 
 
 def test_result_channels_are_role_distinct():
@@ -294,6 +291,10 @@ def test_validate_spawn_preserves_the_empty_vs_unknown_diagnosis():
     ("role", "context"),
     [
         ("explorer", LaunchContext.DETACHED),  # ambient — never a write Tree
+        # Reviews must pass through the detached service so their shared
+        # read-only Tree, structured capture, and posted result stay one
+        # product boundary.
+        ("reviewer", LaunchContext.NATIVE_SUBAGENT),
         ("coordinator", LaunchContext.DETACHED),  # the host session itself
         ("coordinator", LaunchContext.NATIVE_SUBAGENT),
     ],

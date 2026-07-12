@@ -546,7 +546,7 @@ def _plan_freeform(spec: TreeSpec) -> TreePlan:
         )
     leaf = f"{sanitized}-{spec.agent_hash}"
     directory = _repo_dir(spec) / "branches" / leaf
-    base = spec.base if spec.base is not None else "origin/main"
+    base = spec.base.strip() if spec.base is not None else "origin/main"
     return TreePlan(dir=directory, branch=branch, base=base)
 
 

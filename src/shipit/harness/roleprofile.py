@@ -321,9 +321,10 @@ PROFILES: Mapping[Role, RoleProfile] = MappingProxyType(
             ),
             generates_agent_def=True,
             has_brief_template=False,
-            launch_contexts=frozenset(
-                {LaunchContext.DETACHED, LaunchContext.NATIVE_SUBAGENT}
-            ),
+            # The detached review service owns the whole contract: shared
+            # read-only Tree allocation, structured output capture, and the
+            # posted review. No native boundary provides that lifecycle yet.
+            launch_contexts=frozenset({LaunchContext.DETACHED}),
             result_channel=ResultChannel.POSTED_REVIEW,
         ),
     }
