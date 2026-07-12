@@ -2044,6 +2044,74 @@ def test_detect_toolchains_clean_root_is_empty(tmp_path):
     assert irec.detect_toolchains(tmp_path) == frozenset()
 
 
+def test_composition_signals_unions_node_for_a_declared_wasm_pack(tmp_path):
+    # A rust-only wasm crate declares a wasm-pack composition but tracks no
+    # package.json (wasm-pack GENERATES the npm package.json into pkg/). Its
+    # `npm pack` still needs npm, so install unions the node signal off the
+    # DECLARATION, not off a manifest (issue #788).
+    (tmp_path / ".shipit.toml").write_text(
+        '[artifacts.wasm]\nbuild = ["rust"]\nbundle = { composition = "wasm-pack" }\n'
+    )
+    assert verb._composition_signals(tmp_path) == {iunits.TOOLCHAIN_NODE}
+
+
+def test_composition_signals_empty_without_a_wasm_pack_composition(tmp_path):
+    # A non-wasm composition (archive) provisions no extra signal: a plain
+    # rust/node repo's delivered blocks stay byte-identical to pre-#788.
+    (tmp_path / ".shipit.toml").write_text(
+        '[artifacts.cli]\nbuild = ["rust"]\nbundle = { composition = "archive" }\n'
+    )
+    assert verb._composition_signals(tmp_path) == set()
+
+
+def test_composition_signals_empty_without_config(tmp_path):
+    # No .shipit.toml → no extra signals; the augmentation never itself fails
+    # install (an absent map is a missing MAP, not this function's concern).
+    assert verb._composition_signals(tmp_path) == set()
+
+
+def test_composition_signals_empty_on_unparseable_config(tmp_path):
+    # Malformed TOML degrades to no extra signals here — the config's own
+    # parse error surfaces on the verbs that read the map, not the toolchain
+    # augmentation (issue #788).
+    (tmp_path / ".shipit.toml").write_text("this is not = valid = toml\n")
+    assert verb._composition_signals(tmp_path) == set()
+
+
+def test_wasm_pack_composition_delivers_the_node_deps_block(tmp_path):
+    # End to end at the install seam: a rust-only wasm-pack repo (Cargo.toml,
+    # NO tracked package.json) gets the node-deps block off the composition
+    # signal, so bundle-time `npm pack` has npm (issue #788).
+    root = _git_repo(tmp_path)
+    (root / "crates" / "wasm").mkdir(parents=True)
+    (root / "crates" / "wasm" / "Cargo.toml").write_text("[package]\n")
+    (root / ".shipit.toml").write_text(
+        '[artifacts.wasm]\nbuild = ["rust"]\nbundle = { composition = "wasm-pack" }\n'
+    )
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+
+    signals = irec.detect_toolchains(root) | verb._composition_signals(root)
+    assert signals == {iunits.TOOLCHAIN_RUST, iunits.TOOLCHAIN_NODE}
+    keys = {u.key for u in iunits.load_units(toolchains=signals)}
+    assert iunits.PIXI_NODE_DEPS_KEY in keys
+
+
+def test_plain_rust_repo_gets_no_node_deps_block(tmp_path):
+    # The no-wasm control: a rust repo whose only composition is archive keeps
+    # exactly the pre-#788 delivery — the node union fires ONLY on wasm-pack.
+    root = _git_repo(tmp_path)
+    (root / "Cargo.toml").write_text("[package]\n")
+    (root / ".shipit.toml").write_text(
+        '[artifacts.cli]\nbuild = ["rust"]\nbundle = { composition = "archive" }\n'
+    )
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+
+    signals = irec.detect_toolchains(root) | verb._composition_signals(root)
+    assert signals == {iunits.TOOLCHAIN_RUST}
+    keys = {u.key for u in iunits.load_units(toolchains=signals)}
+    assert iunits.PIXI_NODE_DEPS_KEY not in keys
+
+
 def _plan_with_toolchains(root, toolchains: frozenset) -> irec.Plan:
     """gather → reconcile over the toolchain-conditional catalog (#547)."""
     units = iunits.load_units(toolchains=toolchains)

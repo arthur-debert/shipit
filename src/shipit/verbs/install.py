@@ -35,7 +35,7 @@ from pathlib import Path
 
 import click
 
-from .. import events
+from .. import config, events
 from ..install.apply import (
     MODE_LOCAL,
     MODE_PR,
@@ -66,8 +66,44 @@ from ..install.reconcile import (
 from ..install.units import HOOK_RECOVERY_CMD, Unit, load_units
 from ._errors import cli_errors
 from ._render import emit
+from ._tool import load_config
 
 logger = logging.getLogger("shipit.install")
+
+
+def _composition_signals(root: Path) -> set[str]:
+    """Toolchain signals a DECLARED bundle composition needs beyond the
+    consumer's tracked manifests (issue #788 review).
+
+    :func:`~shipit.install.reconcile.detect_toolchains` reads manifests only
+    (a tracked ``package.json`` → the node signal that delivers ``npm``). A
+    ``wasm-pack`` composition runs ``npm pack`` at bundle
+    (:mod:`shipit.release.bundle`) so it NEEDS ``npm``, yet it rides the RUST
+    signal and the crate's npm ``package.json`` is generated into ``pkg/``,
+    never tracked — a rust-only wasm crate would get ``wasm-pack`` without
+    ``npm`` and fail the bundle. The DECLARED composition is the signal: each
+    registry entry names the signal it provisions
+    (:attr:`shipit.release.bundle.Composition.provisions_signal`), read off
+    the artifact map here and unioned into the detected set so the node-deps
+    block ships wherever the composition is declared. Degrades to ``set()``
+    when the config is absent or unparseable — the toolchain augmentation
+    never itself fails install (the config's own parse errors surface on the
+    verbs that read the map, not here).
+    """
+    from ..release import bundle as bundle_registry  # lazy — keep install import-light
+
+    try:
+        artifacts = config.load_artifacts(load_config(Path(root)))
+    except config.ConfigError:
+        return set()
+    signals: set[str] = set()
+    for artifact in artifacts:
+        if artifact.bundle is None:
+            continue
+        comp = bundle_registry.composition(artifact.bundle.composition)
+        if comp is not None and comp.provisions_signal is not None:
+            signals.add(comp.provisions_signal)
+    return signals
 
 
 @click.command(name="install")
@@ -156,7 +192,12 @@ def run(
         # The catalog is signal-conditional (#547 Layer 1): a consumer whose
         # tracked manifests declare a toolchain (Cargo.toml/go.mod/package.json)
         # gets the matching pinned pixi dep block alongside the unconditional set.
-        units = load_units(toolchains=detect_toolchains(Path(path or ".")))
+        # A declared wasm-pack bundle composition unions the node signal too — its
+        # `npm pack` needs npm, which no tracked manifest signals (issue #788).
+        toolchains = detect_toolchains(Path(path or ".")) | _composition_signals(
+            Path(path or ".")
+        )
+        units = load_units(toolchains=toolchains)
         retired = load_retired()
         retired_hooks = load_retired_hooks()
         state = gather(Path(path or "."), units, retired, retired_hooks)

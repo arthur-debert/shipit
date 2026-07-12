@@ -448,7 +448,16 @@ class Composition:
     (wasm-pack's ``scope`` / ``wasm-target`` — the ``@scope`` and wasm-pack
     ``--target``, the only consumer-specific parts); the config boundary
     accepts them ONLY for the composition that names them and rejects them
-    everywhere else (:func:`shipit.config._parse_bundle`).
+    everywhere else (:func:`shipit.config._parse_bundle`). ``provisions_signal``
+    names a toolchain SIGNAL a declared composition needs beyond its own leg —
+    wasm-pack's ``npm pack`` needs the node runtime (``npm`` rides ``nodejs``),
+    but wasm-pack rides the RUST signal and a rust-only wasm crate's npm
+    ``package.json`` is GENERATED into ``pkg/``, never tracked, so the node
+    manifest signal is absent (issue #788 review). ``shipit install`` unions
+    this signal into the detected toolchains off the declared composition
+    (:func:`shipit.verbs.install._composition_signals`), delivering the
+    node-deps block wherever the composition is declared; ``None`` (every
+    composition but wasm-pack) adds nothing.
     """
 
     name: str
@@ -457,6 +466,7 @@ class Composition:
     declared_command: bool = False
     signable: bool = False
     option_keys: tuple[str, ...] = ()
+    provisions_signal: str | None = None
 
     def applies(self, target: str) -> bool:
         """Whether this composition runs for ``target`` (substring match on
@@ -471,6 +481,10 @@ WASM_PACK = Composition(
     "wasm-pack",
     _compose_wasm_pack,
     option_keys=("scope", "wasm-target"),
+    # `npm pack` at bundle needs the node runtime (npm); wasm-pack rides the
+    # rust signal and the crate's npm package.json is generated, never tracked,
+    # so install unions the node signal off this declaration (issue #788).
+    provisions_signal="node",
 )
 MAC_APP = Composition(
     "mac-app",
