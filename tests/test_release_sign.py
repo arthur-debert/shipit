@@ -1234,6 +1234,26 @@ def test_sign_archives_rejected_notarization_fails_before_any_reemit(tmp_path):
     assert (tree / ARCHIVE_NAME).read_bytes() == b"unsigned-tar"
 
 
+def test_sign_archives_reemit_copy_failure_leaves_the_unsigned_tarball_intact(
+    tmp_path, monkeypatch
+):
+    # ADR-0009's barrier extends past the notary verdict to the re-emit copy:
+    # a filesystem failure while staging the signed tarball must not destroy
+    # the unsigned one. The signed bytes land in a temp path beside dest and
+    # only an atomic rename replaces it, so a mid-copy OSError leaves the
+    # original untouched.
+    tree = _archive_tree(tmp_path)
+    recorder = ArchiveRecorder(tmp_path)
+
+    def boom(src, dst):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(sign_mod.shutil, "copy2", boom)
+    with pytest.raises(OSError, match="disk full"):
+        sign_mod.sign_archives(_request(tmp_path, recorder))
+    assert (tree / ARCHIVE_NAME).read_bytes() == b"unsigned-tar"
+
+
 def test_run_sign_dispatches_the_archive_tree_and_emits_the_typed_result(
     tmp_path, capsys
 ):

@@ -1168,10 +1168,17 @@ def sign_archives(req: SignRequest) -> ArchiveSignResult:
         )
         # Stage under the ORIGINAL archive filename (the consumer's name
         # survives the round-trip; with out_dir == tree this replaces the
-        # unsigned tarball in place — the laptop-run shape).
+        # unsigned tarball in place — the laptop-run shape). Copy into a temp
+        # path in the DESTINATION dir, then atomically rename over dest: a
+        # copy failure leaves the unsigned tarball untouched (ADR-0009), and
+        # `os.replace` is atomic only within one filesystem, so the temp must
+        # be beside dest, never the scratch-dir signed_tar (a possibly cross-
+        # device rename).
         dest = req.out_dir / archive.name
-        dest.unlink(missing_ok=True)
-        shutil.copy2(signed_tar, dest)
+        tmp_dest = dest.with_name(f"{dest.name}.signing-tmp")
+        tmp_dest.unlink(missing_ok=True)
+        shutil.copy2(signed_tar, tmp_dest)
+        os.replace(tmp_dest, dest)
         staged.append(str(dest.absolute()))
 
     return ArchiveSignResult(
