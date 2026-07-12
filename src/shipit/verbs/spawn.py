@@ -72,7 +72,7 @@ def spawn() -> None:
         "The Run's role, validated against the fixed Role Profile registry "
         "(RPE01-WS01) before any Tree work: an unknown role, or one whose profile "
         "does not support a detached launch (coordinator, shepherd, explorer), is "
-        "refused loud. The accepted role rides `claude --agent <role>` (ADR-0019 "
+        "refused loudly. The accepted role rides `claude --agent <role>` (ADR-0019 "
         "§2) so the guard allows the Run's own edits; it needs a committed "
         ".claude/agents/<role>.md def in the Tree. `reviewer` gets a shared "
         "READ-ONLY Tree and posts a review through the PR (ADR-0018), not a "

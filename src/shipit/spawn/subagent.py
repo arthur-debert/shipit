@@ -297,7 +297,9 @@ def spawn_subagent(spec: SubagentSpec, bounds: Boundaries | None = None) -> Spaw
     # arguments ARE the worker's dev-cycle identity, so `epic`/`ws`/`role` bind
     # here — the moment they are known and validated — and every subsequent
     # record of this spawn carries them. The role binds NORMALIZED (the parsed
-    # registry Role, not the raw input) so records never carry a cased variant.
+    # registry Role, not the raw input) so every record BOUND from here carries
+    # the canonical value — the pre-validation request milestone above still
+    # narrates the raw `spec.role` as received.
     # `agent` (the spawn id) binds in the launch tails once minted. `env_export`
     # at the launch then threads ALL bound keys into the Run's environment
     # (`SHIPIT_LOG_CTX_*`), so every shipit command the worker runs correlates

@@ -363,11 +363,14 @@ def validate_spawn(name: str, context: LaunchContext) -> RoleProfile:
     """
     try:
         role = parse_role(name)
-    except RoleValidationError:
+    except RoleValidationError as exc:
+        # Preserve parse_role's specific diagnosis (empty vs unknown role) and
+        # append the launch context — rewriting every parse failure into
+        # "unknown role" would mislabel an empty input and diverge from
+        # parse_role's contract.
         raise RoleValidationError(
-            f"unknown role {name!r} for a {context.value} launch — roles are a "
-            f"closed registry (known: {_known_roles()}); refused before any Tree "
-            "is provisioned or a backend launched."
+            f"{exc} Refused for a {context.value} launch before any Tree is "
+            "provisioned or a backend launched."
         ) from None
     profile = PROFILES[role]
     if context not in profile.launch_contexts:

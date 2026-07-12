@@ -246,6 +246,14 @@ def test_validate_spawn_names_role_and_context_for_unknown_roles():
         validate_spawn("wizard", LaunchContext.DETACHED)
 
 
+def test_validate_spawn_preserves_the_empty_vs_unknown_diagnosis():
+    # An empty input keeps parse_role's specific "empty role" diagnosis (not
+    # rewritten to "unknown role ''") while still naming the launch context.
+    with pytest.raises(RoleValidationError, match=r"empty role.*detached") as excinfo:
+        validate_spawn("", LaunchContext.DETACHED)
+    assert "unknown role" not in str(excinfo.value)
+
+
 @pytest.mark.parametrize(
     ("role", "context"),
     [
