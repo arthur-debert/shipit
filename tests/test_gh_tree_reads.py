@@ -62,6 +62,62 @@ def test_pr_for_head_strips_whitespace_from_str_fields(monkeypatch):
     assert pr == gh.HeadPr(number=12, state="OPEN", is_draft=False, base_ref="main")
 
 
+def test_pr_for_number_parses_attachment_snapshot(monkeypatch):
+    payload = json.dumps(
+        {
+            "number": 12,
+            "state": "open",
+            "isDraft": True,
+            "baseRefName": " main ",
+            "headRefName": " feature/x\n",
+            "isCrossRepository": True,
+            "maintainerCanModify": True,
+        }
+    )
+    calls = []
+
+    def fake_run(args, *, cwd=None, token=None, timeout=None):
+        calls.append(args)
+        return payload
+
+    monkeypatch.setattr(gh, "_run", fake_run)
+
+    assert gh.pr_for_number(12, repo="owner/repo") == gh.PrAttachment(
+        number=12,
+        state="OPEN",
+        is_draft=True,
+        base_ref="main",
+        head_ref="feature/x",
+        is_cross_repository=True,
+        maintainer_can_modify=True,
+    )
+    assert calls == [
+        [
+            "gh",
+            "pr",
+            "view",
+            "12",
+            "--repo",
+            "owner/repo",
+            "--json",
+            "number,state,isDraft,baseRefName,headRefName,isCrossRepository,maintainerCanModify",
+        ]
+    ]
+
+
+def test_pr_for_number_fails_loud_on_missing_head_ref(monkeypatch):
+    monkeypatch.setattr(
+        gh,
+        "_run",
+        lambda args, *, cwd=None, token=None, timeout=None: json.dumps(
+            {"number": 12, "state": "OPEN", "isDraft": True, "baseRefName": "main"}
+        ),
+    )
+
+    with pytest.raises(ValueError, match="headRefName"):
+        gh.pr_for_number(12)
+
+
 def test_pr_for_head_none_when_no_pr(monkeypatch):
     # gh's documented "no pull requests found" exit is a PROVABLE absence -> None,
     # distinct from UNKNOWN (an undetermined state).

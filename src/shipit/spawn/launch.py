@@ -25,9 +25,12 @@ module holds everything that does NOT vary:
   carried) that the producer maps to its ``timed_out`` outcome. In exchange, every
   launch is an Exec like any other: one structured record with argv, cwd, rc, and
   ``duration_ms``.
-- :func:`write_task` — the English draft-PR contract a write Run is handed. Reviewer
-  prompts live in :mod:`shipit.review.prompt`, where the product review service can
-  capture structured output and post it through one App-authored result channel.
+- :func:`write_task` / :func:`shepherd_task` — the English contracts handed to
+  writable Runs. The implementer contract opens one draft PR; the shepherd
+  contract attaches to an existing PR and pushes fixes back to that branch.
+  Reviewer prompts live in :mod:`shipit.review.prompt`, where the product review
+  service can capture structured output and post it through one App-authored
+  result channel.
 
 Rooting is the OS process ``cwd`` (ADR-0019 §1), NOT a ``cd`` — so the child's writes
 land in the Tree with no leak to the parent checkout, sidestepping the bash-cwd-reset
@@ -388,4 +391,32 @@ def write_task(
         f"blocking, or await it synchronously before continuing; never end your "
         f"turn — even to 'wait for completion notifications' — while background "
         f"work is in flight."
+    )
+
+
+def shepherd_task(*, pr_number: int, branch: str, base_branch: str) -> str:
+    """The task a spawned shepherd performs: address one existing PR in place.
+
+    A shepherd is a writable Run, but its result channel is NOT the implementer's
+    draft-PR handshake. It attaches to the current head of an existing PR,
+    addresses review feedback, commits, and pushes fixes to that same head branch.
+    It must never open a replacement PR, run the initial PR-open handshake, flip
+    ready, wait for reviewers, or merge; the coordinator and PR engine still own
+    waits and readiness.
+    """
+    return (
+        "You are a spawned shepherd Run launched by `shipit spawn subagent`, "
+        f"attached to existing pull request #{pr_number} on branch {branch!r} "
+        f"(base {base_branch!r}). Work in this writable Tree and address the "
+        "currently open review feedback for that PR. Commit the fixes and push "
+        f"them back to the same branch with `git push origin {branch}`. Do NOT "
+        "open a new pull request, do NOT run the implementer draft-PR handshake, "
+        "do NOT run `shipit pr next`, do NOT flip the PR ready, do NOT wait for "
+        "reviewers, and do NOT merge. If a review comment should not be changed, "
+        "leave a clear rationale on the existing PR and resolve the thread; "
+        "otherwise fix it and resolve it. Sweep the diff for other instances of "
+        "the same finding class before pushing. You are a HEADLESS Run: ending "
+        "your turn exits your process, and any background tasks still running "
+        "are killed with it. Run long work in the foreground or await it "
+        "synchronously; never end your turn while background work is in flight."
     )

@@ -71,12 +71,23 @@ def spawn() -> None:
     help=(
         "The Run's role, validated against the fixed Role Profile registry "
         "(RPE01-WS01) before any Tree work: an unknown role, or one whose profile "
-        "does not support a detached launch (coordinator, shepherd, explorer), is "
-        "refused loudly. The accepted role rides `claude --agent <role>` (ADR-0019 "
-        "§2) so the guard allows the Run's own edits; it needs a committed "
+        "does not support a detached launch (coordinator, explorer), is refused "
+        "loudly. The accepted role rides `claude --agent <role>` (ADR-0019 §2) "
+        "so the guard allows the Run's own edits; it needs a committed "
         ".claude/agents/<role>.md def in the Tree. `reviewer` gets a shared "
-        "READ-ONLY Tree and posts a review through the PR (ADR-0018), not a "
-        "write Tree."
+        "READ-ONLY Tree and posts a review through the PR (ADR-0018), while "
+        "`shepherd` attaches to an existing writable PR head via --pr."
+    ),
+)
+@click.option(
+    "--pr",
+    "pr",
+    type=int,
+    default=None,
+    help=(
+        "Shepherd shape: existing pull request number to attach to. Valid only "
+        "with --role shepherd; the branch/base are resolved from the PR instead "
+        "of cutting a new issue or work-stream branch."
     ),
 )
 @click.option(
@@ -96,6 +107,7 @@ def subagent_cmd(
     ws: int | None,
     issue: int | None,
     role: str,
+    pr: int | None,
     session: str,
     backend: str,
 ) -> None:
@@ -136,6 +148,7 @@ def subagent_cmd(
             ws=ws,
             issue=issue,
             role=role,
+            pr=pr,
             session=session,
             backend=backend,
         )
@@ -183,6 +196,7 @@ def run(
     epic: str | None = None,
     ws: int | None = None,
     issue: int | None = None,
+    pr: int | None = None,
     session: str = "work",
     backend: str = "claude",
     bounds: subagent.Boundaries | None = None,
@@ -204,6 +218,7 @@ def run(
         epic=epic,
         ws=ws,
         issue=issue,
+        pr=pr,
         session=session,
         backend=backend,
     )

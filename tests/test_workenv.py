@@ -17,12 +17,13 @@ from dataclasses import FrozenInstanceError, fields
 import pytest
 
 from shipit import pixienv
-from shipit.harness.roleprofile import NewWriteTree
+from shipit.harness.roleprofile import ExistingPrWriteTree, NewWriteTree
 from shipit.identity import Revision, WorkingDir, repo_from_slug
 from shipit.workenv import (
     ExecutionRouting,
     TreeProvenance,
     WorkEnv,
+    resolve_existing_pr_write_env,
     resolve_write_run_env,
 )
 
@@ -112,6 +113,20 @@ def test_non_pixi_write_run_is_honestly_ambient():
     # Still a real write Tree with full provenance — only the pixi half is absent.
     assert isinstance(env.checkout, NewWriteTree)
     assert env.tree == TreeProvenance(branch="E/WS01", base="origin/E/umbrella")
+
+
+def test_existing_pr_write_run_uses_shepherd_checkout_strategy():
+    env = resolve_existing_pr_write_env(
+        repo=_REPO,
+        tree_path="/trees/acme/widget/branches/e-ws01-pr321",
+        branch="E/WS01",
+        base="origin/E/WS01",
+        pixi_provisioned=False,
+    )
+
+    assert isinstance(env.checkout, ExistingPrWriteTree)
+    assert env.routing is ExecutionRouting.AMBIENT
+    assert env.tree == TreeProvenance(branch="E/WS01", base="origin/E/WS01")
 
 
 def test_env_identity_without_a_provisioned_env_is_refused():

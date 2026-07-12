@@ -36,6 +36,7 @@ def test_spawn_subagent_help_documents_the_verb():
         "--issue",
         "--session",
         "--role",
+        "--pr",
         "--backend",
     ):
         assert token in result.output

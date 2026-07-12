@@ -254,13 +254,12 @@ PROFILES: Mapping[Role, RoleProfile] = MappingProxyType(
             enforcement=_WRITE_POSTURE,
             generates_agent_def=True,
             has_brief_template=True,
-            # Native only TODAY: the dev cycle parks/resumes a shepherd as a
-            # native subagent (ADR-0035). A detached spawn would route the
-            # shepherd through the new-branch/draft-PR implementer handshake
-            # — the exact invalid combination this registry exists to refuse
-            # (spec §Migration) — so DETACHED joins only when the existing-PR
-            # attachment lifecycle lands (RPE01-WS04).
-            launch_contexts=frozenset({LaunchContext.NATIVE_SUBAGENT}),
+            # The shepherd may be launched headless now that the detached path
+            # has its own existing-PR attachment lifecycle (RPE01-WS04). It
+            # never rides the implementer's new-branch/draft-PR handshake.
+            launch_contexts=frozenset(
+                {LaunchContext.DETACHED, LaunchContext.NATIVE_SUBAGENT}
+            ),
             result_channel=ResultChannel.EXISTING_PR_ROUNDS,
         ),
         Role.EXPLORER: RoleProfile(
@@ -356,8 +355,8 @@ def validate_spawn(name: str, context: LaunchContext) -> RoleProfile:
     The registry-driven gate every spawn boundary runs BEFORE Tree
     provisioning or backend launch (the acceptance invariant): an unknown
     role, or a known role whose profile does not support ``context`` (a
-    detached explorer, a detached coordinator, a detached shepherd until
-    WS04), is a :class:`RoleValidationError` naming the role, the requested
+    detached explorer or detached coordinator), is a
+    :class:`RoleValidationError` naming the role, the requested
     context, and the supported alternatives. Returns the role's profile on
     success. Pure: a value check, no I/O of any kind.
     """

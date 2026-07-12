@@ -140,6 +140,22 @@ def test_base_is_origin_main_for_an_issue():
     assert plan(_issue_spec()).base == "origin/main"
 
 
+def test_freeform_branch_can_override_base_for_pr_attachment():
+    p = plan(
+        TreeSpec(
+            repo=REPO,
+            agent_hash="pr321",
+            branch="RPE01/WS04",
+            base="origin/RPE01/WS04",
+            root=ROOT,
+        )
+    )
+
+    assert p.branch == "RPE01/WS04"
+    assert p.base == "origin/RPE01/WS04"
+    assert p.dir == ROOT / "acme" / "widget" / "branches" / "rpe01-ws04-pr321"
+
+
 # --------------------------------------------------------------------------
 # slug sanitization (lives in layout)
 # --------------------------------------------------------------------------

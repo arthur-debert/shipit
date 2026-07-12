@@ -16,16 +16,19 @@ typed-in/typed-out without a network, a clone, or a real backend child.
 
 The pipeline rides the Role Profile registry (RPE01-WS01/WS03):
 
-- **Registry-driven role preflight** (RPE01-WS01): the shape gate runs
+- **Registry-driven role preflight** (RPE01-WS01/RPE01-WS04): the shape gate runs
   :func:`shipit.harness.roleprofile.validate_spawn` for the DETACHED launch
   context, so an unknown role string, a detached explorer (ambient — no Tree,
-  ever), a detached coordinator (the host session), or a detached shepherd
-  (existing-PR attachment is RPE01-WS04) refuses BEFORE any Tree provisioning
-  or backend launch, naming the role and the requested context.
+  ever), or a detached coordinator (the host session) refuses BEFORE any Tree
+  provisioning or backend launch, naming the role and the requested context.
+  Shepherd is detached only through the existing-PR attachment tail added by
+  RPE01-WS04.
 - **Checkout-strategy dispatch** (RPE01-WS03): the pipeline routes on the
   profile's CHECKOUT STRATEGY, never a literal role-name test — a
   :class:`~shipit.harness.roleprofile.NewWriteTree` profile takes the write
-  tail (new write Tree + branch + draft-PR handshake), a
+  tail (new write Tree + branch + draft-PR handshake),
+  :class:`~shipit.harness.roleprofile.ExistingPrWriteTree` takes the shepherd
+  tail (writable Tree attached to an existing PR; no replacement PR), a
   :class:`~shipit.harness.roleprofile.SharedReadOnlyTree` profile takes the
   reviewer tail, and a checkout shape with no detached tail (a later WS's
   profile arriving before its lifecycle) refuses loud rather than falling
@@ -89,6 +92,9 @@ from ..tree.layout import (
     issue_branch,
     work_stream_branch,
 )
+from ..tree.layout import (
+    plan as plan_tree,
+)
 from ..tree.readonly import readonly_plan
 from . import backends, launch
 
@@ -127,12 +133,13 @@ class SubagentSpec:
 
     Two axes decide the Tree. **Role** selects the profile's CHECKOUT STRATEGY
     from the Role Profile registry (RPE01-WS03): a ``NewWriteTree`` profile
-    (implementer) gets a per-Run write Tree; a ``SharedReadOnlyTree`` profile
-    (reviewer, ADR-0018) gets the shared read-only Tree on the existing PR
-    head. **Shape** picks branch/base:
-    ``epic``+``ws`` (branch ``E/WSnn`` cut from ``origin/E/umbrella``) or a
-    standalone ``issue`` (branch ``issues/<id>/<session>`` cut from
-    ``origin/main``). Deliberately NOT validated at construction: the pipeline's
+    (implementer) gets a per-Run write Tree; an ``ExistingPrWriteTree`` profile
+    (shepherd) attaches to a writable existing PR head; a ``SharedReadOnlyTree``
+    profile (reviewer, ADR-0018) gets the shared read-only Tree on the existing
+    PR head. **Shape** picks branch/base: ``epic``+``ws`` (branch ``E/WSnn`` cut
+    from ``origin/E/umbrella``), a standalone ``issue`` (branch
+    ``issues/<id>/<session>`` cut from ``origin/main``), or a shepherd ``pr``
+    attachment resolved from GitHub. Deliberately NOT validated at construction: the pipeline's
     request milestone must record even a malformed ask (ADR-0029 — a refused
     spawn still leaves a durable record of what was asked), so the shape gate is
     :func:`spawn_subagent`'s first stage, not ``__post_init__``.
@@ -143,6 +150,7 @@ class SubagentSpec:
     epic: str | None = None
     ws: int | None = None
     issue: int | None = None
+    pr: int | None = None
     session: str = "work"
     backend: str = "claude"
 
@@ -157,10 +165,11 @@ class SpawnResult:
     """The finished spawn's coordinates — the typed result the verb renders.
 
     Exactly the (frozen, agent-parsed) SPAWNED payload: the Tree the Run worked
-    in, its branch/base, the role and backend, and — for a write Run — the
-    Run↔PR linkage the coordinator drives with ``shipit pr status <N>``. A
-    reviewer Run reports through the EXISTING PR and opens none, so its PR
-    fields stay ``None`` and are absent from :meth:`to_dict`.
+    in, its branch/base, the role and backend, and — for writable PR-producing
+    or PR-attached Runs — the PR linkage the coordinator drives with
+    ``shipit pr status <N>``. A reviewer Run reports through the EXISTING PR via
+    the review service and opens none, so its PR fields stay ``None`` and are
+    absent from :meth:`to_dict`.
     """
 
     tree: str
@@ -205,7 +214,13 @@ class Boundaries:
     remote_branch_exists: Callable[..., bool] = git.remote_branch_exists
     create_tree: Callable[..., Tree] = create
     pr_for_head: Callable[..., gh.HeadPr | gh.UnknownPr | None] = gh.pr_for_head
+    pr_for_number: Callable[..., gh.PrAttachment | gh.UnknownPr | None] = (
+        gh.pr_for_number
+    )
     status_porcelain: Callable[..., list[str]] = git.status_porcelain
+    refresh_attached_tree: Callable[..., None] = lambda path, branch: (
+        _refresh_attached_tree(path, branch)
+    )
     runner: launch.Runner | None = None
     run_review: Callable[..., dict] = review_service.run_detached_review
 
@@ -249,13 +264,12 @@ def spawn_subagent(spec: SubagentSpec, bounds: Boundaries | None = None) -> Spaw
     The one typed spec→result function behind ``shipit spawn subagent``. Raises
     :class:`SpawnError` (a clean runtime refusal, never a traceback) when the
     backend is unsupported, the ROLE fails the Role Profile registry's detached
-    preflight (RPE01-WS01: an unknown role string, or a role whose profile does
+    preflight (RPE01-WS01/RPE01-WS04: an unknown role string, or a role whose profile does
     not support a detached launch — the explorer is ambient-native only, the
-    coordinator is the host session, the shepherd attaches to an existing PR in
-    a later WS — each refused BEFORE any Tree provisioning or backend launch,
+    coordinator is the host session — each refused BEFORE any Tree provisioning or backend launch,
     naming the role and the requested context), the shape is incomplete/invalid
-    (``--epic``/``--ws`` only half given, non-positive ``--ws``/``--issue``, a
-    write role without an issue, a reviewer without any shape, a ``--session``
+    (``--epic``/``--ws`` only half given, non-positive ``--ws``/``--issue``/``--pr``, a
+    new-write role without an issue, a shepherd without a PR, a reviewer without any shape, a ``--session``
     that sanitizes to nothing), ``--repo`` disagrees with the ambient checkout, the command is not
     run inside a GitHub checkout, a git/gh call fails, **Tree creation fails**
     (fail-closed — no native-worktree fallback; this includes a write shape
@@ -309,6 +323,7 @@ def spawn_subagent(spec: SubagentSpec, bounds: Boundaries | None = None) -> Spaw
                 "epic": spec.epic,
                 "ws": spec.ws,
                 "issue": spec.issue,
+                "pr": spec.pr,
                 "session": spec.session if not spec.has_epic_shape else None,
             }.items()
             if value is not None
@@ -337,10 +352,10 @@ def spawn_subagent(spec: SubagentSpec, bounds: Boundaries | None = None) -> Spaw
     # it here before dispatch and before any child environment is exported.
     logcontext.bind(repo=repo_identity.slug)
 
-    # RPE01-WS03: dispatch on the profile's checkout STRATEGY, not a role-name
+    # RPE01-WS03/RPE01-WS04: dispatch on the profile's checkout STRATEGY, not a role-name
     # special case. The read-only tail delegates capture + posting to the product
-    # review service; the write tail preserves the implementer's existing Tree/PR
-    # handshake unchanged.
+    # review service; the existing-PR write tail attaches shepherd to the current PR;
+    # the new-write tail preserves the implementer's Tree/PR handshake unchanged.
     checkout = profile.checkout
     if isinstance(checkout, roleprofile.SharedReadOnlyTree):
         try:
@@ -360,6 +375,17 @@ def spawn_subagent(spec: SubagentSpec, bounds: Boundaries | None = None) -> Spaw
             branch=review_branch,
             source_repo=root,
             role=profile.role.value,
+            adapter=adapter,
+            bounds=bounds,
+        )
+    if isinstance(checkout, roleprofile.ExistingPrWriteTree):
+        return _launch_existing_pr_write(
+            repo=repo_identity,
+            source_repo=root,
+            github_url=url,
+            role=profile.role.value,
+            pr_number=spec.pr,
+            backend=spec.backend,
             adapter=adapter,
             bounds=bounds,
         )
@@ -391,13 +417,13 @@ def validate(
     (no silent default to claude); only then is its adapter resolved (ADR-0020)
     — the adapter supplies the per-backend argv / auth-env / read-only posture,
     and everything downstream is backend-agnostic. The ROLE then rides the Role
-    Profile registry's spawn preflight (RPE01-WS01,
+    Profile registry's spawn preflight (RPE01-WS01/RPE01-WS04,
     :func:`shipit.harness.roleprofile.validate_spawn`): an unknown role string,
     or a role whose profile does not support a DETACHED launch (explorer —
     ambient, a detached spawn would mint a write Tree it must never have;
-    coordinator — the host session; shepherd — existing-PR attachment is a
-    later WS), is refused HERE, before any Tree provisioning or backend
-    launch, with the role and requested context named. ``--epic`` and ``--ws``
+    coordinator — the host session), is refused HERE, before any Tree
+    provisioning or backend launch, with the role and requested context named.
+    Shepherd is valid only with ``--pr`` and no issue/epic shape. ``--epic`` and ``--ws``
     are a PAIR (the epic/work-stream shape); one without the other is an
     incomplete shape and refused loud, and their ABSENCE selects the
     standalone-issue shape (branch ``issues/<id>/<session>``).
@@ -436,6 +462,29 @@ def validate(
             f"--ws must be a positive integer (got {spec.ws})",
             epic=spec.epic,
             ws=spec.ws,
+        )
+    if isinstance(profile.checkout, roleprofile.ExistingPrWriteTree):
+        if spec.pr is None or spec.pr < 1:
+            raise _refusal(
+                f"--pr must be a positive integer for a shepherd existing-PR "
+                f"attachment (got {spec.pr})",
+                role=spec.role,
+            )
+        if spec.has_epic_shape or spec.issue is not None:
+            raise _refusal(
+                "a shepherd attaches to an existing PR with --pr only; do not pass "
+                "--issue, --epic, or --ws, which belong to new-branch/review shapes.",
+                role=spec.role,
+                pr=spec.pr,
+                issue=spec.issue,
+                epic=spec.epic,
+                ws=spec.ws,
+            )
+    elif spec.pr is not None:
+        raise _refusal(
+            f"--pr is only valid for role 'shepherd' (got role {profile.role.value!r})",
+            role=profile.role.value,
+            pr=spec.pr,
         )
     if isinstance(profile.checkout, roleprofile.NewWriteTree) and (
         spec.issue is None or spec.issue < 1
@@ -949,6 +998,256 @@ def _launch_write(
         pr=pr.number,
         pr_state=pr.state,
         pr_is_draft=pr.is_draft,
+    )
+    _log_spawned(result)
+    return result
+
+
+def _refresh_attached_tree(path: str, branch: str) -> None:
+    """Refresh a reused shepherd Tree to the current remote PR head."""
+    git.fetch(cwd=path)
+    git.checkout(branch, cwd=path)
+    git.reset_hard(f"origin/{branch}", cwd=path)
+    git.submodule_update_init(cwd=path)
+
+
+def _create_or_reuse_attached_tree(
+    spec: TreeSpec,
+    *,
+    source_repo: str,
+    github_url: str,
+    head_branch: str,
+    bounds: Boundaries,
+) -> Tree:
+    """Materialize or refresh the stable writable Tree attached to one PR."""
+    try:
+        return bounds.create_tree(spec, source_repo=source_repo, github_url=github_url)
+    except FileExistsError:
+        planned = plan_tree(spec)
+        bounds.refresh_attached_tree(str(planned.dir), head_branch)
+        return Tree(path=str(planned.dir), branch=planned.branch, base=planned.base)
+
+
+def _resolve_pr_attachment(
+    *,
+    repo: identity.Repo,
+    pr_number: int,
+    bounds: Boundaries,
+) -> gh.PrAttachment:
+    """Resolve and validate the existing PR a shepherd will attach to."""
+    try:
+        pr = bounds.pr_for_number(pr_number, repo=repo.slug)
+    except (execrun.ExecError, ValueError) as exc:
+        raise _refusal(
+            f"could not resolve pull request #{pr_number} for shepherd attachment: {exc}",
+            exc=exc,
+            pr=pr_number,
+        ) from exc
+    if pr is None:
+        raise _refusal(
+            f"pull request #{pr_number} does not exist or is not visible; refused "
+            "before launching a shepherd.",
+            pr=pr_number,
+        )
+    if pr is gh.UNKNOWN:
+        raise _refusal(
+            f"could not determine pull request #{pr_number}; refused before "
+            "launching a shepherd.",
+            pr=pr_number,
+        )
+    if pr.state != "OPEN":
+        raise _refusal(
+            f"pull request #{pr.number} is {pr.state}, not OPEN; refused before "
+            "launching a shepherd.",
+            pr=pr.number,
+            pr_state=pr.state,
+        )
+    if pr.is_cross_repository and not pr.maintainer_can_modify:
+        raise _refusal(
+            f"pull request #{pr.number} is from a fork and maintainers cannot modify "
+            "its head branch; refused before launching a shepherd because the "
+            "attachment is not writable.",
+            pr=pr.number,
+        )
+    return pr
+
+
+def _audit_existing_pr_head(
+    pr: gh.HeadPr | gh.UnknownPr | None,
+    *,
+    expected_pr: gh.PrAttachment,
+    branch: str,
+) -> gh.HeadPr:
+    """Prove the attached branch still belongs to the expected open PR."""
+    if pr is None:
+        raise _refusal(
+            f"pull request #{expected_pr.number} head branch {branch!r} no longer "
+            "has a pull request; refused before launching a shepherd.",
+            branch=branch,
+            pr=expected_pr.number,
+        )
+    if pr is gh.UNKNOWN:
+        raise _refusal(
+            f"could not determine the pull request for head branch {branch!r}; "
+            "refused before launching a shepherd.",
+            branch=branch,
+            pr=expected_pr.number,
+        )
+    if pr.number != expected_pr.number:
+        raise _refusal(
+            f"head branch {branch!r} now belongs to PR #{pr.number}, not the "
+            f"requested PR #{expected_pr.number}; refused before launching a shepherd.",
+            branch=branch,
+            pr=expected_pr.number,
+        )
+    if pr.state != "OPEN":
+        raise _refusal(
+            f"pull request #{pr.number} on head branch {branch!r} is {pr.state}, "
+            "not OPEN; refused before launching a shepherd.",
+            branch=branch,
+            pr=pr.number,
+            pr_state=pr.state,
+        )
+    if pr.base_ref != expected_pr.base_ref:
+        raise _refusal(
+            f"pull request #{pr.number} on head branch {branch!r} targets base "
+            f"{pr.base_ref!r}, not the attachment base {expected_pr.base_ref!r}; "
+            "refused before launching a shepherd.",
+            branch=branch,
+            pr=pr.number,
+            pr_base=pr.base_ref,
+        )
+    return pr
+
+
+def _launch_existing_pr_write(
+    *,
+    repo: identity.Repo,
+    source_repo: str,
+    github_url: str,
+    role: str,
+    pr_number: int | None,
+    backend: str,
+    adapter: backends.BackendAdapter,
+    bounds: Boundaries,
+) -> SpawnResult:
+    """Shepherd tail: attach to an existing PR head and push fixes in place.
+
+    The shepherd lifecycle is writable, but it is NOT the implementer's
+    new-branch/draft-PR result channel. It resolves a PR by number, creates or
+    refreshes a stable per-PR Tree from ``origin/<head>``, verifies that the head
+    branch still maps to the same open PR, launches the shepherd task, and returns
+    the existing PR linkage without running the draft-PR handshake.
+    """
+    assert pr_number is not None  # validate() enforces this before dispatch.
+    attach = _resolve_pr_attachment(repo=repo, pr_number=pr_number, bounds=bounds)
+    branch = attach.head_ref
+    base = f"origin/{branch}"
+    tree_spec = TreeSpec(
+        repo=repo,
+        agent_hash=f"pr{attach.number}",
+        branch=branch,
+        base=base,
+    )
+    create_start = time.monotonic()
+    events.emit(
+        logger,
+        "agent.phase",
+        "spawn subagent: phase pr_attachment for %s run",
+        role,
+        extra={"phase": "pr_attachment", "role": role, "backend": backend},
+    )
+    try:
+        tree = _create_or_reuse_attached_tree(
+            tree_spec,
+            source_repo=source_repo,
+            github_url=github_url,
+            head_branch=branch,
+            bounds=bounds,
+        )
+    except (ValueError, execrun.ExecError, OSError) as exc:
+        raise _refusal(
+            f"existing-PR tree attachment failed: {exc}",
+            exc=exc,
+            pr=attach.number,
+            duration_ms=_elapsed_ms(create_start),
+        ) from exc
+
+    logcontext.bind(tree=tree.path, agent=f"pr{attach.number}", pr=attach.number)
+    create_ms = _elapsed_ms(create_start)
+    logger.info(
+        "spawn subagent: existing-PR write tree attached on %s for PR #%d in %dms",
+        tree.branch,
+        attach.number,
+        create_ms,
+        extra={
+            "branch": tree.branch,
+            "base": tree.base,
+            "pr": attach.number,
+            "duration_ms": create_ms,
+        },
+    )
+
+    current = _audit_existing_pr_head(
+        bounds.pr_for_head(tree.branch, cwd=tree.path),
+        expected_pr=attach,
+        branch=tree.branch,
+    )
+
+    pixi_provisioned = pixienv.has_default_env(tree.path)
+    env_prefix = Path(tree.path).joinpath(*pixienv.DEFAULT_ENV_DIR)
+    work_env = workenv.resolve_existing_pr_write_env(
+        repo=repo,
+        tree_path=tree.path,
+        branch=tree.branch,
+        base=tree.base,
+        pixi_provisioned=pixi_provisioned,
+        env_identity=(
+            _read_optional_env_identity(env_prefix) if pixi_provisioned else None
+        ),
+    )
+    logger.info(
+        "spawn subagent: work env resolved — %s routing for the existing-PR write tree",
+        work_env.routing.value,
+        extra={
+            name: value
+            for name, value in {
+                "routing": work_env.routing.value,
+                "checkout": type(work_env.checkout).__name__,
+                "pixi_env": (
+                    work_env.env_identity.environment_name
+                    if work_env.env_identity is not None
+                    else None
+                ),
+                "pr": attach.number,
+            }.items()
+            if value is not None
+        },
+    )
+
+    task = launch.shepherd_task(
+        pr_number=attach.number,
+        branch=tree.branch,
+        base_branch=attach.base_ref,
+    )
+    cmd = launch.route_argv(adapter.build_command(task, role, cwd=tree.path), work_env)
+    try:
+        _run_child(cmd, tree=tree, adapter=adapter, bounds=bounds, role=role)
+    except SpawnError as exc:
+        note = salvage_note(tree.path, bounds)
+        if note is None:
+            raise
+        raise SpawnError(f"{exc}\n{note}") from exc
+
+    result = SpawnResult(
+        tree=tree.path,
+        branch=tree.branch,
+        base=tree.base,
+        role=role,
+        backend=backend,
+        pr=current.number,
+        pr_state=current.state,
+        pr_is_draft=current.is_draft,
     )
     _log_spawned(result)
     return result
