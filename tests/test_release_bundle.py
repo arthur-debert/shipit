@@ -682,6 +682,60 @@ def test_tauri_linux_rerun_overwrites_existing_same_named_bundles(tmp_path):
     )
 
 
+def test_tauri_linux_isolates_the_run_dropping_stale_prior_bundles(tmp_path):
+    # `target/.../bundle` persists across builds, so a prior version's
+    # differently-named .AppImage/.deb still sits under it. The run clears the
+    # declared bundle dir before `tauri build`, so the name-blind collector
+    # sees ONLY this build's outputs — the stale set never rides along, even
+    # the one buried in a stray nested subdir rglob would otherwise sweep in
+    # (codex #515: no stale-artifact release).
+    (artifact,) = _artifacts(TAURI_SPEC)
+    source = tmp_path / "src-tauri/target/release/bundle"
+    (source / "appimage").mkdir(parents=True)
+    (source / "appimage" / "Phos_0.9.0_amd64.AppImage").write_bytes(b"stale")
+    (source / "deb").mkdir(parents=True)
+    (source / "deb" / "Phos_0.9.0_amd64.deb").write_bytes(b"stale")
+    (source / "old" / "nested").mkdir(parents=True)
+    (source / "old" / "nested" / "Phos_0.8.0_amd64.AppImage").write_bytes(b"stale")
+
+    recorder = RunRecorder({"npm": _tauri_linux_effect(tmp_path)})
+    composed = bundle_mod.TAURI.compose(
+        _request(tmp_path, artifact, (), target=LINUX, run_cmd=recorder)
+    )
+
+    out = tmp_path / "dist"
+    assert composed.outputs == (
+        "Phos_1.0.0_amd64.AppImage",
+        "Phos_1.0.0_amd64.deb",
+    )
+    assert not (out / "Phos_0.9.0_amd64.AppImage").exists()
+    assert not (out / "Phos_0.9.0_amd64.deb").exists()
+    assert not (out / "Phos_0.8.0_amd64.AppImage").exists()
+
+
+def test_tauri_darwin_isolation_drops_a_stale_prior_pair(tmp_path):
+    # The same clean-run isolation on darwin (codex #515, class sweep): a stale
+    # prior .app/.dmg under the persistent bundle dir would otherwise trip
+    # _stage_mac_pair's exactly-one guard as a spurious multi-pair hard fail.
+    # The pre-build clear forecloses it — only the fresh pair is staged.
+    (artifact,) = _artifacts(TAURI_SPEC)
+    source = tmp_path / "src-tauri/target/release/bundle"
+    (source / "macos" / "Stale.app").mkdir(parents=True)
+    (source / "dmg").mkdir(parents=True)
+    (source / "dmg" / "Stale_0.9.0_aarch64.dmg").write_bytes(b"stale")
+
+    recorder = RunRecorder({"npm": _bundler_effect(tmp_path), "tar": _tar_effect})
+    composed = bundle_mod.TAURI.compose(
+        _request(tmp_path, artifact, (), target=MAC, run_cmd=recorder)
+    )
+
+    assert composed == bundle_mod.Composed(
+        "app",
+        "tauri",
+        ("Phos.app", "Phos_1.0.0_aarch64.dmg", "app.unsigned-app.tar.gz"),
+    )
+
+
 def test_tauri_darwin_requires_exactly_one_coupled_pair(tmp_path):
     (artifact,) = _artifacts(TAURI_SPEC)
 

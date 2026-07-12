@@ -747,9 +747,10 @@ def _parse_bundle(where: str, spec: object) -> BundleSpec:
     command = spec.get("command")
     source = spec.get("source")
     if entry.declared_command:
-        # mac-app/tauri: the bundler that produces the platform's bundles is
-        # the one consumer-specific part of the mac path (workflows.lex §3.1),
-        # so the declaration must carry it — and say where the bundles land.
+        # mac-app/tauri: the bundler that produces the platform's bundles (the
+        # mac .app/.dmg pair, tauri's linux .AppImage/.deb) is the one
+        # consumer-specific part (workflows.lex §3.1), so the declaration must
+        # carry it — and say where the bundles land.
         if command is None:
             raise ConfigError(
                 f"{where}.bundle: composition `{composition}` runs the "
