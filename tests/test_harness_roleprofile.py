@@ -202,10 +202,10 @@ def test_launch_contracts_match_the_current_dev_cycle():
         LaunchContext.DETACHED,
         LaunchContext.NATIVE_SUBAGENT,
     }
-    # Shepherd is native-only until the existing-PR attachment lifecycle
-    # (RPE01-WS04) exists — a detached shepherd would ride the implementer's
-    # new-branch/draft-PR handshake, the exact invalid combination refused.
-    assert contexts[Role.SHEPHERD] == {LaunchContext.NATIVE_SUBAGENT}
+    assert contexts[Role.SHEPHERD] == {
+        LaunchContext.DETACHED,
+        LaunchContext.NATIVE_SUBAGENT,
+    }
     assert contexts[Role.EXPLORER] == {LaunchContext.NATIVE_SUBAGENT}
     assert contexts[Role.REVIEWER] == {
         LaunchContext.DETACHED,
@@ -259,6 +259,7 @@ def test_validate_spawn_returns_the_profile_for_supported_pairs():
         is PROFILES[Role.IMPLEMENTER]
     )
     assert validate_spawn("reviewer", LaunchContext.DETACHED) is PROFILES[Role.REVIEWER]
+    assert validate_spawn("shepherd", LaunchContext.DETACHED) is PROFILES[Role.SHEPHERD]
     assert (
         validate_spawn("explorer", LaunchContext.NATIVE_SUBAGENT)
         is PROFILES[Role.EXPLORER]
@@ -283,7 +284,6 @@ def test_validate_spawn_preserves_the_empty_vs_unknown_diagnosis():
     [
         ("explorer", LaunchContext.DETACHED),  # ambient — never a write Tree
         ("coordinator", LaunchContext.DETACHED),  # the host session itself
-        ("shepherd", LaunchContext.DETACHED),  # existing-PR attachment is WS04
         ("coordinator", LaunchContext.NATIVE_SUBAGENT),
     ],
 )

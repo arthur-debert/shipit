@@ -140,6 +140,22 @@ def test_base_is_origin_main_for_an_issue():
     assert plan(_issue_spec()).base == "origin/main"
 
 
+def test_freeform_branch_can_override_base_for_pr_attachment():
+    p = plan(
+        TreeSpec(
+            repo=REPO,
+            agent_hash="pr321",
+            branch="RPE01/WS04",
+            base="origin/RPE01/WS04",
+            root=ROOT,
+        )
+    )
+
+    assert p.branch == "RPE01/WS04"
+    assert p.base == "origin/RPE01/WS04"
+    assert p.dir == ROOT / "acme" / "widget" / "branches" / "rpe01-ws04-pr321"
+
+
 # --------------------------------------------------------------------------
 # slug sanitization (lives in layout)
 # --------------------------------------------------------------------------
@@ -468,6 +484,12 @@ def test_freeform_branch_is_verbatim():
 
 def test_freeform_base_is_origin_main():
     assert plan(_freeform_spec()).base == "origin/main"
+
+
+@pytest.mark.parametrize("base", ["", "   "])
+def test_freeform_explicit_blank_base_is_refused(base):
+    with pytest.raises(ValueError, match="base override must not be empty"):
+        plan(_freeform_spec(base=base))
 
 
 def test_freeform_dir_is_branches_kind_with_sanitized_leaf():

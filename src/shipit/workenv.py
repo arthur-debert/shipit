@@ -38,9 +38,11 @@ module exposes per-boundary constructors behind the one common value rather
 than one oversized universal resolver. WS05 landed the write-Run walking
 skeleton (:func:`resolve_write_run_env`, consumed by
 :func:`shipit.spawn.subagent._launch_write` and routed by
-:func:`shipit.spawn.launch.route_argv`); RPE01-WS06 adds the coordinator
-session Tree, reviewer shared read-only Tree, and explorer ambient WorkingDir
-boundaries.
+:func:`shipit.spawn.launch.route_argv`). WS04 adds the sibling existing-PR
+write resolver for shepherd attachment (:func:`resolve_existing_pr_write_env`)
+with the same pixi routing contract but the shepherd checkout strategy;
+RPE01-WS06 adds the coordinator session Tree, reviewer shared read-only Tree,
+and explorer ambient WorkingDir boundaries.
 """
 
 from __future__ import annotations
@@ -51,6 +53,7 @@ from enum import StrEnum
 from .harness.roleprofile import (
     AmbientWorkingDir,
     CheckoutStrategy,
+    ExistingPrWriteTree,
     NewWriteTree,
     SessionTree,
     SharedReadOnlyTree,
@@ -122,26 +125,17 @@ class WorkEnv:
     routing: ExecutionRouting
 
 
-def resolve_write_run_env(
+def _resolve_write_env(
     *,
     repo: Repo,
     tree_path: str,
     branch: str,
     base: str,
+    checkout: CheckoutStrategy,
     pixi_provisioned: bool,
     env_identity: EnvIdentity | None = None,
 ) -> WorkEnv:
-    """Resolve the Work Env for a NEW write Run's freshly materialized Tree.
-
-    The write-Run boundary constructor (RPE01-WS05's walking skeleton): pure
-    and deterministic over the facts the spawn write tail already holds — the
-    Tree's coordinates (``tree_path``/``branch``/``base``, straight from
-    :class:`~shipit.tree.create.Tree`), the checkout's :class:`~shipit.identity.Repo`,
-    and the two pixi facts the boundary probed at its own effectful seam:
-    ``pixi_provisioned`` (:func:`shipit.pixienv.has_default_env` — the same
-    sentinel every routing site keys on) and the optional on-disk
-    ``env_identity`` (:func:`shipit.pixienv.read_env_identity`). No probe,
-    process, or provisioning happens HERE.
+    """Resolve a writable Tree Work Env; callers supply the checkout strategy.
 
     The composed :class:`~shipit.identity.WorkingDir` carries the Tree's path,
     repo, and branch; its revision commit is ``None`` — honest best-effort
@@ -175,12 +169,81 @@ def resolve_write_run_env(
     return WorkEnv(
         working_dir=working_dir,
         tree=TreeProvenance(branch=branch, base=base),
-        checkout=NewWriteTree(),
+        checkout=checkout,
         activation=None,
         env_identity=env_identity,
         routing=(
             ExecutionRouting.PIXI_RUN if pixi_provisioned else ExecutionRouting.AMBIENT
         ),
+    )
+
+
+def resolve_write_run_env(
+    *,
+    repo: Repo,
+    tree_path: str,
+    branch: str,
+    base: str,
+    pixi_provisioned: bool,
+    env_identity: EnvIdentity | None = None,
+) -> WorkEnv:
+    """Resolve the Work Env for a NEW write Run's freshly materialized Tree.
+
+    The write-Run boundary constructor (RPE01-WS05's walking skeleton): pure
+    and deterministic over the facts the spawn write tail already holds — the
+    Tree's coordinates (``tree_path``/``branch``/``base``, straight from
+    :class:`~shipit.tree.create.Tree`), the checkout's :class:`~shipit.identity.Repo`,
+    and the two pixi facts the boundary probed at its own effectful seam:
+    ``pixi_provisioned`` (:func:`shipit.pixienv.has_default_env` — the same
+    sentinel every routing site keys on) and the optional on-disk
+    ``env_identity`` (:func:`shipit.pixienv.read_env_identity`). No probe,
+    process, or provisioning happens HERE.
+
+    Routing follows the provisioning fact, mirroring the ADR-0019-amendment
+    gate: a provisioned write Tree routes ``PIXI_RUN`` (the child launches
+    through the existing pixi-run wrapping and environment scrub); an
+    unprovisioned one — a non-pixi repo — is honestly ``AMBIENT`` with no
+    activation and no env identity, preserving the existing bare-launch
+    behavior. ``activation`` is always ``None`` for a write Run: ``pixi run``
+    computes activation inside the child, so there is no snapshot to borrow —
+    absent-not-fabricated.
+    """
+    return _resolve_write_env(
+        repo=repo,
+        tree_path=tree_path,
+        branch=branch,
+        base=base,
+        checkout=NewWriteTree(),
+        pixi_provisioned=pixi_provisioned,
+        env_identity=env_identity,
+    )
+
+
+def resolve_existing_pr_write_env(
+    *,
+    repo: Repo,
+    tree_path: str,
+    branch: str,
+    base: str,
+    pixi_provisioned: bool,
+    env_identity: EnvIdentity | None = None,
+) -> WorkEnv:
+    """Resolve the Work Env for a shepherd's writable existing-PR attachment.
+
+    This is the same write-Tree execution posture as :func:`resolve_write_run_env`
+    with a different checkout strategy: the Tree is attached to an existing PR
+    head and may be resumed across review rounds. The resolver remains pure over
+    supplied facts; the spawn shepherd tail owns PR resolution, Tree create/reuse,
+    and any refresh before calling here.
+    """
+    return _resolve_write_env(
+        repo=repo,
+        tree_path=tree_path,
+        branch=branch,
+        base=base,
+        checkout=ExistingPrWriteTree(),
+        pixi_provisioned=pixi_provisioned,
+        env_identity=env_identity,
     )
 
 

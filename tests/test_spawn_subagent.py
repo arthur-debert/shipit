@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from shipit import events, execrun, gh, logcontext
+from shipit import events, execrun, gh, git, logcontext
 from shipit.execrun import ExecError
 from shipit.identity import repo_from_slug
 from shipit.spawn import launch
@@ -28,6 +28,7 @@ from shipit.spawn.subagent import (
     Boundaries,
     SpawnError,
     SubagentSpec,
+    _refresh_attached_tree,
     audit_handshake,
     spawn_subagent,
 )
@@ -35,6 +36,15 @@ from shipit.tree import layout
 from shipit.tree.create import Tree
 
 _PR = gh.HeadPr(number=321, state="OPEN", is_draft=True, base_ref="TRE03/umbrella")
+_ATTACHED_PR = gh.PrAttachment(
+    number=321,
+    state="OPEN",
+    is_draft=True,
+    base_ref="TRE03/umbrella",
+    head_ref="TRE03/WS01",
+    is_cross_repository=False,
+    maintainer_can_modify=False,
+)
 
 
 def spec(**overrides) -> SubagentSpec:
@@ -48,10 +58,12 @@ def bounds(
     tmp_path: Path,
     *,
     pr=_PR,
+    attached_pr=_ATTACHED_PR,
     returncode: int = 0,
     umbrella: bool = True,
     org_repo: str = "acme/widget",
     status_lines: list[str] | None = None,
+    create_exists: bool = False,
 ) -> tuple[Boundaries, dict]:
     """Fake every effectful edge as a recording callable; return (bounds, calls).
 
@@ -72,6 +84,8 @@ def bounds(
         calls["spec"] = tree_spec
         calls["source_repo"] = source_repo
         calls["github_url"] = github_url
+        if create_exists:
+            raise FileExistsError("attached tree already exists")
         tree_dir.mkdir(parents=True, exist_ok=True)
         tp = layout.plan(tree_spec)
         return Tree(path=str(tree_dir), branch=tp.branch, base=tp.base)
@@ -88,6 +102,11 @@ def bounds(
         calls["pr_cwd"] = cwd
         return pr
 
+    def pr_for_number(number, *, repo=None):
+        calls["pr_number"] = number
+        calls["pr_repo"] = repo
+        return attached_pr
+
     def remote_branch_exists(branch, *, cwd=None, remote="origin"):
         calls["umbrella_branch"] = branch
         calls["umbrella_cwd"] = cwd
@@ -103,6 +122,10 @@ def bounds(
         calls["review_run_id"] = run_id
         return {"review": {}, "post": {}}
 
+    def refresh_attached_tree(path, branch):
+        calls["refresh_path"] = path
+        calls["refresh_branch"] = branch
+
     return (
         Boundaries(
             repo_root=lambda: str(parent),
@@ -111,7 +134,9 @@ def bounds(
             remote_branch_exists=remote_branch_exists,
             create_tree=create_tree,
             pr_for_head=pr_for_head,
+            pr_for_number=pr_for_number,
             status_porcelain=status_porcelain,
+            refresh_attached_tree=refresh_attached_tree,
             runner=runner,
             run_review=run_review,
         ),
@@ -190,6 +215,202 @@ def test_write_spawn_links_pr_from_the_tree_branch(tmp_path):
     assert calls["pr_branch"] == "TRE03/WS02"  # link resolved from the Tree branch
     assert calls["pr_cwd"] == str(tmp_path / "tree")  # ...read from inside the Tree
     assert result.pr == 321
+
+
+# --- the happy path: shepherd existing-PR write attachment --------------------
+
+
+def shepherd_spec(**overrides) -> SubagentSpec:
+    """A detached shepherd attaches by PR number, never by issue/work-stream shape."""
+    fields = dict(repo="widget", role="shepherd", pr=321)
+    fields.update(overrides)
+    return SubagentSpec(**fields)
+
+
+def test_shepherd_spawn_attaches_to_existing_pr_head_without_new_pr(tmp_path):
+    attached = gh.PrAttachment(
+        number=321,
+        state="OPEN",
+        is_draft=True,
+        base_ref="TRE03/umbrella",
+        head_ref="TRE03/WS04",
+        is_cross_repository=False,
+        maintainer_can_modify=False,
+    )
+    b, calls = bounds(
+        tmp_path,
+        attached_pr=attached,
+        pr=gh.HeadPr(
+            number=321,
+            state="OPEN",
+            is_draft=True,
+            base_ref="TRE03/umbrella",
+        ),
+    )
+
+    result = spawn_subagent(shepherd_spec(), b)
+
+    assert calls["pr_number"] == 321
+    assert calls["pr_repo"] == "acme/widget"
+    tree_spec = calls["spec"]
+    assert tree_spec.branch == "TRE03/WS04"
+    assert tree_spec.base == "origin/TRE03/WS04"
+    assert tree_spec.agent_hash == "pr321"  # stable identity across rounds
+    assert tree_spec.issue is None and tree_spec.epic is None and tree_spec.ws is None
+    assert calls["pr_branch"] == "TRE03/WS04"
+    assert calls["pr_cwd"] == str(tmp_path / "tree")
+    assert calls["cmd"][calls["cmd"].index("--agent") + 1] == "shepherd"
+    task = calls["cmd"][calls["cmd"].index("-p") + 1]
+    assert "pull request #321" in task
+    assert "git push origin HEAD:refs/heads/TRE03/WS04" in task
+    assert "gh pr create" not in task
+    assert "shipit pr next" in task and "do NOT run `shipit pr next`" in task
+    assert result.to_dict() == {
+        "tree": str(tmp_path / "tree"),
+        "branch": "TRE03/WS04",
+        "base": "origin/TRE03/WS04",
+        "role": "shepherd",
+        "backend": "claude",
+        "pr": 321,
+        "pr_state": "OPEN",
+        "pr_is_draft": True,
+    }
+
+
+def test_shepherd_resume_reuses_stable_tree_and_refreshes_current_head(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("SHIPIT_TREES_ROOT", str(tmp_path / "trees"))
+    attached = gh.PrAttachment(
+        number=321,
+        state="OPEN",
+        is_draft=True,
+        base_ref="TRE03/umbrella",
+        head_ref="TRE03/WS04",
+        is_cross_repository=False,
+        maintainer_can_modify=False,
+    )
+    b, calls = bounds(
+        tmp_path,
+        attached_pr=attached,
+        pr=gh.HeadPr(
+            number=321,
+            state="OPEN",
+            is_draft=True,
+            base_ref="TRE03/umbrella",
+        ),
+        create_exists=True,
+    )
+
+    result = spawn_subagent(shepherd_spec(), b)
+
+    planned = layout.plan(calls["spec"])
+    assert calls["refresh_path"] == str(planned.dir)
+    assert calls["refresh_branch"] == "TRE03/WS04"
+    assert result.tree == str(planned.dir)
+    assert result.branch == "TRE03/WS04"
+
+
+def test_shepherd_refresh_refuses_uncommitted_work_before_mutating(monkeypatch):
+    monkeypatch.setattr(git, "status_porcelain", lambda *, cwd: [" M work.py"])
+    monkeypatch.setattr(
+        git,
+        "fetch",
+        lambda **kwargs: pytest.fail("dirty attachment must not be fetched"),
+    )
+
+    with pytest.raises(ValueError, match="1 uncommitted path"):
+        _refresh_attached_tree("/tree", "TRE03/WS04")
+
+
+@pytest.mark.parametrize("unpushed", [None, ("a" * 40,)])
+def test_shepherd_refresh_refuses_unknown_or_local_only_commits(monkeypatch, unpushed):
+    monkeypatch.setattr(git, "status_porcelain", lambda *, cwd: [])
+    monkeypatch.setattr(git, "fetch", lambda *, cwd: None)
+    monkeypatch.setattr(git, "checkout", lambda branch, *, cwd: None)
+    monkeypatch.setattr(git, "unpushed_shas", lambda *, cwd: unpushed)
+    monkeypatch.setattr(
+        git,
+        "reset_hard",
+        lambda *args, **kwargs: pytest.fail("unsafe attachment must not be reset"),
+    )
+
+    with pytest.raises(ValueError, match="could not determine|local-only commit"):
+        _refresh_attached_tree("/tree", "TRE03/WS04")
+
+
+def test_shepherd_wrong_head_pr_is_refused_before_launch(tmp_path):
+    attached = gh.PrAttachment(
+        number=321,
+        state="OPEN",
+        is_draft=True,
+        base_ref="TRE03/umbrella",
+        head_ref="TRE03/WS04",
+        is_cross_repository=False,
+        maintainer_can_modify=False,
+    )
+    b, calls = bounds(
+        tmp_path,
+        attached_pr=attached,
+        pr=gh.HeadPr(
+            number=654,
+            state="OPEN",
+            is_draft=True,
+            base_ref="TRE03/umbrella",
+        ),
+    )
+
+    with pytest.raises(SpawnError, match="not the requested PR #321"):
+        spawn_subagent(shepherd_spec(), b)
+
+    assert "cmd" not in calls
+
+
+def test_shepherd_existing_pr_does_not_require_draft_handshake(tmp_path):
+    attached = gh.PrAttachment(
+        number=321,
+        state="OPEN",
+        is_draft=False,
+        base_ref="TRE03/umbrella",
+        head_ref="TRE03/WS04",
+        is_cross_repository=False,
+        maintainer_can_modify=False,
+    )
+    b, calls = bounds(
+        tmp_path,
+        attached_pr=attached,
+        pr=gh.HeadPr(
+            number=321,
+            state="OPEN",
+            is_draft=False,
+            base_ref="TRE03/umbrella",
+        ),
+    )
+
+    result = spawn_subagent(shepherd_spec(), b)
+
+    assert calls["cmd"][calls["cmd"].index("--agent") + 1] == "shepherd"
+    assert result.pr == 321
+    assert result.pr_is_draft is False
+
+
+@pytest.mark.parametrize("maintainer_can_modify", [False, True])
+def test_shepherd_fork_pr_is_refused_before_tree(tmp_path, maintainer_can_modify):
+    attached = gh.PrAttachment(
+        number=321,
+        state="OPEN",
+        is_draft=True,
+        base_ref="TRE03/umbrella",
+        head_ref="contributor/branch",
+        is_cross_repository=True,
+        maintainer_can_modify=maintainer_can_modify,
+    )
+    b, calls = bounds(tmp_path, attached_pr=attached)
+
+    with pytest.raises(SpawnError, match="fork-head fetching and pushing"):
+        spawn_subagent(shepherd_spec(), b)
+
+    assert "spec" not in calls and "cmd" not in calls
 
 
 def test_provisioned_write_spawn_launches_through_its_work_env(
@@ -437,20 +658,47 @@ def test_unknown_role_is_refused_before_any_io(tmp_path):
     assert not calls  # no boundary touched: nothing created, nothing launched
 
 
-@pytest.mark.parametrize("role", ["explorer", "coordinator", "shepherd"])
+@pytest.mark.parametrize("role", ["explorer", "coordinator"])
 def test_detached_spawn_of_non_detachable_roles_is_refused(tmp_path, role):
     # RPE01-WS01: a KNOWN role whose profile does not support a detached launch
     # refuses before a Tree can be minted — the explorer is ambient (a detached
     # spawn would hand it a write Tree it must never have), the coordinator is
-    # the host session itself, and the shepherd's existing-PR attachment
-    # lifecycle is a later WS (until then a detached shepherd would ride the
-    # implementer's new-branch/draft-PR handshake, the exact invalid combo).
+    # the host session itself.
     b, calls = bounds(tmp_path)
     with pytest.raises(SpawnError) as exc:
         spawn_subagent(spec(role=role), b)
     message = str(exc.value)
     assert role in message and "detached" in message  # role + context named
     assert not calls  # refused pre-provisioning, pre-launch
+
+
+def test_shepherd_requires_pr_attachment_before_any_tree(tmp_path):
+    b, calls = bounds(tmp_path)
+
+    with pytest.raises(SpawnError, match="--pr must be a positive integer"):
+        spawn_subagent(shepherd_spec(pr=None), replace(b, repo_root=lambda: None))
+
+    assert not calls
+
+
+def test_shepherd_refuses_issue_or_epic_shape(tmp_path):
+    b, calls = bounds(tmp_path)
+
+    with pytest.raises(SpawnError, match="--pr only"):
+        spawn_subagent(shepherd_spec(issue=769), b)
+    with pytest.raises(SpawnError, match="--pr only"):
+        spawn_subagent(shepherd_spec(epic="TRE03", ws=4), b)
+
+    assert "spec" not in calls and "cmd" not in calls
+
+
+def test_pr_option_is_only_for_shepherd(tmp_path):
+    b, calls = bounds(tmp_path)
+
+    with pytest.raises(SpawnError, match="only valid for role 'shepherd'"):
+        spawn_subagent(spec(pr=321), b)
+
+    assert "spec" not in calls and "cmd" not in calls
 
 
 def test_role_input_is_normalized_through_the_registry(tmp_path):
