@@ -518,6 +518,28 @@ def test_run_preflight_hard_fails_on_missing_secrets(repo, capsys):
     assert "error:" in err and "PYPI_TOKEN" in err
 
 
+def test_run_preflight_plan_only_skips_presence_never_the_facts(repo, capsys):
+    # Per-stage dispatch (#780): the stage blocks' standalone plan job runs
+    # preflight --plan-only in an environment that deliberately carries no
+    # secrets — the facts (matrix, stages, endpoints, secret NAMES) still
+    # compute; only the presence hard-fail is skipped. Presence was the
+    # source run's preflight's job, and each stage's verb still validates
+    # its own names before acting.
+    rc = release_verb.run_preflight(
+        parse_spec("1.0.0"),
+        plan_only=True,
+        as_json=True,
+        gitio=FakeGit(str(repo)),
+        env={},  # every required secret absent
+    )
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["version"] == "1.0.0"
+    assert payload["endpoints"] == ["gh-release", "pypi"]
+    # The requirement NAMES still ride the plan — only presence is skipped.
+    assert payload["secrets"] == ["RELEASE_TOKEN", "PYPI_TOKEN"]
+
+
 def test_run_preflight_text_rendering_carries_the_plan_summary(repo, capsys):
     rc = release_verb.run_preflight(
         parse_spec("1.0.0-release-rc"),

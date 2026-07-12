@@ -26,6 +26,14 @@ name: wf-release
 # advance-major.yml force-moves on each non-prerelease shipit release —
 # consumers pin `@v1` and upgrade by riding it (or pin a tag to freeze).
 #
+# Per-stage dispatch (TOL02-WS09 #780, ADR-0054): this chain is the FULL
+# path; re-running exactly one stage fresh is the stage blocks' standalone
+# mode — each block re-derives the plan facts at the tag when the caller
+# omits them, and sign/publish take a `run-id` to source a prior run's
+# artifacts. The blessed consumer surface is a routing-only `stage` choice
+# input on the dispatch caller (workflows.lex §8); this chain passes every
+# fact explicitly, so the blocks' plan jobs are skipped no-ops here.
+#
 # Check-name contract (PRD story 42, consumed by ADP02): a consumer calling
 # this workflow from caller job `release` sees checks
 #   release / prepare / prepare
