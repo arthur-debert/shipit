@@ -285,8 +285,8 @@ activation it runs.
 Profile consumers move onto the registry as one coherent migration, with
 invariant tests preventing a half-migrated role. Existing valid coordinator,
 implementer, and reviewer behavior remains stable. Invalid behavior becomes a
-clear refusal: unknown roles, detached explorer spawn, and shepherd-through-new-
-implementer-branch are not compatibility contracts.
+clear refusal: unknown roles, detached explorer spawn, and
+shepherd-through-new-implementer-branch are not compatibility contracts.
 
 ## Alternatives Considered
 
@@ -306,7 +306,7 @@ implementer/shepherd distinction without new special cases.
 Rejected by ADR-0047. The fixed model must be battle-hardened before consumer
 variation could justify weakening or extending it.
 
-### Use one boolean mutation right
+### Use one boolean mutation flag
 
 Rejected because a reviewer may need network and temporary output while the
 reviewed checkout stays immutable, and an explorer may read through Bash without
@@ -441,7 +441,7 @@ Acceptance is the full existing lint and test suite plus focused module tests.
 Live backend dogfood remains optional evidence, not a required test gate for this
 structural refactor.
 
-## Workstream Hints
+## Work Stream Hints
 
 - Establish the Role Profile and structured checkout-strategy model first as a
   pure, exhaustively tested registry.
