@@ -40,7 +40,7 @@ Backend registry
 
 Launcher common path
 
-: `agent-start` — the generic managed launcher (`./agent-start <agent> [args...]`). Usage, the host dispatch, the CLI presence check, and arg forwarding are written once; a change to the common start path cannot be forgotten for one agent. `./claude-start` and `./codex-start` remain as compatibility shims that delegate here and carry no logic of their own.
+: `agent-start` — the generic managed launcher (`./agent-start <agent> [args...]`). Usage, the host dispatch, the CLI presence check, and arg forwarding are written once; a change to the common start path cannot be forgotten for one agent.
 
 ## 2. The host-specific adapters (narrow, named, one per seam)
 
