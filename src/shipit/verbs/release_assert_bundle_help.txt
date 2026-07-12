@@ -13,9 +13,11 @@ the repo declares exactly one; `--expected NAME` bypasses the map entirely.
 
 The check is pure over the tree — no network, no toolchain: every `.app`
 (its Info.plist CFBundleExecutable), every `*.unsigned-app.tar.gz` reseal
-payload (read in place), or — when the tree bundles no app — the loose
-executables, must be named exactly the expected name. A tree with nothing
-to assert fails loudly.
+payload, every plain `.tar.gz`/`.zip` archive and every `.deb` (all read in
+place — the exec bit inside an archive's or a deb's data.tar headers
+survives the artifact transport that strips a loose file's), or — when the
+tree bundles none of those — the loose executables, must be named exactly
+the expected name. A tree with nothing to assert fails loudly.
 
 Exit codes: 0 the main binary matches; 1 it does not (the verdict with
 expected/actual names prints on stderr; `--json` renders the typed verdict

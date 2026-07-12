@@ -10,7 +10,11 @@ It walks the `[artifacts]` map and runs each artifact's DECLARED composition
             `<name>-<target>.tar.gz` (zip + .exe on windows targets) — the
             layout brew formulas and GH release assets assume.
 - deb       cargo-deb against the pre-built release binary (no rebuild, no
-            strip); a run producing no .deb is a hard failure. Linux only.
+            strip); cargo-deb is self-provisioned (`cargo install cargo-deb
+            --locked`) when missing, and never receives --target — builds
+            are native, so it reads target/release/ and derives the Debian
+            arch from the host toolchain. A run producing no .deb is a hard
+            failure. Linux only.
 - wheel     `uv build` emitting BOTH wheel and sdist into the output tree.
 - mac-app   the declared bundler's coupled unsigned .app/.dmg pair PLUS the
             inner .app re-emitted as `<name>.unsigned-app.tar.gz` — the

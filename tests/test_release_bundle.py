@@ -70,7 +70,7 @@ def _entries(mapping: dict) -> tuple[config.ToolchainEntry, ...]:
     return config.load_toolchains({"toolchains": mapping})
 
 
-def _request(tmp_path, artifact, entries, *, target=LINUX, run_cmd, declared=False):
+def _request(tmp_path, artifact, entries, *, target=LINUX, run_cmd):
     return bundle_mod.ComposeRequest(
         artifact=artifact,
         entries=entries,
@@ -78,8 +78,15 @@ def _request(tmp_path, artifact, entries, *, target=LINUX, run_cmd, declared=Fal
         out_dir=tmp_path / "dist",
         target=target,
         run_cmd=run_cmd,
-        target_declared=declared,
     )
+
+
+@pytest.fixture
+def cargo_deb_on_path(monkeypatch):
+    """cargo-deb present on PATH — the deb tests' default, so the recorded
+    calls are the composition's alone regardless of the host machine (the
+    self-provisioning path is pinned by its own test)."""
+    monkeypatch.setattr(bundle_mod.shutil, "which", lambda name: f"/stub/{name}")
 
 
 # --------------------------------------------------------------------------
@@ -184,6 +191,8 @@ def test_archive_rerun_rebuilds_the_stage_and_replaces_the_archive(tmp_path):
 
 def _deb_effect(name="lex-cli_1.0.0-1_amd64.deb"):
     def effect(argv, cwd):
+        if "--output" not in argv:
+            return  # `cargo install cargo-deb` writes nothing into the tree
         out = Path(argv[argv.index("--output") + 1])
         out.mkdir(parents=True, exist_ok=True)
         (out / name).write_bytes(b"deb")
@@ -191,7 +200,7 @@ def _deb_effect(name="lex-cli_1.0.0-1_amd64.deb"):
     return effect
 
 
-def test_deb_invokes_cargo_deb_no_rebuild_no_strip(tmp_path):
+def test_deb_invokes_cargo_deb_no_rebuild_no_strip(tmp_path, cargo_deb_on_path):
     (artifact,) = _artifacts(
         {
             "lex-cli": {
@@ -231,25 +240,49 @@ def test_deb_invokes_cargo_deb_no_rebuild_no_strip(tmp_path):
     assert not (tmp_path / "dist" / ".tmp-lex-cli").exists()
 
 
-def test_deb_rides_an_explicitly_declared_target(tmp_path):
-    # cargo-deb derives the Debian arch from --target (legacy build-deb) —
-    # passed through only when the CALLER declared one.
+def test_deb_never_forwards_target_to_cargo_deb(tmp_path, cargo_deb_on_path):
+    # Issue #784 F3: `shipit build` builds natively into target/release/ (no
+    # --target plumbing), so forwarding the bundle triple would redirect
+    # cargo-deb to the EMPTY target/<triple>/release/. The triple is
+    # naming-only; cargo-deb derives the Debian arch from the host toolchain
+    # — correct by construction on the per-arch matrix runners.
     (artifact,) = _artifacts(
         {"lex": {"build": ["rust"], "bundle": {"composition": "deb"}}}
     )
     recorder = RunRecorder({"cargo": _deb_effect()})
     bundle_mod.DEB.compose(
-        _request(
-            tmp_path, artifact, _entries({".": "rust"}), run_cmd=recorder, declared=True
-        )
+        _request(tmp_path, artifact, _entries({".": "rust"}), run_cmd=recorder)
     )
     ((argv, _cwd),) = recorder.calls
-    assert ("--target", LINUX) == argv[
-        argv.index("--target") : argv.index("--target") + 2
-    ]
+    assert "--target" not in argv
 
 
-def test_deb_hard_fails_when_no_deb_appears(tmp_path):
+def test_deb_self_provisions_cargo_deb_when_missing(tmp_path, monkeypatch):
+    # Issue #784 F2: the wf-build runner arrives without cargo-deb (not on
+    # conda-forge, so no pixi env can carry it) — the composition installs it
+    # itself, through the same recorded Exec seam, BEFORE composing.
+    monkeypatch.setattr(bundle_mod.shutil, "which", lambda name: None)
+    (artifact,) = _artifacts(
+        {
+            "lex-cli": {
+                "build": [{"toolchain": "rust", "package": "lex-cli"}],
+                "bundle": {"composition": "deb"},
+            }
+        }
+    )
+    recorder = RunRecorder({"cargo": _deb_effect()})
+
+    composed = bundle_mod.DEB.compose(
+        _request(tmp_path, artifact, _entries({".": "rust"}), run_cmd=recorder)
+    )
+
+    install, compose_call = recorder.calls
+    assert install == (("cargo", "install", "cargo-deb", "--locked"), tmp_path)
+    assert compose_call[0][:4] == ("cargo", "deb", "--no-build", "--no-strip")
+    assert composed.outputs == ("lex-cli_1.0.0-1_amd64.deb",)
+
+
+def test_deb_hard_fails_when_no_deb_appears(tmp_path, cargo_deb_on_path):
     # The legacy build-deb contract: a green cargo-deb run that wrote nothing
     # is a FAILURE, never a quiet pass.
     (artifact,) = _artifacts(
@@ -262,7 +295,7 @@ def test_deb_hard_fails_when_no_deb_appears(tmp_path):
         )
 
 
-def test_deb_rerun_overwrites_an_existing_same_named_deb(tmp_path):
+def test_deb_rerun_overwrites_an_existing_same_named_deb(tmp_path, cargo_deb_on_path):
     # The common rerun case (same version, same target): an identically-named
     # .deb already sits in the output tree. The old before/after subtraction
     # misread the overwrite as "produced no .deb"; the scratch-dir emit sees it.
@@ -548,7 +581,9 @@ def test_bundle_walks_the_map_composing_skipping_and_passing_through(
     assert recorder.heads == ["tar"]
 
 
-def test_bundle_composes_the_deb_on_its_platform(tmp_path, monkeypatch, capsys):
+def test_bundle_composes_the_deb_on_its_platform(
+    tmp_path, monkeypatch, capsys, cargo_deb_on_path
+):
     root = _repo(tmp_path, monkeypatch)
     _executable(root / "target/release/lex")
     recorder = RunRecorder({"cargo": _deb_effect()})

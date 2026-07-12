@@ -19,10 +19,10 @@ Two halves:
 - :func:`check_tree` — the check itself, over a bundle tree: every main
   binary the tree carries (a ``.app``'s ``CFBundleExecutable``, a reseal
   payload's inner ``.app``, a plain ``.tar.gz``/``.zip`` archive's inner
-  executable, or — when the tree bundles none of those — its loose
-  executables) must be named exactly the expected name. A tree with NO
-  discoverable main binary fails loudly: "nothing to assert" is a wrong
-  bundle, never a pass.
+  executable, a ``.deb``'s inner executable, or — when the tree bundles none
+  of those — its loose executables) must be named exactly the expected name.
+  A tree with NO discoverable main binary fails loudly: "nothing to assert"
+  is a wrong bundle, never a pass.
 
 The archive tier exists because GitHub Actions artifact upload/download
 STRIPS Unix exec bits: wf-publish's unsigned-path assert (ADR-0040) runs
@@ -33,6 +33,16 @@ and preserves the exec bit INSIDE its own header (tar stores mode), so the
 archive is read in place — the same transport-proof, no-extraction shape as
 the reseal payload — and its inner executable is the assertable main binary.
 
+The deb tier (issue #784 F4) exists for the same reason with a thicker shell:
+a deb composition's tree carries ONLY the ``.deb`` — opaque to every other
+tier (``_is_executable`` deliberately excludes it from the loose scan) — so
+without this tier wf-publish's assert fan hard-failed every deb leg with
+"nothing to assert". A ``.deb`` is an ar container (``debian-binary`` +
+``control.tar.*`` + ``data.tar.*``); the ``data.tar`` member is read in place
+(never extracted), and its sole executable regular member — the exec bit
+rides the inner tar's headers, transport-proof — is the assertable main
+binary.
+
 Pure over the filesystem (reads only); rendered by the verb with uniform
 exit codes (0 pass, 1 fail — verdict + expected/actual on stderr, ``--json``
 available), so the WS06 blocks call it with no extra plumbing.
@@ -40,6 +50,7 @@ available), so the WS06 blocks call it with no extra plumbing.
 
 from __future__ import annotations
 
+import io
 import plistlib
 import tarfile
 import zipfile
@@ -57,6 +68,14 @@ RESEAL_SUFFIX = ".unsigned-app.tar.gz"
 #: check. The reseal payload is also a ``.tar.gz`` but is handled separately
 #: (:func:`_payload_main_binary`), so it is excluded by :func:`_is_plain_archive`.
 PLAIN_ARCHIVE_SUFFIXES = (".tar.gz", ".zip")
+
+#: The suffix the deb composition emits (:mod:`shipit.release.bundle`) —
+#: inspected here in place, like every other archive-shaped tier.
+DEB_SUFFIX = ".deb"
+
+#: The ar container's global magic — a ``.deb`` IS an ar archive
+#: (``debian-binary`` + ``control.tar.*`` + ``data.tar.*``).
+_AR_MAGIC = b"!<arch>\n"
 
 
 def expected_main_binary(artifact: config.Artifact) -> str:
@@ -216,6 +235,63 @@ def _archive_main_binary(archive: Path) -> str | None:
     return None
 
 
+def _deb_data_tar(deb: Path) -> bytes | None:
+    """The raw bytes of the deb's ``data.tar.*`` member, read from the ar
+    container in place. An ar archive is the global magic followed by 60-byte
+    member headers (name 16, mtime 12, uid 6, gid 6, mode 8, size 10, magic
+    2) each fronting ``size`` data bytes padded to an even offset; a ``.deb``
+    carries ``debian-binary``, ``control.tar.*`` and ``data.tar.*`` members.
+    ``None`` when the file is not a well-formed ar archive, the data member
+    is missing, or it is truncated."""
+    try:
+        raw = deb.read_bytes()
+    except OSError:
+        return None
+    if not raw.startswith(_AR_MAGIC):
+        return None
+    offset = len(_AR_MAGIC)
+    while offset + 60 <= len(raw):
+        header = raw[offset : offset + 60]
+        if header[58:60] != b"`\n":
+            return None
+        # GNU ar terminates a name with `/`; both spellings strip to the name.
+        name = header[:16].decode("ascii", errors="replace").rstrip().rstrip("/")
+        try:
+            size = int(header[48:58])
+        except ValueError:
+            return None
+        offset += 60
+        if name.startswith("data.tar"):
+            member = raw[offset : offset + size]
+            return member if len(member) == size else None
+        offset += size + (size % 2)
+    return None
+
+
+def _deb_main_binary(deb: Path) -> str | None:
+    """The main-binary name of a ``.deb``, read WITHOUT extraction: the SOLE
+    executable regular member of its ``data.tar`` (the exec bit rides the
+    inner tar's headers — transport-proof, exactly the plain-archive tier's
+    premise; a doc/copyright member carries no exec bit and is never a
+    candidate). ``None`` when undeterminable — an unreadable container, a
+    data.tar compression the runtime cannot open, zero candidates, or
+    several (ambiguity fails loudly, never a silent pick)."""
+    data = _deb_data_tar(deb)
+    if data is None:
+        return None
+    execs: list[str] = []
+    try:
+        with tarfile.open(fileobj=io.BytesIO(data), mode="r:*") as tar:
+            for member in tar:
+                if member.isfile() and member.mode & 0o111:
+                    execs.append(PurePosixPath(member.name).name)
+    except (tarfile.TarError, OSError):
+        return None
+    if len(execs) == 1:
+        return execs[0]
+    return None
+
+
 def _is_executable(path: Path) -> bool:
     """Whether ``path`` is a loose main-binary candidate: an executable
     regular file (or a ``.exe`` — windows carries no exec bit through)."""
@@ -241,7 +317,9 @@ def check_tree(tree: Path, expected: str) -> BundleVerdict:
     3. every plain archive (``*.tar.gz``/``*.zip``), read in place
        (:func:`_archive_main_binary`) — the exec bit inside the archive
        survives artifact transport where the loose file's does not;
-    4. only when the tree carries none of the above: every loose executable
+    4. every ``*.deb``, read in place (:func:`_deb_main_binary`) — its
+       ``data.tar`` member's sole executable, same transport-proof shape;
+    5. only when the tree carries none of the above: every loose executable
        file (``.exe`` counted by suffix, its stem compared).
 
     The verdict is ``ok`` exactly when at least one main binary was found
@@ -259,6 +337,7 @@ def check_tree(tree: Path, expected: str) -> BundleVerdict:
         for p in tree.rglob(f"*{suffix}")
         if p.is_file() and _is_plain_archive(p)
     )
+    debs = sorted(p for p in tree.rglob(f"*{DEB_SUFFIX}") if p.is_file())
     for app in apps:
         name = _app_main_binary(app)
         if name is None:
@@ -277,7 +356,13 @@ def check_tree(tree: Path, expected: str) -> BundleVerdict:
             problems.append(f"{archive.relative_to(tree)}: no determinable main binary")
         else:
             actual.append(name)
-    if not apps and not payloads and not archives:
+    for deb in debs:
+        name = _deb_main_binary(deb)
+        if name is None:
+            problems.append(f"{deb.relative_to(tree)}: no determinable main binary")
+        else:
+            actual.append(name)
+    if not apps and not payloads and not archives and not debs:
         for path in sorted(tree.rglob("*")):
             if _is_executable(path):
                 actual.append(path.stem if path.suffix == ".exe" else path.name)
