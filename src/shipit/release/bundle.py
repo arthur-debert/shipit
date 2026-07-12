@@ -476,7 +476,14 @@ class Composition:
     (:mod:`shipit.release.sign` — the mac-app leg's reseal payload, the
     archive leg's tarball, TOL02-WS08 #779): the config boundary refuses
     ``sign = true`` on any other composition, so a sign declaration can
-    never route to a signer leg that does not exist.
+    never route to a signer leg that does not exist. ``self_signs_mac`` marks
+    the compositions that sign AND notarize their OWN macOS output at BUNDLE
+    time (electron-builder's CSC + notarize path, TOL02-WS14 #790) — the
+    opposite of ``signable``: they never route to shipit's reopen→reseal
+    signer, but their darwin leg still NEEDS the Apple signing credentials in
+    the bundle stage's environment. The plan derives that Apple requirement
+    from this flag (:func:`artifact_self_signs_mac` → secretreq/preflight),
+    keyed on the composition since these compositions refuse ``sign = true``.
     """
 
     name: str
@@ -484,6 +491,7 @@ class Composition:
     platforms: tuple[str, ...] = ()
     declared_command: bool = False
     signable: bool = False
+    self_signs_mac: bool = False
 
     def applies(self, target: str) -> bool:
         """Whether this composition runs for ``target`` (substring match on
@@ -512,6 +520,11 @@ ELECTRON = Composition(
     # config boundary therefore refuses `sign = true` on an electron artifact
     # — electron's darwin signing is declared in the bundler, not the plan.
     signable=False,
+    # But the darwin leg STILL needs the Apple signing creds at bundle time
+    # (electron-builder's CSC + notarize): the plan derives that requirement
+    # from this flag (secretreq/preflight), keyed on the composition since
+    # `sign = true` is refused above (TOL02-WS14 #790).
+    self_signs_mac=True,
 )
 
 #: The CLOSED registry, in a stable order. Adding a composition is adding an
@@ -530,6 +543,27 @@ def signable_names() -> tuple[str, ...]:
     the config boundary's ``sign = true`` refusal message
     (:func:`shipit.config._parse_artifact`)."""
     return tuple(c.name for c in COMPOSITIONS if c.signable)
+
+
+def artifact_self_signs_mac(artifact: config.Artifact) -> bool:
+    """Whether ``artifact`` signs its OWN macOS output at bundle time AND has a
+    darwin leg to sign — so the bundle stage needs the Apple signing
+    credentials in its environment (:data:`Composition.self_signs_mac`, today
+    only electron). Pure.
+
+    Darwin-conditioned on the declared ``platforms`` (a darwin-<arch> entry):
+    an electron artifact built for linux/windows only self-signs nothing, so it
+    demands no Apple creds — the same darwin gate the rust mac-sign path applies
+    to ``sign = true``. An artifact with no ``platforms`` builds on the fleet
+    default (linux), so it is not darwin-bearing here. This is the plan's ONE
+    reader of the flag: secretreq derives the Apple requirement from it, and
+    preflight demands + the caller forwards it (TOL02-WS14 #790)."""
+    if artifact.bundle is None:
+        return False
+    comp = composition(artifact.bundle.composition)
+    if comp is None or not comp.self_signs_mac:
+        return False
+    return any(platform.startswith("darwin") for platform in artifact.platforms)
 
 
 def composition(name: str) -> Composition | None:

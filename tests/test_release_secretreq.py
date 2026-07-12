@@ -230,6 +230,89 @@ def test_signing_artifacts_contribute_one_notary_alternative_requirement():
     assert secretreq.alternative_requirements(_artifacts(PYTHON_PKG)) == ()
 
 
+# --------------------------------------------------------------------------
+# electron self-signs at bundle time (#790): the Apple requirement is derived
+# from the COMPOSITION (electron refuses `sign = true`), darwin-conditioned.
+# --------------------------------------------------------------------------
+
+ELECTRON_DARWIN = """
+[artifacts.app]
+build = ["npm"]
+platforms = ["darwin-arm64", "linux-x86_64"]
+bundle = { composition = "electron", command = ["npm", "run", "dist"], source = "release" }
+endpoints = ["gh-release"]
+"""
+
+ELECTRON_NO_DARWIN = """
+[artifacts.app]
+build = ["npm"]
+platforms = ["linux-x86_64"]
+bundle = { composition = "electron", command = ["npm", "run", "dist"], source = "release" }
+endpoints = ["gh-release"]
+"""
+
+# A bundled but NON-electron, non-signing map — the blast-radius control: the
+# composition-keyed electron derivation must not leak Apple creds onto it.
+ARCHIVE_UNSIGNED = """
+[artifacts.tool]
+build = [{ toolchain = "rust", package = "tool-cli" }]
+platforms = ["darwin-arm64", "linux-x86_64"]
+bundle = { composition = "archive" }
+endpoints = ["gh-release"]
+"""
+
+
+def test_electron_darwin_derives_exactly_the_cert_pair_and_notary_alternative():
+    arts = _artifacts(ELECTRON_DARWIN)
+    # The DEMANDED conjunction: prepare push + the sign-mac cert pair (the
+    # notary trios are the either-satisfies alternative, never demanded names).
+    assert secretreq.required_names(arts) == (
+        "RELEASE_TOKEN",
+        "APPLE_CERTIFICATE",
+        "APPLE_CERTIFICATE_PASSWORD",
+    )
+    # The requiring entry names the electron self-sign, not a sign-mac stage.
+    by_name = {r.name: r.required_by for r in secretreq.requirements(arts)}
+    assert by_name["APPLE_CERTIFICATE"] == "electron bundle self-sign (artifact app)"
+    # The notary alternative rides too, same label.
+    alts = secretreq.alternative_requirements(arts)
+    assert [(a.sets.label, a.required_by) for a in alts] == [
+        ("notary credentials", "electron bundle self-sign (artifact app)")
+    ]
+    # accepted_names forwards both notary trios (the caller/gh-setup surface).
+    assert secretreq.accepted_names(arts) == (
+        "RELEASE_TOKEN",
+        "APPLE_CERTIFICATE",
+        "APPLE_CERTIFICATE_PASSWORD",
+        "ASC_API_KEY_BASE64",
+        "ASC_API_KEY_ID",
+        "ASC_API_ISSUER_ID",
+        "APPLE_ID",
+        "APPLE_PASSWORD",
+        "APPLE_TEAM_ID",
+    )
+
+
+def test_electron_without_a_darwin_leg_derives_no_apple_creds():
+    # Darwin-conditioned: a linux/windows-only electron build self-signs
+    # nothing, so it demands no Apple creds (same gate the rust path's
+    # `sign = true` gets by config requiring a darwin lane).
+    arts = _artifacts(ELECTRON_NO_DARWIN)
+    assert secretreq.required_names(arts) == ("RELEASE_TOKEN",)
+    assert secretreq.accepted_names(arts) == ("RELEASE_TOKEN",)
+    assert secretreq.alternative_requirements(arts) == ()
+
+
+def test_a_non_electron_bundle_derives_no_apple_creds():
+    # Blast-radius control: the electron derivation is keyed on the electron
+    # composition alone. A darwin archive bundle with no `sign = true` derives
+    # nothing Apple — delivery for every non-electron consumer is unchanged.
+    arts = _artifacts(ARCHIVE_UNSIGNED)
+    assert secretreq.required_names(arts) == ("RELEASE_TOKEN",)
+    assert secretreq.accepted_names(arts) == ("RELEASE_TOKEN",)
+    assert secretreq.alternative_requirements(arts) == ()
+
+
 @pytest.mark.parametrize(
     "sources_toml",
     [

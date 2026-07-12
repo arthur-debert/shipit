@@ -738,6 +738,65 @@ def test_registry_marks_the_signer_reopenable_compositions():
     assert bundle_mod.signable_names() == ("archive", "mac-app")
 
 
+def test_registry_marks_electron_as_the_lone_self_signing_composition():
+    # electron self-signs + notarizes its darwin leg at bundle time (#790); the
+    # plan derives the Apple requirement from THIS flag (electron refuses
+    # `sign = true`). No other composition self-signs its own output.
+    assert bundle_mod.ELECTRON.self_signs_mac
+    assert [c.name for c in bundle_mod.COMPOSITIONS if c.self_signs_mac] == ["electron"]
+
+
+def _electron_artifact(platforms):
+    (artifact,) = _artifacts(
+        {
+            "app": {
+                "build": ["npm"],
+                "platforms": platforms,
+                "bundle": {
+                    "composition": "electron",
+                    "command": ["npm", "run", "dist"],
+                    "source": "release",
+                },
+            }
+        }
+    )
+    return artifact
+
+
+def test_artifact_self_signs_mac_needs_electron_and_a_darwin_leg():
+    # The plan's ONE reader of the flag (secretreq/preflight demand the Apple
+    # creds off it). Darwin-conditioned: only an electron artifact WITH a darwin
+    # platform self-signs a mac app.
+    assert bundle_mod.artifact_self_signs_mac(
+        _electron_artifact(["darwin-arm64", "linux-x86_64"])
+    )
+    # linux/windows-only electron self-signs nothing.
+    assert not bundle_mod.artifact_self_signs_mac(_electron_artifact(["linux-x86_64"]))
+    # no platforms → the fleet default (linux), not darwin-bearing.
+    assert not bundle_mod.artifact_self_signs_mac(_electron_artifact([]))
+    # a non-electron darwin bundle (mac-app) routes to the reopen→reseal signer
+    # instead — it is not self-signing.
+    (macapp,) = _artifacts(
+        {
+            "app": {
+                "build": ["npm"],
+                "platforms": ["darwin-arm64"],
+                "bundle": {
+                    "composition": "mac-app",
+                    "command": ["tauri", "build"],
+                    "source": "src-tauri/target/release/bundle",
+                },
+            }
+        }
+    )
+    assert not bundle_mod.artifact_self_signs_mac(macapp)
+    # an artifact with no bundle declaration at all.
+    (plain,) = _artifacts(
+        {"app": {"build": [{"toolchain": "rust"}], "platforms": ["darwin-arm64"]}}
+    )
+    assert not bundle_mod.artifact_self_signs_mac(plain)
+
+
 @pytest.mark.parametrize(
     "system,machine,expected",
     [
