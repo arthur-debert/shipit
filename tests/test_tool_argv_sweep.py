@@ -114,6 +114,11 @@ _ADAPTER_HOMES: dict[str, tuple[str, ...]] = {
     # `npm publish` extend those tools' home lists above.
     "twine": ("release/publish.py",),
     "ruby": ("release/publish.py",),
+    # The VS Code marketplace path (TOL02-WS13 #789): `vsce package` in the
+    # bundle composition registry, `vsce publish` / `ovsx publish` in the
+    # closed endpoint-adapter registry — vsce's two sanctioned homes, ovsx's one.
+    "vsce": ("release/bundle.py", "release/publish.py"),
+    "ovsx": ("release/publish.py",),
     "bin/check-e2e": ("tools/e2e.py",),
     # The act harness (TOL01-WS04): `shipit wf test` is the one place that
     # drives act, and its docker probes/builds live beside it.

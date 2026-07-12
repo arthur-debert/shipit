@@ -573,14 +573,112 @@ def test_mac_app_requires_exactly_one_coupled_pair(tmp_path):
 # --------------------------------------------------------------------------
 
 
+# --------------------------------------------------------------------------
+# vsix — per-target VS Code extension package via `vsce package --target`
+# --------------------------------------------------------------------------
+
+
+def _vsce_writes_out(argv, cwd):
+    """Simulate `vsce package --out <path>` writing the .vsix at that path."""
+    out = argv[argv.index("--out") + 1]
+    Path(out).parent.mkdir(parents=True, exist_ok=True)
+    Path(out).write_bytes(b"PK\x03\x04")
+
+
+def test_vsce_target_maps_every_shipped_platform_and_refuses_the_rest():
+    # The four the issue ships plus the two a rust triple already covers.
+    assert bundle_mod.vsce_target(MAC) == "darwin-arm64"
+    assert bundle_mod.vsce_target("x86_64-apple-darwin") == "darwin-x64"
+    assert bundle_mod.vsce_target(LINUX) == "linux-x64"
+    assert bundle_mod.vsce_target("aarch64-unknown-linux-gnu") == "linux-arm64"
+    assert bundle_mod.vsce_target("x86_64-unknown-linux-musl") == "alpine-x64"
+    assert bundle_mod.vsce_target(WIN) == "win32-x64"
+    with pytest.raises(ReleaseError, match="no VS Code marketplace target"):
+        bundle_mod.vsce_target("riscv64gc-unknown-linux-gnu")
+
+
+def test_vsix_packages_per_target_into_the_out_tree(tmp_path):
+    (artifact,) = _artifacts(
+        {"ext": {"build": ["npm"], "bundle": {"composition": "vsix"}}}
+    )
+    entries = _entries({"editors/vscode": "npm"})
+    recorder = RunRecorder({"vsce": _vsce_writes_out})
+
+    composed = bundle_mod.VSIX.compose(
+        _request(tmp_path, artifact, entries, target=MAC, run_cmd=recorder)
+    )
+
+    out_path = tmp_path / "dist" / "ext-darwin-arm64.vsix"
+    # vsce runs IN the npm leg dir; the .vsix lands in the bundle out tree.
+    assert recorder.calls == [
+        (
+            (
+                "vsce",
+                "package",
+                "--target",
+                "darwin-arm64",
+                "--out",
+                str(out_path),
+            ),
+            tmp_path / "editors/vscode",
+        )
+    ]
+    assert out_path.is_file()
+    assert composed == bundle_mod.Composed("ext", "vsix", ("ext-darwin-arm64.vsix",))
+
+
+def test_vsix_windows_target_maps_to_win32_x64(tmp_path):
+    # The win32-x64 leg's binary rides the cross-target build (WS11 #787) —
+    # the composition just maps the triple and names the .vsix per target.
+    (artifact,) = _artifacts(
+        {"ext": {"build": ["npm"], "bundle": {"composition": "vsix"}}}
+    )
+    entries = _entries({"editors/vscode": "npm"})
+    recorder = RunRecorder({"vsce": _vsce_writes_out})
+
+    composed = bundle_mod.VSIX.compose(
+        _request(tmp_path, artifact, entries, target=WIN, run_cmd=recorder)
+    )
+    assert composed.outputs == ("ext-win32-x64.vsix",)
+    assert (tmp_path / "dist" / "ext-win32-x64.vsix").is_file()
+
+
+def test_vsix_no_output_is_a_hard_failure(tmp_path):
+    (artifact,) = _artifacts(
+        {"ext": {"build": ["npm"], "bundle": {"composition": "vsix"}}}
+    )
+    entries = _entries({"editors/vscode": "npm"})
+    # vsce "runs" but writes nothing — the compose function must hard-fail.
+    recorder = RunRecorder()
+    with pytest.raises(ReleaseError, match="produced no ext-darwin-arm64.vsix"):
+        bundle_mod.VSIX.compose(
+            _request(tmp_path, artifact, entries, target=MAC, run_cmd=recorder)
+        )
+
+
+def test_vsix_without_an_npm_leg_refuses(tmp_path):
+    (artifact,) = _artifacts(
+        {"ext": {"build": ["npm"], "bundle": {"composition": "vsix"}}}
+    )
+    entries = _entries({".": "rust"})  # no npm leg mapped
+    with pytest.raises(ReleaseError, match="needs a .* npm leg"):
+        bundle_mod.VSIX.compose(
+            _request(tmp_path, artifact, entries, target=MAC, run_cmd=RunRecorder())
+        )
+
+
 def test_registry_is_closed_and_platform_scoped():
-    assert bundle_mod.names() == ("archive", "deb", "wheel", "mac-app")
+    assert bundle_mod.names() == ("archive", "deb", "wheel", "vsix", "mac-app")
     assert bundle_mod.composition("deb") is bundle_mod.DEB
     assert bundle_mod.composition("rpm") is None
     assert bundle_mod.ARCHIVE.applies(LINUX) and bundle_mod.ARCHIVE.applies(MAC)
     assert bundle_mod.DEB.applies(LINUX) and not bundle_mod.DEB.applies(MAC)
     assert bundle_mod.MAC_APP.applies(MAC) and not bundle_mod.MAC_APP.applies(LINUX)
     assert bundle_mod.WHEEL.applies(WIN)
+    # vsix runs on every vsce-supported family (darwin/linux/windows).
+    assert bundle_mod.VSIX.applies(MAC)
+    assert bundle_mod.VSIX.applies(LINUX)
+    assert bundle_mod.VSIX.applies(WIN)
 
 
 def test_registry_marks_the_signer_reopenable_compositions():

@@ -456,7 +456,9 @@ def load_toolchains(cfg: dict) -> tuple[ToolchainEntry, ...]:
 
 
 #: The CLOSED distribution-endpoint registry names an ``endpoints`` list may
-#: use (PRD: one adapter per endpoint; gh-release, crates, pypi, npm, brew).
+#: use (PRD: one adapter per endpoint; gh-release, crates, pypi, npm,
+#: vscode-marketplace, open-vsx, brew — the two VS Code marketplace endpoints
+#: land with the ``.vsix`` composition, TOL02-WS13 #789).
 #: Adding an endpoint is an adapter plus an entry here plus its
 #: secret-requirement declaration
 #: (:data:`shipit.release.secretreq.ENDPOINT_SECRETS`); consumed by the
@@ -464,7 +466,15 @@ def load_toolchains(cfg: dict) -> tuple[ToolchainEntry, ...]:
 #: adapter registry (:mod:`shipit.release.publish`, TOL02-WS05), whose entries
 #: mirror this set one-to-one (asserted in its tests, so the two can never
 #: drift).
-ENDPOINTS: tuple[str, ...] = ("gh-release", "crates", "pypi", "npm", "brew")
+ENDPOINTS: tuple[str, ...] = (
+    "gh-release",
+    "crates",
+    "pypi",
+    "npm",
+    "vscode-marketplace",
+    "open-vsx",
+    "brew",
+)
 
 #: The CLOSED OS×arch platform registry a ``platforms`` list may use — the
 #: release-side build/fan-out axis (TOL02-WS02, the lane planner's release

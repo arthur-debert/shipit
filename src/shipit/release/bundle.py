@@ -33,6 +33,18 @@ functions the entries carry:
 - **wheel** — ``uv build`` emitting BOTH the wheel and the sdist into the
   bundle output tree (the legacy ``python-pkg.yml`` build job: one build,
   consumed by multiple publish targets).
+- **vsix** — a per-target VS Code extension ``.vsix`` via ``vsce package
+  --target <vsce-target> --out <name>-<vsce-target>.vsix`` (the legacy
+  ``vscode-ext.yml@v3`` per-platform packaging: one ``.vsix`` per platform,
+  each carrying that platform's prebuilt native binary). The declared platform
+  triple picks the vsce target string (:data:`VSCE_TARGETS`; darwin-arm64 /
+  darwin-x64 / linux-x64 / linux-arm64 / alpine-x64 / win32-x64), a triple with
+  no vsce target being a loud refusal. Runs in the ``npm`` leg (the extension
+  is a node package); the per-target binary it bundles is produced by the build
+  stage — for ``win32-x64`` that binary comes from the cross-target build
+  (TOL02-WS11 #787, the windows leg's stated dependency, not hidden), which
+  writes ``target/<triple>/release/`` for the extension's prepackage step to
+  stage.
 - **mac-app** — the coupled UNSIGNED ``.app``/``.dmg`` pair (the declared
   bundler builds the .app inside the .dmg run; they are not cleanly
   separable) PLUS the inner ``.app`` re-emitted as the reseal payload
@@ -45,8 +57,8 @@ functions the entries carry:
   surprise. Mac targets only.
 
 Every external command runs through the injected runner — the one Exec seam
-(ADR-0028); the ``cargo`` / ``uv`` / ``tar`` / ``zip`` argv literals below
-are those tools' one BUNDLE-side assembly point, whitelisted in the
+(ADR-0028); the ``cargo`` / ``uv`` / ``tar`` / ``zip`` / ``vsce`` argv literals
+below are those tools' one BUNDLE-side assembly point, whitelisted in the
 mechanized argv sweep (``tests/test_tool_argv_sweep.py``). Compose functions
 write ONLY under the request's bundle output tree (ADR-0009's barrier: a
 failing composition exits with nothing half-written outside it); uploading
@@ -75,6 +87,23 @@ from . import ReleaseError
 #: version is PINNED, the same shape as lexd's ``--tag``-pinned self-provision
 #: (:mod:`shipit.provision.lexd`). Bump deliberately, in its own change.
 CARGO_DEB_VERSION = "3.7.0"
+
+#: Target triple → VS Code ``vsce``/``ovsx`` target string (the vsix
+#: composition's per-platform ``--target``). vsce names platforms in its own
+#: ``<os>-<arch>`` vocabulary — distinct from the rust triples the rest of the
+#: release lane speaks — so the composition maps once, here (the four the issue
+#: ships plus the two neighbours a rust triple already covers). A triple with
+#: no entry is a loud refusal (:func:`vsce_target`): the vsix leg never guesses
+#: a marketplace platform. windows-x86_64's binary rides the cross-target build
+#: (TOL02-WS11 #787) — the win32-x64 leg's stated dependency.
+VSCE_TARGETS: dict[str, str] = {
+    "aarch64-apple-darwin": "darwin-arm64",
+    "x86_64-apple-darwin": "darwin-x64",
+    "x86_64-unknown-linux-gnu": "linux-x64",
+    "aarch64-unknown-linux-gnu": "linux-arm64",
+    "x86_64-unknown-linux-musl": "alpine-x64",
+    "x86_64-pc-windows-msvc": "win32-x64",
+}
 
 #: The docs the archive composition ships beside the binary WHEN PRESENT —
 #: the legacy "Package binaries" step's set (README/CHANGELOG/LICENSE).
@@ -359,6 +388,53 @@ def _compose_mac_app(req: ComposeRequest) -> Composed:
     return Composed(req.artifact.name, "mac-app", (app.name, dmg.name, payload))
 
 
+def vsce_target(target: str) -> str:
+    """The VS Code marketplace target string for a rust target triple
+    (:data:`VSCE_TARGETS`), or a loud :class:`ReleaseError` naming the mapped
+    set. Pure. The vsix leg never packages an unmapped platform — a triple with
+    no vsce target is a declaration the marketplace cannot ship."""
+    vt = VSCE_TARGETS.get(target)
+    if vt is None:
+        known = ", ".join(sorted(VSCE_TARGETS))
+        raise ReleaseError(
+            f"vsix composition: target triple `{target}` has no VS Code "
+            f"marketplace target — vsce packages one of: {known}"
+        )
+    return vt
+
+
+def _compose_vsix(req: ComposeRequest) -> Composed:
+    """Package the per-target ``.vsix`` via ``vsce package --target``. See the
+    module docstring's vsix entry.
+
+    Runs in the ``npm`` leg (the extension package) and writes the single
+    ``<name>-<vsce-target>.vsix`` straight into the bundle output tree; the
+    ``vsce`` output path is stated so a rerun overwrites in place (vsce
+    replaces, never appends). The native binary vsce bundles for this target is
+    the build stage's output — for ``win32-x64`` the cross-target build's
+    (TOL02-WS11 #787). A run that leaves no ``.vsix`` is a hard failure, never a
+    quiet pass (the legacy ``vscode-ext.yml@v3`` per-target contract).
+    """
+    leg = _leg_for(req.artifact, req.entries, "npm", "vsix")
+    vt = vsce_target(req.target)
+    out_name = f"{req.artifact.name}-{vt}.vsix"
+    req.out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = req.out_dir / out_name
+    if out_path.exists():
+        out_path.unlink()
+    req.run_cmd(
+        ["vsce", "package", "--target", vt, "--out", str(out_path)],
+        req.root / leg.path,
+    )
+    if not out_path.is_file():
+        raise ReleaseError(
+            f"[artifacts.{req.artifact.name}] vsix composition: vsce package "
+            f"completed but produced no {out_name} under {req.out_dir} — hard "
+            f"fail, never a quiet pass (legacy vscode-ext per-target contract)"
+        )
+    return Composed(req.artifact.name, "vsix", (out_name,))
+
+
 @dataclass(frozen=True)
 class Composition:
     """One registry entry: a composition name, the compose function it runs,
@@ -391,6 +467,11 @@ class Composition:
 ARCHIVE = Composition("archive", _compose_archive, signable=True)
 DEB = Composition("deb", _compose_deb, platforms=("linux",))
 WHEEL = Composition("wheel", _compose_wheel)
+VSIX = Composition(
+    "vsix",
+    _compose_vsix,
+    platforms=("apple-darwin", "linux", "windows"),
+)
 MAC_APP = Composition(
     "mac-app",
     _compose_mac_app,
@@ -401,7 +482,7 @@ MAC_APP = Composition(
 
 #: The CLOSED registry, in a stable order. Adding a composition is adding an
 #: entry here (the toolchain registry's mirror) — never a kind switch.
-COMPOSITIONS: tuple[Composition, ...] = (ARCHIVE, DEB, WHEEL, MAC_APP)
+COMPOSITIONS: tuple[Composition, ...] = (ARCHIVE, DEB, WHEEL, VSIX, MAC_APP)
 
 
 def names() -> tuple[str, ...]:

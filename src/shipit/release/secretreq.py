@@ -196,6 +196,8 @@ ENDPOINT_SECRETS: dict[str, tuple[str, ...]] = {
     "crates": ("CARGO_REGISTRY_TOKEN",),
     "pypi": ("PYPI_TOKEN",),
     "npm": ("NPM_TOKEN",),
+    "vscode-marketplace": ("VSCE_PAT",),
+    "open-vsx": ("OVSX_PAT",),
     "brew": ("HOMEBREW_TAP_TOKEN",),
 }
 

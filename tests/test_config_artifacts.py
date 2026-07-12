@@ -146,7 +146,9 @@ def test_unknown_artifact_key_names_itself_and_the_known_set():
 def test_unknown_endpoint_names_the_closed_registry():
     with pytest.raises(config.ConfigError, match="unknown endpoint `homebrew`") as exc:
         _load('[artifacts.x]\nendpoints = ["homebrew"]\n')
-    assert "gh-release, crates, pypi, npm, brew" in str(exc.value)
+    assert "gh-release, crates, pypi, npm, vscode-marketplace, open-vsx, brew" in str(
+        exc.value
+    )
 
 
 def test_unknown_platform_names_the_closed_registry():
@@ -230,7 +232,7 @@ def test_bundle_composition_names_the_closed_registry():
     # names the known set, mirroring endpoints/toolchains.
     with pytest.raises(config.ConfigError, match="unknown composition `rpm`") as exc:
         _load('[artifacts.x]\nbundle = { composition = "rpm" }\n')
-    assert "archive, deb, wheel, mac-app" in str(exc.value)
+    assert "archive, deb, wheel, vsix, mac-app" in str(exc.value)
 
 
 def test_mac_app_requires_the_declared_bundler_command():
