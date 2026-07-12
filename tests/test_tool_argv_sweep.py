@@ -70,9 +70,10 @@ def _parsed(path: pathlib.Path) -> ast.Module:
 #:   (TOL02-WS03): assembled ONLY in the composition registry
 #:   (:mod:`shipit.release.bundle`) — the tarball/zip contract and the mac
 #:   reseal payload. Both gain the signer unit (:mod:`shipit.release.sign`):
-#:   ``tar`` for the reseal payload's unpack (TOL02-WS04) and the archive
-#:   leg's reopen/re-emit, ``zip`` for the archive leg's per-binary notary
-#:   container (TOL02-WS08 #779).
+#:   ``tar`` for the archive leg's RE-EMIT (TOL02-WS08 #779 — the reseal
+#:   payload's unpack and the archive leg's reopen now read structured
+#:   :mod:`tarfile` metadata, no tar subprocess), ``zip`` for the archive
+#:   leg's per-binary notary container.
 #: - ``codesign`` / ``security`` / ``xcrun`` / ``hdiutil`` — the mac signer
 #:   unit's tools (TOL02-WS04): assembled ONLY in
 #:   :mod:`shipit.release.sign` — keychain lifecycle, inner-first codesign,
