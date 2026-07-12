@@ -24,6 +24,7 @@ wf-release.yml chaining them via nested workflow_call. Two kinds of test:
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 
@@ -40,12 +41,25 @@ COMPOSED = "wf-release.yml"
 #: The story-42 check-name contract: block file -> its stable job ids, in
 #: document order. ADP02 holds consumer branch protection stable against
 #: these — a rename here is a breaking change, and this pin makes it loud.
+#: The `plan` jobs joined in TOL02-WS09 (#780): the standalone
+#: re-derivation, a skipped no-op on every fact-supplied (composed-chain)
+#: run — additive, so existing required checks were untouched.
 STABLE_JOBS = {
     "wf-prepare.yml": ["prepare"],
-    "wf-build.yml": ["build"],
-    "wf-sign-mac.yml": ["sign"],
-    "wf-publish.yml": ["assert", "publish"],
+    "wf-build.yml": ["plan", "build"],
+    "wf-sign-mac.yml": ["plan", "sign"],
+    "wf-publish.yml": ["plan", "assert", "publish"],
     "wf-release.yml": ["prepare", "build", "sign", "publish"],
+}
+
+#: Per-stage dispatch (#780): block file -> the input whose omission turns
+#: the block's `plan` job on (the standalone-mode discriminator). Each is
+#: the fact the composed chain always supplies, so the chain never pays for
+#: a re-derivation.
+PLAN_DISCRIMINATOR = {
+    "wf-build.yml": "matrix",
+    "wf-sign-mac.yml": "sign-matrix",
+    "wf-publish.yml": "stages",
 }
 
 #: A crafted plan matrix entry (the preflight MatrixEntry hand-off shape) on
@@ -149,7 +163,7 @@ def test_assert_bundle_guards_publishes_unsigned_path():
     assert "unsigned-matrix" in assert_job["strategy"]["matrix"]["include"]
     assert "assert-bundle" in _runs(assert_job["steps"])
     publish = doc["jobs"]["publish"]
-    assert publish["needs"] == ["assert"]
+    assert publish["needs"] == ["plan", "assert"]
     # `!cancelled()` overrides the default skip so publish still RUNS when the
     # assert job legitimately skips (all-signed plan / no bundle stage); the
     # result gate below then admits skipped-or-success and blocks failure.
@@ -176,10 +190,13 @@ def test_publish_block_feeds_results_to_the_verb_not_yaml():
     assert "inputs.build-result" not in publish["if"]
     assert "inputs.sign-result" not in publish["if"]
     assert "inputs.matrix" not in publish["if"]
-    # The facts reach the verb untranslated: env passthrough only.
+    # The facts reach the verb untranslated: env passthrough only. Since
+    # #780 each coalesces input-or-plan-output (`||` routes between the two
+    # sources of the SAME fact — the standalone plan job re-derived it via
+    # the same planner); whichever source supplied it rides verbatim.
     step = next(s for s in publish["steps"] if "release publish" in s.get("run", ""))
-    assert step["env"]["MATRIX"] == "${{ inputs.matrix }}"
-    assert step["env"]["STAGES"] == "${{ inputs.stages }}"
+    assert step["env"]["MATRIX"] == "${{ inputs.matrix || needs.plan.outputs.matrix }}"
+    assert step["env"]["STAGES"] == "${{ inputs.stages || needs.plan.outputs.stages }}"
     # Direct wf-publish@v1 callers predate the matrix fact. Omitting it must
     # still compile and must omit the CLI flag, preserving the verb's strict
     # success-only default instead of passing an invalid empty JSON string.
@@ -347,6 +364,120 @@ def test_advance_major_moves_the_floating_branch_on_stable_tags_only():
 
 
 # --------------------------------------------------------------------------
+# Per-stage dispatch drift guards (TOL02-WS09 #780, ADR-0054)
+# --------------------------------------------------------------------------
+
+
+def test_standalone_contract_is_tag_only_on_every_stage_block():
+    # The aligned stage-input contract (#780): prepare standalone-dispatches
+    # on `version` (it CREATES the tag); every downstream stage block on
+    # `tag` alone — all plan facts and results optional, re-derived by the
+    # block's plan job. A new REQUIRED input here breaks one-line dispatch
+    # callers fleet-wide; this pin turns that into an explicit decision.
+    for name in PLAN_DISCRIMINATOR:
+        inputs = _load(name)["on"]["workflow_call"]["inputs"]
+        required = {k for k, spec in inputs.items() if spec.get("required", False)}
+        assert required == {"tag"}, name
+
+
+def test_plan_jobs_gate_on_the_omitted_fact_and_rederive_plan_only():
+    # The plan job runs ONLY when the caller omitted the facts (the
+    # composed chain always supplies them — no re-derivation tax there),
+    # re-derives via the ONE planner (`release preflight --plan-only`,
+    # pinned launcher, pipefail — same masking hazard as wf-prepare), and
+    # runs in a deliberately secret-free environment: --plan-only exists so
+    # it can (presence was the source run's preflight's job; each stage's
+    # verb still validates its own names).
+    for name, fact in PLAN_DISCRIMINATOR.items():
+        job = _load(name)["jobs"]["plan"]
+        assert job["if"] == f"inputs.{fact} == ''", name
+        script = _runs(job["steps"])
+        assert "release preflight" in script, name
+        assert "--plan-only" in script, name
+        assert "pixi run --locked ./bin/shipit" in script, name
+        assert "set -euo pipefail" in script, name
+        assert "secrets." not in json.dumps(job), name
+
+
+def test_fan_jobs_coalesce_input_or_plan_and_override_the_needs_skip():
+    # The fan jobs ride `input || plan-output` (two sources of the SAME
+    # fact, never a re-derivation) and MUST carry `!cancelled()` + explicit
+    # plan-result checks: the plan job SKIPS on every fact-supplied run and
+    # default needs-semantics would skip the fan with it, while a
+    # failed/cancelled re-derivation must still block.
+    fans = {
+        "wf-build.yml": ("build", "matrix"),
+        "wf-sign-mac.yml": ("sign", "sign-matrix"),
+        "wf-publish.yml": ("assert", "unsigned-matrix"),
+    }
+    for name, (job_id, fact) in fans.items():
+        job = _load(name)["jobs"][job_id]
+        needs = job["needs"]
+        assert needs == "plan" or needs == ["plan"], name
+        cond = job["if"]
+        assert "!cancelled()" in cond, name
+        assert "needs.plan.result != 'failure'" in cond, name
+        assert "needs.plan.result != 'cancelled'" in cond, name
+        coalesced = f"inputs.{fact} || needs.plan.outputs.{fact}"
+        assert coalesced in cond, name
+        assert coalesced in job["strategy"]["matrix"]["include"], name
+
+
+def test_publish_plan_job_derives_the_standalone_claims_from_liveness():
+    # The standalone stage-result claims (#780): live stage → success,
+    # plan-proven non-live → skipped, derived from the SAME plan JSON the
+    # facts come from — never from a real result (none exists on this
+    # path). They are enforced, not trusted: the source-run downloads fail
+    # loudly on a missing artifact, then the verb's scar-#3 gate runs
+    # unchanged.
+    script = _runs(_load("wf-publish.yml")["jobs"]["plan"]["steps"])
+    assert "build-result=" in script and ".matrix == []" in script
+    assert "bundle-result=" in script and 'index("bundle")' in script
+    assert "sign-result=" in script and "select(.sign)" in script
+
+
+def test_cross_run_downloads_pair_run_id_with_token_and_gate_both_ways():
+    # download-artifact with `run-id` rides the REST API: it needs a token,
+    # and it must NEVER be the composed chain's path (whose callers do not
+    # grant actions:read) — so every download step is split: same-run (no
+    # run-id/github-token keys, gated `inputs.run-id == ''`) vs cross-run
+    # (both keys, gated `inputs.run-id != ''`).
+    for name in ("wf-sign-mac.yml", "wf-publish.yml"):
+        for job_id, job in _load(name)["jobs"].items():
+            for step in job.get("steps", []):
+                if "download-artifact" not in step.get("uses", ""):
+                    continue
+                cond = step.get("if", "")
+                if "run-id" in step["with"]:
+                    assert step["with"]["run-id"] == "${{ inputs.run-id }}", (
+                        name,
+                        job_id,
+                    )
+                    assert step["with"]["github-token"] == "${{ github.token }}", (
+                        name,
+                        job_id,
+                    )
+                    assert "inputs.run-id != ''" in cond, (name, job_id)
+                else:
+                    assert "github-token" not in step["with"], (name, job_id)
+                    assert "inputs.run-id == ''" in cond, (name, job_id)
+
+
+def test_artifact_downloading_blocks_declare_no_permissions_key():
+    # The downgrade-only rule: a called workflow's `permissions:` can only
+    # STRIP the caller's grant, so a key on wf-sign-mac/wf-publish would
+    # strip the `actions: read` a standalone dispatch caller grants for the
+    # cross-run downloads (and could never elevate anything in return —
+    # gh-release always depended on the caller granting contents:write).
+    # These two inherit the caller's token verbatim; the non-downloading
+    # blocks keep their least-privilege declarations.
+    for name in ("wf-sign-mac.yml", "wf-publish.yml"):
+        assert "permissions" not in _load(name), name
+    assert _load("wf-build.yml")["permissions"] == {"contents": "read"}
+    assert _load("wf-prepare.yml")["permissions"] == {"contents": "write"}
+
+
+# --------------------------------------------------------------------------
 # act dry-run smokes (story 41)
 # --------------------------------------------------------------------------
 
@@ -397,6 +528,29 @@ _SMOKES: dict[str, dict] = {
     # scopes to the entry job because nested workflow outputs only exist at
     # runtime — the printed workflow_call-fidelity hole covers the rest.
     "wf-release.yml": {"inputs": ("version=1.2.3",), "job": "prepare", "local": True},
+    # Per-stage dispatch (#780): each stage block parses and walks its plan
+    # job against the STANDALONE contract too — tag only (+ run-id where
+    # artifacts flow in), every plan fact omitted, so the plan job's `if`
+    # flips ON. Scoped to the plan job: the fan legs ride plan OUTPUTS that
+    # only exist at runtime (act dry-run evaluates the matrix expression
+    # even for an if-gated-off job and fatals on the empty string) — the
+    # same printed workflow_call-fidelity hole the composed chain's smoke
+    # scopes around.
+    "wf-build.yml (standalone)": {
+        "file": "wf-build.yml",
+        "inputs": ("tag=v1.2.3",),
+        "job": "plan",
+    },
+    "wf-sign-mac.yml (standalone)": {
+        "file": "wf-sign-mac.yml",
+        "inputs": ("tag=v1.2.3", "run-id=1"),
+        "job": "plan",
+    },
+    "wf-publish.yml (standalone)": {
+        "file": "wf-publish.yml",
+        "inputs": ("tag=v1.2.3", "run-id=1"),
+        "job": "plan",
+    },
 }
 
 
@@ -412,7 +566,7 @@ def test_block_smokes_green_under_act_dry_run(name, monkeypatch, capsys):
     monkeypatch.chdir(root)
     local = (f"arthur-debert/shipit@v1={root}",) if spec.get("local") else ()
     rc = wf.run(
-        f".github/workflows/{name}",
+        f".github/workflows/{spec.get('file', name)}",
         event=wf.EVENT_WORKFLOW_CALL,
         inputs=spec["inputs"],
         job=spec.get("job"),

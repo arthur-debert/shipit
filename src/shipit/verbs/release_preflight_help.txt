@@ -20,9 +20,14 @@ and the required secret names, derived from the same requirement registry
 
 Every required secret must be present (non-empty) in the environment — the
 caller workflow injects each GitHub secret under its own name — or preflight
-hard-fails. `--unsigned` is the explicit break-glass for a signing repo
-without certs at hand: it flips the plan to the unsigned path, is refused
-when there is no sign stage to skip, and every use is recorded as a
+hard-fails. `--plan-only` skips ONLY that presence check (plan facts and
+refusals unchanged): it exists for the stage blocks' standalone plan job
+(per-stage dispatch, #780), which re-derives the plan at the tag in an
+environment that deliberately carries no secrets — presence was proven by
+the source run's preflight, and each stage's verb still validates its own
+names before acting. `--unsigned` is the explicit break-glass for a signing
+repo without certs at hand: it flips the plan to the unsigned path, is
+refused when there is no sign stage to skip, and every use is recorded as a
 `release.unsigned` event.
 
 Outputs (text or `--json`): version, tag, prerelease and rc flags, event,

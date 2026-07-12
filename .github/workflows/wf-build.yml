@@ -19,49 +19,121 @@ name: wf-build
 #   uses: arthur-debert/shipit/.github/workflows/wf-build.yml@v1
 # — through the composed wf-release.yml or directly (PRD story 38).
 #
-# Check-name contract (PRD story 42, consumed by ADP02): this block's one
-# job is `build`, surfacing per leg as
+# Check-name contract (PRD story 42, consumed by ADP02): this block's
+# stable jobs are `plan` (skipped whenever the caller supplies the facts —
+# every composed-chain run) and `build`, surfacing per leg as
 # `<caller-job> / build (<artifact>, <platform>)`. Never renamed casually.
+#
+# Per-stage dispatch (TOL02-WS09 #780): the plan facts (`version`,
+# `matrix`, `stages`) are OPTIONAL — omit them all and the `plan` job
+# re-derives them at the tag via `release preflight --plan-only` (the same
+# one planner, run in the block, never consumer YAML — ADR-0040's line
+# holds: derivation lives shipit-side). The standalone contract is ONE
+# input: `tag`. Supply the facts all-or-none: a partial set fails loudly at
+# expression evaluation, by design.
 
 on:
   workflow_call:
     inputs:
       version:
-        description: The concrete semver prepare cut.
+        description: >-
+          The concrete semver prepare cut. Optional (per-stage dispatch,
+          #780): omitted, the plan job derives it from the tag (ADR-0041 —
+          the tag is the version authority; v<version> by construction).
         type: string
-        required: true
+        required: false
       tag:
         description: The release tag to build (the checkout ref).
         type: string
         required: true
       matrix:
-        description: The preflight plan's `matrix` field (JSON, verbatim).
+        description: >-
+          The preflight plan's `matrix` field (JSON, verbatim). Optional
+          (per-stage dispatch, #780): omitted, the plan job re-derives it
+          at the tag.
         type: string
-        required: true
+        required: false
       stages:
-        description: The preflight plan's `stages` field (JSON, verbatim).
+        description: >-
+          The preflight plan's `stages` field (JSON, verbatim). Optional
+          (per-stage dispatch, #780) and carried for contract symmetry —
+          this block's per-entry gate is `matrix.bundle`, never the
+          plan-wide stage.
         type: string
-        required: true
+        required: false
 
 permissions:
   contents: read
 
 jobs:
+  plan:
+    # Standalone re-derivation (per-stage dispatch, #780): runs ONLY when
+    # the caller omitted the plan facts — the composed chain always passes
+    # them, so there this job is a skipped no-op. `--plan-only` skips the
+    # secret-presence hard-fail alone: this block carries no secrets, the
+    # source run's preflight already proved presence, and the facts are a
+    # pure function of the artifact map at the tag (the SAME planner
+    # invocation wf-prepare made — one definition, re-run, never remade).
+    if: inputs.matrix == ''
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: prefix-dev/setup-pixi@v0.9.6
+        with:
+          # Lockstep with the Layer 0 bootstrap's PIXI_PIN — see
+          # wf-checks.yml.
+          pixi-version: v0.71.0
+          locked: true
+      - name: Re-derive the plan at the tag
+        id: plan
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          # pipefail: same masking hazard as wf-prepare's plan step — jq's 0
+          # on empty input must not hide a failed planner.
+          set -euo pipefail
+          # ADR-0041: the tag is the version authority; prepare cut it as
+          # v<version>, so the version is read off the tag, never resolved.
+          version="${TAG#v}"
+          plan="$(pixi run --locked ./bin/shipit release preflight "$version" --json --plan-only | jq -c .)"
+          {
+            printf 'version=%s\n' "$version"
+            printf 'matrix=%s\n' "$(jq -c '.matrix' <<<"$plan")"
+          } >> "$GITHUB_OUTPUT"
+
   build:
+    needs: plan
     # An empty matrix is a legitimate plan (no build-bearing artifact —
     # "the tag is the release"): the job skips, and a reusable-workflow
     # caller whose only inner job was if-skipped concludes SKIPPED, not
     # success (canary-confirmed, issue #745). The composed chain passes that
     # result verbatim beside the plan's matrix, and the publish verb's gate
     # accepts the skip because the PLAN proves the stage non-live.
-    if: inputs.matrix != '[]'
+    #
+    # `!cancelled()` + explicit plan-result checks: the plan job SKIPS on
+    # every fact-supplied call, and default needs-semantics would skip this
+    # job with it — the status function overrides that, and the result
+    # checks still block on a failed/cancelled re-derivation. The
+    # `input-or-plan-output` coalescing (`||` — empty string is falsy in
+    # expressions) is routing between the two sources of the SAME fact,
+    # never a re-derivation.
+    if: >-
+      ${{ !cancelled() && needs.plan.result != 'failure'
+      && needs.plan.result != 'cancelled'
+      && (inputs.matrix || needs.plan.outputs.matrix) != ''
+      && (inputs.matrix || needs.plan.outputs.matrix) != '[]' }}
     strategy:
       # Every leg reports (the barrier verdict is wf-publish's verb, which
       # blocks on ANY failed leg — ADR-0009); cancelling siblings would only
       # hide how much of the set is broken.
       fail-fast: false
       matrix:
-        include: ${{ fromJson(inputs.matrix) }}
+        include: ${{ fromJson(inputs.matrix || needs.plan.outputs.matrix) }}
     name: build (${{ matrix.artifact }}, ${{ matrix.platform }})
     runs-on: ${{ matrix.runner }}
     defaults:
@@ -81,7 +153,7 @@ jobs:
           locked: true
       - name: Build
         env:
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ inputs.version || needs.plan.outputs.version }}
         # The real builders (cargo/go/uv/npm — including the frontendDist
         # leg, `build npm`) run inside the consumer's pixi env; the version
         # rides to the toolchains that stamp it.

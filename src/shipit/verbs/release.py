@@ -254,6 +254,7 @@ def run_preflight(
     *,
     event: str = "dispatch",
     unsigned: bool = False,
+    plan_only: bool = False,
     as_json: bool = False,
     gitio: Any = git,
     env: Mapping[str, str] | None = None,
@@ -270,6 +271,14 @@ def run_preflight(
     secret as a same-named env var), and render text or ``--json``. The plan
     refusals (phantom release, nothing-to-break-glass) and the presence
     failure are :class:`~shipit.release.ReleaseError` → exit 1.
+
+    ``plan_only=True`` skips ONLY the secret-presence hard-fail (the plan
+    facts still compute and refusals still fire): the stage blocks'
+    standalone ``plan`` job (TOL02-WS09 #780) re-derives the plan at the tag
+    in an environment that deliberately carries no secrets — presence was
+    proven by the source run's preflight, and each stage's verb still
+    validates its own names before acting. It exists for that job, not for
+    laptops planning a fresh release.
     """
     root_s = gitio.repo_root(cwd=".")
     if root_s is None:
@@ -297,15 +306,16 @@ def run_preflight(
             release_plan.tag,
             extra={"version": release_plan.version, "tag": release_plan.tag},
         )
-    missing = preflight_mod.missing_secrets(
-        release_plan, os.environ if env is None else env
-    )
-    if missing:
-        raise ReleaseError(
-            f"missing required secrets: {', '.join(missing)} — the plan "
-            "cannot run to publish; failing now, before prepare writes any "
-            "history"
+    if not plan_only:
+        missing = preflight_mod.missing_secrets(
+            release_plan, os.environ if env is None else env
         )
+        if missing:
+            raise ReleaseError(
+                f"missing required secrets: {', '.join(missing)} — the plan "
+                "cannot run to publish; failing now, before prepare writes "
+                "any history"
+            )
     emit(release_plan, format_preflight, as_json=as_json)
     logger.info(
         "release preflight planned",
@@ -1396,9 +1406,24 @@ def release() -> None:
         "release.unsigned event; refused when the repo declares no signing."
     ),
 )
+@click.option(
+    "--plan-only",
+    is_flag=True,
+    help=(
+        "Emit the plan facts without the secret-presence hard-fail: the "
+        "stage blocks' standalone plan job (per-stage dispatch, #780) "
+        "re-derives the plan at the tag in a secret-free environment — "
+        "presence was the source run's preflight's job, and each stage's "
+        "verb still validates its own names before acting."
+    ),
+)
 @json_option
 def preflight_cmd(
-    version: version_mod.VersionSpec, event: str, unsigned: bool, as_json: bool
+    version: version_mod.VersionSpec,
+    event: str,
+    unsigned: bool,
+    plan_only: bool,
+    as_json: bool,
 ) -> None:
     """Plan the release: matrix, live stages, endpoints, required secrets.
 
@@ -1409,10 +1434,18 @@ def preflight_cmd(
     never re-derived in YAML — and hard-fails while it is still cheap:
     before any toolchain exists and before prepare writes history. A
     -release-rc version plans GH-release-only (external endpoints dropped
-    from the plan); missing required secrets are a hard failure.
+    from the plan); missing required secrets are a hard failure unless
+    --plan-only skips the presence check (the stage blocks' standalone
+    plan job, which re-derives facts where no secret lives).
     """
     raise SystemExit(
-        run_preflight(version, event=event, unsigned=unsigned, as_json=as_json)
+        run_preflight(
+            version,
+            event=event,
+            unsigned=unsigned,
+            plan_only=plan_only,
+            as_json=as_json,
+        )
     )
 
 

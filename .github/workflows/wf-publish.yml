@@ -35,17 +35,36 @@ name: wf-publish
 #   uses: arthur-debert/shipit/.github/workflows/wf-publish.yml@v1
 # — through the composed wf-release.yml or directly (PRD story 38).
 #
-# Check-name contract (PRD story 42, consumed by ADP02): this block's jobs
-# are `assert` (per unsigned leg: `assert (<artifact>, <platform>)`) and
-# `publish`. Never renamed casually.
+# Check-name contract (PRD story 42, consumed by ADP02): this block's
+# stable jobs are `plan` (skipped whenever the caller supplies the plan
+# facts — every composed-chain run), `assert` (per unsigned leg:
+# `assert (<artifact>, <platform>)`) and `publish`. Never renamed casually.
+#
+# Per-stage dispatch (TOL02-WS09 #780): the standalone contract is `tag` +
+# `run-id` (+ `unsigned` when the source run was a break-glass cut). Omit
+# the plan facts and the stage results, and the `plan` job re-derives the
+# facts at the tag (`release preflight --plan-only`) plus the STANDALONE
+# STAGE-RESULT CLAIMS: live stage → success, plan-proven non-live →
+# skipped. Those claims are the honest statement of what a standalone
+# publish re-dispatch means — the operator asserts the source run completed
+# its live stages — and they are enforced, not trusted: every artifact the
+# claims imply (release-notes, bundle-*, signed-*) is downloaded from the
+# source run and a missing one fails the job loudly, then the verb's
+# scar-#3 gate runs unchanged. A caller that HAS real results (the composed
+# chain, direct composition) passes them and the plan job never runs —
+# results are never translated on that path (ADR-0040). Supply the facts
+# all-or-none: a partial set fails loudly at expression evaluation.
 
 on:
   workflow_call:
     inputs:
       version:
-        description: The concrete semver prepare cut.
+        description: >-
+          The concrete semver prepare cut. Optional (per-stage dispatch,
+          #780): omitted, the plan job derives it from the tag (ADR-0041 —
+          v<version> by construction).
         type: string
-        required: true
+        required: false
       tag:
         description: The release tag (the checkout ref).
         type: string
@@ -54,16 +73,21 @@ on:
         description: >-
           The build stage's result (success|failure|cancelled|skipped) —
           `needs.<build>.result` verbatim. The verb enforces scar #3 against
-          the plan's liveness facts (`matrix`/`stages`).
+          the plan's liveness facts (`matrix`/`stages`). Optional (per-stage
+          dispatch, #780): omitted, the plan job derives the standalone
+          claim (live → success, non-live → skipped) that the source-run
+          downloads then prove.
         type: string
-        required: true
+        required: false
       bundle-result:
         description: >-
           The bundle stage's result. wf-build runs build+bundle as one job,
           so a composed caller passes the same result for both; direct
-          composition with split jobs passes each its own.
+          composition with split jobs passes each its own. Optional
+          (per-stage dispatch, #780): omitted, derived as the standalone
+          claim beside build-result.
         type: string
-        required: true
+        required: false
       matrix:
         description: >-
           The preflight plan's `matrix` field (JSON, verbatim) — the build
@@ -71,31 +95,63 @@ on:
           skipped build legitimate ("the tag is the release"), and the VERB
           derives that verdict — this block never translates a result. Optional
           for backwards compatibility: omitted keeps the strict success-only
-          build gate used by direct callers before issue #745.
+          build gate used by direct callers before issue #745 (unless the
+          plan job re-derived the facts — its matrix then rides to the verb).
         type: string
         required: false
       sign-result:
         description: >-
           The sign stage's result: success (signed path) or skipped
           (unsigned path) publishes; failure or cancelled blocks everything.
+          Optional (per-stage dispatch, #780): omitted, derived as the
+          standalone claim (sign projection live → success, proven by the
+          signed-* downloads; empty → skipped).
         type: string
-        required: true
+        required: false
       unsigned-matrix:
         description: >-
           The preflight plan's unsigned bundle-bearing projection
           (wf-prepare's `unsigned-matrix` output, verbatim): the unsigned
           entries that carry a bundle tree — exactly the trees this block's
           assert job re-guards. Build-only artifacts are excluded upstream.
+          Optional (per-stage dispatch, #780): omitted, the plan job
+          re-derives it at the tag.
         type: string
-        required: true
+        required: false
       stages:
         description: >-
           The preflight plan's `stages` field (JSON, verbatim) — gates the
           assert job AND carries the bundle stage's liveness fact to the
           publish verb (no `bundle` entry proves a skipped bundle
-          legitimate, issue #745).
+          legitimate, issue #745). Optional (per-stage dispatch, #780):
+          omitted, the plan job re-derives the facts — this input is the
+          standalone-mode discriminator, so omit it together with the other
+          facts or the block publishes against a mixed plan.
         type: string
-        required: true
+        required: false
+      run-id:
+        description: >-
+          Per-stage dispatch (#780): the SOURCE run id whose artifacts
+          (release-notes, bundle-*, signed-*) this dispatch stages — the
+          prior run of the same release being re-published. ONE source run
+          only (a standalone sign re-dispatch lands signed-* in ITS run —
+          name that run here). Omitted, artifacts resolve within the
+          current run (the composed-chain path). Cross-run download needs
+          `actions: read` on the caller's token — see the permissions note
+          below.
+        type: string
+        required: false
+      unsigned:
+        description: >-
+          Per-stage dispatch (#780): set when the SOURCE run was an
+          --unsigned break-glass cut, so the plan job re-derives the same
+          unsigned plan (otherwise the re-derived sign projection would
+          claim a signed path the source run never ran, and the signed-*
+          download would fail loudly). Ignored when the plan facts are
+          supplied.
+        type: boolean
+        required: false
+        default: false
     secrets:
       # The endpoint token set (shipit.release.secretreq ENDPOINT_SECRETS,
       # PRD story 46), declared optional: the verb validates every
@@ -111,23 +167,96 @@ on:
       HOMEBREW_TAP_TOKEN:
         required: false
 
-permissions:
-  # gh-release creates the release and uploads assets on this repo.
-  contents: write
+# NO `permissions:` key, deliberately (per-stage dispatch, #780): a called
+# workflow's permissions can only DOWNGRADE the caller's token, so declaring
+# one here would strip the `actions: read` a standalone dispatch caller
+# grants for the cross-run artifact downloads. The block inherits the
+# caller's grant verbatim: gh-release still needs `contents: write` — the
+# composed chain (wf-release) declares it, and a direct caller always had
+# to grant it (a declaration here could never elevate); the standalone
+# dispatch caller grants `contents: write` + `actions: read`.
 
 jobs:
+  plan:
+    # Standalone re-derivation (per-stage dispatch, #780): runs ONLY when
+    # the caller omitted the plan facts (`stages` is the discriminator) —
+    # the composed chain always passes them, so there this job is a skipped
+    # no-op. `--plan-only` skips the secret-presence hard-fail alone (the
+    # publish verb still validates every planned endpoint's token before
+    # the first dispatch). The facts are the SAME planner invocation and jq
+    # projections wf-prepare made; the stage-RESULT claims are the
+    # standalone contract stated in the header — live → success (proven by
+    # the source-run downloads), plan-proven non-live → skipped — never a
+    # translation of a real result, because on this path no real result
+    # exists to translate.
+    if: inputs.stages == ''
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+      unsigned-matrix: ${{ steps.plan.outputs.unsigned-matrix }}
+      stages: ${{ steps.plan.outputs.stages }}
+      build-result: ${{ steps.plan.outputs.build-result }}
+      bundle-result: ${{ steps.plan.outputs.bundle-result }}
+      sign-result: ${{ steps.plan.outputs.sign-result }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: prefix-dev/setup-pixi@v0.9.6
+        with:
+          # Lockstep with the Layer 0 bootstrap's PIXI_PIN — see
+          # wf-checks.yml.
+          pixi-version: v0.71.0
+          locked: true
+      - name: Re-derive the plan at the tag
+        id: plan
+        env:
+          TAG: ${{ inputs.tag }}
+          UNSIGNED: ${{ inputs.unsigned }}
+        run: |
+          # pipefail: same masking hazard as wf-prepare's plan step.
+          set -euo pipefail
+          # ADR-0041: the tag is the version authority (v<version>).
+          version="${TAG#v}"
+          flags=(--plan-only)
+          if [ "$UNSIGNED" = "true" ]; then flags+=(--unsigned); fi
+          plan="$(pixi run --locked ./bin/shipit release preflight "$version" --json "${flags[@]}" | jq -c .)"
+          # The standalone stage-result claims (header contract): liveness
+          # is the plan's fact; the downloads and the verb's scar-#3 gate
+          # are the enforcement.
+          build_result="$(jq -r 'if .matrix == [] then "skipped" else "success" end' <<<"$plan")"
+          bundle_result="$(jq -r 'if (.stages | index("bundle")) then "success" else "skipped" end' <<<"$plan")"
+          sign_result="$(jq -r 'if ([.matrix[] | select(.sign)] | length) > 0
+            then "success" else "skipped" end' <<<"$plan")"
+          {
+            printf 'version=%s\n' "$version"
+            printf 'matrix=%s\n' "$(jq -c '.matrix' <<<"$plan")"
+            printf 'unsigned-matrix=%s\n' "$(jq -c '[.matrix[] | select((.sign | not) and .bundle)]' <<<"$plan")"
+            printf 'stages=%s\n' "$(jq -c '.stages' <<<"$plan")"
+            printf 'build-result=%s\n' "$build_result"
+            printf 'bundle-result=%s\n' "$bundle_result"
+            printf 'sign-result=%s\n' "$sign_result"
+          } >> "$GITHUB_OUTPUT"
+
   assert:
+    needs: plan
     # Plan-gated: only when the plan carries an assert-bundle stage and at
     # least one entry never traverses wf-sign-mac (ADR-0040's unsigned-path
     # placement). Pure file inspection — one ubuntu runner per leg
-    # regardless of the entry's build platform.
+    # regardless of the entry's build platform. `!cancelled()` + explicit
+    # plan-result checks override the default needs-semantics (the plan job
+    # SKIPS on every fact-supplied call); the `||` coalescing routes
+    # between the two sources of the SAME facts.
     if: >-
-      contains(fromJson(inputs.stages), 'assert-bundle')
-      && inputs.unsigned-matrix != '[]'
+      ${{ !cancelled() && needs.plan.result != 'failure'
+      && needs.plan.result != 'cancelled'
+      && contains(fromJson(inputs.stages || needs.plan.outputs.stages), 'assert-bundle')
+      && (inputs.unsigned-matrix || needs.plan.outputs.unsigned-matrix) != '[]' }}
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJson(inputs.unsigned-matrix) }}
+        include: ${{ fromJson(inputs.unsigned-matrix || needs.plan.outputs.unsigned-matrix) }}
     name: assert (${{ matrix.artifact }}, ${{ matrix.platform }})
     runs-on: ubuntu-latest
     steps:
@@ -140,23 +269,41 @@ jobs:
           # wf-checks.yml.
           pixi-version: v0.71.0
           locked: true
+      # Two variants because `with:` keys cannot be conditional: the
+      # same-run path must NOT pass `run-id`/`github-token` (that flips the
+      # action onto the REST API, needing `actions: read` the composed
+      # chain's callers never granted); the cross-run path (standalone
+      # dispatch, #780) passes both.
       - name: Download the bundle
+        if: inputs.run-id == ''
         uses: actions/download-artifact@v8
         with:
           name: bundle-${{ matrix.artifact }}-${{ matrix.platform }}
           path: bundle
+      - name: Download the bundle (from the source run)
+        if: inputs.run-id != ''
+        uses: actions/download-artifact@v8
+        with:
+          name: bundle-${{ matrix.artifact }}-${{ matrix.platform }}
+          path: bundle
+          run-id: ${{ inputs.run-id }}
+          github-token: ${{ github.token }}
       - name: "Assert bundle main binary (scar #2, unsigned path)"
         env:
           ARTIFACT: ${{ matrix.artifact }}
         run: pixi run --locked ./bin/shipit release assert-bundle bundle "$ARTIFACT"
 
   publish:
-    needs: [assert]
+    needs: [plan, assert]
     # Runs when assert succeeded OR legitimately skipped (all-signed plan,
-    # no bundle stage) — never after an assert failure, and never on a
-    # cancelled run. This is the block's INTERNAL ordering of its two
-    # invariants, not scar #3: the stage-result gate stays in the verb.
-    if: ${{ !cancelled() && needs.assert.result != 'failure' }}
+    # no bundle stage) — never after an assert failure, a failed/cancelled
+    # plan re-derivation, or on a cancelled run. This is the block's
+    # INTERNAL ordering of its invariants, not scar #3: the stage-result
+    # gate stays in the verb.
+    if: >-
+      ${{ !cancelled() && needs.plan.result != 'failure'
+      && needs.plan.result != 'cancelled'
+      && needs.assert.result != 'failure' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -168,14 +315,29 @@ jobs:
           # wf-checks.yml.
           pixi-version: v0.71.0
           locked: true
+      # Every download rides in two variants because `with:` keys cannot be
+      # conditional: the same-run path must NOT pass `run-id`/`github-token`
+      # (that flips the action onto the REST API, needing `actions: read`
+      # the composed chain's callers never granted); the cross-run path
+      # (standalone dispatch, #780) passes both.
       - name: Download the release notes
+        if: inputs.run-id == ''
         uses: actions/download-artifact@v8
         with:
           name: release-notes
           # prepare wrote RELEASE_NOTES.md at the repo root; the verb reads
           # it there by default.
           path: .
+      - name: Download the release notes (from the source run)
+        if: inputs.run-id != ''
+        uses: actions/download-artifact@v8
+        with:
+          name: release-notes
+          path: .
+          run-id: ${{ inputs.run-id }}
+          github-token: ${{ github.token }}
       - name: Stage the bundle trees
+        if: inputs.run-id == ''
         uses: actions/download-artifact@v8
         with:
           pattern: bundle-*
@@ -184,29 +346,55 @@ jobs:
           # never collide (the signed .dmg/.tar.gz exception is handled by
           # the signed overlay below).
           merge-multiple: true
+      - name: Stage the bundle trees (from the source run)
+        if: inputs.run-id != ''
+        uses: actions/download-artifact@v8
+        with:
+          pattern: bundle-*
+          path: dist
+          merge-multiple: true
+          run-id: ${{ inputs.run-id }}
+          github-token: ${{ github.token }}
       - name: Overlay the signed artifacts
         # Plan path, not a re-check: on the signed path the signed outputs —
         # the mac-app leg's .dmg or the archive leg's re-emitted .tar.gz,
         # each staged under its ORIGINAL filename — replace the unsigned
         # ones; cp -f makes the overwrite explicit instead of trusting
-        # download-order semantics.
-        if: inputs.sign-result == 'success'
+        # download-order semantics. The sign-result coalesces input-or-plan
+        # (the standalone claim; the download failing loudly is its proof).
+        if: >-
+          ${{ (inputs.sign-result || needs.plan.outputs.sign-result) == 'success'
+          && inputs.run-id == '' }}
         uses: actions/download-artifact@v8
         with:
           pattern: signed-*
           path: dist-signed
           merge-multiple: true
+      - name: Overlay the signed artifacts (from the source run)
+        if: >-
+          ${{ (inputs.sign-result || needs.plan.outputs.sign-result) == 'success'
+          && inputs.run-id != '' }}
+        uses: actions/download-artifact@v8
+        with:
+          pattern: signed-*
+          path: dist-signed
+          merge-multiple: true
+          run-id: ${{ inputs.run-id }}
+          github-token: ${{ github.token }}
       - name: Apply the signed overlay
-        if: inputs.sign-result == 'success'
+        if: (inputs.sign-result || needs.plan.outputs.sign-result) == 'success'
         run: cp -f dist-signed/* dist/
       - name: Publish
+        # Each env coalesces input-or-plan-output (`||` — the two sources
+        # of the same fact/claim, per-stage dispatch #780); whichever source
+        # supplied it, the value rides to the verb verbatim.
         env:
-          VERSION: ${{ inputs.version }}
-          BUILD_RESULT: ${{ inputs.build-result }}
-          BUNDLE_RESULT: ${{ inputs.bundle-result }}
-          SIGN_RESULT: ${{ inputs.sign-result }}
-          MATRIX: ${{ inputs.matrix }}
-          STAGES: ${{ inputs.stages }}
+          VERSION: ${{ inputs.version || needs.plan.outputs.version }}
+          BUILD_RESULT: ${{ inputs.build-result || needs.plan.outputs.build-result }}
+          BUNDLE_RESULT: ${{ inputs.bundle-result || needs.plan.outputs.bundle-result }}
+          SIGN_RESULT: ${{ inputs.sign-result || needs.plan.outputs.sign-result }}
+          MATRIX: ${{ inputs.matrix || needs.plan.outputs.matrix }}
+          STAGES: ${{ inputs.stages || needs.plan.outputs.stages }}
           # gh-release rides the Actions token; endpoint tokens are
           # validated by the verb before the first dispatch.
           GH_TOKEN: ${{ github.token }}
