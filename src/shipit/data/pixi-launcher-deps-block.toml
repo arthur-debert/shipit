@@ -1,0 +1,15 @@
+# The pinned `bin/shipit` launcher's one prerequisite (#758, TOL02-WS17
+# #794): every workflow block (wf-checks and the whole wf-release family)
+# runs `pixi run --locked ./bin/shipit ...`, and the ADR-0033 launcher
+# resolves the repo's shipit pin via `uv tool run` — but hosted runners do
+# not carry uv, so without this block the very first `./bin/shipit` dies 127
+# before any verb runs. Provisioned from conda-forge under setup-pixi's
+# lockfile-keyed cache (the #582 doctrine; the spike measured the launcher's
+# uv resolve at 5s cold / 0-3s warm riding this env — no extra cache step).
+# Anchored under [dependencies] — the DEFAULT env — because that is exactly
+# the PATH a bare `pixi run --locked <task>` resolves. Pinned to the minor
+# line of Layer 0's UV_PIN (bin/setup-dev-env.sh), so dev machines and CI
+# provision the same uv; a lockstep drift test (tests/test_install.py) fails
+# when the two move apart. `uv build` (the python bundle composition) rides
+# this same entry.
+uv = "0.11.*"

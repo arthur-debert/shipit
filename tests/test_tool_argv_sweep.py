@@ -6,7 +6,10 @@ literal whose first element is a guarded tool's binary name, in any module
 outside that tool's whitelisted assembly point(s), fails the build. The gh-only
 sweep that pinned the PROC02 merge (formerly in ``test_gh_adapter.py``) is
 generalized here into ONE table-driven test: adding the next tool is a
-:data:`_ADAPTER_HOMES` entry, not a new test.
+:data:`_ADAPTER_HOMES` entry, not a new test — plus a provisioning row in
+``tests/test_tool_provisioning_guard.py`` (TOL02-WS17 #794: a new Exec tool
+cannot land without a provisioning story; that guard fails until the row and
+its inventory-doc line exist).
 
 The sweep is deliberately literal-shaped (the same net as the original gh
 sweep): it cannot see an argv assembled from a variable head, but every

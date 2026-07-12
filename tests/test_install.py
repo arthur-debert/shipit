@@ -273,7 +273,7 @@ def test_load_units_includes_the_lint_env_blocks():
     assert envs.anchor == "[environments]"
     assert tomllib.loads(envs.desired_inner()) == {"lint": ["lint"]}
 
-    # Four sibling blocks in ONE consumer file: their marker fences must be
+    # Five sibling blocks in ONE consumer file: their marker fences must be
     # pairwise distinct or extract/splice would bleed across regions.
     fences = {
         units[k].open_marker
@@ -282,9 +282,44 @@ def test_load_units_includes_the_lint_env_blocks():
             iunits.PIXI_TEST_TASK_KEY,
             iunits.PIXI_LINT_DEPS_KEY,
             iunits.PIXI_ENVS_KEY,
+            iunits.PIXI_LAUNCHER_DEPS_KEY,
         )
     }
-    assert len(fences) == 4
+    assert len(fences) == 5
+
+
+def test_load_units_includes_the_launcher_deps_block():
+    # #758, closed by TOL02-WS17 (#794): uv — the pinned bin/shipit launcher's
+    # one prerequisite (ADR-0033) — rides the managed pixi surface. The block
+    # is UNCONDITIONAL (zero-arg catalog: every consumer's managed tasks
+    # resolve through the launcher) and anchors in the DEFAULT env, the PATH a
+    # bare `pixi run --locked <task>` on a hosted runner actually resolves.
+    units = {u.key: u for u in iunits.load_units()}
+    launcher = units[iunits.PIXI_LAUNCHER_DEPS_KEY]
+    assert launcher.kind == "block"
+    assert launcher.dest == "pixi.toml"
+    assert launcher.anchor == "[dependencies]"
+    assert set(tomllib.loads(launcher.desired_inner())) == {"uv"}
+
+
+def test_launcher_deps_uv_pin_agrees_with_layer0_uv_pin():
+    # The two uv provisioning paths — Layer 0's reconcile-to-pin bootstrap
+    # (bin/setup-dev-env.sh, dev machines/cloud sessions) and the managed
+    # launcher-deps block (hosted CI runners, via setup-pixi) — must move in
+    # lockstep, or dev and CI run different uvs (the ci-cache-spike "second uv
+    # pin" caveat, docs/dev/ci-cache-spike.md §4).
+    script = iunits.data_bytes("bootstrap", "setup-dev-env.sh").decode("utf-8")
+    uv_pin = next(
+        line.split('"')[1] for line in script.splitlines() if line.startswith("UV_PIN=")
+    )
+    block = tomllib.loads(
+        iunits.data_bytes("pixi-launcher-deps-block.toml").decode("utf-8")
+    )
+    major, minor, *_ = uv_pin.split(".")
+    assert block["uv"] == f"{major}.{minor}.*", (
+        f"managed uv spec {block['uv']!r} is not the minor line of "
+        f"Layer 0's UV_PIN {uv_pin!r}"
+    )
 
 
 def test_packaged_lint_env_agrees_with_shipits_own_manifest():
@@ -319,7 +354,12 @@ def test_shipits_own_pixi_manifest_reconciles_to_noop():
     # `lint` key under [environments]) into shipit's own manifest.
     root = Path(__file__).resolve().parents[1]
     units = {u.key: u for u in iunits.load_units()}
-    for key in (iunits.PIXI_KEY, iunits.PIXI_LINT_DEPS_KEY, iunits.PIXI_ENVS_KEY):
+    for key in (
+        iunits.PIXI_KEY,
+        iunits.PIXI_LINT_DEPS_KEY,
+        iunits.PIXI_ENVS_KEY,
+        iunits.PIXI_LAUNCHER_DEPS_KEY,
+    ):
         unit = units[key]
         assert irec.consumer_hash(root, unit) == unit.desired_hash(), key
 
@@ -3091,8 +3131,10 @@ def test_fresh_consumer_without_pixi_manifest_gets_a_valid_seed(tmp_path, rec):
     assert manifest["tasks"]["test"] == "./bin/shipit test"
     assert set(manifest["feature"]["lint"]["dependencies"]) == set(LINT_TOOLS)
     assert manifest["environments"]["lint"] == ["lint"]
+    # ...and the launcher's uv (#758): the managed tasks all ride ./bin/shipit.
+    assert "uv" in manifest["dependencies"]
 
-    # The seed is scaffold, not a managed unit: only the four block units are
+    # The seed is scaffold, not a managed unit: only the five block units are
     # recorded, so the [workspace] table is consumer-owned from here on.
     managed = config.load_managed(config.load(tmp_path / ".shipit.toml"))
     pixi_keys = {k for k in managed if k.startswith("pixi.toml")}
@@ -3101,6 +3143,7 @@ def test_fresh_consumer_without_pixi_manifest_gets_a_valid_seed(tmp_path, rec):
         iunits.PIXI_TEST_TASK_KEY,
         iunits.PIXI_LINT_DEPS_KEY,
         iunits.PIXI_ENVS_KEY,
+        iunits.PIXI_LAUNCHER_DEPS_KEY,
     }
 
     # The PR body tells the merger the table was seeded and is theirs to edit.
