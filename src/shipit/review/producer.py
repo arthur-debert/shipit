@@ -50,6 +50,13 @@ review-round record's per-run **Variant**. The offline fan-out replay
 the same ``dimension=`` narrowing, :func:`range_pass_task_text` as its variant
 source — so the live and replay arms differ only in how the diff is fetched.
 
+A schema-unenforced backend (agy) whose stdout is UNPARSEABLE is re-prompted ONCE
+with the specific parse failure appended before the producer gives up (#826, the
+per-backend ``retry_on_parse_failure`` opt-in) — the deterministic net even when
+the agent skipped its best-effort self-check. codex (native ``--output-schema``)
+and any TIMEOUT are never retried. Only when the single retry ALSO fails does the
+:class:`BackendError` surface, so the service's #76 salvage stays the FINAL backstop.
+
 It does NOT post, does NOT touch the check-run, and does NOT decide outcomes — the
 service layer (:mod:`shipit.review.service`) owns posting + the funnel breadcrumb,
 exactly as before. The producer raises :class:`BackendUnavailable` (missing CLI),
@@ -146,6 +153,15 @@ class _BackendSpec:
     reports usage is backend-private (codex: a stderr log line; agy: nowhere —
     explicitly :data:`~shipit.review.usage.UNREPORTED`). Probed facts, documented
     in :mod:`shipit.review.usage`.
+
+    ``retry_on_parse_failure`` opts the backend into the deterministic ONE-shot
+    re-prompt net (#826): when a launch's stdout is unparseable, re-prompt the
+    backend ONCE with the specific parse failure appended, then re-parse. On ONLY
+    for a backend with no native schema enforcement (agy) — codex's
+    ``--output-schema`` makes an off-shape response impossible, so it never needs
+    the retry. It does NOT fire on a TIMEOUT (a timeout would just burn a second
+    full deadline; re-prompting fixes a promptly-returned-but-off-shape body, not
+    a slow one) — the salvage stays the backstop there.
     """
 
     schema_inline: bool
@@ -153,6 +169,7 @@ class _BackendSpec:
     native_timeout: bool
     adapter_factory: object  # Callable[[str, str, str | None], BackendAdapter]
     usage_parser: object  # Callable[[launch.LaunchResult], TokenUsage]
+    retry_on_parse_failure: bool
 
 
 def _codex_adapter(model: str, timeout: str, reasoning: str | None) -> BackendAdapter:
@@ -200,6 +217,9 @@ _SPECS: dict[Backend, _BackendSpec] = {
         native_timeout=False,
         adapter_factory=_codex_adapter,
         usage_parser=_codex_usage,
+        # codex's `--output-schema` enforces the shape natively, so an off-shape
+        # response can't happen — no re-prompt net needed.
+        retry_on_parse_failure=False,
     ),
     ANTIGRAVITY: _BackendSpec(
         schema_inline=True,
@@ -207,6 +227,10 @@ _SPECS: dict[Backend, _BackendSpec] = {
         native_timeout=True,
         adapter_factory=_agy_adapter,
         usage_parser=_agy_usage,
+        # agy has no native schema enforcement, so a promptly-returned but
+        # unparseable body is the #76 failure mode — re-prompt it ONCE with the
+        # parse failure before the salvage takes over (#826).
+        retry_on_parse_failure=True,
     ),
 }
 
@@ -620,13 +644,111 @@ def _launch_and_capture(
     artifacts: RunArtifacts | None = None,
     run_id: str | None = None,
 ) -> CapturedReview:
-    """Launch one reviewer child in ``cwd`` under the seam deadline and parse its
-    stdout — the launch core :func:`run_tree_review` (PR/Tree) and
-    :func:`run_range_review` (offline range) share, so the deadline mapping and
-    the timeout→``BackendError`` normalization exist exactly once. The returned
-    :class:`CapturedReview` carries the launch's measured usage
-    (``spec.usage_parser`` over the raw :class:`~shipit.spawn.launch.LaunchResult`)
-    and the adapter's APPLIED reasoning level (RVW03-WS04).
+    """Launch a reviewer child, capture its review, and — for a schema-unenforced
+    backend — apply the deterministic ONE-shot re-prompt net (#826).
+
+    The launch core :func:`run_tree_review` (PR/Tree) and :func:`run_range_review`
+    (offline range) share: it delegates a single launch+parse to :func:`_attempt`,
+    and when that raises a PARSE-failure :class:`BackendError` on a backend opted
+    into the retry (``spec.retry_on_parse_failure`` — agy, no native schema), it
+    re-prompts ONCE with the specific parse failure appended (:func:`_retry_task`)
+    and re-parses. The retry is the deterministic fix even when the agent skipped
+    its best-effort self-check; codex (native ``--output-schema``) never retries.
+
+    A TIMEOUT is NEVER retried (``exc.timed_out``): re-prompting a slow run would
+    just burn a second full deadline, and a timeout is not an off-shape body a
+    re-prompt corrects. When the retry ALSO fails (or the backend does not opt in),
+    the :class:`BackendError` propagates unchanged so the service's #76 salvage
+    stays the FINAL backstop — the retry slots strictly BEFORE it.
+
+    ``run_id`` / ``artifacts`` are threaded to :func:`_attempt`; the bundle
+    reflects the LAST attempt (a retry overwrites the first attempt's streams +
+    meta), so the artifact of record is the output the outcome is settled from.
+    """
+    try:
+        return _attempt(
+            agent,
+            spec,
+            adapter,
+            task,
+            cwd=cwd,
+            timeout=timeout,
+            schema_path=schema_path,
+            launcher=launcher,
+            artifacts=artifacts,
+            run_id=run_id,
+        )
+    except BackendError as exc:
+        # The retry net (#826) fires ONLY for a schema-unenforced backend (agy) and
+        # ONLY on a parse failure, never a timeout — a second run of a slow launch
+        # would just re-burn the deadline. On any other BackendError, propagate to
+        # the service's salvage backstop unchanged.
+        if not spec.retry_on_parse_failure or exc.timed_out:
+            raise
+        logger.info(
+            "%s review output was unparseable — re-prompting ONCE with the parse "
+            "failure before falling through to salvage (retry net, #826)",
+            agent,
+            extra={
+                "reviewer": agent,
+                **({} if run_id is None else {"run_id": run_id}),
+            },
+        )
+        return _attempt(
+            agent,
+            spec,
+            adapter,
+            _retry_task(task, exc),
+            cwd=cwd,
+            timeout=timeout,
+            schema_path=schema_path,
+            launcher=launcher,
+            artifacts=artifacts,
+            run_id=run_id,
+        )
+
+
+def _retry_task(task: str, failure: BackendError) -> str:
+    """Compose the ONE agy re-prompt: the original ``task`` plus the exact failure.
+
+    Appends a terminal RETRY block quoting why the previous output could not be
+    parsed — the :class:`BackendError` message already carries the actionable hint
+    plus a head/tail snippet of the raw output — so agy fixes the concrete problem
+    rather than re-guessing the shape blind. The schema is already in ``task`` (it
+    is the agy prompt), so it is not restated; this composes the single retry and
+    nothing more — the caller (:func:`_launch_and_capture`) never loops.
+    """
+    return (
+        f"{task}\n\n"
+        "RETRY — your PREVIOUS response could NOT be parsed as a valid review:\n"
+        f"{failure}\n"
+        "Emit a SINGLE, complete, valid JSON object that matches the schema above "
+        "and NOTHING else — fix the exact problem reported, and do not add prose "
+        "or markdown fences."
+    )
+
+
+def _attempt(
+    agent: str,
+    spec: _BackendSpec,
+    adapter: BackendAdapter,
+    task: str,
+    *,
+    cwd: str,
+    timeout: str,
+    schema_path: str | None,
+    launcher: launch.Runner | None,
+    artifacts: RunArtifacts | None = None,
+    run_id: str | None = None,
+) -> CapturedReview:
+    """Launch ONE reviewer child in ``cwd`` under the seam deadline and parse its
+    stdout — one attempt, no retry (the retry lives in :func:`_launch_and_capture`).
+
+    The deadline mapping and the timeout→``BackendError`` normalization exist
+    exactly once here. The returned :class:`CapturedReview` carries the launch's
+    measured usage (``spec.usage_parser`` over the raw
+    :class:`~shipit.spawn.launch.LaunchResult`) and the adapter's APPLIED reasoning
+    level (RVW03-WS04).
 
     ``run_id`` is the pass's correlation id — threaded onto the local breadcrumb
     WARNING (the line pointing at the bundle path) so ``shipit logs --run`` /

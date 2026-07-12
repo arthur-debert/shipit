@@ -32,6 +32,7 @@ from .verbs.logevent import log as log_group
 from .verbs.pr import pr as pr_group
 from .verbs.provision import provision as provision_group
 from .verbs.release import release as release_group
+from .verbs.review import review as review_group
 from .verbs.session import session as session_group
 from .verbs.spawn import spawn as spawn_group
 from .verbs.tree import tree as tree_group
@@ -318,6 +319,11 @@ root.add_command(provision_group)
 # attach the whole group to the root.
 root.add_command(pr_group)
 
+# The top-level `review` group (#826) — backend-agnostic, agent-facing review
+# utilities that touch no PR state (`review validate` is the agent self-check);
+# deliberately NOT under `pr`, whose review subgroup owns the PR-scoped acts.
+root.add_command(review_group)
+
 # The nested `hook` group (Claude Code lifecycle-hook entrypoints) — the binary
 # side of the agent harness (ADR-0012); attached the same way as `pr`.
 root.add_command(hook_group)
@@ -396,6 +402,10 @@ _HELP_RESOURCES = {
     ("pr", "ready"): ("shipit.verbs.pr", "pr_ready_help.txt"),
     ("pr", "classify"): ("shipit.verbs.pr", "pr_classify_help.txt"),
     ("pr", "wait"): ("shipit.verbs.pr", "pr_wait_help.txt"),
+    # The top-level `review` group (#826) — backend-agnostic self-check, moved
+    # OUT of `pr review` (a schema check touches no PR state).
+    ("review",): ("shipit.verbs", "review_help.txt"),
+    ("review", "validate"): ("shipit.verbs", "review_validate_help.txt"),
     ("hook",): ("shipit.verbs.hook", "hook_help.txt"),
     ("hook", "pretooluse"): ("shipit.verbs.hook", "hook_pretooluse_help.txt"),
     ("hook", "stop"): ("shipit.verbs.hook", "hook_stop_help.txt"),

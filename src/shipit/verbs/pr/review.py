@@ -1,4 +1,4 @@
-"""`shipit pr review` — the review subgroup: request reviewer(s), replay a range.
+"""`shipit pr review` — the PR-scoped review subgroup: request reviewer(s), replay.
 
 `pr review` is a SUBGROUP under `pr` (so the invocation is
 `shipit pr review request [PR] [--reviewer NAME]`), leaving room for sibling
@@ -6,7 +6,10 @@ review verbs without crowding the top-level `pr` group — `replay` (RVW02-WS03;
 fan-out arm RVW03-WS01) is one: an OFFLINE review of an arbitrary commit range
 — one monolithic pass, or with `--fanout` the full dimension fan-out (the
 sanctioned experiment driver) — that writes the local review-round record and
-touches no PR. This module owns
+touches no PR. The backend-agnostic `validate` self-check (#826) is NOT here: it
+touches no PR state, so it lives at the top level as `shipit review validate`
+(:mod:`shipit.verbs.review`), not nested under this PR-flow group.
+This module owns
 only the thin CLI: parse args -> resolve the typed PR target -> pick the
 adapter scope -> call the engine's reviewer-request service
 (:func:`shipit.prstate.request.request_reviewers` — CLI01-WS03 promoted it out

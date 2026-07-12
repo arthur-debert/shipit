@@ -1,0 +1,30 @@
+`shipit review validate [FILE]` checks a review JSON payload against the
+review schema, so a reviewer agent can verify its own output before handing back.
+
+FILE is a path to the JSON to check; omit it (or pass `-`) to read stdin, so an
+agent can pipe its output straight in:
+
+    cat review.json | shipit review validate
+
+The payload is parsed the SAME tolerant way the funnel parses an agent's stdout
+— surrounding prose and ```json fences are stripped, the single
+`{summary, comments}` review object is selected — then checked against the review
+schema (`REVIEW_SCHEMA`):
+
+  - the `{summary, comments}` envelope and every nested field's type;
+  - `summary.status` is one of APPROVED / REQUEST_CHANGES / COMMENT;
+  - each finding's `severity` is one of `critical | major | minor | nit` — the
+    check this command exists for: a free-form severity is the failure that
+    burned live rounds (#826);
+  - `line` is an integer or null, `confidence` a number in [0, 1];
+  - no unknown keys (the strict schema rejects them).
+
+Output and exit code:
+
+  - conforms  -> prints `valid`, exits 0;
+  - problems  -> prints every problem (one per line, JSON-path prefixed like
+                 `comments[2].severity: …`) to stderr, exits 1;
+  - unparseable JSON -> prints a clean `invalid: …` line to stderr, exits 1.
+
+Every problem is reported at once, so the output is fixed in a single pass rather
+than one error at a time.

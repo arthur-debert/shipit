@@ -29,6 +29,19 @@ blob neither crashes the round nor hides a valid review printed after it.
 shared by the posting path (:mod:`shipit.review.post`) and the review-round
 record (:mod:`shipit.review.roundrecord`), so both consumers coerce agent JSON
 the same way and the record can never disagree with what was posted.
+
+`validate_review` is the zero-dependency structural check of a parsed review
+against :data:`REVIEW_SCHEMA` — the engine behind ``shipit review validate``
+(#826). It exists so a reviewer AGENT can self-verify its output against the same
+shape the funnel expects BEFORE handing it back, closing the loop where an agy
+run returned unparseable/ill-typed JSON and burned the whole round. It returns a
+list of human-readable problem strings (empty == valid) rather than raising, so
+the CLI can print every problem at once; the FIRST-class check it enforces is the
+one the issue calls out — ``severity`` must be one of the shared
+:class:`~shipit.finding.Severity` enum values, never a free-form string. A
+hand-written walk (not a ``jsonschema`` dependency) so the messages point at the
+exact JSON path (``comments[2].severity``) and the package keeps its zero-dep
+posture.
 """
 
 from __future__ import annotations
@@ -174,6 +187,219 @@ def finding_from_dict(raw: dict) -> Finding:
         evidence=_str_field(raw.get("evidence")),
         fix=_str_field(raw.get("fix")),
     )
+
+
+#: The status enum from :data:`REVIEW_SCHEMA` — derived, never a second copy, so
+#: the validator and the schema can never disagree on the allowed summary states.
+_STATUS_VALUES: tuple[str, ...] = tuple(
+    REVIEW_SCHEMA["properties"]["summary"]["properties"]["status"]["enum"]
+)
+#: The severity enum, from the shared domain ladder (the schema derives from the
+#: same source). This is the check the issue (#826) calls out as first-class: an
+#: agent's ``severity`` must be one of these tokens, never a free-form string.
+_SEVERITY_VALUES: tuple[str, ...] = tuple(severity.value for severity in Severity)
+
+
+def _is_str(value: object) -> bool:
+    return isinstance(value, str)
+
+
+def _is_int_not_bool(value: object) -> bool:
+    # `bool` is an `int` subclass — a schema `integer` must reject `true`/`false`,
+    # matching `finding_from_dict`'s `line` coercion (which drops a bool line).
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _is_number_not_bool(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _check_object(
+    value: object, path: str, required: tuple[str, ...], problems: list[str]
+) -> dict | None:
+    """Confirm ``value`` is an object with EXACTLY ``required`` keys.
+
+    Appends a problem for a non-object, any missing required key, and any extra
+    key (``REVIEW_SCHEMA`` is ``additionalProperties: False`` throughout, so an
+    unknown key IS a schema violation — codex's strict ``--output-schema`` rejects
+    it, and flagging it here lets an agent match that bar before handing back).
+    Returns the dict when it is an object (so field checks can proceed even if a
+    key is missing), else ``None``.
+    """
+    if not isinstance(value, dict):
+        problems.append(f"{path}: expected an object, got {_typename(value)}")
+        return None
+    for key in required:
+        if key not in value:
+            problems.append(f"{path}: missing required key {key!r}")
+    for key in value:
+        if key not in required:
+            problems.append(f"{path}: unexpected key {key!r} (not in the schema)")
+    return value
+
+
+def _check_field(
+    obj: dict, key: str, path: str, predicate, expected: str, problems: list[str]
+) -> None:
+    """Type-check ``obj[key]`` with ``predicate`` when the key is present.
+
+    A MISSING key is left to :func:`_check_object`'s required-key pass so a field
+    is never reported twice; this only rejects a present value of the wrong type.
+    """
+    if key in obj and not predicate(obj[key]):
+        problems.append(f"{path}.{key}: expected {expected}, got {_typename(obj[key])}")
+
+
+def _typename(value: object) -> str:
+    """A short JSON-flavored type name for a problem message (``null``, not ``NoneType``)."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, dict):
+        return "object"
+    if isinstance(value, list):
+        return "array"
+    if isinstance(value, float):
+        return "number"
+    if isinstance(value, int):
+        return "integer"
+    return type(value).__name__
+
+
+def validate_review(payload: object) -> list[str]:
+    """Check a parsed review against :data:`REVIEW_SCHEMA`; return problem strings.
+
+    A pure, zero-dependency structural walk: returns an EMPTY list when ``payload``
+    conforms, else one human-readable string per problem (JSON-path prefixed, e.g.
+    ``comments[2].severity: …``) — every problem at once, so an agent fixes its
+    output in one pass rather than whack-a-mole. Never raises and never mutates.
+
+    Enforced (mirroring the schema, ``additionalProperties: False`` throughout):
+    the ``{summary, comments}`` envelope; ``summary`` = ``status`` (one of
+    :data:`_STATUS_VALUES`), ``overall_feedback`` (string), ``coverage`` (=
+    ``reviewed`` list-of-strings + ``skipped`` list-of ``{file, reason}``); each
+    ``comments[i]`` = ``file``/``text``/``category``/``evidence``/``fix`` strings,
+    ``line`` integer-or-null, ``confidence`` number in ``[0, 1]``, and — the
+    first-class check (#826) — ``severity`` one of :data:`_SEVERITY_VALUES`, never
+    a free-form string. Unknown keys are flagged (codex's strict schema rejects
+    them); this is the bar ``shipit review validate`` holds agents to.
+    """
+    problems: list[str] = []
+    root = _check_object(payload, "review", ("summary", "comments"), problems)
+    if root is None:
+        return problems
+
+    summary = root.get("summary")
+    if "summary" in root:
+        _validate_summary(summary, problems)
+
+    comments = root.get("comments")
+    if "comments" in root:
+        if not isinstance(comments, list):
+            problems.append(f"comments: expected an array, got {_typename(comments)}")
+        else:
+            for index, comment in enumerate(comments):
+                _validate_comment(comment, f"comments[{index}]", problems)
+    return problems
+
+
+def _validate_summary(summary: object, problems: list[str]) -> None:
+    """Validate the ``summary`` object (status/overall_feedback/coverage)."""
+    obj = _check_object(
+        summary, "summary", ("status", "overall_feedback", "coverage"), problems
+    )
+    if obj is None:
+        return
+    if "status" in obj and obj["status"] not in _STATUS_VALUES:
+        problems.append(
+            f"summary.status: {obj['status']!r} is not one of "
+            f"{', '.join(_STATUS_VALUES)}"
+        )
+    _check_field(obj, "overall_feedback", "summary", _is_str, "a string", problems)
+    if "coverage" in obj:
+        _validate_coverage(obj["coverage"], problems)
+
+
+def _validate_coverage(coverage: object, problems: list[str]) -> None:
+    """Validate ``summary.coverage`` (reviewed list + skipped file/reason list)."""
+    obj = _check_object(coverage, "summary.coverage", ("reviewed", "skipped"), problems)
+    if obj is None:
+        return
+    reviewed = obj.get("reviewed")
+    if "reviewed" in obj:
+        if not isinstance(reviewed, list):
+            problems.append(
+                f"summary.coverage.reviewed: expected an array, got "
+                f"{_typename(reviewed)}"
+            )
+        else:
+            for index, item in enumerate(reviewed):
+                if not _is_str(item):
+                    problems.append(
+                        f"summary.coverage.reviewed[{index}]: expected a string, "
+                        f"got {_typename(item)}"
+                    )
+    skipped = obj.get("skipped")
+    if "skipped" in obj:
+        if not isinstance(skipped, list):
+            problems.append(
+                f"summary.coverage.skipped: expected an array, got {_typename(skipped)}"
+            )
+        else:
+            for index, item in enumerate(skipped):
+                path = f"summary.coverage.skipped[{index}]"
+                entry = _check_object(item, path, ("file", "reason"), problems)
+                if entry is None:
+                    continue
+                _check_field(entry, "file", path, _is_str, "a string", problems)
+                _check_field(entry, "reason", path, _is_str, "a string", problems)
+
+
+def _validate_comment(comment: object, path: str, problems: list[str]) -> None:
+    """Validate one ``comments[i]`` finding — the severity-enum check lives here."""
+    obj = _check_object(
+        comment,
+        path,
+        (
+            "file",
+            "line",
+            "text",
+            "severity",
+            "category",
+            "confidence",
+            "evidence",
+            "fix",
+        ),
+        problems,
+    )
+    if obj is None:
+        return
+    _check_field(obj, "file", path, _is_str, "a string", problems)
+    _check_field(obj, "text", path, _is_str, "a string", problems)
+    _check_field(obj, "category", path, _is_str, "a string", problems)
+    _check_field(obj, "evidence", path, _is_str, "a string", problems)
+    _check_field(obj, "fix", path, _is_str, "a string", problems)
+    if "line" in obj and not (obj["line"] is None or _is_int_not_bool(obj["line"])):
+        problems.append(
+            f"{path}.line: expected an integer or null, got {_typename(obj['line'])}"
+        )
+    # The first-class check (#826): severity must be one of the shared enum tokens.
+    if "severity" in obj and obj["severity"] not in _SEVERITY_VALUES:
+        problems.append(
+            f"{path}.severity: {obj['severity']!r} is not one of "
+            f"{', '.join(_SEVERITY_VALUES)}"
+        )
+    if "confidence" in obj:
+        confidence = obj["confidence"]
+        if not _is_number_not_bool(confidence):
+            problems.append(
+                f"{path}.confidence: expected a number, got {_typename(confidence)}"
+            )
+        elif not 0 <= confidence <= 1:
+            problems.append(f"{path}.confidence: {confidence} is out of range [0, 1]")
 
 
 def is_review_shaped(payload: dict) -> bool:
