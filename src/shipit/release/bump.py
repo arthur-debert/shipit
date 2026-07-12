@@ -8,6 +8,9 @@ of those projections, plus the artifact-declared bundle-config hook:
 - **rust** — ``cargo set-version --workspace`` (workspace-wide, intra-workspace
   deps included) then ``cargo update --workspace`` (lock refreshed) — the
   legacy ``prepare-release.yml`` bump, forked by copy (ADR-0001/0010).
+  ``cargo set-version`` is cargo-edit's subcommand, and the wf-prepare runner
+  arrives without it — the adapter self-provisions a pinned cargo-edit
+  (:func:`provision`, issue #793, the #785 cargo-deb shape).
 - **npm** — ``npm version <v> --no-git-tag-version`` (``package.json`` +
   ``package-lock.json``; the git side stays prepare's, so the tag/commit
   never happens twice).
@@ -25,11 +28,13 @@ composition of the npm and rust legs, and its bundle-level version file
 ``.shipit.toml`` (:class:`shipit.config.Artifact`), applied by
 :func:`bump_bundle_config` in lockstep with the leg adapters.
 
-Everything here is pure data + pure text rewrites: the adapter COMMANDS run
-in the effectful shell (``shipit release prepare``,
-:mod:`shipit.verbs.release`) through the one Exec seam (ADR-0028) with cwd at
-the leg's map path; the rewrites are string→string functions, fixture-tested.
-The command literals below are these tools' one RELEASE-side assembly point,
+Everything here is pure data + pure text rewrites — plus ONE guarded effect,
+:func:`provision` (the rust adapter's pinned cargo-edit self-install, issue
+#793): the adapter COMMANDS run in the effectful shell (``shipit release
+prepare``, :mod:`shipit.verbs.release`) through the one Exec seam (ADR-0028)
+with cwd at the leg's map path, and provision rides that same injected
+runner; the rewrites are string→string functions, fixture-tested. The
+command literals below are these tools' one RELEASE-side assembly point,
 whitelisted alongside :mod:`shipit.tools.registry` in the mechanized argv
 sweep (``tests/test_tool_argv_sweep.py``).
 """
@@ -38,13 +43,25 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
 from . import ReleaseError
 
 #: The placeholder token in a command template the resolved version replaces
 #: (:meth:`BumpAdapter.commands`).
 VERSION_TOKEN = "{version}"
+
+#: The pinned cargo-edit version the rust bump adapter self-provisions (issue
+#: #793 — the second instance of #784 F2's failure class). A floating ``cargo
+#: install cargo-edit`` resolves the latest crate at prepare time —
+#: irreproducible runs and a supply-chain window — so the version is PINNED,
+#: mirroring the deb composition's ``CARGO_DEB_VERSION``
+#: (:mod:`shipit.release.bundle`). Bump deliberately, in its own change.
+CARGO_EDIT_VERSION = "0.13.11"
 
 
 @dataclass(frozen=True)
@@ -117,6 +134,50 @@ def adapter_for(toolchain: str) -> BumpAdapter:
             f"no bump adapter for toolchain {toolchain!r}; known: {known}"
         )
     return adapter
+
+
+def provision(
+    adapter: BumpAdapter, run_cmd: Callable[[Sequence[str], Path], Any], cwd: Path
+) -> None:
+    """Self-provision ``adapter``'s external tool when it is missing (issue
+    #793 — the #785 cargo-deb shape at the bump seam).
+
+    Today only rust needs one: ``cargo set-version`` is cargo-edit's
+    subcommand, and nothing shipit-side provisions cargo-edit on the
+    wf-prepare runner (lex carried it in its OWN pixi.toml — consumer-side
+    knowledge that never became a contract; every other rust consumer failed
+    identically) — the bump would otherwise die by construction (``error: no
+    such command: set-version``, rc=101). cargo itself is guaranteed present
+    (the rust leg's toolchain). The install runs through
+    the SAME Exec seam as the bump commands, so a failing install raises
+    through ``run_cmd``, aborting prepare loudly with nothing committed
+    (ADR-0009's barrier), never a quiet skip. The version is pinned
+    (:data:`CARGO_EDIT_VERSION`) for a reproducible run.
+
+    No post-install PATH re-check: cargo resolves a custom subcommand
+    (``cargo set-version``) by searching ``$CARGO_HOME/bin`` ITSELF,
+    independent of the process PATH, so the just-installed cargo-edit is
+    found even in an isolated env (pixi) where ``$CARGO_HOME/bin`` is off
+    PATH — a ``shutil.which`` gate here would spuriously abort exactly that
+    case (the #785 rounds 1–2 finding, empirically settled). Every other
+    adapter's tools ride the toolchain itself (npm) or none at all
+    (python/go) — a no-op here.
+    """
+    if adapter.toolchain != "rust":
+        return
+    if shutil.which("cargo-set-version") is not None:
+        return
+    run_cmd(
+        (
+            "cargo",
+            "install",
+            "cargo-edit",
+            "--version",
+            CARGO_EDIT_VERSION,
+            "--locked",
+        ),
+        cwd,
+    )
 
 
 # --------------------------------------------------------------------------

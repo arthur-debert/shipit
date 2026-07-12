@@ -15,6 +15,7 @@ import pytest
 
 from shipit import execrun
 from shipit.identity import Sha
+from shipit.release import bump as bump_mod
 from shipit.release import version as version_mod
 from shipit.verbs import release as release_verb
 
@@ -216,7 +217,17 @@ def test_final_cut_end_to_end(python_repo, capsys):
     assert notes == tag[2]
 
 
-def test_recorded_adapter_command_lines_per_leg(tmp_path, monkeypatch):
+@pytest.fixture
+def cargo_set_version_on_path(monkeypatch):
+    """cargo-set-version present on PATH — the rust-leg tests' default, so
+    the recorded calls are the bump's alone regardless of the host machine
+    (the self-provisioning path is pinned by its own test)."""
+    monkeypatch.setattr(bump_mod.shutil, "which", lambda name: f"/stub/{name}")
+
+
+def test_recorded_adapter_command_lines_per_leg(
+    tmp_path, monkeypatch, cargo_set_version_on_path
+):
     """Exact command lines, exact leg cwds — rust workspace bump + lock
     refresh at the rust leg, npm version at the npm leg (PRD Testing
     Decisions). A prerelease cut, so the changelog only extracts."""
@@ -248,6 +259,39 @@ def test_recorded_adapter_command_lines_per_leg(tmp_path, monkeypatch):
     assert fake.mutated() == ["add", "commit", "tag", "push_atomic"]
     add = next(c for c in fake.calls if c[0] == "add")
     assert "CHANGELOG.md" not in add[1]  # nothing rolled on a prerelease
+
+
+def test_prepare_self_provisions_cargo_edit_when_missing(tmp_path, monkeypatch):
+    """Issue #793: the wf-prepare runner arrives without cargo-edit (`cargo
+    set-version` unavailable) — prepare installs the PINNED cargo-edit through
+    the same recorded Exec seam, at the rust leg's cwd, BEFORE the bump
+    commands run. A failing install raises through the seam, aborting prepare
+    with nothing committed (ADR-0009)."""
+    monkeypatch.setattr(bump_mod.shutil, "which", lambda name: None)
+    root = make_repo(
+        tmp_path,
+        monkeypatch,
+        toml='[toolchains]\n"." = "rust"\n',
+    )
+    fake = gitio_for(root, status_lines=[" M Cargo.toml", " M Cargo.lock"])
+    recorder = CmdRecorder()
+    rc = release_verb.run_prepare(spec("1.0.0-rc.1"), gitio=fake, run_cmd=recorder)
+    assert rc == 0
+    assert recorder.calls == [
+        (
+            (
+                "cargo",
+                "install",
+                "cargo-edit",
+                "--version",
+                bump_mod.CARGO_EDIT_VERSION,
+                "--locked",
+            ),
+            root,
+        ),
+        (("cargo", "set-version", "--workspace", "1.0.0-rc.1"), root),
+        (("cargo", "update", "--workspace"), root),
+    ]
 
 
 def test_bundle_config_hook_bumps_in_lockstep(tmp_path, monkeypatch):

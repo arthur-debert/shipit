@@ -35,7 +35,8 @@ pipeline's planner and its effectful stages:
 - the **bump-adapter registry** (:mod:`shipit.release.bump`): the tag
   decision projected into manifests, one closed entry per toolchain of the
   path→toolchain map (ADR-0007) — rust workspace-wide with the lock
-  refreshed, npm's ``package.json``, python's ``pyproject.toml``, go's
+  refreshed (its cargo-edit self-provisioned when the runner lacks it,
+  issue #793), npm's ``package.json``, python's ``pyproject.toml``, go's
   zero-file projection — plus the artifact-declared bundle-config hook
   (``tauri.conf.json``; "tauri" never enters the dispatch registry, story 25).
 - the **changelog coalesce API** (story 26, consumed not rebuilt):
@@ -118,9 +119,11 @@ from ._tool import load_config
 logger = logging.getLogger("shipit.release")
 
 #: Each bump command Exec's stated timeout (ADR-0028): ``cargo update`` may
-#: refresh the registry index over the network, so the bound is generous —
-#: but a bump is never a build, so it stays well under the build verbs' hour.
-BUMP_TIMEOUT: float = 600.0
+#: refresh the registry index over the network, and the rust adapter's
+#: cargo-edit self-provision (``cargo install``, a cold compile — issue #793)
+#: legitimately runs long, so the bound matches the bundle compositions'
+#: hour (their cargo-deb install is the same shape) rather than minutes.
+BUMP_TIMEOUT: float = 3600.0
 
 #: Where the coalesced notes text lands when ``--notes-out`` is omitted:
 #: repo-root-relative, TRANSIENT (written after the bump commit, never staged
@@ -325,9 +328,10 @@ def run_preflight(
 def _run_bump(argv: Sequence[str], cwd: Path) -> None:
     """Run one bump-adapter command through the one Exec runner (ADR-0028).
 
-    ``check=True``: a failing bump command (missing ``cargo-edit``, an
-    ``npm version`` refusal) raises :class:`~shipit.execrun.ExecError`, which
-    the shared error shell renders — prepare aborts with nothing committed.
+    ``check=True``: a failing bump command (a cargo-edit self-provision
+    install failure, an ``npm version`` refusal) raises
+    :class:`~shipit.execrun.ExecError`, which the shared error shell renders
+    — prepare aborts with nothing committed.
     """
     execrun.run(list(argv), cwd=str(cwd), timeout=BUMP_TIMEOUT)
 
@@ -515,6 +519,10 @@ def run_prepare(
     for entry in entries:
         adapter = bump_mod.adapter_for(entry.toolchain)
         leg_dir = root if entry.path in (".", "") else root / entry.path
+        # Self-provision the adapter's external tool when the runner arrives
+        # without it (issue #793: cargo-edit for `cargo set-version`) — same
+        # seam, so an install failure aborts prepare with nothing committed.
+        bump_mod.provision(adapter, run_cmd, leg_dir)
         for argv in adapter.commands(version):
             run_cmd(argv, leg_dir)
         if adapter.edit_path is not None:

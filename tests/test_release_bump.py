@@ -3,8 +3,9 @@
 The registry is CLOSED and mirrors the toolchain registry exactly — pinned
 here, along with the "tauri is never a dispatch label" invariant. Command
 lines are asserted exactly (recorded-invocation discipline: the argv IS the
-adapter's contract), and the pure rewrites (python's pyproject bump, the
-bundle-config hook) are fixture-tested.
+adapter's contract), the rust adapter's cargo-edit self-provision (issue
+#793) is recorded through the same seam, and the pure rewrites (python's
+pyproject bump, the bundle-config hook) are fixture-tested.
 """
 
 import pytest
@@ -69,6 +70,67 @@ def test_go_is_a_first_class_zero_file_adapter():
 def test_adapter_for_unknown_toolchain_is_loud():
     with pytest.raises(ReleaseError, match="no bump adapter"):
         bump.adapter_for("tauri")
+
+
+# --------------------------------------------------------------------------
+# provision — the rust adapter's cargo-edit self-install (issue #793)
+# --------------------------------------------------------------------------
+
+
+class RunRecorder:
+    """The bump-command Exec seam: records ``(argv, cwd)``, runs nothing."""
+
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, argv, cwd):
+        self.calls.append((tuple(argv), cwd))
+
+
+def test_provision_installs_cargo_edit_when_set_version_missing(tmp_path, monkeypatch):
+    """Issue #793 (the #784-F2 class, second instance): the wf-prepare runner
+    arrives without cargo-edit — the rust adapter installs it itself, PINNED,
+    through the same recorded Exec seam, before any bump command runs."""
+    monkeypatch.setattr(bump.shutil, "which", lambda name: None)
+    recorder = RunRecorder()
+
+    bump.provision(bump.adapter_for("rust"), recorder, tmp_path)
+
+    assert recorder.calls == [
+        (
+            (
+                "cargo",
+                "install",
+                "cargo-edit",
+                "--version",
+                bump.CARGO_EDIT_VERSION,
+                "--locked",
+            ),
+            tmp_path,
+        )
+    ]
+
+
+def test_provision_noops_when_set_version_is_available(tmp_path, monkeypatch):
+    """cargo-set-version already on PATH → nothing installed, nothing run."""
+    monkeypatch.setattr(bump.shutil, "which", lambda name: f"/stub/{name}")
+    recorder = RunRecorder()
+
+    bump.provision(bump.adapter_for("rust"), recorder, tmp_path)
+
+    assert recorder.calls == []
+
+
+@pytest.mark.parametrize("toolchain", ["npm", "python", "go"])
+def test_provision_noops_for_every_other_adapter(tmp_path, monkeypatch, toolchain):
+    """Only rust carries an external bump tool: npm's rides the toolchain
+    itself, python/go project without commands — provision never runs."""
+    monkeypatch.setattr(bump.shutil, "which", lambda name: None)
+    recorder = RunRecorder()
+
+    bump.provision(bump.adapter_for(toolchain), recorder, tmp_path)
+
+    assert recorder.calls == []
 
 
 # --------------------------------------------------------------------------
