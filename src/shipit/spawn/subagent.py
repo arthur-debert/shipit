@@ -14,8 +14,16 @@ Every effectful edge rides the injectable :class:`Boundaries` value (git/gh
 reads, Tree creation, the subprocess runner), so each stage is testable
 typed-in/typed-out without a network, a clone, or a real backend child.
 
-The pipeline itself is unchanged in behavior (a mechanical ADR-0030 promotion):
+The pipeline itself is unchanged in behavior (a mechanical ADR-0030 promotion),
+plus the RPE01-WS01 registry preflight:
 
+- **Registry-driven role preflight** (RPE01-WS01): the shape gate runs
+  :func:`shipit.harness.roleprofile.validate_spawn` for the DETACHED launch
+  context, so an unknown role string, a detached explorer (ambient — no Tree,
+  ever), a detached coordinator (the host session), or a detached shepherd
+  (existing-PR attachment is RPE01-WS04) refuses BEFORE any Tree provisioning
+  or backend launch, naming the role and the requested context. Reviewer
+  dispatch keys off the registry-parsed :class:`~shipit.harness.role.Role`.
 - **Fail-closed** (ADR-0017/0019): a Tree-creation error fails the spawn loud —
   NEVER a silent fallback to a native ``git worktree``. The launcher is reached
   only after a Tree exists, so a failed create can never launch a Run against
@@ -44,6 +52,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from .. import events, execrun, gh, git, identity, logcontext
+from ..harness import roleprofile
+from ..harness.role import Role
 from ..tree.create import Tree, create, new_agent_hash
 from ..tree.layout import (
     TreeSpec,
@@ -71,8 +81,10 @@ logger = logging.getLogger("shipit.spawn")
 SUPPORTED_BACKENDS = backends.supported_backends()
 
 #: The role that gets a shared **read-only Tree** + a **Reviewer Run** (ADR-0018)
-#: instead of the per-Run write Tree every other role gets: a reviewer is read-only
-#: and branch-pinned, so :func:`spawn_subagent` dispatches on this exact value.
+#: instead of the per-Run write Tree every other spawnable role gets. The pipeline
+#: now DISPATCHES on the Role Profile registry's parsed :class:`Role` (RPE01-WS01),
+#: so this string constant only labels the reviewer tail's records/results; the
+#: duplicated-constant cleanup is a later workstream (RPE01-WS08).
 REVIEWER_ROLE = "reviewer"
 
 
@@ -213,10 +225,15 @@ def spawn_subagent(spec: SubagentSpec, bounds: Boundaries | None = None) -> Spaw
 
     The one typed spec→result function behind ``shipit spawn subagent``. Raises
     :class:`SpawnError` (a clean runtime refusal, never a traceback) when the
-    backend is unsupported, the shape is incomplete/invalid (``--epic``/``--ws``
-    only half given, non-positive ``--ws``/``--issue``, a write role without an
-    issue, a reviewer without any shape, a ``--session`` that sanitizes to
-    nothing), ``--repo`` disagrees with the ambient checkout, the command is not
+    backend is unsupported, the ROLE fails the Role Profile registry's detached
+    preflight (RPE01-WS01: an unknown role string, or a role whose profile does
+    not support a detached launch — the explorer is ambient-native only, the
+    coordinator is the host session, the shepherd attaches to an existing PR in
+    a later WS — each refused BEFORE any Tree provisioning or backend launch,
+    naming the role and the requested context), the shape is incomplete/invalid
+    (``--epic``/``--ws`` only half given, non-positive ``--ws``/``--issue``, a
+    write role without an issue, a reviewer without any shape, a ``--session``
+    that sanitizes to nothing), ``--repo`` disagrees with the ambient checkout, the command is not
     run inside a GitHub checkout, a git/gh call fails, **Tree creation fails**
     (fail-closed — no native-worktree fallback; this includes a write shape
     spawned onto a PINLESS base, ADR-0033's surviving guard: provisioning's
@@ -274,18 +291,20 @@ def spawn_subagent(spec: SubagentSpec, bounds: Boundaries | None = None) -> Spaw
             if value is not None
         },
     )
-    adapter = validate(spec)
+    adapter, profile = validate(spec)
 
     # SPAWN-SEAM identity binding (ADR-0032 / LOG04-WS02): the spawn's own
     # arguments ARE the worker's dev-cycle identity, so `epic`/`ws`/`role` bind
     # here — the moment they are known and validated — and every subsequent
-    # record of this spawn carries them. `agent` (the spawn id) binds in the
-    # launch tails once minted. `env_export` at the launch then threads ALL
-    # bound keys into the Run's environment (`SHIPIT_LOG_CTX_*`), so every
-    # shipit command the worker runs correlates to its Work Stream with zero
-    # worker cooperation. A standalone-issue spawn has no epic/ws; `bind` drops
-    # the `None` halves (present-when-bound, absent-not-null).
-    logcontext.bind(epic=spec.epic, ws=spec.ws, role=spec.role)
+    # record of this spawn carries them. The role binds NORMALIZED (the parsed
+    # registry Role, not the raw input) so records never carry a cased variant.
+    # `agent` (the spawn id) binds in the launch tails once minted. `env_export`
+    # at the launch then threads ALL bound keys into the Run's environment
+    # (`SHIPIT_LOG_CTX_*`), so every shipit command the worker runs correlates
+    # to its Work Stream with zero worker cooperation. A standalone-issue spawn
+    # has no epic/ws; `bind` drops the `None` halves (present-when-bound,
+    # absent-not-null).
+    logcontext.bind(epic=spec.epic, ws=spec.ws, role=profile.role.value)
 
     root, repo_identity, url = resolve_spawn_identity(spec, bounds)
 
@@ -294,8 +313,9 @@ def spawn_subagent(spec: SubagentSpec, bounds: Boundaries | None = None) -> Spaw
     # E/WSnn, or a standalone-issue head issues/<id>/<session> — built from the same
     # grammar helpers the write planner uses so a reviewer pins exactly the branch a
     # write Run pushed. Dispatched before the write path so the two never share
-    # provisioning.
-    if spec.role == REVIEWER_ROLE:
+    # provisioning — on the registry-parsed Role (RPE01-WS01), so an oddly cased
+    # role input can never slip past the reviewer dispatch into the write tail.
+    if profile.role is Role.REVIEWER:
         try:
             review_branch = (
                 work_stream_branch(spec.epic, spec.ws)
@@ -323,7 +343,7 @@ def spawn_subagent(spec: SubagentSpec, bounds: Boundaries | None = None) -> Spaw
         tree_spec,
         source_repo=root,
         github_url=url,
-        role=spec.role,
+        role=profile.role.value,
         issue=spec.issue,
         backend=spec.backend,
         adapter=adapter,
@@ -331,16 +351,25 @@ def spawn_subagent(spec: SubagentSpec, bounds: Boundaries | None = None) -> Spaw
     )
 
 
-def validate(spec: SubagentSpec) -> backends.BackendAdapter:
-    """Stage 1 — the shape gate (before any I/O). Returns the resolved adapter.
+def validate(
+    spec: SubagentSpec,
+) -> tuple[backends.BackendAdapter, roleprofile.RoleProfile]:
+    """Stage 1 — the shape gate (before any I/O). Returns (adapter, role profile).
 
     The explicit backend guard fails an unknown backend LOUD at the boundary
     (no silent default to claude); only then is its adapter resolved (ADR-0020)
     — the adapter supplies the per-backend argv / auth-env / read-only posture,
-    and everything downstream is backend-agnostic. ``--epic`` and ``--ws`` are
-    a PAIR (the epic/work-stream shape); one without the other is an incomplete
-    shape and refused loud, and their ABSENCE selects the standalone-issue
-    shape (branch ``issues/<id>/<session>``).
+    and everything downstream is backend-agnostic. The ROLE then rides the Role
+    Profile registry's spawn preflight (RPE01-WS01,
+    :func:`shipit.harness.roleprofile.validate_spawn`): an unknown role string,
+    or a role whose profile does not support a DETACHED launch (explorer —
+    ambient, a detached spawn would mint a write Tree it must never have;
+    coordinator — the host session; shepherd — existing-PR attachment is a
+    later WS), is refused HERE, before any Tree provisioning or backend
+    launch, with the role and requested context named. ``--epic`` and ``--ws``
+    are a PAIR (the epic/work-stream shape); one without the other is an
+    incomplete shape and refused loud, and their ABSENCE selects the
+    standalone-issue shape (branch ``issues/<id>/<session>``).
     """
     if spec.backend not in SUPPORTED_BACKENDS:
         supported = ", ".join(SUPPORTED_BACKENDS)
@@ -350,6 +379,18 @@ def validate(spec: SubagentSpec) -> backends.BackendAdapter:
             backend=spec.backend,
         )
     adapter = backends.resolve(spec.backend)
+
+    # The registry preflight (RPE01-WS01): every `shipit spawn subagent` launch
+    # is DETACHED, so the (role, detached) pairing must be a profile-supported
+    # combination. Fail-closed and pre-I/O — the strict public boundary, in
+    # deliberate contrast to the hook resolver's lenient unknown-worker
+    # fallback (which governs identities but never mints spawns).
+    try:
+        profile = roleprofile.validate_spawn(
+            spec.role, roleprofile.LaunchContext.DETACHED
+        )
+    except roleprofile.RoleValidationError as exc:
+        raise _refusal(str(exc), exc=exc, role=spec.role) from exc
 
     if spec.has_epic_shape and (spec.epic is None or spec.ws is None):
         raise _refusal(
@@ -365,7 +406,7 @@ def validate(spec: SubagentSpec) -> backends.BackendAdapter:
             epic=spec.epic,
             ws=spec.ws,
         )
-    if spec.role != REVIEWER_ROLE and (spec.issue is None or spec.issue < 1):
+    if profile.role is not Role.REVIEWER and (spec.issue is None or spec.issue < 1):
         # ``--issue`` rides the task prompt and the draft PR's issue link (#649:
         # ``closes #<issue>`` for the standalone shape, so the merge auto-closes it;
         # ``for #<issue>`` for the epic shape, non-closing — the umbrella PR closes
@@ -391,7 +432,7 @@ def validate(spec: SubagentSpec) -> backends.BackendAdapter:
             "a reviewer needs a branch to review — give --epic E --ws N or --issue N.",
             role=spec.role,
         )
-    return adapter
+    return adapter, profile
 
 
 def resolve_spawn_identity(
