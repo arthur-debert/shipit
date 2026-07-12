@@ -293,14 +293,37 @@ def test_lane_secrets_must_be_a_list_not_a_bare_string():
 
 @pytest.mark.parametrize(
     "bad",
-    ["9lives", "has-dash", "has space", "GITHUB_TOKEN", "", 42],
+    ["9lives", "has-dash", "has space", "GITHUB_TOKEN", "github_token", "", 42],
 )
 def test_lane_secrets_rejects_names_github_forbids(bad):
-    # Leading digit, dash/space, the reserved `GITHUB_` prefix, empty, and a
+    # Leading digit, dash/space, the reserved `GITHUB_` prefix (rejected
+    # case-insensitively, so lowercase `github_token` too), empty, and a
     # non-string all die at parse — an unroutable name must never reach CI as a
     # silently-dropped credential.
     with pytest.raises(config.ConfigError, match=r"not a valid GitHub secret name"):
         config.load_lanes({"lanes": {"x": {"run": "test", "secrets": [bad]}}})
+
+
+@pytest.mark.parametrize("unknown", ["lane_tokne", "PRIVATE_TOKEN", "other_token"])
+def test_lane_secrets_rejects_well_formed_but_unsupported_slots(unknown):
+    # A name that PASSES GitHub's shape rules but is not a slot the
+    # `wf-checks.yml` block declares (a typo of `lane_token`, a private token)
+    # must still die at parse: it would otherwise ride the matrix and receive
+    # nothing — the silently-dropped credential the closed slot registry exists
+    # to prevent (ADR-0040 routing-only).
+    with pytest.raises(
+        config.ConfigError, match=r"not a workflow-supported secret slot"
+    ):
+        config.load_lanes({"lanes": {"x": {"run": "test", "secrets": [unknown]}}})
+
+
+def test_lane_secrets_deduplicates_preserving_order():
+    # A repeated slot yields a clean, deduped matrix payload (the GHA `contains`
+    # gate is indifferent to duplicates, but the emitted array should be tidy).
+    lanes = config.load_lanes(
+        {"lanes": {"x": {"run": "test", "secrets": ["lane_token", "lane_token"]}}}
+    )
+    assert lanes[0].secrets == ("lane_token",)
 
 
 def test_lane_secrets_is_a_known_key_full_field_set(tmp_path):

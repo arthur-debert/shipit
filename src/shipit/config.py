@@ -1109,6 +1109,17 @@ def _valid_secret_name(name: object) -> bool:
     )
 
 
+#: The closed registry of secret SLOTS the reusable `wf-checks.yml` block
+#: actually declares and routes. A lane's `secrets` allowlist may name only
+#: these: the block gates exactly `contains(matrix.secrets, 'lane_token')`, so a
+#: well-formed-but-unlisted name (`PRIVATE_TOKEN`, the typo `lane_tokne`) would
+#: parse, ride the matrix, and then receive nothing — a silently-dropped
+#: credential. Validate entries against this set at parse, in lockstep with the
+#: block's declared inputs (ADR-0040 routing-only), rather than let CI discover
+#: the drop. Grow this set and the block's `secrets:` inputs together.
+_LANE_SECRET_SLOTS = frozenset({"lane_token"})
+
+
 @dataclass(frozen=True)
 class Lane:
     """One declared CI test unit (the glossary's **Lane**), typed (ADR-0030).
@@ -1216,10 +1227,13 @@ def _parse_lane_secrets(name: str, value: object) -> tuple[str, ...]:
     """Parse a lane's ``secrets`` allowlist into an ordered tuple of names.
 
     Absent = ``()`` (the lane receives no secret). Present must be a list of
-    strings, each a plausible GitHub secret identifier
-    (:func:`_valid_secret_name`); a non-list, a non-string entry, or a
-    malformed name dies at parse — an unroutable secret name must never reach
-    the planner as a silently-dropped CI credential.
+    strings, each both a plausible GitHub secret identifier
+    (:func:`_valid_secret_name`) AND a slot the `wf-checks.yml` block actually
+    routes (:data:`_LANE_SECRET_SLOTS`); a non-list, a non-string entry, a
+    malformed name, or a well-formed-but-unsupported slot dies at parse — an
+    unroutable secret name must never reach the planner as a silently-dropped CI
+    credential. The result is order-preserving-deduplicated so a repeated name
+    yields a clean matrix payload.
     """
     if value is None:
         return ()
@@ -1235,7 +1249,15 @@ def _parse_lane_secrets(name: str, value: object) -> tuple[str, ...]:
                 "secret name (alphanumerics/underscore, no leading digit, no "
                 "`GITHUB_` prefix)"
             )
-    return tuple(value)
+        if entry not in _LANE_SECRET_SLOTS:
+            slots = ", ".join(sorted(_LANE_SECRET_SLOTS))
+            raise ConfigError(
+                f"[lanes].{name}: `secrets` entry {entry!r} is not a "
+                f"workflow-supported secret slot (known slots: {slots}). The "
+                "`wf-checks.yml` block routes only these; a well-formed but "
+                "unlisted name would ride the matrix and receive nothing."
+            )
+    return tuple(dict.fromkeys(value))
 
 
 def load_lanes(cfg: dict) -> list[Lane]:
@@ -1246,8 +1268,8 @@ def load_lanes(cfg: dict) -> list[Lane]:
     emission is deterministic from the file. Raises :class:`ConfigError` on any
     malformed entry — an unknown key, a missing/empty ``run``, an
     out-of-vocabulary ``trigger``, a blank ``runner``/``scope``, a
-    non-list/ill-named ``secrets`` allowlist — so a typo'd lane dies at parse,
-    never as a silently-unrouted CI job or unroutable secret.
+    non-list/ill-named/unsupported-slot ``secrets`` allowlist — so a typo'd lane
+    dies at parse, never as a silently-unrouted CI job or unroutable secret.
     """
     lanes = cfg.get("lanes", {})
     if not isinstance(lanes, dict):
