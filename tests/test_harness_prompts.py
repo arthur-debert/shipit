@@ -13,6 +13,7 @@ import logging
 from pathlib import Path
 
 import pytest
+import yaml
 
 from shipit.harness import prompts
 from shipit.harness.prompts import (
@@ -292,11 +293,13 @@ def test_frontmatter_tools_posture_derives_from_enforcement_posture(role):
     is derived from the registry, never a per-role frontmatter table, so it cannot
     disagree with the enforcement posture."""
     frontmatter = prompts._frontmatter(role)
-    has_tools_line = "\ntools: " in frontmatter
+    parsed = next(yaml.safe_load_all(frontmatter))
     read_only = not profile_for(role).enforcement.checkout_mutation
-    assert has_tools_line is read_only
-    if has_tools_line:
-        assert f"tools: {prompts._READ_ONLY_TOOLS}" in frontmatter
+    assert parsed["name"] == role.value
+    assert parsed["description"] == prompts._AGENT_DESCRIPTIONS[role]
+    assert ("tools" in parsed) is read_only
+    if read_only:
+        assert parsed["tools"] == prompts._READ_ONLY_TOOLS
 
 
 # --- a Role cannot leave prompt/brief/enforcement metadata incomplete (crit. 6)
@@ -315,9 +318,9 @@ def test_declared_agent_def_surface_cannot_ship_incomplete():
         if declares:
             # The generator can build complete frontmatter for it — no missing
             # description, and a posture-derived (not table-lookup) tools line.
-            frontmatter = prompts._frontmatter(role)
-            assert f"name: {role.value}" in frontmatter
-            assert "description: " in frontmatter
+            parsed = next(yaml.safe_load_all(prompts._frontmatter(role)))
+            assert parsed["name"] == role.value
+            assert parsed["description"] == prompts._AGENT_DESCRIPTIONS[role]
 
 
 def test_declared_brief_surface_cannot_ship_incomplete():

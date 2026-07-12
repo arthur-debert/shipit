@@ -206,8 +206,8 @@ class RoleProfile:
     References the Role it profiles; the Lex Role definition (composed by
     :mod:`shipit.harness.prompts`) stays the sole source of behavioral
     content. ``generates_agent_def`` / ``has_brief_template`` declare the
-    generated and brief SURFACES; the generators themselves migrate onto
-    these flags in a later workstream (RPE01-WS02).
+    generated and brief SURFACES consumed by prompt and brief generation;
+    behavioral prose remains in the Role definitions (RPE01-WS02).
     """
 
     role: Role

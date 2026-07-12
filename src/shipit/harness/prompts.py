@@ -29,6 +29,7 @@ only the body composes.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass
@@ -300,7 +301,7 @@ def _frontmatter(role: Role) -> str:
     lines = [
         "---",
         f"name: {role.value}",
-        f"description: {_AGENT_DESCRIPTIONS[role]}",
+        f"description: {json.dumps(_AGENT_DESCRIPTIONS[role])}",
     ]
     if not profile_for(role).enforcement.checkout_mutation:
         lines.append(f"tools: {_READ_ONLY_TOOLS}")
