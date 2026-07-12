@@ -807,6 +807,26 @@ def test_untar_validated_wraps_a_corrupt_archive_as_a_domain_error(tmp_path):
         sign_mod._untar_validated(archive, work, "reseal payload")
 
 
+def test_untar_validated_strips_setuid_and_setgid_bits(tmp_path):
+    # A signable bundle never needs setuid/setgid, and the notary rejects a
+    # setuid Mach-O — so the passthrough extraction filter clears the high bits
+    # a hostile payload might carry while KEEPING the rwx modes a codesign pass
+    # relies on.
+    archive = tmp_path / "payload.tar.gz"
+    with tarfile.open(archive, "w:gz") as tar:
+        info = tarfile.TarInfo("Phos.app/Contents/MacOS/tool")
+        info.mode = 0o6755  # setuid + setgid + rwxr-xr-x
+        info.size = 3
+        tar.addfile(info, io.BytesIO(b"bin"))
+
+    work = tmp_path / "unpacked"
+    sign_mod._untar_validated(archive, work, "reseal payload")
+
+    mode = (work / "Phos.app" / "Contents" / "MacOS" / "tool").stat().st_mode
+    assert mode & 0o7000 == 0  # setuid/setgid/sticky cleared
+    assert mode & 0o0777 == 0o755  # rwx preserved
+
+
 def test_sign_bundle_refuses_a_malicious_payload_before_signing(tmp_path):
     # End-to-end: the headline exploit archive (a symlink NAME carrying " -> "
     # and an absolute real target) is refused as the payload is unpacked, so the

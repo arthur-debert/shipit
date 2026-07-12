@@ -716,10 +716,12 @@ def _confining_filter(
 ) -> Callable[[tarfile.TarInfo, str], tarfile.TarInfo]:
     """An ``extractall`` filter that re-asserts each member is confined to
     ``root`` before it is written — the pre-extraction scan already refused any
-    escaper, so this only ever fires on a race, and otherwise passes the member
-    through UNCHANGED to preserve the bundle's exact modes and symlinks (unlike
-    tarfile's sanitising ``data`` filter, which a re-signed ``.app`` cannot
-    survive)."""
+    escaper, so this only ever fires on a race — and otherwise preserves the
+    bundle's rwx modes and symlinks (unlike tarfile's fully sanitising ``data``
+    filter, which a re-signed ``.app`` cannot survive). Only the setuid/setgid/
+    sticky high bits are cleared: a signable bundle never needs them and the
+    notary rejects a setuid Mach-O, so extracting them from a hostile payload
+    would be a needless footgun."""
 
     def _filter(member: tarfile.TarInfo, dest: str) -> tarfile.TarInfo:
         if not _is_confined(root, member, reject_links=reject_links):
@@ -727,6 +729,7 @@ def _confining_filter(
                 f"member {member.name!r} escaped the extraction dir mid-unpack"
                 " — refusing"
             )
+        member.mode &= ~0o7000  # strip setuid/setgid/sticky; keep rwx
         return member
 
     return _filter
