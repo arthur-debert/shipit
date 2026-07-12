@@ -597,3 +597,47 @@ def test_run_preflight_outside_a_checkout_is_a_domain_refusal(repo, capsys):
     rc = release_verb.run_preflight(parse_spec("1.0.0"), gitio=FakeGit(None), env={})
     assert rc == 1
     assert "not inside a git checkout" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------
+# The dogfood declaration (#774): shipit's OWN release surface
+# --------------------------------------------------------------------------
+
+
+def _dogfood_artifacts() -> tuple[config.Artifact, ...]:
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    return _artifacts((root / ".shipit.toml").read_text(encoding="utf-8"))
+
+
+def test_shipit_declares_the_tag_is_the_payload_surface():
+    # The #774 cutover pin: shipit's own [artifacts] map is ONE no-build
+    # artifact publishing to gh-release only — consumers ride the git pin
+    # (ADR-0033) and the @v1 workflow refs (ADR-0010), so the tag IS the
+    # payload and any build/bundle/sign declaration here would be a phantom
+    # asset. Growing this surface is an explicit decision, not a drift.
+    artifacts = _dogfood_artifacts()
+    assert [a.name for a in artifacts] == ["shipit"]
+    (shipit,) = artifacts
+    assert shipit.build == ()
+    assert shipit.endpoints == ("gh-release",)
+    assert shipit.bundle is None
+    assert shipit.sign is False
+
+
+@pytest.mark.parametrize("raw", ["1.0.0", "1.0.0-release-rc"])
+def test_shipit_dogfood_plan_is_publishable_tag_only_release(raw):
+    # The phantom-release refusal is exactly what #774 fixes: the dogfood
+    # declaration must PLAN — for both the live-fire rc and the real 1.0.0
+    # — as the tag-only shape: empty matrix (nothing builds), stages
+    # preflight → prepare → publish, gh-release as the sole endpoint, and
+    # RELEASE_TOKEN as the sole required secret (gh-release rides
+    # GITHUB_TOKEN).
+    release_plan = preflight.plan(_dogfood_artifacts(), _resolved(raw))
+    assert release_plan.artifacts == ("shipit",)
+    assert release_plan.matrix == ()
+    assert release_plan.stages == ("preflight", "prepare", "publish")
+    assert release_plan.endpoints == ("gh-release",)
+    assert release_plan.secrets == ("RELEASE_TOKEN",)
+    assert release_plan.secret_alternatives == ()

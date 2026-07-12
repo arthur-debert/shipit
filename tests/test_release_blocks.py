@@ -542,6 +542,80 @@ def test_standalone_sign_run_carries_base_artifacts_as_a_publish_source():
 
 
 # --------------------------------------------------------------------------
+# The dogfood dispatch caller (#774) — the WS09 blessed stage-choice shape
+# --------------------------------------------------------------------------
+
+#: shipit's own release caller — the blessed per-stage dispatch surface
+#: (workflows.lex §8, ADR-0054), dogfooded verbatim on the publisher repo.
+DISPATCH_CALLER = "shipit-release.yml"
+
+
+def test_dispatch_caller_is_the_blessed_stage_choice_shape():
+    # The #774 cutover caller IS the shape every consumer inherits: one
+    # workflow_dispatch trigger (never push/PR — a release block must not
+    # run on shipit's own CI), the full five-way stage choice defaulting to
+    # the composed chain, and one routing-only job per stage — a single
+    # remote `uses:` line gated on its stage, no steps, no stage-to-stage
+    # output wiring (exactly what ADR-0040 forbids consumer-side and WS06
+    # proved unwireable). The refs are the FULL remote @v1 form (the
+    # remote-ref scar, #823): this caller models the correct-by-construction
+    # consumer shape even though `./` would happen to resolve here.
+    doc = _load(DISPATCH_CALLER)
+    assert checks.workflow_triggers(doc) == ["workflow_dispatch"]
+    stage = doc["on"]["workflow_dispatch"]["inputs"]["stage"]
+    assert stage["options"] == ["full", "prepare", "build", "sign", "publish"]
+    assert stage["default"] == "full"
+
+    jobs = doc["jobs"]
+    stage_for_job = {
+        "release": "full",
+        "prepare": "prepare",
+        "build": "build",
+        "sign": "sign",
+        "publish": "publish",
+    }
+    assert list(jobs) == list(stage_for_job)
+    for job_id, job in jobs.items():
+        assert job["if"] == f"inputs.stage == '{stage_for_job[job_id]}'", job_id
+        assert "steps" not in job, job_id  # routing only, never logic
+        assert job["uses"].startswith("arthur-debert/shipit/.github/workflows/wf-"), (
+            job_id
+        )
+        assert job["uses"].endswith(".yml@v1"), job_id
+
+
+def test_dispatch_caller_forwards_the_stage_input_contract_verbatim():
+    # The aligned standalone contract (#780): `full`/`prepare` dispatch on
+    # `version`; `build`/`sign`/`publish` on `tag` alone (ADR-0041 — the
+    # version is read off the tag), plus `run-id` on the artifact-consuming
+    # stages. Secrets: RELEASE_TOKEN only, to the stages that push (shipit's
+    # plan is gh-release-only — GITHUB_TOKEN — with no sign stage, so no
+    # endpoint or Apple names are forwarded anywhere).
+    jobs = _load(DISPATCH_CALLER)["jobs"]
+    withs = {job_id: set(job.get("with", {})) for job_id, job in jobs.items()}
+    assert withs["release"] == {"version", "unsigned"}
+    assert withs["prepare"] == {"version", "unsigned"}
+    assert withs["build"] == {"tag"}
+    assert withs["sign"] == {"tag", "run-id"}
+    assert withs["publish"] == {"tag", "run-id", "unsigned"}
+    for job_id, job in jobs.items():
+        secrets = job.get("secrets", {})
+        expected = {"RELEASE_TOKEN"} if job_id in ("release", "prepare") else set()
+        assert set(secrets) == expected, job_id
+
+
+def test_dispatch_caller_grants_cross_run_download_permissions():
+    # workflows.lex §8: the standalone dispatch caller's token must carry
+    # `actions: read` beside the stage's own needs — `run-id` flips
+    # download-artifact onto the REST API, and the downloading blocks
+    # deliberately declare no `permissions:` key (a called workflow can
+    # only DOWNGRADE this grant). `contents: write` covers prepare's push
+    # and publish's gh-release.
+    doc = _load(DISPATCH_CALLER)
+    assert doc["permissions"] == {"contents": "write", "actions": "read"}
+
+
+# --------------------------------------------------------------------------
 # act dry-run smokes (story 41)
 # --------------------------------------------------------------------------
 
@@ -648,3 +722,27 @@ def test_block_smokes_green_under_act_dry_run(name, monkeypatch, capsys):
     assert rc == 0, out
     assert "WF TEST: OK" in out
     assert "act cannot verify" in out
+
+
+@pytest.mark.skipif(shutil.which("act") is None, reason="act not on PATH")
+@pytest.mark.skipif(not _docker_daemon_up(), reason="docker daemon unavailable")
+def test_dispatch_caller_smokes_green_under_act_dry_run(monkeypatch, capsys):
+    # The #774 dogfood caller against a crafted workflow_dispatch: parse,
+    # trigger match, the stage gate, and the remote @v1 ref resolved against
+    # THIS checkout. Scoped to the `prepare` stage dispatch — its block
+    # nests nothing further, so the walk avoids the nested runtime-output
+    # plumbing the composed chain's smoke also scopes around (the printed
+    # workflow_call-fidelity hole).
+    root = _WORKFLOWS.parents[1]
+    monkeypatch.chdir(root)
+    rc = wf.run(
+        ".github/workflows/shipit-release.yml",
+        event=wf.EVENT_WORKFLOW_DISPATCH,
+        inputs=("version=1.0.0", "stage=prepare"),
+        job="prepare",
+        dry_run=True,
+        local_repositories=(f"arthur-debert/shipit@v1={root}",),
+    )
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "WF TEST: OK" in out
