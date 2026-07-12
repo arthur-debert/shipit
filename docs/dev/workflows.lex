@@ -85,6 +85,28 @@ logic is thin YAML) is stated in [./architecture.lex#3].
         pixi Run id — pixi exposes environment metadata, not invocation
         identity.
 
+    Lane self-provisioning — the checkout is deliberately input-free:
+        A lane whose suite needs content the plain checkout does not carry —
+        git submodules the classic case (#759) — provisions it INLINE in the
+        lane's own `run` task, never through a checkout knob on the block. The
+        `wf-checks` checkout is `actions/checkout@v6` with NO `submodules:`
+        input, and it stays that way: a `submodules:` (or any provisioning)
+        input would push a producing decision into the routing-only block —
+        the exact ADR-0040
+        [../adr/0040-workflow-blocks-invariants-in-blocks.md] line this wf-*
+        family holds — so the submodule-init step lives where the
+        compile and the test do, behind `pixi run <lane.run>`, the shipit verb
+        a laptop, a lefthook hook, and the CI job all land in (ADR-0039). That
+        is what keeps laptop and CI identical: the provisioning travels with
+        the task, not with one YAML's checkout step. The precedent is lex's
+        `test-full` lane, which inits its `comms` submodule before
+        `cargo nextest`; the legacy `release/rust-ci.yml` `submodules:` input
+        (release#134) is the anti-pattern this replaces. The rule covers any
+        suite-local provisioning a plain checkout omits, not submodules alone,
+        and is the sanctioned pattern for the WS03–WS05 fleet rollout — a
+        stated rule, not folklore. The local Tree-provisioning twin of this
+        gap is tracked at #485.
+
 3. Design invariants the pipeline learned the hard way
 
     These three are not style preferences — each is a scar. Treat them as
