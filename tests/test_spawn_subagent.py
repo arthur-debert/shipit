@@ -247,6 +247,36 @@ def test_provisioned_write_spawn_launches_through_its_work_env(
     assert record.pixi_env == "default"
 
 
+def test_provisioned_write_spawn_tolerates_invalid_optional_env_identity(
+    tmp_path, caplog
+):
+    # Routing is determined by the provisioned-env sentinel. The identity file
+    # only enriches observability, so malformed optional metadata cannot make an
+    # otherwise launchable write Run fail.
+    b, calls = bounds(tmp_path)
+    tree_dir = tmp_path / "tree"
+    meta = tree_dir / ".pixi" / "envs" / "default" / "conda-meta"
+    meta.mkdir(parents=True)
+    (meta / "pixi").write_text("not json")
+
+    with caplog.at_level(logging.INFO, logger="shipit.spawn"):
+        spawn_subagent(spec(), b)
+
+    assert calls["cmd"][:4] == [
+        "pixi",
+        "run",
+        "--manifest-path",
+        str(tree_dir / "pixi.toml"),
+    ]
+    warning = next(
+        r for r in caplog.records if "pixi env identity unreadable" in r.message
+    )
+    assert warning.levelno == logging.WARNING
+    record = next(r for r in caplog.records if getattr(r, "routing", None))
+    assert record.routing == "pixi-run"
+    assert not hasattr(record, "pixi_env")
+
+
 def test_non_pixi_write_spawn_resolves_ambient_and_launches_bare(tmp_path, caplog):
     # Acceptance (RPE01-WS05): a NON-pixi write Run represents absent pixi
     # activation honestly — the Work Env resolves AMBIENT (no activation, no

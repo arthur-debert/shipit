@@ -577,6 +577,26 @@ def salvage_note(tree_path: str, bounds: Boundaries) -> str | None:
     )
 
 
+def _read_optional_env_identity(env_prefix: Path) -> pixienv.EnvIdentity | None:
+    """Best-effort pixi identity for Work Env observability.
+
+    The provisioned-env sentinel is the authoritative routing fact.  Pixi's
+    ``conda-meta/pixi`` record only enriches the resolved Work Env, so an
+    unreadable or schema-incompatible record must not prevent an otherwise
+    launchable write Run from routing through pixi.
+    """
+    try:
+        return pixienv.read_env_identity(env_prefix)
+    except (OSError, KeyError, TypeError, ValueError):
+        logger.warning(
+            "spawn subagent: pixi env identity unreadable at %s; "
+            "continuing without optional identity metadata",
+            env_prefix,
+            exc_info=True,
+        )
+        return None
+
+
 def audit_handshake(
     pr: gh.HeadPr | gh.UnknownPr | None, *, branch: str, base_branch: str
 ) -> gh.HeadPr:
@@ -810,9 +830,9 @@ def _launch_write(
         branch=tree.branch,
         base=tree.base,
         pixi_provisioned=pixi_provisioned,
-        env_identity=pixienv.read_env_identity(env_prefix)
-        if pixi_provisioned
-        else None,
+        env_identity=(
+            _read_optional_env_identity(env_prefix) if pixi_provisioned else None
+        ),
     )
     # The resolution record (spec §Observability): the routing decision and the
     # pixi env identity WHEN PRESENT (name — never a fabricated run id or a
