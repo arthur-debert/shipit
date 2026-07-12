@@ -275,6 +275,89 @@ def test_unparseable_output_raises_backend_error_with_raw_for_salvage(_faked):
     assert exc.value.timed_out is False
 
 
+# ---------------------------------------------------------------------------
+# Part 5 (#826) — the deterministic ONE-shot re-prompt net for agy parse failures
+# ---------------------------------------------------------------------------
+
+
+def test_agy_reprompts_once_on_unparseable_output_then_parses_the_retry(_faked):
+    # agy's FIRST response is unparseable; the producer re-prompts ONCE with the
+    # specific parse failure appended and parses the valid SECOND response — the
+    # deterministic fix even when the agent skipped its best-effort self-check.
+    prompts: list[str] = []
+
+    def launcher(cmd, *, cwd, env, timeout=None):
+        prompts.append(cmd[-1])
+        if len(prompts) == 1:
+            return LaunchResult(
+                returncode=0, stdout="prose, not json at all", stderr=""
+            )
+        return LaunchResult(returncode=0, stdout=_VALID, stderr="")
+
+    captured = producer.run_tree_review(
+        agent_backend.ANTIGRAVITY, _ctx(), launcher=launcher
+    )
+    assert captured.review["summary"]["status"] == "COMMENT"  # the RETRY parsed
+    assert len(prompts) == 2  # original + exactly ONE retry
+    retry = prompts[1]
+    # The retry is the ORIGINAL task (still fetches the diff) PLUS a terminal block
+    # quoting the SPECIFIC parse failure so agy fixes the concrete problem.
+    assert "gh pr diff 42" in retry
+    assert "RETRY — your PREVIOUS response could NOT be parsed" in retry
+    assert "no parseable JSON" in retry  # the actual failure hint fed back
+
+
+def test_agy_retry_is_one_shot_two_failures_fall_through_to_salvage(_faked):
+    # The retry is ONE shot, not a loop: two consecutive unparseable responses
+    # exhaust it and the BackendError propagates (raw carried) so the service's #76
+    # salvage stays the FINAL backstop AFTER the retry, never a hang.
+    prompts: list[str] = []
+
+    def launcher(cmd, *, cwd, env, timeout=None):
+        prompts.append(cmd[-1])
+        return LaunchResult(returncode=0, stdout="still not json", stderr="")
+
+    with pytest.raises(BackendError) as exc:
+        producer.run_tree_review(agent_backend.ANTIGRAVITY, _ctx(), launcher=launcher)
+    assert len(prompts) == 2  # original + exactly ONE retry, then give up
+    assert exc.value.raw == "still not json"  # the salvage still gets the raw
+    assert exc.value.timed_out is False
+
+
+def test_codex_never_reprompts_on_unparseable_output(_faked):
+    # codex enforces the shape via `--output-schema`, so it does NOT opt into the
+    # retry net: an unparseable codex output raises on the FIRST launch, no retry.
+    prompts: list[str] = []
+
+    def launcher(cmd, *, cwd, env, timeout=None):
+        prompts.append(cmd[-1])
+        return LaunchResult(returncode=0, stdout="prose, no json", stderr="")
+
+    with pytest.raises(BackendError):
+        producer.run_tree_review(agent_backend.CODEX, _ctx(), launcher=launcher)
+    assert len(prompts) == 1  # codex is never re-prompted
+
+
+def test_agy_timeout_is_not_reprompted(_faked):
+    # A TIMEOUT is never retried — re-prompting a slow run would just burn a second
+    # full deadline, and a timeout is not an off-shape body a re-prompt corrects.
+    # The timeout BackendError propagates after exactly ONE launch.
+    prompts: list[str] = []
+
+    def launcher(cmd, *, cwd, env, timeout=None):
+        prompts.append(cmd[-1])
+        return LaunchResult(
+            returncode=0,
+            stdout="{ truncated… timed out waiting for response",
+            stderr="",
+        )
+
+    with pytest.raises(BackendError) as exc:
+        producer.run_tree_review(agent_backend.ANTIGRAVITY, _ctx(), launcher=launcher)
+    assert exc.value.timed_out is True
+    assert len(prompts) == 1  # timeout -> no retry
+
+
 def test_dry_run_prints_argv_and_never_launches_or_clones(monkeypatch, capsys):
     # No create_readonly / which fakes: dry-run must work without the CLI or a clone.
     cloned: list = []

@@ -44,7 +44,10 @@ The only backend-conditional part is the schema presentation:
 
 from __future__ import annotations
 
+import json
+
 from .dimensions import Dimension
+from .schema import REVIEW_SCHEMA
 
 
 def _scope_and_context(diff_noun: str = "this PR's diff") -> str:
@@ -85,35 +88,19 @@ files, do NOT execute build, test, or shell commands and do NOT start \
 background tasks — this is a read-only review, not an agentic session."""
 
 
-# Human-readable description of the expected JSON, embedded for backends without
-# native schema enforcement (agy). Kept in sync with schema.REVIEW_SCHEMA.
-_SCHEMA_PROSE = """\
-JSON Schema:
-{
-  "summary": {
-    "status": "APPROVED" | "REQUEST_CHANGES" | "COMMENT",
-    "overall_feedback": "Overall summary of findings and recommendations.",
-    "coverage": {
-      "reviewed": ["files or file:hunk ranges you actually reviewed"],
-      "skipped": [{"file": "path", "reason": "why it was skipped"}]
-    }
-  },
-  "comments": [
-    {
-      "file": "path/relative/to/repo/root",
-      "line": 42,
-      "text": "Review comment text",
-      "severity": "critical" | "major" | "minor" | "nit",
-      "category": "e.g. correctness, cross-file invariants, security, tests",
-      "confidence": 0.9,
-      "evidence": "the quoted code the finding rests on",
-      "fix": "the suggested remedy (may be empty)"
-    }
-  ]
-}
-
-"line" may be null for a file-level finding not tied to a specific line — use \
-null rather than inventing a line number to fill the field."""
+# The expected JSON shape for a backend without native schema enforcement (agy),
+# embedded in the prompt. It is the ACTUAL `REVIEW_SCHEMA` serialized (not a
+# hand-maintained example), so the agy prompt can NEVER drift from what the
+# validator (`shipit pr review validate`) and codex's `--output-schema` enforce —
+# there is one source of truth (#826). A one-line human lead-in frames it, and the
+# nullable-`line` note (still accurate: `line` is typed `["integer", "null"]`)
+# spells out the one field whose optionality is easy to get wrong.
+_SCHEMA_PROSE = (
+    "Your output must satisfy this JSON Schema:\n"
+    + json.dumps(REVIEW_SCHEMA, indent=2)
+    + '\n\n"line" may be null for a file-level finding not tied to a specific '
+    "line — use null rather than inventing a line number to fill the field."
+)
 
 # Appended ONLY for backends without native schema enforcement (agy): an emphatic
 # restatement that the ENTIRE response must be one complete, valid JSON object and
@@ -128,6 +115,38 @@ JSON. Do not stop early or truncate: every brace and bracket must be closed so t
 output is syntactically valid JSON that a strict parser accepts on the first try. \
 If you have many findings, keep each comment concise rather than emitting an \
 incomplete object."""
+
+# Appended ONLY for agy (schema_inline): a BEST-EFFORT nudge to self-verify the
+# composed JSON against the schema with the `shipit pr review validate` CLI before
+# emitting it — the producer-side deterministic retry net (#826) is the guaranteed
+# backstop, but a self-check at the agent catches an off-shape payload BEFORE it
+# costs a launch. Worded as a SHOULD, never a hard loop-until-green: if the CLI is
+# unavailable the agent must emit directly, not block. codex enforces the shape out
+# of band (`--output-schema`) and so never sees this.
+_SELF_VERIFY_INSTRUCTION = """\
+BEST-EFFORT SELF-CHECK (recommended, not required): before you emit your JSON, if \
+the `shipit` CLI is on your PATH, you SHOULD verify your output against this schema \
+— write your composed JSON to a temp file and run `shipit pr review validate \
+<file>`, or pipe it straight in (`printf '%s' "$YOUR_JSON" | shipit pr review \
+validate`) — and fix any problems it reports before emitting. This is a SHOULD, not \
+a hard gate: if `shipit` is not available or the check cannot run, do NOT loop, \
+retry, or block on it — just emit your best JSON directly and stop."""
+
+
+def _agy_schema_appendix() -> str:
+    """The agy-only schema block appended to a reviewer task (``schema_inline``).
+
+    One place composes the three agy-specific tails so every arm (full,
+    incremental, range, and their dimension passes) presents an identical block:
+    the serialized :data:`REVIEW_SCHEMA` (:data:`_SCHEMA_PROSE`), the #76
+    JSON-validity hardening (:data:`_JSON_VALIDITY_INSTRUCTION`), and the
+    best-effort ``shipit pr review validate`` self-check
+    (:data:`_SELF_VERIFY_INSTRUCTION`). codex enforces the shape natively and gets
+    none of this.
+    """
+    return (
+        f"{_SCHEMA_PROSE}\n\n{_JSON_VALIDITY_INSTRUCTION}\n\n{_SELF_VERIFY_INSTRUCTION}"
+    )
 
 
 def build_reviewer_task(
@@ -214,7 +233,7 @@ captures your output and posts the review."""
     if dimension is not None:
         body = f"{body}\n\n{_dimension_section(dimension)}"
     if schema_inline:
-        body = f"{body}\n\n{_SCHEMA_PROSE}\n\n{_JSON_VALIDITY_INSTRUCTION}"
+        body = f"{body}\n\n{_agy_schema_appendix()}"
 
     return body
 
@@ -324,7 +343,7 @@ text before or after the JSON. Do NOT post the review yourself — do not run \
 captures your output and posts the review."""
 
     if schema_inline:
-        body = f"{body}\n\n{_SCHEMA_PROSE}\n\n{_JSON_VALIDITY_INSTRUCTION}"
+        body = f"{body}\n\n{_agy_schema_appendix()}"
 
     return body
 
@@ -403,6 +422,6 @@ records it locally."""
         section = _dimension_section(dimension)
         body = f"{body}\n\n{section}"
     if schema_inline:
-        body = f"{body}\n\n{_SCHEMA_PROSE}\n\n{_JSON_VALIDITY_INSTRUCTION}"
+        body = f"{body}\n\n{_agy_schema_appendix()}"
 
     return body
