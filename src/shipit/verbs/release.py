@@ -325,9 +325,10 @@ def run_preflight(
 def _run_bump(argv: Sequence[str], cwd: Path) -> None:
     """Run one bump-adapter command through the one Exec runner (ADR-0028).
 
-    ``check=True``: a failing bump command (missing ``cargo-edit``, an
-    ``npm version`` refusal) raises :class:`~shipit.execrun.ExecError`, which
-    the shared error shell renders — prepare aborts with nothing committed.
+    ``check=True``: a failing bump command (a ``cargo install cargo-edit``
+    self-provision failure, an ``npm version`` refusal) raises
+    :class:`~shipit.execrun.ExecError`, which the shared error shell renders —
+    prepare aborts with nothing committed.
     """
     execrun.run(list(argv), cwd=str(cwd), timeout=BUMP_TIMEOUT)
 
@@ -515,6 +516,13 @@ def run_prepare(
     for entry in entries:
         adapter = bump_mod.adapter_for(entry.toolchain)
         leg_dir = root if entry.path in (".", "") else root / entry.path
+        provision = adapter.provision
+        if provision is not None and shutil.which(provision.probe) is None:
+            # The adapter-carried self-provision (issue #793, the #784-F2/#785
+            # shape): the runner arrives without the adapter's tool, so the
+            # pinned install runs through the same seam BEFORE the commands.
+            # No post-install re-probe — see :class:`shipit.release.bump.Provision`.
+            run_cmd(provision.install, leg_dir)
         for argv in adapter.commands(version):
             run_cmd(argv, leg_dir)
         if adapter.edit_path is not None:

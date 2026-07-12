@@ -40,6 +40,32 @@ def test_rust_stages_workspace_manifests_and_lock():
     )
 
 
+def test_rust_self_provision_is_pinned_cargo_edit():
+    """Issue #793 (the #784-F2/#785 pattern): `cargo set-version` is
+    cargo-edit's subcommand, and nothing provisions cargo-edit on the
+    wf-prepare runner — the adapter carries its own pinned install. The
+    probe is the subcommand's binary name; the install argv is exact
+    (recorded-invocation discipline) and PINNED for reproducibility."""
+    provision = bump.adapter_for("rust").provision
+    assert provision == bump.Provision(
+        probe="cargo-set-version",
+        install=(
+            "cargo",
+            "install",
+            "cargo-edit",
+            "--version",
+            bump.CARGO_EDIT_VERSION,
+            "--locked",
+        ),
+    )
+
+
+def test_only_rust_carries_a_self_provision():
+    """The other adapters' tools arrive with their toolchains (npm with node,
+    nothing for the pure/zero-file shapes) — no provision entry."""
+    assert [t for t, a in bump.ADAPTERS.items() if a.provision is not None] == ["rust"]
+
+
 def test_npm_command_line():
     """The package's own version bump, git side suppressed (prepare owns it)."""
     assert bump.adapter_for("npm").commands("2.0.0-rc.1") == (

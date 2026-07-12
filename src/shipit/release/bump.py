@@ -8,6 +8,12 @@ of those projections, plus the artifact-declared bundle-config hook:
 - **rust** — ``cargo set-version --workspace`` (workspace-wide, intra-workspace
   deps included) then ``cargo update --workspace`` (lock refreshed) — the
   legacy ``prepare-release.yml`` bump, forked by copy (ADR-0001/0010).
+  ``set-version`` is cargo-edit's subcommand, and cargo-edit is
+  SELF-PROVISIONED (a pinned ``cargo install cargo-edit``, issue #793 —
+  the deb composition's cargo-deb shape, #784 F2): it is not on conda-forge,
+  so no pixi env can carry it, and the wf-prepare runner arrives without it.
+  The adapter CARRIES the provision (:class:`Provision`); prepare executes
+  it through the same Exec seam when the probe binary is off PATH.
 - **npm** — ``npm version <v> --no-git-tag-version`` (``package.json`` +
   ``package-lock.json``; the git side stays prepare's, so the tag/commit
   never happens twice).
@@ -46,6 +52,38 @@ from . import ReleaseError
 #: (:meth:`BumpAdapter.commands`).
 VERSION_TOKEN = "{version}"
 
+#: The pinned cargo-edit version the rust adapter self-provisions (issue
+#: #793). A floating ``cargo install cargo-edit`` resolves the latest crate
+#: at prepare time — irreproducible bumps and a supply-chain window — so the
+#: version is PINNED, the same shape as the deb composition's
+#: :data:`shipit.release.bundle.CARGO_DEB_VERSION`. Bump deliberately, in its
+#: own change.
+CARGO_EDIT_VERSION = "0.13.11"
+
+
+@dataclass(frozen=True)
+class Provision:
+    """A registry entry's self-provision: how its missing tool gets installed.
+
+    ``probe`` is the binary name whose ABSENCE from PATH triggers the install
+    (``shutil.which``, checked by prepare); ``install`` is the exact argv (a
+    PINNED ``cargo install``) prepare runs through the same Exec seam as the
+    adapter's commands, cwd at the leg's map path. A failing install raises
+    through the seam's ``check=True``, aborting prepare loudly (ADR-0009's
+    barrier), never a quiet skip.
+
+    Deliberately NO post-install re-probe (the #785 rounds-1–2 lesson): cargo
+    resolves a custom subcommand by searching ``$CARGO_HOME/bin`` ITSELF,
+    independent of the process PATH, so the just-installed tool is found even
+    in an isolated env (pixi) where ``$CARGO_HOME/bin`` is off PATH — a
+    ``shutil.which`` gate would spuriously abort exactly that case. The same
+    resolution makes a false-negative probe harmless: re-installing the
+    pinned version is a no-op ("already installed", rc 0).
+    """
+
+    probe: str
+    install: tuple[str, ...]
+
 
 @dataclass(frozen=True)
 class BumpAdapter:
@@ -57,14 +95,19 @@ class BumpAdapter:
     rewrite (:func:`edit_for`) bumps instead of a command — the toolchain-free
     python path. ``stage`` is the leg-relative pathspec set of every file the
     bump may touch — the ONLY paths prepare stages and commits (story 24's
-    stage-only-intended-files). A zero-command, zero-edit, zero-stage entry
-    (go) is a first-class projection: the tag carries the version alone.
+    stage-only-intended-files). ``provision`` is the entry's self-provision
+    (:class:`Provision`, issue #793) — prepare runs its install through the
+    same seam BEFORE the commands when the probe binary is missing; ``None``
+    for the adapters whose tools arrive with their toolchains. A
+    zero-command, zero-edit, zero-stage entry (go) is a first-class
+    projection: the tag carries the version alone.
     """
 
     toolchain: str
     command_templates: tuple[tuple[str, ...], ...] = ()
     edit_path: str | None = None
     stage: tuple[str, ...] = ()
+    provision: Provision | None = None
 
     def commands(self, version: str) -> tuple[tuple[str, ...], ...]:
         """The concrete argv sequence for ``version`` — templates with
@@ -88,6 +131,19 @@ RUST = BumpAdapter(
         ("cargo", "update", "--workspace"),
     ),
     stage=("Cargo.toml", "**/Cargo.toml", "Cargo.lock"),
+    # `cargo set-version` is cargo-edit's subcommand — self-provisioned when
+    # the wf-prepare runner arrives without it (issue #793; see Provision).
+    provision=Provision(
+        probe="cargo-set-version",
+        install=(
+            "cargo",
+            "install",
+            "cargo-edit",
+            "--version",
+            CARGO_EDIT_VERSION,
+            "--locked",
+        ),
+    ),
 )
 NPM = BumpAdapter(
     "npm",
