@@ -70,7 +70,7 @@ def _entries(mapping: dict) -> tuple[config.ToolchainEntry, ...]:
     return config.load_toolchains({"toolchains": mapping})
 
 
-def _request(tmp_path, artifact, entries, *, target=LINUX, run_cmd):
+def _request(tmp_path, artifact, entries, *, target=LINUX, build_target=None, run_cmd):
     return bundle_mod.ComposeRequest(
         artifact=artifact,
         entries=entries,
@@ -78,6 +78,7 @@ def _request(tmp_path, artifact, entries, *, target=LINUX, run_cmd):
         out_dir=tmp_path / "dist",
         target=target,
         run_cmd=run_cmd,
+        build_target=build_target,
     )
 
 
@@ -140,6 +141,37 @@ def test_archive_windows_target_zips_and_takes_the_exe(tmp_path):
     assert recorder.calls == [(("zip", "-r", f"{stem}.zip", stem), tmp_path / "dist")]
     assert (tmp_path / "dist" / stem / "lex.exe").is_file()
     assert composed.outputs == (f"{stem}.zip", f"{stem}/")
+
+
+def test_archive_cross_build_reads_the_triple_release_dir(tmp_path):
+    # A CROSS build (build_target set — TOL02-WS11): `shipit build --target
+    # <triple>` wrote target/<triple>/release/, so the archive reads the binary
+    # from THERE, not the native target/release/. The naming triple and the
+    # build triple are the same in CI (wf-build passes one --target to both).
+    (artifact,) = _artifacts(
+        {"lex": {"build": ["rust"], "bundle": {"composition": "archive"}}}
+    )
+    entries = _entries({".": "rust"})
+    musl = "x86_64-unknown-linux-musl"
+    # Only the triple dir has the binary — a native target/release/ would be
+    # empty, so a green run proves the cross dir was read.
+    _executable(tmp_path / f"target/{musl}/release/lex")
+    recorder = RunRecorder()
+
+    composed = bundle_mod.ARCHIVE.compose(
+        _request(
+            tmp_path,
+            artifact,
+            entries,
+            target=musl,
+            build_target=musl,
+            run_cmd=recorder,
+        )
+    )
+
+    stem = f"lex-{musl}"
+    assert (tmp_path / "dist" / stem / "lex").is_file()
+    assert composed.outputs == (f"{stem}.tar.gz", f"{stem}/")
 
 
 def test_archive_without_a_built_binary_refuses(tmp_path):
@@ -240,12 +272,10 @@ def test_deb_invokes_cargo_deb_no_rebuild_no_strip(tmp_path, cargo_deb_on_path):
     assert not (tmp_path / "dist" / ".tmp-lex-cli").exists()
 
 
-def test_deb_never_forwards_target_to_cargo_deb(tmp_path, cargo_deb_on_path):
-    # Issue #784 F3: `shipit build` builds natively into target/release/ (no
-    # --target plumbing), so forwarding the bundle triple would redirect
-    # cargo-deb to the EMPTY target/<triple>/release/. The triple is
-    # naming-only; cargo-deb derives the Debian arch from the host toolchain
-    # — correct by construction on the per-arch matrix runners.
+def test_deb_native_build_omits_target(tmp_path, cargo_deb_on_path):
+    # A NATIVE build (build_target None): `shipit build` wrote target/release/,
+    # so cargo-deb reads it with no --target and derives the Debian arch from
+    # the host toolchain — correct by construction on the per-arch runners.
     (artifact,) = _artifacts(
         {"lex": {"build": ["rust"], "bundle": {"composition": "deb"}}}
     )
@@ -255,6 +285,31 @@ def test_deb_never_forwards_target_to_cargo_deb(tmp_path, cargo_deb_on_path):
     )
     ((argv, _cwd),) = recorder.calls
     assert "--target" not in argv
+
+
+def test_deb_cross_build_forwards_the_triple_to_cargo_deb(tmp_path, cargo_deb_on_path):
+    # A CROSS build (build_target set — TOL02-WS11): `shipit build --target
+    # <triple>` wrote target/<triple>/release/, so cargo-deb is pointed at the
+    # SAME dir via --target (which also derives the Debian arch from the
+    # triple). The triple-dir contract's one owner is the threaded target
+    # (issue #785 deferral, resolved by #787).
+    (artifact,) = _artifacts(
+        {"lex": {"build": ["rust"], "bundle": {"composition": "deb"}}}
+    )
+    musl = "x86_64-unknown-linux-musl"
+    recorder = RunRecorder({"cargo": _deb_effect()})
+    bundle_mod.DEB.compose(
+        _request(
+            tmp_path,
+            artifact,
+            _entries({".": "rust"}),
+            target=musl,
+            build_target=musl,
+            run_cmd=recorder,
+        )
+    )
+    ((argv, _cwd),) = recorder.calls
+    assert argv[argv.index("--target") + 1] == musl
 
 
 def test_deb_self_provisions_cargo_deb_when_missing(tmp_path, monkeypatch):
@@ -584,7 +639,10 @@ def test_bundle_walks_the_map_composing_skipping_and_passing_through(
     tmp_path, monkeypatch, capsys
 ):
     root = _repo(tmp_path, monkeypatch)
-    _executable(root / "target/release/lex")
+    # An EXPLICIT --target is the cross signal (TOL02-WS11): the build was
+    # `shipit build --target <triple>`, so the binary lives under the triple
+    # release dir and the archive composition reads there.
+    _executable(root / f"target/{MAC}/release/lex")
     recorder = RunRecorder()
 
     rc = release_verb.run_bundle(target=MAC, run_cmd=recorder)
@@ -599,22 +657,45 @@ def test_bundle_walks_the_map_composing_skipping_and_passing_through(
     assert recorder.heads == ["tar"]
 
 
+def test_bundle_native_host_default_reads_target_release(tmp_path, monkeypatch, capsys):
+    # No explicit --target (the native local bundle): the triple is host-derived
+    # for NAMING only, build_target stays None, and the archive reads the native
+    # target/release/ — the same triple must never redirect the read dir here.
+    # Darwin host: only the archive applies (the deb is linux-only, skipped),
+    # so the native read path is exercised without a cargo-deb stub.
+    root = _repo(tmp_path, monkeypatch)
+    monkeypatch.setattr(release_verb.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(release_verb.platform, "machine", lambda: "arm64")
+    _executable(root / "target/release/lex")  # native dir, no triple subdir
+
+    rc = release_verb.run_bundle(run_cmd=RunRecorder())
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "bundled 1 artifact" in out
+    assert MAC in out  # named for the host triple
+
+
 def test_bundle_composes_the_deb_on_its_platform(
     tmp_path, monkeypatch, capsys, cargo_deb_on_path
 ):
     root = _repo(tmp_path, monkeypatch)
-    _executable(root / "target/release/lex")
+    # Explicit --target = cross: the binary is under the triple release dir.
+    _executable(root / f"target/{LINUX}/release/lex")
     recorder = RunRecorder({"cargo": _deb_effect()})
 
     rc = release_verb.run_bundle(target=LINUX, run_cmd=recorder)
 
     assert rc == 0
     assert recorder.heads == ["tar", "cargo"]  # declaration order
+    # cargo-deb is pointed at the SAME cross dir via --target (TOL02-WS11).
+    (cargo_argv,) = [argv for argv, _ in recorder.calls if argv[0] == "cargo"]
+    assert "--target" in cargo_argv and LINUX in cargo_argv
 
 
 def test_bundle_json_carries_the_typed_result(tmp_path, monkeypatch, capsys):
     root = _repo(tmp_path, monkeypatch)
-    _executable(root / "target/release/lex")
+    _executable(root / f"target/{MAC}/release/lex")  # explicit --target = cross dir
     rc = release_verb.run_bundle(target=MAC, as_json=True, run_cmd=RunRecorder())
     assert rc == 0
     payload = json.loads(capsys.readouterr().out)
@@ -683,7 +764,7 @@ def test_bundle_artifact_narrows_the_walk_to_one_artifact(
     # bundle tree never carries a sibling artifact's binary (which would
     # fail wf-publish's per-artifact assert-bundle on a multi-artifact map).
     root = _repo(tmp_path, monkeypatch)
-    _executable(root / "target/release/lex")
+    _executable(root / f"target/{LINUX}/release/lex")  # explicit --target = cross dir
     recorder = RunRecorder({"cargo": _deb_effect()})
 
     rc = release_verb.run_bundle(target=LINUX, artifact="lex", run_cmd=recorder)

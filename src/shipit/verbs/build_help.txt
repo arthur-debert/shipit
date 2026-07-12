@@ -8,3 +8,10 @@ Run bare `shipit build` for every build leg. Pass a leg name or path to build
 one leg. Arguments after `--` are forwarded to the selected builder and require
 exactly one selected leg. `--version VERSION` supplies release-version injection
 only for build targets that declare it.
+
+`--target TRIPLE` cross-compiles the rust legs to TRIPLE (`cargo build --target
+TRIPLE`), landing the binary in `target/TRIPLE/release/` — the plumbing that
+reaches the cross platforms a native runner cannot build natively (darwin-x86_64,
+musl). Omitted, builds are native into `target/release/`. No effect on go/python/
+npm legs. Pass the same TRIPLE to `shipit release bundle` so it reads the same
+directory.
