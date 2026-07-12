@@ -305,6 +305,36 @@ def test_pixi_pin_is_lockstep_across_all_blocks():
         assert pins == reference, name
 
 
+#: Fleet-standard majors for the first-party actions (issue #761). Every
+#: entry is the action's current node24 major — checkout v6 is the fleet
+#: standard; upload v6 / download v7 were each family's node24 flip, and
+#: the pins ride the current major above that (upload v7, download v8).
+#: Exact single pins (not minimums) so a bump is one sweep, never a drift.
+FIRST_PARTY_ACTION_PINS = {
+    "actions/checkout": "actions/checkout@v6",
+    "actions/upload-artifact": "actions/upload-artifact@v7",
+    "actions/download-artifact": "actions/download-artifact@v8",
+}
+
+
+def test_first_party_action_pins_are_node24_and_lockstep_everywhere():
+    # Issue #761: the wf-* blocks are the fleet's single source of action
+    # pins — a node20-deprecated major here re-warns on EVERY @v1 consumer
+    # run, undoing cutovers consumers already made. Sweep ALL of shipit's
+    # workflows (blocks, ci.yml, advance-major.yml) against the pin table.
+    for path in sorted(_WORKFLOWS.glob("*.yml")):
+        for job_id, job in _load(path.name)["jobs"].items():
+            for step in job.get("steps", []):
+                uses = step.get("uses") or ""
+                action = uses.split("@", 1)[0]
+                if action in FIRST_PARTY_ACTION_PINS:
+                    assert uses == FIRST_PARTY_ACTION_PINS[action], (
+                        path.name,
+                        job_id,
+                        uses,
+                    )
+
+
 def test_advance_major_moves_the_floating_branch_on_stable_tags_only():
     # The @vN propagation path (issue #564 AC: decision recorded — a
     # BRANCH, force-moved with lease, prereleases never advance it).

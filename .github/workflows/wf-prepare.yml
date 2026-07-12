@@ -144,7 +144,7 @@ jobs:
       endpoints: ${{ steps.plan.outputs.endpoints }}
       secrets: ${{ steps.plan.outputs.secrets }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           # Full history: prepare resolves bump words from tags and rolls
           # the changelog; a shallow clone would leave both unanswerable.
@@ -230,7 +230,7 @@ jobs:
             printf 'prerelease=%s\n' "$(jq -r '.prerelease' <<<"$prepared")"
           } >> "$GITHUB_OUTPUT"
       - name: Ship the release notes to wf-publish
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-notes
           path: RELEASE_NOTES.md

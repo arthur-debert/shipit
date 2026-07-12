@@ -70,7 +70,7 @@ jobs:
         # default is PowerShell) — same rule as wf-checks.yml's lane step.
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ inputs.tag }}
       - uses: prefix-dev/setup-pixi@v0.9.6
@@ -106,7 +106,7 @@ jobs:
         run: pixi run --locked ./bin/shipit release bundle --target "$TARGET" --artifact "$ARTIFACT"
       - name: Upload the staged bundle tree
         if: matrix.bundle
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bundle-${{ matrix.artifact }}-${{ matrix.platform }}
           # dist/ minus the unsigned .app directory (upload would destroy
