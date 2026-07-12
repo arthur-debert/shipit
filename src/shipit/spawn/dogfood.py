@@ -545,7 +545,8 @@ def verify_reviewer_run(
 ) -> None:
     """Spawn a real REVIEWER Run and assert the read-only / shared / review facts.
 
-    Drives ``shipit spawn subagent --role reviewer`` (no ``--issue``), then asserts:
+    Drives ``shipit spawn subagent --role reviewer --backend codex`` (no
+    ``--issue``), then asserts:
     the spawn exited 0 and emitted a SPAWNED summary with NO PR linkage (a reviewer
     reports through the PR); the isolation invariants hold; the Tree is genuinely
     read-only; a SECOND reviewer spawn REUSES the same Tree (shared per
@@ -565,6 +566,8 @@ def verify_reviewer_run(
         str(cfg.ws),
         "--role",
         "reviewer",
+        "--backend",
+        "codex",
     ]
     # Snapshot the PR's reviews BEFORE spawning the reviewer, so the post-spawn check
     # asserts a NEW review (a count delta), not merely "≥1 review exists".
