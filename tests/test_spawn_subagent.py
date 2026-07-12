@@ -811,6 +811,23 @@ def test_reviewer_service_failure_is_a_clean_refusal(tmp_path):
         )
 
 
+def test_reviewer_service_failure_records_elapsed_time(tmp_path, caplog):
+    b, _ = bounds(tmp_path)
+
+    def boom(*args, **kwargs):
+        raise ExecError(["codex"], rc=1, stderr="clone or launch failed")
+
+    with caplog.at_level(logging.ERROR, logger="shipit.spawn"):
+        with pytest.raises(SpawnError):
+            spawn_subagent(
+                spec(role="reviewer", ws=3, issue=None, backend="codex"),
+                replace(b, run_review=boom),
+            )
+
+    [refusal] = [record for record in caplog.records if record.levelno == logging.ERROR]
+    assert isinstance(refusal.duration_ms, int)
+
+
 # --- the spawn-seam identity binding + export (LOG04-WS02 / ADR-0032) ---------
 # The spawn seam binds the worker's dev-cycle identity from its OWN arguments
 # (`epic`/`ws`/`role`, plus the minted `agent` spawn id) and `env_export`

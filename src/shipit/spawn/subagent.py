@@ -281,7 +281,7 @@ def spawn_subagent(spec: SubagentSpec, bounds: Boundaries | None = None) -> Spaw
     # the request milestone and any pre-Tree refusal carry NO spawn identity,
     # and each key appears exactly once — at the seam that binds it for this
     # spawn (ADR-0029 record contract).
-    logcontext.unbind("tree", "agent", "epic", "ws", "role")
+    logcontext.unbind("tree", "agent", "epic", "ws", "role", "pr", "repo")
     # Lifecycle milestone (ADR-0029): the spawn REQUEST, narrated as received —
     # before any gate — so even a refused spawn leaves a durable record of what
     # was asked. The shape fields ride as flat extras (absent when not given);
@@ -963,6 +963,7 @@ def _launch_reviewer(
             branch=branch,
             pr=pr.number,
             backend=adapter.name,
+            duration_ms=_elapsed_ms(review_start),
         ) from exc
     review_ms = _elapsed_ms(review_start)
     events.emit(
