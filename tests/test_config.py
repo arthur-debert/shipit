@@ -266,6 +266,54 @@ def test_lanes_entry_must_be_a_table():
         config.load_lanes({"lanes": "off"})
 
 
+# --------------------------------------------------------------------------
+# [lanes].<lane>.secrets — the declared-secrets allowlist (#778)
+# --------------------------------------------------------------------------
+
+
+def test_lane_secrets_absent_defaults_to_empty_tuple():
+    # No allowlist = the lane is handed no secret (the default, least privilege).
+    lane = config.load_lanes({"lanes": {"x": {"run": "test"}}})[0]
+    assert lane.secrets == ()
+
+
+def test_lane_secrets_allowlist_parses_to_an_ordered_tuple_of_names():
+    lanes = config.load_lanes(
+        {"lanes": {"wasm": {"run": "test wasm", "secrets": ["lane_token"]}}}
+    )
+    assert lanes[0].secrets == ("lane_token",)
+
+
+def test_lane_secrets_must_be_a_list_not_a_bare_string():
+    # `secrets = "lane_token"` is the `secrets: inherit` shape this seam refuses
+    # — a scalar is rejected so the allowlist is always an explicit named set.
+    with pytest.raises(config.ConfigError, match=r"`secrets` must be a list"):
+        config.load_lanes({"lanes": {"x": {"run": "test", "secrets": "lane_token"}}})
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ["9lives", "has-dash", "has space", "GITHUB_TOKEN", "", 42],
+)
+def test_lane_secrets_rejects_names_github_forbids(bad):
+    # Leading digit, dash/space, the reserved `GITHUB_` prefix, empty, and a
+    # non-string all die at parse — an unroutable name must never reach CI as a
+    # silently-dropped credential.
+    with pytest.raises(config.ConfigError, match=r"not a valid GitHub secret name"):
+        config.load_lanes({"lanes": {"x": {"run": "test", "secrets": [bad]}}})
+
+
+def test_lane_secrets_is_a_known_key_full_field_set(tmp_path):
+    p = tmp_path / ".shipit.toml"
+    p.write_text(
+        '[lanes.wasm]\nrun = "test wasm"\nrequired = true\nsecrets = ["lane_token"]\n'
+    )
+    lane = config.load_lanes(config.load(p))[0]
+    assert lane == config.Lane(
+        name="wasm", run="test wasm", required=True, secrets=("lane_token",)
+    )
+
+
 def test_lanes_bool_and_string_field_types():
     with pytest.raises(config.ConfigError, match="must be booleans"):
         config.load_lanes({"lanes": {"x": {"run": "lint", "required": "yes"}}})

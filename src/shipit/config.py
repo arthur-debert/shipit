@@ -1071,7 +1071,10 @@ def load_artifacts(cfg: dict) -> tuple[Artifact, ...]:
 #
 # `required` = blocking at merge; `local` = also enforced at commit/push (the
 # required∩local set IS the commit/push checks); `trigger` = which event runs
-# it at all; `runner`/`scope` are routing hints the planner consumes.
+# it at all; `runner`/`scope` are routing hints the planner consumes; `secrets`
+# is the declared-secrets allowlist (#778) — the named block secret slot(s)
+# this lane may be handed (e.g. `secrets = ["lane_token"]`), NOT
+# `secrets: inherit`.
 
 #: The lane triggers the planner routes (glossary: pr / push / nightly /
 #: dispatch). A closed set so a typo (`trigger = "PR"`) dies at parse.
@@ -1079,7 +1082,31 @@ LANE_TRIGGERS = frozenset({"pr", "push", "nightly", "dispatch"})
 
 #: The per-lane keys `load_lanes` accepts; anything else is a typo that must
 #: die fast (the same closed-registry philosophy as `_KNOWN_TABLES`).
-_LANE_KEYS = frozenset({"run", "required", "local", "trigger", "runner", "scope"})
+_LANE_KEYS = frozenset(
+    {"run", "required", "local", "trigger", "runner", "scope", "secrets"}
+)
+
+#: A plausible GitHub Actions secret identifier — GitHub's own rule (docs:
+#: "Naming your secrets"): alphanumerics and underscores only, never leading
+#: with a digit. The `GITHUB_` prefix is additionally reserved by GitHub, so a
+#: lane declaring it would name a secret the platform forbids; reject it at
+#: parse (see :func:`_valid_secret_name`) rather than let CI discover it.
+_SECRET_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+
+
+def _valid_secret_name(name: object) -> bool:
+    """Whether ``name`` is a declarable GitHub secret identifier (routing-only).
+
+    This validates the SHAPE of the name the lane routes — the block's optional
+    secret INPUT slot (`lane_token`), not the consumer's underlying repo secret
+    (which the caller forwards and shipit never sees). GitHub's rules: alnum +
+    underscore, no leading digit, and no `GITHUB_` prefix (platform-reserved).
+    """
+    return (
+        isinstance(name, str)
+        and bool(_SECRET_NAME_RE.match(name))
+        and not name.upper().startswith("GITHUB_")
+    )
 
 
 @dataclass(frozen=True)
@@ -1090,6 +1117,16 @@ class Lane:
     ``"test rust"``); ``required`` blocks at merge; ``local`` also enforces at
     commit/push; ``trigger`` names the event that runs it; ``runner`` and
     ``scope`` are planner routing hints (``None`` = planner default).
+
+    ``secrets`` is the lane's DECLARED-SECRETS ALLOWLIST (#778): the named,
+    scoped secret slot(s) this lane may be handed — NOT ``secrets: inherit``.
+    Each name is one optional secret INPUT the ``wf-checks`` block declares
+    (today just ``lane_token``, a single repo-scoped read token); the planner
+    carries the allowlist into the matrix entry and the block exposes an
+    opted-in slot as env for THIS lane's step only, so a lane that did not
+    declare a slot never sees the credential (least privilege). Empty tuple =
+    the lane receives no secret (the default). The block stays routing-only
+    (ADR-0040): it routes named secrets, it embeds no producing logic.
     """
 
     name: str
@@ -1099,6 +1136,7 @@ class Lane:
     trigger: str = "pr"
     runner: str | None = None
     scope: str | None = None
+    secrets: tuple[str, ...] = ()
 
 
 #: The fragment-sync check declared as a Lane (TOL01-WS06, PRD story 18): a PR
@@ -1161,6 +1199,7 @@ def _parse_lane(name: str, spec: object) -> Lane:
             raise ConfigError(f"[lanes].{name}: `{key}` must be a non-empty string")
         else:
             cleaned[key] = value.strip()
+    secrets = _parse_lane_secrets(name, spec.get("secrets"))
     return Lane(
         name=name,
         run=run.strip(),
@@ -1169,7 +1208,34 @@ def _parse_lane(name: str, spec: object) -> Lane:
         trigger=trigger,
         runner=cleaned["runner"],
         scope=cleaned["scope"],
+        secrets=secrets,
     )
+
+
+def _parse_lane_secrets(name: str, value: object) -> tuple[str, ...]:
+    """Parse a lane's ``secrets`` allowlist into an ordered tuple of names.
+
+    Absent = ``()`` (the lane receives no secret). Present must be a list of
+    strings, each a plausible GitHub secret identifier
+    (:func:`_valid_secret_name`); a non-list, a non-string entry, or a
+    malformed name dies at parse — an unroutable secret name must never reach
+    the planner as a silently-dropped CI credential.
+    """
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise ConfigError(
+            f"[lanes].{name}: `secrets` must be a list of secret names, e.g. "
+            '`secrets = ["lane_token"]`'
+        )
+    for entry in value:
+        if not _valid_secret_name(entry):
+            raise ConfigError(
+                f"[lanes].{name}: `secrets` entry {entry!r} is not a valid GitHub "
+                "secret name (alphanumerics/underscore, no leading digit, no "
+                "`GITHUB_` prefix)"
+            )
+    return tuple(value)
 
 
 def load_lanes(cfg: dict) -> list[Lane]:
@@ -1179,8 +1245,9 @@ def load_lanes(cfg: dict) -> list[Lane]:
     Declaration order is preserved (TOML table order), so the planner's job
     emission is deterministic from the file. Raises :class:`ConfigError` on any
     malformed entry — an unknown key, a missing/empty ``run``, an
-    out-of-vocabulary ``trigger``, a blank ``runner``/``scope`` — so a typo'd
-    lane dies at parse, never as a silently-unrouted CI job.
+    out-of-vocabulary ``trigger``, a blank ``runner``/``scope``, a
+    non-list/ill-named ``secrets`` allowlist — so a typo'd lane dies at parse,
+    never as a silently-unrouted CI job or unroutable secret.
     """
     lanes = cfg.get("lanes", {})
     if not isinstance(lanes, dict):
