@@ -25,9 +25,9 @@ module holds everything that does NOT vary:
   carried) that the producer maps to its ``timed_out`` outcome. In exchange, every
   launch is an Exec like any other: one structured record with argv, cwd, rc, and
   ``duration_ms``.
-- :func:`write_task` / :func:`reviewer_task` — the English PR-contract prompts a Run is
-  handed. These are backend-agnostic: they convey *what work to do and how to report
-  it* (the PR is the result channel, ADR-0019 §6), not how any particular CLI is shaped.
+- :func:`write_task` — the English draft-PR contract a write Run is handed. Reviewer
+  prompts live in :mod:`shipit.review.prompt`, where the product review service can
+  capture structured output and post it through one App-authored result channel.
 
 Rooting is the OS process ``cwd`` (ADR-0019 §1), NOT a ``cd`` — so the child's writes
 land in the Tree with no leak to the parent checkout, sidestepping the bash-cwd-reset
@@ -388,35 +388,4 @@ def write_task(
         f"blocking, or await it synchronously before continuing; never end your "
         f"turn — even to 'wait for completion notifications' — while background "
         f"work is in flight."
-    )
-
-
-def reviewer_task(branch: str) -> str:
-    """The task a spawned **reviewer** Run performs (ADR-0018): read the diff, review.
-
-    The reviewer runs in a SHARED read-only Tree already checked out on ``branch``
-    (the PR head), so its result is delivered THROUGH the PR (ADR-0017): it reads the
-    diff and the surrounding code, then posts exactly one review with ``gh pr review``
-    (approve / request-changes / comment) for the PR on this branch. It never edits,
-    builds, pushes, or merges — the ``chmod``'d read-only Tree is the load-bearing FS
-    guard across every backend (ADR-0018 / ADR-0020 §Decision 3), and each adapter adds
-    its own native read-only posture as best-effort defense-in-depth: ``claude`` narrows
-    to a read-only ``--tools`` allow-list, while ``codex`` / ``agy`` (no granular
-    allow-list) rely on a sandbox/permission posture (codex ``--sandbox`` + network
-    config; agy dropping ``--dangerously-skip-permissions``). The prompt states the
-    intent on top of that.
-
-    The diff is read with ``gh pr diff`` — NOT a hardcoded ``git diff origin/main…``:
-    a work stream / epic PR targets its umbrella branch, not ``main``, so a baked-in
-    base would compute the wrong range. ``gh pr diff`` uses the PR's own base/head, so
-    the reviewer sees exactly the PR's changes whatever the base is.
-    """
-    return (
-        "You are a spawned reviewer Run launched by `shipit spawn subagent`. You are "
-        f"in a shared READ-ONLY checkout of the PR head `{branch}`. Read the PR's diff "
-        "with `gh pr diff` (it uses the PR's actual base and head — do not assume the "
-        "base is `main`) and the code it touches, judge it against the issue it closes "
-        "and this repo's conventions, then post exactly ONE review through the PR with "
-        "`gh pr review` (approve, request-changes, or comment). Do not edit, build, "
-        "push, or merge — if a change is needed, say so in the review. Then stop."
     )

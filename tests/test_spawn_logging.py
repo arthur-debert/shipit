@@ -115,19 +115,25 @@ def test_reviewer_spawn_narrates_the_lifecycle_at_info(tmp_path, caplog):
 
     with caplog.at_level(logging.DEBUG, logger="shipit.spawn"):
         rc = spawn_verb.run(
-            repo="widget", epic="TRE03", ws=3, role="reviewer", bounds=b
+            repo="widget",
+            epic="TRE03",
+            ws=3,
+            role="reviewer",
+            backend="codex",
+            bounds=b,
         )
     assert rc == 0
     infos = _spawn_records(caplog, logging.INFO)
 
-    # Tree assignment (the shared read-only Tree) is timed like the write one.
-    assigned = [r for r in infos if hasattr(r, "base") and hasattr(r, "duration_ms")]
-    assert len(assigned) == 1
-    assert assigned[0].branch == "TRE03/WS03"
-    assert isinstance(assigned[0].duration_ms, int)
+    # Delegation carries the planned shared Tree branch and typed existing PR.
+    delegated = [r for r in infos if hasattr(r, "base") and hasattr(r, "pr")]
+    assert len(delegated) == 1
+    assert delegated[0].branch == "TRE03/WS03"
+    assert delegated[0].pr == 321
 
-    # Launch + child exit, as on the write path.
-    assert [r for r in infos if hasattr(r, "cwd")]
+    # Service launch + settle preserve the common Run lifecycle events.
+    launched = [r for r in infos if hasattr(r, "cwd")]
+    assert len(launched) == 1 and launched[0].backend == "codex"
     exited = [r for r in infos if hasattr(r, "rc")]
     assert len(exited) == 1 and exited[0].rc == 0
 
@@ -224,8 +230,8 @@ def test_validation_refusals_are_no_longer_print_only(caplog):
     assert errors[0].backend == "nonexistent"
 
 
-def test_refused_spawn_does_not_inherit_the_previous_spawns_tree(tmp_path, caplog):
-    """ADR-0029 record contract: `tree` appears once ASSIGNED for THIS spawn.
+def test_refused_spawn_does_not_inherit_previous_spawn_context(tmp_path, caplog):
+    """ADR-0029 record contract: spawn identity belongs to THIS spawn.
 
     A prior spawn binds `tree` in the process-global log context (and a nested
     spawn inherits it from the parent's exported ``SHIPIT_LOG_CTX_TREE``); a
@@ -239,6 +245,7 @@ def test_refused_spawn_does_not_inherit_the_previous_spawns_tree(tmp_path, caplo
         # A prior spawn succeeds and leaves its own tree bound in the context.
         assert _write_spawn(tmp_path) == 0
         assert logcontext.bound().get("tree") == str(tmp_path / "tree")
+        logcontext.bind(pr=321, repo="acme/widget")
 
         # A fresh spawn refused before Tree creation (unsupported backend) must
         # not carry the previous spawn's tree: entry drops it, nothing rebinds it.
@@ -247,9 +254,9 @@ def test_refused_spawn_does_not_inherit_the_previous_spawns_tree(tmp_path, caplo
             repo="widget", issue=1, role="implementer", backend="nonexistent"
         )
         assert rc == 1
-        assert "tree" not in logcontext.bound()
+        assert not {"tree", "pr", "repo"} & logcontext.bound().keys()
     finally:
-        logcontext.unbind("tree")
+        logcontext.unbind("tree", "pr", "repo")
 
 
 def test_the_request_is_recorded_even_when_refused(caplog):
@@ -346,7 +353,12 @@ def test_reviewer_spawn_tags_agent_spawned_and_agent_done(tmp_path, caplog):
     b, _calls = bounds(tmp_path)
     with caplog.at_level(logging.INFO, logger="shipit.spawn"):
         rc = spawn_verb.run(
-            repo="widget", epic="TRE03", ws=3, role="reviewer", bounds=b
+            repo="widget",
+            epic="TRE03",
+            ws=3,
+            role="reviewer",
+            backend="codex",
+            bounds=b,
         )
     assert rc == 0
     assert _event_tags(caplog) == [

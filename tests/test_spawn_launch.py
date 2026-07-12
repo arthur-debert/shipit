@@ -56,23 +56,6 @@ def test_write_task_background_rule_is_shape_independent():
     assert "foreground" in task.lower()
 
 
-def test_reviewer_task_names_the_branch_and_posts_a_review():
-    task = launch.reviewer_task("TRE03/WS03")
-    assert "TRE03/WS03" in task
-    assert "gh pr review" in task
-    # The read-only posture is stated: no edits/build/push/merge.
-    assert "READ-ONLY" in task
-
-
-def test_reviewer_task_reads_the_diff_with_gh_pr_diff_not_a_hardcoded_base():
-    # The diff instruction must use `gh pr diff` (the PR's actual base/head), NOT a baked
-    # `git diff origin/main...HEAD` — an epic/umbrella PR has a non-main base, so a
-    # hardcoded base would compute the wrong range.
-    task = launch.reviewer_task("TRE03/WS03")
-    assert "gh pr diff" in task
-    assert "origin/main" not in task
-
-
 def test_launch_routes_through_the_injected_runner():
     seen: dict = {}
 

@@ -96,7 +96,14 @@ def test_reviewer_spawned_block_omits_the_pr_linkage(tmp_path, capsys):
     the coordinates only — no pr/pr_state/pr_is_draft keys."""
     b, _calls = bounds(tmp_path)
 
-    rc = spawn_verb.run(repo="widget", role="reviewer", epic="TRE03", ws=3, bounds=b)
+    rc = spawn_verb.run(
+        repo="widget",
+        role="reviewer",
+        epic="TRE03",
+        ws=3,
+        backend="codex",
+        bounds=b,
+    )
 
     assert rc == 0
     out = capsys.readouterr().out
