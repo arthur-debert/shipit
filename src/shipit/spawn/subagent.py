@@ -587,7 +587,7 @@ def _read_optional_env_identity(env_prefix: Path) -> pixienv.EnvIdentity | None:
     """
     try:
         return pixienv.read_env_identity(env_prefix)
-    except (OSError, KeyError, TypeError, ValueError):
+    except Exception:  # noqa: BLE001 - optional metadata must never block launch.
         logger.warning(
             "spawn subagent: pixi env identity unreadable at %s; "
             "continuing without optional identity metadata",

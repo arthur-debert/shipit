@@ -247,8 +247,9 @@ def test_provisioned_write_spawn_launches_through_its_work_env(
     assert record.pixi_env == "default"
 
 
+@pytest.mark.parametrize("invalid_identity", ["not json", "[]", "{}", "null"])
 def test_provisioned_write_spawn_tolerates_invalid_optional_env_identity(
-    tmp_path, caplog
+    tmp_path, caplog, invalid_identity
 ):
     # Routing is determined by the provisioned-env sentinel. The identity file
     # only enriches observability, so malformed optional metadata cannot make an
@@ -257,7 +258,7 @@ def test_provisioned_write_spawn_tolerates_invalid_optional_env_identity(
     tree_dir = tmp_path / "tree"
     meta = tree_dir / ".pixi" / "envs" / "default" / "conda-meta"
     meta.mkdir(parents=True)
-    (meta / "pixi").write_text("not json")
+    (meta / "pixi").write_text(invalid_identity)
 
     with caplog.at_level(logging.INFO, logger="shipit.spawn"):
         spawn_subagent(spec(), b)

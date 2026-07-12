@@ -12,6 +12,7 @@ directly, and the Exec seam by faking ``execrun.run`` / injecting a fake runner.
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 
 import pytest
 
@@ -319,6 +320,18 @@ def test_route_argv_leaves_an_ambient_work_env_bare():
     argv = ["claude", "-p", "do the thing"]
 
     assert launch.route_argv(argv, _write_env(pixi_provisioned=False)) == argv
+
+
+def test_route_argv_refuses_an_activation_snapshot_context():
+    # This consumer does not apply activation snapshots. Treating one as ambient
+    # would silently launch with the wrong tools, so misuse fails at the seam.
+    env = replace(
+        _write_env(pixi_provisioned=False),
+        routing=workenv.ExecutionRouting.ACTIVATION_SNAPSHOT,
+    )
+
+    with pytest.raises(ValueError, match="activation-snapshot"):
+        launch.route_argv(["claude"], env)
 
 
 def test_route_argv_records_its_routing_decision_at_debug(caplog):

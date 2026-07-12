@@ -251,10 +251,11 @@ def route_argv(argv: list[str], work_env: workenv.WorkEnv) -> list[str]:
     (:func:`shipit.workenv.resolve_write_run_env`); this function only carries
     it out — ``PIXI_RUN`` re-expresses the argv through the checkout's own
     pixi env via the pixi adapter's builder (:func:`shipit.pixienv.run_argv`,
-    ADR-0028: the argv stays in pixi's domain home), anything else leaves the
-    argv BARE (``AMBIENT`` — a non-pixi checkout keeps its existing launch
-    behavior, honestly unrouted; ``ACTIVATION_SNAPSHOT`` contexts do not launch
-    through this seam). No probe here: recomputing the gate is exactly the
+    ADR-0028: the argv stays in pixi's domain home); ``AMBIENT`` leaves the
+    argv BARE (a non-pixi checkout keeps its existing launch behavior,
+    honestly unrouted). ``ACTIVATION_SNAPSHOT`` contexts do not launch through
+    this seam and are refused loudly rather than silently losing their
+    activation. No probe here: recomputing the gate is exactly the
     duplication Work Env exists to end. Pure argv-in/argv-out; the routing
     narration lands at DEBUG like :func:`pixi_wrap`'s (ADR-0029 mechanics).
     """
@@ -266,13 +267,17 @@ def route_argv(argv: list[str], work_env: workenv.WorkEnv) -> list[str]:
             extra={"pixi_wrapped": True},
         )
         return pixienv.run_argv(argv, root)
-    logger.debug(
-        "launch argv left bare: the work env at %s routes %s, not pixi-run",
-        root,
-        work_env.routing.value,
-        extra={"pixi_wrapped": False},
+    if work_env.routing is workenv.ExecutionRouting.AMBIENT:
+        logger.debug(
+            "launch argv left bare: the work env at %s routes ambient",
+            root,
+            extra={"pixi_wrapped": False},
+        )
+        return argv
+    raise ValueError(
+        f"unsupported launch routing at this seam: {work_env.routing.value}; "
+        "activation-snapshot contexts require their activation consumer"
     )
-    return argv
 
 
 def scrub_tree_env(env: Mapping[str, str]) -> dict[str, str]:
