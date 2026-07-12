@@ -8,6 +8,12 @@ of those projections, plus the artifact-declared bundle-config hook:
 - **rust** — ``cargo set-version --workspace`` (workspace-wide, intra-workspace
   deps included) then ``cargo update --workspace`` (lock refreshed) — the
   legacy ``prepare-release.yml`` bump, forked by copy (ADR-0001/0010).
+  ``set-version`` is a cargo-edit subcommand, provisioned through the
+  shipit-MANAGED pixi surface for rust consumers (the
+  ``pixi.toml#shipit-rust-release-deps`` block, issue #793) — when it is
+  absent, prepare fails LOUDLY naming the install reconcile
+  (:func:`explain_command_failure`) and NEVER installs at run time (the #582
+  cache doctrine: provisioning rides setup-pixi's lockfile-keyed cache).
 - **npm** — ``npm version <v> --no-git-tag-version`` (``package.json`` +
   ``package-lock.json``; the git side stays prepare's, so the tag/commit
   never happens twice).
@@ -38,6 +44,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from . import ReleaseError
@@ -45,6 +52,45 @@ from . import ReleaseError
 #: The placeholder token in a command template the resolved version replaces
 #: (:meth:`BumpAdapter.commands`).
 VERSION_TOKEN = "{version}"
+
+#: cargo's unknown-subcommand failure marker (``error: no such command: …``) —
+#: the stderr substring that identifies an UNPROVISIONED cargo-edit at the rust
+#: adapter's ``cargo set-version`` (issue #793). Matched as a substring so
+#: cargo's quoting style around the subcommand name never matters.
+CARGO_NO_SUCH_COMMAND = "no such command"
+
+
+def explain_command_failure(argv: Sequence[str], stderr: str) -> str | None:
+    """A remediation-bearing message for a KNOWN adapter-command failure. Pure.
+
+    ``None`` means "not a shape this registry knows" — the caller re-raises the
+    original error untranslated. Today the one known shape is the rust
+    adapter's ``cargo set-version`` dying unprovisioned (issue #793, the
+    #784-F2 failure class): cargo-edit rides the shipit-managed pixi surface
+    for rust consumers (the ``pixi.toml#shipit-rust-release-deps`` block,
+    conda-forge-pinned, cached by setup-pixi under the lockfile key — the #582
+    doctrine), so prepare NEVER installs it at run time; the remediation is the
+    consumer's install reconcile. The probe is the ATTEMPT itself — cargo
+    resolves custom subcommands via ``$CARGO_HOME/bin`` first, then PATH
+    (issue #785's empirical finding), so a ``shutil.which`` pre-gate would
+    wrongly abort exactly the setups the attempt would have resolved.
+    """
+    if tuple(argv[:2]) == ("cargo", "set-version") and CARGO_NO_SUCH_COMMAND in stderr:
+        return (
+            "rust bump needs `cargo set-version` (cargo-edit), which is not "
+            "provisioned on this runner. cargo-edit rides the shipit-managed "
+            "pixi surface for rust repos (the "
+            "`pixi.toml#shipit-rust-release-deps` block, pinned from "
+            "conda-forge) and is never installed at release run time — this "
+            "repo's shipit pin/managed set is stale. Reconcile with a "
+            "COMMITTING install (`shipit install --pr` opens the reconcile "
+            "draft PR; `shipit install --local` commits on the current "
+            "branch) — only these regenerate and stage pixi.lock alongside "
+            "the pixi.toml block, so the committed lock stays coherent; plain "
+            "`shipit install` only refreshes the working tree and leaves the "
+            "lock stale. Merge/commit the reconcile, then re-run the release."
+        )
+    return None
 
 
 @dataclass(frozen=True)

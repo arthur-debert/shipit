@@ -538,3 +538,62 @@ def test_go_prerelease_tags_head_without_a_commit(tmp_path, monkeypatch, capsys)
     out = json.loads(capsys.readouterr().out)
     assert out["release_sha"] == str(BASE_SHA)
     assert out["prerelease"] is True
+
+
+# --------------------------------------------------------------------------
+# Unprovisioned cargo-edit (#793) — the loud reconcile remediation
+# --------------------------------------------------------------------------
+
+
+def test_unprovisioned_cargo_edit_aborts_with_the_reconcile_remedy(
+    tmp_path, monkeypatch, capsys
+):
+    """The #784-F2 class, second instance (#793): `cargo set-version` dying
+    with cargo's unknown-subcommand error aborts prepare BEFORE any git
+    mutation, and the error names the remediation — the COMMITTING install
+    reconcile (`shipit install --pr`, which regenerates and stages the lock),
+    never a run-time `cargo install` (the #582 cache doctrine). The probe is
+    the attempt itself: no which-gate ran first."""
+    root = make_repo(tmp_path, monkeypatch, toml='[toolchains]\n"." = "rust"\n')
+    fake = gitio_for(root)
+
+    def run_cmd(argv, cwd):
+        raise execrun.ExecError(
+            list(argv), rc=101, stderr="error: no such command: `set-version`"
+        )
+
+    rc = release_verb.run_prepare(spec("0.2.0"), gitio=fake, run_cmd=run_cmd)
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert err.startswith("error: ")
+    assert "cargo-edit" in err
+    # Assert BOTH committing reconciles and the lock, consistently with the
+    # bump-level test (#793 review): the remedy names --pr/--local and the
+    # regenerated pixi.lock, never plain tree-mode `shipit install`.
+    assert "`shipit install --pr`" in err
+    assert "`shipit install --local`" in err
+    assert "pixi.lock" in err
+    assert "pixi.toml#shipit-rust-release-deps" in err
+    # Nothing committed, tagged, or pushed — the barrier held (ADR-0009).
+    assert fake.mutated() == []
+
+
+def test_an_unknown_bump_failure_stays_the_untranslated_exec_error(
+    tmp_path, monkeypatch, capsys
+):
+    """Only the KNOWN shapes translate: any other bump-command failure keeps
+    the shared error shell's ExecError rendering, remediation-free."""
+    root = make_repo(tmp_path, monkeypatch, toml='[toolchains]\n"." = "rust"\n')
+    fake = gitio_for(root)
+
+    def run_cmd(argv, cwd):
+        raise execrun.ExecError(
+            list(argv), rc=101, stderr="error: failed to parse manifest at Cargo.toml"
+        )
+
+    rc = release_verb.run_prepare(spec("0.2.0"), gitio=fake, run_cmd=run_cmd)
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "failed to parse manifest" in err
+    assert "shipit install" not in err
+    assert fake.mutated() == []

@@ -151,6 +151,26 @@ def test_manifest_check_solves_the_lint_env(staged):
     assert seen["argv"] == ["pixi", "install", "--environment", "lint"]
 
 
+def test_manifest_solve_is_unlocked_so_managed_block_edits_stay_lock_coherent(
+    staged,
+):
+    # The #793 lock-coherence contract: a reconcile that edits a managed
+    # pixi.toml block (e.g. delivering the cargo-edit release block) makes the
+    # committed pixi.lock stale — every consumer `pixi run --locked` would then
+    # hard-fail. Self-cert's solve deliberately carries NO `--locked`, so pixi
+    # REGENERATES the workspace lock to match the reconciled manifest (and
+    # apply stages it into the same commit — the PIXI_LOCK tests below); a
+    # locked solve here would fail on exactly the edit install just made.
+    seen = {}
+
+    def runner(argv, **kw):
+        seen["argv"] = argv
+        return _exec_ok(argv)
+
+    assert selfcert._check_manifest(staged, runner).ok
+    assert "--locked" not in seen["argv"]
+
+
 def test_manifest_check_solves_under_a_scrubbed_env(staged, monkeypatch):
     # A parent dev session's leaked project pointer must not reach the solve:
     # self-cert hands pixi a scrubbed, complete child env (replace_env), so the
