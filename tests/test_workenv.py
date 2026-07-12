@@ -1,13 +1,12 @@
-"""Tests for the Work Env value and its write-Run resolver (RPE01-WS05).
+"""Tests for the Work Env value and boundary-specific resolvers (RPE01).
 
 The spec's Work Env testing contract (docs/spec/role-profiles-work-env.md
-§Testing — Work Env value and resolution), for the boundary this workstream
-lands: the NEW write Tree. Everything is asserted typed-in/typed-out — the
-resolver is pure over supplied facts, so no filesystem, process, pixi, or
-network is touched anywhere in this module (the nonexistent paths are the
-point). The launch-side CONSUMER (:func:`shipit.spawn.launch.route_argv`) is
-covered in ``test_spawn_launch.py`` and the end-to-end write tail in
-``test_spawn_subagent.py``.
+§Testing — Work Env value and resolution). Everything is asserted
+typed-in/typed-out — each resolver is pure over supplied facts, so no
+filesystem, process, pixi, or network is touched anywhere in this module (the
+nonexistent paths are the point). The launch-side CONSUMER
+(:func:`shipit.spawn.launch.route_argv`) is covered in ``test_spawn_launch.py``
+and the end-to-end write tail in ``test_spawn_subagent.py``.
 """
 
 from __future__ import annotations
@@ -17,12 +16,20 @@ from dataclasses import FrozenInstanceError, fields
 import pytest
 
 from shipit import pixienv
-from shipit.harness.roleprofile import NewWriteTree
-from shipit.identity import Revision, WorkingDir, repo_from_slug
+from shipit.harness.roleprofile import (
+    AmbientWorkingDir,
+    NewWriteTree,
+    SessionTree,
+    SharedReadOnlyTree,
+)
+from shipit.identity import Revision, Sha, WorkingDir, repo_from_slug
 from shipit.workenv import (
     ExecutionRouting,
     TreeProvenance,
     WorkEnv,
+    resolve_ambient_env,
+    resolve_readonly_review_env,
+    resolve_session_env,
     resolve_write_run_env,
 )
 
@@ -43,6 +50,16 @@ _ENV_IDENTITY = pixienv.env_identity_from_dict(
         },
     }
 )
+
+_ACTIVATION = pixienv.Activation(
+    environment_variables={
+        "PATH": "/trees/acme/widget/ephemeral/sess/.pixi/envs/default/bin:/usr/bin",
+        "CONDA_PREFIX": "/trees/acme/widget/ephemeral/sess/.pixi/envs/default",
+    },
+    activation_scripts=(),
+)
+
+_HEAD = Sha("a" * 40)
 
 
 def resolve(**overrides) -> WorkEnv:
@@ -95,6 +112,133 @@ def test_working_dir_and_tree_provenance_compose_without_duplication():
     )
     assert env.tree == TreeProvenance(branch="E/WS01", base="origin/E/umbrella")
     assert {f.name for f in fields(TreeProvenance)} == {"branch", "base"}
+
+
+# --- the coordinator session Tree --------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "session_id",
+    [
+        "sess-20260712-120000-41",  # Claude: WorktreeCreate pre-launch seam
+        "codex-20260712-120000-42",  # Codex: explicit provision-then-exec seam
+    ],
+)
+def test_coordinator_session_hosts_resolve_the_same_work_env_shape(session_id):
+    # Acceptance: Claude and Codex keep their narrow host adapters, but once
+    # they supply session Tree coordinates + pixi's shell-hook snapshot, Work
+    # Env resolution is the same SessionTree semantics.
+    env = resolve_session_env(
+        repo=_REPO,
+        tree_path=f"/trees/acme/widget/ephemeral/{session_id}",
+        branch=f"ephemeral/{session_id}",
+        base="origin/main",
+        activation=_ACTIVATION,
+        env_identity=_ENV_IDENTITY,
+    )
+
+    assert isinstance(env.checkout, SessionTree)
+    assert env.working_dir == WorkingDir(
+        path=f"/trees/acme/widget/ephemeral/{session_id}",
+        repo=_REPO,
+        revision=Revision(branch=f"ephemeral/{session_id}", commit=None),
+    )
+    assert env.tree == TreeProvenance(
+        branch=f"ephemeral/{session_id}", base="origin/main"
+    )
+    assert env.routing is ExecutionRouting.ACTIVATION_SNAPSHOT
+    # The activation is the exact supplied shell-hook snapshot, not a PATH
+    # recomputation or a rendered export script.
+    assert env.activation is _ACTIVATION
+    assert env.env_identity is _ENV_IDENTITY
+
+
+def test_non_pixi_session_tree_is_a_valid_ambient_work_env():
+    # Acceptance: a coordinator session in a non-pixi repo carries no
+    # Activation/EnvIdentity and still resolves to a session Tree rather than
+    # erroring or fabricating pixi state.
+    env = resolve_session_env(
+        repo=_REPO,
+        tree_path="/trees/acme/widget/ephemeral/sess-no-pixi",
+        branch="ephemeral/sess-no-pixi",
+        base="origin/main",
+        activation=None,
+    )
+
+    assert isinstance(env.checkout, SessionTree)
+    assert env.routing is ExecutionRouting.AMBIENT
+    assert env.activation is None
+    assert env.env_identity is None
+
+
+def test_session_env_identity_without_activation_is_refused():
+    with pytest.raises(ValueError, match="incoherent session"):
+        resolve_session_env(
+            repo=_REPO,
+            tree_path="/trees/acme/widget/ephemeral/sess-bad",
+            branch="ephemeral/sess-bad",
+            base="origin/main",
+            activation=None,
+            env_identity=_ENV_IDENTITY,
+        )
+
+
+# --- the reviewer shared read-only Tree --------------------------------------
+
+
+def test_reviewer_readonly_tree_records_provenance_without_pixi_activation():
+    # Acceptance: reviewer Work Env is a shared read-only Tree with checkout
+    # provenance but no provisioned pixi env; ambient routing preserves the
+    # existing reviewer launch posture over the chmod'd filesystem guard.
+    env = resolve_readonly_review_env(
+        repo=_REPO,
+        tree_path="/trees/acme/widget/review/rpe01-ws06-12345678",
+        branch="RPE01/WS06",
+        commit=_HEAD,
+    )
+
+    assert isinstance(env.checkout, SharedReadOnlyTree)
+    assert env.checkout.tree_backed is True
+    assert env.checkout.writable is False
+    assert env.working_dir == WorkingDir(
+        path="/trees/acme/widget/review/rpe01-ws06-12345678",
+        repo=_REPO,
+        revision=Revision(branch="RPE01/WS06", commit=_HEAD),
+    )
+    # A review Tree checks out an existing PR-head branch; it does not cut a new
+    # branch from a base ref.
+    assert env.tree == TreeProvenance(branch="RPE01/WS06", base=None)
+    assert env.routing is ExecutionRouting.AMBIENT
+    assert env.activation is None
+    assert env.env_identity is None
+
+
+# --- the explorer ambient WorkingDir -----------------------------------------
+
+
+def test_explorer_ambient_env_has_no_tree_or_detached_write_path():
+    # Acceptance: explorer remains an ambient WorkingDir: no Tree provenance,
+    # no activation identity, and a checkout strategy that is neither
+    # tree-backed nor writable.
+    env = resolve_ambient_env(
+        repo=_REPO,
+        path="/src/acme/widget",
+        branch="main",
+        commit=_HEAD,
+    )
+
+    assert isinstance(env.checkout, AmbientWorkingDir)
+    assert env.checkout.tree_backed is False
+    assert env.checkout.writable is False
+    assert env.working_dir == WorkingDir(
+        path="/src/acme/widget",
+        repo=_REPO,
+        revision=Revision(branch="main", commit=_HEAD),
+    )
+    assert env.tree is None
+    assert env.routing is ExecutionRouting.AMBIENT
+    assert env.activation is None
+    assert env.env_identity is None
 
 
 # --- the non-pixi write Run ---------------------------------------------------
