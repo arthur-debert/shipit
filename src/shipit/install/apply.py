@@ -79,9 +79,10 @@ HOOK_ACTIVATE_ARGV = ["install"]
 #: is left dirty with an untracked ``pixi.lock`` after an install lands.
 PIXI_LOCK = "pixi.lock"
 
-#: The suffix ``lefthook install`` renames a pre-existing hook to before it
-#: writes its own shim, and the markers that positively identify a
-#: lefthook-generated shim (#777 mode 2). A stale ``.git/hooks/pre-commit.old``
+#: The suffix ``lefthook install`` appends when it renames a pre-existing hook
+#: ``<hook>`` to ``<hook>.old`` before writing its own shim, and the markers
+#: that positively identify a lefthook-generated shim (#777 mode 2). A stale
+#: ``.git/hooks/pre-commit.old``
 #: left by a prior (release-era) ``lefthook install`` makes the next
 #: activation's rename fail ("can't rename pre-commit to pre-commit.old — file
 #: already exists"), which absorbs into a failed ``hooks`` postcondition and
@@ -762,7 +763,8 @@ def apply(
                 )
         logger.error(
             "install self-certification failed — failing closed (no commit, no "
-            "PR); rolled the staged writes back",
+            "PR); staged writes rolled back best-effort (a preceding warning "
+            "flags any partial rollback)",
             extra={
                 "root": str(root),
                 "mode": mode,
