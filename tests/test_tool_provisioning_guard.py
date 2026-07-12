@@ -160,6 +160,17 @@ PROVISIONING: dict[str, tuple[Provisioned, ...]] = {
     "pytest": (
         Provisioned("pytest", CONSUMER_ENV, note="test lane, never a release stage"),
     ),
+    "tree-sitter": (
+        Provisioned(
+            "tree-sitter",
+            CONSUMER_OWNED,
+            hole=True,
+            note="tree-sitter CLI drives generate/corpus/tarball (#792); not "
+            "on conda-forge (a WS12–WS16 composition tool), so the "
+            "consumer's own env provides it — open hole until a fleet "
+            "tree-sitter release consumer pins it (ADP02 rc proof)",
+        ),
+    ),
     "npm": (
         Provisioned(
             "nodejs",
@@ -289,6 +300,7 @@ _NON_ARGV_LITERALS = frozenset(
         "release",
         "rust",
         "scope",
+        "src",
         "success",
         "v",
         "windows",

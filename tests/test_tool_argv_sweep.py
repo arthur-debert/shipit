@@ -52,8 +52,9 @@ def _parsed(path: pathlib.Path) -> ast.Module:
 #:   ``os_probe``): the OS process table has exactly one reader.
 #: - ``curl`` — the lexd release fetch (:mod:`shipit.provision.lexd`): the one
 #:   external download shipit performs (ADP00-WS03).
-#: - ``cargo`` / ``go`` / ``pytest`` / ``npm`` / ``uv`` — the Tool verbs'
-#:   default producing commands (TOL01-WS01/WS02): assembled ONLY in the
+#: - ``cargo`` / ``go`` / ``pytest`` / ``npm`` / ``uv`` / ``tree-sitter`` —
+#:   the Tool verbs' default producing commands (TOL01-WS01/WS02,
+#:   ``tree-sitter`` TOL02-WS16): assembled ONLY in the
 #:   closed toolchain registry (:mod:`shipit.tools.registry`); a per-path
 #:   ``.shipit.toml`` override is consumer DATA, never a second assembly
 #:   point. ``npm`` has a second sanctioned home: the Tree provisioner's
@@ -101,6 +102,11 @@ _ADAPTER_HOMES: dict[str, tuple[str, ...]] = {
     ),
     "go": ("tools/registry.py",),
     "pytest": ("tools/registry.py",),
+    # tree-sitter (TOL02-WS16 #792): the generated-parser toolchain's
+    # generate/corpus commands, assembled ONLY in the closed registry. The
+    # tarball composition's payload is bytes, not a tree-sitter argv — the
+    # tar invocation stays under `tar`'s bundle home.
+    "tree-sitter": ("tools/registry.py",),
     "npm": (
         "tools/registry.py",
         "tree/create.py",

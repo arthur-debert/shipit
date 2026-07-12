@@ -48,6 +48,7 @@ the runner its block pins; the DEFAULT pixi env is the PATH that run sees):
 | `npm` (`nodejs`) | prepare (`npm version`), bundle (`npm pack` of the wasm-pack tree, #788), build (`npm run build`), publish (`npm publish`) | pixi-managed (`pixi.toml#shipit-node-deps`) — delivered on the node manifest signal AND on a declared `wasm-pack` composition (#788: its `npm pack` needs npm, but wasm-pack rides the rust signal and the crate's npm `package.json` is generated, never tracked, so install unions the node signal off the declaration — `Composition.provisions_signal`) | `nodejs` `26.*`, `pnpm` `11.*` | `test_missing_npm_gets_the_reconcile_remedy` (#801, closed hole 3), `test_wasm_pack_composition_delivers_the_node_deps_block` (#788) |
 | `go` | build (`go build`) | runner image (ubuntu images still carry Go) | floats | none (see holes) |
 | `pytest` | test lane (not a release stage) | consumer env | consumer's | — |
+| `tree-sitter` | test lane (corpus tests, `tree-sitter test`); build (`tree-sitter generate`); bundle (tarball composition) | consumer-owned (not on conda-forge — see holes) | consumer's | — (open hole 6) |
 | `twine` | publish (pypi endpoint) | pixi-managed (`pixi.toml#shipit-python-release-deps`, #801 — the python toolchain signal, closed hole 2) | `6.2.*` | `test_missing_twine_gets_the_reconcile_remedy` |
 | `ruby` | publish (brew formula `ruby -c` syntax check) | runner image (ubuntu) | floats | — |
 | `tar` | bundle (archive composition), sign (reseal payload) | runner image (ubuntu + macos) | floats | — |
@@ -102,6 +103,14 @@ to one line each) so the guard notes' numbering stays stable:
    windows runner, which ships no `zip`. Windows legs are out of contract
    fleet-wide today (#785: cross-compile lanes out of contract); the drift
    guard row records it so a windows onboarding cannot miss it.
+6. **`tree-sitter` CLI on release runners.** The generate/corpus/tarball
+   composition (TOL02-WS16 #792) shells out to `tree-sitter`, which is not on
+   conda-forge (a WS12–WS16 composition tool), so no managed pixi block can
+   carry it — the consumer's own env provides it today (consumer-owned). When
+   the first fleet tree-sitter release consumer (lex-fmt/tree-sitter-lex)
+   onboards, its rc proof pins the CLI (self-provision via `cargo install
+   tree-sitter-cli`, the cargo-deb precedent, or a consumer-declared pixi
+   dep); the hole closes then. Deferred to ADP02 per the issue.
 
 With holes 1–3 closed, a stock consumer needs ZERO consumer-side
 provisioning to traverse prepare → publish: every release-stage tool is
@@ -110,12 +119,14 @@ self-provision exception. The proof is the #801 canary rc — a shipit-canary
 `-release-rc` cut on stock managed blocks only — run after the canary repo's
 install reconcile picks these blocks up.
 
-Future composition tools (WS13–WS16: `vsce`, `electron-builder`,
-`tauri`, `tree-sitter`; notary tooling beyond `xcrun notarytool`) are not
-Exec tools yet (WS12's `wasm-pack` has landed — its row is in the inventory
-above). When their workstreams land argv for them, the drift guard
+Future composition tools (WS13–WS15: `vsce`, `electron-builder`,
+`tauri`; notary tooling beyond `xcrun notarytool`) are not
+Exec tools yet (WS12's `wasm-pack` and WS16's `tree-sitter` have landed —
+their rows are in the inventory above). When their workstreams land argv for
+them, the drift guard
 fails until the tool gets a provisioning row — that is the guard doing its
-job; do not allowlist around it.
+job; do not allowlist around it. (`tree-sitter` landed with WS16 #792 — its
+row is above, its provisioning an open hole until an rc consumer pins it.)
 
 ## The drift guard
 

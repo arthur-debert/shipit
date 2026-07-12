@@ -197,6 +197,12 @@ ENDPOINT_SECRETS: dict[str, tuple[str, ...]] = {
     "pypi": ("PYPI_TOKEN",),
     "npm": ("NPM_TOKEN",),
     "brew": ("HOMEBREW_TAP_TOKEN",),
+    # notify-downstreams fires repository_dispatch at OTHER repos (TOL02-WS16
+    # #792); the workflow's ambient GITHUB_TOKEN is scoped to the source repo
+    # and cannot dispatch cross-repo, so the cascade needs its own PAT with
+    # the downstreams' `contents:write`/`metadata` — declared here so
+    # gh-setup syncs it and preflight validates its presence.
+    "notify-downstreams": ("DOWNSTREAM_DISPATCH_TOKEN",),
 }
 
 #: The pypi adapter's testpypi flag adds this name to the pypi entry's

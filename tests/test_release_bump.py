@@ -66,6 +66,16 @@ def test_go_is_a_first_class_zero_file_adapter():
     assert not adapter.projects_files
 
 
+def test_tree_sitter_is_a_zero_file_adapter():
+    """TOL02-WS16 #792: the generated-parser tarball is content-addressed by
+    the tag (ADR-0041), npm publish off — no manifest projection, the go shape."""
+    adapter = bump.adapter_for("tree-sitter")
+    assert adapter.commands("1.2.3") == ()
+    assert adapter.edit_path is None
+    assert adapter.stage == ()
+    assert not adapter.projects_files
+
+
 def test_adapter_for_unknown_toolchain_is_loud():
     with pytest.raises(ReleaseError, match="no bump adapter"):
         bump.adapter_for("tauri")
