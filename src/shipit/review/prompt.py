@@ -127,7 +127,7 @@ _SELF_VERIFY_INSTRUCTION = """\
 BEST-EFFORT SELF-CHECK (recommended, not required): before you emit your JSON, if \
 the `shipit` CLI is on your PATH, you SHOULD verify your output against this schema \
 — write your composed JSON to a temp file and run `shipit review validate \
-<file>`, or pipe it straight in (`printf '%s' "$YOUR_JSON" | shipit pr review \
+<file>`, or pipe it straight in (`printf '%s' "$YOUR_JSON" | shipit review \
 validate`) — and fix any problems it reports before emitting. This is a SHOULD, not \
 a hard gate: if `shipit` is not available or the check cannot run, do NOT loop, \
 retry, or block on it — just emit your best JSON directly and stop."""
