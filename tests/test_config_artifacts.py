@@ -268,7 +268,8 @@ def test_tarball_with_no_platforms_is_allowed():
 def test_wasm_pack_with_multiple_platforms_is_refused():
     # wasm-pack's npm `.tgz` is version-qualified but NOT target-qualified — the
     # sibling of the tarball guard (#828). >1 platform would publish colliding
-    # unqualified `<name>.tgz` bytes in the merged dist/, so it is refused.
+    # `<name>-<version>.tgz` bytes (no `-<target>` qualifier) in the merged
+    # dist/, so it is refused.
     with pytest.raises(config.ConfigError, match="is platform-independent"):
         _load(
             "[artifacts.wasm]\n"
@@ -279,8 +280,8 @@ def test_wasm_pack_with_multiple_platforms_is_refused():
 
 
 def test_wasm_pack_with_a_single_platform_is_allowed():
-    # The shipped contract: exactly one lane — one leg, one unqualified npm tgz,
-    # no collision ("built once, published once").
+    # The shipped contract: exactly one lane — one leg, one npm tgz (not
+    # target-qualified), no collision ("built once, published once").
     (artifact,) = _load(
         "[artifacts.wasm]\n"
         'build = ["rust"]\n'
@@ -291,7 +292,7 @@ def test_wasm_pack_with_a_single_platform_is_allowed():
 
 
 def test_wasm_pack_with_no_platforms_is_allowed():
-    # No declaration defaults to a single lane — the unqualified npm tgz still
+    # No declaration defaults to a single lane — the npm tgz still
     # builds on exactly one leg (the default/shipped lane stays valid).
     (artifact,) = _load(
         '[artifacts.wasm]\nbuild = ["rust"]\nbundle = { composition = "wasm-pack" }\n'
