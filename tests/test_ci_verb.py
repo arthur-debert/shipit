@@ -13,9 +13,11 @@ failing SAFE to full scope when git cannot answer.
 from __future__ import annotations
 
 import json
+import logging
 
 import pytest
 
+from shipit import logcontext
 from shipit.verbs import ci as ci_verb
 
 LANES_TOML = """
@@ -89,6 +91,30 @@ def test_plan_emits_the_matrix_as_single_line_json_on_stdout(laned_repo, capsys)
         },
     ]
     assert "2 of 2 lanes: lint, wasm" in err
+
+
+def test_plan_logs_work_env_evidence_for_each_ci_lane(laned_repo, capsys, caplog):
+    caplog.set_level(logging.INFO, logger="shipit.ci")
+    logcontext.bind(repo="acme/widget")
+    try:
+        rc = ci_verb.run(event="pr")
+    finally:
+        logcontext.unbind("repo")
+
+    assert rc == 0
+    capsys.readouterr()
+    records = [
+        record
+        for record in caplog.records
+        if getattr(record, "work_env_boundary", None) == "ci.lane-job"
+    ]
+    assert [record.lane for record in records] == ["lint", "wasm"]
+    assert {record.checkout_strategy for record in records} == {"direct-checkout"}
+    assert {record.routing for record in records} == {"pixi-run"}
+    assert records[0].working_dir == str(laned_repo.resolve())
+    assert records[0].working_dir_repo == "acme/widget"
+    assert records[0].pixi_environment_name == "lint"
+    assert "pixi_run_id" not in records[0].__dict__
 
 
 def test_plan_accepts_the_github_event_name_verbatim(laned_repo, capsys):

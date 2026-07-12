@@ -10,6 +10,8 @@ the Tree clone + the model launch FAKED — no real Tree, no real model.
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 from shipit import execrun
@@ -91,6 +93,29 @@ def test_codex_launches_in_the_tree_and_captures_the_review(_faked):
     # the default `600s` reaches the runner as a bare 600.0s process deadline (no
     # headroom: the seam IS codex's sole enforcement).
     assert _faked["timeout"] == 600.0
+
+
+def test_tree_review_logs_readonly_work_env_evidence(_faked, caplog):
+    caplog.set_level(logging.INFO, logger="shipit.review")
+
+    producer.run_tree_review(agent_backend.CODEX, _ctx(), launcher=_faked["launcher"])
+
+    record = next(
+        record
+        for record in caplog.records
+        if getattr(record, "work_env_boundary", None) == "review.readonly-run"
+    )
+    assert record.role == "reviewer"
+    assert record.pr == 42
+    assert record.reviewer == "codex"
+    assert record.checkout_strategy == "shared-read-only-tree"
+    assert record.routing == "ambient"
+    assert record.working_dir.endswith("tre05-ws04b-abcd1234")
+    assert record.working_dir_repo == "arthur-debert/shipit"
+    assert record.working_dir_branch == "TRE05/WS04b"
+    assert record.working_dir_commit == "deadbeef" * 5
+    assert "environment_variables" not in record.__dict__
+    assert "pixi_run_id" not in record.__dict__
 
 
 def test_agy_maps_to_the_antigravity_adapter_with_prose_schema(_faked):
@@ -338,6 +363,19 @@ def test_missing_head_branch_is_a_clean_failure(_faked):
     with pytest.raises(RuntimeError) as exc:
         producer.run_tree_review(agent_backend.CODEX, ctx, launcher=_faked["launcher"])
     assert "head branch" in str(exc.value)
+
+
+def test_missing_head_branch_fails_with_a_preprovisioned_tree(_faked):
+    ctx = _ctx()
+    ctx.head_ref = ""
+    with pytest.raises(RuntimeError, match="head branch"):
+        producer.run_tree_review(
+            agent_backend.CODEX,
+            ctx,
+            tree_path="/trees/already-provisioned",
+            launcher=_faked["launcher"],
+        )
+    assert "cmd" not in _faked
 
 
 def test_resolve_repo_uses_the_view_slug_when_known(monkeypatch):

@@ -69,9 +69,9 @@ import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from .. import execrun, gh, git
+from .. import execrun, gh, git, workenv
 from ..agent.backend import ANTIGRAVITY, CODEX, Backend
-from ..identity import Repo, repo_from_slug
+from ..identity import Repo, Sha, repo_from_slug
 from ..spawn import launch
 from ..spawn.backends.antigravity import AntigravityAdapter
 from ..spawn.backends.base import BackendAdapter
@@ -452,27 +452,45 @@ def run_tree_review(
             dimension=dimension,
         )
     adapter = spec.adapter_factory(model, timeout, reasoning)  # type: ignore[operator]
+    repo = _resolve_repo(ctx)
+    branch = (ctx.head_ref or "").strip()
+    if not branch:
+        raise RuntimeError(
+            f"cannot review PR #{ctx.number}: its head branch "
+            "(headRefName) is unknown, so the shared read-only Tree "
+            "cannot be provisioned."
+        )
 
     schema_path: str | None = None
     try:
         if dry_run:
-            repo = _resolve_repo(ctx)
-            branch = (ctx.head_ref or "").strip()
-            if not branch:
-                raise RuntimeError(
-                    f"cannot review PR #{ctx.number}: its head branch "
-                    "(headRefName) is unknown, so the shared read-only Tree "
-                    "cannot be provisioned."
-                )
             return _dry_run(agent, ctx, spec, adapter, task, repo, branch)
 
         if spec.native_schema:
             schema_path = _write_schema_tempfile()
 
         cwd = tree_path if tree_path is not None else provision_review_tree(ctx)
+        head = getattr(ctx, "head_sha", None)
+        commit = head if isinstance(head, Sha) else None
+        review_env = workenv.resolve_readonly_review_env(
+            repo=repo,
+            tree_path=cwd,
+            branch=branch,
+            commit=commit,
+        )
         correlation = {} if run_id is None else {"run_id": run_id}
         if dimension is not None:
             correlation["dimension"] = dimension.name
+        logger.info(
+            "review work env resolved — %s routing for read-only reviewer tree",
+            review_env.routing.value,
+            extra=workenv.resolution_record(
+                review_env,
+                boundary="review.readonly-run",
+                role=_REVIEWER_ROLE,
+                extra={"pr": ctx.number, "reviewer": agent, **correlation},
+            ),
+        )
         logger.info(
             "review launching for pr#%s (agent=%s%s) in read-only Tree %s",
             ctx.number,

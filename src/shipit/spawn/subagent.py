@@ -445,7 +445,14 @@ def validate(
             spec.role, roleprofile.LaunchContext.DETACHED
         )
     except roleprofile.RoleValidationError as exc:
-        raise _refusal(str(exc), exc=exc, role=spec.role) from exc
+        raise _refusal(
+            str(exc),
+            exc=exc,
+            role=spec.role,
+            requested_role=spec.role,
+            launch_context=roleprofile.LaunchContext.DETACHED.value,
+            refusal_reason="role-profile-validation",
+        ) from exc
 
     if spec.has_epic_shape and (spec.epic is None or spec.ws is None):
         raise _refusal(
@@ -926,19 +933,11 @@ def _launch_write(
     logger.info(
         "spawn subagent: work env resolved — %s routing for the write tree",
         work_env.routing.value,
-        extra={
-            name: value
-            for name, value in {
-                "routing": work_env.routing.value,
-                "checkout": type(work_env.checkout).__name__,
-                "pixi_env": (
-                    work_env.env_identity.environment_name
-                    if work_env.env_identity is not None
-                    else None
-                ),
-            }.items()
-            if value is not None
-        },
+        extra=workenv.resolution_record(
+            work_env,
+            boundary="spawn.write-run",
+            role=role,
+        ),
     )
     # Launch the backend child rooted in the Tree through its adapter (ADR-0020): the
     # cwd IS the Tree, the adapter's child_env scrubs the backend's auth-shadowing vars
@@ -1217,20 +1216,12 @@ def _launch_existing_pr_write(
     logger.info(
         "spawn subagent: work env resolved — %s routing for the existing-PR write tree",
         work_env.routing.value,
-        extra={
-            name: value
-            for name, value in {
-                "routing": work_env.routing.value,
-                "checkout": type(work_env.checkout).__name__,
-                "pixi_env": (
-                    work_env.env_identity.environment_name
-                    if work_env.env_identity is not None
-                    else None
-                ),
-                "pr": attach.number,
-            }.items()
-            if value is not None
-        },
+        extra=workenv.resolution_record(
+            work_env,
+            boundary="spawn.existing-pr-write",
+            role=role,
+            extra={"pr": attach.number},
+        ),
     )
 
     task = launch.shepherd_task(

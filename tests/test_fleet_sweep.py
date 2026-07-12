@@ -526,6 +526,24 @@ def test_sweep_unprovisioned_tree_keeps_the_bare_launcher_argv(tmp_path):
     assert argv == (str(cwd / "bin" / "shipit"), "test")
 
 
+def test_sweep_report_cells_carry_work_env_evidence(tmp_path):
+    report, _, _ = _sweep([_ENTRY], tmp_path, tools=("test",))
+
+    data = report.to_dict()["repos"][0]["cells"]["test"]
+    assert data["work_env_boundary"] == "fleet-sweep.cell"
+    assert data["fleet_repo"] == "a/b"
+    assert data["tool"] == "test"
+    assert data["working_dir"] == str(tmp_path / "trees" / "a-b")
+    assert data["working_dir_repo"] == "a/b"
+    assert data["working_dir_branch"] == "fleet-sweep-x"
+    assert data["tree_branch"] == "fleet-sweep-x"
+    assert data["tree_base"] == "origin/main"
+    assert data["checkout_strategy"] == "new-write-tree"
+    assert data["routing"] == "ambient"
+    assert "environment_variables" not in data
+    assert "pixi_run_id" not in data
+
+
 def test_sweep_red_cell_carries_command_and_output(tmp_path):
     exec_fake = _FakeExec(rcs={"test": 1})
     report, _, _ = _sweep([_ENTRY], tmp_path, exec_fake=exec_fake)
