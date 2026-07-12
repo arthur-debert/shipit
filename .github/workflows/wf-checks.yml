@@ -41,7 +41,7 @@ jobs:
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           # Full history: the thin/full scope decision diffs the PR against
           # origin/<base-ref>; a shallow clone would leave the diff
@@ -83,7 +83,7 @@ jobs:
     # (ADR-0040: zero logic in the block).
     continue-on-error: ${{ !matrix.required }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: prefix-dev/setup-pixi@v0.9.6
         with:
           # Lockstep with the Layer 0 bootstrap's PIXI_PIN — see the plan job.

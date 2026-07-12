@@ -131,7 +131,7 @@ jobs:
     name: assert (${{ matrix.artifact }}, ${{ matrix.platform }})
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ inputs.tag }}
       - uses: prefix-dev/setup-pixi@v0.9.6
@@ -141,7 +141,7 @@ jobs:
           pixi-version: v0.71.0
           locked: true
       - name: Download the bundle
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: bundle-${{ matrix.artifact }}-${{ matrix.platform }}
           path: bundle
@@ -159,7 +159,7 @@ jobs:
     if: ${{ !cancelled() && needs.assert.result != 'failure' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ inputs.tag }}
       - uses: prefix-dev/setup-pixi@v0.9.6
@@ -169,14 +169,14 @@ jobs:
           pixi-version: v0.71.0
           locked: true
       - name: Download the release notes
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: release-notes
           # prepare wrote RELEASE_NOTES.md at the repo root; the verb reads
           # it there by default.
           path: .
       - name: Stage the bundle trees
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: bundle-*
           path: dist
@@ -190,7 +190,7 @@ jobs:
         # one; cp -f makes the overwrite explicit instead of trusting
         # download-order semantics.
         if: inputs.sign-result == 'success'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: signed-*
           path: dist-signed
