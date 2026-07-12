@@ -31,7 +31,10 @@ the durable code is one slim versioned package; and configuration is explicit.
     `pixi build` backend is preview-grade and emits conda packages, not wheels
     or signed installers. shipit keeps the real builders (cargo, tauri,
     electron-builder) and uses pixi to PROVISION and RUN them — never to be the
-    build backend. See [#3].
+    build backend. See [#3]. Re-verified with real probe builds at pixi 0.71.0
+    (TOL02-WS10, [./tol02-ws10-pixi-build-spike.md]): no backend exists for any
+    disputed artifact type, no cross-compilation, and even the escape hatch's
+    output is structurally a conda archive.
 
 2. The slow/fast split
 
