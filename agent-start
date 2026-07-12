@@ -18,9 +18,8 @@
 #   ephemeral session Tree explicitly and then execs codex rooted in it.
 #
 # Convenience only, never a requirement: `claude -w <name>` and
-# `./bin/shipit session codex` work identically without this file. The
-# `./claude-start` / `./codex-start` siblings are compatibility shims that
-# delegate here. Extra args are forwarded to the agent CLI verbatim.
+# `./bin/shipit session codex` work identically without this file. Extra args
+# are forwarded to the agent CLI verbatim.
 #
 # The common path scrubs the worker's agent-identity log-context keys before
 # dispatch — SHIPIT_LOG_CTX_ROLE, plus the paired AGENT and RUN spawn ids: a
