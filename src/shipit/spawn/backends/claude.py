@@ -35,9 +35,9 @@ from .base import BackendAdapter
 ANTHROPIC_API_KEY = "ANTHROPIC_API_KEY"
 
 #: The read-only tool allow-list for a **reviewer** Run (ADR-0018 / ADR-0019 §4): a
-#: reviewer reads the diff and code and posts a review, so it gets the read tools plus
-#: ``Bash`` (to run ``gh pr diff`` and ``gh pr review``) but NOT ``Write`` / ``Edit`` —
-#: the read-only posture rides the ``--tools`` allow-list, mirroring the reviewer
+#: reviewer reads the diff and code and emits structured output, so it gets the read
+#: tools plus ``Bash`` (to run ``gh pr diff``) but NOT ``Write`` / ``Edit`` — the
+#: read-only posture rides the ``--tools`` allow-list, mirroring the reviewer
 #: agent-def frontmatter. ``claude`` is the one backend with a native allow-list, so its
 #: ``read_only=True`` posture is this tuple; codex/agy have none and instead build a
 #: sandbox/permission posture (their adapters), with the chmod'd Tree as the FS guard.

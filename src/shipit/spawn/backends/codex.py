@@ -31,14 +31,12 @@ NOT from guessed flags. Three facts are load-bearing and non-obvious:
   ever written into the Tree.
 
 **Reviewer (read-only) posture — WS04a, probed, NOT the ADR's first guess.** The ADR
-recorded ``--ephemeral --sandbox read-only`` for a reviewer Run, but that decision was
-taken when the reviewer *returned* its findings on stdout (the funnel captured them). In
-the spawn-Tree path the reviewer **self-posts** via ``gh pr review`` — which needs the
-**network**. WS04a probed codex 0.139 directly and found ``--sandbox read-only`` **blocks
-the network** (``curl … → Could not resolve host``), so a read-only-sandbox reviewer
-**cannot post its review**. Per ADR-0020 §Decision 3 the load-bearing read-only guarantee
-is the **chmod'd Tree** (the FS layer), not the native sandbox, so the chosen reviewer
-posture is the *least-privilege codex sandbox that still grants the network*:
+recorded ``--ephemeral --sandbox read-only`` for a reviewer Run, but WS04a probed
+codex 0.139 directly and found ``--sandbox read-only`` **blocks the network**
+(``curl … → Could not resolve host``), so a read-only-sandbox reviewer cannot fetch PR
+context with ``gh pr diff``. Per ADR-0020 §Decision 3 the load-bearing read-only
+guarantee is the **chmod'd Tree** (the FS layer), not the native sandbox, so the chosen
+reviewer posture is the *least-privilege codex sandbox that still grants the network*:
 ``--ephemeral --sandbox workspace-write -c sandbox_workspace_write.network_access=true``
 (probe-confirmed to reach the network). It deliberately does **NOT** carry the write Run's
 ``--dangerously-bypass-approvals-and-sandbox``: the chmod'd Tree makes the workspace
@@ -108,10 +106,10 @@ def resolve_model(model: str) -> str:
 
 
 #: The codex ``-c`` override that enables outbound network inside the reviewer's
-#: ``workspace-write`` sandbox (WS04a probe). Without it the sandbox blocks the network a
-#: self-posting reviewer needs for ``gh pr diff`` / ``gh pr review`` (``read-only`` blocks
-#: the network outright, with no override that re-grants it). Value is a TOML literal codex
-#: parses (``foo.bar=true``).
+#: ``workspace-write`` sandbox (WS04a probe). Without it the sandbox blocks the network
+#: a captured reviewer needs for ``gh pr diff`` (``read-only`` blocks the network
+#: outright, with no override that re-grants it). Value is a TOML literal codex parses
+#: (``foo.bar=true``).
 NETWORK_ACCESS_OVERRIDE = "sandbox_workspace_write.network_access=true"
 
 #: The codex ``-c`` config key that pins the model's reasoning effort (RVW03-WS04,
@@ -197,12 +195,11 @@ class CodexAdapter(BackendAdapter):
           needs the unsandboxed posture; the chmod'd Tree (ADR-0018) is the external sandbox
           that flag documents.
         - **reviewer** (``read_only=True``): ``--ephemeral --sandbox workspace-write
-          -c sandbox_workspace_write.network_access=true``. WS04a probed codex 0.139: a
-          reviewer **self-posts** via ``gh pr review``, which needs the network, but
-          ``--sandbox read-only`` (the ADR's first guess, taken when the funnel captured
-          stdout) **blocks the network** — so the reviewer uses the least-privilege sandbox
-          that still grants the network. It deliberately omits the write bypass flag: the
-          chmod'd Tree is the load-bearing read-only guard (ADR-0020 §Decision 3), and
+          -c sandbox_workspace_write.network_access=true``. WS04a probed codex 0.139:
+          ``--sandbox read-only`` blocks the network a captured reviewer needs for
+          ``gh pr diff``, so the reviewer uses the least-privilege sandbox that still
+          grants the network. It deliberately omits the write bypass flag: the chmod'd
+          Tree is the load-bearing read-only guard (ADR-0020 §Decision 3), and
           ``workspace-write`` confines any escape to ``[workdir, /tmp, $TMPDIR]`` as
           best-effort defense-in-depth. ``--ephemeral`` skips session persistence.
 
@@ -215,7 +212,6 @@ class CodexAdapter(BackendAdapter):
         ``--output-schema <path>`` so codex enforces its structured output against the
         review JSON schema natively. It is the funnel **capture** reviewer's robustness
         win (ADR-0020 §migration-cost: *keep ``--output-schema`` on the codex reviewer*);
-        the self-posting spawn-surface reviewer leaves it ``None`` and so omits the flag.
         It is never added to a WRITE Run (a write Run emits no captured JSON).
         """
         del cwd  # codex roots via the process cwd; no path belongs in its argv.

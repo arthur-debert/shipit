@@ -468,17 +468,24 @@ def validate(
             epic=spec.epic,
             ws=spec.ws,
         )
+    attachment_roles = ", ".join(
+        role.value
+        for role in roleprofile.roles_with_checkout_strategy(
+            roleprofile.ExistingPrWriteTree
+        )
+    )
     if isinstance(profile.checkout, roleprofile.ExistingPrWriteTree):
         if spec.pr is None or spec.pr < 1:
             raise _refusal(
-                f"--pr must be a positive integer for a shepherd existing-PR "
-                f"attachment (got {spec.pr})",
+                "--pr must be a positive integer for an existing-PR attachment "
+                f"role ({attachment_roles}; got {spec.pr})",
                 role=spec.role,
             )
         if spec.has_epic_shape or spec.issue is not None:
             raise _refusal(
-                "a shepherd attaches to an existing PR with --pr only; do not pass "
-                "--issue, --epic, or --ws, which belong to new-branch/review shapes.",
+                "an existing-PR attachment role attaches with --pr only; do not "
+                "pass --issue, --epic, or --ws, which belong to new-branch/review "
+                f"shapes (attachment roles: {attachment_roles}).",
                 role=spec.role,
                 pr=spec.pr,
                 issue=spec.issue,
@@ -487,7 +494,8 @@ def validate(
             )
     elif spec.pr is not None:
         raise _refusal(
-            f"--pr is only valid for role 'shepherd' (got role {profile.role.value!r})",
+            "--pr is only valid for existing-PR attachment roles "
+            f"({attachment_roles}; got role {profile.role.value!r})",
             role=profile.role.value,
             pr=spec.pr,
         )

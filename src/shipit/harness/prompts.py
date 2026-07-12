@@ -132,8 +132,8 @@ _AGENT_DESCRIPTIONS: dict[Role, str] = {
     ),
     Role.REVIEWER: (
         "Read-only, branch-pinned reviewer: reads a PR head in a shared "
-        "read-only Tree and posts one review, mutates nothing. Use to review "
-        "a PR."
+        "read-only Tree and emits one structured review result for shipit to "
+        "post, mutates nothing. Use to review a PR."
     ),
 }
 

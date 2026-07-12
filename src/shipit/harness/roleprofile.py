@@ -353,6 +353,22 @@ def profile_for(role: Role) -> RoleProfile:
     return PROFILES[role]
 
 
+def roles_with_checkout_strategy(checkout_type: type) -> tuple[Role, ...]:
+    """All roles whose profile uses ``checkout_type`` as its checkout strategy.
+
+    This is the registry-derived inverse lookup for call sites that need to name
+    a lifecycle family (for example, "roles that attach to an existing PR")
+    without restating today's role list. It remains pure and deterministic over
+    the fixed Shipit-owned registry; unsupported/custom role strings still fail
+    through :func:`parse_role` / :func:`validate_spawn`.
+    """
+    return tuple(
+        role
+        for role, profile in PROFILES.items()
+        if isinstance(profile.checkout, checkout_type)
+    )
+
+
 def delegates_code_authorship(role: Role) -> bool:
     """True iff ``role`` may mutate its checkout but must NOT author code itself.
 
