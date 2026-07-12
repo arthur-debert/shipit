@@ -159,7 +159,7 @@ def test_coordinator_session_hosts_resolve_the_same_work_env_shape(session_id):
     assert env.env_identity is _ENV_IDENTITY
 
 
-def test_non_pixi_session_tree_is_a_valid_ambient_work_env():
+def test_non_pixi_session_tree_uses_ambient_routing():
     # Acceptance: a coordinator session in a non-pixi repo carries no
     # Activation/EnvIdentity and still resolves to a session Tree rather than
     # erroring or fabricating pixi state.
@@ -250,7 +250,7 @@ def test_explorer_ambient_env_has_no_tree_or_detached_write_path():
 # --- the non-pixi write Run ---------------------------------------------------
 
 
-def test_non_pixi_write_run_is_honestly_ambient():
+def test_non_pixi_write_run_uses_ambient_routing():
     # Acceptance: a non-pixi write Run represents absent pixi activation
     # honestly — no activation, no env identity, AMBIENT routing (the existing
     # bare-launch behavior), never a fabricated stand-in.

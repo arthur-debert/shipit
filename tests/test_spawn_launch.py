@@ -306,7 +306,7 @@ def test_route_argv_carries_out_the_pixi_run_decision():
     ]
 
 
-def test_route_argv_leaves_an_ambient_work_env_bare():
+def test_route_argv_leaves_an_ambient_routed_work_env_bare():
     # A non-pixi write Run resolves AMBIENT (absent activation, honestly) and
     # keeps the existing bare-launch behavior — argv unchanged, same object
     # semantics as pixi_wrap's unprovisioned branch.

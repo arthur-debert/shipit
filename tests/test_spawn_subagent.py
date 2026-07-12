@@ -508,7 +508,7 @@ def test_provisioned_write_spawn_tolerates_invalid_optional_env_identity(
     assert not hasattr(record, "pixi_environment_name")
 
 
-def test_non_pixi_write_spawn_resolves_ambient_and_launches_bare(tmp_path, caplog):
+def test_non_pixi_write_spawn_uses_ambient_routing_and_launches_bare(tmp_path, caplog):
     # Acceptance (RPE01-WS05): a NON-pixi write Run represents absent pixi
     # activation honestly — the Work Env resolves AMBIENT (no activation, no
     # env identity extra on the record) — and the existing launch behavior is
