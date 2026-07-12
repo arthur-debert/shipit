@@ -31,6 +31,23 @@ name: wf-checks
 
 on:
   workflow_call:
+    # The declared-secrets seam (#778, ADR-0040 routing-only): ONE optional,
+    # named, repo-scoped read token — NOT `secrets: inherit`. A reusable
+    # workflow's secrets are declared here and CANNOT be dynamically indexed by
+    # a matrix value (`secrets[matrix.foo]` is illegal GHA), so the block names
+    # its known slot statically and the planner-emitted `matrix.secrets`
+    # allowlist merely GATES whether a lane's step is handed it. The caller
+    # forwards its own repo secret into this slot — one line, consumer-owned:
+    #     secrets:
+    #       lane_token: ${{ secrets.YOUR_REPO_READ_TOKEN }}
+    # Absent (no caller `secrets:`) leaves every lane token-less, unchanged.
+    secrets:
+      lane_token:
+        required: false
+        description: >-
+          Optional repo-scoped read token. Exposed as $LANE_TOKEN in the step
+          of any lane that allowlists it (`secrets = ["lane_token"]` in
+          .shipit.toml); every other lane never sees it (least privilege).
 
 permissions:
   contents: read
@@ -113,8 +130,6 @@ jobs:
         with:
           workspaces: ${{ matrix.rust_workspaces || '' }}
       - name: Run lane
-        env:
-          LANE_RUN: ${{ matrix.run }}
         # Force bash: `matrix.runner` is consumer-chosen, and on a Windows-runner
         # lane the default `run:` shell is PowerShell, where the split below is
         # invalid. `shell: bash` pins bash on every GitHub-HOSTED runner (Git bash
@@ -129,6 +144,18 @@ jobs:
         # is passed to pixi as a LITERAL argument — which pixi rejects as an
         # unknown task/arg — instead of being interpreted by this runner shell.
         # Same split result for every legitimate lane, no shell-injection seam.
+        env:
+          LANE_RUN: ${{ matrix.run }}
+          # The declared-secrets seam (#778). `LANE_TOKEN`'s KEY is static (GHA
+          # forbids a dynamic env key too) and its VALUE is the routing: the
+          # `lane_token` slot is bound ONLY when this lane's planner-emitted
+          # allowlist opted in — `contains(matrix.secrets, 'lane_token')`, an
+          # exact array-membership test since `matrix.secrets` is a JSON array.
+          # A lane that did not declare it gets `''`, never the token (least
+          # privilege). Routing-only (ADR-0040): the gate READS the planner's
+          # allowlist, it derives nothing; the value comes straight from
+          # `secrets.lane_token` and never transits the public plan matrix.
+          LANE_TOKEN: ${{ contains(matrix.secrets, 'lane_token') && secrets.lane_token || '' }}
         run: |
           read -ra lane_argv <<<"$LANE_RUN"
           pixi run --locked "${lane_argv[@]}"

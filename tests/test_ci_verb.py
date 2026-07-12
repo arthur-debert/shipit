@@ -78,6 +78,7 @@ def test_plan_emits_the_matrix_as_single_line_json_on_stdout(laned_repo, capsys)
             "envset": "lint",
             "caches": {"rust": False, "sccache": False, "uv": False},
             "rust_workspaces": "",
+            "secrets": [],
         },
         {
             "name": "wasm",
@@ -88,6 +89,7 @@ def test_plan_emits_the_matrix_as_single_line_json_on_stdout(laned_repo, capsys)
             "envset": "test",
             "caches": {"rust": True, "sccache": False, "uv": False},
             "rust_workspaces": "crates/wasm -> ../../target",
+            "secrets": [],
         },
     ]
     assert "2 of 2 lanes: lint, wasm" in err
