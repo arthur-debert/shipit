@@ -97,6 +97,20 @@ nit_cap = 3
 [toolchains]
 "." = "python"
 
+# [artifacts] — shipit's OWN release surface (#774, the 1.0.0 cutover): ONE
+# no-build artifact whose sole endpoint is the GitHub release. shipit is
+# consumed via the git pin (`[shipit] version`, ADR-0033) and `@v1` workflow
+# refs (ADR-0010) — the TAG is the payload — so the minimal HONEST declaration
+# is the zero-build shape ("the tag is the release"): preflight plans stages
+# preflight → prepare → publish with an EMPTY matrix (nothing builds, bundles,
+# or signs), and publish creates the tag's GH release carrying the coalesced
+# notes. A `wheel` composition is deliberately NOT declared: nothing consumes
+# a shipit wheel (the launcher installs from the git pin), and a phantom asset
+# would be a dishonest release surface. gh-release rides the workflow's own
+# GITHUB_TOKEN, so this declaration adds nothing to the [secrets] map.
+[artifacts.shipit]
+endpoints = ["gh-release"]
+
 # [lanes] — the declared CI test units (docs/legacy-prd/tol01-ci-tools.md story 14):
 # `{ run, required, local, trigger, runner, scope }`, keyed by lane name. The
 # lane planner (`shipit ci plan`, TOL01-WS05) maps these + the CI event + a
