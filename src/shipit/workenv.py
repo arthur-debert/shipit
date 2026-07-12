@@ -35,11 +35,12 @@ at its own effectful seam and hands the results in).
 
 Resolution is boundary-specific by design (spec §Design Decisions): this
 module exposes per-boundary constructors behind the one common value rather
-than one oversized universal resolver. WS05 lands the write-Run walking
+than one oversized universal resolver. WS05 landed the write-Run walking
 skeleton (:func:`resolve_write_run_env`, consumed by
 :func:`shipit.spawn.subagent._launch_write` and routed by
-:func:`shipit.spawn.launch.route_argv`); session, read-only, and ambient
-boundaries follow in RPE01-WS06.
+:func:`shipit.spawn.launch.route_argv`); RPE01-WS06 adds the coordinator
+session Tree, reviewer shared read-only Tree, and explorer ambient WorkingDir
+boundaries.
 """
 
 from __future__ import annotations
@@ -47,8 +48,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 
-from .harness.roleprofile import CheckoutStrategy, NewWriteTree
-from .identity import Repo, Revision, WorkingDir
+from .harness.roleprofile import (
+    AmbientWorkingDir,
+    CheckoutStrategy,
+    NewWriteTree,
+    SessionTree,
+    SharedReadOnlyTree,
+)
+from .identity import Repo, Revision, Sha, WorkingDir
 from .pixienv import Activation, EnvIdentity
 
 
@@ -78,17 +85,19 @@ class ExecutionRouting(StrEnum):
 class TreeProvenance:
     """What a Shipit-provisioned Tree adds BEYOND its WorkingDir — never a rival to it.
 
-    ``branch`` is the branch the Tree was cut onto and ``base`` the ref it was
-    cut from (e.g. ``origin/E/umbrella``) — the allocation facts
-    :class:`~shipit.tree.create.Tree` reports at materialization. There is
-    deliberately NO path field: the composed :class:`~shipit.identity.WorkingDir`
-    is the one checkout identity (spec: "Tree provenance and WorkingDir
-    identity compose rather than duplicate one another"), so provenance can
-    never drift from the location it annotates.
+    ``branch`` is the branch the Tree is checked out on. ``base`` is the ref a
+    Tree branch was cut from when such a ref exists (for write and session
+    Trees, e.g. ``origin/E/umbrella``). It is ``None`` for a shared read-only
+    reviewer Tree: that checkout is pinned to an existing PR-head branch and
+    does not cut a new branch from a base. There is deliberately NO path field:
+    the composed :class:`~shipit.identity.WorkingDir` is the one checkout
+    identity (spec: "Tree provenance and WorkingDir identity compose rather
+    than duplicate one another"), so provenance can never drift from the
+    location it annotates.
     """
 
     branch: str
-    base: str
+    base: str | None
 
 
 @dataclass(frozen=True)
@@ -172,4 +181,112 @@ def resolve_write_run_env(
         routing=(
             ExecutionRouting.PIXI_RUN if pixi_provisioned else ExecutionRouting.AMBIENT
         ),
+    )
+
+
+def resolve_session_env(
+    *,
+    repo: Repo,
+    tree_path: str,
+    branch: str,
+    base: str,
+    activation: Activation | None,
+    env_identity: EnvIdentity | None = None,
+) -> WorkEnv:
+    """Resolve the Work Env for the coordinator's ephemeral session Tree.
+
+    Claude and Codex reach the session Tree through different host seams
+    (``claude --worktree`` vs ``shipit session codex``), but once the boundary
+    supplies the Tree coordinates and optional pixi activation snapshot, the
+    resolved Work Env is the same: a :class:`SessionTree` with
+    :class:`ExecutionRouting.ACTIVATION_SNAPSHOT` when an existing
+    ``pixi shell-hook --json`` snapshot was captured, or honest
+    :class:`ExecutionRouting.AMBIENT` absence for a non-pixi checkout.
+
+    The activation is BORROWED from pixi's own :class:`Activation` value
+    object. This resolver never computes PATH, shells out, detects manifests,
+    or provisions anything. An ``env_identity`` without an activation snapshot
+    is incoherent for this boundary and is refused: a non-pixi session is
+    represented by both values being absent.
+    """
+    if env_identity is not None and activation is None:
+        raise ValueError(
+            "incoherent session facts: an EnvIdentity was supplied without an "
+            "Activation snapshot; a non-pixi or unactivated session must carry "
+            "neither."
+        )
+    return WorkEnv(
+        working_dir=WorkingDir(
+            path=tree_path,
+            repo=repo,
+            revision=Revision(branch=branch, commit=None),
+        ),
+        tree=TreeProvenance(branch=branch, base=base),
+        checkout=SessionTree(),
+        activation=activation,
+        env_identity=env_identity,
+        routing=(
+            ExecutionRouting.ACTIVATION_SNAPSHOT
+            if activation is not None
+            else ExecutionRouting.AMBIENT
+        ),
+    )
+
+
+def resolve_readonly_review_env(
+    *,
+    repo: Repo,
+    tree_path: str,
+    branch: str,
+    commit: Sha | None = None,
+) -> WorkEnv:
+    """Resolve the Work Env for a reviewer shared read-only Tree.
+
+    A reviewer Tree is branch-pinned and Shipit-provisioned, but deliberately
+    unprovisioned for pixi (ADR-0018): no ``.treeinclude``, no pixi env, no
+    write-run activation. The Work Env therefore records Tree provenance
+    (branch, with no cut-from base), a :class:`SharedReadOnlyTree` checkout
+    strategy, absent ``activation``/``env_identity``, and
+    :class:`ExecutionRouting.AMBIENT` so the existing reviewer launcher keeps
+    using ambient read tools over the chmod'd checkout guard.
+    """
+    return WorkEnv(
+        working_dir=WorkingDir(
+            path=tree_path,
+            repo=repo,
+            revision=Revision(branch=branch, commit=commit),
+        ),
+        tree=TreeProvenance(branch=branch, base=None),
+        checkout=SharedReadOnlyTree(),
+        activation=None,
+        env_identity=None,
+        routing=ExecutionRouting.AMBIENT,
+    )
+
+
+def resolve_ambient_env(
+    *,
+    repo: Repo,
+    path: str,
+    branch: str | None = None,
+    commit: Sha | None = None,
+) -> WorkEnv:
+    """Resolve the Work Env for an explorer's ambient WorkingDir.
+
+    Explorer work is ambient by design: no provisioned Tree, no detached write
+    path, no pixi activation supplied by Shipit, and no environment identity to
+    fabricate. The caller supplies only the already-known checkout identity
+    facts; resolution is a pure value construction over them.
+    """
+    return WorkEnv(
+        working_dir=WorkingDir(
+            path=path,
+            repo=repo,
+            revision=Revision(branch=branch, commit=commit),
+        ),
+        tree=None,
+        checkout=AmbientWorkingDir(),
+        activation=None,
+        env_identity=None,
+        routing=ExecutionRouting.AMBIENT,
     )
