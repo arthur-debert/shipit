@@ -325,7 +325,7 @@ def test_first_party_action_pins_are_node24_and_lockstep_everywhere():
     for path in sorted(_WORKFLOWS.glob("*.yml")):
         for job_id, job in _load(path.name)["jobs"].items():
             for step in job.get("steps", []):
-                uses = step.get("uses", "")
+                uses = step.get("uses") or ""
                 action = uses.split("@", 1)[0]
                 if action in FIRST_PARTY_ACTION_PINS:
                     assert uses == FIRST_PARTY_ACTION_PINS[action], (
