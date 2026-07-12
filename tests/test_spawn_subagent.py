@@ -719,7 +719,7 @@ def test_shepherd_refuses_issue_or_epic_shape(tmp_path):
     assert "spec" not in calls and "cmd" not in calls
 
 
-def test_pr_option_is_only_for_shepherd(tmp_path):
+def test_pr_option_is_only_for_existing_pr_attachment_roles(tmp_path):
     b, calls = bounds(tmp_path)
 
     with pytest.raises(SpawnError, match="existing-PR attachment roles"):

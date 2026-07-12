@@ -468,13 +468,13 @@ def validate(
             epic=spec.epic,
             ws=spec.ws,
         )
-    if isinstance(profile.checkout, roleprofile.ExistingPrWriteTree):
-        attachment_roles = ", ".join(
-            role.value
-            for role in roleprofile.roles_with_checkout_strategy(
-                roleprofile.ExistingPrWriteTree
-            )
+    attachment_roles = ", ".join(
+        role.value
+        for role in roleprofile.roles_with_checkout_strategy(
+            roleprofile.ExistingPrWriteTree
         )
+    )
+    if isinstance(profile.checkout, roleprofile.ExistingPrWriteTree):
         if spec.pr is None or spec.pr < 1:
             raise _refusal(
                 "--pr must be a positive integer for an existing-PR attachment "
@@ -493,12 +493,6 @@ def validate(
                 ws=spec.ws,
             )
     elif spec.pr is not None:
-        attachment_roles = ", ".join(
-            role.value
-            for role in roleprofile.roles_with_checkout_strategy(
-                roleprofile.ExistingPrWriteTree
-            )
-        )
         raise _refusal(
             "--pr is only valid for existing-PR attachment roles "
             f"({attachment_roles}; got role {profile.role.value!r})",
