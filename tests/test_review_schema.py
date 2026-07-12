@@ -206,3 +206,148 @@ def test_a_bare_non_object_json_value_is_not_accepted():
     for bare in ("[1, 2, 3]", '"just a string"', "42"):
         with pytest.raises(ValueError, match="Could not parse valid JSON"):
             extract_json(bare)
+
+
+# --- validate_review — the schema self-check behind `shipit pr review validate` ---
+
+
+def _valid_review() -> dict:
+    """A deep-copied conforming review, so a test can mutate ONE field to a defect."""
+    return json.loads(_REVIEW_JSON)
+
+
+def test_validate_review_accepts_a_conforming_payload():
+    from shipit.review.schema import validate_review
+
+    assert validate_review(_valid_review()) == []
+
+
+def test_validate_review_accepts_null_line_and_empty_skipped():
+    """A file-level finding uses `line: null`, and a clean review's `skipped` is
+    an empty list — both conform (the shape the funnel posts every round)."""
+    from shipit.review.schema import validate_review
+
+    review = _valid_review()
+    review["comments"][0]["line"] = None
+    assert validate_review(review) == []
+
+
+def test_validate_review_rejects_a_non_object():
+    from shipit.review.schema import validate_review
+
+    problems = validate_review([1, 2, 3])
+    assert len(problems) == 1
+    assert "expected an object" in problems[0]
+
+
+def test_validate_review_reports_missing_envelope_keys():
+    from shipit.review.schema import validate_review
+
+    problems = validate_review({})
+    joined = "\n".join(problems)
+    assert "missing required key 'summary'" in joined
+    assert "missing required key 'comments'" in joined
+
+
+def test_validate_review_rejects_a_free_form_severity():
+    """The first-class check (#826): a severity outside the 4-tier enum is the
+    failure the command exists to catch — reported with the JSON path and the
+    allowed tokens."""
+    from shipit.review.schema import validate_review
+
+    review = _valid_review()
+    review["comments"][0]["severity"] = "blocker"
+    problems = validate_review(review)
+    assert any(
+        "comments[0].severity" in p and "'blocker'" in p and "critical" in p
+        for p in problems
+    ), problems
+
+
+def test_validate_review_rejects_a_bad_status_enum():
+    from shipit.review.schema import validate_review
+
+    review = _valid_review()
+    review["summary"]["status"] = "LGTM"
+    problems = validate_review(review)
+    assert any("summary.status" in p and "'LGTM'" in p for p in problems), problems
+
+
+def test_validate_review_rejects_a_bool_line():
+    """`bool` is an int subclass; a schema `integer` line must reject `true` — the
+    same rule `finding_from_dict` applies so `line: true` never anchors to line 1."""
+    from shipit.review.schema import validate_review
+
+    review = _valid_review()
+    review["comments"][0]["line"] = True
+    problems = validate_review(review)
+    assert any("comments[0].line" in p for p in problems), problems
+
+
+def test_validate_review_rejects_confidence_out_of_range():
+    from shipit.review.schema import validate_review
+
+    review = _valid_review()
+    review["comments"][0]["confidence"] = 1.5
+    problems = validate_review(review)
+    assert any(
+        "comments[0].confidence" in p and "out of range" in p for p in problems
+    ), problems
+
+
+def test_validate_review_rejects_a_non_number_confidence():
+    from shipit.review.schema import validate_review
+
+    review = _valid_review()
+    review["comments"][0]["confidence"] = "high"
+    problems = validate_review(review)
+    assert any(
+        "comments[0].confidence" in p and "expected a number" in p for p in problems
+    ), problems
+
+
+def test_validate_review_flags_unknown_keys():
+    """`REVIEW_SCHEMA` is additionalProperties:False — codex's strict schema rejects
+    an unknown key, so the validator flags it too (an agent matches that bar here)."""
+    from shipit.review.schema import validate_review
+
+    review = _valid_review()
+    review["comments"][0]["blocking"] = True
+    problems = validate_review(review)
+    assert any("unexpected key 'blocking'" in p for p in problems), problems
+
+
+def test_validate_review_reports_a_missing_comment_field_once():
+    """A missing required field is reported by the required-key pass and NOT also
+    as a type error, so each defect surfaces exactly once."""
+    from shipit.review.schema import validate_review
+
+    review = _valid_review()
+    del review["comments"][0]["fix"]
+    problems = validate_review(review)
+    matches = [p for p in problems if "comments[0]" in p and "'fix'" in p]
+    assert len(matches) == 1, problems
+    assert "missing required key 'fix'" in matches[0]
+
+
+def test_validate_review_validates_coverage_skipped_entries():
+    from shipit.review.schema import validate_review
+
+    review = _valid_review()
+    review["summary"]["coverage"]["skipped"] = [{"file": "x.py"}]
+    problems = validate_review(review)
+    assert any(
+        "summary.coverage.skipped[0]" in p and "'reason'" in p for p in problems
+    ), problems
+
+
+def test_validate_review_reports_every_problem_at_once():
+    """Multiple defects surface together, so an agent fixes them in one pass."""
+    from shipit.review.schema import validate_review
+
+    review = _valid_review()
+    review["summary"]["status"] = "LGTM"
+    review["comments"][0]["severity"] = "blocker"
+    review["comments"][0]["confidence"] = 2
+    problems = validate_review(review)
+    assert len(problems) >= 3

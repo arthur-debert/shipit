@@ -392,6 +392,7 @@ _HELP_RESOURCES = {
     ("pr", "review"): ("shipit.verbs.pr", "pr_review_help.txt"),
     ("pr", "review", "request"): ("shipit.verbs.pr", "pr_review_request_help.txt"),
     ("pr", "review", "replay"): ("shipit.verbs.pr", "pr_review_replay_help.txt"),
+    ("pr", "review", "validate"): ("shipit.verbs.pr", "pr_review_validate_help.txt"),
     ("pr", "next"): ("shipit.verbs.pr", "pr_next_help.txt"),
     ("pr", "ready"): ("shipit.verbs.pr", "pr_ready_help.txt"),
     ("pr", "classify"): ("shipit.verbs.pr", "pr_classify_help.txt"),
