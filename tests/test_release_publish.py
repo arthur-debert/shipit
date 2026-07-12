@@ -844,32 +844,54 @@ def _stage_vsix(assets_dir: Path, *names: str) -> None:
 
 def test_vsix_uploads_selects_only_the_vsix_files():
     names = ["ext-darwin-arm64.vsix", "ext-win32-x64.vsix", "ext-linux-x64.tar.gz"]
-    assert publish_mod.vsix_uploads(names) == (
+    assert publish_mod.vsix_uploads(names, "ext") == (
         "ext-darwin-arm64.vsix",
         "ext-win32-x64.vsix",
     )
 
 
+def test_vsix_uploads_scopes_to_the_artifact_never_a_sibling():
+    # A multi-artifact release coalesces every artifact's .vsix into one
+    # assets_dir; publish must ship only THIS artifact's outputs. Both the
+    # `<artifact>-` prefix AND the `<vsce-target>` middle must match — a
+    # sibling extension's .vsix (or one whose name merely starts the same) is
+    # never shipped under this artifact's endpoint/token.
+    names = [
+        "ext-darwin-arm64.vsix",  # this artifact
+        "other-darwin-arm64.vsix",  # a sibling extension
+        "ext-9.9.9.vsix",  # `ext-`-prefixed but not a vsce target middle
+    ]
+    assert publish_mod.vsix_uploads(names, "ext") == ("ext-darwin-arm64.vsix",)
+
+
 def test_vscode_marketplace_publishes_each_staged_vsix(tmp_path):
     artifact = _artifacts({"ext": {"endpoints": ["vscode-marketplace"]}})[0]
+    entries = _entries({"editors/vscode": "npm"})
     probe = SeamRecorder()
-    req = _request(tmp_path, artifact, env={"VSCE_PAT": "pat-tok"}, probe=probe)
+    req = _request(
+        tmp_path, artifact, entries=entries, env={"VSCE_PAT": "pat-tok"}, probe=probe
+    )
     _stage_vsix(req.assets_dir, "ext-darwin-arm64.vsix", "ext-win32-x64.vsix")
 
     published = publish_mod._publish_vscode_marketplace(req)
 
-    # One vsce publish per staged .vsix, sorted, --packagePath at the staged path.
+    # One `npm exec -- vsce publish` per staged .vsix, sorted, --packagePath at
+    # the staged path; vsce rides `npm exec` (the node_modules/.bin dep).
     argv0, cwd0, env0 = probe.calls[0]
     assert argv0 == (
+        "npm",
+        "exec",
+        "--",
         "vsce",
         "publish",
         "--packagePath",
         str(req.assets_dir / "ext-darwin-arm64.vsix"),
     )
-    assert cwd0 == tmp_path
+    # Runs from the npm leg dir — vsce reads that leg's package.json manifest.
+    assert cwd0 == tmp_path / "editors/vscode"
     # Token rides the env under the var vsce reads (VSCE_PAT), never argv.
     assert env0 == {"VSCE_PAT": "pat-tok"}
-    assert [c[0][3] for c in probe.calls] == [
+    assert [c[0][-1] for c in probe.calls] == [
         str(req.assets_dir / "ext-darwin-arm64.vsix"),
         str(req.assets_dir / "ext-win32-x64.vsix"),
     ]
@@ -882,14 +904,17 @@ def test_vscode_marketplace_publishes_each_staged_vsix(tmp_path):
 
 def test_vscode_marketplace_publish_over_existing_is_success(tmp_path):
     artifact = _artifacts({"ext": {"endpoints": ["vscode-marketplace"]}})[0]
+    entries = _entries({"editors/vscode": "npm"})
     probe = SeamRecorder(
         {
-            "vsce": lambda argv: _fail(
+            "npm": lambda argv: _fail(
                 argv, "ERROR  Version 1.2.3 is already published on the Marketplace."
             )
         }
     )
-    req = _request(tmp_path, artifact, env={"VSCE_PAT": "tok"}, probe=probe)
+    req = _request(
+        tmp_path, artifact, entries=entries, env={"VSCE_PAT": "tok"}, probe=probe
+    )
     _stage_vsix(req.assets_dir, "ext-darwin-arm64.vsix")
     published = publish_mod._publish_vscode_marketplace(req)
     assert published.actions == ("ext-darwin-arm64.vsix already published — resumed",)
@@ -897,10 +922,13 @@ def test_vscode_marketplace_publish_over_existing_is_success(tmp_path):
 
 def test_vscode_marketplace_a_real_failure_aborts_with_the_stderr_tail(tmp_path):
     artifact = _artifacts({"ext": {"endpoints": ["vscode-marketplace"]}})[0]
+    entries = _entries({"editors/vscode": "npm"})
     probe = SeamRecorder(
-        {"vsce": lambda argv: _fail(argv, "ERROR  invalid personal access token")}
+        {"npm": lambda argv: _fail(argv, "ERROR  invalid personal access token")}
     )
-    req = _request(tmp_path, artifact, env={"VSCE_PAT": "tok"}, probe=probe)
+    req = _request(
+        tmp_path, artifact, entries=entries, env={"VSCE_PAT": "tok"}, probe=probe
+    )
     _stage_vsix(req.assets_dir, "ext-darwin-arm64.vsix")
     with pytest.raises(ReleaseError, match="invalid personal access token"):
         publish_mod._publish_vscode_marketplace(req)
@@ -908,7 +936,8 @@ def test_vscode_marketplace_a_real_failure_aborts_with_the_stderr_tail(tmp_path)
 
 def test_vscode_marketplace_without_a_vsix_refuses(tmp_path):
     artifact = _artifacts({"ext": {"endpoints": ["vscode-marketplace"]}})[0]
-    req = _request(tmp_path, artifact, env={"VSCE_PAT": "tok"})
+    entries = _entries({"editors/vscode": "npm"})
+    req = _request(tmp_path, artifact, entries=entries, env={"VSCE_PAT": "tok"})
     req.assets_dir.mkdir(parents=True, exist_ok=True)
     with pytest.raises(ReleaseError, match="no .vsix under"):
         publish_mod._publish_vscode_marketplace(req)
@@ -924,15 +953,27 @@ def test_vscode_marketplace_missing_token_refuses(tmp_path):
 
 def test_open_vsx_publishes_with_ovsx_and_its_own_token(tmp_path):
     artifact = _artifacts({"ext": {"endpoints": ["open-vsx"]}})[0]
+    entries = _entries({"editors/vscode": "npm"})
     probe = SeamRecorder()
-    req = _request(tmp_path, artifact, env={"OVSX_PAT": "ovsx-tok"}, probe=probe)
+    req = _request(
+        tmp_path, artifact, entries=entries, env={"OVSX_PAT": "ovsx-tok"}, probe=probe
+    )
     _stage_vsix(req.assets_dir, "ext-linux-arm64.vsix")
 
     published = publish_mod._publish_open_vsx(req)
 
-    argv0, _cwd0, env0 = probe.calls[0]
-    # ovsx takes the .vsix positionally (no --packagePath), token under OVSX_PAT.
-    assert argv0 == ("ovsx", "publish", str(req.assets_dir / "ext-linux-arm64.vsix"))
+    argv0, cwd0, env0 = probe.calls[0]
+    # ovsx rides `npm exec` and takes the .vsix positionally (no --packagePath),
+    # token under OVSX_PAT; runs from the npm leg dir.
+    assert argv0 == (
+        "npm",
+        "exec",
+        "--",
+        "ovsx",
+        "publish",
+        str(req.assets_dir / "ext-linux-arm64.vsix"),
+    )
+    assert cwd0 == tmp_path / "editors/vscode"
     assert env0 == {"OVSX_PAT": "ovsx-tok"}
     assert published.endpoint == "open-vsx"
     assert published.actions == ("published ext-linux-arm64.vsix",)

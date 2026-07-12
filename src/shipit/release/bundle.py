@@ -33,14 +33,17 @@ functions the entries carry:
 - **wheel** — ``uv build`` emitting BOTH the wheel and the sdist into the
   bundle output tree (the legacy ``python-pkg.yml`` build job: one build,
   consumed by multiple publish targets).
-- **vsix** — a per-target VS Code extension ``.vsix`` via ``vsce package
-  --target <vsce-target> --out <name>-<vsce-target>.vsix`` (the legacy
+- **vsix** — a per-target VS Code extension ``.vsix`` via ``npm exec -- vsce
+  package --target <vsce-target> --out <name>-<vsce-target>.vsix`` (the legacy
   ``vscode-ext.yml@v3`` per-platform packaging: one ``.vsix`` per platform,
   each carrying that platform's prebuilt native binary). The declared platform
   triple picks the vsce target string (:data:`VSCE_TARGETS`; darwin-arm64 /
   darwin-x64 / linux-x64 / linux-arm64 / alpine-x64 / win32-x64), a triple with
-  no vsce target being a loud refusal. Runs in the ``npm`` leg (the extension
-  is a node package); the per-target binary it bundles is produced by the build
+  no vsce target being a loud refusal. Runs ``vsce`` through ``npm exec`` in the
+  ``npm`` leg (the extension is a node package) — vsce is the consumer's
+  ``@vscode/vsce`` devDependency under ``node_modules/.bin``, never a
+  fleet-provisioned PATH binary, so the local package context resolves it. The
+  per-target binary it bundles is produced by the build
   stage — for ``win32-x64`` that binary comes from the cross-target build
   (TOL02-WS11 #787, the windows leg's stated dependency, not hidden), which
   writes ``target/<triple>/release/`` for the extension's prepackage step to
@@ -398,22 +401,26 @@ def vsce_target(target: str) -> str:
         known = ", ".join(sorted(VSCE_TARGETS))
         raise ReleaseError(
             f"vsix composition: target triple `{target}` has no VS Code "
-            f"marketplace target — vsce packages one of: {known}"
+            f"marketplace target — the mapped rust triples are: {known}"
         )
     return vt
 
 
 def _compose_vsix(req: ComposeRequest) -> Composed:
-    """Package the per-target ``.vsix`` via ``vsce package --target``. See the
-    module docstring's vsix entry.
+    """Package the per-target ``.vsix`` via ``npm exec -- vsce package
+    --target``. See the module docstring's vsix entry.
 
-    Runs in the ``npm`` leg (the extension package) and writes the single
-    ``<name>-<vsce-target>.vsix`` straight into the bundle output tree; the
-    ``vsce`` output path is stated so a rerun overwrites in place (vsce
-    replaces, never appends). The native binary vsce bundles for this target is
-    the build stage's output — for ``win32-x64`` the cross-target build's
-    (TOL02-WS11 #787). A run that leaves no ``.vsix`` is a hard failure, never a
-    quiet pass (the legacy ``vscode-ext.yml@v3`` per-target contract).
+    Runs ``vsce`` through ``npm exec`` in the ``npm`` leg (the extension
+    package): vsce is the consumer's ``@vscode/vsce`` devDependency under
+    ``node_modules/.bin``, so ``npm exec`` resolves it from the local package
+    context — a bare ``vsce`` would not be on ``PATH`` under ``pixi run
+    ./bin/shipit``. Writes the single ``<name>-<vsce-target>.vsix`` straight
+    into the bundle output tree; the ``vsce`` output path is stated so a rerun
+    overwrites in place (vsce replaces, never appends). The native binary vsce
+    bundles for this target is the build stage's output — for ``win32-x64`` the
+    cross-target build's (TOL02-WS11 #787). A run that leaves no ``.vsix`` is a
+    hard failure, never a quiet pass (the legacy ``vscode-ext.yml@v3``
+    per-target contract).
     """
     leg = _leg_for(req.artifact, req.entries, "npm", "vsix")
     vt = vsce_target(req.target)
@@ -423,7 +430,17 @@ def _compose_vsix(req: ComposeRequest) -> Composed:
     if out_path.exists():
         out_path.unlink()
     req.run_cmd(
-        ["vsce", "package", "--target", vt, "--out", str(out_path)],
+        [
+            "npm",
+            "exec",
+            "--",
+            "vsce",
+            "package",
+            "--target",
+            vt,
+            "--out",
+            str(out_path),
+        ],
         req.root / leg.path,
     )
     if not out_path.is_file():

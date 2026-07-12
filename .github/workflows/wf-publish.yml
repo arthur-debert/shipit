@@ -166,6 +166,10 @@ on:
         required: false
       HOMEBREW_TAP_TOKEN:
         required: false
+      VSCE_PAT:
+        required: false
+      OVSX_PAT:
+        required: false
 
 # NO `permissions:` key, deliberately (per-stage dispatch, #780): a called
 # workflow's permissions can only DOWNGRADE the caller's token, so declaring
@@ -442,6 +446,8 @@ jobs:
           PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
         # Scar #3 is the verb's first act (pure gate before any I/O), fed
         # the stage results AND the plan's liveness facts verbatim (issue #745
         # — the verb, never this YAML, decides that an empty-matrix

@@ -22,13 +22,16 @@ switch), one adapter per name of :data:`shipit.config.ENDPOINTS`:
 - **npm** — publishes the prebuilt package tree (wasm-pack output style)
   without rebuilding (``--ignore-scripts``); publish-over-existing is
   SUCCESS.
-- **vscode-marketplace** — ``vsce publish --packagePath`` of every staged
-  per-target ``.vsix`` (the vsix composition's output), the token riding the
+- **vscode-marketplace** — ``npm exec -- vsce publish --packagePath`` of this
+  artifact's staged per-target ``.vsix`` (the vsix composition's output),
+  run from the ``npm`` leg dir (vsce is the extension's ``node_modules/.bin``
+  devDependency and reads the leg's ``package.json``), the token riding the
   ``VSCE_PAT`` env vsce reads; publish-over-existing is SUCCESS (idempotent
   resume). An external endpoint the RC guard skips — a ``-release-rc`` cut
   never touches the marketplace (rc = gh-release only).
-- **open-vsx** — ``ovsx publish`` of the same staged ``.vsix`` set to the
-  Open VSX registry (``OVSX_PAT``); publish-over-existing is SUCCESS.
+- **open-vsx** — ``npm exec -- ovsx publish`` of this artifact's same staged
+  ``.vsix`` set to the Open VSX registry (``OVSX_PAT``), run from the ``npm``
+  leg dir; publish-over-existing is SUCCESS.
   Also external / RC-guarded. Declarable now; a consumer wires it on only
   once its ``OVSX_PAT`` verifies (the lex-fmt/vscode repo's open-vsx leg is
   wired-but-off pending a working PAT — issue #789).
@@ -70,9 +73,9 @@ create becomes edit, an unchanged formula pushes nothing.
 
 Effects run through the request's injected seams: ``run_cmd``/``probe`` are
 the one Exec runner (ADR-0028 — the ``cargo publish`` / ``twine`` /
-``npm publish`` / ``vsce publish`` / ``ovsx publish`` / ``ruby -c`` argv
-literals below are those tools' one publish-side assembly point, whitelisted
-in ``tests/test_tool_argv_sweep.py``),
+``npm publish`` / ``npm exec -- vsce publish`` / ``npm exec -- ovsx publish`` /
+``ruby -c`` argv literals below are those tools' one publish-side assembly
+point, whitelisted in ``tests/test_tool_argv_sweep.py``),
 ``ghio`` the gh Tool adapter (:mod:`shipit.gh` — the gh-release REST/CLI
 calls), ``gitio`` the git adapter (the tap clone/commit/push). Each adapter's
 required secret NAME comes from the one derivation authority
@@ -105,6 +108,7 @@ from ..changelog import SEMVER_RE
 from . import ReleaseError, secretreq
 from . import brew as brew_mod
 from . import integrity as integrity_mod
+from .bundle import VSCE_TARGETS
 from .version import RELEASE_RC_PRE
 
 #: The upstream stage results a publish invocation states (GH Actions job
@@ -158,6 +162,14 @@ NPM_AUTH_ENV = "NODE_AUTH_TOKEN"
 #: (unlike cargo/npm, whose read var differs from the secret name).
 VSCE_PAT_ENV = "VSCE_PAT"
 OVSX_PAT_ENV = "OVSX_PAT"
+
+#: The vsce/ovsx target strings (:data:`shipit.release.bundle.VSCE_TARGETS`
+#: values) — the closed suffix set the vsix composition names its per-target
+#: outputs with (``<artifact>-<vsce-target>.vsix``). Publish scopes an
+#: artifact's ``.vsix`` uploads by exactly this suffix set so a sibling
+#: extension's ``.vsix`` in the coalesced assets tree is never shipped under
+#: this artifact's endpoint/token (:func:`vsix_uploads`).
+VSIX_TARGET_STRINGS: frozenset[str] = frozenset(VSCE_TARGETS.values())
 
 #: cargo's already-published stderr signatures (lowercased match): the
 #: idempotent-resume contract — an already-uploaded crate version is SUCCESS
@@ -867,10 +879,29 @@ def _publish_npm(req: PublishRequest) -> Published:
 # --------------------------------------------------------------------------
 
 
-def vsix_uploads(names: Sequence[str]) -> tuple[str, ...]:
-    """The staged per-target ``.vsix`` files, sorted. Pure over the asset
-    listing — the vsix composition's output the marketplace endpoints ship."""
-    return tuple(sorted(n for n in names if n.endswith(".vsix")))
+def vsix_uploads(names: Sequence[str], artifact: str) -> tuple[str, ...]:
+    """This ARTIFACT's staged per-target ``.vsix`` files, sorted. Pure over the
+    asset listing.
+
+    Scoped to ``artifact`` exactly as pypi scopes to its distribution
+    (:func:`_pypi_dist_name`): the vsix composition names every output
+    ``<artifact>-<vsce-target>.vsix``
+    (:func:`shipit.release.bundle._compose_vsix`), so a name counts only when
+    its ``<artifact>-`` prefix AND its ``<vsce-target>`` middle
+    (:data:`VSIX_TARGET_STRINGS`) both match. A sibling extension's ``.vsix``
+    sharing the coalesced ``assets_dir`` — or one whose name merely starts with
+    this artifact's — is never shipped under this artifact's endpoint/token.
+    """
+    prefix = f"{artifact}-"
+    return tuple(
+        sorted(
+            n
+            for n in names
+            if n.endswith(".vsix")
+            and n.startswith(prefix)
+            and n[len(prefix) : -len(".vsix")] in VSIX_TARGET_STRINGS
+        )
+    )
 
 
 def vsix_already_published(stderr: str) -> bool:
@@ -887,11 +918,20 @@ def _publish_vsix_marketplace(
     secret: str,
     token_env: str,
 ) -> Published:
-    """Publish every staged ``.vsix`` to a VS Code marketplace via ``argv_head``
-    (``vsce publish --packagePath`` / ``ovsx publish``). Shared body of the two
-    marketplace adapters — same staged-vsix set, same idempotent-resume rule,
-    differing only in the tool head, the ``secret`` NAME the token is looked up
-    under, and the ``token_env`` var the tool reads it from.
+    """Publish this artifact's staged ``.vsix`` files to a VS Code marketplace
+    via ``argv_head`` (``npm exec -- vsce publish --packagePath`` / ``npm exec
+    -- ovsx publish``). Shared body of the two marketplace adapters — same
+    per-artifact vsix set, same idempotent-resume rule, differing only in the
+    tool head, the ``secret`` NAME the token is looked up under, and the
+    ``token_env`` var the tool reads it from.
+
+    Runs from the ``npm`` leg directory (:func:`_leg_for`), like ``_publish_npm``
+    / ``_publish_pypi``: vsce/ovsx are the extension's ``node_modules/.bin``
+    devDependencies, so ``npm exec`` resolves them there, and ``vsce publish``
+    reads the leg's ``package.json`` from its cwd (from ``req.root`` it would
+    fail ``Manifest not found``). The uploaded set is scoped to THIS artifact
+    (:func:`vsix_uploads`), so a multi-artifact release never ships a sibling
+    extension's ``.vsix`` under this endpoint/token.
 
     Each ``.vsix`` publishes through the PROBE seam: a nonzero exit whose stderr
     says already-published is SUCCESS (the resume contract, ADR-0009 phase 2);
@@ -902,7 +942,9 @@ def _publish_vsix_marketplace(
     endpoints ship, so their absence is a bundle gap, never a silent skip.
     """
     token = _require_token(req, endpoint, secret)
-    vsixes = vsix_uploads(_asset_names(req.assets_dir))
+    leg = _leg_for(req.artifact, req.entries, "npm", endpoint)
+    pkg_dir = _leg_dir(req.root, leg)
+    vsixes = vsix_uploads(_asset_names(req.assets_dir), req.artifact.name)
     if not vsixes:
         raise ReleaseError(
             f"[artifacts.{req.artifact.name}] {endpoint}: no .vsix under "
@@ -912,7 +954,7 @@ def _publish_vsix_marketplace(
     actions = []
     for vsix in vsixes:
         result = req.probe(
-            [*argv_head, str(req.assets_dir / vsix)], req.root, {token_env: token}
+            [*argv_head, str(req.assets_dir / vsix)], pkg_dir, {token_env: token}
         )
         if result.rc == 0:
             actions.append(f"published {vsix}")
@@ -927,34 +969,44 @@ def _publish_vsix_marketplace(
 
 
 def _publish_vscode_marketplace(req: PublishRequest) -> Published:
-    """``vsce publish --packagePath`` of every staged ``.vsix``. See the module
-    docstring's vscode-marketplace entry. External / RC-guarded: a live-fire
-    cut skips this endpoint (:func:`plan`), so rc = gh-release only.
+    """``npm exec -- vsce publish --packagePath`` of this artifact's staged
+    ``.vsix`` files. See the module docstring's vscode-marketplace entry.
+    External / RC-guarded: a live-fire cut skips this endpoint (:func:`plan`),
+    so rc = gh-release only.
 
-    The token is looked up under its secret name (:data:`VSCE_SECRET`) and
-    rides the child env under the var vsce reads (:data:`VSCE_PAT_ENV` — the
+    vsce runs through ``npm exec`` from the ``npm`` leg dir (the ``@vscode/vsce``
+    devDependency, and the leg's ``package.json`` manifest ``vsce publish``
+    reads). The token is looked up under its secret name (:data:`VSCE_SECRET`)
+    and rides the child env under the var vsce reads (:data:`VSCE_PAT_ENV` — the
     same string), never argv. ``--packagePath`` publishes the prebuilt
     per-target package (no repackage here — the bundle stage built it).
     """
     return _publish_vsix_marketplace(
         req,
         "vscode-marketplace",
-        ["vsce", "publish", "--packagePath"],
+        ["npm", "exec", "--", "vsce", "publish", "--packagePath"],
         VSCE_SECRET,
         VSCE_PAT_ENV,
     )
 
 
 def _publish_open_vsx(req: PublishRequest) -> Published:
-    """``ovsx publish`` of every staged ``.vsix`` to Open VSX. See the module
-    docstring's open-vsx entry. External / RC-guarded like vscode-marketplace.
+    """``npm exec -- ovsx publish`` of this artifact's staged ``.vsix`` files to
+    Open VSX. See the module docstring's open-vsx entry. External / RC-guarded
+    like vscode-marketplace.
 
-    The token is looked up under its secret name (:data:`OVSX_SECRET`) and
-    rides the child env under the var ovsx reads (:data:`OVSX_PAT_ENV`), never
-    argv. ``ovsx publish <file>`` takes the prebuilt ``.vsix`` positionally.
+    ovsx runs through ``npm exec`` from the ``npm`` leg dir (the ``ovsx``
+    devDependency). The token is looked up under its secret name
+    (:data:`OVSX_SECRET`) and rides the child env under the var ovsx reads
+    (:data:`OVSX_PAT_ENV`), never argv. ``ovsx publish <file>`` takes the
+    prebuilt ``.vsix`` positionally.
     """
     return _publish_vsix_marketplace(
-        req, "open-vsx", ["ovsx", "publish"], OVSX_SECRET, OVSX_PAT_ENV
+        req,
+        "open-vsx",
+        ["npm", "exec", "--", "ovsx", "publish"],
+        OVSX_SECRET,
+        OVSX_PAT_ENV,
     )
 
 

@@ -602,17 +602,21 @@ def test_vsix_packages_per_target_into_the_out_tree(tmp_path):
         {"ext": {"build": ["npm"], "bundle": {"composition": "vsix"}}}
     )
     entries = _entries({"editors/vscode": "npm"})
-    recorder = RunRecorder({"vsce": _vsce_writes_out})
+    recorder = RunRecorder({"npm": _vsce_writes_out})
 
     composed = bundle_mod.VSIX.compose(
         _request(tmp_path, artifact, entries, target=MAC, run_cmd=recorder)
     )
 
     out_path = tmp_path / "dist" / "ext-darwin-arm64.vsix"
-    # vsce runs IN the npm leg dir; the .vsix lands in the bundle out tree.
+    # vsce runs through `npm exec` (the node_modules/.bin devDependency, not a
+    # PATH binary) IN the npm leg dir; the .vsix lands in the bundle out tree.
     assert recorder.calls == [
         (
             (
+                "npm",
+                "exec",
+                "--",
                 "vsce",
                 "package",
                 "--target",
@@ -634,7 +638,7 @@ def test_vsix_windows_target_maps_to_win32_x64(tmp_path):
         {"ext": {"build": ["npm"], "bundle": {"composition": "vsix"}}}
     )
     entries = _entries({"editors/vscode": "npm"})
-    recorder = RunRecorder({"vsce": _vsce_writes_out})
+    recorder = RunRecorder({"npm": _vsce_writes_out})
 
     composed = bundle_mod.VSIX.compose(
         _request(tmp_path, artifact, entries, target=WIN, run_cmd=recorder)

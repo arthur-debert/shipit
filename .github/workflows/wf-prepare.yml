@@ -107,6 +107,10 @@ on:
         required: false
       HOMEBREW_TAP_TOKEN:
         required: false
+      VSCE_PAT:
+        required: false
+      OVSX_PAT:
+        required: false
       APPLE_CERTIFICATE:
         required: false
       APPLE_CERTIFICATE_PASSWORD:
@@ -177,6 +181,8 @@ jobs:
           PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           ASC_API_KEY_BASE64: ${{ secrets.ASC_API_KEY_BASE64 }}
