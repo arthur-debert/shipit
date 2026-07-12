@@ -131,6 +131,17 @@ _ADAPTER_HOMES: dict[str, tuple[str, ...]] = {
     # `npm publish` extend those tools' home lists above.
     "twine": ("release/publish.py",),
     "ruby": ("release/publish.py",),
+    # The VS Code marketplace path (TOL02-WS13 #789): vsce/ovsx are the
+    # consumer's node_modules/.bin devDependencies, never PATH binaries, so
+    # they ride `npm exec -- vsce/ovsx ...` — the argv HEAD is `npm` (covered by
+    # npm's homes above: `release/bundle.py` for `vsce package`,
+    # `release/publish.py` for `vsce/ovsx publish`), so the sweep never sees a
+    # bare vsce/ovsx head. These entries still pin the ONLY files that may
+    # assemble those tools' argv AND keep the provisioning bijection
+    # (test_tool_provisioning_guard) — vsce/ovsx are provisioned tools whether
+    # or not they front their own argv.
+    "vsce": ("release/bundle.py", "release/publish.py"),
+    "ovsx": ("release/publish.py",),
     "bin/check-e2e": ("tools/e2e.py",),
     # The act harness (TOL01-WS04): `shipit wf test` is the one place that
     # drives act, and its docker probes/builds live beside it.

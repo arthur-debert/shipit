@@ -166,6 +166,10 @@ on:
         required: false
       HOMEBREW_TAP_TOKEN:
         required: false
+      VSCE_PAT:
+        required: false
+      OVSX_PAT:
+        required: false
       # The notify-downstreams cascade's cross-repo PAT (TOL02-WS16 #792):
       # the ambient GITHUB_TOKEN cannot repository_dispatch into another repo,
       # so this token carries the downstreams' write scope. Optional like
@@ -449,6 +453,8 @@ jobs:
           PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
           DOWNSTREAM_DISPATCH_TOKEN: ${{ secrets.DOWNSTREAM_DISPATCH_TOKEN }}
         # Scar #3 is the verb's first act (pure gate before any I/O), fed
         # the stage results AND the plan's liveness facts verbatim (issue #745

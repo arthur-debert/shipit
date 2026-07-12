@@ -24,6 +24,19 @@ switch), one adapter per name of :data:`shipit.config.ENDPOINTS`:
   ships) without rebuilding (``--ignore-scripts``), scoped to THIS artifact's
   package name (the assert-bundle identity chain); publish-over-existing is
   SUCCESS.
+- **vscode-marketplace** — ``npm exec -- vsce publish --packagePath`` of this
+  artifact's staged per-target ``.vsix`` (the vsix composition's output),
+  run from the ``npm`` leg dir (vsce is the extension's ``node_modules/.bin``
+  devDependency and reads the leg's ``package.json``), the token riding the
+  ``VSCE_PAT`` env vsce reads; publish-over-existing is SUCCESS (idempotent
+  resume). An external endpoint the RC guard skips — a ``-release-rc`` cut
+  never touches the marketplace (rc = gh-release only).
+- **open-vsx** — ``npm exec -- ovsx publish`` of this artifact's same staged
+  ``.vsix`` set to the Open VSX registry (``OVSX_PAT``), run from the ``npm``
+  leg dir; publish-over-existing is SUCCESS.
+  Also external / RC-guarded. Declarable now; a consumer wires it on only
+  once its ``OVSX_PAT`` verifies (the lex-fmt/vscode repo's open-vsx leg is
+  wired-but-off pending a working PAT — issue #789).
 - **brew** (the one *derived* endpoint) — renders the shared formula
   template (:mod:`shipit.release.brew`) against the FINAL release-asset
   URLs/sha256s and the crate's metadata, includes the private-repo download
@@ -72,8 +85,9 @@ create becomes edit, an unchanged formula pushes nothing.
 
 Effects run through the request's injected seams: ``run_cmd``/``probe`` are
 the one Exec runner (ADR-0028 — the ``cargo publish`` / ``twine`` /
-``npm publish`` / ``ruby -c`` argv literals below are those tools' one
-publish-side assembly point, whitelisted in ``tests/test_tool_argv_sweep.py``),
+``npm publish`` / ``npm exec -- vsce publish`` / ``npm exec -- ovsx publish`` /
+``ruby -c`` argv literals below are those tools' one publish-side assembly
+point, whitelisted in ``tests/test_tool_argv_sweep.py``),
 ``ghio`` the gh Tool adapter (:mod:`shipit.gh` — the gh-release REST/CLI
 calls), ``gitio`` the git adapter (the tap clone/commit/push). Each adapter's
 required secret NAME comes from the one derivation authority
@@ -106,6 +120,7 @@ from ..changelog import SEMVER_RE
 from . import ReleaseError, secretreq
 from . import brew as brew_mod
 from . import integrity as integrity_mod
+from .bundle import VSCE_TARGETS
 from .version import RELEASE_RC_PRE
 
 #: The upstream stage results a publish invocation states (GH Actions job
@@ -140,6 +155,8 @@ CRATES_SECRET = secretreq.ENDPOINT_SECRETS["crates"][0]
 PYPI_SECRET = secretreq.ENDPOINT_SECRETS["pypi"][0]
 TESTPYPI_SECRET = secretreq.TESTPYPI_SECRET
 NPM_SECRET = secretreq.ENDPOINT_SECRETS["npm"][0]
+VSCE_SECRET = secretreq.ENDPOINT_SECRETS["vscode-marketplace"][0]
+OVSX_SECRET = secretreq.ENDPOINT_SECRETS["open-vsx"][0]
 TAP_SECRET = secretreq.ENDPOINT_SECRETS["brew"][0]
 NOTIFY_SECRET = secretreq.ENDPOINT_SECRETS["notify-downstreams"][0]
 
@@ -158,6 +175,22 @@ NOTIFY_EVENT_TYPE = "upstream-release"
 CARGO_TOKEN_ENV = "CARGO_REGISTRY_TOKEN"
 NPM_AUTH_ENV = "NODE_AUTH_TOKEN"
 
+#: The env var vsce/ovsx READ their personal access token under — the same
+#: string as each endpoint's secret NAME (:data:`VSCE_SECRET` /
+#: :data:`OVSX_SECRET`): both tools take ``VSCE_PAT`` / ``OVSX_PAT`` from the
+#: environment (or ``-p``), so provision-name and tool-read-name coincide here
+#: (unlike cargo/npm, whose read var differs from the secret name).
+VSCE_PAT_ENV = "VSCE_PAT"
+OVSX_PAT_ENV = "OVSX_PAT"
+
+#: The vsce/ovsx target strings (:data:`shipit.release.bundle.VSCE_TARGETS`
+#: values) — the closed suffix set the vsix composition names its per-target
+#: outputs with (``<artifact>-<vsce-target>.vsix``). Publish scopes an
+#: artifact's ``.vsix`` uploads by exactly this suffix set so a sibling
+#: extension's ``.vsix`` in the coalesced assets tree is never shipped under
+#: this artifact's endpoint/token (:func:`vsix_uploads`).
+VSIX_TARGET_STRINGS: frozenset[str] = frozenset(VSCE_TARGETS.values())
+
 #: cargo's already-published stderr signatures (lowercased match): the
 #: idempotent-resume contract — an already-uploaded crate version is SUCCESS
 #: (PRD story 36), so a re-run after a mid-workspace failure skips past it.
@@ -171,6 +204,16 @@ CRATE_ALREADY_PUBLISHED_MARKERS: tuple[str, ...] = (
 NPM_ALREADY_PUBLISHED_MARKERS: tuple[str, ...] = (
     "previously published",
     "cannot publish over",
+)
+
+#: vsce/ovsx's already-published stderr signatures (lowercased match): the
+#: same already-published-is-success resume contract for the two VS Code
+#: marketplaces — re-running the terminal stage over an already-shipped
+#: version converges (ADR-0009 phase 2), never a spurious failure.
+VSIX_ALREADY_PUBLISHED_MARKERS: tuple[str, ...] = (
+    "already exists",
+    "already published",
+    "is already published",
 )
 
 #: The runner seams an adapter executes through — ``(argv, cwd, env) ->
@@ -899,6 +942,142 @@ def _publish_npm(req: PublishRequest) -> Published:
 
 
 # --------------------------------------------------------------------------
+# vscode-marketplace / open-vsx — per-target .vsix publish (external, RC-guarded)
+# --------------------------------------------------------------------------
+
+
+def vsix_uploads(names: Sequence[str], artifact: str) -> tuple[str, ...]:
+    """This ARTIFACT's staged per-target ``.vsix`` files, sorted. Pure over the
+    asset listing.
+
+    Scoped to ``artifact`` exactly as pypi scopes to its distribution
+    (:func:`_pypi_dist_name`): the vsix composition names every output
+    ``<artifact>-<vsce-target>.vsix``
+    (:func:`shipit.release.bundle._compose_vsix`), so a name counts only when
+    its ``<artifact>-`` prefix AND its ``<vsce-target>`` middle
+    (:data:`VSIX_TARGET_STRINGS`) both match. A sibling extension's ``.vsix``
+    sharing the coalesced ``assets_dir`` — or one whose name merely starts with
+    this artifact's — is never shipped under this artifact's endpoint/token.
+    """
+    prefix = f"{artifact}-"
+    return tuple(
+        sorted(
+            n
+            for n in names
+            if n.endswith(".vsix")
+            and n.startswith(prefix)
+            and n[len(prefix) : -len(".vsix")] in VSIX_TARGET_STRINGS
+        )
+    )
+
+
+def vsix_already_published(stderr: str) -> bool:
+    """Whether a failed ``vsce``/``ovsx`` publish is the already-published
+    resume case (:data:`VSIX_ALREADY_PUBLISHED_MARKERS`). Pure."""
+    lowered = stderr.lower()
+    return any(marker in lowered for marker in VSIX_ALREADY_PUBLISHED_MARKERS)
+
+
+def _publish_vsix_marketplace(
+    req: PublishRequest,
+    endpoint: str,
+    argv_head: Sequence[str],
+    secret: str,
+    token_env: str,
+) -> Published:
+    """Publish this artifact's staged ``.vsix`` files to a VS Code marketplace
+    via ``argv_head`` (``npm exec -- vsce publish --packagePath`` / ``npm exec
+    -- ovsx publish``). Shared body of the two marketplace adapters — same
+    per-artifact vsix set, same idempotent-resume rule, differing only in the
+    tool head, the ``secret`` NAME the token is looked up under, and the
+    ``token_env`` var the tool reads it from.
+
+    Runs from the ``npm`` leg directory (:func:`_leg_for`), like ``_publish_npm``
+    / ``_publish_pypi``: vsce/ovsx are the extension's ``node_modules/.bin``
+    devDependencies, so ``npm exec`` resolves them there, and ``vsce publish``
+    reads the leg's ``package.json`` from its cwd (from ``req.root`` it would
+    fail ``Manifest not found``). The uploaded set is scoped to THIS artifact
+    (:func:`vsix_uploads`), so a multi-artifact release never ships a sibling
+    extension's ``.vsix`` under this endpoint/token.
+
+    Each ``.vsix`` publishes through the PROBE seam: a nonzero exit whose stderr
+    says already-published is SUCCESS (the resume contract, ADR-0009 phase 2);
+    anything else aborts with the stderr tail. The token rides the child env
+    under the var the tool reads (``token_env``), never argv. A run with no
+    staged ``.vsix`` is a loud refusal — the vsix composition
+    (:func:`shipit.release.bundle._compose_vsix`) produces the assets these
+    endpoints ship, so their absence is a bundle gap, never a silent skip.
+    """
+    token = _require_token(req, endpoint, secret)
+    leg = _leg_for(req.artifact, req.entries, "npm", endpoint)
+    pkg_dir = _leg_dir(req.root, leg)
+    vsixes = vsix_uploads(_asset_names(req.assets_dir), req.artifact.name)
+    if not vsixes:
+        raise ReleaseError(
+            f"[artifacts.{req.artifact.name}] {endpoint}: no .vsix under "
+            f"{req.assets_dir} — the vsix composition produces the per-target "
+            f"packages these endpoints publish; run `shipit release bundle` first"
+        )
+    actions = []
+    for vsix in vsixes:
+        result = req.probe(
+            [*argv_head, str(req.assets_dir / vsix)], pkg_dir, {token_env: token}
+        )
+        if result.rc == 0:
+            actions.append(f"published {vsix}")
+        elif vsix_already_published(result.stderr):
+            actions.append(f"{vsix} already published — resumed")
+        else:
+            raise ReleaseError(
+                f"[artifacts.{req.artifact.name}] {endpoint}: publishing {vsix} "
+                f"failed:\n{_tail(result.stderr)}"
+            )
+    return Published(req.artifact.name, endpoint, tuple(actions))
+
+
+def _publish_vscode_marketplace(req: PublishRequest) -> Published:
+    """``npm exec -- vsce publish --packagePath`` of this artifact's staged
+    ``.vsix`` files. See the module docstring's vscode-marketplace entry.
+    External / RC-guarded: a live-fire cut skips this endpoint (:func:`plan`),
+    so rc = gh-release only.
+
+    vsce runs through ``npm exec`` from the ``npm`` leg dir (the ``@vscode/vsce``
+    devDependency, and the leg's ``package.json`` manifest ``vsce publish``
+    reads). The token is looked up under its secret name (:data:`VSCE_SECRET`)
+    and rides the child env under the var vsce reads (:data:`VSCE_PAT_ENV` — the
+    same string), never argv. ``--packagePath`` publishes the prebuilt
+    per-target package (no repackage here — the bundle stage built it).
+    """
+    return _publish_vsix_marketplace(
+        req,
+        "vscode-marketplace",
+        ["npm", "exec", "--", "vsce", "publish", "--packagePath"],
+        VSCE_SECRET,
+        VSCE_PAT_ENV,
+    )
+
+
+def _publish_open_vsx(req: PublishRequest) -> Published:
+    """``npm exec -- ovsx publish`` of this artifact's staged ``.vsix`` files to
+    Open VSX. See the module docstring's open-vsx entry. External / RC-guarded
+    like vscode-marketplace.
+
+    ovsx runs through ``npm exec`` from the ``npm`` leg dir (the ``ovsx``
+    devDependency). The token is looked up under its secret name
+    (:data:`OVSX_SECRET`) and rides the child env under the var ovsx reads
+    (:data:`OVSX_PAT_ENV`), never argv. ``ovsx publish <file>`` takes the
+    prebuilt ``.vsix`` positionally.
+    """
+    return _publish_vsix_marketplace(
+        req,
+        "open-vsx",
+        ["npm", "exec", "--", "ovsx", "publish"],
+        OVSX_SECRET,
+        OVSX_PAT_ENV,
+    )
+
+
+# --------------------------------------------------------------------------
 # brew (derived)
 # --------------------------------------------------------------------------
 
@@ -1133,6 +1312,18 @@ PYPI = EndpointAdapter(
 NPM = EndpointAdapter(
     "npm", "release", _publish_npm, secrets=secretreq.ENDPOINT_SECRETS["npm"]
 )
+VSCODE_MARKETPLACE = EndpointAdapter(
+    "vscode-marketplace",
+    "release",
+    _publish_vscode_marketplace,
+    secrets=secretreq.ENDPOINT_SECRETS["vscode-marketplace"],
+)
+OPEN_VSX = EndpointAdapter(
+    "open-vsx",
+    "release",
+    _publish_open_vsx,
+    secrets=secretreq.ENDPOINT_SECRETS["open-vsx"],
+)
 BREW = EndpointAdapter(
     "brew",
     "derived",
@@ -1154,16 +1345,19 @@ NOTIFY_DOWNSTREAMS = EndpointAdapter(
 #: The CLOSED registry, in a stable order (the config boundary's
 #: :data:`shipit.config.ENDPOINTS` names exactly this set — asserted in the
 #: tests, so the two can never drift). Adding an endpoint is adding an entry
-#: here plus the config name — never a switch. Marketplace-class adapters
-#: (VS Marketplace, Open VSX, Zed) are deliberately ABSENT
-#: (PRD Out of Scope): their entries land when their repos migrate.
-#: notify-downstreams (TOL02-WS16 #792) is present — not a marketplace
-#: publisher but the generated-parser release's cross-repo cascade.
+#: here plus the config name — never a switch. The two VS Code marketplace
+#: adapters (vscode-marketplace, open-vsx) publish the vsix composition's
+#: per-target ``.vsix`` and are external / RC-guarded (TOL02-WS13 #789);
+#: notify-downstreams (TOL02-WS16 #792) is present too — not a marketplace
+#: publisher but the generated-parser release's cross-repo cascade. Other
+#: marketplace-class adapters (Zed) stay ABSENT until their repos migrate.
 ADAPTERS: tuple[EndpointAdapter, ...] = (
     GH_RELEASE,
     CRATES,
     PYPI,
     NPM,
+    VSCODE_MARKETPLACE,
+    OPEN_VSX,
     BREW,
     NOTIFY_DOWNSTREAMS,
 )

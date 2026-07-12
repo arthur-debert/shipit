@@ -456,9 +456,12 @@ def load_toolchains(cfg: dict) -> tuple[ToolchainEntry, ...]:
 
 
 #: The CLOSED distribution-endpoint registry names an ``endpoints`` list may
-#: use (PRD: one adapter per endpoint; gh-release, crates, pypi, npm, brew,
-#: notify-downstreams). Adding an endpoint is an adapter plus an entry here
-#: plus its secret-requirement declaration
+#: use (PRD: one adapter per endpoint; gh-release, crates, pypi, npm,
+#: vscode-marketplace, open-vsx, brew, notify-downstreams — the two VS Code
+#: marketplace endpoints land with the ``.vsix`` composition (TOL02-WS13 #789),
+#: notify-downstreams the tree-sitter cascade (TOL02-WS16 #792)). Adding an
+#: endpoint is an adapter plus an entry here plus its secret-requirement
+#: declaration
 #: (:data:`shipit.release.secretreq.ENDPOINT_SECRETS`); consumed by the
 #: release planner (``release preflight``, WS02) and by the publish stage's
 #: adapter registry (:mod:`shipit.release.publish`, TOL02-WS05), whose entries
@@ -474,6 +477,8 @@ ENDPOINTS: tuple[str, ...] = (
     "crates",
     "pypi",
     "npm",
+    "vscode-marketplace",
+    "open-vsx",
     "brew",
     "notify-downstreams",
 )

@@ -48,9 +48,11 @@ the runner its block pins; the DEFAULT pixi env is the PATH that run sees):
 | `npm` (`nodejs`) | prepare (`npm version`), bundle (`npm pack` of the wasm-pack tree, #788), build (`npm run build`), publish (`npm publish`) | pixi-managed (`pixi.toml#shipit-node-deps`) — delivered on the node manifest signal AND on a declared `wasm-pack` composition (#788: its `npm pack` needs npm, but wasm-pack rides the rust signal and the crate's npm `package.json` is generated, never tracked, so install unions the node signal off the declaration — `Composition.provisions_signal`) | `nodejs` `26.*`, `pnpm` `11.*` | `test_missing_npm_gets_the_reconcile_remedy` (#801, closed hole 3), `test_wasm_pack_composition_delivers_the_node_deps_block` (#788) |
 | `go` | build (`go build`) | runner image (ubuntu images still carry Go) | floats | none (see holes) |
 | `pytest` | test lane (not a release stage) | consumer env | consumer's | — |
-| `tree-sitter` | test lane (corpus tests, `tree-sitter test`); build (`tree-sitter generate`); bundle (tarball composition) | consumer-owned (not on conda-forge — see holes) | consumer's | — (open hole 6) |
+| `tree-sitter` | test lane (corpus tests, `tree-sitter test`); build (`tree-sitter generate`); bundle (tarball composition) | consumer-owned (not on conda-forge — see holes) | consumer's | — (open hole 7) |
 | `twine` | publish (pypi endpoint) | pixi-managed (`pixi.toml#shipit-python-release-deps`, #801 — the python toolchain signal, closed hole 2) | `6.2.*` | `test_missing_twine_gets_the_reconcile_remedy` |
 | `ruby` | publish (brew formula `ruby -c` syntax check) | runner image (ubuntu) | floats | — |
+| `vsce` | bundle (vsix composition `vsce package --target`), publish (vscode-marketplace `vsce publish`) | consumer-owned (the extension repo's `@vscode/vsce` devDependency; no fleet block) | consumer's | — (open hole 6) |
+| `ovsx` | publish (open-vsx `ovsx publish`) | consumer-owned (the extension repo's `ovsx` devDependency) | consumer's | — (wired-but-off, open hole 6) |
 | `tar` | bundle (archive composition), sign (reseal payload) | runner image (ubuntu + macos) | floats | — |
 | `zip` | bundle (zip archive legs) | runner image (ubuntu + macos; ABSENT on windows runners) | floats | — (windows legs out of contract, see holes) |
 | `codesign` / `security` / `xcrun` / `hdiutil` | sign (mac signer unit, wf-sign-mac on `macos-*`) | runner image (Apple toolchain; notarytool ⊂ Xcode) | Xcode image version | — (image contract) |
@@ -103,7 +105,17 @@ to one line each) so the guard notes' numbering stays stable:
    windows runner, which ships no `zip`. Windows legs are out of contract
    fleet-wide today (#785: cross-compile lanes out of contract); the drift
    guard row records it so a windows onboarding cannot miss it.
-6. **`tree-sitter` CLI on release runners.** The generate/corpus/tarball
+6. **`vsce`/`ovsx` on the vscode marketplace legs (TOL02-WS13, #789).** The
+   VS Code marketplace tools are node CLIs the extension repo carries as
+   `@vscode/vsce` / `ovsx` devDependencies (`npm ci` → `node_modules/.bin`),
+   not conda-forge packages — so they are consumer-owned today, with no
+   fleet-managed block. The vsix composition's `win32-x64` leg additionally
+   depends on the cross-target build (TOL02-WS11 #787) for the windows binary
+   it packages. The hole closes when a real vscode consumer (lex-fmt/vscode)
+   cuts an rc through the pipeline as ADP02 resumes — either onboarding a
+   managed node block or ratifying consumer-owned as the deliberate posture;
+   `ovsx` stays wired-but-off until that consumer's `OVSX_PAT` verifies.
+7. **`tree-sitter` CLI on release runners.** The generate/corpus/tarball
    composition (TOL02-WS16 #792) shells out to `tree-sitter`, which is not on
    conda-forge (a WS12–WS16 composition tool), so no managed pixi block can
    carry it — the consumer's own env provides it today (consumer-owned). When
@@ -117,16 +129,17 @@ provisioning to traverse prepare → publish: every release-stage tool is
 runner-image, setup-pixi, pixi-managed, or the recorded cargo-deb
 self-provision exception. The proof is the #801 canary rc — a shipit-canary
 `-release-rc` cut on stock managed blocks only — run after the canary repo's
-install reconcile picks these blocks up.
+install reconcile picks these blocks up. The lone exception is a VS Code
+extension consumer, whose `vsce`/`ovsx` ride its own node manifest (open
+hole 6) — a marketplace-shaped consumer, not the stock rust/python one.
 
-Future composition tools (WS13–WS15: `vsce`, `electron-builder`,
-`tauri`; notary tooling beyond `xcrun notarytool`) are not
-Exec tools yet (WS12's `wasm-pack` and WS16's `tree-sitter` have landed —
-their rows are in the inventory above). When their workstreams land argv for
-them, the drift guard
-fails until the tool gets a provisioning row — that is the guard doing its
-job; do not allowlist around it. (`tree-sitter` landed with WS16 #792 — its
-row is above, its provisioning an open hole until an rc consumer pins it.)
+Future composition tools (WS14–WS15: `electron-builder`, `tauri`; notary
+tooling beyond `xcrun notarytool`) are not Exec tools yet — WS12's
+`wasm-pack`, WS13's `vsce`/`ovsx` (open hole 6), and WS16's `tree-sitter`
+(open hole 7) have all landed, their rows in the inventory above. When the
+remaining workstreams land argv for their tools, the drift guard fails until
+the tool gets a provisioning row — that is the guard doing its job; do not
+allowlist around it.
 
 ## The drift guard
 

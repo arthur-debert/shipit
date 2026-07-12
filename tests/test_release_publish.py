@@ -318,10 +318,11 @@ def test_is_live_fire(version, live):
 
 
 def test_registry_mirrors_the_config_endpoint_set_and_stages():
-    """The closed registry: exactly the config boundary's ENDPOINTS (no
-    marketplace-class adapters — PRD Out of Scope), brew + notify-downstreams
-    the derived entries, gh-release the one the RC guard keeps, brew +
-    notify-downstreams the stable-only pair (#792)."""
+    """The closed registry: exactly the config boundary's ENDPOINTS (now
+    including the two VS Code marketplace endpoints, TOL02-WS13, and the
+    notify-downstreams cascade, TOL02-WS16); brew + notify-downstreams the
+    derived entries and the stable-only pair (#792), gh-release the one the RC
+    guard keeps."""
     assert publish_mod.names() == config.ENDPOINTS
     assert [a.name for a in publish_mod.ADAPTERS if a.stage == "derived"] == [
         "brew",
@@ -338,6 +339,11 @@ def test_registry_mirrors_the_config_endpoint_set_and_stages():
         "brew",
         "notify-downstreams",
     ]
+    # The marketplace endpoints are external (RC-guarded) release-stage entries.
+    assert {"vscode-marketplace", "open-vsx"} <= {a.name for a in publish_mod.ADAPTERS}
+    for name in ("vscode-marketplace", "open-vsx"):
+        adapter = publish_mod.adapter_for(name)
+        assert adapter is not None and adapter.external and adapter.stage == "release"
 
 
 def test_registry_secret_names_mirror_the_derivation_authority():
@@ -460,10 +466,12 @@ def test_plan_live_fire_skips_notify_downstreams_via_rc_guard():
 def test_plan_unknown_endpoint_is_a_hard_error_naming_the_known_set():
     """The config boundary already rejects unknown names; the registry
     re-refuses for hand-built artifacts — never a quiet skip."""
-    rogue = config.Artifact(name="ext", endpoints=("vs-marketplace",))
+    rogue = config.Artifact(name="ext", endpoints=("zed-extensions",))
     with pytest.raises(ReleaseError, match="unknown endpoint") as err:
         publish_mod.plan([rogue], prerelease=False, live_fire=False)
-    assert "gh-release, crates, pypi, npm, brew" in str(err.value)
+    assert "gh-release, crates, pypi, npm, vscode-marketplace, open-vsx, brew" in str(
+        err.value
+    )
 
 
 def test_plan_brew_alone_refuses_without_an_unskipped_gh_release():
@@ -926,6 +934,237 @@ def test_npm_publish_over_existing_is_success(tmp_path):
     )
     published = publish_mod._publish_npm(req)
     assert published.actions == ("@lex-fmt/lex-wasm 1.2.3 already published — resumed",)
+
+
+# --------------------------------------------------------------------------
+# vscode-marketplace / open-vsx — per-target .vsix publish (external, RC-guarded)
+# --------------------------------------------------------------------------
+
+
+def _stage_vsix(assets_dir: Path, *names: str) -> None:
+    """Drop empty per-target .vsix files (plus a non-vsix asset) in the staged
+    tree — the bundle stage's vsix-composition output the endpoints publish."""
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    for name in names:
+        (assets_dir / name).write_bytes(b"PK\x03\x04")  # a zip magic; content unused
+    (assets_dir / "ext-linux-x64.tar.gz").write_bytes(b"")  # never a .vsix upload
+
+
+def test_vsix_uploads_selects_only_the_vsix_files():
+    names = ["ext-darwin-arm64.vsix", "ext-win32-x64.vsix", "ext-linux-x64.tar.gz"]
+    assert publish_mod.vsix_uploads(names, "ext") == (
+        "ext-darwin-arm64.vsix",
+        "ext-win32-x64.vsix",
+    )
+
+
+def test_vsix_uploads_scopes_to_the_artifact_never_a_sibling():
+    # A multi-artifact release coalesces every artifact's .vsix into one
+    # assets_dir; publish must ship only THIS artifact's outputs. Both the
+    # `<artifact>-` prefix AND the `<vsce-target>` middle must match — a
+    # sibling extension's .vsix (or one whose name merely starts the same) is
+    # never shipped under this artifact's endpoint/token.
+    names = [
+        "ext-darwin-arm64.vsix",  # this artifact
+        "other-darwin-arm64.vsix",  # a sibling extension
+        "ext-9.9.9.vsix",  # `ext-`-prefixed but not a vsce target middle
+    ]
+    assert publish_mod.vsix_uploads(names, "ext") == ("ext-darwin-arm64.vsix",)
+
+
+def test_vscode_marketplace_publishes_each_staged_vsix(tmp_path):
+    artifact = _artifacts({"ext": {"endpoints": ["vscode-marketplace"]}})[0]
+    entries = _entries({"editors/vscode": "npm"})
+    probe = SeamRecorder()
+    req = _request(
+        tmp_path, artifact, entries=entries, env={"VSCE_PAT": "pat-tok"}, probe=probe
+    )
+    _stage_vsix(req.assets_dir, "ext-darwin-arm64.vsix", "ext-win32-x64.vsix")
+
+    published = publish_mod._publish_vscode_marketplace(req)
+
+    # One `npm exec -- vsce publish` per staged .vsix, sorted, --packagePath at
+    # the staged path; vsce rides `npm exec` (the node_modules/.bin dep).
+    argv0, cwd0, env0 = probe.calls[0]
+    assert argv0 == (
+        "npm",
+        "exec",
+        "--",
+        "vsce",
+        "publish",
+        "--packagePath",
+        str(req.assets_dir / "ext-darwin-arm64.vsix"),
+    )
+    # Runs from the npm leg dir — vsce reads that leg's package.json manifest.
+    assert cwd0 == tmp_path / "editors/vscode"
+    # Token rides the env under the var vsce reads (VSCE_PAT), never argv.
+    assert env0 == {"VSCE_PAT": "pat-tok"}
+    assert [c[0][-1] for c in probe.calls] == [
+        str(req.assets_dir / "ext-darwin-arm64.vsix"),
+        str(req.assets_dir / "ext-win32-x64.vsix"),
+    ]
+    assert published.endpoint == "vscode-marketplace"
+    assert published.actions == (
+        "published ext-darwin-arm64.vsix",
+        "published ext-win32-x64.vsix",
+    )
+
+
+def test_vscode_marketplace_publish_over_existing_is_success(tmp_path):
+    artifact = _artifacts({"ext": {"endpoints": ["vscode-marketplace"]}})[0]
+    entries = _entries({"editors/vscode": "npm"})
+    probe = SeamRecorder(
+        {
+            "npm": lambda argv: _fail(
+                argv, "ERROR  Version 1.2.3 is already published on the Marketplace."
+            )
+        }
+    )
+    req = _request(
+        tmp_path, artifact, entries=entries, env={"VSCE_PAT": "tok"}, probe=probe
+    )
+    _stage_vsix(req.assets_dir, "ext-darwin-arm64.vsix")
+    published = publish_mod._publish_vscode_marketplace(req)
+    assert published.actions == ("ext-darwin-arm64.vsix already published — resumed",)
+
+
+def test_vscode_marketplace_a_real_failure_aborts_with_the_stderr_tail(tmp_path):
+    artifact = _artifacts({"ext": {"endpoints": ["vscode-marketplace"]}})[0]
+    entries = _entries({"editors/vscode": "npm"})
+    probe = SeamRecorder(
+        {"npm": lambda argv: _fail(argv, "ERROR  invalid personal access token")}
+    )
+    req = _request(
+        tmp_path, artifact, entries=entries, env={"VSCE_PAT": "tok"}, probe=probe
+    )
+    _stage_vsix(req.assets_dir, "ext-darwin-arm64.vsix")
+    with pytest.raises(ReleaseError, match="invalid personal access token"):
+        publish_mod._publish_vscode_marketplace(req)
+
+
+def test_vscode_marketplace_without_a_vsix_refuses(tmp_path):
+    artifact = _artifacts({"ext": {"endpoints": ["vscode-marketplace"]}})[0]
+    entries = _entries({"editors/vscode": "npm"})
+    req = _request(tmp_path, artifact, entries=entries, env={"VSCE_PAT": "tok"})
+    req.assets_dir.mkdir(parents=True, exist_ok=True)
+    with pytest.raises(ReleaseError, match="no .vsix under"):
+        publish_mod._publish_vscode_marketplace(req)
+
+
+def test_vscode_marketplace_missing_token_refuses(tmp_path):
+    artifact = _artifacts({"ext": {"endpoints": ["vscode-marketplace"]}})[0]
+    req = _request(tmp_path, artifact, env={})
+    _stage_vsix(req.assets_dir, "ext-darwin-arm64.vsix")
+    with pytest.raises(ReleaseError, match="VSCE_PAT"):
+        publish_mod._publish_vscode_marketplace(req)
+
+
+def test_open_vsx_publishes_with_ovsx_and_its_own_token(tmp_path):
+    artifact = _artifacts({"ext": {"endpoints": ["open-vsx"]}})[0]
+    entries = _entries({"editors/vscode": "npm"})
+    probe = SeamRecorder()
+    req = _request(
+        tmp_path, artifact, entries=entries, env={"OVSX_PAT": "ovsx-tok"}, probe=probe
+    )
+    _stage_vsix(req.assets_dir, "ext-linux-arm64.vsix")
+
+    published = publish_mod._publish_open_vsx(req)
+
+    argv0, cwd0, env0 = probe.calls[0]
+    # ovsx rides `npm exec` and takes the .vsix positionally (no --packagePath),
+    # token under OVSX_PAT; runs from the npm leg dir.
+    assert argv0 == (
+        "npm",
+        "exec",
+        "--",
+        "ovsx",
+        "publish",
+        str(req.assets_dir / "ext-linux-arm64.vsix"),
+    )
+    assert cwd0 == tmp_path / "editors/vscode"
+    assert env0 == {"OVSX_PAT": "ovsx-tok"}
+    assert published.endpoint == "open-vsx"
+    assert published.actions == ("published ext-linux-arm64.vsix",)
+
+
+def test_open_vsx_publish_over_existing_is_success(tmp_path):
+    # The ovsx path shares the idempotent-resume rule (already-published stderr
+    # is success) — covered independently of vscode-marketplace so a regression
+    # in the ovsx argv/token leg cannot hide behind the vsce tests.
+    artifact = _artifacts({"ext": {"endpoints": ["open-vsx"]}})[0]
+    entries = _entries({"editors/vscode": "npm"})
+    probe = SeamRecorder(
+        {"npm": lambda argv: _fail(argv, "ERROR  already exists in the registry.")}
+    )
+    req = _request(
+        tmp_path, artifact, entries=entries, env={"OVSX_PAT": "tok"}, probe=probe
+    )
+    _stage_vsix(req.assets_dir, "ext-linux-arm64.vsix")
+    published = publish_mod._publish_open_vsx(req)
+    assert published.actions == ("ext-linux-arm64.vsix already published — resumed",)
+
+
+def test_open_vsx_a_real_failure_aborts_with_the_stderr_tail(tmp_path):
+    artifact = _artifacts({"ext": {"endpoints": ["open-vsx"]}})[0]
+    entries = _entries({"editors/vscode": "npm"})
+    probe = SeamRecorder(
+        {"npm": lambda argv: _fail(argv, "ERROR  invalid access token")}
+    )
+    req = _request(
+        tmp_path, artifact, entries=entries, env={"OVSX_PAT": "tok"}, probe=probe
+    )
+    _stage_vsix(req.assets_dir, "ext-linux-arm64.vsix")
+    with pytest.raises(ReleaseError, match="invalid access token"):
+        publish_mod._publish_open_vsx(req)
+
+
+def test_open_vsx_without_a_vsix_refuses(tmp_path):
+    artifact = _artifacts({"ext": {"endpoints": ["open-vsx"]}})[0]
+    entries = _entries({"editors/vscode": "npm"})
+    req = _request(tmp_path, artifact, entries=entries, env={"OVSX_PAT": "tok"})
+    req.assets_dir.mkdir(parents=True, exist_ok=True)
+    with pytest.raises(ReleaseError, match="no .vsix under"):
+        publish_mod._publish_open_vsx(req)
+
+
+def test_open_vsx_missing_token_refuses(tmp_path):
+    artifact = _artifacts({"ext": {"endpoints": ["open-vsx"]}})[0]
+    entries = _entries({"editors/vscode": "npm"})
+    req = _request(tmp_path, artifact, entries=entries, env={})
+    _stage_vsix(req.assets_dir, "ext-linux-arm64.vsix")
+    with pytest.raises(ReleaseError, match="OVSX_PAT"):
+        publish_mod._publish_open_vsx(req)
+
+
+def test_marketplace_endpoints_refuse_without_an_npm_leg(tmp_path):
+    # Both marketplace adapters run from the npm leg dir (vsce/ovsx are the
+    # extension's node_modules/.bin devDependencies, and `vsce publish` reads
+    # the leg's package.json). With a token present but no npm leg mapped, the
+    # leg resolution is a loud refusal — never a silent run from req.root.
+    for endpoint, token, publish in (
+        ("vscode-marketplace", "VSCE_PAT", publish_mod._publish_vscode_marketplace),
+        ("open-vsx", "OVSX_PAT", publish_mod._publish_open_vsx),
+    ):
+        artifact = _artifacts({"ext": {"endpoints": [endpoint]}})[0]
+        req = _request(tmp_path, artifact, entries=(), env={token: "tok"})
+        _stage_vsix(req.assets_dir, "ext-darwin-arm64.vsix")
+        with pytest.raises(ReleaseError, match="needs a .* npm leg"):
+            publish(req)
+
+
+def test_plan_rc_guard_skips_both_marketplace_endpoints(tmp_path):
+    """A -release-rc live-fire cut keeps ONLY gh-release: the two marketplace
+    endpoints are external, so the RC guard skips them (rc = gh-release only —
+    the WS13 acceptance: marketplace honors the RC guard)."""
+    artifacts = _artifacts(
+        {"ext": {"endpoints": ["gh-release", "vscode-marketplace", "open-vsx"]}}
+    )
+    dispatched = publish_mod.plan(artifacts, prerelease=True, live_fire=True)
+    live = {d.adapter.name for d in dispatched if d.skip is None}
+    assert live == {"gh-release"}
+    for name in ("vscode-marketplace", "open-vsx"):
+        skip = next(d.skip for d in dispatched if d.adapter.name == name)
+        assert skip == publish_mod.SKIP_RC_GUARD
 
 
 # --------------------------------------------------------------------------

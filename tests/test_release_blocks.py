@@ -349,6 +349,53 @@ def test_sign_chain_declares_and_forwards_both_notary_trios():
             assert forwarded[name] == f"${{{{ secrets.{name} }}}}", job_id
 
 
+def test_endpoint_tokens_are_declared_forwarded_and_mapped_everywhere():
+    # The closed endpoint token surface (shipit.release.secretreq
+    # ENDPOINT_SECRETS) must ride the reusable workflow contract end to end,
+    # or a consumer declaring the endpoint passes preflight token validation
+    # while the called workflow never exposes the secret into the job env —
+    # the marketplace path fails before it can publish (TOL02-WS13 #789).
+    # Derived from the registry so the NEXT endpoint adapter's token is
+    # guarded here automatically, never a hand-maintained mirror. All optional:
+    # WHICH tokens must be non-empty is the plan's/verb's call, never YAML's.
+    from shipit.release import secretreq
+
+    endpoint_tokens = {
+        name for names in secretreq.ENDPOINT_SECRETS.values() for name in names
+    }
+
+    # Declared optional in every block that mirrors the surface …
+    for block in ("wf-prepare.yml", "wf-publish.yml", "wf-release.yml"):
+        declared = _load(block)["on"]["workflow_call"]["secrets"]
+        assert endpoint_tokens <= set(declared), block
+        assert all(
+            not spec.get("required", False)
+            for name, spec in declared.items()
+            if name in endpoint_tokens
+        ), block
+
+    # … wf-prepare injects them for preflight's presence validation …
+    plan_step = next(
+        s for s in _steps("wf-prepare.yml", "prepare") if s.get("id") == "plan"
+    )
+    for name in sorted(endpoint_tokens):
+        assert plan_step["env"][name] == f"${{{{ secrets.{name} }}}}", name
+
+    # … wf-publish's Publish step reads each as a same-named env var …
+    publish_step = next(
+        s for s in _steps("wf-publish.yml", "publish") if s.get("name") == "Publish"
+    )
+    for name in sorted(endpoint_tokens):
+        assert publish_step["env"][name] == f"${{{{ secrets.{name} }}}}", name
+
+    # … and the composed chain forwards them to prepare and publish.
+    jobs = _load(COMPOSED)["jobs"]
+    for job_id in ("prepare", "publish"):
+        forwarded = jobs[job_id]["secrets"]
+        for name in sorted(endpoint_tokens):
+            assert forwarded[name] == f"${{{{ secrets.{name} }}}}", (job_id, name)
+
+
 def test_pixi_pin_is_lockstep_across_all_blocks():
     # The wf-checks.yml pin is the one test_install.py locks to the Layer 0
     # bootstrap; every release block must ride the SAME pin so a bump is
