@@ -126,6 +126,88 @@ def test_bump_pyproject_ignores_version_of_other_tables_only():
 
 
 # --------------------------------------------------------------------------
+# to_pep440 — the semver→PEP 440 manifest normalization (issue #807)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("semver", "pep440"),
+    [
+        # Stable versions are identical in both spellings — passed through.
+        ("1.0.0", "1.0.0"),
+        ("0.1.0", "0.1.0"),
+        ("10.20.30", "10.20.30"),
+        # The reserved live-fire suffix → a deterministic throwaway rc0 (the
+        # tag keeps -release-rc; the RC guard keys off the tag).
+        ("1.0.0-release-rc", "1.0.0rc0"),
+        ("2.3.4-release-rc.2", "2.3.4rc2"),
+        # General prerelease forms → their PEP 440 equivalents.
+        ("1.2.3-rc.1", "1.2.3rc1"),
+        ("1.2.3-alpha.2", "1.2.3a2"),
+        ("1.2.3-beta.3", "1.2.3b3"),
+        # Aliases and the numberless / single-identifier spellings.
+        ("1.2.3-c.1", "1.2.3rc1"),
+        ("1.2.3-preview.5", "1.2.3rc5"),
+        ("1.2.3-rc", "1.2.3rc0"),
+        ("1.2.3-rc1", "1.2.3rc1"),
+        ("1.2.3-alpha", "1.2.3a0"),
+        ("1.2.3-Beta.4", "1.2.3b4"),  # case-insensitive phase word
+    ],
+)
+def test_to_pep440_maps_semver_to_pep440(semver, pep440):
+    assert bump.to_pep440(semver) == pep440
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "1.2.3-snapshot.1",  # unknown phase word
+        "1.2.3-dev.1",  # not a PEP 440 prerelease phase
+        "1.2.3-1",  # purely numeric prerelease — no phase
+        "1.2.3-rc.1.2",  # multi-segment run
+        "1.2.3-rc.foo",  # non-numeric number component
+    ],
+)
+def test_to_pep440_refuses_unmappable_suffix_loudly(bad):
+    with pytest.raises(ReleaseError, match="no PEP 440 mapping"):
+        bump.to_pep440(bad)
+
+
+@pytest.mark.parametrize(
+    "annotated",
+    [
+        "1.0.0+build.1",  # stable version with build metadata
+        "1.2.3-rc.1+build.1",  # prerelease with build metadata
+    ],
+)
+def test_to_pep440_refuses_build_metadata_loudly(annotated):
+    """Build metadata is forbidden across the release version flow
+    (parse_spec rejects it, version_tags disqualifies it), so a +-annotated
+    version never reaches a legitimate manifest write. to_pep440 refuses it
+    LOUDLY rather than silently dropping the +segment on prereleases (or
+    passing it through on stable versions) — the manifest value is exactly
+    what the tag names (ADR-0041)."""
+    with pytest.raises(ReleaseError, match="build metadata is not allowed"):
+        bump.to_pep440(annotated)
+
+
+def test_bump_pyproject_normalizes_a_prerelease_to_pep440():
+    """The #807 root cause: a -release-rc semver written verbatim is valid
+    semver but invalid PEP 440 and breaks the source build at the tag. The
+    manifest gets the PEP 440 form; the tag (elsewhere) stays semver."""
+    text = '[project]\nname = "x"\nversion = "0.0.0"\n'
+    assert bump.bump_pyproject(text, "1.0.0-release-rc") == (
+        '[project]\nname = "x"\nversion = "1.0.0rc0"\n'
+    )
+
+
+def test_bump_pyproject_refuses_an_unmappable_prerelease():
+    text = '[project]\nname = "x"\nversion = "0.0.0"\n'
+    with pytest.raises(ReleaseError, match="no PEP 440 mapping"):
+        bump.bump_pyproject(text, "1.0.0-snapshot.1")
+
+
+# --------------------------------------------------------------------------
 # bump_bundle_config — the artifact-declared hook's rewrite (story 25)
 # --------------------------------------------------------------------------
 
