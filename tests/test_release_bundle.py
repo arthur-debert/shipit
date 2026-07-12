@@ -569,6 +569,279 @@ def test_mac_app_requires_exactly_one_coupled_pair(tmp_path):
 
 
 # --------------------------------------------------------------------------
+# tarball — the generated-parser contract (TOL02-WS16 #792)
+# --------------------------------------------------------------------------
+
+
+def _tarball_artifact():
+    (artifact,) = _artifacts(
+        {"parser": {"build": ["tree-sitter"], "bundle": {"composition": "tarball"}}}
+    )
+    return artifact
+
+
+def test_tarball_tars_the_generated_parser_payload_present(tmp_path):
+    artifact = _tarball_artifact()
+    entries = _entries({".": "tree-sitter"})
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src/parser.c").write_text("/* generated */")
+    (tmp_path / "queries").mkdir()
+    (tmp_path / "queries/highlights.scm").write_text(";; hi")
+    (tmp_path / "grammar.js").write_text("module.exports = grammar({});")
+    # binding.gyp / package.json / bindings absent — ship only what is present.
+    recorder = RunRecorder()
+
+    composed = bundle_mod.TARBALL.compose(
+        _request(tmp_path, artifact, entries, run_cmd=recorder)
+    )
+
+    archive = tmp_path / "dist" / "parser.tar.gz"
+    assert recorder.calls == [
+        (
+            (
+                "tar",
+                "-czf",
+                str(archive),
+                "-C",
+                str(tmp_path),
+                "src",
+                "queries",
+                "grammar.js",
+            ),
+            tmp_path,
+        )
+    ]
+    # Platform-independent: no `-<target>` suffix — every leg composes the same name.
+    assert composed == bundle_mod.Composed("parser", "tarball", ("parser.tar.gz",))
+
+
+def test_tarball_reads_the_tree_sitter_leg_subdir(tmp_path):
+    # The payload is collected under the tree-sitter leg's path, not the root.
+    (artifact,) = _artifacts(
+        {"parser": {"build": ["tree-sitter"], "bundle": {"composition": "tarball"}}}
+    )
+    entries = _entries({"grammar": "tree-sitter"})
+    (tmp_path / "grammar/src").mkdir(parents=True)
+    (tmp_path / "grammar/src/parser.c").write_text("/* generated */")
+    recorder = RunRecorder()
+
+    bundle_mod.TARBALL.compose(_request(tmp_path, artifact, entries, run_cmd=recorder))
+
+    ((argv, cwd),) = recorder.calls
+    assert argv == (
+        "tar",
+        "-czf",
+        str(tmp_path / "dist" / "parser.tar.gz"),
+        "-C",
+        str(tmp_path / "grammar"),
+        "src",
+    )
+
+
+def test_tarball_without_generated_src_refuses(tmp_path):
+    # The tarball ships the `tree-sitter generate` output — no src/ means the
+    # parser was never generated (run `shipit build` first), a hard fail.
+    artifact = _tarball_artifact()
+    recorder = RunRecorder()
+    with pytest.raises(ReleaseError, match="no generated parser"):
+        bundle_mod.TARBALL.compose(
+            _request(
+                tmp_path, artifact, _entries({".": "tree-sitter"}), run_cmd=recorder
+            )
+        )
+    assert recorder.calls == []  # nothing ran, nothing written
+
+
+def test_tarball_rerun_unlinks_the_stale_archive(tmp_path):
+    artifact = _tarball_artifact()
+    entries = _entries({".": "tree-sitter"})
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src/parser.c").write_text("/* generated */")
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    stale = dist / "parser.tar.gz"
+    stale.write_bytes(b"STALE")
+
+    def _tar_writes(argv, cwd):
+        Path(argv[2]).write_bytes(b"FRESH")
+
+    recorder = RunRecorder({"tar": _tar_writes})
+    bundle_mod.TARBALL.compose(_request(tmp_path, artifact, entries, run_cmd=recorder))
+    assert stale.read_bytes() == b"FRESH"  # the stale archive was replaced
+
+
+# --------------------------------------------------------------------------
+# wasm-pack — build the pkg tree, npm pack the tarball (TOL02-WS12 #788)
+# --------------------------------------------------------------------------
+
+WASM_SPEC = {
+    "wasm": {
+        "build": ["rust"],
+        "bundle": {"composition": "wasm-pack", "scope": "lex-fmt"},
+    }
+}
+
+
+def _wasm_pack_effect(name="package.json"):
+    """Simulate `wasm-pack build`: it writes an npm package tree (at least a
+    package.json) under its --out-dir."""
+
+    def effect(argv, cwd):
+        out = Path(argv[argv.index("--out-dir") + 1])
+        out.mkdir(parents=True, exist_ok=True)
+        (out / name).write_text('{"name": "@lex-fmt/lex-wasm"}', encoding="utf-8")
+
+    return effect
+
+
+def _npm_pack_effect(tarball="lex-fmt-lex-wasm-1.2.3.tgz"):
+    """Simulate `npm pack`: it writes ONE .tgz into --pack-destination."""
+
+    def effect(argv, cwd):
+        out = Path(argv[argv.index("--pack-destination") + 1])
+        out.mkdir(parents=True, exist_ok=True)
+        (out / tarball).write_bytes(b"tgz")
+
+    return effect
+
+
+def test_wasm_pack_builds_the_pkg_tree_and_packs_the_tarball(tmp_path):
+    (artifact,) = _artifacts(WASM_SPEC)
+    recorder = RunRecorder(
+        {"wasm-pack": _wasm_pack_effect(), "npm": _npm_pack_effect()}
+    )
+
+    composed = bundle_mod.WASM_PACK.compose(
+        _request(
+            tmp_path, artifact, _entries({"crates/lex-wasm": "rust"}), run_cmd=recorder
+        )
+    )
+
+    dist = tmp_path / "dist"
+    crate = tmp_path / "crates/lex-wasm"
+    pkg = dist / ".pkg-wasm"
+    scratch = dist / ".tmp-wasm"
+    # wasm-pack builds the rust crate into a fresh pkg tree (default target
+    # `bundler`, the declared `--scope`); npm pack (--ignore-scripts, no
+    # second build path) then tarballs it into a scratch that bundle moves
+    # into dist/.
+    assert recorder.calls == [
+        (
+            (
+                "wasm-pack",
+                "build",
+                "--release",
+                "--target",
+                "bundler",
+                "--out-dir",
+                str(pkg),
+                "--scope",
+                "lex-fmt",
+            ),
+            crate,
+        ),
+        (("npm", "pack", "--ignore-scripts", "--pack-destination", str(scratch)), pkg),
+    ]
+    assert composed == bundle_mod.Composed(
+        "wasm", "wasm-pack", ("lex-fmt-lex-wasm-1.2.3.tgz",)
+    )
+    assert (dist / "lex-fmt-lex-wasm-1.2.3.tgz").is_file()
+    # only the tarball survives — the scratch pkg tree and npm-pack scratch go
+    assert not pkg.exists()
+    assert not scratch.exists()
+
+
+def test_wasm_pack_defaults_the_target_and_omits_scope_when_undeclared(tmp_path):
+    (artifact,) = _artifacts(
+        {"wasm": {"build": ["rust"], "bundle": {"composition": "wasm-pack"}}}
+    )
+    recorder = RunRecorder(
+        {"wasm-pack": _wasm_pack_effect(), "npm": _npm_pack_effect("wasm-1.2.3.tgz")}
+    )
+
+    bundle_mod.WASM_PACK.compose(
+        _request(tmp_path, artifact, _entries({".": "rust"}), run_cmd=recorder)
+    )
+
+    wasm_argv = recorder.calls[0][0]
+    assert "--scope" not in wasm_argv  # unscoped package: no --scope flag
+    assert wasm_argv[: wasm_argv.index("--out-dir")] == (
+        "wasm-pack",
+        "build",
+        "--release",
+        "--target",
+        "bundler",
+    )
+
+
+def test_wasm_pack_honors_a_declared_wasm_target(tmp_path):
+    (artifact,) = _artifacts(
+        {
+            "wasm": {
+                "build": ["rust"],
+                "bundle": {"composition": "wasm-pack", "wasm-target": "web"},
+            }
+        }
+    )
+    recorder = RunRecorder(
+        {"wasm-pack": _wasm_pack_effect(), "npm": _npm_pack_effect("wasm-1.2.3.tgz")}
+    )
+
+    bundle_mod.WASM_PACK.compose(
+        _request(tmp_path, artifact, _entries({".": "rust"}), run_cmd=recorder)
+    )
+
+    wasm_argv = recorder.calls[0][0]
+    assert wasm_argv[wasm_argv.index("--target") + 1] == "web"
+
+
+def test_wasm_pack_hard_fails_when_the_build_leaves_no_package_json(tmp_path):
+    (artifact,) = _artifacts(WASM_SPEC)
+    # wasm-pack "runs" but writes nothing — a wrong/empty build, not a tarball.
+    recorder = RunRecorder({"npm": _npm_pack_effect()})
+    with pytest.raises(ReleaseError, match="left no package.json"):
+        bundle_mod.WASM_PACK.compose(
+            _request(
+                tmp_path,
+                artifact,
+                _entries({"crates/lex-wasm": "rust"}),
+                run_cmd=recorder,
+            )
+        )
+    # the barrier holds: no tarball leaked into dist/, scratch cleaned
+    assert not (tmp_path / "dist" / ".pkg-wasm").exists()
+
+
+def test_wasm_pack_hard_fails_when_npm_pack_yields_no_tarball(tmp_path):
+    (artifact,) = _artifacts(WASM_SPEC)
+    # build succeeds, but npm pack produces nothing — a hard fail, never a pass.
+    recorder = RunRecorder({"wasm-pack": _wasm_pack_effect()})
+    with pytest.raises(ReleaseError, match=r"produced 0 \.tgz"):
+        bundle_mod.WASM_PACK.compose(
+            _request(
+                tmp_path,
+                artifact,
+                _entries({"crates/lex-wasm": "rust"}),
+                run_cmd=recorder,
+            )
+        )
+    assert not (tmp_path / "dist" / ".pkg-wasm").exists()
+
+
+def test_wasm_pack_needs_a_rust_leg(tmp_path):
+    (artifact,) = _artifacts(WASM_SPEC)
+    # no rust leg mapped -> a loud refusal naming the composition, never a skip.
+    with pytest.raises(
+        ReleaseError, match=r"wasm-pack composition needs a \[toolchains\] rust leg"
+    ):
+        bundle_mod.WASM_PACK.compose(
+            _request(
+                tmp_path, artifact, _entries({".": "python"}), run_cmd=RunRecorder()
+            )
+        )
+
+
+# --------------------------------------------------------------------------
 # The registry and the host-target derivation
 # --------------------------------------------------------------------------
 
@@ -672,8 +945,17 @@ def test_vsix_without_an_npm_leg_refuses(tmp_path):
 
 
 def test_registry_is_closed_and_platform_scoped():
-    assert bundle_mod.names() == ("archive", "deb", "wheel", "vsix", "mac-app")
+    assert bundle_mod.names() == (
+        "archive",
+        "deb",
+        "wheel",
+        "wasm-pack",
+        "vsix",
+        "mac-app",
+        "tarball",
+    )
     assert bundle_mod.composition("deb") is bundle_mod.DEB
+    assert bundle_mod.composition("wasm-pack") is bundle_mod.WASM_PACK
     assert bundle_mod.composition("rpm") is None
     assert bundle_mod.ARCHIVE.applies(LINUX) and bundle_mod.ARCHIVE.applies(MAC)
     assert bundle_mod.DEB.applies(LINUX) and not bundle_mod.DEB.applies(MAC)
@@ -683,6 +965,35 @@ def test_registry_is_closed_and_platform_scoped():
     assert bundle_mod.VSIX.applies(MAC)
     assert bundle_mod.VSIX.applies(LINUX)
     assert bundle_mod.VSIX.applies(WIN)
+    # wasm is platform-independent — built once, published once (no triple gate).
+    assert bundle_mod.WASM_PACK.applies(LINUX) and bundle_mod.WASM_PACK.applies(MAC)
+    # tarball is platform-independent (generated C source, no per-OS variant):
+    # it applies to every target so any declared lane composes it (#792).
+    assert bundle_mod.TARBALL.applies(LINUX) and bundle_mod.TARBALL.applies(MAC)
+    assert bundle_mod.TARBALL.applies(WIN)
+    assert not bundle_mod.TARBALL.signable  # a source tarball has no binary to sign
+
+
+def test_source_compositions_do_not_assert_a_binary():
+    # The scar-#2 guard checks a main binary; a source/package composition has
+    # none, so preflight omits assert-bundle for it (#792 tarball, wheel sdist,
+    # #788 wasm-pack npm tgz, #789 vsix zip).
+    assert bundle_mod.ARCHIVE.asserts_binary
+    assert bundle_mod.DEB.asserts_binary
+    assert bundle_mod.MAC_APP.asserts_binary
+    assert not bundle_mod.WHEEL.asserts_binary
+    assert not bundle_mod.TARBALL.asserts_binary
+    assert not bundle_mod.WASM_PACK.asserts_binary
+    assert not bundle_mod.VSIX.asserts_binary
+
+
+def test_registry_marks_the_platform_independent_compositions():
+    # tarball emits one unqualified `<name>.tar.gz` (identical generated C on
+    # every leg), so the config boundary refuses it with >1 platform — an
+    # unqualified name built on multiple legs would collide in the merged dist/.
+    assert bundle_mod.platform_independent_names() == ("tarball",)
+    assert bundle_mod.TARBALL.platform_independent
+    assert not bundle_mod.ARCHIVE.platform_independent
 
 
 def test_registry_marks_the_signer_reopenable_compositions():

@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -676,6 +677,32 @@ def release_upload(tag: str, files: list[str], *, cwd: str | None = None) -> Non
         ["gh", "release", "upload", tag, *files, "--clobber"],
         cwd=cwd,
         timeout=_UPLOAD_TIMEOUT,
+    )
+
+
+def repository_dispatch(
+    slug: str,
+    *,
+    event_type: str,
+    payload: Mapping[str, object],
+    token: str | None = None,
+) -> None:
+    """Fire a ``repository_dispatch`` at ``slug`` (``owner/name``) — the
+    notify-downstreams cascade's one write (TOL02-WS16 #792).
+
+    POSTs ``repos/{slug}/dispatches`` with ``event_type`` and
+    ``client_payload`` (the source repo/tag/version the downstream's
+    ``on.repository_dispatch`` workflow reads). ``token`` authenticates the
+    call as a cross-repo PAT (``DOWNSTREAM_DISPATCH_TOKEN``): the source
+    workflow's ambient ``GITHUB_TOKEN`` cannot dispatch into another repo, so
+    the adapter always passes one. A nonzero rc raises through ``rest`` — a
+    failed dispatch is loud, never a silent drop.
+    """
+    rest(
+        f"repos/{slug}/dispatches",
+        method="POST",
+        body={"event_type": event_type, "client_payload": dict(payload)},
+        token=token,
     )
 
 

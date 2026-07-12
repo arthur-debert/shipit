@@ -138,7 +138,7 @@ def test_unknown_artifact_key_names_itself_and_the_known_set():
     with pytest.raises(config.ConfigError, match="unknown key `endpoint`") as exc:
         _load('[artifacts.x]\nendpoint = ["gh-release"]\n')
     assert (
-        "build, platforms, bundle, bundle-config, endpoints, e2e, "
+        "build, platforms, bundle, bundle-config, endpoints, downstreams, e2e, "
         "main-binary, product-name, sign" in str(exc.value)
     )
 
@@ -149,6 +149,132 @@ def test_unknown_endpoint_names_the_closed_registry():
     assert "gh-release, crates, pypi, npm, vscode-marketplace, open-vsx, brew" in str(
         exc.value
     )
+
+
+def test_downstreams_parse_with_the_notify_endpoint(tmp_path):
+    (artifact,) = _load(
+        "[artifacts.parser]\n"
+        'build = ["tree-sitter"]\n'
+        'bundle = { composition = "tarball" }\n'
+        'endpoints = ["gh-release", "notify-downstreams"]\n'
+        'downstreams = ["lex-fmt/vscode", "lex-fmt/nvim", "lex-fmt/lexed"]\n'
+    )
+    assert artifact.downstreams == ("lex-fmt/vscode", "lex-fmt/nvim", "lex-fmt/lexed")
+    assert "notify-downstreams" in artifact.endpoints
+
+
+def test_notify_endpoint_without_downstreams_is_refused():
+    # The endpoint fires repository_dispatch AT the list — an endpoint with no
+    # list is a no-op declaration, refused at parse (#792).
+    with pytest.raises(config.ConfigError, match="needs a `downstreams` list"):
+        _load(
+            "[artifacts.parser]\n"
+            'build = ["tree-sitter"]\n'
+            'bundle = { composition = "tarball" }\n'
+            'endpoints = ["gh-release", "notify-downstreams"]\n'
+        )
+
+
+def test_downstreams_without_the_notify_endpoint_is_refused():
+    # A downstreams list nothing fires is dead config — refused (#792).
+    with pytest.raises(config.ConfigError, match="notify-downstreams.*is not"):
+        _load(
+            "[artifacts.parser]\n"
+            'build = ["tree-sitter"]\n'
+            'bundle = { composition = "tarball" }\n'
+            'endpoints = ["gh-release"]\n'
+            'downstreams = ["lex-fmt/vscode"]\n'
+        )
+
+
+def test_downstream_not_owner_name_slug_is_refused():
+    with pytest.raises(config.ConfigError, match="is not an `owner/name` repo slug"):
+        _load(
+            "[artifacts.parser]\n"
+            'endpoints = ["notify-downstreams"]\n'
+            'downstreams = ["justname"]\n'
+        )
+
+
+def test_duplicate_downstream_is_refused():
+    with pytest.raises(
+        config.ConfigError, match="duplicate downstream `lex-fmt/vscode`"
+    ):
+        _load(
+            "[artifacts.parser]\n"
+            'endpoints = ["notify-downstreams"]\n'
+            'downstreams = ["lex-fmt/vscode", "lex-fmt/vscode"]\n'
+        )
+
+
+def test_downstreams_normalized_to_canonical_lowercase_slug(tmp_path):
+    # GitHub owner/name are case-insensitive; downstreams go through the
+    # canonical slug parser so every dispatch targets one normalized form (#792).
+    (artifact,) = _load(
+        "[artifacts.parser]\n"
+        'endpoints = ["notify-downstreams"]\n'
+        'downstreams = ["Lex-Fmt/VSCode", "LEX-FMT/Nvim"]\n'
+    )
+    assert artifact.downstreams == ("lex-fmt/vscode", "lex-fmt/nvim")
+
+
+def test_case_only_duplicate_downstream_is_refused():
+    # Case-only repeats collapse to one canonical slug — a repeated dispatch is
+    # never an intent, so the collision is refused rather than dispatched twice.
+    with pytest.raises(
+        config.ConfigError, match="duplicate downstream `lex-fmt/vscode`"
+    ):
+        _load(
+            "[artifacts.parser]\n"
+            'endpoints = ["notify-downstreams"]\n'
+            'downstreams = ["lex-fmt/vscode", "Lex-Fmt/VSCode"]\n'
+        )
+
+
+def test_tarball_with_multiple_platforms_is_refused():
+    # A platform-independent composition emits one unqualified archive; >1
+    # platform would build colliding assets in the merged dist/ — refused (#792).
+    with pytest.raises(config.ConfigError, match="is platform-independent"):
+        _load(
+            "[artifacts.parser]\n"
+            'build = ["tree-sitter"]\n'
+            'bundle = { composition = "tarball" }\n'
+            'platforms = ["linux-x86_64", "darwin-arm64"]\n'
+        )
+
+
+def test_tarball_with_a_single_platform_is_allowed():
+    # Exactly one lane is fine — one leg, one unqualified archive, no collision.
+    (artifact,) = _load(
+        "[artifacts.parser]\n"
+        'build = ["tree-sitter"]\n'
+        'bundle = { composition = "tarball" }\n'
+        'platforms = ["linux-x86_64"]\n'
+    )
+    assert artifact.platforms == ("linux-x86_64",)
+
+
+def test_tarball_with_no_platforms_is_allowed():
+    # No declaration defaults to a single lane, so the unqualified archive still
+    # builds on exactly one leg.
+    (artifact,) = _load(
+        "[artifacts.parser]\n"
+        'build = ["tree-sitter"]\n'
+        'bundle = { composition = "tarball" }\n'
+    )
+    assert artifact.platforms == ()
+
+
+def test_multi_platform_archive_is_still_allowed():
+    # The guard is scoped to platform-independent compositions: archive emits
+    # target-qualified names, so multiple platforms never collide.
+    (artifact,) = _load(
+        "[artifacts.lex]\n"
+        'build = ["rust"]\n'
+        'bundle = { composition = "archive" }\n'
+        'platforms = ["linux-x86_64", "darwin-arm64"]\n'
+    )
+    assert artifact.platforms == ("linux-x86_64", "darwin-arm64")
 
 
 def test_unknown_platform_names_the_closed_registry():
@@ -232,7 +358,7 @@ def test_bundle_composition_names_the_closed_registry():
     # names the known set, mirroring endpoints/toolchains.
     with pytest.raises(config.ConfigError, match="unknown composition `rpm`") as exc:
         _load('[artifacts.x]\nbundle = { composition = "rpm" }\n')
-    assert "archive, deb, wheel, vsix, mac-app" in str(exc.value)
+    assert "archive, deb, wheel, wasm-pack, vsix, mac-app" in str(exc.value)
 
 
 def test_mac_app_requires_the_declared_bundler_command():
@@ -284,6 +410,53 @@ def test_registry_assembled_compositions_reject_declared_command(key, value):
     with pytest.raises(config.ConfigError, match=f"`{key}` applies only to"):
         _load(
             f'[artifacts.x]\nbundle = {{ composition = "archive", {key} = {value} }}\n'
+        )
+
+
+def test_wasm_pack_parses_scope_and_wasm_target(tmp_path):
+    # wasm-pack's optional consumer-specific parts (TOL02-WS12 #788): the npm
+    # @scope and wasm-pack's --target, declared on the bundle table.
+    (artifact,) = _load(
+        "[artifacts.wasm]\n"
+        'build = ["rust"]\n'
+        'bundle = { composition = "wasm-pack", scope = "lex-fmt", '
+        'wasm-target = "web" }\n'
+    )
+    assert artifact.bundle == config.BundleSpec(
+        composition="wasm-pack", scope="lex-fmt", wasm_target="web"
+    )
+
+
+def test_wasm_pack_scope_and_target_default_to_absent():
+    # Both are optional — an undeclared scope/target is None (the composition
+    # applies wasm-pack's own default target, `bundler`).
+    (artifact,) = _load(
+        '[artifacts.wasm]\nbuild = ["rust"]\nbundle = { composition = "wasm-pack" }\n'
+    )
+    assert artifact.bundle == config.BundleSpec(
+        composition="wasm-pack", scope=None, wasm_target=None
+    )
+
+
+@pytest.mark.parametrize("key", ["scope", "wasm-target"])
+def test_wasm_pack_options_must_be_non_empty_strings(key):
+    with pytest.raises(config.ConfigError, match=f"{key} must be a non-empty string"):
+        _load(
+            "[artifacts.wasm]\n"
+            'build = ["rust"]\n'
+            f'bundle = {{ composition = "wasm-pack", {key} = "" }}\n'
+        )
+
+
+@pytest.mark.parametrize("key", ["scope", "wasm-target"])
+def test_wasm_pack_options_are_rejected_on_other_compositions(key):
+    # scope/wasm-target are wasm-pack's ONLY (option_keys) — an unknown key on
+    # a composition that does not name them, so a typo dies at parse.
+    with pytest.raises(config.ConfigError, match=f"unknown key `{key}`"):
+        _load(
+            "[artifacts.x]\n"
+            'build = ["rust"]\n'
+            f'bundle = {{ composition = "archive", {key} = "web" }}\n'
         )
 
 

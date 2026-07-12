@@ -29,6 +29,12 @@ of those projections, plus the artifact-declared bundle-config hook:
   tag is the source of truth, the version is injected at build via
   ``-ldflags -X`` (:mod:`shipit.tools.build`). Not an exception — an entry
   whose projection set is empty.
+- **tree-sitter** — a ZERO-FILE adapter too (TOL02-WS16 #792): the
+  generated-parser tarball is content-addressed by the tag and legacy
+  ``tree-sitter.yml`` runs with npm-publish OFF, so there is no published
+  manifest whose version a downstream resolves — the tag alone names the
+  release (the go shape, for the same ADR-0041 reason: no projection to
+  bump).
 
 "tauri" is NEVER a registry key (PRD story 25, ADR-0007): a Tauri app is a
 composition of the npm and rust legs, and its bundle-level version file
@@ -179,11 +185,17 @@ NPM = BumpAdapter(
 )
 PYTHON = BumpAdapter("python", edit_path="pyproject.toml", stage=("pyproject.toml",))
 GO = BumpAdapter("go")
+#: tree-sitter: zero-file, like go — the generated-parser tarball's version is
+#: the tag (ADR-0041), npm publish off (legacy tree-sitter.yml), so no manifest
+#: projection to bump (TOL02-WS16 #792).
+TREE_SITTER = BumpAdapter("tree-sitter")
 
 #: The CLOSED registry, keyed by toolchain name — exactly the
 #: :mod:`shipit.tools.registry` set, pinned by test. No "tauri" key, ever
 #: (story 25): bundle-level files ride :func:`bump_bundle_config`.
-ADAPTERS: dict[str, BumpAdapter] = {a.toolchain: a for a in (RUST, GO, PYTHON, NPM)}
+ADAPTERS: dict[str, BumpAdapter] = {
+    a.toolchain: a for a in (RUST, GO, PYTHON, NPM, TREE_SITTER)
+}
 
 
 def adapter_for(toolchain: str) -> BumpAdapter:

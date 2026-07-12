@@ -209,6 +209,33 @@ def test_publish_block_feeds_results_to_the_verb_not_yaml():
     assert 'args+=(--matrix "$MATRIX")' in script
 
 
+def test_publish_block_declares_feeds_and_forwards_every_endpoint_token():
+    # ADR-0040 routing: the publish block passes each endpoint's token to the
+    # verb, which validates the plan-required subset. The token set IS
+    # secretreq.ENDPOINT_SECRETS (gh-release declares none — ambient token), so
+    # a new endpoint (notify-downstreams #792) cannot land its adapter without
+    # wiring its token here, in the block AND the composed chain's forward.
+    from shipit.release import secretreq
+
+    endpoint_tokens = {
+        name for names in secretreq.ENDPOINT_SECRETS.values() for name in names
+    }
+    assert "DOWNSTREAM_DISPATCH_TOKEN" in endpoint_tokens  # the #792 addition
+
+    declared = _load("wf-publish.yml")["on"]["workflow_call"]["secrets"]
+    assert endpoint_tokens <= set(declared)
+    assert all(not declared[name].get("required", False) for name in endpoint_tokens)
+    # The publish step reads each as a same-named env var …
+    publish = _load("wf-publish.yml")["jobs"]["publish"]
+    step = next(s for s in publish["steps"] if "release publish" in s.get("run", ""))
+    for name in sorted(endpoint_tokens):
+        assert step["env"][name] == f"${{{{ secrets.{name} }}}}"
+    # … and the composed chain forwards each to the publish job.
+    forwarded = _load(COMPOSED)["jobs"]["publish"]["secrets"]
+    for name in sorted(endpoint_tokens):
+        assert forwarded[name] == f"${{{{ secrets.{name} }}}}"
+
+
 def test_prepare_pipeline_steps_set_pipefail():
     # The plan and prepare steps pipe a shipit invocation into jq. The default
     # step shell is `bash -e` WITHOUT pipefail, so a failed producer would be

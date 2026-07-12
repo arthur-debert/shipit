@@ -104,6 +104,9 @@ class FakeGh:
 
         return _Repo()
 
+    def repository_dispatch(self, slug, *, event_type, payload, token=None):
+        self.calls.append(("dispatch", slug, event_type, dict(payload), token))
+
 
 class FakeGit:
     """The recorded git-adapter seam for the tap push (clone → status →
@@ -316,11 +319,26 @@ def test_is_live_fire(version, live):
 
 def test_registry_mirrors_the_config_endpoint_set_and_stages():
     """The closed registry: exactly the config boundary's ENDPOINTS (now
-    including the two VS Code marketplace endpoints, TOL02-WS13), brew the one
-    derived entry, gh-release the one the RC guard keeps."""
+    including the two VS Code marketplace endpoints, TOL02-WS13, and the
+    notify-downstreams cascade, TOL02-WS16); brew + notify-downstreams the
+    derived entries and the stable-only pair (#792), gh-release the one the RC
+    guard keeps."""
     assert publish_mod.names() == config.ENDPOINTS
-    assert [a.name for a in publish_mod.ADAPTERS if a.stage == "derived"] == ["brew"]
+    assert [a.name for a in publish_mod.ADAPTERS if a.stage == "derived"] == [
+        "brew",
+        "notify-downstreams",
+    ]
     assert [a.name for a in publish_mod.ADAPTERS if not a.external] == ["gh-release"]
+    assert [a.name for a in publish_mod.ADAPTERS if a.stable_only] == [
+        "brew",
+        "notify-downstreams",
+    ]
+    # The repo-reading endpoints: brew (asset URLs) + notify-downstreams
+    # (dispatch payload) — the verb resolves the source slug only for these.
+    assert [a.name for a in publish_mod.ADAPTERS if a.needs_repo] == [
+        "brew",
+        "notify-downstreams",
+    ]
     # The marketplace endpoints are external (RC-guarded) release-stage entries.
     assert {"vscode-marketplace", "open-vsx"} <= {a.name for a in publish_mod.ADAPTERS}
     for name in ("vscode-marketplace", "open-vsx"):
@@ -380,6 +398,69 @@ def test_plan_prerelease_skips_only_brew():
     assert verdicts["gh-release"] is None
     assert verdicts["crates"] is None
     assert verdicts["brew"] == publish_mod.SKIP_STABLE_ONLY
+
+
+def _notify_artifacts(downstreams=("lex-fmt/vscode", "lex-fmt/nvim")):
+    return _artifacts(
+        {
+            "parser": {
+                "endpoints": ["gh-release", "notify-downstreams"],
+                "downstreams": list(downstreams),
+            }
+        }
+    )
+
+
+def test_plan_notify_downstreams_is_derived_after_gh_release():
+    """The cascade endpoint is derived: gh-release must land the release
+    before the downstreams are told to rebuild against it (#792)."""
+    dispatched = publish_mod.plan(
+        _notify_artifacts(), prerelease=False, live_fire=False
+    )
+    order = [d.adapter.name for d in dispatched]
+    assert order == ["gh-release", "notify-downstreams"]
+    assert all(d.skip is None for d in dispatched)
+
+
+def test_plan_notify_downstreams_alone_refuses_without_an_unskipped_gh_release():
+    """notify-downstreams tells the downstreams to rebuild against this
+    release; without an unskipped gh-release in the plan it would notify them
+    of a release that never landed on GitHub — a hard plan refusal, mirroring
+    the brew→gh-release invariant (#792)."""
+    artifacts = _artifacts(
+        {"parser": {"endpoints": ["notify-downstreams"], "downstreams": ["a/b"]}}
+    )
+    with pytest.raises(ReleaseError, match="notify-downstreams tells the downstream"):
+        publish_mod.plan(artifacts, prerelease=False, live_fire=False)
+
+
+def test_plan_notify_downstreams_skipped_never_trips_the_gh_release_invariant():
+    """The invariant reads the UNSKIPPED set: a prerelease skips
+    notify-downstreams, so a plan without gh-release is valid — the endpoint
+    fires no cascade to strand."""
+    artifacts = _artifacts(
+        {"parser": {"endpoints": ["notify-downstreams"], "downstreams": ["a/b"]}}
+    )
+    dispatched = publish_mod.plan(artifacts, prerelease=True, live_fire=False)
+    assert dispatched[0].skip == publish_mod.SKIP_NOTIFY_PRERELEASE
+
+
+def test_plan_prerelease_skips_notify_downstreams():
+    """Fires on REAL releases only: a plain prerelease notifies no one — its
+    own stated reason, distinct from brew's stable-only skip (#792)."""
+    dispatched = publish_mod.plan(_notify_artifacts(), prerelease=True, live_fire=False)
+    verdicts = {d.adapter.name: d.skip for d in dispatched}
+    assert verdicts["gh-release"] is None
+    assert verdicts["notify-downstreams"] == publish_mod.SKIP_NOTIFY_PRERELEASE
+
+
+def test_plan_live_fire_skips_notify_downstreams_via_rc_guard():
+    """An rc live-fire cut skips it as an external endpoint — the RC guard
+    wins over the stable-only skip (checked first), keeping only gh-release."""
+    dispatched = publish_mod.plan(_notify_artifacts(), prerelease=True, live_fire=True)
+    verdicts = {d.adapter.name: d.skip for d in dispatched}
+    assert verdicts["gh-release"] is None
+    assert verdicts["notify-downstreams"] == publish_mod.SKIP_RC_GUARD
 
 
 def test_plan_unknown_endpoint_is_a_hard_error_naming_the_known_set():
@@ -778,18 +859,30 @@ def test_pypi_pyproject_without_a_name_refuses(tmp_path):
 
 
 # --------------------------------------------------------------------------
-# npm — prebuilt tree, no rebuild, publish-over-existing is success
+# npm — the staged tarball IS the artifact, no rebuild, publish-over-existing
+# is success (TOL02-WS12 #788)
 # --------------------------------------------------------------------------
 
 
-def test_npm_publishes_the_prebuilt_tree_without_rebuilding(tmp_path):
-    artifact = _artifacts({"wasm": {"endpoints": ["npm"]}})[0]
-    entries = _entries({"pkg": "npm"})
+def _stage_npm_tarball(tmp_path, name):
+    dist = tmp_path / "dist"
+    dist.mkdir(parents=True, exist_ok=True)
+    (dist / name).write_bytes(b"tgz")
+    return dist / name
+
+
+def test_npm_publishes_the_staged_tarball_without_rebuilding(tmp_path):
+    # The declared npm package name (`product-name`) flattens to the `npm pack`
+    # tarball name (`@lex-fmt/lex-wasm` -> `lex-fmt-lex-wasm-<version>.tgz`),
+    # and that same declaration scopes the publish to THIS artifact's tarball.
+    (artifact,) = _artifacts(
+        {"wasm": {"product-name": "@lex-fmt/lex-wasm", "endpoints": ["npm"]}}
+    )
+    tarball = _stage_npm_tarball(tmp_path, "lex-fmt-lex-wasm-1.2.3.tgz")
     probe = SeamRecorder()
     req = _request(
         tmp_path,
         artifact,
-        entries=entries,
         env={"NPM_TOKEN": "npm-tok"},  # looked up under the secret name
         probe=probe,
     )
@@ -797,17 +890,33 @@ def test_npm_publishes_the_prebuilt_tree_without_rebuilding(tmp_path):
     published = publish_mod._publish_npm(req)
 
     argv, cwd, env = probe.calls[0]
-    assert argv == ("npm", "publish", "--ignore-scripts")
-    assert cwd == tmp_path / "pkg"  # the prebuilt tree, not a rebuild
-    # ...and fed to npm under the var npm reads (NODE_AUTH_TOKEN), not the
-    # secret name — the two-vocabulary indirection secretreq owns.
+    # the STAGED tarball (an absolute path), never a rebuild from a source tree
+    assert argv == ("npm", "publish", str(tarball), "--ignore-scripts")
+    assert cwd == tmp_path
+    # ...and the token is fed to npm under the var npm reads (NODE_AUTH_TOKEN),
+    # not the secret name — the two-vocabulary indirection secretreq owns.
     assert env == {"NODE_AUTH_TOKEN": "npm-tok"}
-    assert published.actions == ("published 1.2.3 from pkg",)
+    assert published.actions == (
+        "published @lex-fmt/lex-wasm 1.2.3 (lex-fmt-lex-wasm-1.2.3.tgz)",
+    )
+
+
+def test_npm_missing_staged_tarball_is_a_loud_refusal(tmp_path):
+    # No tarball staged -> the bundle stage never ran (or the name mismatched);
+    # publish refuses loudly rather than a silent no-op or scanning the tree.
+    (artifact,) = _artifacts(
+        {"wasm": {"product-name": "@lex-fmt/lex-wasm", "endpoints": ["npm"]}}
+    )
+    req = _request(tmp_path, artifact, env={"NPM_TOKEN": "tok"}, probe=SeamRecorder())
+    with pytest.raises(ReleaseError, match="no tarball `lex-fmt-lex-wasm-1.2.3.tgz`"):
+        publish_mod._publish_npm(req)
 
 
 def test_npm_publish_over_existing_is_success(tmp_path):
-    artifact = _artifacts({"wasm": {"endpoints": ["npm"]}})[0]
-    entries = _entries({"pkg": "npm"})
+    (artifact,) = _artifacts(
+        {"wasm": {"product-name": "@lex-fmt/lex-wasm", "endpoints": ["npm"]}}
+    )
+    _stage_npm_tarball(tmp_path, "lex-fmt-lex-wasm-1.2.3.tgz")
     probe = SeamRecorder(
         {
             "npm": lambda argv: _fail(
@@ -820,12 +929,11 @@ def test_npm_publish_over_existing_is_success(tmp_path):
     req = _request(
         tmp_path,
         artifact,
-        entries=entries,
         env={"NPM_TOKEN": "tok"},
         probe=probe,
     )
     published = publish_mod._publish_npm(req)
-    assert published.actions == ("1.2.3 already published — resumed",)
+    assert published.actions == ("@lex-fmt/lex-wasm 1.2.3 already published — resumed",)
 
 
 # --------------------------------------------------------------------------
@@ -1096,6 +1204,16 @@ def test_brew_without_archives_refuses(tmp_path):
     artifact = _artifacts({"lex": {"endpoints": ["brew"]}})[0]
     req = _request(tmp_path, artifact, env={"HOMEBREW_TAP_TOKEN": "tok"})
     with pytest.raises(ReleaseError, match="tar.gz archives"):
+        publish_mod._publish_brew(req)
+
+
+def test_brew_refuses_an_unresolved_source_repo(tmp_path):
+    """The verb resolves the source slug for a live needs_repo dispatch; a
+    direct caller that omits it gets a loud ReleaseError (not a strippable
+    assert) — the formula's asset URLs need the `owner/name`."""
+    artifact = _artifacts({"lex": {"endpoints": ["brew"]}})[0]
+    req = _request(tmp_path, artifact, env={"HOMEBREW_TAP_TOKEN": "tok"}, repo=None)
+    with pytest.raises(ReleaseError, match="no source repo resolved"):
         publish_mod._publish_brew(req)
 
 
@@ -1590,12 +1708,12 @@ def test_publish_missing_npm_binary_gets_the_reconcile_remedy(
         tmp_path,
         monkeypatch,
         toml="""
-[toolchains]
-"." = "npm"
-
 [artifacts.pkg]
 endpoints = ["npm"]
 """,
+        # The staged tarball IS the artifact (WS12); stage it so the npm probe
+        # is REACHED — the missing-binary death is then what the remedy catches.
+        assets=("pkg-1.2.3.tgz",),
     )
 
     rc = release_verb.run_publish(
@@ -1665,3 +1783,84 @@ def test_publish_cli_requires_the_result_inputs():
     result = CliRunner().invoke(release_verb.release, ["publish", "1.2.3"])
     assert result.exit_code == 2
     assert "--build-result" in result.output
+
+
+# --------------------------------------------------------------------------
+# notify-downstreams adapter (TOL02-WS16 #792)
+# --------------------------------------------------------------------------
+
+
+def test_notify_downstreams_fires_one_dispatch_per_downstream(tmp_path):
+    """The cascade's happy path: one `upstream-release` repository_dispatch
+    per declared downstream, each carrying the source repo/tag/version/artifact
+    in its client payload, authenticated by the cross-repo PAT."""
+    artifact = _notify_artifacts()[0]
+    ghio = FakeGh()
+    req = _request(
+        tmp_path,
+        artifact,
+        version="1.2.3",
+        env={publish_mod.NOTIFY_SECRET: "pat-xyz"},
+        ghio=ghio,
+    )
+    published = publish_mod._publish_notify_downstreams(req)
+    dispatches = [c for c in ghio.calls if c[0] == "dispatch"]
+    assert [c[1] for c in dispatches] == ["lex-fmt/vscode", "lex-fmt/nvim"]
+    for _, _slug, event_type, payload, token in dispatches:
+        assert event_type == publish_mod.NOTIFY_EVENT_TYPE
+        assert token == "pat-xyz"
+        assert payload == {
+            "repo": "acme/widget",
+            "tag": "v1.2.3",
+            "version": "1.2.3",
+            "artifact": "parser",
+        }
+    assert published.endpoint == "notify-downstreams"
+    assert published.actions == (
+        "dispatched upstream-release to lex-fmt/vscode",
+        "dispatched upstream-release to lex-fmt/nvim",
+    )
+
+
+def test_notify_downstreams_refuses_an_unresolved_source_repo(tmp_path):
+    """The verb resolves the source slug for a live needs_repo dispatch; a
+    direct caller that omits it gets a loud ReleaseError (not a strippable
+    assert, not a null-repo payload) — the payload names the upstream the
+    downstreams rebuild against."""
+    artifact = _notify_artifacts()[0]
+    ghio = FakeGh()
+    req = _request(
+        tmp_path,
+        artifact,
+        version="1.2.3",
+        env={publish_mod.NOTIFY_SECRET: "pat-xyz"},
+        ghio=ghio,
+        repo=None,
+    )
+    with pytest.raises(ReleaseError, match="no source repo resolved"):
+        publish_mod._publish_notify_downstreams(req)
+    assert not [c for c in ghio.calls if c[0] == "dispatch"]
+
+
+def test_notify_downstreams_refuses_without_the_cross_repo_token(tmp_path):
+    """The ambient GITHUB_TOKEN cannot dispatch cross-repo, so a missing
+    DOWNSTREAM_DISPATCH_TOKEN is a loud refusal — never a silent no-notify."""
+    artifact = _notify_artifacts()[0]
+    ghio = FakeGh()
+    req = _request(tmp_path, artifact, version="1.2.3", env={}, ghio=ghio)
+    with pytest.raises(ReleaseError, match="DOWNSTREAM_DISPATCH_TOKEN"):
+        publish_mod._publish_notify_downstreams(req)
+    assert not [c for c in ghio.calls if c[0] == "dispatch"]
+
+
+def test_notify_downstreams_secret_mirrors_the_derivation_authority():
+    """The endpoint's secret name IS its `secretreq.ENDPOINT_SECRETS` entry —
+    gh-setup syncs it and preflight validates its presence from that one map."""
+    assert (
+        publish_mod.NOTIFY_SECRET
+        == (secretreq_mod.ENDPOINT_SECRETS["notify-downstreams"][0])
+    )
+    adapter = publish_mod.adapter_for("notify-downstreams")
+    assert adapter is not None
+    assert adapter.secrets == secretreq_mod.ENDPOINT_SECRETS["notify-downstreams"]
+    assert adapter.stable_only and adapter.stage == "derived"

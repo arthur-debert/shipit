@@ -20,11 +20,15 @@ The plan's five fields (story 27):
   vocabulary, driven by declarations instead of workflow inputs. Opting out
   of a platform drops its entry, never leaves a dead job.
 - ``stages`` — the live stage subset of ``preflight → prepare → bundle →
-  assert-bundle → sign → publish``: bundle (and its assert) only when some
+  assert-bundle → sign → publish``: bundle only when some
   matrix entry actually bundles — a composition that APPLIES to a built
   platform (a composition matching none of its artifact's platforms is a loud
-  refusal, not a silently dropped stage); sign only when declared signing
-  meets a darwin entry (and ``--unsigned`` did not flip it).
+  refusal, not a silently dropped stage); assert-bundle only when a bundling
+  entry's composition carries a main binary to check
+  (:attr:`shipit.release.bundle.Composition.asserts_binary` — archive/deb/
+  mac-app, never a source composition like wheel or tarball #792); sign only
+  when declared signing meets a darwin entry (and ``--unsigned`` did not flip
+  it).
 - ``endpoints`` — the post-RC-guard endpoint set: a ``-release-rc`` version
   plans GH-release-only with every external endpoint dropped from the plan,
   not filtered later in YAML (story 33's guard consumed as plan shape;
@@ -307,10 +311,26 @@ def plan(
                 f"platform, or the bundle is never produced"
             )
 
+    # assert-bundle (the scar-#2 integrity guard) is live only when some
+    # bundling entry's composition carries a MAIN BINARY to check
+    # (:attr:`shipit.release.bundle.Composition.asserts_binary`): a source /
+    # package composition (wheel's sdist+wheel, tarball's generated C, #792)
+    # has no binary, and running the guard over its ``.tar.gz`` would hard-fail
+    # with "no main binary". So bundle can be live while assert-bundle is not.
+    by_name = {artifact.name: artifact for artifact in artifacts}
+    asserting = {
+        name
+        for name in bundling
+        if (spec := by_name[name].bundle) is not None
+        and (comp := bundle.composition(spec.composition)) is not None
+        and comp.asserts_binary
+    }
     bundle_live = bool(bundling)
     live = {"preflight", "prepare", "publish"}
     if bundle_live:
-        live |= {"bundle", "assert-bundle"}
+        live.add("bundle")
+    if asserting:
+        live.add("assert-bundle")
     if sign_live and not unsigned:
         live.add("sign")
     stages = tuple(stage for stage in STAGES if stage in live)

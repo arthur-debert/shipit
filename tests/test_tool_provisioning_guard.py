@@ -13,8 +13,9 @@ provisions X on the runner". This module is that tie, in four directions:
    on any argv-shaped literal head that is neither inventoried nor
    explicitly declared a non-argv literal (:data:`_NON_ARGV_LITERALS`). This
    is the tripwire for a tool that never even reached the argv sweep's
-   table: the WS12–WS16 composition tools (wasm-pack, vsce, electron-builder,
-   tauri, tree-sitter) land HERE first. Do not allowlist a real tool.
+   table: the WS13–WS16 composition tools (vsce, electron-builder, tauri,
+   tree-sitter) land HERE first (WS12's wasm-pack has landed — its row is
+   below). Do not allowlist a real tool.
 3. **Pin lockstep** — each pinned entry is cross-checked against its one
    authority (``CARGO_DEB_VERSION``, the managed pixi block data files, the
    wf blocks' ``pixi-version``), so the registry cannot claim a pin the code
@@ -159,6 +160,17 @@ PROVISIONING: dict[str, tuple[Provisioned, ...]] = {
     "pytest": (
         Provisioned("pytest", CONSUMER_ENV, note="test lane, never a release stage"),
     ),
+    "tree-sitter": (
+        Provisioned(
+            "tree-sitter",
+            CONSUMER_OWNED,
+            hole=True,
+            note="tree-sitter CLI drives generate/corpus/tarball (#792); not "
+            "on conda-forge (a WS12–WS16 composition tool), so the "
+            "consumer's own env provides it — open hole until a fleet "
+            "tree-sitter release consumer pins it (ADP02 rc proof)",
+        ),
+    ),
     "npm": (
         Provisioned(
             "nodejs",
@@ -169,6 +181,16 @@ PROVISIONING: dict[str, tuple[Provisioned, ...]] = {
             "npm fails loudly naming the reconcile (#801 closes hole 3)",
         ),
         Provisioned("pnpm", PIXI_MANAGED, pin="11.*", note="node-deps block"),
+    ),
+    "wasm-pack": (
+        Provisioned(
+            "wasm-pack",
+            PIXI_MANAGED,
+            pin="0.13.*",
+            note="the wasm/npm bundle composition's builder (TOL02-WS12 #788); "
+            "rides the rust-release-deps block (rust signal), pinned from "
+            "conda-forge — provisions wasm-pack + the wasm32 target (WS10 #798)",
+        ),
     ),
     "uv": (
         Provisioned(
@@ -300,6 +322,8 @@ _NON_ARGV_LITERALS = frozenset(
         "pyproject.toml",
         "release",
         "rust",
+        "scope",
+        "src",
         "success",
         "v",
         "windows",
@@ -424,6 +448,7 @@ def test_pins_agree_with_their_one_authority():
     assert _row("cargo", "cargo-deb").pin == release_bundle.CARGO_DEB_VERSION
     rust_release = _block_toml("pixi-rust-release-deps-block.toml")
     assert _row("cargo", "cargo-edit").pin == rust_release["cargo-edit"]
+    assert _row("wasm-pack", "wasm-pack").pin == rust_release["wasm-pack"]
     rust_toolchain = _block_toml("pixi-rust-release-toolchain-block.toml")
     assert _row("cargo", "cargo").pin == rust_toolchain["rust"]
     # ...and the two managed rust surfaces (release default-env toolchain,

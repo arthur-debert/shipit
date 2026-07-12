@@ -33,6 +33,25 @@ functions the entries carry:
 - **wheel** — ``uv build`` emitting BOTH the wheel and the sdist into the
   bundle output tree (the legacy ``python-pkg.yml`` build job: one build,
   consumed by multiple publish targets).
+- **wasm-pack** — the wasm/npm leg (TOL02-WS12 #788, WS10 DECIDED #798:
+  bespoke ``wasm-pack`` composition, pixi provisions ``wasm-pack`` + the
+  wasm32 target, the npm tarball is the artifact). ``wasm-pack build`` the
+  rust leg's crate into a fresh ``pkg/`` npm package tree (wasm + JS glue +
+  ``package.json``, the version wasm-pack reads from the crate's ``Cargo.toml``
+  — bumped by ``release prepare``), then ``npm pack --ignore-scripts`` that
+  tree into the ONE ``<pkg>-<version>.tgz`` npm tarball staged under the bundle
+  output tree (``--ignore-scripts`` forecloses a package lifecycle script —
+  ``prepare``/``prepack``/``postpack`` — running arbitrary code as a SECOND
+  build path during bundle, the same guarantee the npm publish leg makes on the
+  prebuilt tarball, ``release/publish.py``).
+  That tarball is BOTH the gh-release asset and exactly what the npm endpoint
+  publishes (``release/publish.py`` — no rebuild), and the assert-bundle npm
+  tier reads its inner ``package.json`` ``name`` as the assertable identity.
+  The optional ``scope`` / ``wasm-target`` declarations are the only
+  consumer-specific parts (``@scope`` and wasm-pack's ``--target``, default
+  ``bundler``); every other flag is registry-assembled. The scratch ``pkg/``
+  tree is always removed — only the tarball survives (ADR-0009's barrier: a
+  composition writes only its declared artifact under ``out_dir``).
 - **vsix** — a per-target VS Code extension ``.vsix`` via ``npm exec -- vsce
   package --target <vsce-target> --out <name>-<vsce-target>.vsix`` (the legacy
   ``vscode-ext.yml@v3`` per-platform packaging: one ``.vsix`` per platform,
@@ -42,12 +61,14 @@ functions the entries carry:
   no vsce target being a loud refusal. Runs ``vsce`` through ``npm exec`` in the
   ``npm`` leg (the extension is a node package) — vsce is the consumer's
   ``@vscode/vsce`` devDependency under ``node_modules/.bin``, never a
-  fleet-provisioned PATH binary, so the local package context resolves it. The
-  per-target binary it bundles is produced by the build
-  stage — for ``win32-x64`` that binary comes from the cross-target build
-  (TOL02-WS11 #787, the windows leg's stated dependency, not hidden), which
-  writes ``target/<triple>/release/`` for the extension's prepackage step to
-  stage.
+  fleet-provisioned PATH binary, so the local package context resolves it. A
+  ``.vsix`` is a zip package with no reopenable main binary, so — like wheel,
+  wasm-pack, and tarball — it is NOT binary-asserting (``asserts_binary=False``,
+  the scar-#2 guard is skipped). The per-target binary it bundles is produced
+  by the build stage — for ``win32-x64`` that binary comes from the
+  cross-target build (TOL02-WS11 #787, the windows leg's stated dependency, not
+  hidden), which writes ``target/<triple>/release/`` for the extension's
+  prepackage step to stage.
 - **mac-app** — the coupled UNSIGNED ``.app``/``.dmg`` pair (the declared
   bundler builds the .app inside the .dmg run; they are not cleanly
   separable) PLUS the inner ``.app`` re-emitted as the reseal payload
@@ -58,10 +79,16 @@ functions the entries carry:
   sign-then-bundle). The declared ``command`` is the only consumer-specific
   part; a missing payload is a bundle-stage failure, never a signer
   surprise. Mac targets only.
+- **tarball** — the generated-parser ``<name>.tar.gz`` (TOL02-WS16 #792,
+  legacy ``tree-sitter.yml@v3``): the tree-sitter leg's generated ``src/``
+  tree plus the grammar/queries/bindings that are present. Platform-
+  independent (generated C source, no per-OS variant — no ``-<target>``
+  suffix), so every matrix leg composes the identical bytes.
 
 Every external command runs through the injected runner — the one Exec seam
-(ADR-0028); the ``cargo`` / ``uv`` / ``tar`` / ``zip`` / ``vsce`` argv literals
-below are those tools' one BUNDLE-side assembly point, whitelisted in the
+(ADR-0028); the ``cargo`` / ``uv`` / ``wasm-pack`` / ``npm`` / ``tar`` /
+``zip`` / ``vsce`` argv literals below are those tools' one BUNDLE-side
+assembly point, whitelisted in the
 mechanized argv sweep (``tests/test_tool_argv_sweep.py``). Compose functions
 write ONLY under the request's bundle output tree (ADR-0009's barrier: a
 failing composition exits with nothing half-written outside it); uploading
@@ -346,6 +373,134 @@ def _compose_wheel(req: ComposeRequest) -> Composed:
     return Composed(req.artifact.name, "wheel", (*wheels, *sdists))
 
 
+#: The generated-parser payload the ``tarball`` composition ships — tree-sitter's
+#: conventional layout under the tree-sitter leg's path. ``src`` (the
+#: ``tree-sitter generate`` output: ``parser.c``, the ``tree_sitter/``
+#: headers, ``node-types.json``, ``grammar.json``) is the REQUIRED core — its
+#: absence means the parser was never generated. The rest ride WHEN PRESENT
+#: (the :data:`DOC_FILES` "when present" shape): a grammar declares queries
+#: and bindings or it does not, and an absent one ships nothing rather than an
+#: empty dir. This is the legacy ``tree-sitter.yml@v3`` tarball contract
+#: (generated parser + grammar + queries), assembled shipit-side.
+TREE_SITTER_PAYLOAD: tuple[str, ...] = (
+    "src",
+    "queries",
+    "grammar.js",
+    "package.json",
+    "binding.gyp",
+    "bindings",
+)
+
+
+def _compose_tarball(req: ComposeRequest) -> Composed:
+    """The generated-parser tarball: ``<name>.tar.gz`` of the tree-sitter
+    leg's :data:`TREE_SITTER_PAYLOAD` (the ``tree-sitter generate`` output
+    plus the grammar/queries/bindings, when present). See the module
+    docstring's tarball entry.
+
+    A generated parser is platform-independent C source — no per-OS variant —
+    so the archive carries NO ``-<target>`` suffix: every matrix leg that runs
+    it composes the identical bytes under the one name (parity with legacy
+    ``tree-sitter.tar.gz``). ``src`` is required — its absence is a bundle-
+    stage failure (``shipit build`` runs ``tree-sitter generate`` first),
+    never a quiet empty archive.
+    """
+    leg = _leg_for(req.artifact, req.entries, "tree-sitter", "tarball")
+    leg_dir = req.root if leg.path in (".", "") else req.root / leg.path
+    if not (leg_dir / "src").is_dir():
+        raise ReleaseError(
+            f"[artifacts.{req.artifact.name}] tarball composition: no generated "
+            f"parser at {leg_dir / 'src'} — the tarball ships the "
+            f"`tree-sitter generate` output; run `shipit build` first"
+        )
+    present = [name for name in TREE_SITTER_PAYLOAD if (leg_dir / name).exists()]
+    archive = f"{req.artifact.name}.tar.gz"
+    archive_path = req.out_dir / archive
+    req.out_dir.mkdir(parents=True, exist_ok=True)
+    if archive_path.exists():
+        # tar -czf truncates, but an unlink keeps the rerun's artifact exactly
+        # the fresh tree (the archive/mac-app recreate-from-clean contract).
+        archive_path.unlink()
+    req.run_cmd(
+        ["tar", "-czf", str(archive_path), "-C", str(leg_dir), *present],
+        req.root,
+    )
+    return Composed(req.artifact.name, "tarball", (archive,))
+
+
+#: wasm-pack's default output target when a wasm/npm artifact declares none —
+#: the ``bundler`` target (webpack/rollup/vite consumers), wasm-pack's own
+#: default. A consumer targeting ``web`` / ``nodejs`` / ``no-modules`` declares
+#: it via ``bundle.wasm-target``.
+WASM_PACK_DEFAULT_TARGET = "bundler"
+
+
+def _compose_wasm_pack(req: ComposeRequest) -> Composed:
+    """``wasm-pack build`` the rust leg's crate → a ``pkg/`` npm tree, then
+    ``npm pack`` it into the ONE npm tarball. See the module docstring's
+    wasm-pack entry.
+
+    The crate is the FIRST mapped ``[toolchains]`` rust leg (the deb tier's
+    rule): wasm-pack builds a rust crate, so the wasm/npm artifact maps its
+    crate as a rust leg and declares ``build = ["rust"]``. ``wasm-pack build``
+    writes a FRESH ``pkg/`` scratch tree under the output tree (wasm-pack
+    itself clears ``--out-dir``); ``npm pack --ignore-scripts`` then produces
+    the tarball, moved into ``out_dir`` (``--ignore-scripts`` keeps a generated
+    ``package.json`` lifecycle script from running a second build path during
+    bundle — the publish leg's ``--ignore-scripts`` guarantee, at the pack).
+    The scratch ``pkg/`` is always removed — only the tarball
+    is a declared artifact (ADR-0009's barrier). A build that leaves no
+    ``package.json``, or a pack that yields no single ``.tgz``, is a hard
+    bundle-stage failure, never a quiet pass.
+    """
+    leg = _leg_for(req.artifact, req.entries, "rust", "wasm-pack")
+    spec = req.artifact.bundle
+    assert spec is not None
+    target = spec.wasm_target or WASM_PACK_DEFAULT_TARGET
+    req.out_dir.mkdir(parents=True, exist_ok=True)
+    pkg = req.out_dir / f".pkg-{req.artifact.name}"
+    if pkg.exists():
+        # A rerun rebuilds pkg/ from scratch; wasm-pack clears its --out-dir,
+        # but removing it here keeps a failed prior run from leaking a stale
+        # tree into this one's npm pack.
+        shutil.rmtree(pkg)
+    crate = req.root / leg.path
+    argv = [
+        "wasm-pack",
+        "build",
+        "--release",
+        "--target",
+        target,
+        "--out-dir",
+        str(pkg),
+    ]
+    if spec.scope is not None:
+        argv += ["--scope", spec.scope]
+    try:
+        req.run_cmd(argv, crate)
+        if not (pkg / "package.json").is_file():
+            raise ReleaseError(
+                f"[artifacts.{req.artifact.name}] wasm-pack composition: "
+                f"`wasm-pack build` left no package.json under {pkg} — the npm "
+                f"package tree is the artifact; a build that produces none is a "
+                f"hard fail, never a quiet pass"
+            )
+        produced = _emit_into_out(
+            req, ["npm", "pack", "--ignore-scripts"], "--pack-destination", pkg
+        )
+    finally:
+        if pkg.exists():
+            shutil.rmtree(pkg)
+    tarballs = [name for name in produced if name.endswith(".tgz")]
+    if len(tarballs) != 1:
+        raise ReleaseError(
+            f"[artifacts.{req.artifact.name}] wasm-pack composition: `npm pack` "
+            f"produced {len(tarballs)} .tgz under {req.out_dir} (expected exactly "
+            f"one npm tarball — the artifact)"
+        )
+    return Composed(req.artifact.name, "wasm-pack", (tarballs[0],))
+
+
 def _compose_mac_app(req: ComposeRequest) -> Composed:
     """The coupled unsigned ``.app``/``.dmg`` pair + the reseal payload.
 
@@ -466,7 +621,39 @@ class Composition:
     (:mod:`shipit.release.sign` — the mac-app leg's reseal payload, the
     archive leg's tarball, TOL02-WS08 #779): the config boundary refuses
     ``sign = true`` on any other composition, so a sign declaration can
-    never route to a signer leg that does not exist.
+    never route to a signer leg that does not exist. ``asserts_binary`` marks
+    the compositions whose output carries a MAIN BINARY the scar-#2 integrity
+    guard checks (:mod:`shipit.release.integrity`, workflows.lex §3.2) —
+    archive/deb/mac-app. A source/package composition (wheel's sdist+wheel,
+    tarball's generated C, wasm-pack's npm tgz) has no binary to name, so the
+    preflight planner omits the ``assert-bundle`` stage for it
+    (:func:`shipit.release.preflight.plan`): running the guard over a source
+    ``.tar.gz`` would hard-fail with "no main binary" (the deb tier's #784-F4
+    lesson, inverted — nothing to assert).
+    ``platform_independent`` marks the compositions whose output carries NO
+    ``-<target>`` qualifier — the tarball's generated C source is identical on
+    every OS, so it emits one unqualified ``<name>.tar.gz`` (parity with legacy
+    ``tree-sitter.tar.gz``). Because ``wf-publish.yml`` merges every leg's
+    ``dist/`` into one flat tree (``merge-multiple``), an unqualified name
+    built on more than one leg would COLLIDE (last writer wins, and tar bytes
+    are not guaranteed identical across runners — mtimes/uid/gid), so the
+    config boundary refuses such a composition declared with >1 ``platforms``
+    (:func:`shipit.config._parse_artifact`): it must build on exactly one leg.
+    ``option_keys`` are the
+    EXTRA optional declaration keys a registry-assembled composition accepts
+    (wasm-pack's ``scope`` / ``wasm-target`` — the ``@scope`` and wasm-pack
+    ``--target``, the only consumer-specific parts); the config boundary
+    accepts them ONLY for the composition that names them and rejects them
+    everywhere else (:func:`shipit.config._parse_bundle`). ``provisions_signal``
+    names a toolchain SIGNAL a declared composition needs beyond its own leg —
+    wasm-pack's ``npm pack`` needs the node runtime (``npm`` rides ``nodejs``),
+    but wasm-pack rides the RUST signal and a rust-only wasm crate's npm
+    ``package.json`` is GENERATED into ``pkg/``, never tracked, so the node
+    manifest signal is absent (issue #788 review). ``shipit install`` unions
+    this signal into the detected toolchains off the declared composition
+    (:func:`shipit.verbs.install._composition_signals`), delivering the
+    node-deps block wherever the composition is declared; ``None`` (every
+    composition but wasm-pack) adds nothing.
     """
 
     name: str
@@ -474,6 +661,10 @@ class Composition:
     platforms: tuple[str, ...] = ()
     declared_command: bool = False
     signable: bool = False
+    asserts_binary: bool = True
+    platform_independent: bool = False
+    option_keys: tuple[str, ...] = ()
+    provisions_signal: str | None = None
 
     def applies(self, target: str) -> bool:
         """Whether this composition runs for ``target`` (substring match on
@@ -483,11 +674,34 @@ class Composition:
 
 ARCHIVE = Composition("archive", _compose_archive, signable=True)
 DEB = Composition("deb", _compose_deb, platforms=("linux",))
-WHEEL = Composition("wheel", _compose_wheel)
+#: wheel: a python sdist+wheel — no native binary, so the scar-#2 guard has
+#: nothing to assert (its sdist IS a ``.tar.gz``, which the guard would
+#: otherwise misread as a binary archive and hard-fail).
+WHEEL = Composition("wheel", _compose_wheel, asserts_binary=False)
+#: wasm-pack: an npm ``.tgz`` (wasm/JS package) — like the wheel sdist and the
+#: tree-sitter tarball it carries no main binary, so the scar-#2 guard is
+#: skipped for it (``asserts_binary=False``); a source package built via
+#: ``npm pack`` has nothing for the integrity guard to assert.
+WASM_PACK = Composition(
+    "wasm-pack",
+    _compose_wasm_pack,
+    asserts_binary=False,
+    option_keys=("scope", "wasm-target"),
+    # `npm pack` at bundle needs the node runtime (npm); wasm-pack rides the
+    # rust signal and the crate's npm package.json is generated, never tracked,
+    # so install unions the node signal off this declaration (issue #788).
+    provisions_signal="node",
+)
+#: vsix: a per-target VS Code extension ``.vsix`` (a zip package) — no
+#: reopenable main binary, so like wheel/wasm-pack/tarball the scar-#2 guard is
+#: skipped (``asserts_binary=False``): preflight never routes the vsix leg
+#: through assert-bundle, which would hard-fail "no main binary" on a tree
+#: carrying only the per-target ``<name>-<vsce-target>.vsix``.
 VSIX = Composition(
     "vsix",
     _compose_vsix,
     platforms=("apple-darwin", "linux", "windows"),
+    asserts_binary=False,
 )
 MAC_APP = Composition(
     "mac-app",
@@ -496,10 +710,28 @@ MAC_APP = Composition(
     declared_command=True,
     signable=True,
 )
+#: tree-sitter's generated-parser tarball (TOL02-WS16 #792) — platform-
+#: independent (the same generated C source on every leg, emitted as one
+#: unqualified ``<name>.tar.gz``), NOT signable (a source tarball has no binary
+#: the mac signer reopens), and NOT binary-asserting (a source ``.tar.gz`` has
+#: no main binary — the scar-#2 guard is skipped for it, like the wheel's
+#: sdist). ``platform_independent`` makes the config boundary refuse it with
+#: >1 ``platforms`` (the unqualified name would collide across legs).
+TARBALL = Composition(
+    "tarball", _compose_tarball, asserts_binary=False, platform_independent=True
+)
 
 #: The CLOSED registry, in a stable order. Adding a composition is adding an
 #: entry here (the toolchain registry's mirror) — never a kind switch.
-COMPOSITIONS: tuple[Composition, ...] = (ARCHIVE, DEB, WHEEL, VSIX, MAC_APP)
+COMPOSITIONS: tuple[Composition, ...] = (
+    ARCHIVE,
+    DEB,
+    WHEEL,
+    WASM_PACK,
+    VSIX,
+    MAC_APP,
+    TARBALL,
+)
 
 
 def names() -> tuple[str, ...]:
@@ -513,6 +745,14 @@ def signable_names() -> tuple[str, ...]:
     the config boundary's ``sign = true`` refusal message
     (:func:`shipit.config._parse_artifact`)."""
     return tuple(c.name for c in COMPOSITIONS if c.signable)
+
+
+def platform_independent_names() -> tuple[str, ...]:
+    """The composition names whose output is unqualified (no ``-<target>``
+    suffix), registry order — for the config boundary's >1-``platforms``
+    refusal message (:func:`shipit.config._parse_artifact`). An unqualified
+    archive built on more than one leg would collide in the merged ``dist/``."""
+    return tuple(c.name for c in COMPOSITIONS if c.platform_independent)
 
 
 def composition(name: str) -> Composition | None:
