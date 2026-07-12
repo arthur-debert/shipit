@@ -1767,9 +1767,22 @@ def test_load_units_toolchain_blocks_are_conditional():
     base = {u.key for u in iunits.load_units()}
     assert not (base & toolchain_keys)
 
-    for key, signal, *_ in iunits.TOOLCHAIN_UNITS:
+    # Per-signal: each signal adds exactly ITS blocks — one for go/node, TWO
+    # for rust (the lint toolchain + the release-side cargo-edit block, #793).
+    for signal in (iunits.TOOLCHAIN_RUST, iunits.TOOLCHAIN_GO, iunits.TOOLCHAIN_NODE):
+        expected = {key for key, sig, *_ in iunits.TOOLCHAIN_UNITS if sig == signal}
         keys = {u.key for u in iunits.load_units(toolchains=frozenset({signal}))}
-        assert keys - base == {key}, signal
+        assert keys - base == expected, signal
+    assert (
+        len(
+            {
+                key
+                for key, sig, *_ in iunits.TOOLCHAIN_UNITS
+                if sig == iunits.TOOLCHAIN_RUST
+            }
+        )
+        == 2
+    )
 
     all_keys = {
         u.key
@@ -1808,6 +1821,16 @@ def test_toolchain_block_units_have_the_right_shape():
     assert node.anchor == "[dependencies]"
     assert tomllib.loads(node.desired_inner()) == {"nodejs": "26.*", "pnpm": "11.*"}
 
+    # rust ALSO gets the release-side bump tool (#793): cargo-edit anchors in
+    # the DEFAULT env — wf-prepare runs shipit via bare `pixi run --locked
+    # ./bin/shipit`, which resolves [dependencies], not the lint feature — so
+    # `cargo set-version` is on exactly the PATH `release prepare` executes
+    # with. Pinned to conda-forge 0.13.11 (the issue's decided pin).
+    rust_release = units[iunits.PIXI_RUST_RELEASE_DEPS_KEY]
+    assert rust_release.dest == "pixi.toml"
+    assert rust_release.anchor == "[dependencies]"
+    assert tomllib.loads(rust_release.desired_inner()) == {"cargo-edit": "0.13.11.*"}
+
     # Sibling blocks in one consumer file: fences pairwise distinct, or
     # extract/splice would bleed across regions (the lint-env blocks' rule).
     fences = {
@@ -1815,11 +1838,12 @@ def test_toolchain_block_units_have_the_right_shape():
         for k in (
             iunits.PIXI_LINT_DEPS_KEY,
             iunits.PIXI_RUST_DEPS_KEY,
+            iunits.PIXI_RUST_RELEASE_DEPS_KEY,
             iunits.PIXI_GO_DEPS_KEY,
             iunits.PIXI_NODE_DEPS_KEY,
         )
     }
-    assert len(fences) == 4
+    assert len(fences) == 5
 
 
 def test_packaged_rust_pin_agrees_with_shipits_own_test_toolchain():
@@ -1867,6 +1891,48 @@ def test_rust_block_coexists_with_lint_deps_block_under_one_anchor():
     merged = parsed["feature"]["lint"]["dependencies"]
     assert merged["rust"] == "1.96.*"
     assert merged["ruff"] == tomllib.loads(deps.desired_inner())["ruff"]
+
+
+def test_rust_release_block_coexists_with_node_block_under_dependencies():
+    # The [dependencies] sibling pair (#793): a rust+node consumer gets BOTH
+    # the cargo-edit release block and the node runtime block under the ONE
+    # [dependencies] header — sibling regions, no bleed, one merged table.
+    units = {
+        u.key: u
+        for u in iunits.load_units(
+            toolchains=frozenset({iunits.TOOLCHAIN_RUST, iunits.TOOLCHAIN_NODE})
+        )
+    }
+    release = units[iunits.PIXI_RUST_RELEASE_DEPS_KEY]
+    node = units[iunits.PIXI_NODE_DEPS_KEY]
+
+    text = '[workspace]\nname = "acme"\n'
+    text = splice.splice_block(
+        text, node.desired_inner(), node.open_marker, node.close_marker, node.anchor
+    )
+    text = splice.splice_block(
+        text,
+        release.desired_inner(),
+        release.open_marker,
+        release.close_marker,
+        release.anchor,
+    )
+
+    assert (
+        splice.extract_block(text, node.open_marker, node.close_marker)
+        == node.desired_inner()
+    )
+    assert (
+        splice.extract_block(text, release.open_marker, release.close_marker)
+        == release.desired_inner()
+    )
+    # ONE header line (both blocks' comments mention the table by name, so
+    # count actual header lines, not substring occurrences).
+    headers = [ln for ln in text.splitlines() if ln.strip() == "[dependencies]"]
+    assert len(headers) == 1
+    merged = tomllib.loads(text)["dependencies"]
+    assert merged["cargo-edit"] == "0.13.11.*"
+    assert merged["nodejs"] == "26.*"
 
 
 def _git_repo(tmp_path: Path) -> Path:

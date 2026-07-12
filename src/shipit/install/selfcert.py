@@ -168,7 +168,17 @@ def _scoped_lint(root: Path, paths: list[str], runner) -> tuple[int, str]:
 
 
 def _check_manifest(root: Path, runner) -> CertCheck:
-    """Postcondition 1: the stamped config parses; the managed lint env solves."""
+    """Postcondition 1: the stamped config parses; the managed lint env solves.
+
+    The solve is deliberately UNLOCKED (no ``--locked``): a reconcile that
+    edits a managed pixi.toml block (e.g. the #793 cargo-edit release block)
+    leaves the committed ``pixi.lock`` stale, and pixi's workspace-coherent
+    re-solve here is what regenerates it — apply then stages the refreshed
+    lock into the same commit (:data:`shipit.install.apply.PIXI_LOCK`), so no
+    consumer ``pixi run --locked`` (wf-prepare's shipit execution included)
+    ever meets a manifest/lock mismatch. A failing solve fails CLOSED
+    (:class:`~shipit.install.errors.SelfCertError` upstream: no commit, no PR).
+    """
     try:
         config.load(root / config.CONFIG_NAME)
     except config.ConfigError as exc:

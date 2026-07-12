@@ -119,7 +119,16 @@ PIXI_ENVS_ANCHOR = "[environments]"
 # local-only" CI gap. rust and go anchor under the lint feature (they provision
 # LINTER toolchains, siblings of the managed lint-deps block above); node
 # anchors under `[dependencies]` — it provisions the repo's OWN node/pnpm
-# runtime, not a linter. Delivered only when :func:`load_units` is passed the
+# runtime, not a linter. The rust signal delivers a SECOND block (#793, the
+# #784-F2 class): the release-side bump tool (cargo-edit, whose
+# `cargo set-version` is the rust bump adapter's projection command,
+# shipit/release/bump.py) — anchored under `[dependencies]` too, NOT the lint
+# feature, because wf-prepare executes shipit in the DEFAULT pixi env
+# (`pixi run --locked ./bin/shipit`) and the tool must be on THAT run's PATH.
+# Provisioning rides pixi/conda-forge under setup-pixi's lockfile-keyed cache
+# (the #582 doctrine); `release prepare` itself never installs at run time —
+# it fails loudly naming this reconcile instead. Delivered only when
+# :func:`load_units` is passed the
 # toolchain signal (`toolchains=`), so the zero-arg catalog is byte-identical
 # to the pre-#547 one. A consumer who ALREADY pins one of a block's keys in its
 # anchor table keeps their pin: the first splice would duplicate the TOML key
@@ -143,6 +152,9 @@ PIXI_NODE_DEPS_OPEN = (
 )
 PIXI_NODE_DEPS_CLOSE = "# <<< shipit-managed node deps <<<"
 PIXI_NODE_DEPS_ANCHOR = "[dependencies]"
+PIXI_RUST_RELEASE_DEPS_KEY = "pixi.toml#shipit-rust-release-deps"
+PIXI_RUST_RELEASE_DEPS_OPEN = "# >>> shipit-managed rust release deps (do not edit; regenerate via `shipit install`) >>>"
+PIXI_RUST_RELEASE_DEPS_CLOSE = "# <<< shipit-managed rust release deps <<<"
 # (unit key, toolchain signal, open, close, anchor, packaged data file) — the
 # catalog rows :func:`load_units` appends per requested toolchain, in this order.
 TOOLCHAIN_UNITS = (
@@ -153,6 +165,14 @@ TOOLCHAIN_UNITS = (
         PIXI_RUST_DEPS_CLOSE,
         PIXI_LINT_DEPS_ANCHOR,
         "pixi-rust-lint-deps-block.toml",
+    ),
+    (
+        PIXI_RUST_RELEASE_DEPS_KEY,
+        TOOLCHAIN_RUST,
+        PIXI_RUST_RELEASE_DEPS_OPEN,
+        PIXI_RUST_RELEASE_DEPS_CLOSE,
+        PIXI_NODE_DEPS_ANCHOR,
+        "pixi-rust-release-deps-block.toml",
     ),
     (
         PIXI_GO_DEPS_KEY,

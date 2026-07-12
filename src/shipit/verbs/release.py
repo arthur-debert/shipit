@@ -325,9 +325,13 @@ def run_preflight(
 def _run_bump(argv: Sequence[str], cwd: Path) -> None:
     """Run one bump-adapter command through the one Exec runner (ADR-0028).
 
-    ``check=True``: a failing bump command (missing ``cargo-edit``, an
-    ``npm version`` refusal) raises :class:`~shipit.execrun.ExecError`, which
-    the shared error shell renders — prepare aborts with nothing committed.
+    ``check=True``: a failing bump command (an ``npm version`` refusal, a
+    broken manifest) raises :class:`~shipit.execrun.ExecError`, which the
+    shared error shell renders — prepare aborts with nothing committed. The
+    KNOWN failure shapes (an unprovisioned ``cargo set-version``, issue #793)
+    are translated at the adapter loop in :func:`run_prepare` via
+    :func:`shipit.release.bump.explain_command_failure` into a
+    :class:`~shipit.release.ReleaseError` that names the remediation.
     """
     execrun.run(list(argv), cwd=str(cwd), timeout=BUMP_TIMEOUT)
 
@@ -516,7 +520,19 @@ def run_prepare(
         adapter = bump_mod.adapter_for(entry.toolchain)
         leg_dir = root if entry.path in (".", "") else root / entry.path
         for argv in adapter.commands(version):
-            run_cmd(argv, leg_dir)
+            try:
+                run_cmd(argv, leg_dir)
+            except execrun.ExecError as exc:
+                # Translate the KNOWN failure shapes (an unprovisioned
+                # `cargo set-version`, issue #793) into a ReleaseError naming
+                # the remediation — the reconcile, never a run-time install
+                # (the #582 cache doctrine). The probe IS this attempt: no
+                # `shutil.which` pre-gate (issue #785's cargo-resolution
+                # finding). An unknown failure re-raises untranslated.
+                remedy = bump_mod.explain_command_failure(argv, exc.stderr)
+                if remedy is None:
+                    raise
+                raise ReleaseError(remedy) from exc
         if adapter.edit_path is not None:
             manifest = leg_dir / adapter.edit_path
             if not manifest.is_file():

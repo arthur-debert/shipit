@@ -160,3 +160,51 @@ def test_bump_bundle_config_refuses_a_nested_first_version():
     text = '{"app": {"version": "0.0.9"}, "version": "0.1.0"}'
     with pytest.raises(ReleaseError, match="not the top-level"):
         bump.bump_bundle_config(text, "0.2.0")
+
+
+# --------------------------------------------------------------------------
+# explain_command_failure — the #793 unprovisioned-cargo-edit translation
+# --------------------------------------------------------------------------
+
+
+def test_missing_cargo_set_version_gets_the_reconcile_remedy():
+    """Issue #793: `cargo set-version` dying with cargo's unknown-subcommand
+    error means cargo-edit is unprovisioned — the message names the managed
+    block and the install reconcile, NEVER a run-time install (#582)."""
+    message = bump.explain_command_failure(
+        ("cargo", "set-version", "--workspace", "1.2.3"),
+        "error: no such command: `set-version`",
+    )
+    assert message is not None
+    assert "cargo-edit" in message
+    assert "`shipit install`" in message
+    assert "pixi.toml#shipit-rust-release-deps" in message
+    assert "pixi.lock" in message  # the reconcile commit must carry the lock
+    assert "cargo install" not in message  # the superseded #795/#796 shape
+
+
+def test_a_different_cargo_set_version_failure_stays_untranslated():
+    """A failing bump for any OTHER reason (broken manifest, dirty workspace)
+    is not the provisioning gap — it re-raises as the original ExecError."""
+    assert (
+        bump.explain_command_failure(
+            ("cargo", "set-version", "--workspace", "1.2.3"),
+            "error: failed to parse manifest at Cargo.toml",
+        )
+        is None
+    )
+
+
+def test_other_commands_never_match_even_with_the_marker():
+    """The translation is argv-scoped: only the rust adapter's set-version
+    command maps to the cargo-edit remedy, whatever the stderr says."""
+    assert (
+        bump.explain_command_failure(("npm", "version", "1.2.3"), "no such command")
+        is None
+    )
+    assert (
+        bump.explain_command_failure(
+            ("cargo", "update", "--workspace"), "error: no such command: `whatever`"
+        )
+        is None
+    )
