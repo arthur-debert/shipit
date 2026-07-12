@@ -527,16 +527,17 @@ class BundleSpec:
     word is bundle).
 
     ``composition`` names an entry of the CLOSED composition registry
-    (:mod:`shipit.release.bundle` — archive, deb, wheel, mac-app), the
-    ADR-0007 shape: the bundle step is declared per artifact, keyed off the
-    map, never a project-Kind switch. ``command`` is the declared bundler
-    argv the ``mac-app`` composition runs (``tauri build``,
-    ``electron-builder`` — the only consumer-specific part of the mac path,
-    workflows.lex §3.1), through the one exec seam like every producing
-    command (ADR-0028); ``source`` is the repo-relative directory that
-    bundler leaves the coupled ``.app``/``.dmg`` pair under. Both are
-    REQUIRED by ``mac-app`` and rejected for every other composition (their
-    commands are registry-assembled, never declared).
+    (:mod:`shipit.release.bundle` — archive, deb, wheel, wasm-pack, mac-app,
+    tauri), the ADR-0007 shape: the bundle step is declared per artifact, keyed
+    off the map, never a project-Kind switch. ``command`` is the declared
+    bundler argv the declared-command compositions (``mac-app``, ``tauri``) run
+    (``tauri build``, ``electron-builder`` — the only consumer-specific part of
+    the mac path, workflows.lex §3.1), through the one exec seam like every
+    producing command (ADR-0028); ``source`` is the repo-relative directory that
+    bundler leaves its bundles under (the coupled ``.app``/``.dmg`` pair on
+    darwin, tauri's ``.AppImage``/``.deb`` on linux). Both are REQUIRED by the
+    declared-command compositions and rejected for every other composition
+    (their commands are registry-assembled, never declared).
 
     ``scope`` / ``wasm_target`` are the ``wasm-pack`` composition's optional
     consumer-specific parts (TOL02-WS12 #788): the npm ``@scope`` (``--scope``,
@@ -746,9 +747,9 @@ def _parse_bundle(where: str, spec: object) -> BundleSpec:
     command = spec.get("command")
     source = spec.get("source")
     if entry.declared_command:
-        # mac-app: the bundler that produces the coupled .app/.dmg pair is the
-        # one consumer-specific part of the mac path (workflows.lex §3.1), so
-        # the declaration must carry it — and say where the pair lands.
+        # mac-app/tauri: the bundler that produces the platform's bundles is
+        # the one consumer-specific part of the mac path (workflows.lex §3.1),
+        # so the declaration must carry it — and say where the bundles land.
         if command is None:
             raise ConfigError(
                 f"{where}.bundle: composition `{composition}` runs the "
@@ -774,7 +775,7 @@ def _parse_bundle(where: str, spec: object) -> BundleSpec:
         if key in spec:
             raise ConfigError(
                 f"{where}.bundle: `{key}` applies only to compositions that "
-                f"run a declared bundler (mac-app); composition "
+                f"run a declared bundler (mac-app, tauri); composition "
                 f"`{composition}` assembles its own commands"
             )
     # wasm-pack's optional scope/wasm-target — non-empty strings when present

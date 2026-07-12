@@ -569,6 +569,142 @@ def test_mac_app_requires_exactly_one_coupled_pair(tmp_path):
 
 
 # --------------------------------------------------------------------------
+# tauri — one `tauri build`, the platform's bundles (TOL02-WS15 #791)
+# --------------------------------------------------------------------------
+
+TAURI_SPEC = {
+    "app": {
+        "build": ["rust", "npm"],
+        "bundle": {
+            "composition": "tauri",
+            "command": ["npm", "run", "tauri", "build"],
+            "source": "src-tauri/target/release/bundle",
+        },
+    }
+}
+
+
+def _tauri_linux_effect(
+    root, appimage="Phos_1.0.0_amd64.AppImage", deb="Phos_1.0.0_amd64.deb"
+):
+    """Simulate `tauri build` on linux: the .AppImage and .deb it leaves under
+    the bundle dir's per-format subdirs."""
+
+    def effect(argv, cwd):
+        source = root / "src-tauri/target/release/bundle"
+        (source / "appimage").mkdir(parents=True, exist_ok=True)
+        (source / "appimage" / appimage).write_bytes(b"appimage")
+        (source / "deb").mkdir(parents=True, exist_ok=True)
+        (source / "deb" / deb).write_bytes(b"deb")
+
+    return effect
+
+
+def test_tauri_darwin_emits_the_pair_and_the_reseal_payload(tmp_path):
+    # The darwin leg is the mac-app shape — same coupled pair + reseal payload,
+    # so the consumer-agnostic signer reopens it with zero tauri knowledge
+    # (workflows.lex §3.1). Only the Composed's composition label differs.
+    (artifact,) = _artifacts(TAURI_SPEC)
+    recorder = RunRecorder({"npm": _bundler_effect(tmp_path), "tar": _tar_effect})
+
+    composed = bundle_mod.TAURI.compose(
+        _request(tmp_path, artifact, (), target=MAC, run_cmd=recorder)
+    )
+
+    source = tmp_path / "src-tauri/target/release/bundle"
+    out = tmp_path / "dist"
+    assert recorder.calls == [
+        (("npm", "run", "tauri", "build"), tmp_path),
+        (
+            (
+                "tar",
+                "-czf",
+                str(out / "app.unsigned-app.tar.gz"),
+                "-C",
+                str(source / "macos"),
+                "Phos.app",
+            ),
+            tmp_path,
+        ),
+    ]
+    assert (out / "Phos.app/Contents/MacOS/phos").is_file()
+    assert (out / "Phos.app/Contents/Current").is_symlink()
+    assert (out / "Phos_1.0.0_aarch64.dmg").is_file()
+    assert composed == bundle_mod.Composed(
+        "app",
+        "tauri",
+        ("Phos.app", "Phos_1.0.0_aarch64.dmg", "app.unsigned-app.tar.gz"),
+    )
+
+
+def test_tauri_linux_collects_the_appimage_and_deb(tmp_path):
+    (artifact,) = _artifacts(TAURI_SPEC)
+    recorder = RunRecorder({"npm": _tauri_linux_effect(tmp_path)})
+
+    composed = bundle_mod.TAURI.compose(
+        _request(tmp_path, artifact, (), target=LINUX, run_cmd=recorder)
+    )
+
+    out = tmp_path / "dist"
+    # Only `tauri build` ran — no tar, no reseal payload on linux; the bundles
+    # are copied into the out tree as-is.
+    assert recorder.calls == [(("npm", "run", "tauri", "build"), tmp_path)]
+    assert (out / "Phos_1.0.0_amd64.AppImage").is_file()
+    assert (out / "Phos_1.0.0_amd64.deb").is_file()
+    assert composed == bundle_mod.Composed(
+        "app",
+        "tauri",
+        ("Phos_1.0.0_amd64.AppImage", "Phos_1.0.0_amd64.deb"),
+    )
+
+
+def test_tauri_linux_hard_fails_when_no_bundle_appears(tmp_path):
+    # A `tauri build` that leaves no .AppImage/.deb is a hard fail, never a
+    # quiet pass (ADR-0009's barrier).
+    (artifact,) = _artifacts(TAURI_SPEC)
+    recorder = RunRecorder()  # `tauri build` "succeeds" but writes nothing
+    with pytest.raises(ReleaseError, match=r"left no \*\.AppImage/\*\.deb bundle"):
+        bundle_mod.TAURI.compose(
+            _request(tmp_path, artifact, (), target=LINUX, run_cmd=recorder)
+        )
+
+
+def test_tauri_linux_rerun_overwrites_existing_same_named_bundles(tmp_path):
+    (artifact,) = _artifacts(TAURI_SPEC)
+    recorder = RunRecorder({"npm": _tauri_linux_effect(tmp_path)})
+    for _ in range(2):
+        composed = bundle_mod.TAURI.compose(
+            _request(tmp_path, artifact, (), target=LINUX, run_cmd=recorder)
+        )
+    assert composed.outputs == (
+        "Phos_1.0.0_amd64.AppImage",
+        "Phos_1.0.0_amd64.deb",
+    )
+
+
+def test_tauri_darwin_requires_exactly_one_coupled_pair(tmp_path):
+    (artifact,) = _artifacts(TAURI_SPEC)
+
+    def two_apps(argv, cwd):
+        _bundler_effect(tmp_path)(argv, cwd)
+        _bundler_effect(tmp_path, app="Other.app")(argv, cwd)
+
+    recorder = RunRecorder({"npm": two_apps, "tar": _tar_effect})
+    with pytest.raises(ReleaseError, match=r"exactly one coupled \.app/\.dmg pair"):
+        bundle_mod.TAURI.compose(
+            _request(tmp_path, artifact, (), target=MAC, run_cmd=recorder)
+        )
+
+
+def test_tauri_skips_the_windows_target(tmp_path):
+    # Windows is out of scope (no icon.ico, #791) — the composition does not
+    # apply, so the verb skips it rather than running `tauri build` to nothing.
+    assert bundle_mod.TAURI.applies(MAC)
+    assert bundle_mod.TAURI.applies(LINUX)
+    assert not bundle_mod.TAURI.applies(WIN)
+
+
+# --------------------------------------------------------------------------
 # wasm-pack — build the pkg tree, npm pack the tarball (TOL02-WS12 #788)
 # --------------------------------------------------------------------------
 
@@ -745,7 +881,14 @@ def test_wasm_pack_needs_a_rust_leg(tmp_path):
 
 
 def test_registry_is_closed_and_platform_scoped():
-    assert bundle_mod.names() == ("archive", "deb", "wheel", "wasm-pack", "mac-app")
+    assert bundle_mod.names() == (
+        "archive",
+        "deb",
+        "wheel",
+        "wasm-pack",
+        "mac-app",
+        "tauri",
+    )
     assert bundle_mod.composition("deb") is bundle_mod.DEB
     assert bundle_mod.composition("wasm-pack") is bundle_mod.WASM_PACK
     assert bundle_mod.composition("rpm") is None
@@ -755,14 +898,19 @@ def test_registry_is_closed_and_platform_scoped():
     assert bundle_mod.WHEEL.applies(WIN)
     # wasm is platform-independent — built once, published once (no triple gate).
     assert bundle_mod.WASM_PACK.applies(LINUX) and bundle_mod.WASM_PACK.applies(MAC)
+    # tauri bundles darwin (.app/.dmg) AND linux (.AppImage/.deb); windows is
+    # out of scope (#791), so it never applies there.
+    assert bundle_mod.TAURI.applies(MAC) and bundle_mod.TAURI.applies(LINUX)
+    assert not bundle_mod.TAURI.applies(WIN)
 
 
 def test_registry_marks_the_signer_reopenable_compositions():
-    # The signable set IS the signer's leg set (TOL02-WS08 #779): mac-app
-    # (the reseal payload leg) and archive (the raw-binary tarball leg).
-    # The config boundary refuses `sign = true` on anything else, so a sign
-    # declaration can never route to a signer leg that does not exist.
-    assert bundle_mod.signable_names() == ("archive", "mac-app")
+    # The signable set IS the signer's leg set (TOL02-WS08 #779, TOL02-WS15
+    # #791): archive (the raw-binary tarball leg) plus mac-app and tauri (both
+    # emit the reseal payload the mac-app signer leg reopens). The config
+    # boundary refuses `sign = true` on anything else, so a sign declaration
+    # can never route to a signer leg that does not exist.
+    assert bundle_mod.signable_names() == ("archive", "mac-app", "tauri")
 
 
 @pytest.mark.parametrize(

@@ -62,6 +62,26 @@ functions the entries carry:
   sign-then-bundle). The declared ``command`` is the only consumer-specific
   part; a missing payload is a bundle-stage failure, never a signer
   surprise. Mac targets only.
+- **tauri** — the tauri-cli app bundler (TOL02-WS15 #791, WS10 DECIDED #798:
+  bespoke ``tauri-cli`` composition, pixi provisions ``tauri-cli``). ONE
+  declared ``tauri build`` (the only consumer-specific part) leaves the
+  platform's bundles under the declared ``source`` dir, and the composition
+  collects whatever that platform produces:
+
+  - on **darwin** — the coupled ``.app``/``.dmg`` pair PLUS the reseal payload,
+    the EXACT mac-app shape (the shared :func:`_stage_mac_pair`): the mac
+    signer is consumer-agnostic and keys off the ``*.unsigned-app.tar.gz``
+    payload, not the composition (workflows.lex §3.1 — "the only tauri-specific
+    part is the bundler"), so a tauri darwin bundle rides the same sign path as
+    electron with zero signer changes;
+  - on **linux** — the ``.AppImage`` and ``.deb`` tauri build leaves
+    (:data:`_TAURI_LINUX_GLOBS`), staged into the output tree.
+
+  Windows is out of scope (the legacy ``tauri-app.yml`` ships no
+  ``icon.ico``, #791), so the composition is gated to darwin+linux targets and
+  a windows leg is a clean skip, never a surprise. A darwin bundle missing its
+  pair, or a linux bundle producing no ``.AppImage``/``.deb``, is a hard
+  bundle-stage failure, never a quiet pass (ADR-0009's barrier).
 
 Every external command runs through the injected runner — the one Exec seam
 (ADR-0028); the ``cargo`` / ``uv`` / ``wasm-pack`` / ``npm`` / ``tar`` /
@@ -407,24 +427,24 @@ def _compose_wasm_pack(req: ComposeRequest) -> Composed:
     return Composed(req.artifact.name, "wasm-pack", (tarballs[0],))
 
 
-def _compose_mac_app(req: ComposeRequest) -> Composed:
-    """The coupled unsigned ``.app``/``.dmg`` pair + the reseal payload.
+def _stage_mac_pair(req: ComposeRequest, source: Path, composition: str) -> Composed:
+    """Stage the coupled unsigned ``.app``/``.dmg`` pair from ``source`` and
+    re-emit the inner ``.app`` as ``<name>.unsigned-app.tar.gz`` — the
+    symlink/exec-bit-preserving tar the signer reseals from (workflows.lex
+    §3.1). A missing payload is a bundle-stage failure, never a signer
+    surprise.
 
-    Runs the DECLARED bundler (the one consumer-specific part), collects the
-    exactly-one pair from the declared ``source`` dir, and re-emits the inner
-    ``.app`` as ``<name>.unsigned-app.tar.gz`` — the symlink/exec-bit-
-    preserving tar the signer reseals from (workflows.lex §3.1). A missing
-    payload is THIS stage's failure, never a signer surprise.
+    Shared by the mac-app and tauri darwin compositions: both leave a single
+    ``.app``/``.dmg`` pair a declared darwin bundler produced, and the mac
+    signer is consumer-agnostic — it keys off the reseal payload, not the
+    composition that made it (:func:`shipit.release.sign.detect_shape`). Zero
+    or multiple pairs is a hard error (never a nondeterministic pick).
     """
-    spec = req.artifact.bundle
-    assert spec is not None and spec.command is not None and spec.source is not None
-    req.run_cmd(list(spec.command), req.root)
-    source = req.root / spec.source
     apps = sorted(p for p in source.rglob("*.app") if p.is_dir())
     dmgs = sorted(p for p in source.rglob("*.dmg") if p.is_file())
     if len(apps) != 1 or len(dmgs) != 1:
         raise ReleaseError(
-            f"[artifacts.{req.artifact.name}] mac-app composition needs "
+            f"[artifacts.{req.artifact.name}] {composition} composition needs "
             f"exactly one coupled .app/.dmg pair under {source}; found "
             f"{len(apps)} .app and {len(dmgs)} .dmg"
         )
@@ -449,7 +469,66 @@ def _compose_mac_app(req: ComposeRequest) -> Composed:
             f"SIGNED .app (workflows.lex §3.1), so a mac bundle without it is "
             f"a bundle-stage failure"
         )
-    return Composed(req.artifact.name, "mac-app", (app.name, dmg.name, payload))
+    return Composed(req.artifact.name, composition, (app.name, dmg.name, payload))
+
+
+def _compose_mac_app(req: ComposeRequest) -> Composed:
+    """The coupled unsigned ``.app``/``.dmg`` pair + the reseal payload.
+
+    Runs the DECLARED bundler (the one consumer-specific part), then stages the
+    exactly-one pair from the declared ``source`` dir via the shared
+    :func:`_stage_mac_pair`. See the module docstring's mac-app entry.
+    """
+    spec = req.artifact.bundle
+    assert spec is not None and spec.command is not None and spec.source is not None
+    req.run_cmd(list(spec.command), req.root)
+    return _stage_mac_pair(req, req.root / spec.source, "mac-app")
+
+
+#: The tauri linux bundle globs the tauri composition collects — the
+#: ``.AppImage`` and ``.deb`` ``tauri build`` leaves under its bundle dir.
+#: Windows is out of scope (the legacy ``tauri-app.yml`` ships no ``icon.ico``,
+#: #791), so the composition is darwin+linux-gated and never looks for a
+#: ``.msi``/``.exe``.
+_TAURI_LINUX_GLOBS: tuple[str, ...] = ("*.AppImage", "*.deb")
+
+
+def _compose_tauri(req: ComposeRequest) -> Composed:
+    """``tauri build`` the app, collect the current platform's bundles.
+
+    Runs the DECLARED ``tauri build`` (the one consumer-specific part), then:
+    on a darwin target stages the coupled ``.app``/``.dmg`` pair + reseal
+    payload (the shared :func:`_stage_mac_pair` — the same sign path as
+    mac-app/electron); on a linux target collects the ``.AppImage`` and
+    ``.deb`` (:data:`_TAURI_LINUX_GLOBS`) into the output tree. See the module
+    docstring's tauri entry. The composition is gated to darwin+linux
+    (:data:`TAURI`), so a windows leg never reaches here.
+    """
+    spec = req.artifact.bundle
+    assert spec is not None and spec.command is not None and spec.source is not None
+    req.run_cmd(list(spec.command), req.root)
+    source = req.root / spec.source
+    if "apple-darwin" in req.target:
+        return _stage_mac_pair(req, source, "tauri")
+    req.out_dir.mkdir(parents=True, exist_ok=True)
+    produced: list[str] = []
+    for pattern in _TAURI_LINUX_GLOBS:
+        for path in sorted(source.rglob(pattern)):
+            if not path.is_file():
+                continue
+            dest = req.out_dir / path.name
+            if dest.exists():
+                dest.unlink()
+            shutil.copy2(path, dest)
+            produced.append(path.name)
+    if not produced:
+        globs = "/".join(_TAURI_LINUX_GLOBS)
+        raise ReleaseError(
+            f"[artifacts.{req.artifact.name}] tauri composition: `tauri build` "
+            f"left no {globs} bundle under {source} — a linux tauri build that "
+            f"produces none is a hard fail, never a quiet pass"
+        )
+    return Composed(req.artifact.name, "tauri", tuple(sorted(produced)))
 
 
 @dataclass(frozen=True)
@@ -516,10 +595,29 @@ MAC_APP = Composition(
     declared_command=True,
     signable=True,
 )
+TAURI = Composition(
+    "tauri",
+    _compose_tauri,
+    # darwin (.app/.dmg + reseal payload) AND linux (.AppImage/.deb); windows
+    # is out of scope (no icon.ico, #791) so it is NOT listed — a windows leg
+    # is a clean skip.
+    platforms=("apple-darwin", "linux"),
+    declared_command=True,
+    # The darwin leg emits the same reseal payload as mac-app, so `sign = true`
+    # over a tauri app routes to the mac signer's existing mac-app leg.
+    signable=True,
+)
 
 #: The CLOSED registry, in a stable order. Adding a composition is adding an
 #: entry here (the toolchain registry's mirror) — never a kind switch.
-COMPOSITIONS: tuple[Composition, ...] = (ARCHIVE, DEB, WHEEL, WASM_PACK, MAC_APP)
+COMPOSITIONS: tuple[Composition, ...] = (
+    ARCHIVE,
+    DEB,
+    WHEEL,
+    WASM_PACK,
+    MAC_APP,
+    TAURI,
+)
 
 
 def names() -> tuple[str, ...]:
