@@ -567,7 +567,12 @@ def test_unprovisioned_cargo_edit_aborts_with_the_reconcile_remedy(
     err = capsys.readouterr().err
     assert err.startswith("error: ")
     assert "cargo-edit" in err
-    assert "`shipit install --pr`" in err  # the committing reconcile (#793 review)
+    # Assert BOTH committing reconciles and the lock, consistently with the
+    # bump-level test (#793 review): the remedy names --pr/--local and the
+    # regenerated pixi.lock, never plain tree-mode `shipit install`.
+    assert "`shipit install --pr`" in err
+    assert "`shipit install --local`" in err
+    assert "pixi.lock" in err
     assert "pixi.toml#shipit-rust-release-deps" in err
     # Nothing committed, tagged, or pushed — the barrier held (ADR-0009).
     assert fake.mutated() == []
