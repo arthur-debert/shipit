@@ -260,8 +260,13 @@ def test_deb_never_forwards_target_to_cargo_deb(tmp_path, cargo_deb_on_path):
 def test_deb_self_provisions_cargo_deb_when_missing(tmp_path, monkeypatch):
     # Issue #784 F2: the wf-build runner arrives without cargo-deb (not on
     # conda-forge, so no pixi env can carry it) — the composition installs it
-    # itself, through the same recorded Exec seam, BEFORE composing.
-    monkeypatch.setattr(bundle_mod.shutil, "which", lambda name: None)
+    # itself, through the same recorded Exec seam, BEFORE composing. `which`
+    # reports it missing before the install and present after (the post-install
+    # PATH re-check must see it).
+    which_results = iter([None])
+    monkeypatch.setattr(
+        bundle_mod.shutil, "which", lambda name: next(which_results, f"/stub/{name}")
+    )
     (artifact,) = _artifacts(
         {
             "lex-cli": {
@@ -277,9 +282,43 @@ def test_deb_self_provisions_cargo_deb_when_missing(tmp_path, monkeypatch):
     )
 
     install, compose_call = recorder.calls
-    assert install == (("cargo", "install", "cargo-deb", "--locked"), tmp_path)
+    assert install == (
+        (
+            "cargo",
+            "install",
+            "cargo-deb",
+            "--version",
+            bundle_mod.CARGO_DEB_VERSION,
+            "--locked",
+        ),
+        tmp_path,
+    )
     assert compose_call[0][:4] == ("cargo", "deb", "--no-build", "--no-strip")
     assert composed.outputs == ("lex-cli_1.0.0-1_amd64.deb",)
+
+
+def test_deb_fails_when_self_provisioned_cargo_deb_not_on_path(tmp_path, monkeypatch):
+    # Issue #784 F2: `cargo install` writes into $CARGO_HOME/bin, which is not
+    # guaranteed on PATH under a pixi/isolated cargo. A green install whose
+    # binary is still undiscoverable aborts loudly with the remediation, never
+    # a downstream opaque "no such subcommand: deb".
+    monkeypatch.setattr(bundle_mod.shutil, "which", lambda name: None)
+    (artifact,) = _artifacts(
+        {
+            "lex-cli": {
+                "build": [{"toolchain": "rust", "package": "lex-cli"}],
+                "bundle": {"composition": "deb"},
+            }
+        }
+    )
+    recorder = RunRecorder({"cargo": _deb_effect()})
+    with pytest.raises(ReleaseError, match="still not on PATH"):
+        bundle_mod.DEB.compose(
+            _request(tmp_path, artifact, _entries({".": "rust"}), run_cmd=recorder)
+        )
+    # Only the install ran — the composition never reached `cargo deb`.
+    ((argv, _cwd),) = recorder.calls
+    assert argv[:3] == ("cargo", "install", "cargo-deb")
 
 
 def test_deb_hard_fails_when_no_deb_appears(tmp_path, cargo_deb_on_path):

@@ -11,7 +11,8 @@ It walks the `[artifacts]` map and runs each artifact's DECLARED composition
             layout brew formulas and GH release assets assume.
 - deb       cargo-deb against the pre-built release binary (no rebuild, no
             strip); cargo-deb is self-provisioned (`cargo install cargo-deb
-            --locked`) when missing, and never receives --target — builds
+            --version <pin> --locked`, pinned for a reproducible build) when
+            missing, and never receives --target — builds
             are native, so it reads target/release/ and derives the Debian
             arch from the host toolchain. A run producing no .deb is a hard
             failure. Linux only.
