@@ -20,8 +20,9 @@ Two halves:
   binary the tree carries (a ``.app``'s ``CFBundleExecutable``, a reseal
   payload's inner ``.app``, a plain ``.tar.gz``/``.zip`` archive's inner
   executable, a ``.deb``'s inner executable, a ``.tgz`` npm tarball's
-  ``package.json`` name, or — when the tree bundles none of those — its loose
-  executables) must be named exactly the expected name.
+  ``package.json`` name, an electron ``.dmg``/``.AppImage``'s declared product
+  name, or — when the tree bundles none of those — its loose executables) must
+  be named exactly the expected name.
   A tree with NO discoverable main binary fails loudly: "nothing to assert"
   is a wrong bundle, never a pass.
 
@@ -44,6 +45,26 @@ without this tier wf-publish's assert fan hard-failed every deb leg with
 rides the inner tar's headers, transport-proof — is the assertable main
 binary.
 
+The electron tier (issue #790) is the exception to "crack the container": a
+``.dmg`` (Apple UDIF disk image) and an ``.AppImage`` (ELF runtime + squashfs)
+are OPAQUE to pure reads — no stdlib cracks them and this guard shells out to
+nothing — so the tier asserts the product name electron-builder stamped into
+the FILENAME (``<product>-<version>[-<arch>].dmg``) instead of an inner
+binary. Because that name assertion is a HEURISTIC (a filename, not a cracked
+binary), it is a FALLBACK: the ``.dmg``/``.AppImage`` tiers assert only when
+the tree carries no authoritative binary tier (``.app``/reseal-payload/
+archive/deb). This is what keeps a NON-electron ``.dmg`` — a tauri mac-app's
+own ``Product_1.0.0_arch.dmg``, which rides beside its authoritative ``.app``
+and reseal payload — from being misread as a second, unparseable "main
+binary" and failing a bundle its ``.app`` already asserts correctly. The
+electron DARWIN leg is signable like mac-app (electron-builder does not sign at
+build): it ships the unsigned ``.app`` as a ``<name>.unsigned-app.tar.gz``
+reseal payload, so this guard — running at ``wf-sign-mac``'s entry — reads the
+payload's authoritative ``CFBundleExecutable`` and the opaque ``.dmg`` name
+tier stays the fallback. Only the electron LINUX leg (an ``.AppImage`` with no
+reseal payload, not signable) leans on the container name tier as its sole
+assert.
+
 Pure over the filesystem (reads only); rendered by the verb with uniform
 exit codes (0 pass, 1 fail — verdict + expected/actual on stderr, ``--json``
 available), so the WS06 blocks call it with no extra plumbing.
@@ -54,6 +75,7 @@ from __future__ import annotations
 import io
 import json
 import plistlib
+import re
 import tarfile
 import zipfile
 from dataclasses import dataclass
@@ -85,6 +107,33 @@ NPM_TARBALL_SUFFIX = ".tgz"
 #: The ar container's global magic — a ``.deb`` IS an ar archive
 #: (``debian-binary`` + ``control.tar.*`` + ``data.tar.*``).
 _AR_MAGIC = b"!<arch>\n"
+
+#: The electron composition's darwin/linux distributable suffixes
+#: (:mod:`shipit.release.bundle`). UNLIKE every other tier — which cracks its
+#: container in place (a ``.tar``/``.zip``/``.deb``/``.app``) — a ``.dmg``
+#: (Apple UDIF disk image) and an ``.AppImage`` (ELF runtime + squashfs) are
+#: OPAQUE to pure reads, so these tiers assert the DECLARED name
+#: electron-builder stamped into the filename from ``productName`` rather than
+#: the inner executable. Because the assert is name-only (a heuristic), it is a
+#: FALLBACK — it runs only when the tree carries no authoritative binary tier
+#: (see :func:`check_tree`): a tauri mac-app's own ``.dmg`` rides beside its
+#: ``.app``/reseal payload, which assert the real binary, so the opaque ``.dmg``
+#: is not (mis)read as a second, unparseable main binary.
+DMG_SUFFIX = ".dmg"
+APPIMAGE_SUFFIX = ".AppImage"
+
+#: electron-builder's incremental-update sidecar suffix (``.dmg.blockmap``,
+#: ``.exe.blockmap``, ``.AppImage.blockmap``) — inert data beside a
+#: distributable, never a main-binary candidate.
+BLOCKMAP_SUFFIX = ".blockmap"
+
+#: The version-boundary in an electron-builder distributable filename
+#: (``<product>-<version>[-<arch>]<suffix>``): the first ``-`` immediately
+#: followed by a digit. Everything before it is the product-name segment the
+#: electron name tiers assert. (Heuristic — a productName whose own text
+#: carries a ``-<digit>`` before the version would truncate early; the
+#: assert then fails loudly rather than silently passing a wrong name.)
+_ELECTRON_VERSION_BOUNDARY = re.compile(r"-\d")
 
 
 def expected_main_binary(artifact: config.Artifact) -> str:
@@ -304,6 +353,23 @@ def _deb_main_binary(deb: Path) -> str | None:
     return None
 
 
+def _container_product_name(path: Path, suffix: str) -> str | None:
+    """The product-name segment of an electron-builder distributable filename
+    (``<product>-<version>[-<arch>]<suffix>``) — everything before the version
+    boundary (:data:`_ELECTRON_VERSION_BOUNDARY`). ``None`` when the name
+    carries no version boundary (unparseable) — which, in the fallback tier
+    that calls this (:func:`check_tree`, no authoritative binary present), the
+    guard reports as an undeterminable container rather than asserting a
+    garbled name. Pure, name-only — the ``.dmg``/``.AppImage`` container itself
+    is opaque to pure reads (see :data:`DMG_SUFFIX`)."""
+    stem = path.name[: -len(suffix)]
+    match = _ELECTRON_VERSION_BOUNDARY.search(stem)
+    if match is None:
+        return None
+    product = stem[: match.start()]
+    return product or None
+
+
 def _npm_tarball_main_binary(tarball: Path) -> str | None:
     """The npm package IDENTITY of a ``.tgz`` — its inner
     ``package/package.json`` ``name`` (``@scope/pkg`` for a scoped package),
@@ -342,9 +408,15 @@ def _is_executable(path: Path) -> bool:
         return False
     if path.suffix == ".exe":
         return True
-    # Archives ride the bundle tree too (the tarball the archive composition
-    # wrote); an exec bit on one would misread it as a binary.
-    if path.name.endswith((".tar.gz", ".tgz", ".zip", ".dmg", ".deb", ".whl")):
+    # Archives and opaque distributables ride the bundle tree too (the tarball
+    # the archive composition wrote; the .tgz npm tarball; electron's
+    # .dmg/.AppImage, whose own tiers assert them, and the .blockmap sidecars
+    # beside them). An .AppImage is an executable ELF, so without excluding it
+    # the loose scan would misread it as a main binary named
+    # `<product>-<version>.AppImage`.
+    if path.name.endswith(
+        (".tar.gz", ".tgz", ".zip", ".dmg", ".deb", ".whl", ".AppImage", ".blockmap")
+    ):
         return False
     return bool(path.stat().st_mode & 0o111)
 
@@ -366,7 +438,23 @@ def check_tree(tree: Path, expected: str) -> BundleVerdict:
        (:func:`_npm_tarball_main_binary`) — its ``package/package.json``
        ``name`` is the assertable identity (a wasm/npm artifact has no
        executable main binary; its identity is the npm package name);
-    6. only when the tree carries none of the above: every loose executable
+    6. only when tiers 1–5 found NO authoritative binary: every ``*.dmg`` and
+       ``*.AppImage`` (electron distributables), asserted by the product-name
+       segment of the filename (:func:`_container_product_name`) — the
+       container is opaque to pure reads, so the tier asserts the DECLARED
+       name, not the inner binary. This tier is a FALLBACK precisely BECAUSE
+       it is a filename heuristic: a tauri mac-app ships its own ``.dmg``
+       beside the ``.app``/reseal payload that authoritatively assert its
+       binary, so that non-electron ``.dmg`` (often ``Product_1.0.0_arch``,
+       which the tier cannot even split) must NOT escalate to a failure the
+       ``.app`` already cleared. An electron darwin BUNDLE tree carries the
+       ``.dmg`` beside the reseal payload (``*.unsigned-app.tar.gz``), so tier
+       2 authoritatively asserts the payload's inner ``.app`` there and this
+       fallback is skipped; the ``.dmg`` name tier is the assert that runs only
+       over a payload-less tree — the signed publish leg, where the resealed
+       ``.dmg`` crosses the artifact boundary but the fragile ``.app``/payload
+       do not;
+    7. only when the tree carries none of the above: every loose executable
        file (``.exe`` counted by suffix, its stem compared).
 
     The verdict is ``ok`` exactly when at least one main binary was found
@@ -386,6 +474,8 @@ def check_tree(tree: Path, expected: str) -> BundleVerdict:
     )
     debs = sorted(p for p in tree.rglob(f"*{DEB_SUFFIX}") if p.is_file())
     tarballs = sorted(p for p in tree.rglob(f"*{NPM_TARBALL_SUFFIX}") if p.is_file())
+    dmgs = sorted(p for p in tree.rglob(f"*{DMG_SUFFIX}") if p.is_file())
+    appimages = sorted(p for p in tree.rglob(f"*{APPIMAGE_SUFFIX}") if p.is_file())
     for app in apps:
         name = _app_main_binary(app)
         if name is None:
@@ -418,7 +508,27 @@ def check_tree(tree: Path, expected: str) -> BundleVerdict:
             )
         else:
             actual.append(name)
-    if not apps and not payloads and not archives and not debs and not tarballs:
+    # The opaque-container tiers are a name-only FALLBACK: they assert only
+    # when tiers 1–5 found no authoritative binary. A tauri mac-app's own
+    # `.dmg` rides beside its `.app`/reseal payload, so gating on those keeps
+    # that non-electron container (which the name heuristic cannot parse) from
+    # escalating to a failure the `.app` already cleared.
+    if not (apps or payloads or archives or debs or tarballs):
+        for dmg in dmgs:
+            name = _container_product_name(dmg, DMG_SUFFIX)
+            if name is None:
+                problems.append(f"{dmg.relative_to(tree)}: no determinable main binary")
+            else:
+                actual.append(name)
+        for appimage in appimages:
+            name = _container_product_name(appimage, APPIMAGE_SUFFIX)
+            if name is None:
+                problems.append(
+                    f"{appimage.relative_to(tree)}: no determinable main binary"
+                )
+            else:
+                actual.append(name)
+    if not (apps or payloads or archives or debs or tarballs or dmgs or appimages):
         for path in sorted(tree.rglob("*")):
             if _is_executable(path):
                 actual.append(path.stem if path.suffix == ".exe" else path.name)

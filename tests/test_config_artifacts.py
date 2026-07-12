@@ -358,8 +358,9 @@ def test_bundle_composition_names_the_closed_registry():
     # names the known set, mirroring endpoints/toolchains.
     with pytest.raises(config.ConfigError, match="unknown composition `rpm`") as exc:
         _load('[artifacts.x]\nbundle = { composition = "rpm" }\n')
-    assert "archive, deb, wheel, wasm-pack, vsix, mac-app, tauri, tarball" in str(
-        exc.value
+    assert (
+        "archive, deb, wheel, wasm-pack, vsix, mac-app, tauri, electron, tarball"
+        in str(exc.value)
     )
 
 
@@ -447,6 +448,45 @@ def test_sign_with_a_tauri_bundle_parses():
     )
     assert artifact.sign is True
     assert artifact.bundle.composition == "tauri"
+
+
+def test_electron_parses_command_and_source_like_a_declared_bundler():
+    # electron is a declared-command composition (its `electron-builder` argv
+    # is the one consumer-specific part, issue #790), so command + source are
+    # REQUIRED and parsed exactly like mac-app's.
+    (artifact,) = _load(
+        "[artifacts.app]\n"
+        'build = ["npm"]\n'
+        'bundle = { composition = "electron", command = ["npm", "run", "dist"],'
+        ' source = "./release" }\n'
+    )
+    assert artifact.bundle == config.BundleSpec(
+        composition="electron",
+        command=("npm", "run", "dist"),
+        source="release",
+    )
+
+
+def test_electron_requires_the_declared_bundler_command():
+    with pytest.raises(config.ConfigError, match="declare its argv"):
+        _load('[artifacts.x]\nbuild = ["npm"]\nbundle = { composition = "electron" }\n')
+
+
+def test_sign_with_electron_is_accepted_it_routes_through_the_sign_stage():
+    # electron is SIGNABLE (WS14 #790): its darwin .app ships UNSIGNED as the
+    # reseal payload the standalone mac sign stage reopens — electron-builder
+    # does not sign at build. So `sign = true` over electron is ACCEPTED and
+    # routes through the same signer leg as mac-app.
+    (artifact,) = _load(
+        "[artifacts.app]\n"
+        'build = ["npm"]\n'
+        'platforms = ["darwin-arm64"]\n'
+        'bundle = { composition = "electron", command = ["npm", "run", "dist"],'
+        ' source = "release" }\n'
+        "sign = true\n"
+    )
+    assert artifact.sign is True
+    assert artifact.bundle.composition == "electron"
 
 
 def test_bundle_command_must_be_an_argv_list():
@@ -560,7 +600,7 @@ def test_sign_without_a_bundle_is_refused():
     with pytest.raises(
         config.ConfigError,
         match=r"sign = true requires a bundle composition the signer can "
-        r"reopen \(archive, mac-app, tauri\); got no bundle",
+        r"reopen \(archive, mac-app, tauri, electron\); got no bundle",
     ):
         _load(
             "[artifacts.x]\n"
@@ -571,13 +611,13 @@ def test_sign_without_a_bundle_is_refused():
 
 
 def test_sign_with_an_unsignable_composition_is_refused():
-    # The signer has legs for the mac-app payload and the archive tarball
-    # only; `sign = true` over a wheel (or deb) composition routes nowhere —
-    # refused at parse, naming the signable set.
+    # The signer has legs for the mac-app/electron payload and the archive
+    # tarball only; `sign = true` over a wheel (or deb) composition routes
+    # nowhere — refused at parse, naming the signable set.
     with pytest.raises(
         config.ConfigError,
         match=r"sign = true requires a bundle composition the signer can "
-        r"reopen \(archive, mac-app, tauri\); got composition `wheel`",
+        r"reopen \(archive, mac-app, tauri, electron\); got composition `wheel`",
     ):
         _load(
             "[artifacts.x]\n"

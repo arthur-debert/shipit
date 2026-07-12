@@ -544,17 +544,20 @@ class BundleSpec:
     word is bundle).
 
     ``composition`` names an entry of the CLOSED composition registry
-    (:mod:`shipit.release.bundle` — archive, deb, wheel, wasm-pack, mac-app,
-    tauri), the ADR-0007 shape: the bundle step is declared per artifact, keyed
-    off the map, never a project-Kind switch. ``command`` is the declared
-    bundler argv the declared-command compositions (``mac-app``, ``tauri``) run
-    (``tauri build``, ``electron-builder`` — the only consumer-specific part of
-    the mac path, workflows.lex §3.1), through the one exec seam like every
-    producing command (ADR-0028); ``source`` is the repo-relative directory that
-    bundler leaves its bundles under (the coupled ``.app``/``.dmg`` pair on
-    darwin, tauri's ``.AppImage``/``.deb`` on linux). Both are REQUIRED by the
-    declared-command compositions and rejected for every other composition
-    (their commands are registry-assembled, never declared).
+    (:mod:`shipit.release.bundle` — archive, deb, wheel, wasm-pack, vsix,
+    mac-app, tauri, electron, tarball), the ADR-0007 shape: the bundle step is
+    declared per artifact, keyed off the map, never a project-Kind switch.
+    ``command`` is the declared bundler argv the DECLARED-COMMAND compositions
+    run (``mac-app``'s / ``tauri``'s ``tauri build``, ``electron``'s
+    ``electron-builder`` — the one consumer-specific part of each,
+    workflows.lex §3.1), through the one exec seam like every producing command
+    (ADR-0028); ``source`` is the repo-relative directory that bundler leaves
+    its distributables under (mac-app's coupled ``.app``/``.dmg`` pair, tauri's
+    ``.app``/``.dmg`` on darwin + ``.AppImage``/``.deb`` on linux, electron's
+    per-platform ``.dmg``/``.AppImage``/``.exe`` set). Both are REQUIRED by
+    every declared-command composition (``mac-app``, ``tauri``, ``electron``)
+    and rejected for the registry-assembled ones (archive, deb, wheel, … —
+    their commands are assembled, never declared).
 
     ``scope`` / ``wasm_target`` are the ``wasm-pack`` composition's optional
     consumer-specific parts (TOL02-WS12 #788): the npm ``@scope`` (``--scope``,

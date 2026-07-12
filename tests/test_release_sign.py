@@ -320,6 +320,43 @@ def test_nested_signable_inner_first_frameworks_opaque_symlinks_skipped(tmp_path
     assert app not in paths
 
 
+def _electron_app(root: Path, name: str = "Lexed.app") -> Path:
+    """An electron-shaped .app: the main executable, the opaque Electron
+    Framework, and the GPU/Renderer/Plugin helper .apps each with their own
+    Mach-O — the structure the electron composition (WS14 #790) routes through
+    this signer."""
+    app = root / name
+    macos = app / "Contents" / "MacOS"
+    macos.mkdir(parents=True)
+    (macos / "Lexed").write_bytes(MACHO_64)
+    frameworks = app / "Contents" / "Frameworks"
+    ef = frameworks / "Electron Framework.framework" / "Versions" / "A"
+    ef.mkdir(parents=True)
+    (ef / "Electron Framework").write_bytes(MACHO_64)  # opaque — root only
+    for kind in ("", " (GPU)", " (Renderer)", " (Plugin)"):
+        helper = frameworks / f"Lexed Helper{kind}.app" / "Contents" / "MacOS"
+        helper.mkdir(parents=True)
+        (helper / f"Lexed Helper{kind}").write_bytes(MACHO_64)
+    return app
+
+
+def test_nested_signable_over_an_electron_app_orders_every_helper_inner_first(tmp_path):
+    # WS14 #790: electron routes through the standalone mac signer; its nested
+    # GPU/Renderer/Plugin helper .apps must each be enumerated (inner Mach-O
+    # THEN the helper root) so the inner-first walk signs them all — a flat sign
+    # leaves the helpers unhardened and the notary rejects them. The Electron
+    # Framework contributes its root only (opaque).
+    app = _electron_app(tmp_path)
+    order = sign_mod.sign_order(sign_mod.nested_signable(app), app)
+    rel = [str(p.relative_to(tmp_path)) for p in order]
+    assert "Lexed.app/Contents/Frameworks/Electron Framework.framework" in rel
+    for kind in ("", " (GPU)", " (Renderer)", " (Plugin)"):
+        base = f"Lexed.app/Contents/Frameworks/Lexed Helper{kind}.app"
+        inner = f"{base}/Contents/MacOS/Lexed Helper{kind}"
+        assert rel.index(inner) < rel.index(base) < rel.index("Lexed.app")
+    assert rel[-1] == "Lexed.app"  # the top-level .app is signed LAST
+
+
 def test_nested_signable_lists_code_plugin_and_bundle_roots(tmp_path):
     """A CODE-bearing loadable ``.plugin`` / ``.bundle`` root is signed as a
     unit: signing only its inner Mach-O leaves the bundle root unsigned, which

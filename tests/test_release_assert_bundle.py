@@ -433,6 +433,86 @@ def test_an_app_takes_precedence_over_loose_executables(tmp_path):
 
 
 # --------------------------------------------------------------------------
+# check_tree — electron .dmg / .AppImage, asserted by the declared filename
+# --------------------------------------------------------------------------
+
+
+def test_dmg_asserts_the_product_name_from_the_filename(tmp_path):
+    # The .dmg is opaque to pure reads (issue #790), so the tier asserts the
+    # product name electron-builder stamped into `<product>-<version>-<arch>`.
+    (tmp_path / "Phos-1.2.3-arm64.dmg").write_bytes(b"udif")
+    verdict = integrity.check_tree(tmp_path, "Phos")
+    assert verdict.ok
+    assert verdict.actual == ("Phos",)
+
+
+def test_dmg_with_the_wrong_product_name_fails(tmp_path):
+    (tmp_path / "gen_fixtures-1.2.3-arm64.dmg").write_bytes(b"udif")
+    verdict = integrity.check_tree(tmp_path, "Phos")
+    assert not verdict.ok
+    assert verdict.actual == ("gen_fixtures",)
+
+
+def test_dmg_with_a_hyphenated_product_name_keeps_the_whole_name(tmp_path):
+    # The version boundary is the first `-<digit>`, so a hyphen in the product
+    # name (before the version) survives.
+    (tmp_path / "Simple-Gal-UI-0.4.0-arm64.dmg").write_bytes(b"udif")
+    assert integrity.check_tree(tmp_path, "Simple-Gal-UI").ok
+
+
+def test_appimage_asserts_the_product_name_and_is_not_a_loose_binary(tmp_path):
+    # An .AppImage is an executable ELF; without its tier the loose scan would
+    # misread it as a main binary named `Phos-1.2.3.AppImage`. The tier asserts
+    # the product segment instead, and the .blockmap sidecar is inert.
+    appimage = tmp_path / "Phos-1.2.3.AppImage"
+    appimage.write_bytes(b"\x7fELF")
+    appimage.chmod(0o755)
+    (tmp_path / "Phos-1.2.3.AppImage.blockmap").write_bytes(b"blockmap")
+    verdict = integrity.check_tree(tmp_path, "Phos")
+    assert verdict.ok
+    assert verdict.actual == ("Phos",)
+
+
+def test_an_authoritative_app_takes_precedence_over_the_dmg_name_tier(tmp_path):
+    # The .dmg/.AppImage name tiers are a FALLBACK: when an authoritative
+    # binary tier is present (here a .app), it asserts and the opaque .dmg name
+    # tier is skipped. The verdict still passes off the .app's authoritative
+    # CFBundleExecutable — the transport-fragile .app just does not reach
+    # wf-publish, where the .dmg name tier is what runs.
+    _make_app(tmp_path, app="Phos.app", executable="Phos")
+    (tmp_path / "Phos-1.2.3-arm64.dmg").write_bytes(b"udif")
+    (tmp_path / "Phos-1.2.3-arm64.dmg.blockmap").write_bytes(b"blockmap")
+    verdict = integrity.check_tree(tmp_path, "Phos")
+    assert verdict.ok
+    assert verdict.actual == ("Phos",)
+
+
+def test_a_mac_app_dmg_does_not_fail_the_tree_its_app_asserts(tmp_path):
+    # Regression: a tauri mac-app ships its OWN .dmg beside the .app and reseal
+    # payload — and tauri names it `Product_1.0.0_arch.dmg` (underscores), which
+    # the electron name tier cannot split into product/version. The .dmg tier
+    # must NOT escalate that non-electron container to a failure the .app and
+    # payload already cleared: it is a fallback, gated off the authoritative
+    # tiers being present.
+    _make_app(tmp_path, app="Phos.app", executable="phos")
+    _make_payload(tmp_path, executable="phos")
+    (tmp_path / "Phos_1.0.0_aarch64.dmg").write_bytes(b"udif")
+    verdict = integrity.check_tree(tmp_path, "phos")
+    assert verdict.ok
+    assert verdict.actual == ("phos",)
+
+
+def test_dmg_without_a_version_boundary_is_undeterminable(tmp_path):
+    # A name the tier cannot split into product/version fails loudly with the
+    # diagnosis — never a silent pass. (No authoritative tier present, so the
+    # .dmg fallback tier runs and reports the undeterminable container.)
+    (tmp_path / "installer.dmg").write_bytes(b"udif")
+    verdict = integrity.check_tree(tmp_path, "Phos")
+    assert not verdict.ok
+    assert "no determinable main binary" in verdict.problem
+
+
+# --------------------------------------------------------------------------
 # check_tree — npm tarballs, read in place (TOL02-WS12 #788)
 # --------------------------------------------------------------------------
 
