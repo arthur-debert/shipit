@@ -91,7 +91,7 @@ background tasks — this is a read-only review, not an agentic session."""
 # The expected JSON shape for a backend without native schema enforcement (agy),
 # embedded in the prompt. It is the ACTUAL `REVIEW_SCHEMA` serialized (not a
 # hand-maintained example), so the agy prompt can NEVER drift from what the
-# validator (`shipit pr review validate`) and codex's `--output-schema` enforce —
+# validator (`shipit review validate`) and codex's `--output-schema` enforce —
 # there is one source of truth (#826). A one-line human lead-in frames it, and the
 # nullable-`line` note (still accurate: `line` is typed `["integer", "null"]`)
 # spells out the one field whose optionality is easy to get wrong.
@@ -117,7 +117,7 @@ If you have many findings, keep each comment concise rather than emitting an \
 incomplete object."""
 
 # Appended ONLY for agy (schema_inline): a BEST-EFFORT nudge to self-verify the
-# composed JSON against the schema with the `shipit pr review validate` CLI before
+# composed JSON against the schema with the `shipit review validate` CLI before
 # emitting it — the producer-side deterministic retry net (#826) is the guaranteed
 # backstop, but a self-check at the agent catches an off-shape payload BEFORE it
 # costs a launch. Worded as a SHOULD, never a hard loop-until-green: if the CLI is
@@ -126,7 +126,7 @@ incomplete object."""
 _SELF_VERIFY_INSTRUCTION = """\
 BEST-EFFORT SELF-CHECK (recommended, not required): before you emit your JSON, if \
 the `shipit` CLI is on your PATH, you SHOULD verify your output against this schema \
-— write your composed JSON to a temp file and run `shipit pr review validate \
+— write your composed JSON to a temp file and run `shipit review validate \
 <file>`, or pipe it straight in (`printf '%s' "$YOUR_JSON" | shipit pr review \
 validate`) — and fix any problems it reports before emitting. This is a SHOULD, not \
 a hard gate: if `shipit` is not available or the check cannot run, do NOT loop, \
@@ -140,7 +140,7 @@ def _agy_schema_appendix() -> str:
     incremental, range, and their dimension passes) presents an identical block:
     the serialized :data:`REVIEW_SCHEMA` (:data:`_SCHEMA_PROSE`), the #76
     JSON-validity hardening (:data:`_JSON_VALIDITY_INSTRUCTION`), and the
-    best-effort ``shipit pr review validate`` self-check
+    best-effort ``shipit review validate`` self-check
     (:data:`_SELF_VERIFY_INSTRUCTION`). codex enforces the shape natively and gets
     none of this.
     """

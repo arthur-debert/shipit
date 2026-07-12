@@ -1,0 +1,10 @@
+`shipit review` groups the backend-agnostic, agent-facing review utilities —
+the ones that touch NO PR state. (The PR-scoped reviewer acts — requesting a
+reviewer, replaying a commit range — live under `shipit pr review`.)
+
+Verbs:
+
+  - `validate [FILE]` — check a review JSON payload against the review schema
+    (`REVIEW_SCHEMA`) so a reviewer agent can self-verify its output before
+    handing it back. Reads FILE or stdin; prints `valid`/exit 0 or the
+    path-anchored problems/exit 1. See `shipit review validate help`.

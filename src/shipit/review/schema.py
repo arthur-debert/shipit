@@ -31,7 +31,7 @@ record (:mod:`shipit.review.roundrecord`), so both consumers coerce agent JSON
 the same way and the record can never disagree with what was posted.
 
 `validate_review` is the zero-dependency structural check of a parsed review
-against :data:`REVIEW_SCHEMA` — the engine behind ``shipit pr review validate``
+against :data:`REVIEW_SCHEMA` — the engine behind ``shipit review validate``
 (#826). It exists so a reviewer AGENT can self-verify its output against the same
 shape the funnel expects BEFORE handing it back, closing the loop where an agy
 run returned unparseable/ill-typed JSON and burned the whole round. It returns a
@@ -285,7 +285,7 @@ def validate_review(payload: object) -> list[str]:
     ``line`` integer-or-null, ``confidence`` number in ``[0, 1]``, and — the
     first-class check (#826) — ``severity`` one of :data:`_SEVERITY_VALUES`, never
     a free-form string. Unknown keys are flagged (codex's strict schema rejects
-    them); this is the bar ``shipit pr review validate`` holds agents to.
+    them); this is the bar ``shipit review validate`` holds agents to.
     """
     problems: list[str] = []
     root = _check_object(payload, "review", ("summary", "comments"), problems)

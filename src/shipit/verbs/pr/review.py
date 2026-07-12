@@ -1,4 +1,4 @@
-"""`shipit pr review` — the review subgroup: request reviewer(s), replay, validate.
+"""`shipit pr review` — the PR-scoped review subgroup: request reviewer(s), replay.
 
 `pr review` is a SUBGROUP under `pr` (so the invocation is
 `shipit pr review request [PR] [--reviewer NAME]`), leaving room for sibling
@@ -6,10 +6,9 @@ review verbs without crowding the top-level `pr` group — `replay` (RVW02-WS03;
 fan-out arm RVW03-WS01) is one: an OFFLINE review of an arbitrary commit range
 — one monolithic pass, or with `--fanout` the full dimension fan-out (the
 sanctioned experiment driver) — that writes the local review-round record and
-touches no PR. `validate` (#826) is another: a reviewer AGENT pipes its own JSON
-output through it to self-check the shape against `REVIEW_SCHEMA` — same parse the
-funnel uses, plus the severity-enum check — BEFORE handing back, so an
-unparseable/ill-typed payload dies at the agent instead of burning the round.
+touches no PR. The backend-agnostic `validate` self-check (#826) is NOT here: it
+touches no PR state, so it lives at the top level as `shipit review validate`
+(:mod:`shipit.verbs.review`), not nested under this PR-flow group.
 This module owns
 only the thin CLI: parse args -> resolve the typed PR target -> pick the
 adapter scope -> call the engine's reviewer-request service
@@ -87,69 +86,6 @@ def request_cmd(pr: int | None, reviewer: str | None) -> None:
     (no ``review_requested`` edge created) or a ``gh`` failure exits non-zero.
     """
     raise SystemExit(run(pr, reviewer=reviewer))
-
-
-@cmd.command(name="validate")
-@click.argument("path", metavar="FILE", required=False)
-def validate_cmd(path: str | None) -> None:
-    """Validate a review JSON payload against the review schema — for agent self-check.
-
-    FILE is a path to the JSON; omitted or `-` reads stdin, so a reviewer agent
-    can pipe its own output straight in (`… | shipit pr review validate`) before
-    handing it back. The payload is parsed the SAME tolerant way the funnel parses
-    an agent's stdout (fences and wrapper prose are stripped), then checked against
-    `REVIEW_SCHEMA`: the `{summary, comments}` envelope, every field's type, and —
-    the check this exists for (#826) — each finding's `severity` must be one of
-    `critical | major | minor | nit`. Prints `valid` and exits 0 when it conforms;
-    prints every problem (one per line, JSON-path prefixed) and exits 1 otherwise;
-    exits 1 with a clean error when the input is not parseable JSON at all.
-    """
-    raise SystemExit(run_validate(path))
-
-
-@cli_errors
-def run_validate(path: str | None) -> int:
-    """Read FILE (or stdin) -> tolerant parse -> schema check -> print. Exit code.
-
-    0 when the payload parses AND conforms to `REVIEW_SCHEMA`; 1 when it fails to
-    parse (unparseable / not review-shaped) or has any schema problem. Reads stdin
-    when ``path`` is ``None`` or ``"-"`` so the reviewer agent's stdout pipes in
-    directly. An unreadable FILE raises into the :func:`~.._errors.cli_errors`
-    shell as one clean ``error: …`` line.
-    """
-    from ...review.schema import extract_json, is_review_shaped, validate_review
-
-    if path is None or path == "-":
-        raw = sys.stdin.read()
-    else:
-        try:
-            with open(path, encoding="utf-8") as handle:
-                raw = handle.read()
-        except OSError as exc:
-            raise PrStateError(f"cannot read review JSON {path!r}: {exc}") from exc
-
-    try:
-        payload = extract_json(raw, want=is_review_shaped)
-    except ValueError:
-        # Not parseable as a review-shaped object at all — the funnel would fail
-        # to parse this too. Report it as a validation failure (exit 1), not a
-        # crash, so the agent learns its output never even reached the schema.
-        print(
-            "invalid: no review-shaped JSON object found (expected a single "
-            "{summary, comments} object) — check for truncation, prose, or "
-            "markdown fences around the JSON",
-            file=sys.stderr,
-        )
-        return 1
-
-    problems = validate_review(payload)
-    if not problems:
-        print("valid")
-        return 0
-    print(f"invalid: {len(problems)} schema problem(s):", file=sys.stderr)
-    for problem in problems:
-        print(f"  - {problem}", file=sys.stderr)
-    return 1
 
 
 @cmd.command(name="replay")

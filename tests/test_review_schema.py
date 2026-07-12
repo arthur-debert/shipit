@@ -208,7 +208,7 @@ def test_a_bare_non_object_json_value_is_not_accepted():
             extract_json(bare)
 
 
-# --- validate_review — the schema self-check behind `shipit pr review validate` ---
+# --- validate_review — the schema self-check behind `shipit review validate` ---
 
 
 def _valid_review() -> dict:

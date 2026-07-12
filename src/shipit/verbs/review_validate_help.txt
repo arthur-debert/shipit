@@ -1,10 +1,10 @@
-`shipit pr review validate [FILE]` checks a review JSON payload against the
+`shipit review validate [FILE]` checks a review JSON payload against the
 review schema, so a reviewer agent can verify its own output before handing back.
 
 FILE is a path to the JSON to check; omit it (or pass `-`) to read stdin, so an
 agent can pipe its output straight in:
 
-    cat review.json | shipit pr review validate
+    cat review.json | shipit review validate
 
 The payload is parsed the SAME tolerant way the funnel parses an agent's stdout
 — surrounding prose and ```json fences are stripped, the single

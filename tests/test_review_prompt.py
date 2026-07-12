@@ -115,11 +115,11 @@ def test_agy_task_embeds_the_serialized_real_schema_not_a_hand_written_example()
 
 
 def test_agy_task_carries_the_best_effort_self_verify_instruction():
-    """The agy path nudges the agent to self-verify with `shipit pr review validate`
+    """The agy path nudges the agent to self-verify with `shipit review validate`
     (#826) — worded as a best-effort SHOULD, never a hard loop-until-green that
     could hang when the CLI is unavailable."""
     task = build_reviewer_task(_INSTRUCTIONS, 7, schema_inline=True)
-    assert "shipit pr review validate" in task
+    assert "shipit review validate" in task
     assert "BEST-EFFORT SELF-CHECK" in task
     # It is a SHOULD, explicitly not a blocking loop.
     assert "SHOULD" in task
@@ -129,11 +129,11 @@ def test_agy_task_carries_the_best_effort_self_verify_instruction():
 def test_codex_task_omits_schema_validity_and_self_verify():
     """The codex path (`schema_inline=False`) enforces the shape out of band, so it
     embeds NONE of the agy-only block: no schema, no JSON-validity hardening, and no
-    `shipit pr review validate` self-check nudge."""
+    `shipit review validate` self-check nudge."""
     task = build_reviewer_task(_INSTRUCTIONS, 7, schema_inline=False)
     assert "JSON Schema:" not in task
     assert "ENTIRE response must be a single, complete, valid JSON object" not in task
-    assert "shipit pr review validate" not in task
+    assert "shipit review validate" not in task
     assert "BEST-EFFORT SELF-CHECK" not in task
 
 
