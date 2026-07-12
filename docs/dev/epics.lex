@@ -133,7 +133,11 @@ dependencies.
     exploration agent to find what the feature changed in the docs — out-of-code
     docs under `docs/` and docstrings, especially module-level ones that capture
     design, trade-offs, and pointers — and to make those changes on a dedicated
-    PR.
+    PR. For execution-model epics, the pass explicitly reconciles the glossary,
+    agent-host seams, Tree and spawn guidance, pixi execution reference, CI/Lane
+    and fleet evidence, development-cycle role guidance, and generated Role
+    references. Preserve historical PRDs as history; point readers at the
+    merged Spec and ADRs as the authoritative feature definition and decisions.
 
 6. The umbrella PR
 

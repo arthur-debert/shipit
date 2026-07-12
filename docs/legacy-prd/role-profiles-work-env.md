@@ -1,5 +1,9 @@
 # Role Profiles and Work Env Foundation
 
+> Historical planning artifact. The authoritative shipped feature definition is
+> `docs/spec/role-profiles-work-env.md`; governing decisions remain ADR-0046
+> and ADR-0047.
+
 ## Problem Statement
 
 Shipit has a clear agentic development model, but several core execution concepts are still spread across prompts, hooks, spawn logic, Tree handling, tool execution, and review flow. That makes the system harder to reason about and easier to accidentally fork: a Role can be described one way in the prompt, enforced another way in a hook, and routed differently by spawn.

@@ -24,7 +24,7 @@ logic is thin YAML) is stated in [./architecture.lex#3].
     forward:
 
     Pipeline:
-        preflight -> prepare -> build[xOS] -> package[xOS] -> sign[mac] -> release
+        preflight -> prepare -> build(xOS) -> package(xOS) -> sign(mac) -> release
 
     - preflight: resolve whether signing is requested (one switch, referenced
       everywhere downstream), validate that the changelog has content, and
@@ -34,13 +34,13 @@ logic is thin YAML) is stated in [./architecture.lex#3].
       push, and emit the release-notes artifact. For tauri this bumps THREE
       version files in lockstep (package.json + src-tauri/Cargo.toml +
       tauri.conf.json); they must stay in sync or the build breaks.
-    - build [per OS]: build the frontend, then COMPILE ONLY (no bundle). The
+    - build (per OS): build the frontend, then COMPILE ONLY (no bundle). The
       cross-job artifact is the ~tens-of-MB compiled binary + the built
       frontendDist — NOT the multi-GB target/ tree. This is the expensive,
       cache-warmed half (rust-cache + sccache).
-    - package [per OS]: download the compile artifact, bundle it UNSIGNED, and
+    - package (per OS): download the compile artifact, bundle it UNSIGNED, and
       assert the bundle's integrity before upload. Needs no rust toolchain.
-    - sign [mac, optional]: only when signing is requested. See [#3.1].
+    - sign (mac, optional): only when signing is requested. See [#3.1].
     - release: publish the GitHub release from the notes + tag + bundles, with
       partial-release prevention (see [#3.3]).
 
@@ -70,6 +70,17 @@ logic is thin YAML) is stated in [./architecture.lex#3].
     These building blocks already exist in arthur-debert/release as
     bin-internal/*.sh scripts called by thin workflow steps, so the migration
     is mechanical: each script becomes a pixi task; the routing stays in YAML.
+
+    CI Lane Work Env:
+        A CI Lane job is a Main-checkout Work Env, not a Tree. GitHub Actions
+        provides the fresh checkout and runner; the Lane planner supplies the
+        lane name, event, runner, required/advisory bit, and pixi environment
+        name. Execution still happens through the workflow's existing
+        `pixi run --locked` caller and shipit verb; Work Env only records the
+        resolved `direct-checkout` / `pixi-run` evidence. Do not instantiate
+        local Tree objects in CI just to share terminology, and do not invent a
+        pixi Run id — pixi exposes environment metadata, not invocation
+        identity.
 
 3. Design invariants the pipeline learned the hard way
 
