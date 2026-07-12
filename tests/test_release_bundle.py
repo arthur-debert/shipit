@@ -1464,10 +1464,13 @@ def test_source_compositions_do_not_assert_a_binary():
 
 def test_registry_marks_the_platform_independent_compositions():
     # tarball emits one unqualified `<name>.tar.gz` (identical generated C on
-    # every leg), so the config boundary refuses it with >1 platform — an
-    # unqualified name built on multiple legs would collide in the merged dist/.
-    assert bundle_mod.platform_independent_names() == ("tarball",)
+    # every leg) and wasm-pack one unqualified npm `<name>.tgz` (version- but not
+    # target-qualified, #828), so the config boundary refuses either with >1
+    # platform — an unqualified name built on multiple legs would collide in the
+    # merged dist/. Registry order: wasm-pack precedes tarball in COMPOSITIONS.
+    assert bundle_mod.platform_independent_names() == ("wasm-pack", "tarball")
     assert bundle_mod.TARBALL.platform_independent
+    assert bundle_mod.WASM_PACK.platform_independent
     assert not bundle_mod.ARCHIVE.platform_independent
 
 

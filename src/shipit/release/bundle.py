@@ -959,7 +959,9 @@ class Composition:
     ``platform_independent`` marks the compositions whose output carries NO
     ``-<target>`` qualifier — the tarball's generated C source is identical on
     every OS, so it emits one unqualified ``<name>.tar.gz`` (parity with legacy
-    ``tree-sitter.tar.gz``). Because ``wf-publish.yml`` merges every leg's
+    ``tree-sitter.tar.gz``); the wasm-pack npm ``<name>.tgz`` is the sibling case
+    (#828), version-qualified but not target-qualified. Because ``wf-publish.yml``
+    merges every leg's
     ``dist/`` into one flat tree (``merge-multiple``), an unqualified name
     built on more than one leg would COLLIDE (last writer wins, and tar bytes
     are not guaranteed identical across runners — mtimes/uid/gid), so the
@@ -1007,11 +1009,18 @@ WHEEL = Composition("wheel", _compose_wheel, asserts_binary=False)
 #: wasm-pack: an npm ``.tgz`` (wasm/JS package) — like the wheel sdist and the
 #: tree-sitter tarball it carries no main binary, so the scar-#2 guard is
 #: skipped for it (``asserts_binary=False``); a source package built via
-#: ``npm pack`` has nothing for the integrity guard to assert.
+#: ``npm pack`` has nothing for the integrity guard to assert. It is also
+#: ``platform_independent`` (sibling to the tarball guard, #828): ``npm pack``
+#: emits one version-qualified but NOT target-qualified ``<name>.tgz`` — the
+#: wasm/JS bytes carry no per-OS variant, so the config boundary refuses a >1
+#: ``platforms`` declaration (the unqualified name would collide, last-writer-
+#: wins, in ``wf-publish.yml``'s merged ``dist/`` and tar bytes are not
+#: identical across runners); it must build on exactly one leg.
 WASM_PACK = Composition(
     "wasm-pack",
     _compose_wasm_pack,
     asserts_binary=False,
+    platform_independent=True,
     option_keys=("scope", "wasm-target"),
     # `npm pack` at bundle needs the node runtime (npm); wasm-pack rides the
     # rust signal and the crate's npm package.json is generated, never tracked,
