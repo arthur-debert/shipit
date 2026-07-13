@@ -1,4 +1,10 @@
 `shipit wf` contains workflow-development tools.
 
-Use it to validate GitHub Actions workflow edits locally before a push. The
-current public verb is `shipit wf test`.
+Use it to validate GitHub Actions workflow edits locally before a push, and
+to prove the sign surface against real infrastructure. The public verbs:
+
+- `shipit wf test` — run one workflow (or one job) under act in a container
+  against a crafted event, locally, before the first push.
+- `shipit wf verify-canary` — dispatch shipit-canary's release caller
+  through the sign proof chains on live GitHub (the standing sign e2e,
+  workflows.lex §9) and watch every run to its verdict.

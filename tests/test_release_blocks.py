@@ -705,7 +705,9 @@ def test_dispatch_caller_forwards_the_stage_input_contract_verbatim():
     # The aligned standalone contract (#780): `full`/`prepare` dispatch on
     # `version`; `build`/`sign`/`publish` on `tag` alone (ADR-0041 — the
     # version is read off the tag), plus `run-id` on the artifact-consuming
-    # stages. Secrets follow the uniform per-stage grant rule (#896): every
+    # stages (`sign`, `publish`) naming their source run — `build` takes
+    # none: its `notes` job re-derives release-notes at the tag (#898).
+    # Secrets follow the uniform per-stage grant rule (#896): every
     # stage job forwards the SAME plan-required set as `full`, trimmed to
     # its block's declared names — shipit's plan-required set is exactly
     # RELEASE_TOKEN, so `release`/`prepare` forward it and the other stages
