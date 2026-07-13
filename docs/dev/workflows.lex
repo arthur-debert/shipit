@@ -311,3 +311,62 @@ logic is thin YAML) is stated in [./architecture.lex#3].
       validation on any plan with sign or registry endpoints, and a `sign`
       job omitting ASC_API_KEY_BASE64 dies at notarize). The uniform grant
       rule above is the guard, and `shipit wf test` enforces it.
+
+9. The standing sign e2e — shipit-canary's signed-darwin surface (#899)
+
+    Owner directive (2026-07-13): signing is guarded by FULL RUNS that prove
+    it works, dispatchable at will — those runs guide sign work, instead of
+    discovering breakage live on consumer rc's. The evidence for the gap:
+    `tests/test_release_sign.py` carries 70 unit tests, and BOTH live
+    sign-path failures of the rollout were invisible to every one of them,
+    because the load-bearing facts only exist against real infrastructure —
+    shipit#873/#889 (codesign could not resolve the signing identity: the
+    temp keychain was missing from the search list; needs a REAL macOS
+    runner + the real cert) and shipit#898 (a standalone sign dispatch died
+    relaying `release-notes`; needs the REAL cross-run artifact hand-off).
+
+    The surface lives on shipit-canary (the standing ADP00 probe), canary-
+    side; the owner/coordinator applies it there:
+
+    - `[artifacts]` declares ONE trivial compiled binary — a hello-world go
+      target is enough — on `platforms = ["darwin-arm64"]` with an `archive`
+      bundle, `endpoints = ["gh-release"]`, and `sign = true`: the minimal
+      declaration that puts a real build+sign matrix in the plan (`sign =
+      true` requires a build target, a darwin platform, and a signable
+      composition — the config parse refuses less), plus the go path in
+      `[toolchains]`.
+    - the blessed stage-choice caller
+      (`.github/workflows/shipit-release.yml`, §8's shape verbatim, @v1
+      refs) with the UNIFORM per-stage grants: RELEASE_TOKEN forwarded on
+      `release`/`prepare`, the whole Apple set on `release`/`sign`.
+      `shipit wf test` lints the copy against the #896 rule.
+    - the secret set, OWNER-pushed on the canary repo (same cert the fleet
+      uses) — exactly these names: `RELEASE_TOKEN`, plus wf-sign-mac's
+      declared surface (`SIGN_BLOCK_SECRETS`, drift-pinned to the block
+      file): `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`,
+      `ASC_API_KEY_BASE64`, `ASC_API_KEY_ID`, `ASC_API_ISSUER_ID`,
+      `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`. No endpoint tokens:
+      gh-release rides the workflow's own GITHUB_TOKEN.
+
+    The proofs, one command: `shipit wf verify-canary --version <v>`
+    dispatches BOTH chains on the canary and watches every run to its
+    verdict —
+
+    - `stage=full` rc: the composed chain including sign+notarize on the
+      real macOS runner (the #873/#889 class);
+    - the staged relay: `prepare` -> `build` -> `sign` -> `publish` as four
+      standalone dispatches, `tag`/`run-id` threaded per §8 (sign feeds off
+      the build run, publish names the SIGN run) — the #898 regression
+      surface.
+
+    THE RULE: any shipit PR touching the sign/relay/wf-yml surface —
+    `shipit/release/sign.py`, `wf-sign-mac.yml`, `wf-release.yml`, the
+    stage blocks, the blessed-caller shape — cites a green canary chain run
+    in BOTH modes (the verb's printed CANARY PROOF block, verbatim) before
+    the change is delivered to v1 (advance-major). The unit tests stay
+    necessary; on this surface they are proven insufficient.
+
+    Teardown discipline: canary rc's are torn down AFTER inspection, like
+    every proof — the verb prints the exact `gh release delete <tag> -R
+    arthur-debert/shipit-canary --yes --cleanup-tag` lines and never
+    deletes what has not been inspected.

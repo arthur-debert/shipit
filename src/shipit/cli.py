@@ -37,6 +37,7 @@ from .verbs.session import session as session_group
 from .verbs.spawn import spawn as spawn_group
 from .verbs.tree import tree as tree_group
 from .verbs.wf import wf as wf_group
+from .verbs.wf_canary import verify_canary_cmd
 
 #: The CLI entry's own logger — carries the SHIPIT_EXEC announcement's durable
 #: twin (ADR-0033) through the LOG01 pipeline like any subsystem logger.
@@ -365,6 +366,11 @@ root.add_command(fleet_group)
 # The nested `wf` group (TOL01-WS04) — workflow tools: `shipit wf test` runs
 # one workflow/job under act in a container against a crafted event, so a
 # workflow edit is validated locally before any push (PRD stories 40/41).
+# `shipit wf verify-canary` (#899) is the group's LIVE counterpart — the
+# standing sign e2e that dispatches shipit-canary's blessed caller through
+# both proof chains; registered here (not at wf.py's bottom) so the sibling
+# modules stay import-order independent.
+wf_group.add_command(verify_canary_cmd)
 root.add_command(wf_group)
 
 
@@ -439,6 +445,7 @@ _HELP_RESOURCES = {
     ("fleet", "sweep"): ("shipit.verbs", "fleet_sweep_help.txt"),
     ("wf",): ("shipit.verbs", "wf_help.txt"),
     ("wf", "test"): ("shipit.verbs", "wf_test_help.txt"),
+    ("wf", "verify-canary"): ("shipit.verbs", "wf_verify_canary_help.txt"),
 }
 
 register_long_help(root, _HELP_RESOURCES)

@@ -1,0 +1,53 @@
+`shipit wf verify-canary` dispatches shipit-canary's release caller through
+the sign proof chains on live GitHub and watches every run to its verdict.
+
+Use it to prove a sign/relay/workflow change against real infrastructure — a
+real macOS runner, the real fleet cert, the real cross-run artifact hand-off
+— before it ships to a consumer rc. The runbook (docs/dev/workflows.lex §9)
+requires any shipit PR touching the sign/relay/wf-yml surface to cite a green
+run of BOTH chains.
+
+Usage
+
+  shipit wf verify-canary --version VERSION [--mode both|full|staged]
+                          [--repo OWNER/NAME] [--workflow FILE] [--ref REF]
+
+What it does
+
+- mode `full`: dispatches one `stage=full` rc — the composed chain including
+  sign + notarize (the codesign/keychain class of failure: shipit#873/#889).
+- mode `staged`: dispatches `prepare`, `build`, `sign`, `publish` as four
+  standalone runs, threading `tag`/`run-id` between them — the cross-run
+  artifact relay (the release-notes hand-off class: shipit#898). The relay
+  stops at the first red stage; the remainder is reported `skipped`.
+- mode `both` (default): both chains, each on its own derived rc version
+  (`<version>-full` / `<version>-staged`).
+
+It waits for every run to complete, prints a CANARY PROOF block (one line
+per run with its URL — paste it into the shipit PR), prints the teardown
+commands (canary rc's are torn down after inspection; the verb never deletes
+what you have not inspected), and exits 0 only when every run is green.
+
+Prerequisites (on the canary repo)
+
+- the blessed stage-choice caller (default `shipit-release.yml`) on the
+  dispatched ref;
+- a signed darwin artifact in `[artifacts]` so the plan carries a real
+  build/sign matrix;
+- the Apple secret set + RELEASE_TOKEN provisioned (owner-pushed; the exact
+  names are listed in docs/dev/workflows.lex §9).
+
+This verb hits live GitHub and burns real runner minutes: it is an operator
+command, never part of `pixi run test` or CI.
+
+Examples
+
+  # the full proof matrix, one command
+  shipit wf verify-canary --version 0.0.7-canary-rc
+
+  # just the staged relay (the #898 regression surface)
+  shipit wf verify-canary --version 0.0.8-canary-rc --mode staged
+
+Exit codes: 0 every dispatched run green; 1 any red, timed-out, or skipped
+step; a failed gh call (missing binary, auth, unknown workflow) is a hard
+`error:` failure.

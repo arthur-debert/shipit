@@ -24,6 +24,9 @@ macOS/Windows runners, GPU, cross-workflow cascade, partial ``workflow_call``
 fidelity, dispatch UX, the wf-sign-mac signer leg, and the release blocks'
 real side effects are outside act's reach, and the standing notice is
 what keeps a local green trusted only where it is valid (PRD story 41).
+The live counterpart for the sign part of that surface is the sibling
+``shipit wf verify-canary`` (:mod:`.wf_canary`, #899): real runs on the
+shipit-canary probe, per the workflows.lex §9 runbook.
 
 The pure cores — event-payload crafting (:func:`craft_event` /
 :func:`parse_inputs`), job selection (:func:`workflow_jobs`), the act argv
@@ -674,7 +677,13 @@ def run(
 
 @click.group(name="wf")
 def wf() -> None:
-    """Workflow tools — validate GitHub Actions workflows locally."""
+    """Workflow tools — validate workflows locally; prove sign live.
+
+    `wf test` runs a workflow under act in a container (local, no
+    side effects); `wf verify-canary` (its live counterpart, #899)
+    dispatches shipit-canary's release caller through the sign proof
+    chains on real GitHub — the surface act cannot reach.
+    """
 
 
 @wf.command(name="test")

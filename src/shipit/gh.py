@@ -735,6 +735,76 @@ def release_upload(tag: str, files: list[str], *, cwd: str | None = None) -> Non
     )
 
 
+# --------------------------------------------------------------------------
+# workflow-dispatch runs (the `wf verify-canary` dispatcher's surface, #899)
+# --------------------------------------------------------------------------
+
+
+def workflow_run(
+    workflow: str, *, repo: str, ref: str, fields: Mapping[str, str]
+) -> None:
+    """``gh workflow run`` — dispatch one ``workflow_dispatch`` caller run.
+
+    ``fields`` are the caller's typed inputs, passed as ``-f key=value``
+    pairs in the given order (the blessed stage-choice caller's
+    ``stage``/``version``/``tag``/``run-id`` set, workflows.lex §8). The
+    dispatch is fire-and-forget on GitHub's side — discovery of the run it
+    minted is :func:`run_list_dispatched`'s job.
+    """
+    args = ["gh", "workflow", "run", workflow, "-R", repo, "--ref", ref]
+    for key, value in fields.items():
+        args += ["-f", f"{key}={value}"]
+    _run(args)
+
+
+def run_list_dispatched(repo: str, workflow: str, *, limit: int = 20) -> list[dict]:
+    """The workflow's most recent ``workflow_dispatch`` runs, newest first.
+
+    Each entry carries ``databaseId``/``status``/``conclusion``/``url`` — the
+    set a dispatcher needs to discover a freshly-minted run against a
+    baseline snapshot and follow it. Empty output parses to ``[]``.
+    """
+    out = _run(
+        [
+            "gh",
+            "run",
+            "list",
+            "-R",
+            repo,
+            "--workflow",
+            workflow,
+            "--event",
+            "workflow_dispatch",
+            "--json",
+            "databaseId,status,conclusion,url",
+            "--limit",
+            str(limit),
+        ]
+    )
+    return json.loads(out or "[]")
+
+
+def run_verdict(repo: str, run_id: int) -> dict:
+    """One Actions run's verdict read: ``status``/``conclusion``/``url``.
+
+    ``status`` is ``completed`` once the run has a ``conclusion``
+    (``success``/``failure``/…); until then the poller keeps watching.
+    """
+    out = _run(
+        [
+            "gh",
+            "run",
+            "view",
+            str(run_id),
+            "-R",
+            repo,
+            "--json",
+            "status,conclusion,url",
+        ]
+    )
+    return json.loads(out or "{}")
+
+
 def repository_dispatch(
     slug: str,
     *,
