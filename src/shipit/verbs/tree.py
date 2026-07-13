@@ -90,7 +90,10 @@ def tree() -> None:
 @click.option(
     "--branch",
     default=None,
-    help="Freeform shape: provision a Tree on branch NAME, cut from origin/main.",
+    help=(
+        "Freeform shape: provision a Tree on branch NAME. Existing remote heads "
+        "start from origin/NAME; new branches start from origin/main."
+    ),
 )
 @click.option(
     "--slug",
@@ -118,7 +121,8 @@ def create_cmd(
     - ``--issue N [--session S] [--slug S]`` → branch ``issues/<n>/<session>``,
       base ``origin/main``
     - ``--epic E --ws N [--slug S]``         → branch ``E/WSnn``, base ``origin/E/umbrella``
-    - ``--branch NAME``                      → branch ``NAME`` verbatim, base ``origin/main``
+    - ``--branch NAME``                      → branch ``NAME`` verbatim, base ``origin/NAME``
+      when that remote head exists, else ``origin/main``
 
     Creates a fully-independent clone under the central root on the resolved branch,
     then prints ``READY {path, branch, base}``. The clone's ``origin`` is the repo's
@@ -163,6 +167,7 @@ def run_create(
         # canonical, case-normalized Repo — never an API slug re-split by hand.
         repo_identity = identity.resolve_repo(root)
         url = git.remote_url(cwd=root)
+        base = _freeform_base(branch, cwd=root) if branch is not None else None
     except (execrun.ExecError, ValueError) as exc:
         print(f"tree create: {exc}", file=sys.stderr)
         return 1
@@ -175,6 +180,7 @@ def run_create(
         epic=epic,
         ws=ws,
         branch=branch,
+        base=base,
         slug=slug,
     )
     try:
@@ -192,6 +198,18 @@ def run_create(
         return 1
     _emit_ready(result)
     return 0
+
+
+def _freeform_base(branch: str, *, cwd: str) -> str | None:
+    """Return the base override for a freeform branch, if it already exists remotely.
+
+    ``shipit tree create --branch NAME`` has two user intents behind the same flag:
+    attach a Tree to an existing remote branch, or start a brand-new branch. The
+    remote head is the signal. Existing remote heads are cut from ``origin/NAME`` so
+    the new Tree starts at the branch's current tip; absent heads return ``None`` so
+    the pure planner keeps its normal ``origin/main`` default for new freeform work.
+    """
+    return f"origin/{branch}" if git.remote_branch_exists(branch, cwd=cwd) else None
 
 
 def _select_shape(

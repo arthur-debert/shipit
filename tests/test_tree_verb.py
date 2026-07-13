@@ -112,6 +112,7 @@ def test_run_create_epic_ws_shape_builds_spec(monkeypatch, capsys):
 
 def test_run_create_branch_shape_builds_spec(monkeypatch, capsys):
     _patch_identity(monkeypatch)
+    monkeypatch.setattr(git, "remote_branch_exists", lambda branch, *, cwd: False)
     captured = _capture_create(
         monkeypatch,
         Tree(path="/repo/trees/spike", branch="spike/foo", base="origin/main"),
@@ -127,6 +128,47 @@ def test_run_create_branch_shape_builds_spec(monkeypatch, capsys):
     assert out.splitlines()[0] == "READY"
     payload = json.loads("\n".join(out.splitlines()[1:]))
     assert payload["branch"] == "spike/foo"
+
+
+def test_run_create_branch_shape_existing_remote_branch_uses_remote_head(monkeypatch):
+    _patch_identity(monkeypatch)
+    probes = []
+
+    def remote_branch_exists(branch, *, cwd):
+        probes.append((branch, cwd))
+        return True
+
+    monkeypatch.setattr(git, "remote_branch_exists", remote_branch_exists)
+    captured = _capture_create(
+        monkeypatch,
+        Tree(path="/repo/trees/spike", branch="spike/foo", base="origin/spike/foo"),
+    )
+
+    rc = tree_verb.run_create(branch="spike/foo")
+
+    assert rc == 0
+    assert probes == [("spike/foo", "/repo")]
+    assert captured["spec"].branch == "spike/foo"
+    assert captured["spec"].base == "origin/spike/foo"
+
+
+def test_run_create_branch_shape_new_branch_keeps_default_base(monkeypatch):
+    _patch_identity(monkeypatch)
+    probes = []
+
+    def remote_branch_exists(branch, *, cwd):
+        probes.append((branch, cwd))
+        return False
+
+    monkeypatch.setattr(git, "remote_branch_exists", remote_branch_exists)
+    captured = _capture_create(monkeypatch)
+
+    rc = tree_verb.run_create(branch="new/topic")
+
+    assert rc == 0
+    assert probes == [("new/topic", "/repo")]
+    assert captured["spec"].branch == "new/topic"
+    assert captured["spec"].base is None
 
 
 def test_run_create_issue_shape_unchanged(monkeypatch, capsys):

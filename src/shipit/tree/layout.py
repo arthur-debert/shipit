@@ -7,7 +7,8 @@ no I/O, so the truth table is unit-tested directly (Testing Decisions in the PRD
 
 :func:`plan` resolves EVERY spec shape — ``--issue N [--session S] [--slug S]``,
 ``--epic E --ws N [--slug S]``, freeform ``--branch NAME`` with an optional
-internal base override, and the coordinator's ``ephemeral`` session Tree
+base override supplied by callers that have probed a remote head, and the coordinator's
+``ephemeral`` session Tree
 (naming.lex §3; ADR-0027). :class:`TreeSpec` stays a single typed entry point:
 adding a shape is adding a field plus a branch in :func:`plan`, not reshaping
 callers.
@@ -371,10 +372,11 @@ class TreeSpec:
     ``session`` names the standalone-issue branch's leaf — ``issues/<id>/<session>``,
     default ``work`` — so a +1 session on the same issue (``issues/<id>/onboard``)
     coexists under the ``issues/<id>/`` ref directory (see :func:`_plan_issue`); it is
-    unused by the epic, freeform, and ephemeral shapes. ``base`` is an internal
-    override for the freeform shape only: normal freeform work still cuts from
-    ``origin/main``, while shepherd PR attachment cuts from ``origin/<head>`` so
-    the Tree starts at the current PR head.
+    unused by the epic, freeform, and ephemeral shapes. ``base`` is a caller-supplied
+    override for the freeform shape only: brand-new freeform work still cuts from
+    ``origin/main``, while callers that have identified an existing remote head
+    (CLI ``--branch NAME`` or shepherd PR attachment) pass ``origin/<head>`` so
+    the Tree starts at that head.
 
     The four shapes :func:`plan` dispatches on (and validates as mutually
     exclusive):
@@ -516,10 +518,12 @@ def _plan_freeform(spec: TreeSpec) -> TreePlan:
     - **branch**: the freeform name verbatim — the caller owns its meaning, so the
       planner reflects the request rather than mangling it (naming.lex §3 lists the
       freeform name as a branch form in its own right).
-    - **base**: normally ``origin/main`` — freeform work, like a standalone issue,
-      is cut from the default branch. An internal caller may override this with
-      another explicit remote ref; shepherd PR attachment uses ``origin/<head>``
-      so an existing-PR write Tree starts from the PR head instead of from main.
+    - **base**: normally ``origin/main`` — brand-new freeform work, like a standalone
+      issue, is cut from the default branch. A caller may override this with another
+      explicit remote ref after it has proven that ref is the intended starting point:
+      CLI ``--branch NAME`` uses ``origin/NAME`` when that remote head already exists,
+      and shepherd PR attachment uses ``origin/<head>`` so an existing-PR write Tree
+      starts from the PR head instead of from main.
     - **dir**: ``<root>/<org>/<repo>/branches/<sanitized-branch>-<agent-hash>`` —
       the freeform name is sanitized into one safe leaf (slashes and other
       separators collapse to ``-``) so an arbitrary branch like ``spike/foo`` maps
