@@ -22,8 +22,9 @@ The repeated CLI concepts are defined ONCE here:
   word) through the canonical parser
   (:func:`shipit.release.version.parse_spec`, ADR-0041).
 - :data:`BARE_SEMVER` — a CONCRETE version argument for the tag-state
-  re-derivation verbs (``release notes``, #898): bare semver only, no bump
-  words (the version is read off an existing tag, ADR-0041).
+  re-derivation verbs (``release notes``, #898): the same canonical parser,
+  minus bump words — and so also no ``v`` prefix, no build metadata (the
+  version is read off an existing tag, ADR-0041).
 
 The PR target is the deliberate exception (ADR-0030): click validates only
 the explicit ``int``; resolving "which PR" (explicit number vs the current
@@ -127,24 +128,31 @@ class BareSemverParam(click.ParamType):
     version READ OFF an existing tag (ADR-0041: ``v<version>`` by
     construction), so a bump word — resolvable only against tag history, for
     a cut that has not happened yet — is a usage error here, rejected at
-    argv parse (exit 2) like every malformed version.
+    argv parse (exit 2) like every malformed version. Validation runs through
+    the release version grammar (:func:`shipit.release.version.parse_spec`),
+    so the shapes ``release prepare`` could never have cut — a ``v`` prefix,
+    build metadata (``+…``) — die here too, with the grammar's own messages.
     """
 
     name = "version"
 
     def convert(self, value: object, param, ctx) -> str:
-        from ..changelog import is_semver  # lazy: verb-only
+        from ..release.version import parse_spec  # lazy: verb-only
 
         raw = str(value)
-        if is_semver(raw):
-            return raw
-        self.fail(
-            f"{raw!r} is not a bare semver version (expected e.g. 1.2.3 or "
-            "1.2.3-rc.1 — no 'v' prefix, no bump words: the version is read "
-            "off the tag, ADR-0041)",
-            param,
-            ctx,
-        )
+        try:
+            spec = parse_spec(raw)
+        except ValueError as exc:
+            self.fail(str(exc), param, ctx)
+        if spec.semver is None:
+            self.fail(
+                f"{raw!r} is a bump word, but the version here is read off "
+                "an existing tag (ADR-0041) — pass the concrete version the "
+                "tag names (e.g. 1.2.3)",
+                param,
+                ctx,
+            )
+        return spec.semver
 
 
 #: The shared instance verbs reference (a ParamType is stateless).

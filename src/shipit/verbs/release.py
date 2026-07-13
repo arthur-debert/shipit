@@ -752,7 +752,7 @@ def run_notes(
         print(plan.notes, end="")
     logger.info(
         "release notes re-derived",
-        extra={"version": version, "out": out or "-", "resume": True},
+        extra={"version": version, "out": out or "-"},
     )
     return 0
 
