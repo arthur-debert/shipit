@@ -4,6 +4,8 @@
 
 ## Unreleased
 
+## 1.1.0 - 2026-07-13
+
 - lanes: declared-secrets seam — a per-lane `secrets` allowlist routes one
   scoped token into a wf-checks lane, gated routing-only in the block so a
   private-source test surface can move onto a managed lane (#778)
