@@ -11,9 +11,10 @@ switch), one adapter per name of :data:`shipit.config.ENDPOINTS`:
   semver suffix and RE-ASSERTED on the resume/edit path (the legacy
   release#726 scar: ``gh release edit`` leaves the flag unchanged unless
   passed); uploads the staged bundle assets with ``--clobber``.
-- **crates** — workspace crates in topological dependency order
-  (:func:`crates_publish_order`); an already-uploaded crate version is
-  SUCCESS, so a re-run after a mid-workspace failure resumes (PRD story 36).
+- **crates** — workspace crates in topological dependency order, excluding
+  ``publish = false`` members (:func:`crates_publish_order`); an
+  already-uploaded crate version is SUCCESS, so a re-run after a
+  mid-workspace failure resumes (PRD story 36).
 - **pypi** — twine-style upload of the staged wheel+sdist with
   ``--skip-existing`` (idempotent), plus the ``--testpypi`` staging flag;
   token presence is validated before any upload. The upload is SCOPED to the
@@ -658,13 +659,20 @@ def crates_publish_order(metadata: dict) -> tuple[str, ...]:
     From parsed ``cargo metadata`` output: only workspace members are
     published, ordered so every member's in-workspace dependencies precede
     it (PRD story 36 — resumption mid-workspace needs a stable order).
-    Dev-dependencies are excluded (they may legally cycle — a lib's test
-    helper depending back on the lib — and do not gate publishing). Ties
-    break alphabetically, so the order is deterministic. A genuine cycle
-    among normal/build dependencies is a :class:`ReleaseError`.
+    Members with ``publish = false`` (rendered as ``"publish": []`` in the
+    metadata; test helpers, example crates) are excluded — ``cargo publish``
+    refuses them, which would abort a real multi-crate publish mid-workspace
+    (issue #849). A non-empty ``publish`` list only restricts the target
+    registry and stays in the order. Dev-dependencies are excluded (they may
+    legally cycle — a lib's test helper depending back on the lib — and do
+    not gate publishing). Ties break alphabetically, so the order is
+    deterministic. A genuine cycle among normal/build dependencies is a
+    :class:`ReleaseError`.
     """
     id_to_name = {
-        pkg.get("id"): pkg.get("name") for pkg in metadata.get("packages", [])
+        pkg.get("id"): pkg.get("name")
+        for pkg in metadata.get("packages", [])
+        if pkg.get("publish") != []
     }
     member_names = {
         id_to_name[member]

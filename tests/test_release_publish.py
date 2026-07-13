@@ -609,14 +609,26 @@ def test_gh_release_without_the_notes_file_refuses(tmp_path):
 # --------------------------------------------------------------------------
 
 
-def _cargo_metadata(deps: dict[str, list], dev: dict[str, list] | None = None) -> str:
+def _cargo_metadata(
+    deps: dict[str, list],
+    dev: dict[str, list] | None = None,
+    unpublished: set[str] | None = None,
+) -> str:
     dev = dev or {}
+    unpublished = unpublished or set()
     packages = []
     for name, needs in deps.items():
         dependencies = [{"name": d, "kind": None} for d in needs]
         dependencies += [{"name": d, "kind": "dev"} for d in dev.get(name, [])]
         packages.append(
-            {"id": f"id-{name}", "name": name, "dependencies": dependencies}
+            {
+                "id": f"id-{name}",
+                "name": name,
+                "dependencies": dependencies,
+                # cargo metadata renders `publish = false` as `[]`; the
+                # publish-anywhere default is `null`.
+                "publish": [] if name in unpublished else None,
+            }
         )
     return json.dumps(
         {
@@ -640,6 +652,29 @@ def test_crates_publish_order_ignores_dev_dependency_cycles():
         _cargo_metadata({"core": [], "helper": ["core"]}, dev={"core": ["helper"]})
     )
     assert publish_mod.crates_publish_order(metadata) == ("core", "helper")
+
+
+def test_crates_publish_order_excludes_publish_false_members():
+    """A `publish = false` workspace member (test helper, example crate) must
+    not appear in the derived order — a real publish would abort on it
+    (issue #849, found by the standout ADP02-WS08 cutover). Dependents may
+    still dev-depend on it; that link is already excluded as a dev-dep, and
+    the member itself is dropped even when publishable crates sort after it."""
+    metadata = json.loads(
+        _cargo_metadata(
+            {"app": ["core"], "core": [], "test-helper": ["core"]},
+            unpublished={"test-helper"},
+        )
+    )
+    assert publish_mod.crates_publish_order(metadata) == ("core", "app")
+
+
+def test_crates_publish_order_keeps_registry_restricted_members():
+    """`publish = ["some-registry"]` restricts WHERE a crate may go; only the
+    empty list (`publish = false`) means never-publish and is excluded."""
+    metadata = json.loads(_cargo_metadata({"core": []}))
+    metadata["packages"][0]["publish"] = ["my-registry"]
+    assert publish_mod.crates_publish_order(metadata) == ("core",)
 
 
 def test_crates_publish_order_refuses_a_real_cycle():
