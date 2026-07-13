@@ -301,12 +301,17 @@ def stage_caller_jobs(doc: object) -> dict[str, str] | None:
     """Job id → stage, when ``doc`` parses as the blessed stage-choice
     dispatch caller (workflows.lex §8); ``None`` for any other workflow. Pure.
 
-    Recognition is the blessed shape itself: a ``workflow_dispatch`` trigger
+    Recognition is the trigger shape alone: a ``workflow_dispatch`` trigger
     whose ``stage`` choice offers exactly :data:`CALLER_STAGES`, and jobs
     gated ``if: inputs.stage == '<stage>'``. Both YAML readings of the
     trigger key are tolerated (plain ``safe_load`` turns ``on:`` into the
     YAML-1.1 boolean ``True`` — the same gotcha :mod:`shipit.checks` loads
     around), so the function works on either parse.
+
+    EVERY gated job is mapped — the function neither requires each stage to
+    appear nor forbids two jobs gating the same stage. What each stage's
+    grants must look like (including that ``full`` be unambiguous) is
+    :func:`caller_secret_drift`'s claim, made from this complete map.
     """
     if not isinstance(doc, dict):
         return None
@@ -352,15 +357,32 @@ def caller_secret_drift(doc: object) -> list[str]:
     drifts narrow and always passes; but a stage job ENUMERATING under an
     inheriting ``full`` is flagged for the un-trimmed stages (the list cannot
     be proven to cover the plan).
+
+    :func:`stage_caller_jobs` maps every gated job, so EVERY job gating a
+    stage is held to the rule — a second job gating the same stage is not an
+    arbitrary-pick blind spot but one more grant to check. The one exception
+    is ``full`` itself: two jobs gating ``full`` make the plan-required set
+    ambiguous, which is a violation in its own right (the blessed caller has
+    one job per stage) and suppresses the per-stage claims that would need it.
     """
     stages = stage_caller_jobs(doc)
     if stages is None:
         return []
     jobs = doc["jobs"]  # a dict — stage_caller_jobs proved the shape
-    by_stage = {stage: job_id for job_id, stage in stages.items()}
-    full_id = by_stage.get("full")
-    if full_id is None:
+    by_stage: dict[str, list[str]] = {}
+    for job_id, stage in stages.items():
+        by_stage.setdefault(stage, []).append(job_id)
+    full_ids = by_stage.get("full", [])
+    if not full_ids:
         return []  # no full job to define the plan-required set — no claim
+    if len(full_ids) > 1:
+        named = ", ".join(repr(j) for j in full_ids)
+        return [
+            f"jobs {named} all gate stage full — the blessed caller has ONE "
+            "job per stage, and duplicate full jobs leave the plan-required "
+            "secret set ambiguous; keep a single full job"
+        ]
+    full_id = full_ids[0]
 
     def forwarded(job_id: str) -> frozenset[str] | None:
         job = jobs[job_id]
@@ -372,34 +394,33 @@ def caller_secret_drift(doc: object) -> list[str]:
     full = forwarded(full_id)
     violations: list[str] = []
     for stage in CALLER_STAGES[1:]:
-        job_id = by_stage.get(stage)
-        if job_id is None:
-            continue
-        got = forwarded(job_id)
-        if got is None:
-            continue  # inherit is never too narrow
-        trim = _STAGE_TRIM[stage]
-        if full is None and trim is None:
-            violations.append(
-                f"job {job_id!r} (stage {stage}) enumerates its secrets while "
-                f"{full_id!r} (stage full) rides `secrets: inherit` — a list "
-                "cannot be proven to cover the plan; inherit here too"
-            )
-            continue
-        want = trim if full is None else (full if trim is None else full & trim)
-        missing = sorted(want - got)
-        stray = sorted(got - want)
-        if missing or stray:
-            parts = []
-            if missing:
-                parts.append("missing " + ", ".join(missing))
-            if stray:
-                parts.append("stray " + ", ".join(stray))
-            violations.append(
-                f"job {job_id!r} (stage {stage}) must forward the same "
-                f"plan-required secret set as {full_id!r} (stage full), "
-                f"trimmed to its block's declared names ({'; '.join(parts)})"
-            )
+        for job_id in by_stage.get(stage, ()):
+            got = forwarded(job_id)
+            if got is None:
+                continue  # inherit is never too narrow
+            trim = _STAGE_TRIM[stage]
+            if full is None and trim is None:
+                violations.append(
+                    f"job {job_id!r} (stage {stage}) enumerates its secrets "
+                    f"while {full_id!r} (stage full) rides `secrets: inherit` "
+                    "— a list cannot be proven to cover the plan; inherit "
+                    "here too"
+                )
+                continue
+            want = trim if full is None else (full if trim is None else full & trim)
+            missing = sorted(want - got)
+            stray = sorted(got - want)
+            if missing or stray:
+                parts = []
+                if missing:
+                    parts.append("missing " + ", ".join(missing))
+                if stray:
+                    parts.append("stray " + ", ".join(stray))
+                violations.append(
+                    f"job {job_id!r} (stage {stage}) must forward the same "
+                    f"plan-required secret set as {full_id!r} (stage full), "
+                    f"trimmed to its block's declared names ({'; '.join(parts)})"
+                )
     return violations
 
 

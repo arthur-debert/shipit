@@ -294,6 +294,35 @@ def test_caller_without_a_full_job_makes_no_claim():
     assert wf.caller_secret_drift(doc) == []
 
 
+def test_every_job_gating_a_stage_is_checked():
+    # Two jobs gate `sign`: one compliant, one missing a notary name. There
+    # is no arbitrary pick — the drifting duplicate is flagged regardless of
+    # declaration order.
+    doc = _caller()
+    partial = tuple(n for n in _APPLE if n != "ASC_API_KEY_BASE64")
+    doc["jobs"]["sign-two"] = {
+        "if": "inputs.stage == 'sign'",
+        "uses": "arthur-debert/shipit/.github/workflows/wf-sign-mac.yml@v1",
+        "secrets": {name: f"${{{{ secrets.{name} }}}}" for name in partial},
+    }
+    drift = wf.caller_secret_drift(doc)
+    assert len(drift) == 1
+    assert "'sign-two'" in drift[0]
+    assert "missing ASC_API_KEY_BASE64" in drift[0]
+
+
+def test_duplicate_full_jobs_are_ambiguous_and_flagged():
+    # Two jobs gating `full` leave the plan-required set ambiguous: that is
+    # itself the violation, and no per-stage claim is made on top of it.
+    doc = _caller()
+    doc["jobs"]["release-two"] = dict(doc["jobs"]["release"])
+    drift = wf.caller_secret_drift(doc)
+    assert len(drift) == 1
+    assert "'release'" in drift[0]
+    assert "'release-two'" in drift[0]
+    assert "ambiguous" in drift[0]
+
+
 # --------------------------------------------------------------------------
 # Pure cores — the act argv encoding
 # --------------------------------------------------------------------------
