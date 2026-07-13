@@ -24,7 +24,7 @@ cargo-edit = "0.13.11.*"
 # (the #582 doctrine: the release run NEVER installs at run time). Pinned to the
 # minor line (`0.15.*` — conda match-spec); a bump is one data edit, rolled out
 # on each consumer's next `shipit install` reconcile. 0.15.* per #846: the
-# original 0.13.* pin was never solvable — conda-forge never carried a 0.13
-# build (verified 0.14.0/0.15.0 only, osx-arm64 + linux-64) — so every
+# original 0.13.* pin was never solvable — conda-forge never published any
+# 0.13.x wasm-pack build (verified on osx-arm64 + linux-64) — so every
 # consumer's default env died at solve.
 wasm-pack = "0.15.*"
