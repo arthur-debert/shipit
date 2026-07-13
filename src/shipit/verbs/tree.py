@@ -208,7 +208,11 @@ def _freeform_base(branch: str, *, cwd: str) -> str | None:
     remote head is the signal. Existing remote heads are cut from ``origin/NAME`` so
     the new Tree starts at the branch's current tip; absent heads return ``None`` so
     the pure planner keeps its normal ``origin/main`` default for new freeform work.
+    Names that sanitize to empty also return ``None`` without probing, leaving the
+    planner's domain validation to raise the canonical error.
     """
+    if not layout.sanitize_slug(branch):
+        return None
     return f"origin/{branch}" if git.remote_branch_exists(branch, cwd=cwd) else None
 
 

@@ -130,7 +130,9 @@ def test_run_create_branch_shape_builds_spec(monkeypatch, capsys):
     assert payload["branch"] == "spike/foo"
 
 
-def test_run_create_branch_shape_existing_remote_branch_uses_remote_head(monkeypatch):
+def test_run_create_branch_shape_existing_remote_branch_uses_remote_head(
+    monkeypatch, capsys
+):
     _patch_identity(monkeypatch)
     probes = []
 
@@ -150,9 +152,10 @@ def test_run_create_branch_shape_existing_remote_branch_uses_remote_head(monkeyp
     assert probes == [("spike/foo", "/repo")]
     assert captured["spec"].branch == "spike/foo"
     assert captured["spec"].base == "origin/spike/foo"
+    capsys.readouterr()
 
 
-def test_run_create_branch_shape_new_branch_keeps_default_base(monkeypatch):
+def test_run_create_branch_shape_new_branch_keeps_default_base(monkeypatch, capsys):
     _patch_identity(monkeypatch)
     probes = []
 
@@ -169,6 +172,31 @@ def test_run_create_branch_shape_new_branch_keeps_default_base(monkeypatch):
     assert probes == [("new/topic", "/repo")]
     assert captured["spec"].branch == "new/topic"
     assert captured["spec"].base is None
+    capsys.readouterr()
+
+
+def test_run_create_branch_shape_invalid_freeform_skips_remote_probe(
+    monkeypatch, capsys
+):
+    _patch_identity(monkeypatch)
+    probes = []
+
+    def remote_branch_exists(branch, *, cwd):
+        probes.append((branch, cwd))
+        return True
+
+    def fake_create(spec, *, source_repo, github_url):
+        layout_mod.plan(spec)
+        raise AssertionError("planner should reject the branch")
+
+    monkeypatch.setattr(git, "remote_branch_exists", remote_branch_exists)
+    monkeypatch.setattr(tree_verb, "create", fake_create)
+
+    rc = tree_verb.run_create(branch="///")
+
+    assert rc == 1
+    assert probes == []
+    assert "sanitizes to an empty name" in capsys.readouterr().err
 
 
 def test_run_create_issue_shape_unchanged(monkeypatch, capsys):
