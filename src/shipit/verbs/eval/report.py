@@ -38,7 +38,6 @@ substrate stays a local file (ADR-0013).
 
 from __future__ import annotations
 
-import fcntl
 import json
 import logging
 import sys
@@ -204,7 +203,8 @@ def _group_query(key_expr: str, order_by: str) -> str:
 
 @contextmanager
 def _shared_lock(path: Path) -> Iterator[None]:
-    """Hold a shared ``flock`` (``LOCK_SH``) on ``path`` for the wrapped block.
+    """Hold a shared lock (:func:`~shipit.harness.eval.store.lock_shared`) on
+    ``path`` for the wrapped block.
 
     For a reader whose actual file I/O is NOT its own locked handle — DuckDB's
     ``read_json_auto`` opens the store itself (:func:`aggregate`) — so the lock
@@ -212,10 +212,11 @@ def _shared_lock(path: Path) -> Iterator[None]:
     cooperative: while this shared lock is held, a concurrent appender's
     :func:`~shipit.harness.eval.store.append_record` cannot take its exclusive
     lock, so no half-flushed line is visible to the read (RVW03-WS03). Released
-    when the fd closes at block exit. ``path`` must exist (the caller checks).
+    when the fd closes at block exit; a no-op on Windows (the store seam's
+    single-writer assumption, #893). ``path`` must exist (the caller checks).
     """
     with path.open(encoding="utf-8") as fh:
-        fcntl.flock(fh, fcntl.LOCK_SH)
+        store.lock_shared(fh)
         yield
 
 
@@ -403,7 +404,8 @@ def _read_jsonl(path: str | Path | None) -> list[dict]:
     line-by-line (not ``read_text().splitlines()``) so an unbounded append-only
     store does not allocate the whole file plus a split-line list at once.
 
-    Takes a SHARED ``flock`` (``LOCK_SH``) before iterating, mirroring
+    Takes a SHARED lock (:func:`~shipit.harness.eval.store.lock_shared`; a
+    no-op on Windows, #893) before iterating, mirroring
     :func:`shipit.harness.eval.store.read_records` (RVW03-WS03): it waits out an
     in-flight exclusive append rather than streaming a half-flushed final line —
     which would otherwise LOUDLY warn and drop a valid record mid-append.
@@ -415,7 +417,7 @@ def _read_jsonl(path: str | Path | None) -> list[dict]:
         return []
     records: list[dict] = []
     with target.open(encoding="utf-8") as fh:
-        fcntl.flock(fh, fcntl.LOCK_SH)
+        store.lock_shared(fh)
         for lineno, line in enumerate(fh, start=1):
             if not line.strip():
                 continue
