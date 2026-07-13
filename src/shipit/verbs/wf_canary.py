@@ -324,7 +324,7 @@ def run(
     (:func:`mode_versions`). Prints the proof-citation block and the teardown
     commands either way, and returns ``0`` only when EVERY step ran green.
     """
-    started = time.monotonic()
+    started = monotonic()
     versions = mode_versions(version, mode)
     print(f"wf verify-canary: {repo} {workflow} (mode {mode})")
 
@@ -372,7 +372,7 @@ def run(
             "mode": mode,
             "rc": rc,
             "steps": len(steps),
-            "duration_ms": int((time.monotonic() - started) * 1000),
+            "duration_ms": int((monotonic() - started) * 1000),
         },
     )
     return rc
