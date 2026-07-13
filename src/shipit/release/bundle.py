@@ -536,7 +536,12 @@ def _wasm_crate_dir(
         ["cargo", "metadata", "--format-version", "1", "--no-deps"],
         req.root / leg.path,
     )
-    assert metadata is not None
+    if metadata is None:
+        raise ReleaseError(
+            f"[artifacts.{req.artifact.name}] wasm-pack composition: `cargo "
+            f"metadata` returned no result to resolve the declared rust build "
+            f"package `{package}` against"
+        )
     crate_dir = crate_dir_for_package(json.loads(metadata.stdout), package)
     if crate_dir is None:
         raise ReleaseError(
@@ -548,7 +553,7 @@ def _wasm_crate_dir(
 
 
 def _compose_wasm_pack(req: ComposeRequest) -> Composed:
-    """``wasm-pack build`` the rust leg's crate → a ``pkg/`` npm tree, then
+    """``wasm-pack build`` the artifact's wasm crate → a ``pkg/`` npm tree, then
     ``npm pack`` it into the ONE npm tarball. See the module docstring's
     wasm-pack entry.
 
