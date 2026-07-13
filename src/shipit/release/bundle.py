@@ -36,7 +36,15 @@ functions the entries carry:
 - **wasm-pack** — the wasm/npm leg (TOL02-WS12 #788, WS10 DECIDED #798:
   bespoke ``wasm-pack`` composition, pixi provisions ``wasm-pack`` + the
   wasm32 target, the npm tarball is the artifact). ``wasm-pack build`` the
-  rust leg's crate into a fresh ``pkg/`` npm package tree (wasm + JS glue +
+  artifact's OWN wasm crate — resolved from the artifact's declared rust
+  ``build`` target ``package`` (issue #904: mirrors the cargo/deb legs' ``-p``
+  package), located via ``cargo metadata``'s ``manifest_path`` so a workspace
+  whose ``[toolchains]`` rust path is the root (``"." = "rust"``) still runs
+  wasm-pack in the crate dir, not against the ``[workspace]``-only root
+  ``Cargo.toml``, and a repo with MULTIPLE wasm crates addresses each one; a
+  wasm artifact declaring no package keeps the ``[toolchains]`` rust path
+  (single-crate/root repos unchanged) — into a fresh ``pkg/`` npm package tree
+  (wasm + JS glue +
   ``package.json``, the version wasm-pack reads from the crate's ``Cargo.toml``
   — bumped by ``release prepare``), then ``npm pack --ignore-scripts`` that
   tree into the ONE ``<pkg>-<version>.tgz`` npm tarball staged under the bundle
@@ -153,6 +161,7 @@ apply to the current target) is ``shipit release bundle``
 
 from __future__ import annotations
 
+import json
 import shutil
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -486,14 +495,77 @@ def _compose_tarball(req: ComposeRequest) -> Composed:
 WASM_PACK_DEFAULT_TARGET = "bundler"
 
 
+def crate_dir_for_package(metadata: dict, package: str) -> Path | None:
+    """The absolute crate directory of workspace ``package`` from parsed
+    ``cargo metadata`` — the parent of its ``manifest_path`` (the crate's
+    ``Cargo.toml``) — or ``None`` when no package of that name is present. Pure.
+
+    A workspace's ``cargo metadata`` lists every member with an ABSOLUTE
+    ``manifest_path``, so this resolves a declared package to its own crate dir
+    regardless of where it sits in the tree (phos-core's top-level
+    ``phos-color-wasm/``, lex's ``crates/lex-wasm/``), which is exactly the
+    wasm-pack cwd (issue #904). It is pure over the parsed metadata so it
+    unit-tests without a real cargo (the ``crates_publish_order`` pattern,
+    :mod:`shipit.release.publish`)."""
+    for pkg in metadata.get("packages", []):
+        if pkg.get("name") == package:
+            manifest = pkg.get("manifest_path")
+            if manifest:
+                return Path(manifest).parent
+    return None
+
+
+def _wasm_crate_dir(
+    req: ComposeRequest, leg: config.ToolchainEntry, package: str | None
+) -> Path:
+    """The directory ``wasm-pack build`` runs in for this artifact.
+
+    When the wasm artifact declares a rust ``build`` target ``package`` (issue
+    #904), resolve THAT crate's dir via ``cargo metadata`` (the same
+    ``manifest_path`` lookup the cargo/deb legs' ``-p`` honors): a workspace
+    whose ``[toolchains]`` rust path is the root (``"." = "rust"``) would
+    otherwise run wasm-pack against the ``[workspace]``-only root ``Cargo.toml``
+    and hard-fail with ``missing field `package```, and a repo with multiple
+    wasm crates could not address each one. When NO package is declared, keep
+    the ``[toolchains]`` rust path (``req.root / leg.path``) so
+    single-crate/root repos are unchanged. A declared package absent from the
+    workspace metadata is a loud refusal, never a fall-back to the wrong dir."""
+    if package is None:
+        return req.root / leg.path
+    metadata = req.run_cmd(
+        ["cargo", "metadata", "--format-version", "1", "--no-deps"],
+        req.root / leg.path,
+    )
+    if metadata is None:
+        raise ReleaseError(
+            f"[artifacts.{req.artifact.name}] wasm-pack composition: `cargo "
+            f"metadata` returned no result to resolve the declared rust build "
+            f"package `{package}` against"
+        )
+    crate_dir = crate_dir_for_package(json.loads(metadata.stdout), package)
+    if crate_dir is None:
+        raise ReleaseError(
+            f"[artifacts.{req.artifact.name}] wasm-pack composition: the "
+            f"declared rust build package `{package}` names no crate in the "
+            f"`cargo metadata` workspace — nothing to run wasm-pack against"
+        )
+    return crate_dir
+
+
 def _compose_wasm_pack(req: ComposeRequest) -> Composed:
-    """``wasm-pack build`` the rust leg's crate → a ``pkg/`` npm tree, then
+    """``wasm-pack build`` the artifact's wasm crate → a ``pkg/`` npm tree, then
     ``npm pack`` it into the ONE npm tarball. See the module docstring's
     wasm-pack entry.
 
-    The crate is the FIRST mapped ``[toolchains]`` rust leg (the deb tier's
-    rule): wasm-pack builds a rust crate, so the wasm/npm artifact maps its
-    crate as a rust leg and declares ``build = ["rust"]``. ``wasm-pack build``
+    The crate is the artifact's OWN wasm crate: the dir of its declared rust
+    ``build`` target ``package`` resolved via ``cargo metadata``
+    (:func:`_wasm_crate_dir` / :func:`crate_dir_for_package`, issue #904), or —
+    when no package is declared — the FIRST mapped ``[toolchains]`` rust leg's
+    path (the deb tier's rule, single-crate/root repos unchanged). Declaring
+    the package is what lets a workspace whose ``[toolchains]`` rust path is the
+    root (``"." = "rust"``) build the crate rather than the ``[workspace]``-only
+    root ``Cargo.toml``, and a repo with multiple wasm crates address each one.
+    ``wasm-pack build``
     writes a FRESH ``pkg/`` scratch tree under the output tree (wasm-pack
     itself clears ``--out-dir``); ``npm pack --ignore-scripts`` then produces
     the tarball, moved into ``out_dir`` (``--ignore-scripts`` keeps a generated
@@ -507,6 +579,11 @@ def _compose_wasm_pack(req: ComposeRequest) -> Composed:
     leg = _leg_for(req.artifact, req.entries, "rust", "wasm-pack")
     spec = req.artifact.bundle
     assert spec is not None
+    package = next(
+        (t.package for t in req.artifact.build if t.toolchain == "rust" and t.package),
+        None,
+    )
+    crate = _wasm_crate_dir(req, leg, package)
     target = spec.wasm_target or WASM_PACK_DEFAULT_TARGET
     req.out_dir.mkdir(parents=True, exist_ok=True)
     pkg = req.out_dir / f".pkg-{req.artifact.name}"
@@ -515,7 +592,6 @@ def _compose_wasm_pack(req: ComposeRequest) -> Composed:
         # but removing it here keeps a failed prior run from leaking a stale
         # tree into this one's npm pack.
         shutil.rmtree(pkg)
-    crate = req.root / leg.path
     argv = [
         "wasm-pack",
         "build",

@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from shipit import config
+from shipit import config, execrun
 from shipit.release import ReleaseError
 from shipit.release import bundle as bundle_mod
 from shipit.verbs import release as release_verb
@@ -46,9 +46,11 @@ class RunRecorder:
         argv = [str(a) for a in argv]
         self.calls.append((tuple(argv), Path(cwd)))
         effect = self.effects.get(argv[0])
-        if effect is not None:
-            effect(argv, Path(cwd))
-        return None
+        # Most effects only WRITE (returning None); an effect that needs to feed
+        # the composition a result — `cargo metadata`'s stdout, read by the
+        # wasm-pack package resolver (issue #904) — returns an ExecResult, which
+        # becomes this seam's return value.
+        return effect(argv, Path(cwd)) if effect is not None else None
 
     @property
     def heads(self):
@@ -1336,6 +1338,153 @@ def test_wasm_pack_needs_a_rust_leg(tmp_path):
                 tmp_path, artifact, _entries({".": "python"}), run_cmd=RunRecorder()
             )
         )
+
+
+# wasm-pack — resolve the crate from the artifact's declared build package
+# (issue #904: not the shared [toolchains] rust path)
+# --------------------------------------------------------------------------
+
+
+def _cargo_metadata_effect(manifests: dict):
+    """Simulate `cargo metadata`: return an ExecResult whose stdout is a
+    workspace metadata JSON mapping each package NAME to its manifest_path."""
+
+    def effect(argv, cwd):
+        packages = [
+            {"name": name, "manifest_path": str(path)}
+            for name, path in manifests.items()
+        ]
+        return execrun.ExecResult(
+            argv=tuple(argv),
+            rc=0,
+            stdout=json.dumps({"packages": packages}),
+            stderr="",
+            duration_ms=1,
+        )
+
+    return effect
+
+
+def test_crate_dir_for_package_resolves_the_manifest_dir():
+    # A multi-member workspace with top-level crate dirs (phos-core's shape):
+    # the resolver returns the declared package's own crate dir, the parent of
+    # its manifest_path.
+    metadata = {
+        "packages": [
+            {"name": "phos-color", "manifest_path": "/repo/phos-color/Cargo.toml"},
+            {
+                "name": "phos-color-wasm",
+                "manifest_path": "/repo/phos-color-wasm/Cargo.toml",
+            },
+            {"name": "phos-viewer", "manifest_path": "/repo/phos-viewer/Cargo.toml"},
+        ]
+    }
+    assert bundle_mod.crate_dir_for_package(metadata, "phos-color-wasm") == Path(
+        "/repo/phos-color-wasm"
+    )
+    # A crate nested under crates/ (lex's shape) resolves just the same.
+    nested = {
+        "packages": [
+            {"name": "lex-wasm", "manifest_path": "/l/crates/lex-wasm/Cargo.toml"}
+        ]
+    }
+    assert bundle_mod.crate_dir_for_package(nested, "lex-wasm") == Path(
+        "/l/crates/lex-wasm"
+    )
+
+
+def test_crate_dir_for_package_is_none_when_the_package_is_absent():
+    # A package naming no workspace member resolves to None (the caller turns
+    # that into a loud refusal; a missing PACKAGE DECLARATION is handled a level
+    # up, keeping today's [toolchains]-path behavior).
+    metadata = {
+        "packages": [{"name": "other", "manifest_path": "/repo/other/Cargo.toml"}]
+    }
+    assert bundle_mod.crate_dir_for_package(metadata, "phos-color-wasm") is None
+
+
+def test_wasm_pack_runs_in_the_declared_packages_crate_dir(tmp_path):
+    # The workspace-root [toolchains] rust path (`"." = "rust"`) is the exact
+    # phos-core wall: without package resolution wasm-pack runs at the root
+    # against the [workspace]-only Cargo.toml. Declaring the build package makes
+    # it run in the crate's own dir instead (issue #904).
+    (artifact,) = _artifacts(
+        {
+            "wasm": {
+                "build": [{"toolchain": "rust", "package": "phos-color-wasm"}],
+                "bundle": {"composition": "wasm-pack", "scope": "phos"},
+            }
+        }
+    )
+    crate_dir = tmp_path / "phos-color-wasm"
+    recorder = RunRecorder(
+        {
+            "cargo": _cargo_metadata_effect(
+                {"phos-color-wasm": crate_dir / "Cargo.toml"}
+            ),
+            "wasm-pack": _wasm_pack_effect(),
+            "npm": _npm_pack_effect("phos-phos-color-wasm-1.2.3.tgz"),
+        }
+    )
+
+    bundle_mod.WASM_PACK.compose(
+        # [toolchains] rust path is the workspace root — the phos-core shape.
+        _request(tmp_path, artifact, _entries({".": "rust"}), run_cmd=recorder)
+    )
+
+    # cargo metadata is read from the [toolchains] rust path (the workspace)…
+    assert recorder.calls[0] == (
+        ("cargo", "metadata", "--format-version", "1", "--no-deps"),
+        tmp_path,
+    )
+    # …and wasm-pack runs in the RESOLVED crate dir, not the root.
+    wasm_argv, wasm_cwd = recorder.calls[1]
+    assert wasm_argv[0] == "wasm-pack"
+    assert wasm_cwd == crate_dir
+    assert wasm_cwd != tmp_path
+
+
+def test_wasm_pack_without_a_declared_package_skips_cargo_metadata(tmp_path):
+    # No package declared -> keep today's behavior: run wasm-pack in the
+    # [toolchains] rust path, no cargo metadata probe (single-crate/root repos
+    # unchanged).
+    (artifact,) = _artifacts(WASM_SPEC)
+    recorder = RunRecorder(
+        {"wasm-pack": _wasm_pack_effect(), "npm": _npm_pack_effect()}
+    )
+
+    bundle_mod.WASM_PACK.compose(
+        _request(
+            tmp_path, artifact, _entries({"crates/lex-wasm": "rust"}), run_cmd=recorder
+        )
+    )
+
+    assert "cargo" not in recorder.heads
+    wasm_argv, wasm_cwd = recorder.calls[0]
+    assert wasm_argv[0] == "wasm-pack"
+    assert wasm_cwd == tmp_path / "crates/lex-wasm"
+
+
+def test_wasm_pack_hard_fails_when_the_declared_package_is_unknown(tmp_path):
+    # A declared package that names no workspace crate is a loud refusal, never
+    # a silent fall-back to the wrong (root) dir.
+    (artifact,) = _artifacts(
+        {
+            "wasm": {
+                "build": [{"toolchain": "rust", "package": "does-not-exist"}],
+                "bundle": {"composition": "wasm-pack"},
+            }
+        }
+    )
+    recorder = RunRecorder(
+        {"cargo": _cargo_metadata_effect({"other": tmp_path / "other/Cargo.toml"})}
+    )
+    with pytest.raises(ReleaseError, match=r"names no crate in the `cargo metadata`"):
+        bundle_mod.WASM_PACK.compose(
+            _request(tmp_path, artifact, _entries({".": "rust"}), run_cmd=recorder)
+        )
+    # the resolver failed before any build tree was written
+    assert not (tmp_path / "dist" / ".pkg-wasm").exists()
 
 
 # --------------------------------------------------------------------------
