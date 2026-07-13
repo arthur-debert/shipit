@@ -808,6 +808,87 @@ def test_lint_config_units_reconcile_add_noop_override(tmp_path, rec):
     assert actions()[iunits.MARKDOWNLINT_FILE] == irec.NOOP
 
 
+# --------------------------------------------------------------------------
+# The managed .gitignore release-output block (#906) — a root-level single-crate
+# `cargo publish` aborts its VCS-dirty check when shipit's own release-stage
+# outputs (RELEASE_NOTES.md, dist-signed/, dist/) sit uncommitted at the repo
+# root, so the managed set ignores them fleet-wide via a marker block in the
+# consumer-owned .gitignore.
+# --------------------------------------------------------------------------
+
+
+def test_load_units_includes_the_gitignore_release_block():
+    unit = {u.key: u for u in iunits.load_units()}[iunits.GITIGNORE_KEY]
+    assert unit.kind == "block"
+    assert unit.dest == iunits.GITIGNORE_FILE == ".gitignore"
+    assert unit.open_marker == iunits.GITIGNORE_OPEN
+    assert unit.close_marker == iunits.GITIGNORE_CLOSE
+    assert unit.anchor is None  # no anchor: appends at EOF / creates the file
+    assert unit.content == iunits.data_bytes("gitignore-block")
+
+
+def test_managed_gitignore_block_covers_the_release_stage_outputs():
+    """The block ignores exactly the transient repo-root artifacts the issue
+    names (#906): the RELEASE_NOTES.md the notes stage writes, the dist-signed/
+    the sign stage stages, and dist/ for parity — the trio that dirties a
+    root-level crate's `cargo publish`."""
+    entries = [
+        line
+        for line in iunits.data_bytes("gitignore-block").decode().splitlines()
+        if line and not line.startswith("#")
+    ]
+    assert entries == ["RELEASE_NOTES.md", "dist/", "dist-signed/"]
+
+
+def test_gitignore_block_add_noop_override_and_preserves_consumer_entries(
+    tmp_path, rec
+):
+    """A consumer with their own .gitignore keeps it: the block is spliced in
+    (ADD), their entries survive, a re-install NOOPs, and an edit to the managed
+    block surfaces as OVERRIDE — never silently kept."""
+
+    def action():
+        return next(
+            d.action
+            for d in _plan(tmp_path).decisions
+            if d.unit.key == iunits.GITIGNORE_KEY
+        )
+
+    (tmp_path / ".gitignore").write_text("# consumer\nnode_modules/\n")
+    assert action() == irec.ADD
+    _apply(tmp_path)
+    body = (tmp_path / ".gitignore").read_text()
+    assert "node_modules/" in body  # the consumer's own entry is untouched
+    assert iunits.GITIGNORE_OPEN in body and "dist-signed/" in body
+    assert action() == irec.NOOP
+    # A consumer edit INSIDE the managed block is an OVERRIDE, not a silent keep.
+    edited = body.replace("dist-signed/", "dist-signed/\ncoverage/")
+    (tmp_path / ".gitignore").write_text(edited)
+    assert action() == irec.OVERRIDE
+
+
+def test_gitignore_block_creates_the_file_when_the_consumer_has_none(tmp_path, rec):
+    """A consumer with no .gitignore at all (the stock case) gets one created,
+    carrying just the managed block."""
+    assert not (tmp_path / ".gitignore").exists()
+    _apply(tmp_path)
+    body = (tmp_path / ".gitignore").read_text()
+    assert iunits.GITIGNORE_OPEN in body
+    assert splice.extract_block(
+        body, iunits.GITIGNORE_OPEN, iunits.GITIGNORE_CLOSE
+    ) == iunits.data_bytes("gitignore-block").decode().strip("\n")
+
+
+def test_shipits_own_gitignore_reconciles_to_noop():
+    """The dogfood drift check (the WS01 pattern): shipit self-installs at Tree
+    provisioning, so its own committed .gitignore must carry the managed block
+    BYTE-IDENTICAL — a block edit is one data-file change mirrored into shipit's
+    own .gitignore (or this test fails)."""
+    root = Path(__file__).resolve().parents[1]
+    unit = {u.key: u for u in iunits.load_units()}[iunits.GITIGNORE_KEY]
+    assert irec.consumer_hash(root, unit) == unit.desired_hash()
+
+
 def test_load_units_has_skills_agents_and_bootstrap():
     units = iunits.load_units()
     keys = {u.key for u in units}

@@ -36,3 +36,17 @@ target/
 # Agent worktrees (isolation: worktree) — never tracked
 .claude/worktrees/
 .todos.db
+
+# >>> shipit-managed release-output ignores (do not edit; regenerate via `shipit install`) >>>
+# shipit release-stage outputs — transient artifacts the release verbs write at
+# the repo ROOT: `shipit release notes` writes RELEASE_NOTES.md, the sign stage
+# stages dist-signed/, and compositions write dist/. Ignoring them keeps a
+# root-level single-crate `cargo publish` VCS-dirty check clean (#906 — cargo
+# inspects the crate root, so unignored root-level artifacts abort the publish)
+# and stops these throwaway outputs from ever being committed anywhere. Managed
+# by shipit — a local edit surfaces as an OVERRIDE at the next `shipit install`
+# reconcile; add your OWN ignores outside this block.
+RELEASE_NOTES.md
+dist/
+dist-signed/
+# <<< shipit-managed release-output ignores <<<
