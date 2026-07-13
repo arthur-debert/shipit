@@ -58,6 +58,24 @@ LINT_CONFIG_UNITS = (
     (PRETTIERRC_FILE, "prettierrc.yaml"),
 )
 
+# The managed `.gitignore` release-output block (#906). shipit's OWN release
+# stages write transient artifacts at the repo ROOT — `shipit release notes`
+# writes RELEASE_NOTES.md (shipit/verbs/release.py: DEFAULT_NOTES_FILE), the
+# sign stage stages `dist-signed/` (wf-sign-mac.yml `--out dist-signed`), and
+# compositions write `dist/` (DEFAULT_BUNDLE_DIR). For a consumer whose
+# publishable crate IS the repo root (a single-crate package, not a `crates/`
+# workspace), `cargo publish` runs its VCS-dirty check against that root and
+# ABORTS when these artifacts sit there uncommitted — the simple-gal
+# `v0.20.6-rc.1` failure. So the managed set ignores them fleet-wide: a marker
+# block in the consumer-owned `.gitignore` (comment markers — `#` is a valid
+# gitignore comment; consumer entries outside the block are untouched, spliced
+# in / created at the repo root by the standard block splicer). NOT
+# `--allow-dirty`, which would bake the artifacts into the published .crate.
+GITIGNORE_FILE = ".gitignore"
+GITIGNORE_KEY = ".gitignore#shipit-release-outputs"
+GITIGNORE_OPEN = "# >>> shipit-managed release-output ignores (do not edit; regenerate via `shipit install`) >>>"
+GITIGNORE_CLOSE = "# <<< shipit-managed release-output ignores <<<"
+
 PIXI_FILE = "pixi.toml"
 PIXI_KEY = "pixi.toml#shipit-tasks"
 PIXI_OPEN = (
@@ -617,6 +635,22 @@ def load_units(*, toolchains: frozenset[str] = frozenset()) -> list[Unit]:
             dest=AGENTS_FILE,
             kind="block",
             content=data_bytes("agents-block.md"),
+        )
+    )
+
+    # The managed `.gitignore` release-output block (#906): a marker block in the
+    # consumer-owned `.gitignore` ignoring shipit's own repo-root release-stage
+    # outputs, so a root-level single-crate `cargo publish` stops aborting on the
+    # dirty tree they create — see the GITIGNORE_* constants' comment. No anchor:
+    # the block appends at EOF (creating `.gitignore` if the consumer has none).
+    units.append(
+        Unit(
+            key=GITIGNORE_KEY,
+            dest=GITIGNORE_FILE,
+            kind="block",
+            content=data_bytes("gitignore-block"),
+            open_marker=GITIGNORE_OPEN,
+            close_marker=GITIGNORE_CLOSE,
         )
     )
 
