@@ -26,6 +26,7 @@ from pathlib import Path
 import pytest
 import yaml
 from conftest import (
+    LOCAL_BIN_PATH_LEG,
     PIXI_ABSENCE_GUARD,
     managed_cc_hook_command,
     managed_pretooluse_hook_command,
@@ -1226,6 +1227,11 @@ def test_load_units_includes_the_agent_start_launcher():
     # worker-role export before dispatch, so a coordinator launched from a
     # spawned Run's shell cannot silently disarm the edit guard.
     assert "unset SHIPIT_LOG_CTX_ROLE" in text
+    # #848 hardening (copilot on vscode#157, gemini on mkdocs-lex#22): resolve
+    # the launcher's own directory symlink- and dash-safely (`cd -P --` /
+    # `dirname --`), and launch FROM the repo root wherever invoked from.
+    assert 'cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")"' in text
+    assert 'cd -- "$repo"' in text
 
 
 def test_launcher_matches_shipits_own_copy():
@@ -1629,6 +1635,9 @@ def test_load_units_includes_the_setup_dev_env_bootstrap():
     assert "astral.sh/uv/install" not in text
     # Provisioning never mutates pixi.lock: the env solve is `--locked` only.
     assert "pixi install --locked" in text
+    # #848 hardening (same family as the agent-start finding): the repo root
+    # resolves symlink- and dash-safely.
+    assert 'cd -P -- "$(dirname -- "$SELF")/.."' in text
 
 
 def test_setup_dev_env_matches_shipits_own_copy():
@@ -1775,6 +1784,52 @@ def test_managed_sessionstart_hook_exports_local_bin_before_the_launcher():
     ):
         other = json.loads(units[key].desired_inner())["hooks"][0]["command"]
         assert path_leg not in other
+
+
+def test_hook_commands_share_one_guarded_local_bin_path_leg():
+    # #848 (gemini on tree-sitter-lex#89, copilot on supage#171): the codex
+    # hook pair shipped with NO ~/.local/bin prepend while their Claude twins
+    # carried one — `pixi` (the PreToolUse guard chain) and `bin/shipit` (needs
+    # uv) live exactly where Layer 0 provisions them. Every hook command that
+    # resolves the Layer 0 install dir now carries the SAME leg byte-for-byte
+    # (conftest.LOCAL_BIN_PATH_LEG), guarded for an unset $HOME (gemini on
+    # mkdocs-lex#22: an unguarded prepend pushes a literal "/.local/bin" onto
+    # PATH in HOME-less hook shells), so parity cannot drift twin-by-twin again.
+    units = {u.key: u for u in iunits.load_units()}
+    for key in (
+        iunits.SETTINGS_KEY,
+        iunits.SETTINGS_SESSIONSTART_KEY,
+        iunits.CODEX_PRETOOLUSE_KEY,
+        iunits.CODEX_SESSIONSTART_KEY,
+    ):
+        command = json.loads(units[key].desired_inner())["hooks"][0]["command"]
+        assert LOCAL_BIN_PATH_LEG in command, (
+            f"{key} lacks the shared guarded ~/.local/bin PATH leg"
+        )
+    # The leg lands BEFORE its consumer: the pixi resolution in the codex
+    # guard, and (after the setup-dev-env leg that populates ~/.local/bin) the
+    # pinned-launcher probe in the codex sessionstart entry.
+    guard_cmd = json.loads(units[iunits.CODEX_PRETOOLUSE_KEY].desired_inner())["hooks"][
+        0
+    ]["command"]
+    assert guard_cmd.index(LOCAL_BIN_PATH_LEG) < guard_cmd.index("pixi run")
+    session_cmd = json.loads(units[iunits.CODEX_SESSIONSTART_KEY].desired_inner())[
+        "hooks"
+    ][0]["command"]
+    assert (
+        session_cmd.index("setup-dev-env.sh")
+        < session_cmd.index(LOCAL_BIN_PATH_LEG)
+        < session_cmd.index('test -x "$repo/bin/shipit"')
+    )
+    # The three additive hooks that resolve nothing from ~/.local/bin at
+    # session-start time stay leg-less (the #601 test above pins the same).
+    for key in (
+        iunits.SETTINGS_STOP_KEY,
+        iunits.SETTINGS_SUBAGENTSTOP_KEY,
+        iunits.SETTINGS_WORKTREECREATE_KEY,
+    ):
+        other = json.loads(units[key].desired_inner())["hooks"][0]["command"]
+        assert LOCAL_BIN_PATH_LEG not in other
 
 
 def test_load_units_toolchain_blocks_are_conditional():
@@ -2533,6 +2588,30 @@ def test_agent_start_scrubs_the_inherited_worker_agent_identity_exports(
         "run=ABSENT",
         "pr=632",
     ]
+
+
+def test_agent_start_launches_from_the_repo_root(tmp_path: Path):
+    # #848 (copilot on vscode#157): the launcher computes `repo=` from its own
+    # location but used to dispatch from the CALLER's cwd — invoked from
+    # outside the checkout, the coordinator session rooted itself in whatever
+    # directory the caller happened to be in. The common path now cd's to the
+    # repo root before dispatch, so every host launches from the checkout.
+    agent_start = _lay_down_launcher(tmp_path)
+    env = _fake_cli(tmp_path, "claude")
+    (tmp_path / "fakepath" / "claude").write_text("#!/usr/bin/env bash\npwd -P\n")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+
+    proc = subprocess.run(
+        [str(agent_start), "claude"],
+        env=env,
+        cwd=elsewhere,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == os.path.realpath(tmp_path)
 
 
 def test_agent_start_rejects_an_unknown_or_missing_agent(tmp_path: Path):

@@ -213,9 +213,10 @@ test = { cmd = "./bin/shipit provision lexd && ./bin/shipit test" }
 # provisioning script anymore.
 [feature.lint.dependencies]
 # >>> shipit-managed lint deps (do not edit; regenerate via `shipit install`) >>>
-# The fleet-pinned lint toolchain (arthur-debert/shipit docs/legacy-prd/adoption.md: the managed set owns
-# the consumer environment). Canonical versions live HERE — a bump is one data
-# edit, rolled fleet-wide on each consumer's next `shipit install` reconcile.
+# The fleet-pinned lint toolchain (docs/legacy-prd/adoption.md in the
+# arthur-debert/shipit repo: the managed set owns the consumer environment).
+# Canonical versions live HERE — a bump is one data edit, rolled fleet-wide on
+# each consumer's next `shipit install` reconcile.
 ruff = "0.15.*"
 # shellcheck is PINNED DOWN to 0.10.* (not 0.11): shellcheck 0.11.0 has an SC2218
 # reaching-definitions false positive — a call to an EARLIER-defined function is

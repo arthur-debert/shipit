@@ -394,6 +394,18 @@ AGENT_LAUNCHER_FILE = "agent-start"
 # its event. (The Layer D repo-root launcher is the generic `./agent-start`
 # unit — see AGENT_LAUNCHER_FILE; the agent-specific `claude-start`/`codex-start`
 # shims were retired in #815.)
+#
+# Failure posture (#848, decided — copilot asked whether the missing fail-open
+# guard on the trailing `./bin/shipit hook sessionstart` was deliberate): the
+# ABSENCE cases are fail-open (`cd` failing and the launcher-presence probe both
+# skip with exit 0 — an unprovisioned checkout must never brick a session), but
+# a PRESENT launcher's exit code propagates UNCHANGED, deliberately fail-loud.
+# SessionStart is non-blocking in Claude Code (a non-zero hook surfaces stderr
+# without denying anything), and a launcher that ran and errored is degraded
+# activation the operator must see — wrapping it in `|| exit 0` would hide that
+# behind a green session start. Same split as the additive-hook shape in
+# tests/conftest.py `managed_cc_hook_command`: fail-open is for a runtime that
+# is genuinely absent, never for a hook that ran and errored.
 SETTINGS_SESSIONSTART_KEY = ".claude/settings.json#shipit-sessionstart-hook"
 SETTINGS_SESSIONSTART_MARKER = "shipit hook sessionstart"
 
