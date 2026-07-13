@@ -38,7 +38,7 @@ from shipit.install import apply as iapply
 from shipit.install import reconcile as irec
 from shipit.install import selfcert, splice
 from shipit.install import units as iunits
-from shipit.install.errors import InstallError
+from shipit.install.errors import InstallError, SelfCertError
 from shipit.verbs import install as verb
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -2725,6 +2725,12 @@ class _GhRecorder:
     def switch_create(self, branch, *, cwd):
         self.calls.append(("switch", branch))
 
+    def switch(self, branch, *, cwd):
+        # The MODE_PR caller-branch restore (#777 mode 1) — recorded under its
+        # own name so a test can assert the checkout is returned to the branch
+        # it started on after the PR flow.
+        self.calls.append(("switch_back", branch))
+
     def add(self, paths, *, cwd):
         self.calls.append(("add", tuple(paths)))
 
@@ -2757,6 +2763,7 @@ def rec(monkeypatch):
     r = _GhRecorder()
     for name in (
         "switch_create",
+        "switch",
         "add",
         "commit",
         "push",
@@ -2816,8 +2823,17 @@ def test_fresh_install_writes_set_and_opens_draft_pr(tmp_path, rec):
     # A DRAFT PR was opened; the rendered body lists the additions.
     assert ("pr_create", True) in rec.calls
     assert "### Added" in rec.pr_body
-    # Order: branch -> add -> commit -> push -> pr.
-    assert rec.names() == ["switch", "add", "commit", "push", "pr_create"]
+    # Order: branch -> add -> commit -> push -> pr -> restore the caller's branch
+    # (#777 mode 1: the flow returns the checkout to where it started).
+    assert rec.names() == [
+        "switch",
+        "add",
+        "commit",
+        "push",
+        "pr_create",
+        "switch_back",
+    ]
+    assert ("switch_back", "main") in rec.calls
 
 
 def test_fresh_install_provisions_agent_defs_and_settings_hook(tmp_path, rec):
@@ -3356,7 +3372,14 @@ def test_pr_mode_on_virgin_repo_with_lint_debt_reaches_the_pr_leg(tmp_path, rec)
     # The hooks were armed by this very run…
     assert rec.hook_activations == [tmp_path]
     # …and the push/PR leg still ran, both git write ops bypassing the hooks.
-    assert rec.names() == ["switch", "add", "commit", "push", "pr_create"]
+    assert rec.names() == [
+        "switch",
+        "add",
+        "commit",
+        "push",
+        "pr_create",
+        "switch_back",
+    ]
     assert rec.commit_no_verify is True
     assert rec.push_no_verify is True
     assert result.pr_url == "https://github.com/acme/repo/pull/1"
@@ -3769,6 +3792,247 @@ def test_activation_output_joins_streams_with_newline(tmp_path):
         _exec_result(1, stdout="done", stderr="fatal: broken")
     )
     assert out == "done\nfatal: broken"
+
+
+# --------------------------------------------------------------------------
+# #777 install --pr flow-robustness (modes 1-3): caller-branch restore, the
+# stale-lefthook-backup pre-clean, and the transactional fail-closed rollback.
+# --------------------------------------------------------------------------
+
+# A minimal lefthook-generated shim: carries BOTH markers the pre-clean keys on.
+_LEFTHOOK_SHIM = (
+    "#!/bin/sh\n"
+    'if [ "$LEFTHOOK" = "0" ]; then\n  exit 0\nfi\n'
+    'call_lefthook run "pre-commit" "$@"\n'
+)
+
+
+def test_preclean_removes_a_stale_lefthook_shim_backup(tmp_path):
+    # Mode 2: a stale `<hook>.old` left by a prior (release-era) `lefthook
+    # install` is what collides with the next activation's rename. A backup
+    # positively identified as a lefthook shim (both markers) is removed.
+    hooks = tmp_path / ".git" / "hooks"
+    hooks.mkdir(parents=True)
+    (hooks / "pre-commit.old").write_text(_LEFTHOOK_SHIM)
+    (hooks / "pre-push.old").write_text(_LEFTHOOK_SHIM)
+    iapply._preclean_stale_hook_backups(tmp_path)
+    assert not (hooks / "pre-commit.old").exists()
+    assert not (hooks / "pre-push.old").exists()
+
+
+def test_preclean_preserves_a_non_lefthook_backup(tmp_path):
+    # Conservative by construction: a `.old` that is NOT a lefthook shim (a
+    # hand-written consumer hook backup) is left untouched — install only removes
+    # backups it can positively identify as tool-authored.
+    hooks = tmp_path / ".git" / "hooks"
+    hooks.mkdir(parents=True)
+    consumer = "#!/bin/sh\necho my own pre-commit\nexit 0\n"
+    (hooks / "pre-commit.old").write_text(consumer)
+    # A file that carries only ONE marker is still not a shim — require both.
+    (hooks / "pre-push.old").write_text("#!/bin/sh\n# mentions LEFTHOOK in a comment\n")
+    iapply._preclean_stale_hook_backups(tmp_path)
+    assert (hooks / "pre-commit.old").read_text() == consumer
+    assert (hooks / "pre-push.old").is_file()
+
+
+def test_preclean_leaves_the_live_hooks_untouched(tmp_path):
+    # The pre-clean targets ONLY `.old` backups — a live `pre-commit` shim (no
+    # `.old` suffix) is never removed, even though it is a lefthook shim.
+    hooks = tmp_path / ".git" / "hooks"
+    hooks.mkdir(parents=True)
+    (hooks / "pre-commit").write_text(_LEFTHOOK_SHIM)
+    iapply._preclean_stale_hook_backups(tmp_path)
+    assert (hooks / "pre-commit").read_text() == _LEFTHOOK_SHIM
+
+
+def test_preclean_no_hooks_dir_is_a_noop(tmp_path):
+    # A consumer whose `.git/hooks` does not exist must not raise.
+    iapply._preclean_stale_hook_backups(tmp_path)  # no .git/hooks yet
+
+
+def test_pr_install_precleans_a_stale_lefthook_backup_before_activation(tmp_path, rec):
+    # Mode 2 end-to-end: a writing `install --pr` clears the colliding backup as
+    # part of its activation step, so `lefthook install` never fails the rename
+    # (and self-cert never fails closed on it).
+    hooks = tmp_path / ".git" / "hooks"
+    hooks.mkdir(parents=True)
+    (hooks / "pre-commit.old").write_text(_LEFTHOOK_SHIM)
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    _apply(tmp_path, iapply.MODE_PR)
+    assert not (hooks / "pre-commit.old").exists()
+
+
+def test_pr_flow_restores_the_caller_branch(tmp_path, rec):
+    # Mode 1: MODE_PR stages onto `shipit/install`, then returns the caller's
+    # checkout to the branch it started on (the recorder's `current_branch` is
+    # "main"). Without this the operator is stranded off-main with no notice.
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    _apply(tmp_path, iapply.MODE_PR)
+    assert rec.calls[-1] == ("switch_back", "main")
+
+
+def test_pr_flow_restores_the_caller_branch_even_when_a_git_step_fails(
+    tmp_path, rec, monkeypatch
+):
+    # Mode 1: the restore rides a `finally`, so a git/gh failure mid-flow still
+    # returns the caller to their branch rather than stranding them on the
+    # scratch branch on top of the error.
+    def boom(*a, **k):
+        raise ExecError(["git", "push"], rc=1, stderr="denied")
+
+    monkeypatch.setattr(git, "push", boom)
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    with pytest.raises(ExecError):
+        _apply(tmp_path, iapply.MODE_PR)
+    assert ("switch_back", "main") in rec.calls
+
+
+def test_pr_flow_from_detached_head_does_not_restore(tmp_path, rec, monkeypatch):
+    # Nothing to restore to (detached HEAD → current_branch is None): the flow
+    # still stages the PR but attempts no switch-back.
+    monkeypatch.setattr(git, "current_branch", lambda *, cwd: None)
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    _apply(tmp_path, iapply.MODE_PR)
+    assert not any(name == "switch_back" for name, _ in rec.calls)
+
+
+def test_restore_caller_branch_skips_none_and_the_scratch_branch(tmp_path, rec):
+    # The guard: no branch to restore to (None) and a checkout already on the
+    # scratch branch both no-op — there is nowhere sensible to switch.
+    iapply._restore_caller_branch(str(tmp_path), None)
+    iapply._restore_caller_branch(str(tmp_path), iapply.INSTALL_BRANCH)
+    assert not any(name == "switch_back" for name, _ in rec.calls)
+
+
+def test_restore_committing_writes_is_a_transaction(tmp_path):
+    # Mode 3 primitive: an existing path is restored to its pre-write bytes
+    # verbatim; a path absent before the writes (snapshot cell None) is unlinked.
+    # The now-empty parent dir is left behind — inert (git does not track empty
+    # dirs and reconcile reads files), which is why the rollback restores file
+    # state only.
+    (tmp_path / "kept.txt").write_bytes(b"MUTATED\n")  # was b"before\n"
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "new.txt").write_text("added by the failed apply\n")
+    snapshot = {
+        "kept.txt": iapply._SnapshotCell(b"before\n", 0o644),
+        "sub/new.txt": None,
+    }
+    iapply._restore_committing_writes(tmp_path, snapshot)
+    assert (tmp_path / "kept.txt").read_bytes() == b"before\n"
+    assert not (tmp_path / "sub" / "new.txt").exists()
+
+
+def test_restore_committing_writes_is_best_effort_across_files(tmp_path):
+    # #838 review (minor): an emergency rollback restores every path it can — a
+    # single failing path does not abort the rest — then raises a combined
+    # OSError naming the unrecoverable path(s) (the caller logs it as a partial
+    # rollback). The failing entry is FIRST so the assertion proves the loop
+    # continued past it.
+    (tmp_path / "blocked").mkdir()  # write_bytes onto a dir -> IsADirectoryError
+    (tmp_path / "ok.txt").write_bytes(b"MUTATED\n")
+    snapshot = {
+        "blocked": iapply._SnapshotCell(b"never lands\n", 0o644),
+        "ok.txt": iapply._SnapshotCell(b"restored\n", 0o644),
+    }
+    with pytest.raises(OSError, match="blocked"):
+        iapply._restore_committing_writes(tmp_path, snapshot)
+    # The later path was still restored despite the earlier failure.
+    assert (tmp_path / "ok.txt").read_bytes() == b"restored\n"
+
+
+def test_restore_committing_writes_restores_the_original_mode(tmp_path):
+    # #838 review (major): the snapshot carries permission bits, so a rollback
+    # returns BOTH content and mode — a write that flipped the executable bit
+    # (write_unit chmods managed executables to 0755) never leaves a mode-only
+    # dirty file after the content is restored.
+    victim = tmp_path / "bin" / "shipit"
+    victim.parent.mkdir(parents=True)
+    victim.write_bytes(b"consumer launcher\n")
+    victim.chmod(0o644)
+    cell = iapply._snapshot_cell(victim)
+    assert cell == iapply._SnapshotCell(b"consumer launcher\n", 0o644)
+    # Simulate the apply: new bytes AND the managed-executable chmod.
+    victim.write_bytes(b"MANAGED launcher\n")
+    victim.chmod(0o755)
+    iapply._restore_committing_writes(tmp_path, {"bin/shipit": cell})
+    assert victim.read_bytes() == b"consumer launcher\n"
+    assert stat.S_IMODE(victim.stat().st_mode) == 0o644
+
+
+def test_pr_selfcert_failure_rolls_the_staged_writes_back(tmp_path, rec):
+    # Mode 3: a failed self-cert must leave NOTHING half-applied. Before this fix
+    # the fail-closed run had already written the managed set AND stamped
+    # `.shipit.toml`, so a rerun read "nothing to do" and exited 0 over an
+    # unrecoverable partial state.
+    (tmp_path / "AGENTS.md").write_text("# Acme\n\nConsumer text.\n")
+    original_agents = (tmp_path / "AGENTS.md").read_text()
+
+    def failing_cert(plan, root, **kw):
+        return selfcert.CertReport(
+            checks=(selfcert.CertCheck(name="planted", ok=False, detail="boom"),)
+        )
+
+    with pytest.raises(SelfCertError):
+        _apply(tmp_path, iapply.MODE_PR, certify=failing_cert)
+
+    # Fail-closed BEFORE any git side effect (no branch switch, no commit, no PR)…
+    assert rec.names() == []
+    # …and the managed content apply staged is gone: no manifest stamp, no
+    # written units, the consumer's own AGENTS.md un-spliced. (The rollback
+    # restores file STATE; an emptied managed directory is inert — git does not
+    # track it and reconcile reads files, not dirs.)
+    assert not (tmp_path / ".shipit.toml").exists()
+    assert not (tmp_path / "skills" / "to-spec" / "SKILL.md").exists()
+    assert not (tmp_path / "bin" / "shipit").exists()
+    assert (tmp_path / "AGENTS.md").read_text() == original_agents
+
+    # The decisive property the half-applied state broke: a rerun still has real
+    # work to do — reconcile does NOT collapse to nothing_to_do.
+    again = _plan(tmp_path)
+    assert not again.nothing_to_do
+    assert again.writes
+
+
+def test_pr_selfcert_failure_restores_an_executable_managed_files_mode(tmp_path, rec):
+    # #838 review (major), end-to-end: an existing `bin/shipit` that diverges
+    # from the managed launcher is an OVERRIDE — write_unit rewrites it AND
+    # chmods it 0755. A failed self-cert must roll back BOTH its content and its
+    # original mode, never leaving a mode-only dirty (executable) file.
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    launcher = tmp_path / "bin" / "shipit"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text("# the consumer's own launcher\n")
+    launcher.chmod(0o644)
+
+    def failing_cert(plan, root, **kw):
+        return selfcert.CertReport(
+            checks=(selfcert.CertCheck(name="planted", ok=False),)
+        )
+
+    with pytest.raises(SelfCertError):
+        _apply(tmp_path, iapply.MODE_PR, certify=failing_cert)
+
+    # Content AND mode are exactly as apply found them.
+    assert launcher.read_text() == "# the consumer's own launcher\n"
+    assert stat.S_IMODE(launcher.stat().st_mode) == 0o644
+
+
+def test_local_selfcert_failure_also_rolls_back(tmp_path, rec):
+    # The transaction covers every committing mode, not just PR: MODE_LOCAL
+    # (Tree provisioning) fails closed and rolls back identically.
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+
+    def failing_cert(plan, root, **kw):
+        return selfcert.CertReport(
+            checks=(selfcert.CertCheck(name="planted", ok=False),)
+        )
+
+    with pytest.raises(SelfCertError):
+        _apply(tmp_path, iapply.MODE_LOCAL, certify=failing_cert)
+    assert rec.names() == []
+    assert not (tmp_path / ".shipit.toml").exists()
+    assert not (tmp_path / "bin" / "shipit").exists()
+    assert not _plan(tmp_path).nothing_to_do
 
 
 # --------------------------------------------------------------------------
