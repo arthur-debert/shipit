@@ -81,6 +81,46 @@ def test_expected_name_skips_a_package_with_no_usable_basename(package):
     assert integrity.expected_main_binary(artifact) == "phos"
 
 
+def test_expected_name_prepends_the_scope_for_a_scoped_wasm_pack():
+    # `wasm-pack build --scope <s>` stamps `@<s>/<pkg>` into the package.json
+    # name, so the expected name must carry the same `@scope/` prefix — the
+    # base name from the chain, prefixed (lex, the first scoped npm artifact
+    # through shipit — issue #909).
+    artifact = _artifact(
+        {
+            "build": [{"toolchain": "rust", "package": "lex-wasm"}],
+            "bundle": {"composition": "wasm-pack", "scope": "lex-fmt"},
+        },
+        name="lex-wasm",
+    )
+    assert integrity.expected_main_binary(artifact) == "@lex-fmt/lex-wasm"
+
+
+def test_expected_name_leaves_an_unscoped_wasm_pack_bare():
+    # phos-core's wasm artifacts are unscoped — no scope, no `@scope/` prefix
+    # (the regression guard for the path this fix must not disturb).
+    artifact = _artifact(
+        {
+            "build": [{"toolchain": "rust", "package": "phos-wasm"}],
+            "bundle": {"composition": "wasm-pack"},
+        },
+        name="phos-wasm",
+    )
+    assert integrity.expected_main_binary(artifact) == "phos-wasm"
+
+
+def test_expected_name_is_unaffected_for_a_non_wasm_bundle():
+    # A scope is a wasm-pack-only key, so every other composition has no scope
+    # and keeps the bare base name — an archive artifact is unchanged.
+    artifact = _artifact(
+        {
+            "build": [{"toolchain": "rust", "package": "phos-app"}],
+            "bundle": {"composition": "archive"},
+        }
+    )
+    assert integrity.expected_main_binary(artifact) == "phos-app"
+
+
 # --------------------------------------------------------------------------
 # check_tree — .app fixtures
 # --------------------------------------------------------------------------
