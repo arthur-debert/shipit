@@ -1,4 +1,4 @@
-"""`shipit release prepare` — recorded-invocation tests over the injected seams.
+"""`shipit release prepare` / `release notes` — recorded-invocation tests over the injected seams.
 
 The shell is driven end-to-end against real tmp-path trees (the changelog
 read/roll and manifest edits hit the real filesystem) with the TWO effectful
@@ -690,3 +690,95 @@ def test_a_non_missing_binary_launch_failure_stays_untranslated(
     err = capsys.readouterr().err
     assert "shipit install" not in err
     assert fake.mutated() == []
+
+
+# --------------------------------------------------------------------------
+# `release notes` — the tag-state re-derivation (#898)
+# --------------------------------------------------------------------------
+
+
+_SECTION = "## 0.2.0 - 2026-01-01\n\n### Fixed\n\n- a fix\n"
+
+
+def test_notes_reemits_the_committed_section_verbatim(tmp_path, monkeypatch, capsys):
+    """A final tag's checkout (section committed, fragments consumed) re-emits
+    the identical notes text on stdout — the resume derivation (ADR-0009),
+    read, never remade — and mutates nothing."""
+    root = make_repo(
+        tmp_path,
+        monkeypatch,
+        toml=_PY_TOML,
+        fragments=(),
+        files=[("CHANGELOG/0.2.0.md", _SECTION), ("pyproject.toml", _PYPROJECT)],
+    )
+    rc = release_verb.run_notes("0.2.0", gitio=gitio_for(root))
+    assert rc == 0
+    # THE one notes text: the section body minus its `## …` heading — exactly
+    # what the tag annotation and the GH release carry (story 26).
+    assert capsys.readouterr().out == "### Fixed\n\n- a fix\n"
+    # Read-only: the cut state is untouched.
+    assert (root / "CHANGELOG" / "0.2.0.md").read_text(encoding="utf-8") == _SECTION
+
+
+def test_notes_out_writes_the_file_and_reports(tmp_path, monkeypatch, capsys):
+    """--out writes the notes artifact (relative paths anchor to the repo
+    root, like prepare's --notes-out) and moves the text off stdout."""
+    root = make_repo(
+        tmp_path,
+        monkeypatch,
+        toml=_PY_TOML,
+        fragments=(),
+        files=[("CHANGELOG/0.2.0.md", _SECTION)],
+    )
+    rc = release_verb.run_notes("0.2.0", out="RELEASE_NOTES.md", gitio=gitio_for(root))
+    assert rc == 0
+    assert (root / "RELEASE_NOTES.md").read_text(
+        encoding="utf-8"
+    ) == "### Fixed\n\n- a fix\n"
+    assert "wrote" in capsys.readouterr().out
+
+
+def test_notes_prerelease_extracts_from_the_fragments(tmp_path, monkeypatch, capsys):
+    """A prerelease tag's checkout still carries its fragments (an extract
+    never consumes them) — the notes re-derive from those, nothing written."""
+    root = make_repo(tmp_path, monkeypatch, toml=_PY_TOML)
+    rc = release_verb.run_notes("0.2.0-rc.1", gitio=gitio_for(root))
+    assert rc == 0
+    assert capsys.readouterr().out == "### Fixed\n\n- a fix\n"
+    assert (root / "CHANGELOG" / "unreleased-x.md").is_file()  # kept
+
+
+def test_notes_refuses_an_uncut_final_and_mutates_nothing(
+    tmp_path, monkeypatch, capsys
+):
+    """A final version whose section does not exist while fragments remain is
+    a state prepare never tagged: the plan would CUT, and `release notes`
+    re-derives, never cuts — refused loudly, fragments untouched."""
+    root = make_repo(tmp_path, monkeypatch, toml=_PY_TOML)
+    rc = release_verb.run_notes("0.2.0", gitio=gitio_for(root))
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert err.startswith("error: ")
+    assert "never cuts" in err
+    assert (root / "CHANGELOG" / "unreleased-x.md").is_file()
+    assert not (root / "CHANGELOG" / "0.2.0.md").exists()
+
+
+def test_notes_refuses_outside_a_checkout(tmp_path, monkeypatch, capsys):
+    class NoRepo(FakeGit):
+        def repo_root(self, *, cwd):
+            return None
+
+    monkeypatch.chdir(tmp_path)
+    rc = release_verb.run_notes("0.2.0", gitio=NoRepo())
+    assert rc == 1
+    assert "not inside a git checkout" in capsys.readouterr().err
+
+
+def test_notes_empty_state_is_the_changelog_refusal(tmp_path, monkeypatch, capsys):
+    """No fragments and no section: the coalesce API's empty-release refusal
+    surfaces through the shared error shell, exit 1."""
+    root = make_repo(tmp_path, monkeypatch, toml=_PY_TOML, fragments=())
+    rc = release_verb.run_notes("0.2.0", gitio=gitio_for(root))
+    assert rc == 1
+    assert "refusing an empty release" in capsys.readouterr().err

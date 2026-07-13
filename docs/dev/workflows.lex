@@ -277,13 +277,20 @@ logic is thin YAML) is stated in [./architecture.lex#3].
     - Facts travel all-or-none: supplying `stages` while omitting
       `unsigned-matrix` fails loudly at expression evaluation, never
       publishes against a mixed plan.
-    - ONE source run per dispatch: a standalone sign re-dispatch makes its
-      OWN run a complete publish source — it lands its signed-* artifacts AND
+    - ONE source run per dispatch: every stage's run is a SUFFICIENT source
+      for its successor. A standalone sign re-dispatch makes its OWN run a
+      complete publish source — it lands its signed-* artifacts AND
       re-uploads the base families it did not itself produce (every bundle-*
       tree plus release-notes, carried from its source run by the
       `carry-bundles` / `carry-notes` jobs), so the follow-up publish
       dispatch names THAT run as `run-id` and finds all three artifact
-      families there. Multi-run stitching is unsupported; the escape hatch is
+      families there. A standalone build dispatch has no source run to carry
+      FROM (prepare's run uploaded the notes), so its `notes` job RE-DERIVES
+      the release-notes artifact at the tag instead (#898: `shipit release
+      notes` — deterministic because prepare committed the changelog roll
+      at/before the tag; an uncut tree is refused, never cut) — a follow-up
+      sign/publish naming a standalone build run finds notes beside the
+      bundle-* trees. Multi-run stitching is unsupported; the escape hatch is
       the full re-dispatch, which converges (ADR-0009). The carried
       duplication is accepted.
     - An --unsigned source run re-publishes with `unsigned: true`, or the

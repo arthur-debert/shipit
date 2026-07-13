@@ -1,0 +1,19 @@
+`shipit release notes VERSION` re-emits THE one coalesced release-notes text
+for an already-cut VERSION — read-only, never a cut.
+
+VERSION is the bare semver read off an existing tag (`v<version>`, ADR-0041 —
+no bump words). Run at that tag's checkout, the notes re-derive exactly as
+prepare produced them (ADR-0009): a final version re-emits the committed
+`CHANGELOG/<version>.md` section's body; a prerelease re-extracts from the
+fragments (an extract never consumed them). A checkout that was never cut for
+VERSION — uncut fragments and no section — is refused loudly.
+
+This is the per-stage dispatch relay's notes source (#898, workflows.lex §8):
+a stage block dispatched on the tag alone has no source run to carry the
+`release-notes` artifact from, so wf-build's standalone `notes` job runs this
+verb at the tag and uploads the result, making a standalone build run a
+complete source for the sign/publish stages.
+
+`--out FILE` writes the text (relative paths anchor to the repo root, like
+prepare's `--notes-out`) with a report on stdout; omitted, the notes print
+verbatim to stdout.
