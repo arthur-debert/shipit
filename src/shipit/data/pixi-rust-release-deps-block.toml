@@ -19,12 +19,23 @@ cargo-edit = "0.13.11.*"
 # — the artifact. wasm-pack is on conda-forge, so it anchors HERE (the rust
 # release-deps block, rust signal) beside cargo-edit rather than
 # self-provisioning (the cargo-deb #785 exception is for tools conda-forge does
-# NOT carry). conda-forge's wasm-pack pulls the wasm32-unknown-unknown target
-# std it needs, so pixi provisions BOTH under setup-pixi's lockfile-keyed cache
-# (the #582 doctrine: the release run NEVER installs at run time). Pinned to the
+# NOT carry). Provisioned under setup-pixi's lockfile-keyed cache (the #582
+# doctrine: the release run NEVER installs at run time). Pinned to the
 # minor line (`0.15.*` — conda match-spec); a bump is one data edit, rolled out
 # on each consumer's next `shipit install` reconcile. 0.15.* per #846: the
 # original 0.13.* pin was never solvable — conda-forge never published any
 # 0.13.x wasm-pack build (verified on osx-arm64 + linux-64) — so every
 # consumer's default env died at solve.
 wasm-pack = "0.15.*"
+# The wasm32 target std for the managed rust sysroot (#853): conda-forge's
+# wasm-pack does NOT pull it — its only deps are __glibc/libgcc (osx: __osx),
+# so the WS12 record's "wasm-pack pulls the wasm32 std" claim was false and
+# every wasm build against the managed `rust` toolchain died with
+# "wasm32-unknown-unknown target not found in sysroot" (found live in the
+# ADP02 rust reconcile wave). Anchors HERE, the shared rust-signal block
+# beside wasm-pack, per the WS12 decision record (no wasm-gated block);
+# accepted residue: ~20MB in every rust consumer's default env, wasm or not.
+# Pinned in LOCKSTEP with the rust toolchain line (drift-tested,
+# `test_pins_agree_with_their_one_authority`) — bump `rust` and this key in
+# the same diff, or the std misses the sysroot version.
+rust-std-wasm32-unknown-unknown = "1.96.*"

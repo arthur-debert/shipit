@@ -1861,13 +1861,17 @@ def test_toolchain_block_units_have_the_right_shape():
     # with. Pinned to conda-forge 0.13.11 (the issue's decided pin). wasm-pack
     # rides the same rust-signal block (TOL02-WS12 #788): the wasm/npm bundle
     # composition's builder, on conda-forge in the DEFAULT release env —
-    # pinned to 0.15.* (#846: conda-forge never carried a 0.13 build).
+    # pinned to 0.15.* (#846: conda-forge never carried a 0.13 build). The
+    # wasm32 target std rides beside it (#853): conda's wasm-pack does NOT
+    # pull it, so without this key any wasm build against the managed rust
+    # sysroot fails; pinned in lockstep with the rust toolchain line.
     rust_release = units[iunits.PIXI_RUST_RELEASE_DEPS_KEY]
     assert rust_release.dest == "pixi.toml"
     assert rust_release.anchor == "[dependencies]"
     assert tomllib.loads(rust_release.desired_inner()) == {
         "cargo-edit": "0.13.11.*",
         "wasm-pack": "0.15.*",
+        "rust-std-wasm32-unknown-unknown": "1.96.*",
     }
 
     # The rust RELEASE toolchain (#801, TOL02-WS17 hole 1): cargo itself in
