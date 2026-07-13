@@ -189,8 +189,18 @@ PROVISIONING: dict[str, tuple[Provisioned, ...]] = {
             pin="0.15.*",
             note="the wasm/npm bundle composition's builder (TOL02-WS12 #788); "
             "rides the rust-release-deps block (rust signal), pinned from "
-            "conda-forge — provisions wasm-pack + the wasm32 target (WS10 "
-            "#798); 0.15.* per #846 (conda-forge never carried 0.13)",
+            "conda-forge; 0.15.* per #846 (conda-forge never carried 0.13)",
+        ),
+        Provisioned(
+            "rust-std-wasm32-unknown-unknown",
+            PIXI_MANAGED,
+            pin="1.96.*",
+            note="the wasm32 target std for the managed rust sysroot (#853): "
+            "conda-forge's wasm-pack does NOT pull it (the WS12 claim that "
+            "it did was false — its only deps are __glibc/libgcc), so it "
+            "rides the rust-release-toolchain block beside `rust`, in "
+            "lockstep with it — and is skipped WITH it for a consumer that "
+            "owns its own rust pin",
         ),
     ),
     "uv": (
@@ -455,6 +465,15 @@ def test_pins_agree_with_their_one_authority():
     assert _row("wasm-pack", "wasm-pack").pin == rust_release["wasm-pack"]
     rust_toolchain = _block_toml("pixi-rust-release-toolchain-block.toml")
     assert _row("cargo", "cargo").pin == rust_toolchain["rust"]
+    assert (
+        _row("wasm-pack", "rust-std-wasm32-unknown-unknown").pin
+        == rust_toolchain["rust-std-wasm32-unknown-unknown"]
+    )
+    # The wasm32 std is the managed rust toolchain's OWN sysroot component
+    # (#853): it rides the toolchain block and its pin moves in lockstep with
+    # the `rust` line, or wasm builds solve a std that misses the delivered
+    # sysroot version.
+    assert rust_toolchain["rust-std-wasm32-unknown-unknown"] == rust_toolchain["rust"]
     # ...and the two managed rust surfaces (release default-env toolchain,
     # lint-feature toolchain) move in lockstep — one rust, two envs (#801).
     rust_lint = _block_toml("pixi-rust-lint-deps-block.toml")

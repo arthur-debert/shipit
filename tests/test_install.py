@@ -1916,7 +1916,9 @@ def test_toolchain_block_units_have_the_right_shape():
     # with. Pinned to conda-forge 0.13.11 (the issue's decided pin). wasm-pack
     # rides the same rust-signal block (TOL02-WS12 #788): the wasm/npm bundle
     # composition's builder, on conda-forge in the DEFAULT release env —
-    # pinned to 0.15.* (#846: conda-forge never carried a 0.13 build).
+    # pinned to 0.15.* (#846: conda-forge never carried a 0.13 build). NOT
+    # here: the wasm32 target std (#853) — a sysroot component, it rides the
+    # toolchain block below so a consumer-owned `rust` pin skips it too.
     rust_release = units[iunits.PIXI_RUST_RELEASE_DEPS_KEY]
     assert rust_release.dest == "pixi.toml"
     assert rust_release.anchor == "[dependencies]"
@@ -1926,13 +1928,20 @@ def test_toolchain_block_units_have_the_right_shape():
     }
 
     # The rust RELEASE toolchain (#801, TOL02-WS17 hole 1): cargo itself in
-    # the default env — a SINGLE-KEY block, deliberately separate from the
-    # cargo-edit block so a consumer-side `rust` pin conflicts alone (the
-    # PixiKeyConflict guard skips per block) without losing cargo-edit.
+    # the default env — the sysroot-only block, deliberately separate from
+    # the cargo-edit block so a consumer-side `rust` pin conflicts the
+    # sysroot alone (the PixiKeyConflict guard skips per block) without
+    # losing cargo-edit. The wasm32 target std rides HERE (#853): conda's
+    # wasm-pack does NOT pull it, and as a sysroot component it must be
+    # delivered — and skipped — with the `rust` line it moves in lockstep
+    # with, never handed to a consumer that owns its own rust pin.
     rust_toolchain = units[iunits.PIXI_RUST_RELEASE_TOOLCHAIN_KEY]
     assert rust_toolchain.dest == "pixi.toml"
     assert rust_toolchain.anchor == "[dependencies]"
-    assert tomllib.loads(rust_toolchain.desired_inner()) == {"rust": "1.96.*"}
+    assert tomllib.loads(rust_toolchain.desired_inner()) == {
+        "rust": "1.96.*",
+        "rust-std-wasm32-unknown-unknown": "1.96.*",
+    }
 
     # The python release-side publish tool (#801, TOL02-WS17 hole 2): twine
     # for the pypi endpoint, in the default env — the PATH wf-publish's bare
@@ -1962,14 +1971,20 @@ def test_toolchain_block_units_have_the_right_shape():
 def test_rust_release_toolchain_pin_agrees_with_the_rust_lint_block():
     # One rust, two envs (#801): the default-env release toolchain and the
     # lint-feature toolchain must pin the same line, or a consumer lints with
-    # a different rust than it releases with.
+    # a different rust than it releases with. The wasm32 std (#853) is a
+    # component of that same sysroot, so it rides this block on the same
+    # lockstep line — exhaustive equality, so a key that drifts in OR out of
+    # the sysroot block fails here by name.
     toolchain = tomllib.loads(
         iunits.data_bytes("pixi-rust-release-toolchain-block.toml").decode("utf-8")
     )
     lint = tomllib.loads(
         iunits.data_bytes("pixi-rust-lint-deps-block.toml").decode("utf-8")
     )
-    assert toolchain == {"rust": lint["rust"]}
+    assert toolchain == {
+        "rust": lint["rust"],
+        "rust-std-wasm32-unknown-unknown": lint["rust"],
+    }
 
 
 def test_packaged_rust_pin_agrees_with_shipits_own_test_toolchain():
@@ -2308,6 +2323,16 @@ def test_consumer_rust_pin_conflicts_the_toolchain_block_alone(tmp_path):
     assert iunits.PIXI_RUST_RELEASE_TOOLCHAIN_KEY not in keys
     assert iunits.PIXI_RUST_RELEASE_DEPS_KEY in keys  # cargo-edit still lands
     assert iunits.PIXI_RUST_DEPS_KEY in keys  # so does the lint toolchain
+    # The wasm32 std moves WITH the skipped sysroot (#853): it rides the
+    # toolchain block, not the release-deps block, so a consumer that owns
+    # its `rust` pin is never handed a std pinned to the MANAGED rust
+    # version — the consumer self-provisions the matching std (#759 rule).
+    deps = next(
+        d.unit
+        for d in plan.decisions
+        if d.unit.key == iunits.PIXI_RUST_RELEASE_DEPS_KEY
+    )
+    assert "rust-std-wasm32-unknown-unknown" not in tomllib.loads(deps.desired_inner())
 
 
 # --------------------------------------------------------------------------

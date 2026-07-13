@@ -7,13 +7,29 @@
 # wf-release stage executes with. conda-forge's `rust` is the official
 # toolchain (cargo included), provisioned under setup-pixi's lockfile-keyed
 # cache (the #582 doctrine: the release run NEVER installs at run time).
-# Deliberately a SINGLE-KEY block, SEPARATE from the cargo-edit release-deps
-# block: a consumer already pinning `rust` in its own [dependencies] (the
-# pre-#801 consumer-side workaround) keeps its pin via the PixiKeyConflict
-# first-splice guard WITHOUT losing cargo-edit delivery — a shared block
-# would be skipped whole. Pinned in lockstep with the rust lint block
-# (drift-tested); a bump is one data edit per block, same diff. If this repo
-# no longer ships rust (the last Cargo.toml is gone), delete this block and
-# its `pixi.toml#shipit-rust-release-toolchain` entry in .shipit.toml's
+# Deliberately the SYSROOT-ONLY block, SEPARATE from the cargo-edit
+# release-deps block: a consumer already pinning `rust` in its own
+# [dependencies] (the pre-#801 consumer-side workaround) keeps its pin via
+# the PixiKeyConflict first-splice guard WITHOUT losing cargo-edit delivery
+# — a block shared with the release deps would be skipped whole. Pinned in
+# lockstep with the rust lint block (drift-tested); a bump is one data edit
+# per block, same diff. If this repo no longer ships rust (the last
+# Cargo.toml is gone), delete this block and its
+# `pixi.toml#shipit-rust-release-toolchain` entry in .shipit.toml's
 # [managed] table — a reconcile only ADDS toolchain blocks, never retires one.
 rust = "1.96.*"
+# The wasm32 target std for this managed sysroot (#853): conda-forge's
+# wasm-pack does NOT pull it — its only deps are __glibc/libgcc (osx: __osx),
+# so the WS12 record's "wasm-pack pulls the wasm32 std" claim was false and
+# every wasm build against the managed `rust` toolchain died with
+# "wasm32-unknown-unknown target not found in sysroot" (found live in the
+# ADP02 rust reconcile wave). Anchors HERE, beside the `rust` line it is a
+# component of — NOT in the release-deps block — so a consumer that owns its
+# `rust` pin skips the std WITH the toolchain (one sysroot, one owner: that
+# consumer self-provisions the matching std, the sanctioned #759 rule)
+# instead of receiving a std that misses its own rust version. Still no
+# wasm-gated block (the WS12 record); accepted residue: ~20MB in every rust
+# consumer's default env, wasm or not. Pinned in LOCKSTEP with the `rust`
+# line above (drift-tested, `test_pins_agree_with_their_one_authority`) —
+# bump both keys in the same diff, or the std misses the sysroot version.
+rust-std-wasm32-unknown-unknown = "1.96.*"
