@@ -831,13 +831,15 @@ def test_managed_gitignore_block_covers_the_release_stage_outputs():
     """The block ignores exactly the transient repo-root artifacts the issue
     names (#906): the RELEASE_NOTES.md the notes stage writes, the dist-signed/
     the sign stage stages, and dist/ for parity — the trio that dirties a
-    root-level crate's `cargo publish`."""
+    root-level crate's `cargo publish`. Each entry is ROOT-ANCHORED (leading
+    slash) so it matches only the repo-root artifact, never a same-named nested
+    path such as crates/foo/dist/."""
     entries = [
         line
         for line in iunits.data_bytes("gitignore-block").decode().splitlines()
         if line and not line.startswith("#")
     ]
-    assert entries == ["RELEASE_NOTES.md", "dist/", "dist-signed/"]
+    assert entries == ["/RELEASE_NOTES.md", "/dist/", "/dist-signed/"]
 
 
 def test_gitignore_block_add_noop_override_and_preserves_consumer_entries(
@@ -859,10 +861,10 @@ def test_gitignore_block_add_noop_override_and_preserves_consumer_entries(
     _apply(tmp_path)
     body = (tmp_path / ".gitignore").read_text()
     assert "node_modules/" in body  # the consumer's own entry is untouched
-    assert iunits.GITIGNORE_OPEN in body and "dist-signed/" in body
+    assert iunits.GITIGNORE_OPEN in body and "/dist-signed/" in body
     assert action() == irec.NOOP
     # A consumer edit INSIDE the managed block is an OVERRIDE, not a silent keep.
-    edited = body.replace("dist-signed/", "dist-signed/\ncoverage/")
+    edited = body.replace("/dist-signed/", "/dist-signed/\ncoverage/")
     (tmp_path / ".gitignore").write_text(edited)
     assert action() == irec.OVERRIDE
 
