@@ -27,6 +27,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+import yaml
 
 from shipit import execrun, lint
 from shipit.verbs import wf
@@ -124,6 +125,202 @@ def test_workflow_jobs_no_jobs_is_a_value_error():
 def test_workflow_jobs_unparseable_yaml_is_a_value_error():
     with pytest.raises(ValueError, match="not parseable"):
         wf.workflow_jobs("on: [push\n")
+
+
+# --------------------------------------------------------------------------
+# Pure cores — the stage-caller uniform secret rule (#896)
+# --------------------------------------------------------------------------
+
+_APPLE = sorted(wf.SIGN_BLOCK_SECRETS)
+
+
+def _caller(
+    *,
+    full=("RELEASE_TOKEN", "CARGO_REGISTRY_TOKEN", *_APPLE),
+    prepare=("RELEASE_TOKEN", "CARGO_REGISTRY_TOKEN", *_APPLE),
+    build=(),
+    sign=_APPLE,
+    publish=("CARGO_REGISTRY_TOKEN",),
+) -> dict:
+    """A parsed stage-choice caller for a signing+crates plan; each stage's
+    forwarded secret names (or the string 'inherit') are injectable so every
+    drift class is one keyword away from the compliant default."""
+
+    def job(stage: str, secrets) -> dict:
+        spec = {
+            "if": f"inputs.stage == '{stage}'",
+            "uses": f"arthur-debert/shipit/.github/workflows/wf-{stage}.yml@v1",
+        }
+        if secrets == "inherit":
+            spec["secrets"] = "inherit"
+        elif secrets:
+            spec["secrets"] = {name: f"${{{{ secrets.{name} }}}}" for name in secrets}
+        return spec
+
+    return {
+        "on": {
+            "workflow_dispatch": {
+                "inputs": {"stage": {"options": list(wf.CALLER_STAGES)}}
+            }
+        },
+        "jobs": {
+            "release": job("full", full),
+            "prepare": job("prepare", prepare),
+            "build": job("build", build),
+            "sign": job("sign", sign),
+            "publish": job("publish", publish),
+        },
+    }
+
+
+def test_stage_caller_jobs_maps_the_blessed_shape():
+    assert wf.stage_caller_jobs(_caller()) == {
+        "release": "full",
+        "prepare": "prepare",
+        "build": "build",
+        "sign": "sign",
+        "publish": "publish",
+    }
+
+
+def test_stage_caller_jobs_tolerates_the_yaml_11_on_key():
+    # Plain safe_load turns `on:` into the boolean True (the checks-module
+    # gotcha); the detector must read either key.
+    doc = _caller()
+    doc[True] = doc.pop("on")
+    assert wf.stage_caller_jobs(doc) is not None
+
+
+def test_stage_caller_jobs_ignores_other_workflows():
+    # Not a dict, no dispatch trigger, and a dispatch without the five-stage
+    # choice: all outside the blessed shape, all None — the lint stays scoped
+    # to callers and never fires on ordinary workflows.
+    assert wf.stage_caller_jobs("nope") is None
+    assert wf.stage_caller_jobs({"on": "push", "jobs": {"a": {}}}) is None
+    trimmed = _caller()
+    trimmed["on"]["workflow_dispatch"]["inputs"]["stage"]["options"] = [
+        "full",
+        "prepare",
+    ]
+    assert wf.stage_caller_jobs(trimmed) is None
+
+
+def test_compliant_caller_has_no_drift():
+    # The blessed grants: prepare == full; sign == full ∩ the Apple set;
+    # publish == full ∩ the endpoint set; build empty.
+    assert wf.caller_secret_drift(_caller()) == []
+
+
+def test_minimal_plan_caller_has_no_drift():
+    # shipit's own shape: full/prepare forward RELEASE_TOKEN alone, and the
+    # trimmed stages forward nothing (RELEASE_TOKEN is not among their
+    # blocks' declared names).
+    doc = _caller(
+        full=("RELEASE_TOKEN",), prepare=("RELEASE_TOKEN",), sign=(), publish=()
+    )
+    assert wf.caller_secret_drift(doc) == []
+
+
+def test_prepare_narrower_than_full_is_the_896_defect():
+    # The live fire (#896 defect 1): prepare forwards RELEASE_TOKEN alone on
+    # a signing+crates plan — preflight validates the WHOLE plan's secret set
+    # at prepare entry, so the standalone dispatch can never pass.
+    drift = wf.caller_secret_drift(_caller(prepare=("RELEASE_TOKEN",)))
+    assert len(drift) == 1
+    assert "stage prepare" in drift[0]
+    assert "CARGO_REGISTRY_TOKEN" in drift[0]
+    assert "ASC_API_KEY_BASE64" in drift[0]
+
+
+def test_sign_missing_one_notary_name_is_the_896_defect():
+    # #896 defect 2: the consumer sign jobs omitted ASC_API_KEY_BASE64 — green
+    # on the full chain (wf-release forwards internally), dead standalone.
+    partial = tuple(n for n in _APPLE if n != "ASC_API_KEY_BASE64")
+    drift = wf.caller_secret_drift(_caller(sign=partial))
+    assert len(drift) == 1
+    assert "stage sign" in drift[0]
+    assert "missing ASC_API_KEY_BASE64" in drift[0]
+
+
+def test_stray_and_build_secrets_are_drift():
+    # A stage forwarding a name outside full's trimmed set is as non-uniform
+    # as a missing one; wf-build declares no secrets at all.
+    extra = ("CARGO_REGISTRY_TOKEN", "PYPI_TOKEN")
+    drift = wf.caller_secret_drift(_caller(publish=extra))
+    assert len(drift) == 1
+    assert "stray PYPI_TOKEN" in drift[0]
+    drift = wf.caller_secret_drift(_caller(build=("RELEASE_TOKEN",)))
+    assert len(drift) == 1
+    assert "stage build" in drift[0]
+    assert "stray RELEASE_TOKEN" in drift[0]
+
+
+def test_inherit_is_never_too_narrow():
+    # `secrets: inherit` forwards the repo's whole set — a superset of any
+    # plan-required set — so an inheriting stage job always satisfies the
+    # rule, and an all-inherit caller trivially does.
+    assert wf.caller_secret_drift(_caller(prepare="inherit")) == []
+    doc = _caller(
+        full="inherit", prepare="inherit", build=(), sign="inherit", publish="inherit"
+    )
+    assert wf.caller_secret_drift(doc) == []
+
+
+def test_enumerating_under_an_inheriting_full_is_checked_or_flagged():
+    # full inherits, so the plan-required set is unknowable from the caller:
+    # a TRIMMED stage's enumeration is still checkable — it must cover its
+    # block's whole declared surface (forwarding a declared-but-unset name is
+    # harmless; omitting a needed one is the #896 death) — while an
+    # un-trimmed prepare enumeration cannot be proven complete and is
+    # flagged as drift outright.
+    endpoints = tuple(sorted(wf.PUBLISH_BLOCK_SECRETS))
+    ok = _caller(full="inherit", prepare="inherit", publish=endpoints)
+    assert wf.caller_secret_drift(ok) == []
+    partial = tuple(n for n in _APPLE if n != "ASC_API_KEY_BASE64")
+    drift = wf.caller_secret_drift(
+        _caller(full="inherit", prepare="inherit", publish=endpoints, sign=partial)
+    )
+    assert len(drift) == 1
+    assert "missing ASC_API_KEY_BASE64" in drift[0]
+    drift = wf.caller_secret_drift(_caller(full="inherit", publish=endpoints))
+    assert len(drift) == 1
+    assert "stage prepare" in drift[0]
+    assert "inherit" in drift[0]
+
+
+def test_caller_without_a_full_job_makes_no_claim():
+    doc = _caller()
+    del doc["jobs"]["release"]
+    assert wf.caller_secret_drift(doc) == []
+
+
+def test_every_job_gating_a_stage_is_checked():
+    # Two jobs gate `sign`: one compliant, one missing a notary name. There
+    # is no arbitrary pick — the drifting duplicate is flagged regardless of
+    # declaration order.
+    doc = _caller()
+    partial = tuple(n for n in _APPLE if n != "ASC_API_KEY_BASE64")
+    doc["jobs"]["sign-two"] = {
+        "if": "inputs.stage == 'sign'",
+        "uses": "arthur-debert/shipit/.github/workflows/wf-sign-mac.yml@v1",
+        "secrets": {name: f"${{{{ secrets.{name} }}}}" for name in partial},
+    }
+    drift = wf.caller_secret_drift(doc)
+    assert len(drift) == 1
+    assert "'sign-two'" in drift[0]
+    assert "missing ASC_API_KEY_BASE64" in drift[0]
+
+
+def test_duplicate_full_jobs_are_ambiguous_and_flagged():
+    # Two jobs gating `full` leave the plan-required set ambiguous: that is
+    # itself the violation, and no per-stage claim is made on top of it.
+    doc = _caller()
+    doc["jobs"]["release-two"] = dict(doc["jobs"]["release"])
+    drift = wf.caller_secret_drift(doc)
+    assert len(drift) == 1
+    assert "'release'" in drift[0]
+    assert "'release-two'" in drift[0]
+    assert "ambiguous" in drift[0]
 
 
 # --------------------------------------------------------------------------
@@ -290,6 +487,33 @@ def test_unknown_job_selector_hard_errors_listing_jobs(workflow_file, capsys):
     assert "deploy" in err
     assert "build, test" in err
     assert rec.calls == []
+
+
+def test_drifting_stage_caller_refuses_before_act(tmp_path, capsys):
+    """The #896 lint at the verb seam: a stage-choice caller whose `prepare`
+    grant is narrower than `full`'s is refused loudly BEFORE act — act cannot
+    see the class (secrets never ride a local smoke), so a green act run must
+    not be allowed to launder the broken shape."""
+    path = tmp_path / "release.yml"
+    path.write_text(
+        yaml.safe_dump(_caller(prepare=("RELEASE_TOKEN",))), encoding="utf-8"
+    )
+    rec = _Recorder()
+    rc = wf.run(str(path), event=wf.EVENT_WORKFLOW_DISPATCH, run_cmd=rec)
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "per-stage secret drift (#896)" in err
+    assert "stage prepare" in err
+    assert rec.calls == []
+
+
+def test_compliant_stage_caller_proceeds_to_act(tmp_path):
+    path = tmp_path / "release.yml"
+    path.write_text(yaml.safe_dump(_caller()), encoding="utf-8")
+    rec = _Recorder()
+    rc = wf.run(str(path), event=wf.EVENT_WORKFLOW_DISPATCH, run_cmd=rec)
+    assert rc == 0
+    assert any(c[0] == "act" for c in rec.calls)
 
 
 def test_missing_workflow_file_refuses(tmp_path, capsys):

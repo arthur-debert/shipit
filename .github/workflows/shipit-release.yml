@@ -27,14 +27,32 @@ name: shipit-release
 # choices stay offered because this caller dogfoods the blessed shape,
 # never a trimmed variant.
 #
-# Secrets — exactly the plan-required set for shipit's plan:
+# Secrets — THE PER-STAGE GRANT RULE (#896, the staged-dispatch live-fire
+# scar): every stage job forwards the SAME plan-required secret set as
+# `full`, trimmed only to the names its block DECLARES (GitHub refuses a
+# caller forwarding an undeclared secret). wf-prepare declares the full
+# universe — its preflight re-derives and re-validates the WHOLE plan's
+# secret set at every entry — so a standalone `prepare` needs exactly
+# `full`'s set, never a subset; wf-sign-mac declares the whole Apple/
+# notary set (omit one — the live fire dropped ASC_API_KEY_BASE64 — and a
+# standalone sign dies at notarize); wf-publish the endpoint tokens;
+# wf-build nothing. A narrower per-stage grant is green on every
+# full-chain run (wf-release forwards the secrets internally) and dead on
+# the standalone dispatch; `shipit wf test` refuses the shape.
+#
+# shipit's own plan-required set is minimal — exactly:
 #   RELEASE_TOKEN  prepare's tag+branch push through the ruleset (a
 #                  GITHUB_TOKEN push would not re-trigger workflows, so
 #                  the tag push could never fire advance-major.yml).
 # gh-release rides the workflow's own GITHUB_TOKEN (no registry entry);
 # there are no external endpoints, so no endpoint token is forwarded. The
 # Apple signing set is not forwarded either: the plan carries no sign
-# stage, and preflight would refuse a break-glass `--unsigned` on it.
+# stage, and preflight would refuse a break-glass `--unsigned` on it. So
+# the uniform rule lands here as: `release`/`prepare` forward
+# RELEASE_TOKEN, and `build`/`sign`/`publish` forward nothing ONLY
+# because RELEASE_TOKEN is not among their blocks' declared names — a
+# consumer whose plan carries sign or registry endpoints forwards its
+# full plan-required set at EVERY stage its blocks declare it on.
 
 on:
   workflow_dispatch:

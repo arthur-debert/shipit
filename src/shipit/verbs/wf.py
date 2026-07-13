@@ -26,8 +26,10 @@ real side effects are outside act's reach, and the standing notice is
 what keeps a local green trusted only where it is valid (PRD story 41).
 
 The pure cores — event-payload crafting (:func:`craft_event` /
-:func:`parse_inputs`), job selection (:func:`workflow_jobs`), and the act argv
-encoding (:func:`act_argv`) — are kept out of the Exec boundary so they are
+:func:`parse_inputs`), job selection (:func:`workflow_jobs`), the act argv
+encoding (:func:`act_argv`), and the stage-caller secret lint
+(:func:`stage_caller_jobs` / :func:`caller_secret_drift`, #896) — are kept out
+of the Exec boundary so they are
 fixture-testable with no docker anywhere near the tests, the same split the
 lint service uses. Every act/docker invocation goes through the one Exec runner
 (:mod:`shipit.execrun`, ADR-0028) via the injectable ``run_cmd`` seam; verb
@@ -35,7 +37,10 @@ tests assert the RECORDED argv.
 
 Exit semantics are the uniform Tool contract (PRD story 8): ``0`` clean, ``1``
 a failed verdict (act's nonzero — a red job, an event the workflow does not
-listen to) or a refusal (missing workflow file, unknown job selector), and a
+listen to) or a refusal (missing workflow file, unknown job selector, a
+stage-choice dispatch caller whose per-stage secret grants drift from
+``full``'s — the #896 class no act run can see, since secrets never ride a
+local smoke), and a
 missing ``act``/``docker`` binary is the standard HARD-fail (the Exec runner's
 launch failure, mapped by :func:`~._errors.cli_errors` to one ``error: …``
 line + exit 1) — never a silent skip.
@@ -45,6 +50,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sys
 import tempfile
 import time
@@ -232,6 +238,192 @@ def workflow_jobs(text: str) -> list[str]:
     return [str(job) for job in jobs]
 
 
+# --------------------------------------------------------------------------
+# Pure core — the stage-choice caller's uniform secret rule (#896)
+# --------------------------------------------------------------------------
+
+#: The blessed stage-choice caller's ``stage`` options (workflows.lex §8,
+#: ADR-0054) — the shape :func:`stage_caller_jobs` recognizes, in the order
+#: the model caller offers them.
+CALLER_STAGES: tuple[str, ...] = ("full", "prepare", "build", "sign", "publish")
+
+#: wf-sign-mac's DECLARED secret surface — the whole Apple/notary set. A sign
+#: dispatch that omits any of these (the #896 live fire dropped
+#: ASC_API_KEY_BASE64) imports a partial keychain and dies at sign/notarize.
+#: A drift test pins this frozenset to the block file itself.
+SIGN_BLOCK_SECRETS = frozenset(
+    {
+        "APPLE_CERTIFICATE",
+        "APPLE_CERTIFICATE_PASSWORD",
+        "ASC_API_KEY_BASE64",
+        "ASC_API_KEY_ID",
+        "ASC_API_ISSUER_ID",
+        "APPLE_ID",
+        "APPLE_PASSWORD",
+        "APPLE_TEAM_ID",
+    }
+)
+
+#: wf-publish's DECLARED secret surface — the endpoint-token set. Pinned to
+#: the block file by the same drift test as :data:`SIGN_BLOCK_SECRETS`.
+PUBLISH_BLOCK_SECRETS = frozenset(
+    {
+        "CARGO_REGISTRY_TOKEN",
+        "PYPI_TOKEN",
+        "NPM_TOKEN",
+        "HOMEBREW_TAP_TOKEN",
+        "VSCE_PAT",
+        "OVSX_PAT",
+        "DOWNSTREAM_DISPATCH_TOKEN",
+    }
+)
+
+#: Stage → the trim its block's declared surface imposes on ``full``'s set
+#: (GitHub refuses a caller forwarding a secret the called workflow does not
+#: declare, so "the same set as full" is only expressible up to declaration).
+#: ``None`` means NO trim: wf-prepare declares the entire secret universe —
+#: its preflight re-derives and re-validates the WHOLE plan's secret set at
+#: every entry — so a standalone `prepare` needs exactly ``full``'s set.
+#: wf-build declares nothing (its plan job runs secret-free by design).
+_STAGE_TRIM: dict[str, frozenset[str] | None] = {
+    "prepare": None,
+    "build": frozenset(),
+    "sign": SIGN_BLOCK_SECRETS,
+    "publish": PUBLISH_BLOCK_SECRETS,
+}
+
+#: The blessed caller's stage gate, as written by the model caller and every
+#: consumer copy: ``if: inputs.stage == '<stage>'``.
+_STAGE_GATE_RE = re.compile(r"inputs\.stage\s*==\s*'([a-z]+)'")
+
+
+def stage_caller_jobs(doc: object) -> dict[str, str] | None:
+    """Job id → stage, when ``doc`` parses as the blessed stage-choice
+    dispatch caller (workflows.lex §8); ``None`` for any other workflow. Pure.
+
+    Recognition is the trigger shape alone: a ``workflow_dispatch`` trigger
+    whose ``stage`` choice offers exactly :data:`CALLER_STAGES`, and jobs
+    gated ``if: inputs.stage == '<stage>'``. Both YAML readings of the
+    trigger key are tolerated (plain ``safe_load`` turns ``on:`` into the
+    YAML-1.1 boolean ``True`` — the same gotcha :mod:`shipit.checks` loads
+    around), so the function works on either parse.
+
+    EVERY gated job is mapped — the function neither requires each stage to
+    appear nor forbids two jobs gating the same stage. What each stage's
+    grants must look like (including that ``full`` be unambiguous) is
+    :func:`caller_secret_drift`'s claim, made from this complete map.
+    """
+    if not isinstance(doc, dict):
+        return None
+    on = doc.get("on", doc.get(True))
+    if not isinstance(on, dict):
+        return None
+    dispatch = on.get("workflow_dispatch")
+    if not isinstance(dispatch, dict):
+        return None
+    inputs = dispatch.get("inputs")
+    stage = inputs.get("stage") if isinstance(inputs, dict) else None
+    if not isinstance(stage, dict):
+        return None
+    if sorted(stage.get("options") or []) != sorted(CALLER_STAGES):
+        return None
+    jobs = doc.get("jobs")
+    if not isinstance(jobs, dict):
+        return None
+    out: dict[str, str] = {}
+    for job_id, job in jobs.items():
+        cond = job.get("if", "") if isinstance(job, dict) else ""
+        match = _STAGE_GATE_RE.search(str(cond))
+        if match and match.group(1) in CALLER_STAGES:
+            out[str(job_id)] = match.group(1)
+    return out or None
+
+
+def caller_secret_drift(doc: object) -> list[str]:
+    """Violations of the uniform per-stage secret rule (#896), one line each;
+    empty when ``doc`` is not a stage-choice caller or its grants hold. Pure.
+
+    THE RULE: every stage job forwards the SAME plan-required secret set as
+    ``full``, trimmed only to the names its block declares
+    (:data:`_STAGE_TRIM`). A narrower grant is invisible to every green
+    full-chain run — wf-release forwards the secrets internally — and kills
+    only the standalone dispatch: the #896 live fire, where a `prepare`
+    forwarding RELEASE_TOKEN alone failed preflight's whole-plan secret
+    validation on any plan with sign or registry endpoints, and a `sign` job
+    omitting ASC_API_KEY_BASE64 would die at notarize.
+
+    ``secrets: inherit`` forwards the caller repo's whole secret set — a
+    superset of any plan-required set — so an inheriting stage job never
+    drifts narrow and always passes; but a stage job ENUMERATING under an
+    inheriting ``full`` is flagged for the un-trimmed stages (the list cannot
+    be proven to cover the plan).
+
+    :func:`stage_caller_jobs` maps every gated job, so EVERY job gating a
+    stage is held to the rule — a second job gating the same stage is not an
+    arbitrary-pick blind spot but one more grant to check. The one exception
+    is ``full`` itself: two jobs gating ``full`` make the plan-required set
+    ambiguous, which is a violation in its own right (the blessed caller has
+    one job per stage) and suppresses the per-stage claims that would need it.
+    """
+    stages = stage_caller_jobs(doc)
+    if stages is None:
+        return []
+    jobs = doc["jobs"]  # a dict — stage_caller_jobs proved the shape
+    by_stage: dict[str, list[str]] = {}
+    for job_id, stage in stages.items():
+        by_stage.setdefault(stage, []).append(job_id)
+    full_ids = by_stage.get("full", [])
+    if not full_ids:
+        return []  # no full job to define the plan-required set — no claim
+    if len(full_ids) > 1:
+        named = ", ".join(repr(j) for j in full_ids)
+        return [
+            f"jobs {named} all gate stage full — the blessed caller has ONE "
+            "job per stage, and duplicate full jobs leave the plan-required "
+            "secret set ambiguous; keep a single full job"
+        ]
+    full_id = full_ids[0]
+
+    def forwarded(job_id: str) -> frozenset[str] | None:
+        job = jobs[job_id]
+        secrets = job.get("secrets") if isinstance(job, dict) else None
+        if secrets == "inherit":
+            return None  # the whole repo secret set
+        return frozenset(secrets) if isinstance(secrets, dict) else frozenset()
+
+    full = forwarded(full_id)
+    violations: list[str] = []
+    for stage in CALLER_STAGES[1:]:
+        for job_id in by_stage.get(stage, ()):
+            got = forwarded(job_id)
+            if got is None:
+                continue  # inherit is never too narrow
+            trim = _STAGE_TRIM[stage]
+            if full is None and trim is None:
+                violations.append(
+                    f"job {job_id!r} (stage {stage}) enumerates its secrets "
+                    f"while {full_id!r} (stage full) rides `secrets: inherit` "
+                    "— a list cannot be proven to cover the plan; inherit "
+                    "here too"
+                )
+                continue
+            want = trim if full is None else (full if trim is None else full & trim)
+            missing = sorted(want - got)
+            stray = sorted(got - want)
+            if missing or stray:
+                parts = []
+                if missing:
+                    parts.append("missing " + ", ".join(missing))
+                if stray:
+                    parts.append("stray " + ", ".join(stray))
+                violations.append(
+                    f"job {job_id!r} (stage {stage}) must forward the same "
+                    f"plan-required secret set as {full_id!r} (stage full), "
+                    f"trimmed to its block's declared names ({'; '.join(parts)})"
+                )
+    return violations
+
+
 def act_argv(
     *,
     event: str,
@@ -389,6 +581,12 @@ def run(
     daemon). ``local_repositories`` maps remote ``owner/repo@ref``
     workflow/action refs to local paths (see :func:`act_argv`).
 
+    A workflow that parses as the blessed stage-choice dispatch caller is
+    additionally linted against the uniform per-stage secret rule
+    (:func:`caller_secret_drift`, #896) and refused on drift before act runs
+    — the one caller-shape defect no green act run (or full-chain CI run)
+    can surface.
+
     The act-untestable surface (:func:`untestable_notice`) is printed on EVERY
     completed run, green or red, before the verdict line.
     """
@@ -401,15 +599,24 @@ def run(
             f"--input only applies to --event {' / '.join(INPUT_EVENT_KINDS)} "
             f"(got --event {event})"
         )
+    text = wf_path.read_text(encoding="utf-8")
     try:
         dispatch_inputs = parse_inputs(inputs)
-        jobs = workflow_jobs(wf_path.read_text(encoding="utf-8"))
+        jobs = workflow_jobs(text)
     except ValueError as exc:
         return _fail(str(exc))
     if job is not None and job not in jobs:
         # The Tool-verb selector rule (ADR-0039): a selector that matches
         # nothing is a hard error NAMING the valid selectors, never a no-op.
         return _fail(f"no job {job!r} in {workflow} — jobs: {', '.join(jobs)}")
+    # The stage-caller secret lint (#896): a stage-choice dispatch caller whose
+    # per-stage grants drift from `full`'s is green on every composed-chain run
+    # (wf-release forwards the secrets internally) and dead on the standalone
+    # dispatch — a class act can never catch, because secrets never ride a
+    # local smoke. The broken shape is refused before act runs at all.
+    drift = caller_secret_drift(yaml.safe_load(text))
+    if drift:
+        return _fail("per-stage secret drift (#896): " + "; ".join(drift))
 
     run_cmd = run_cmd or _run_cmd
     payload = craft_event(event, branch=branch, inputs=dispatch_inputs)
