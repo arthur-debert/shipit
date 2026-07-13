@@ -1026,6 +1026,17 @@ def test_parse_keychain_list_reads_the_quoted_paths_in_order():
     assert sign_mod._parse_keychain_list("") == []
 
 
+def test_parse_keychain_list_keeps_a_path_with_an_embedded_quote_whole():
+    # `security list-keychains` prints paths unescaped: a keychain whose
+    # filename contains `"` must survive the parse whole — a truncated path
+    # restored on teardown would corrupt the user's search list.
+    out = '    "/tmp/my"quote.keychain"\n    "/Library/Keychains/extra.keychain"\n'
+    assert sign_mod._parse_keychain_list(out) == [
+        '/tmp/my"quote.keychain',
+        "/Library/Keychains/extra.keychain",
+    ]
+
+
 def test_sign_bundle_invalid_notarization_fetches_the_log_and_fails(tmp_path):
     _fixture_tree(tmp_path)
     recorder = SignRecorder(tmp_path, statuses=("Invalid",))

@@ -66,10 +66,9 @@ names they need, the required set is derived from what the repo ships):
   per-invocation TEMPORARY keychain — spliced into the user keychain SEARCH
   LIST for the pass (``codesign`` does not reliably resolve identities from
   a keychain outside the search list, #873) — torn down on every exit path
-  with the original search list restored, with
-  unique keychain/cert paths per call so the ``.app`` and ``.dmg`` signing
-  passes in one run cannot collide (the legacy fixed path collided with exit
-  48). An EMPTY cert password is VALID — a passwordless ``.p12`` is legal
+  with the original search list restored; unique keychain/cert paths per
+  call mean the ``.app`` and ``.dmg`` signing passes in one run cannot
+  collide (the legacy fixed path collided with exit 48). An EMPTY cert password is VALID — a passwordless ``.p12`` is legal
   PKCS#12, and gating a skip on the password once silently shipped
   ad-hoc-signed binaries;
 - notarization accepts either credential style behind one flag array
@@ -1020,8 +1019,16 @@ def _parse_keychain_list(stdout: str) -> list[str]:
     """The keychain paths out of ``security list-keychains`` output (one
     quoted path per line, whitespace-indented), order preserved — the user
     search list :func:`_sign_paths` snapshots before splicing the temporary
-    keychain in, and restores on teardown. Pure."""
-    return re.findall(r'"([^"]+)"', stdout)
+    keychain in, and restores on teardown. Parsed per line, stripping the
+    surrounding quotes — a path-scanning regex would truncate a path with an
+    embedded ``"`` (``security`` prints paths unescaped) and the teardown
+    would then restore a corrupted search list. Pure."""
+    paths = []
+    for line in stdout.splitlines():
+        stripped = line.strip()
+        if len(stripped) >= 2 and stripped.startswith('"') and stripped.endswith('"'):
+            paths.append(stripped[1:-1])
+    return paths
 
 
 def _decode_b64(value: str, what: str) -> bytes:
