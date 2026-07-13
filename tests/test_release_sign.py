@@ -56,6 +56,13 @@ IDENTITY = "Developer ID Application: Phos (TEAM123)"
 
 FIND_IDENTITY_OUT = f'  1) ABCDEF0123 "{IDENTITY}"\n     1 valid identities found\n'
 
+#: The runner's pre-existing user keychain search list — what `security
+#: list-keychains -d user` reports BEFORE the temp keychain is spliced in
+#: (#873), and what the teardown must restore verbatim.
+LOGIN_KEYCHAIN = "/Users/tester/Library/Keychains/login.keychain-db"
+
+LIST_KEYCHAINS_OUT = f'    "{LOGIN_KEYCHAIN}"\n'
+
 
 def _make_targz(dest: Path, base: Path, names: list[str]) -> None:
     """Write a real gzip tarball at ``dest`` whose members are ``names`` taken
@@ -490,6 +497,10 @@ class SignRecorder:
         stdout = ""
         if argv[0] == "security" and argv[1] == "find-identity":
             stdout = FIND_IDENTITY_OUT
+        elif argv == ("security", "list-keychains", "-d", "user"):
+            # The QUERY only (the `-s` setter consumes no output): the
+            # pre-splice user search list the teardown must restore.
+            stdout = LIST_KEYCHAINS_OUT
         elif argv[0] == "hdiutil":
             Path(argv[-1]).write_bytes(b"signed-dmg")
         elif argv[:3] == ("xcrun", "notarytool", "submit"):
@@ -579,6 +590,11 @@ def test_sign_bundle_full_recorded_sequence(tmp_path):
                 "kc-pass",
                 kc,
             ),
+            # The search-list splice (#873): snapshot the user list, then
+            # re-set it with the temp keychain PREPENDED — codesign resolves
+            # identities through the search list, not --keychain alone.
+            ("security", "list-keychains", "-d", "user"),
+            ("security", "list-keychains", "-d", "user", "-s", kc, LOGIN_KEYCHAIN),
             ("security", "find-identity", "-v", "-p", "codesigning", kc),
         ]
 
@@ -612,6 +628,9 @@ def test_sign_bundle_full_recorded_sequence(tmp_path):
     expected = [
         *keychain_setup(kc1, cert1),
         *[argv for path in inner_first for argv in signs(path, kc1)],
+        # Teardown: the ORIGINAL search list restored (temp keychain gone),
+        # then the temp keychain deleted.
+        ("security", "list-keychains", "-d", "user", "-s", LOGIN_KEYCHAIN),
         ("security", "delete-keychain", kc1),
         (
             "hdiutil",
@@ -627,6 +646,7 @@ def test_sign_bundle_full_recorded_sequence(tmp_path):
         ),
         *keychain_setup(kc2, cert2),  # the dmg pass: its OWN unique keychain
         *signs(signed_dmg, kc2),
+        ("security", "list-keychains", "-d", "user", "-s", LOGIN_KEYCHAIN),
         ("security", "delete-keychain", kc2),
         (
             "xcrun",
@@ -956,9 +976,54 @@ def test_sign_bundle_no_identity_still_tears_the_keychain_down(tmp_path):
     recorder = SignRecorder(tmp_path, effects={"security": no_identity})
     with pytest.raises(ReleaseError, match="no codesigning identity"):
         sign_mod.sign_bundle(_request(tmp_path, recorder))
-    # Teardown ran on the failure path, and the decoded cert is gone.
+    # Teardown ran on the failure path: the user search list restored to its
+    # pre-splice snapshot (#873), the keychain deleted, the decoded cert gone.
+    assert (
+        "security",
+        "list-keychains",
+        "-d",
+        "user",
+        "-s",
+        LOGIN_KEYCHAIN,
+    ) in recorder.argvs
     assert recorder.heads("security", "delete-keychain")
     assert not (tmp_path / "scratch" / "cert-u1.p12").exists()
+
+
+def test_sign_bundle_never_restores_an_unread_search_list(tmp_path):
+    # The restore guard (#873): when the pass dies BEFORE the search-list
+    # snapshot is read (here: create-keychain itself fails), the teardown must
+    # NOT run a restore — `list-keychains -d user -s` from an unread snapshot
+    # would set the user's search list to EMPTY, wiping it.
+    _fixture_tree(tmp_path)
+
+    def create_fails(argv):
+        if argv[1] == "create-keychain":
+            raise execrun.ExecError(list(argv), rc=1, stderr="boom", cause="exit")
+        return None
+
+    recorder = SignRecorder(tmp_path, effects={"security": create_fails})
+    with pytest.raises(execrun.ExecError):
+        sign_mod.sign_bundle(_request(tmp_path, recorder))
+    # No search-list SETTER ever ran (neither splice nor restore)...
+    setters = [
+        argv for argv in recorder.heads("security", "list-keychains") if "-s" in argv
+    ]
+    assert setters == []
+    # ...while the rest of the teardown still did.
+    assert recorder.heads("security", "delete-keychain")
+
+
+def test_parse_keychain_list_reads_the_quoted_paths_in_order():
+    out = (
+        '    "/Users/runner/Library/Keychains/login.keychain-db"\n'
+        '    "/Library/Keychains/extra.keychain"\n'
+    )
+    assert sign_mod._parse_keychain_list(out) == [
+        "/Users/runner/Library/Keychains/login.keychain-db",
+        "/Library/Keychains/extra.keychain",
+    ]
+    assert sign_mod._parse_keychain_list("") == []
 
 
 def test_sign_bundle_invalid_notarization_fetches_the_log_and_fails(tmp_path):
@@ -1272,7 +1337,8 @@ def _archive_tree(tmp_path: Path, *, binaries=("lex",)) -> Path:
 
 
 def _keychain_setup(kc: str, cert: str, password: str = "p12pass") -> list[tuple]:
-    """The temporary-keychain lifecycle argvs (create → … → find-identity)."""
+    """The temporary-keychain lifecycle argvs (create → … → search-list
+    splice → find-identity)."""
     return [
         ("security", "create-keychain", "-p", "kc-pass", kc),
         ("security", "set-keychain-settings", "-lut", "3600", kc),
@@ -1298,6 +1364,10 @@ def _keychain_setup(kc: str, cert: str, password: str = "p12pass") -> list[tuple
             "kc-pass",
             kc,
         ),
+        # The search-list splice (#873): snapshot, then prepend the temp
+        # keychain — codesign resolves identities through the search list.
+        ("security", "list-keychains", "-d", "user"),
+        ("security", "list-keychains", "-d", "user", "-s", kc, LOGIN_KEYCHAIN),
         ("security", "find-identity", "-v", "-p", "codesigning", kc),
     ]
 
@@ -1362,6 +1432,8 @@ def test_sign_archives_full_recorded_sequence(tmp_path):
     expected = [
         *_keychain_setup(kc1, cert1),
         *_codesigns(binary, kc1),
+        # Teardown: the ORIGINAL search list restored, then the keychain gone.
+        ("security", "list-keychains", "-d", "user", "-s", LOGIN_KEYCHAIN),
         ("security", "delete-keychain", kc1),
         # notarytool needs a container: the signed binary rides a zip (the
         # legacy `zip <bin>-notarize.zip <bin>` layout; -j junks the path).
