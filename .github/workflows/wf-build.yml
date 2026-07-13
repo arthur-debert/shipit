@@ -21,20 +21,22 @@ name: wf-build
 #
 # Check-name contract (PRD story 42, consumed by ADP02): this block's
 # stable jobs are `plan` (skipped whenever the caller supplies the facts —
-# every composed-chain run), `build`, surfacing per leg as
-# `<caller-job> / build (<artifact>, <platform>)`, and the standalone-only
-# `carry-notes` (skipped on every composed-chain run, so additive like
-# `plan`). Never renamed casually.
+# every composed-chain run) and `build`, surfacing per leg as
+# `<caller-job> / build (<artifact>, <platform>)`, plus the standalone-only
+# `notes` (#898) — like `plan`, a skipped no-op on every fact-supplied run,
+# so existing required checks are untouched. Never renamed casually.
 #
 # Per-stage dispatch (TOL02-WS09 #780): the plan facts (`version`,
 # `matrix`, `stages`) are OPTIONAL — omit them all and the `plan` job
 # re-derives them at the tag via `release preflight --plan-only` (the same
 # one planner, run in the block, never consumer YAML — ADR-0040's line
 # holds: derivation lives shipit-side). The standalone contract is ONE
-# input: `tag` — plus `run-id` (the prepare run) when the dispatch is a
-# staged-relay leg whose run must feed a follow-up sign/publish (#899).
-# Supply the facts all-or-none: a partial set fails loudly at expression
-# evaluation, by design.
+# input: `tag`. Supply the facts all-or-none: a partial set fails loudly at
+# expression evaluation, by design. A standalone run is also a RELAY-
+# COMPLETE source for its successor (#898, workflows.lex §8): the `notes`
+# job re-derives the `release-notes` artifact at the tag, so a follow-up
+# sign/publish dispatch naming THIS run as its single source finds the
+# notes beside the bundle-* trees.
 
 on:
   workflow_call:
@@ -65,23 +67,9 @@ on:
           plan-wide stage.
         type: string
         required: false
-      run-id:
-        description: >-
-          Staged relay (#899): the SOURCE run id (the prepare run) whose
-          `release-notes` artifact this dispatch carries forward, making
-          THIS run a complete sign source (workflows.lex §8's
-          one-source-run rule). Omitted, nothing is carried (the
-          composed-chain path — one shared run already holds the notes).
-          Cross-run download needs `actions: read` on the caller's token —
-          see the permissions note below.
-        type: string
-        required: false
 
-# NO `permissions:` key, deliberately (staged relay, #899): a called
-# workflow's permissions can only DOWNGRADE the caller's token, so declaring
-# one here would strip the `actions: read` a standalone dispatch caller
-# grants for carry-notes' cross-run download (workflows.lex §8) — the same
-# rule wf-sign-mac and wf-publish follow.
+permissions:
+  contents: read
 
 jobs:
   plan:
@@ -123,6 +111,48 @@ jobs:
             printf 'version=%s\n' "$version"
             printf 'matrix=%s\n' "$(jq -c '.matrix' <<<"$plan")"
           } >> "$GITHUB_OUTPUT"
+
+  notes:
+    # Relay-completeness (#898, workflows.lex §8): the single-source-run rule
+    # makes every stage's run a SUFFICIENT source for its successor, and the
+    # sign/publish stages download `release-notes` from their ONE `run-id` —
+    # but a build dispatched on the tag alone has no source run to CARRY the
+    # notes from (prepare's run uploaded them). Prepare committed the
+    # changelog roll at/before the tag, so this job RE-DERIVES the identical
+    # text at the tag instead: `shipit release notes` re-emits the committed
+    # section (or a prerelease's fragments) and refuses an uncut tree — read,
+    # never remade (ADR-0009), the same shipit-side-derivation line as `plan`
+    # (ADR-0040). Standalone ONLY (`inputs.matrix == ''`, the same
+    # discriminator as `plan`): a fact-supplied (composed-chain) run shares
+    # prepare's run, which already carries `release-notes` — a second upload
+    # would collide — so there this job is a skipped no-op, keeping the
+    # story-42 check surface additive.
+    if: inputs.matrix == ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: prefix-dev/setup-pixi@v0.9.6
+        with:
+          # Lockstep with the Layer 0 bootstrap's PIXI_PIN — see
+          # wf-checks.yml.
+          pixi-version: v0.71.0
+          locked: true
+      - name: Re-derive the release notes at the tag
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          # ADR-0041: the tag is the version authority (v<version>).
+          version="${TAG#v}"
+          pixi run --locked ./bin/shipit release notes "$version" --out RELEASE_NOTES.md
+      - name: Upload the release notes into this run
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-notes
+          path: RELEASE_NOTES.md
+          if-no-files-found: error
 
   build:
     needs: plan
@@ -216,36 +246,4 @@ jobs:
           path: |
             dist/**
             !dist/**/*.app/**
-          if-no-files-found: error
-
-  # Carry-forward (staged relay, #899): make THIS build run a COMPLETE sign
-  # source. A standalone sign names ONE run as its `run-id` and downloads
-  # `bundle-*` AND `release-notes` from it (its carry-notes mirrors the
-  # notes onward for publish, workflows.lex §8's single-source-run rule),
-  # but the build legs produce only bundle-* — release-notes is prepare's.
-  # This job re-uploads it from the SOURCE (prepare) run under its original
-  # name, so the four-dispatch relay threads one run-id per stage:
-  # prepare → build → sign → publish. Standalone ONLY: `run-id == ''` (the
-  # composed chain — one shared run, nothing to carry) skips it, so
-  # existing required checks are untouched (like `plan`).
-  carry-notes:
-    if: inputs.run-id != ''
-    runs-on: ubuntu-latest
-    steps:
-      # Cross-run only: `run-id`/`github-token` flip download-artifact onto
-      # the REST API, which needs the `actions: read` a standalone dispatch
-      # caller grants.
-      - name: Download the release notes (from the source run)
-        if: inputs.run-id != ''
-        uses: actions/download-artifact@v8
-        with:
-          name: release-notes
-          path: notes
-          run-id: ${{ inputs.run-id }}
-          github-token: ${{ github.token }}
-      - name: Re-upload the release notes into this run
-        uses: actions/upload-artifact@v7
-        with:
-          name: release-notes
-          path: notes/*
           if-no-files-found: error

@@ -10,12 +10,12 @@ sign matrix of proofs on live GitHub, and watches every run to its verdict:
   invisible to every unit test, because it needs the runner + cert).
 - ``staged`` — ``prepare`` → ``build`` → ``sign`` → ``publish`` as four
   standalone dispatches, threading ``tag``/``run-id`` between them exactly
-  as workflows.lex §8 prescribes (each stage names its predecessor's run:
-  build carries ``release-notes`` forward from the prepare run, sign feeds
-  off the build run, publish names the SIGN run — every source run made a
-  COMPLETE source by its block's carry-forward jobs): the REAL cross-run
-  artifact hand-off — the #898 regression surface, where a standalone sign
-  dispatch died relaying ``release-notes``.
+  as workflows.lex §8 prescribes (every stage's run is a SUFFICIENT source
+  for its successor: build dispatches on the tag alone — its standalone
+  ``notes`` job re-derives ``release-notes`` there (#898) — sign feeds off
+  the build run, publish names the SIGN run): the REAL cross-run artifact
+  hand-off — the #898 regression surface, where a standalone sign dispatch
+  died relaying ``release-notes``.
 
 Why it exists (the owner directive behind #899): ``tests/test_release_sign.py``
 carries 70 unit tests and both live sign-path failures of the rollout were
@@ -90,17 +90,18 @@ MODES: tuple[str, ...] = (MODE_FULL, MODE_STAGED, MODE_BOTH)
 RELAY_ORDER: tuple[str, ...] = ("prepare", "build", "sign", "publish")
 
 #: Stage → the relay stage whose RUN feeds it as ``run-id`` (``None``: the
-#: stage consumes no prior run). Each stage names its PREDECESSOR, because
-#: each standalone block makes its OWN run a complete source for the next
-#: (workflows.lex §8's one-source-run rule): build names the prepare run and
-#: carries ``release-notes`` forward (wf-build's carry-notes — without it the
-#: build run lacks the notes and sign's own carry-notes dies, the #898
-#: class); sign names the build run (bundles + carried notes) and carries the
-#: base families onward; publish names the SIGN run — naming the build run
-#: instead would publish the unsigned bundles.
+#: stage consumes no prior run). Each artifact-consuming stage names its
+#: PREDECESSOR, because every stage's run is a SUFFICIENT source for its
+#: successor (workflows.lex §8's one-source-run rule): prepare and build
+#: consume nothing — build dispatches on the tag alone, its standalone
+#: `notes` job re-deriving ``release-notes`` there (#898: without it the
+#: build run lacks the notes and sign's carry-notes dies); sign names the
+#: build run (bundles + re-derived notes) and carries the base families
+#: onward; publish names the SIGN run — naming the build run instead would
+#: publish the unsigned bundles.
 RELAY_SOURCE: dict[str, str | None] = {
     "prepare": None,
-    "build": "prepare",
+    "build": None,
     "sign": "build",
     "publish": "sign",
 }
@@ -157,9 +158,12 @@ def stage_inputs(
     The workflows.lex §8 aligned stage-input contract, as the dispatcher
     threads it: ``full``/``prepare`` ride ``version`` (they create the tag);
     the relay's later stages (``build``, ``sign``, ``publish``) ride ``tag``
-    + ``run-id`` — the SOURCE run named by :data:`RELAY_SOURCE`, looked up
-    in ``run_ids`` (stage → completed run id; a missing source is a caller
-    bug and raises KeyError loudly).
+    (ADR-0041 — the version is read off it), plus ``run-id`` on the
+    artifact-consuming stages (``sign``, ``publish``) — the SOURCE run named
+    by :data:`RELAY_SOURCE`, looked up in ``run_ids`` (stage → completed run
+    id; a missing source is a caller bug and raises KeyError loudly).
+    ``build`` names no run: its standalone ``notes`` job re-derives
+    ``release-notes`` at the tag (#898).
     """
     if stage in (MODE_FULL, "prepare"):
         return {"stage": stage, "version": version}

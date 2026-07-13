@@ -390,6 +390,7 @@ _HELP_RESOURCES = {
     ("release",): ("shipit.verbs", "release_help.txt"),
     ("release", "preflight"): ("shipit.verbs", "release_preflight_help.txt"),
     ("release", "prepare"): ("shipit.verbs", "release_prepare_help.txt"),
+    ("release", "notes"): ("shipit.verbs", "release_notes_help.txt"),
     ("release", "bundle"): ("shipit.verbs", "release_bundle_help.txt"),
     ("release", "assert-bundle"): ("shipit.verbs", "release_assert_bundle_help.txt"),
     ("release", "sign"): ("shipit.verbs", "release_sign_help.txt"),

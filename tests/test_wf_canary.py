@@ -3,8 +3,9 @@
 Three layers:
 
 * PURE CORES — the per-mode version derivation, the stage-input threading
-  table (workflows.lex §8: each relay stage names its predecessor's run —
-  build the prepare run, sign the build run, publish the SIGN run), new-run
+  table (workflows.lex §8: each artifact-consuming relay stage names its
+  predecessor's run — sign the build run, publish the SIGN run; build rides
+  the tag alone, its `notes` job re-deriving release-notes there), new-run
   discovery, and the proof / teardown renderings — fixture-tested with no
   boundary anywhere near them. Plus the relay-availability drift guard:
   the threading table modelled against the block files' actual artifact
@@ -73,11 +74,12 @@ def test_full_and_prepare_dispatch_on_version():
 
 
 def test_each_relay_stage_names_its_predecessors_run():
-    # workflows.lex §8: build names the PREPARE run (its carry-notes brings
-    # release-notes forward), sign the BUILD run, publish the SIGN run.
+    # workflows.lex §8: build dispatches on the tag alone (its `notes` job
+    # re-derives release-notes there, #898); sign names the BUILD run,
+    # publish the SIGN run.
     run_ids = {"prepare": 1, "build": 2, "sign": 3}
     build = wf_canary.stage_inputs("build", version="1.2.3", run_ids=run_ids)
-    assert build == {"stage": "build", "tag": "v1.2.3", "run-id": "1"}
+    assert build == {"stage": "build", "tag": "v1.2.3"}
     sign = wf_canary.stage_inputs("sign", version="1.2.3", run_ids=run_ids)
     assert sign == {"stage": "sign", "tag": "v1.2.3", "run-id": "2"}
     publish = wf_canary.stage_inputs("publish", version="1.2.3", run_ids=run_ids)
@@ -128,8 +130,9 @@ def test_every_relay_source_run_carries_what_its_consumer_downloads():
     # (prepare's artifact), so a staged sign dispatch died at its own
     # carry-notes download. Model the relay: a stage's run HOLDS every
     # family its block uploads (its own produce plus the standalone
-    # carry-forward jobs — active on the relay path, where run-id is always
-    # supplied); a stage NEEDS every family its block downloads CROSS-RUN
+    # carry-forward / re-derivation jobs — active on the relay path, where
+    # every dispatch is standalone); a stage NEEDS every family its block
+    # downloads CROSS-RUN
     # (steps naming `run-id`). Every need must be present in the run
     # RELAY_SOURCE names as that stage's source.
     uploads = {
@@ -148,8 +151,9 @@ def test_every_relay_source_run_carries_what_its_consumer_downloads():
         else:
             missing = needs - uploads[source]
             assert not missing, (stage, source, missing)
-    # The scar itself, stated directly: the build run carries the notes
-    # forward, so it is a complete source for the sign dispatch that names it.
+    # The scar itself, stated directly: the build run holds the notes (its
+    # `notes` job re-derives them at the tag, #898), so it is a complete
+    # source for the sign dispatch that names it.
     assert "release-notes" in uploads["build"]
 
 
@@ -310,14 +314,10 @@ def test_staged_mode_threads_run_ids_through_the_relay(monkeypatch, capsys):
     rc = wf_canary.run("1.2.3", mode="staged", sleep=sleep, monotonic=monotonic)
     assert rc == 0
     assert [d["stage"] for d in scripted.dispatched] == list(wf_canary.RELAY_ORDER)
-    # prepare rides the version; build names the PREPARE run (the
-    # release-notes carry, workflows.lex §8).
+    # prepare rides the version; build rides the tag alone (its `notes` job
+    # re-derives release-notes there, workflows.lex §8 / #898).
     assert scripted.dispatched[0] == {"stage": "prepare", "version": "1.2.3"}
-    assert scripted.dispatched[1] == {
-        "stage": "build",
-        "tag": "v1.2.3",
-        "run-id": "101",
-    }
+    assert scripted.dispatched[1] == {"stage": "build", "tag": "v1.2.3"}
     # sign names the BUILD run; publish names the SIGN run (workflows.lex §8).
     assert scripted.dispatched[2]["run-id"] == "102"
     assert scripted.dispatched[3]["run-id"] == "103"
