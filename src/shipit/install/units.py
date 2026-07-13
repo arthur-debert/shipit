@@ -202,6 +202,7 @@ PIXI_PYTHON_RELEASE_DEPS_CLOSE = "# <<< shipit-managed python release deps <<<"
 PIXI_TREE_SITTER_DEPS_KEY = "pixi.toml#shipit-tree-sitter-release-deps"
 PIXI_TREE_SITTER_DEPS_OPEN = "# >>> shipit-managed tree-sitter release deps (do not edit; regenerate via `shipit install`) >>>"
 PIXI_TREE_SITTER_DEPS_CLOSE = "# <<< shipit-managed tree-sitter release deps <<<"
+PIXI_TREE_SITTER_DEPS_ANCHOR = "[dependencies]"
 # (unit key, toolchain signal, open, close, anchor, packaged data file) — the
 # catalog rows :func:`load_units` appends per requested toolchain, in this order.
 TOOLCHAIN_UNITS = (
@@ -258,7 +259,7 @@ TOOLCHAIN_UNITS = (
         TOOLCHAIN_TREE_SITTER,
         PIXI_TREE_SITTER_DEPS_OPEN,
         PIXI_TREE_SITTER_DEPS_CLOSE,
-        PIXI_NODE_DEPS_ANCHOR,
+        PIXI_TREE_SITTER_DEPS_ANCHOR,
         "pixi-tree-sitter-release-deps-block.toml",
     ),
 )
