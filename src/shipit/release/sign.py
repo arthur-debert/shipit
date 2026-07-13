@@ -63,10 +63,12 @@ names they need, the required set is derived from what the repo ships):
 
 - signing always uses the Developer ID ``.p12``
   (:data:`CERT_SECRET`/:data:`CERT_PASSWORD_SECRET`) imported into a
-  per-invocation TEMPORARY keychain torn down on every exit path, with
-  unique keychain/cert paths per call so the ``.app`` and ``.dmg`` signing
-  passes in one run cannot collide (the legacy fixed path collided with exit
-  48). An EMPTY cert password is VALID — a passwordless ``.p12`` is legal
+  per-invocation TEMPORARY keychain — spliced into the user keychain SEARCH
+  LIST for the pass (``codesign`` does not reliably resolve identities from
+  a keychain outside the search list, #873) — torn down on every exit path
+  with the original search list restored; unique keychain/cert paths per
+  call mean the ``.app`` and ``.dmg`` signing passes in one run cannot
+  collide (the legacy fixed path collided with exit 48). An EMPTY cert password is VALID — a passwordless ``.p12`` is legal
   PKCS#12, and gating a skip on the password once silently shipped
   ad-hoc-signed binaries;
 - notarization accepts either credential style behind one flag array
@@ -331,8 +333,11 @@ def codesign_argv(
 ) -> list[str]:
     """One codesign invocation: hardened runtime + secure timestamp, forced
     re-sign (the bundler may have ad-hoc-signed), the signing identity pinned
-    to ``keychain`` via ``--keychain`` (found there without touching the user's
-    global keychain search list), optional entitlements. Pure."""
+    to ``keychain`` via ``--keychain`` (the temporary keychain ALSO rides the
+    user keychain search list for the pass — :func:`_sign_paths` splices it in,
+    because on current macOS ``--keychain`` alone does not reliably resolve an
+    identity from a keychain outside the search list, #873; the flag keeps the
+    lookup pinned to the intended keychain), optional entitlements. Pure."""
     argv = ["codesign", "--force", "--sign", identity, "--options", "runtime"]
     argv.append("--timestamp")
     if keychain is not None:
@@ -1010,6 +1015,24 @@ def _parse_identity(stdout: str) -> str | None:
     return match.group(1) if match else None
 
 
+def _parse_keychain_list(stdout: str) -> list[str]:
+    """The keychain paths out of ``security list-keychains`` output (one
+    quoted path per line, whitespace-indented), order preserved — the user
+    search list :func:`_sign_paths` snapshots before splicing the temporary
+    keychain in, and restores on teardown. Each entry is matched from its
+    opening quote at the start of a line to the closing quote that ends a
+    line: ``security`` prints paths unescaped, so an embedded ``"`` must not
+    truncate the path and an embedded newline must not split it — either
+    corruption would be restored into the user's search list on teardown.
+    Pure."""
+    return [
+        match.group(1)
+        for match in re.finditer(
+            r'^[ \t]*"(.*?)"[ \t]*$', stdout, re.MULTILINE | re.DOTALL
+        )
+    ]
+
+
 def _decode_b64(value: str, what: str) -> bytes:
     """Decode base64 secret material, re-shaping a garbage value as the
     domain refusal (never a raw ``binascii.Error`` traceback).
@@ -1036,13 +1059,24 @@ def _sign_paths(
 
     The full legacy ``sign-mac`` lifecycle: unique keychain + cert paths per
     call (the ``.app`` and ``.dmg`` passes in one run must not collide),
-    create/unlock/import/partition-list, identity discovery IN that keychain,
-    then per path a forced hardened-runtime + timestamp sign followed by
-    ``codesign --verify --strict``. The signing keychain is pinned on every
-    ``codesign`` via ``--keychain`` rather than prepended to the user's global
-    keychain search list: a search-list mutation outlives a ``SIGKILL`` (or a
-    power loss) that skips the ``finally`` teardown and would then permanently
-    pollute a release engineer's laptop. Entitlements are assigned PER CODE ROLE
+    create/unlock/import/partition-list, a SEARCH-LIST splice (snapshot the
+    user keychain search list, re-set it with the temporary keychain
+    prepended), identity discovery IN that keychain, then per path a forced
+    hardened-runtime + timestamp sign followed by ``codesign --verify
+    --strict``. The splice is LOAD-BEARING (#873, live-fire proven): on
+    current macOS runners ``codesign --keychain <path>`` alone does not
+    reliably resolve an identity from a keychain OUTSIDE the search list —
+    the ``find-identity`` guard passes (it takes the keychain as an explicit
+    argument) while codesign itself fails with ``no identity found``; every
+    battle-tested CI signing flow (apple-actions/import-codesign-certs,
+    tauri, electron-builder) runs ``security list-keychains -d user -s
+    <temp> <original…>`` after import. The ``--keychain`` pin on each
+    codesign stays as the explicit lookup hint. The ``finally`` restores the
+    snapshotted original search list (ONLY when the splice actually ran — a
+    blind restore from an unread snapshot would wipe the user's list); a
+    ``SIGKILL`` that skips the teardown leaves at worst a stale entry
+    pointing at a deleted scratch file, which macOS ignores.
+    Entitlements are assigned PER CODE ROLE
     by ``policy`` (:func:`entitlements_for`): the top-level ``.app`` (the LAST
     path) gets the app entitlements, a nested electron helper ``.app`` its own,
     a nested ``.appex`` its own sandbox set — never JIT — and every other path
@@ -1061,6 +1095,11 @@ def _sign_paths(
     # records can never carry it in clear.
     redact.register_secret(kc_pass)
     run = req.run_cmd
+    # The user search-list snapshot: None until the splice below actually
+    # reads it, so the finally can tell "never spliced" (restore would WIPE
+    # the user's search list) from "spliced, restore it" — even an empty
+    # snapshot restores faithfully.
+    original_keychains: list[str] | None = None
     try:
         cert.write_bytes(_decode_b64(signing.cert_p12_base64, CERT_SECRET))
         run(
@@ -1103,6 +1142,27 @@ def _sign_paths(
             ],
             SIGN_CMD_TIMEOUT,
         )
+        # The search-list splice (#873): codesign resolves identities through
+        # the keychain SEARCH LIST — `--keychain` alone does not reliably
+        # reach a keychain outside it on current macOS, so the find-identity
+        # guard below would pass (explicit keychain argument) while codesign
+        # itself fails with "no identity found". Snapshot the user list, then
+        # re-set it with the temporary keychain prepended; the finally
+        # restores the snapshot.
+        listed = run(["security", "list-keychains", "-d", "user"], SIGN_CMD_TIMEOUT)
+        original_keychains = _parse_keychain_list(listed.stdout)
+        run(
+            [
+                "security",
+                "list-keychains",
+                "-d",
+                "user",
+                "-s",
+                str(keychain),
+                *original_keychains,
+            ],
+            SIGN_CMD_TIMEOUT,
+        )
         found = run(
             ["security", "find-identity", "-v", "-p", "codesigning", str(keychain)],
             SIGN_CMD_TIMEOUT,
@@ -1132,9 +1192,18 @@ def _sign_paths(
             run(["codesign", "--verify", "--strict", str(path)], SIGN_CMD_TIMEOUT)
         return identity
     finally:
-        # Teardown on EVERY exit: delete-keychain removes the file and its
-        # search-list entry; best-effort so a cleanup failure never masks the
+        # Teardown on EVERY exit: restore the snapshotted user search list
+        # (only when the splice ran — see original_keychains above), then
+        # delete-keychain removes the file and any remaining search-list
+        # entry; each step best-effort so a cleanup failure never masks the
         # error that aborted the pass. The decoded cert must not outlive it.
+        if original_keychains is not None:
+            with contextlib.suppress(execrun.ExecError):
+                run(
+                    ["security", "list-keychains", "-d", "user", "-s"]
+                    + original_keychains,
+                    SIGN_CMD_TIMEOUT,
+                )
         with contextlib.suppress(execrun.ExecError):
             run(["security", "delete-keychain", str(keychain)], SIGN_CMD_TIMEOUT)
         cert.unlink(missing_ok=True)
