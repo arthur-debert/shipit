@@ -33,7 +33,7 @@ the full reference (with `file:line` citations and a refresh procedure) is
    agent's process tree.
 
 2. **There is no pixi run-id / env-UUID / on-disk log.** pixi persists only
-   *static* state (envs by name; `.pixi/envs/<env>/conda-meta/.pixi-environment-fingerprint`
+   _static_ state (envs by name; `.pixi/envs/<env>/conda-meta/.pixi-environment-fingerprint`
    = "provisioned & consistent with the lock"; `pixi.lock`). So **the only stable
    per-run correlation key is Codex's `session_id`** (the transcript
    filename). Join observability on shipit-owned keys + `session_id` — pixi gives
