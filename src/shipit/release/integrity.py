@@ -142,7 +142,27 @@ def expected_main_binary(artifact: config.Artifact) -> str:
     (``product-name``) → the first build target's declared package (its
     basename — ``./cmd/padz`` → ``padz``) → the artifact name. A package with
     no usable basename (a bare ``.``/``./``/``..``/``/``) is skipped, never
-    asserted as the expected name. Pure."""
+    asserted as the expected name.
+
+    A ``wasm-pack`` bundle that declares a ``scope`` publishes a SCOPED npm
+    package: ``wasm-pack build --scope <s>`` stamps ``@<s>/<pkg>`` into
+    ``package/package.json`` ``name`` (the identity
+    :func:`_npm_tarball_main_binary` reads back), so the expected name must
+    carry the same ``@scope/`` prefix — the base name from the chain above,
+    prefixed. An unscoped wasm-pack (``scope`` is ``None``) and every other
+    composition keep the bare base name. Pure."""
+    base = _base_main_binary(artifact)
+    bundle = artifact.bundle
+    if bundle is not None and bundle.scope is not None:
+        return f"@{bundle.scope}/{base}"
+    return base
+
+
+def _base_main_binary(artifact: config.Artifact) -> str:
+    """The un-scoped expected main-binary name — the fallback chain
+    (mainBinaryName → productName → first package basename → artifact name),
+    before :func:`expected_main_binary` applies any npm ``@scope`` prefix.
+    Pure."""
     if artifact.main_binary is not None:
         return artifact.main_binary
     if artifact.product_name is not None:
