@@ -8,6 +8,10 @@ pipeline's planner and its effectful stages:
   machine-readable plan, hard-failing on missing secrets before any write;
 - ``shipit release prepare`` (TOL02-WS01 #559) — the pipeline's only writer
   of repo history;
+- ``shipit release notes`` (#898) — the READ-ONLY re-derivation of THE one
+  coalesced notes text at an already-cut checkout (see :func:`run_notes`):
+  the per-stage dispatch relay's notes source (workflows.lex §8) for a
+  standalone stage run with no source run to carry ``release-notes`` from;
 - ``shipit release bundle`` (TOL02-WS03 #561) — the composition of build
   outputs into unsigned Artifacts, the effectful walk over the closed
   composition registry (:mod:`shipit.release.bundle`);
@@ -117,7 +121,7 @@ from ..release import sign as sign_mod
 from ..release import version as version_mod
 from . import changelog as changelog_verb
 from ._errors import cli_errors
-from ._params import VERSION_SPEC, json_option
+from ._params import BARE_SEMVER, VERSION_SPEC, json_option
 from ._render import emit
 from ._tool import load_config
 
@@ -683,6 +687,72 @@ def run_prepare(
             "tag_only": resolved.tag_only,
             "committed": len(to_commit),
         },
+    )
+    return 0
+
+
+# --------------------------------------------------------------------------
+# The notes re-derivation (per-stage dispatch relay, #898)
+# --------------------------------------------------------------------------
+
+
+@cli_errors
+def run_notes(
+    version: str,
+    *,
+    out: str | None = None,
+    gitio: Any = git,
+    read_tree: Callable[[Path], changelog_verb.ChangelogTree] | None = None,
+) -> int:
+    """Re-emit THE one coalesced notes text for an already-cut ``version``.
+    Returns 0/1.
+
+    The per-stage dispatch relay's notes source (#898, workflows.lex §8): a
+    stage block dispatched on the tag alone has no source run to carry the
+    ``release-notes`` artifact from, but prepare committed the changelog
+    roll at/before the tag, so the SAME text is re-derivable from the
+    checkout — :func:`~shipit.verbs.changelog.plan_cut` re-plans the cut and
+    the resume/extract paths re-emit the identical notes (ADR-0009), read,
+    never remade. Strictly READ-ONLY: a plan that would MUTATE the tree (a
+    final version with uncut fragments — a state prepare never tagged) is
+    refused loudly; this verb re-derives what prepare produced, it never
+    cuts.
+
+    ``version`` arrives as a validated bare semver (bump words died at the
+    click boundary — the version is read off the tag, ADR-0041). ``--out``
+    writes the text to FILE (repo-root-anchored when relative, like
+    prepare's ``--notes-out``) with a report on stdout; omitted, the notes
+    print VERBATIM to stdout. ``gitio``/``read_tree`` are the test seams,
+    matching :func:`run_prepare`.
+    """
+    root_s = gitio.repo_root(cwd=".")
+    if root_s is None:
+        raise ReleaseError(
+            "not inside a git checkout — `release notes` re-derives the "
+            "notes from a tag's checked-out CHANGELOG/ tree"
+        )
+    root = Path(root_s)
+
+    _tree, plan = changelog_verb.plan_cut(root, version, read_tree=read_tree)
+    if plan.mutates:
+        raise ReleaseError(
+            f"CHANGELOG/ carries uncut fragments and no {version} section — "
+            "this checkout is not an already-cut state, so there are no "
+            f"prepare-produced notes for {version} to re-emit; `release "
+            "notes` re-derives, it never cuts (run `shipit release prepare` "
+            "for a fresh cut)"
+        )
+
+    if out:
+        out_arg = Path(out)
+        notes_path = out_arg if out_arg.is_absolute() else root / out_arg
+        _write_notes(notes_path, plan.notes)
+        print(f"notes: wrote {notes_path} ({version})")
+    else:
+        print(plan.notes, end="")
+    logger.info(
+        "release notes re-derived",
+        extra={"version": version, "out": out or "-"},
     )
     return 0
 
@@ -1507,6 +1577,33 @@ def prepare_cmd(
     branch ref is never advanced.
     """
     raise SystemExit(run_prepare(version, notes_out=notes_out, as_json=as_json))
+
+
+@release.command(name="notes")
+@click.argument("version", type=BARE_SEMVER)
+@click.option(
+    "--out",
+    type=click.Path(dir_okay=False),
+    help=(
+        "Write the notes text to FILE (relative paths anchor to the repo "
+        "root, like prepare's --notes-out) with a report on stdout; omitted, "
+        "the notes print verbatim to stdout."
+    ),
+)
+def notes_cmd(version: str, out: str | None) -> None:
+    """Re-emit the release-notes text for an already-cut VERSION.
+
+    VERSION is the bare semver read off an existing tag (v<version>, ADR-0041
+    — no bump words). Run at that tag's checkout, this re-derives THE one
+    coalesced notes text prepare produced (ADR-0009: the committed
+    CHANGELOG/<version>.md section for a final, the fragments for a
+    prerelease) — the per-stage dispatch relay's notes source (#898): a
+    stage block dispatched on the tag alone re-derives the release-notes
+    artifact instead of carrying it from a source run it does not have.
+    Read-only: a checkout that was never cut for VERSION is refused, never
+    cut here.
+    """
+    raise SystemExit(run_notes(version, out=out))
 
 
 @release.command(name="bundle")

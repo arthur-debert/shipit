@@ -21,6 +21,10 @@ The repeated CLI concepts are defined ONCE here:
 - :data:`VERSION_SPEC` — a release version argument (``<semver>`` or a bump
   word) through the canonical parser
   (:func:`shipit.release.version.parse_spec`, ADR-0041).
+- :data:`BARE_SEMVER` — a CONCRETE version argument for the tag-state
+  re-derivation verbs (``release notes``, #898): the same canonical parser,
+  minus bump words — and so also no ``v`` prefix, no build metadata (the
+  version is read off an existing tag, ADR-0041).
 
 The PR target is the deliberate exception (ADR-0030): click validates only
 the explicit ``int``; resolving "which PR" (explicit number vs the current
@@ -115,6 +119,44 @@ class VersionSpecParam(click.ParamType):
 
 #: The shared instance verbs reference (a ParamType is stateless).
 VERSION_SPEC = VersionSpecParam()
+
+
+class BareSemverParam(click.ParamType):
+    """A CONCRETE bare-semver version at parse — no bump words, no ``v`` prefix.
+
+    The tag-state re-derivation verbs (``release notes``, #898) take the
+    version READ OFF an existing tag (ADR-0041: ``v<version>`` by
+    construction), so a bump word — resolvable only against tag history, for
+    a cut that has not happened yet — is a usage error here, rejected at
+    argv parse (exit 2) like every malformed version. Validation runs through
+    the release version grammar (:func:`shipit.release.version.parse_spec`),
+    so the shapes ``release prepare`` could never have cut — a ``v`` prefix,
+    build metadata (``+…``) — die here too, with the grammar's own messages.
+    """
+
+    name = "version"
+
+    def convert(self, value: object, param, ctx) -> str:
+        from ..release.version import parse_spec  # lazy: verb-only
+
+        raw = str(value)
+        try:
+            spec = parse_spec(raw)
+        except ValueError as exc:
+            self.fail(str(exc), param, ctx)
+        if spec.semver is None:
+            self.fail(
+                f"{raw!r} is a bump word, but the version here is read off "
+                "an existing tag (ADR-0041) — pass the concrete version the "
+                "tag names (e.g. 1.2.3)",
+                param,
+                ctx,
+            )
+        return spec.semver
+
+
+#: The shared instance verbs reference (a ParamType is stateless).
+BARE_SEMVER = BareSemverParam()
 
 
 def _ambient_repo() -> Repo | None:

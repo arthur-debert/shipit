@@ -46,10 +46,12 @@ COMPOSED = "wf-release.yml"
 #: run — additive, so existing required checks were untouched. The
 #: `carry-bundles`/`carry-notes` jobs joined too (#780): standalone-only
 #: base-artifact carry-forward, likewise skipped no-ops on the composed
-#: chain, so likewise additive.
+#: chain, so likewise additive. wf-build's `notes` job joined in #898:
+#: standalone-only notes re-derivation at the tag (build has no source run
+#: to carry from), likewise a skipped no-op on the composed chain.
 STABLE_JOBS = {
     "wf-prepare.yml": ["prepare"],
-    "wf-build.yml": ["plan", "build"],
+    "wf-build.yml": ["plan", "notes", "build"],
     "wf-sign-mac.yml": ["plan", "sign", "carry-bundles", "carry-notes"],
     "wf-publish.yml": ["plan", "assert", "publish"],
     "wf-release.yml": ["prepare", "build", "sign", "publish"],
@@ -627,6 +629,33 @@ def test_standalone_sign_run_carries_base_artifacts_as_a_publish_source():
     assert "inputs.run-id != ''" in carry_notes["if"]
     up = next(s for s in carry_notes["steps"] if "upload-artifact" in s.get("uses", ""))
     assert up["with"]["name"] == "release-notes"
+
+
+def test_standalone_build_run_rederives_notes_as_a_relay_source():
+    # #898: a standalone build run must be a SUFFICIENT source for its
+    # successor (§8's single-source-run rule) — sign/publish download
+    # `release-notes` from their ONE run-id, but build's legs never touch the
+    # notes and, dispatched on the tag alone, build has no source run to
+    # CARRY them from (prepare's run uploaded them). The `notes` job
+    # RE-DERIVES them at the tag instead (`shipit release notes` — the
+    # committed changelog roll makes the text deterministic; an uncut tree is
+    # refused, never cut) and uploads them into THIS run under the original
+    # name. Standalone-only via the same discriminator as `plan`
+    # (inputs.matrix == ''): a fact-supplied (composed-chain) run shares
+    # prepare's run — a second `release-notes` upload would collide — so the
+    # job skips there, keeping the story-42 check surface additive.
+    doc = _load("wf-build.yml")
+    notes = doc["jobs"]["notes"]
+    assert notes["if"] == "inputs.matrix == ''"
+    runs = _runs(notes["steps"])
+    assert "release notes" in runs
+    assert "--out RELEASE_NOTES.md" in runs
+    # ADR-0041: the version is read off the tag, never passed separately.
+    assert "${TAG#v}" in runs
+    up = next(s for s in notes["steps"] if "upload-artifact" in s.get("uses", ""))
+    assert up["with"]["name"] == "release-notes"
+    assert up["with"]["path"] == "RELEASE_NOTES.md"
+    assert up["with"]["if-no-files-found"] == "error"
 
 
 # --------------------------------------------------------------------------

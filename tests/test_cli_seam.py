@@ -33,6 +33,7 @@ from shipit.verbs._context import (
 )
 from shipit.verbs._errors import cli_errors
 from shipit.verbs._params import (
+    BARE_SEMVER,
     REPO_SLUG,
     dry_run_option,
     json_option,
@@ -199,6 +200,44 @@ def test_repo_slug_param_malformed_is_a_usage_error_exit_2():
     result = CliRunner().invoke(probe, ["not-a-slug"])
     assert result.exit_code == 2
     assert "not an owner/name slug" in result.output
+
+
+def test_bare_semver_param_passes_a_concrete_version_through():
+    @click.command()
+    @click.argument("version", type=BARE_SEMVER)
+    def probe(version) -> None:
+        click.echo(version)
+
+    for raw in ("1.2.3", "1.2.3-rc.1"):
+        result = CliRunner().invoke(probe, [raw])
+        assert result.exit_code == 0
+        assert result.output.strip() == raw
+
+
+@pytest.mark.parametrize(
+    ("raw", "message"),
+    [
+        ("v1.2.3", "without the 'v' prefix"),
+        ("patch", "bump word"),
+        ("not-a-version", "expected a bare semver"),
+        ("1.2.3+build.7", "build metadata"),
+    ],
+)
+def test_bare_semver_param_rejects_non_concrete_versions_exit_2(raw, message):
+    """The tag-state re-derivation verbs (#898) take the version read OFF the
+    tag (ADR-0041), validated through the release version grammar: a 'v'
+    prefix, a bump word, build metadata (a shape `release prepare` could
+    never have cut), or garbage is a usage error at parse — exit 2, never
+    verb-body code."""
+
+    @click.command()
+    @click.argument("version", type=BARE_SEMVER)
+    def probe(version) -> None:  # pragma: no cover - never reached
+        click.echo(version)
+
+    result = CliRunner().invoke(probe, [raw])
+    assert result.exit_code == 2
+    assert message in result.output
 
 
 def test_repo_argument_defaults_to_the_ambient_repo():
