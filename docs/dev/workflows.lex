@@ -250,9 +250,11 @@ logic is thin YAML) is stated in [./architecture.lex#3].
     - The aligned stage-input contract: `prepare` dispatches on `version`
       (it CREATES the tag); `build`, `sign`, `publish` dispatch on `tag`
       alone (ADR-0041 — the version is read off `v<version>`), plus `run-id`
-      on the artifact-consuming stages (`sign`, `publish`) naming the SOURCE
-      run whose artifacts feed them. `checks` needs nothing: wf-checks takes
-      no inputs and plans its own lanes.
+      naming the SOURCE run whose artifacts feed them — `sign` and `publish`
+      download their inputs from it, and `build` takes it (the prepare run)
+      to carry `release-notes` forward so its own run is a complete sign
+      source (#899; see the one-source-run rule below). `checks` needs
+      nothing: wf-checks takes no inputs and plans its own lanes.
     - Standalone `wf-publish` derives stage-result CLAIMS from plan liveness
       (live -> success, plan-proven non-live -> skipped): the honest
       statement of a re-dispatch — the operator asserts the source run
@@ -287,23 +289,26 @@ logic is thin YAML) is stated in [./architecture.lex#3].
     - Facts travel all-or-none: supplying `stages` while omitting
       `unsigned-matrix` fails loudly at expression evaluation, never
       publishes against a mixed plan.
-    - ONE source run per dispatch: a standalone sign re-dispatch makes its
-      OWN run a complete publish source — it lands its signed-* artifacts AND
-      re-uploads the base families it did not itself produce (every bundle-*
-      tree plus release-notes, carried from its source run by the
-      `carry-bundles` / `carry-notes` jobs), so the follow-up publish
-      dispatch names THAT run as `run-id` and finds all three artifact
-      families there. Multi-run stitching is unsupported; the escape hatch is
-      the full re-dispatch, which converges (ADR-0009). The carried
-      duplication is accepted.
+    - ONE source run per dispatch: each standalone stage makes its OWN run
+      a complete source for the next — it lands what it produced AND
+      re-uploads the families it did not itself produce, carried from its
+      source run. wf-build's `carry-notes` re-uploads `release-notes` from
+      the prepare run (#899 — without it a follow-up sign naming the build
+      run dies at its own carry-notes, the #898 class); wf-sign-mac lands
+      signed-* and its `carry-bundles` / `carry-notes` re-upload every
+      bundle-* tree plus release-notes, so the follow-up publish names THAT
+      run as `run-id` and finds all three artifact families there.
+      Multi-run stitching is unsupported; the escape hatch is the full
+      re-dispatch, which converges (ADR-0009). The carried duplication is
+      accepted.
     - An --unsigned source run re-publishes with `unsigned: true`, or the
       re-derived plan claims a signed path and the signed-* download fails
       loudly.
     - Cross-run downloads ride the REST API: the standalone dispatch
       caller's job grants `actions: read` beside the stage's own needs.
-      `wf-sign-mac` and `wf-publish` deliberately declare NO `permissions:`
-      key — a called workflow can only downgrade the caller's token, and a
-      key would strip that grant.
+      `wf-build`, `wf-sign-mac` and `wf-publish` deliberately declare NO
+      `permissions:` key — a called workflow can only downgrade the
+      caller's token, and a key would strip that grant.
     - A too-narrow per-stage secret grant is INVISIBLE to every green
       full-chain run — wf-release forwards the secrets internally — and
       kills only the standalone dispatch (the #896 live fire: a `prepare`
@@ -355,9 +360,10 @@ logic is thin YAML) is stated in [./architecture.lex#3].
     - `stage=full` rc: the composed chain including sign+notarize on the
       real macOS runner (the #873/#889 class);
     - the staged relay: `prepare` -> `build` -> `sign` -> `publish` as four
-      standalone dispatches, `tag`/`run-id` threaded per §8 (sign feeds off
-      the build run, publish names the SIGN run) — the #898 regression
-      surface.
+      standalone dispatches, `tag`/`run-id` threaded per §8 (each stage
+      names its predecessor's run: build carries `release-notes` forward
+      from the prepare run, sign feeds off the build run, publish names the
+      SIGN run) — the #898 regression surface.
 
     THE RULE: any shipit PR touching the sign/relay/wf-yml surface —
     `shipit/release/sign.py`, `wf-sign-mac.yml`, `wf-release.yml`, the

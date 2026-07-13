@@ -33,6 +33,12 @@ dispatch surface.
   construction), plus `run-id` on the artifact-consuming stages (`sign`,
   `publish`) naming the SOURCE run whose artifacts feed them. `checks` needs
   no work: wf-checks takes no inputs and plans its own lanes.
+  *Amended (#899):* `build` also accepts `run-id` (the prepare run) — its
+  standalone-only `carry-notes` job re-uploads `release-notes` from that
+  run, making the build run a complete sign source; without it the staged
+  relay's sign dispatch (which names the build run) dies at its own
+  carry-notes download, the shipit#898 class. The one-source-run rule in
+  workflows.lex §8 carries the current statement.
 - Standalone `wf-publish` derives stage-result CLAIMS from plan liveness
   (live → success, plan-proven non-live → skipped): the honest statement of a
   re-dispatch — the operator asserts the source run completed its live

@@ -17,11 +17,14 @@ What it does
 - mode `full`: dispatches one `stage=full` rc — the composed chain including
   sign + notarize (the codesign/keychain class of failure: shipit#873/#889).
 - mode `staged`: dispatches `prepare`, `build`, `sign`, `publish` as four
-  standalone runs, threading `tag`/`run-id` between them — the cross-run
-  artifact relay (the release-notes hand-off class: shipit#898). The relay
-  stops at the first red stage; the remainder is reported `skipped`.
-- mode `both` (default): both chains, each on its own derived rc version
-  (`<version>-full` / `<version>-staged`).
+  standalone runs, threading `tag`/`run-id` between them (each stage names
+  its predecessor's run) — the cross-run artifact relay (the release-notes
+  hand-off class: shipit#898). The relay stops at the first red stage; the
+  remainder is reported `skipped`.
+- mode `both` (default): both chains, each on its own derived rc version —
+  a plain version gets `-full` / `-staged`; a version already carrying a
+  prerelease extends it with `.full` / `.staged` (`0.0.7-canary-rc` →
+  `0.0.7-canary-rc.full`), keeping both valid semver.
 
 It waits for every run to complete, prints a CANARY PROOF block (one line
 per run with its URL — paste it into the shipit PR), prints the teardown

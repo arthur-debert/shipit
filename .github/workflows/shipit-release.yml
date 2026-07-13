@@ -69,8 +69,8 @@ on:
           What to dispatch: the full composed chain (default) or ONE
           independently re-runnable stage block (per-stage dispatch,
           ADR-0054). `prepare` dispatches on `version`; `build`, `sign`
-          and `publish` on `tag` (+ `run-id` for the artifact-consuming
-          stages).
+          and `publish` on `tag` + `run-id` — each naming its source run
+          in the staged relay (workflows.lex §8).
         required: false
         type: choice
         default: full
@@ -89,9 +89,10 @@ on:
         type: string
       run-id:
         description: >-
-          The SOURCE run id whose artifacts feed an artifact-consuming
-          stage dispatch (`sign`, `publish`) — one source run per dispatch
-          (workflows.lex §8). Ignored by the other stages.
+          The SOURCE run id whose artifacts feed a stage dispatch — one
+          source run per dispatch (workflows.lex §8): `build` names the
+          prepare run (it carries `release-notes` forward), `sign` the
+          build run, `publish` the sign run. Ignored by `full`/`prepare`.
         required: false
         type: string
       unsigned:
@@ -136,6 +137,7 @@ jobs:
     uses: arthur-debert/shipit/.github/workflows/wf-build.yml@v1
     with:
       tag: ${{ inputs.tag }}
+      run-id: ${{ inputs.run-id }}
 
   sign:
     if: inputs.stage == 'sign'

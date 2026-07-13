@@ -10,8 +10,10 @@ sign matrix of proofs on live GitHub, and watches every run to its verdict:
   invisible to every unit test, because it needs the runner + cert).
 - ``staged`` — ``prepare`` → ``build`` → ``sign`` → ``publish`` as four
   standalone dispatches, threading ``tag``/``run-id`` between them exactly
-  as workflows.lex §8 prescribes (sign feeds off the build run; publish
-  names the SIGN run, which carried the base families): the REAL cross-run
+  as workflows.lex §8 prescribes (each stage names its predecessor's run:
+  build carries ``release-notes`` forward from the prepare run, sign feeds
+  off the build run, publish names the SIGN run — every source run made a
+  COMPLETE source by its block's carry-forward jobs): the REAL cross-run
   artifact hand-off — the #898 regression surface, where a standalone sign
   dispatch died relaying ``release-notes``.
 
@@ -88,14 +90,17 @@ MODES: tuple[str, ...] = (MODE_FULL, MODE_STAGED, MODE_BOTH)
 RELAY_ORDER: tuple[str, ...] = ("prepare", "build", "sign", "publish")
 
 #: Stage → the relay stage whose RUN feeds it as ``run-id`` (``None``: the
-#: stage consumes no prior run). Sign's source is the build run (the bundles);
-#: publish names the SIGN run — a standalone sign makes its OWN run a complete
-#: publish source by carrying the base families forward (workflows.lex §8's
-#: one-source-run rule), so naming the build run instead would publish the
-#: unsigned bundles.
+#: stage consumes no prior run). Each stage names its PREDECESSOR, because
+#: each standalone block makes its OWN run a complete source for the next
+#: (workflows.lex §8's one-source-run rule): build names the prepare run and
+#: carries ``release-notes`` forward (wf-build's carry-notes — without it the
+#: build run lacks the notes and sign's own carry-notes dies, the #898
+#: class); sign names the build run (bundles + carried notes) and carries the
+#: base families onward; publish names the SIGN run — naming the build run
+#: instead would publish the unsigned bundles.
 RELAY_SOURCE: dict[str, str | None] = {
     "prepare": None,
-    "build": None,
+    "build": "prepare",
     "sign": "build",
     "publish": "sign",
 }
@@ -151,10 +156,10 @@ def stage_inputs(
 
     The workflows.lex §8 aligned stage-input contract, as the dispatcher
     threads it: ``full``/``prepare`` ride ``version`` (they create the tag);
-    ``build`` rides ``tag`` alone; the artifact-consuming stages (``sign``,
-    ``publish``) ride ``tag`` + ``run-id`` — the SOURCE run named by
-    :data:`RELAY_SOURCE`, looked up in ``run_ids`` (stage → completed run id;
-    a missing source is a caller bug and raises KeyError loudly).
+    the relay's later stages (``build``, ``sign``, ``publish``) ride ``tag``
+    + ``run-id`` — the SOURCE run named by :data:`RELAY_SOURCE`, looked up
+    in ``run_ids`` (stage → completed run id; a missing source is a caller
+    bug and raises KeyError loudly).
     """
     if stage in (MODE_FULL, "prepare"):
         return {"stage": stage, "version": version}
@@ -376,7 +381,8 @@ def run(
     help=(
         "The rc version the proof chains cut (bare semver, e.g. "
         "0.0.7-canary-rc). Mode `both` derives a distinct sub-version per "
-        "chain (`.full` / `.staged`)."
+        "chain: a plain version gets `-full` / `-staged`; a version already "
+        "carrying a prerelease extends it with `.full` / `.staged`."
     ),
 )
 @click.option(

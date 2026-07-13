@@ -44,12 +44,12 @@ COMPOSED = "wf-release.yml"
 #: The `plan` jobs joined in TOL02-WS09 (#780): the standalone
 #: re-derivation, a skipped no-op on every fact-supplied (composed-chain)
 #: run — additive, so existing required checks were untouched. The
-#: `carry-bundles`/`carry-notes` jobs joined too (#780): standalone-only
-#: base-artifact carry-forward, likewise skipped no-ops on the composed
-#: chain, so likewise additive.
+#: `carry-bundles`/`carry-notes` jobs joined too (#780, then wf-build's
+#: carry-notes in #899): standalone-only base-artifact carry-forward,
+#: likewise skipped no-ops on the composed chain, so likewise additive.
 STABLE_JOBS = {
     "wf-prepare.yml": ["prepare"],
-    "wf-build.yml": ["plan", "build"],
+    "wf-build.yml": ["plan", "build", "carry-notes"],
     "wf-sign-mac.yml": ["plan", "sign", "carry-bundles", "carry-notes"],
     "wf-publish.yml": ["plan", "assert", "publish"],
     "wf-release.yml": ["prepare", "build", "sign", "publish"],
@@ -533,7 +533,7 @@ def test_cross_run_downloads_pair_run_id_with_token_and_gate_both_ways():
     # grant actions:read) — so every download step is split: same-run (no
     # run-id/github-token keys, gated `inputs.run-id == ''`) vs cross-run
     # (both keys, gated `inputs.run-id != ''`).
-    for name in ("wf-sign-mac.yml", "wf-publish.yml"):
+    for name in ("wf-build.yml", "wf-sign-mac.yml", "wf-publish.yml"):
         for job_id, job in _load(name)["jobs"].items():
             for step in job.get("steps", []):
                 if "download-artifact" not in step.get("uses", ""):
@@ -556,15 +556,15 @@ def test_cross_run_downloads_pair_run_id_with_token_and_gate_both_ways():
 
 def test_artifact_downloading_blocks_declare_no_permissions_key():
     # The downgrade-only rule: a called workflow's `permissions:` can only
-    # STRIP the caller's grant, so a key on wf-sign-mac/wf-publish would
-    # strip the `actions: read` a standalone dispatch caller grants for the
-    # cross-run downloads (and could never elevate anything in return —
-    # gh-release always depended on the caller granting contents:write).
-    # These two inherit the caller's token verbatim; the non-downloading
-    # blocks keep their least-privilege declarations.
-    for name in ("wf-sign-mac.yml", "wf-publish.yml"):
+    # STRIP the caller's grant, so a key on wf-build/wf-sign-mac/wf-publish
+    # would strip the `actions: read` a standalone dispatch caller grants
+    # for the cross-run downloads (and could never elevate anything in
+    # return — gh-release always depended on the caller granting
+    # contents:write). These three inherit the caller's token verbatim
+    # (wf-build joined in #899: its carry-notes downloads cross-run); the
+    # non-downloading block keeps its least-privilege declaration.
+    for name in ("wf-build.yml", "wf-sign-mac.yml", "wf-publish.yml"):
         assert "permissions" not in _load(name), name
-    assert _load("wf-build.yml")["permissions"] == {"contents": "read"}
     assert _load("wf-prepare.yml")["permissions"] == {"contents": "write"}
 
 
@@ -629,6 +629,24 @@ def test_standalone_sign_run_carries_base_artifacts_as_a_publish_source():
     assert up["with"]["name"] == "release-notes"
 
 
+def test_standalone_build_run_carries_release_notes_as_a_sign_source():
+    # A standalone build run must be a COMPLETE sign source (#899): sign
+    # names ONE run-id and downloads bundle-* (its legs) AND release-notes
+    # (its carry-notes) from it, but the build legs produce only bundle-* —
+    # release-notes is prepare's. wf-build's carry-notes re-uploads it from
+    # the SOURCE (prepare) run under its original name. Standalone-only
+    # (run-id != ''), a skipped no-op on the composed chain.
+    carry_notes = _load("wf-build.yml")["jobs"]["carry-notes"]
+    assert "inputs.run-id != ''" in carry_notes["if"]
+    down = next(
+        s for s in carry_notes["steps"] if "download-artifact" in s.get("uses", "")
+    )
+    assert down["with"]["name"] == "release-notes"
+    assert down["with"]["run-id"] == "${{ inputs.run-id }}"
+    up = next(s for s in carry_notes["steps"] if "upload-artifact" in s.get("uses", ""))
+    assert up["with"]["name"] == "release-notes"
+
+
 # --------------------------------------------------------------------------
 # The dogfood dispatch caller (#774) — the WS09 blessed stage-choice shape
 # --------------------------------------------------------------------------
@@ -675,8 +693,10 @@ def test_dispatch_caller_is_the_blessed_stage_choice_shape():
 def test_dispatch_caller_forwards_the_stage_input_contract_verbatim():
     # The aligned standalone contract (#780): `full`/`prepare` dispatch on
     # `version`; `build`/`sign`/`publish` on `tag` alone (ADR-0041 — the
-    # version is read off the tag), plus `run-id` on the artifact-consuming
-    # stages. Secrets follow the uniform per-stage grant rule (#896): every
+    # version is read off the tag), plus `run-id` naming each stage's
+    # source run (build joined in #899: it carries release-notes forward
+    # from the prepare run). Secrets follow the uniform per-stage grant
+    # rule (#896): every
     # stage job forwards the SAME plan-required set as `full`, trimmed to
     # its block's declared names — shipit's plan-required set is exactly
     # RELEASE_TOKEN, so `release`/`prepare` forward it and the other stages
@@ -685,7 +705,7 @@ def test_dispatch_caller_forwards_the_stage_input_contract_verbatim():
     withs = {job_id: set(job.get("with", {})) for job_id, job in jobs.items()}
     assert withs["release"] == {"version", "unsigned"}
     assert withs["prepare"] == {"version", "unsigned"}
-    assert withs["build"] == {"tag"}
+    assert withs["build"] == {"tag", "run-id"}
     assert withs["sign"] == {"tag", "run-id"}
     assert withs["publish"] == {"tag", "run-id", "unsigned"}
     for job_id, job in jobs.items():
