@@ -8,9 +8,11 @@ the shipit-managed pixi surface provisions, that failure has exactly one
 correct remediation: the consumer's install reconcile (the #582 doctrine —
 provisioning rides setup-pixi's lockfile-keyed cache, a release run NEVER
 installs at run time). This module is the ONE map from an argv head to that
-remediation, shared by the prepare-side bump loop and the publish-side
-dispatch loop (:mod:`shipit.verbs.release`), so the two stages can never
-explain the same gap two ways.
+remediation, shared by the prepare-side bump loop, the publish-side
+dispatch loop (:mod:`shipit.verbs.release`), and the build verb's
+missing-builder hard fail (:mod:`shipit.verbs.build`, #890 — where a
+missing ``tree-sitter`` killed the first tarball-consumer rc), so the
+stages can never explain the same gap two ways.
 
 The probe is the ATTEMPT itself — no ``shutil.which`` pre-gate (issue #785's
 resolution finding, generalized: the attempt fails with the missing-binary
@@ -48,6 +50,12 @@ _MANAGED_TOOLS: dict[str, tuple[str, str, str]] = {
         "twine (the pypi endpoint's uploader)",
         "pixi.toml#shipit-python-release-deps",
         "python",
+    ),
+    "tree-sitter": (
+        "the tree-sitter CLI (conda-forge `tree-sitter-cli` — `tree-sitter "
+        "generate` at build, the corpus `tree-sitter test` lane)",
+        "pixi.toml#shipit-tree-sitter-release-deps",
+        "tree-sitter",
     ),
 }
 

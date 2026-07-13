@@ -1839,14 +1839,15 @@ def test_load_units_toolchain_blocks_are_conditional():
     base = {u.key for u in iunits.load_units()}
     assert not (base & toolchain_keys)
 
-    # Per-signal: each signal adds exactly ITS blocks — one for go/node/python,
-    # THREE for rust (the lint toolchain + the release-side cargo-edit block
-    # #793 + the release toolchain block #801).
+    # Per-signal: each signal adds exactly ITS blocks — one for
+    # go/node/python/tree-sitter, THREE for rust (the lint toolchain + the
+    # release-side cargo-edit block #793 + the release toolchain block #801).
     for signal in (
         iunits.TOOLCHAIN_RUST,
         iunits.TOOLCHAIN_GO,
         iunits.TOOLCHAIN_NODE,
         iunits.TOOLCHAIN_PYTHON,
+        iunits.TOOLCHAIN_TREE_SITTER,
     ):
         expected = {key for key, sig, *_ in iunits.TOOLCHAIN_UNITS if sig == signal}
         keys = {u.key for u in iunits.load_units(toolchains=frozenset({signal}))}
@@ -1871,6 +1872,7 @@ def test_load_units_toolchain_blocks_are_conditional():
                     iunits.TOOLCHAIN_GO,
                     iunits.TOOLCHAIN_NODE,
                     iunits.TOOLCHAIN_PYTHON,
+                    iunits.TOOLCHAIN_TREE_SITTER,
                 }
             )
         )
@@ -1888,6 +1890,7 @@ def test_toolchain_block_units_have_the_right_shape():
                     iunits.TOOLCHAIN_GO,
                     iunits.TOOLCHAIN_NODE,
                     iunits.TOOLCHAIN_PYTHON,
+                    iunits.TOOLCHAIN_TREE_SITTER,
                 }
             )
         )
@@ -1951,6 +1954,16 @@ def test_toolchain_block_units_have_the_right_shape():
     assert python_release.anchor == "[dependencies]"
     assert tomllib.loads(python_release.desired_inner()) == {"twine": "6.2.*"}
 
+    # The tree-sitter toolchain's CLI (#890, TOL02-WS17 hole 7): conda-forge
+    # tree-sitter-cli in the default env — the PATH the release stages'
+    # `pixi run --locked ./bin/shipit` resolves for `tree-sitter generate`
+    # and the corpus lane. Pinned 0.25.* in parity with the grammar
+    # consumer's own devDependency line (^0.25.0).
+    tree_sitter = units[iunits.PIXI_TREE_SITTER_DEPS_KEY]
+    assert tree_sitter.dest == "pixi.toml"
+    assert tree_sitter.anchor == "[dependencies]"
+    assert tomllib.loads(tree_sitter.desired_inner()) == {"tree-sitter-cli": "0.25.*"}
+
     # Sibling blocks in one consumer file: fences pairwise distinct, or
     # extract/splice would bleed across regions (the lint-env blocks' rule).
     fences = {
@@ -1963,9 +1976,10 @@ def test_toolchain_block_units_have_the_right_shape():
             iunits.PIXI_GO_DEPS_KEY,
             iunits.PIXI_NODE_DEPS_KEY,
             iunits.PIXI_PYTHON_RELEASE_DEPS_KEY,
+            iunits.PIXI_TREE_SITTER_DEPS_KEY,
         )
     }
-    assert len(fences) == 7
+    assert len(fences) == 8
 
 
 def test_rust_release_toolchain_pin_agrees_with_the_rust_lint_block():
@@ -2119,7 +2133,7 @@ def test_detect_toolchains_clean_root_is_empty(tmp_path):
     assert irec.detect_toolchains(tmp_path) == frozenset()
 
 
-def test_composition_signals_unions_node_for_a_declared_wasm_pack(tmp_path):
+def test_declared_signals_unions_node_for_a_declared_wasm_pack(tmp_path):
     # A rust-only wasm crate declares a wasm-pack composition but tracks no
     # package.json (wasm-pack GENERATES the npm package.json into pkg/). Its
     # `npm pack` still needs npm, so install unions the node signal off the
@@ -2127,30 +2141,30 @@ def test_composition_signals_unions_node_for_a_declared_wasm_pack(tmp_path):
     (tmp_path / ".shipit.toml").write_text(
         '[artifacts.wasm]\nbuild = ["rust"]\nbundle = { composition = "wasm-pack" }\n'
     )
-    assert verb._composition_signals(tmp_path) == {iunits.TOOLCHAIN_NODE}
+    assert verb._declared_signals(tmp_path) == {iunits.TOOLCHAIN_NODE}
 
 
-def test_composition_signals_empty_without_a_wasm_pack_composition(tmp_path):
+def test_declared_signals_empty_without_a_wasm_pack_composition(tmp_path):
     # A non-wasm composition (archive) provisions no extra signal: a plain
     # rust/node repo's delivered blocks stay byte-identical to pre-#788.
     (tmp_path / ".shipit.toml").write_text(
         '[artifacts.cli]\nbuild = ["rust"]\nbundle = { composition = "archive" }\n'
     )
-    assert verb._composition_signals(tmp_path) == set()
+    assert verb._declared_signals(tmp_path) == set()
 
 
-def test_composition_signals_empty_without_config(tmp_path):
+def test_declared_signals_empty_without_config(tmp_path):
     # No .shipit.toml → no extra signals; the augmentation never itself fails
     # install (an absent map is a missing MAP, not this function's concern).
-    assert verb._composition_signals(tmp_path) == set()
+    assert verb._declared_signals(tmp_path) == set()
 
 
-def test_composition_signals_empty_on_unparseable_config(tmp_path):
+def test_declared_signals_empty_on_unparseable_config(tmp_path):
     # Malformed TOML degrades to no extra signals here — the config's own
     # parse error surfaces on the verbs that read the map, not the toolchain
     # augmentation (issue #788).
     (tmp_path / ".shipit.toml").write_text("this is not = valid = toml\n")
-    assert verb._composition_signals(tmp_path) == set()
+    assert verb._declared_signals(tmp_path) == set()
 
 
 def test_wasm_pack_composition_delivers_the_node_deps_block(tmp_path):
@@ -2165,7 +2179,7 @@ def test_wasm_pack_composition_delivers_the_node_deps_block(tmp_path):
     )
     subprocess.run(["git", "add", "."], cwd=root, check=True)
 
-    signals = irec.detect_toolchains(root) | verb._composition_signals(root)
+    signals = irec.detect_toolchains(root) | verb._declared_signals(root)
     assert signals == {iunits.TOOLCHAIN_RUST, iunits.TOOLCHAIN_NODE}
     keys = {u.key for u in iunits.load_units(toolchains=signals)}
     assert iunits.PIXI_NODE_DEPS_KEY in keys
@@ -2181,10 +2195,43 @@ def test_plain_rust_repo_gets_no_node_deps_block(tmp_path):
     )
     subprocess.run(["git", "add", "."], cwd=root, check=True)
 
-    signals = irec.detect_toolchains(root) | verb._composition_signals(root)
+    signals = irec.detect_toolchains(root) | verb._declared_signals(root)
     assert signals == {iunits.TOOLCHAIN_RUST}
     keys = {u.key for u in iunits.load_units(toolchains=signals)}
     assert iunits.PIXI_NODE_DEPS_KEY not in keys
+    assert iunits.PIXI_TREE_SITTER_DEPS_KEY not in keys
+
+
+def test_declared_signals_unions_tree_sitter_for_a_declared_toolchain_leg(tmp_path):
+    # A grammar repo has NO manifest for the toolchain walk to find — the
+    # `[toolchains]` declaration is the only signal, so install unions it off
+    # the registry entry's provisions_signal (#890, the wasm-pack mechanics
+    # on the toolchain axis).
+    (tmp_path / ".shipit.toml").write_text('[toolchains]\n"." = "tree-sitter"\n')
+    assert verb._declared_signals(tmp_path) == {iunits.TOOLCHAIN_TREE_SITTER}
+
+
+def test_tree_sitter_toolchain_delivers_the_cli_block(tmp_path):
+    # End to end at the install seam (#890, closing TOL02-WS17 open hole 7):
+    # a declared tree-sitter grammar repo gets the tree-sitter-release-deps
+    # block in the default env, so the release run's `tree-sitter generate`
+    # (and the corpus `tree-sitter test` lane) has the CLI — the WS16 first
+    # live fire died missing-binary exactly here.
+    root = _git_repo(tmp_path)
+    (root / "grammar.js").write_text("module.exports = grammar({});\n")
+    (root / ".shipit.toml").write_text(
+        "[toolchains]\n"
+        '"." = "tree-sitter"\n'
+        "[artifacts.tree-sitter-demo]\n"
+        'build = ["tree-sitter"]\n'
+        'bundle = { composition = "tarball" }\n'
+    )
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+
+    signals = irec.detect_toolchains(root) | verb._declared_signals(root)
+    assert signals == {iunits.TOOLCHAIN_TREE_SITTER}
+    keys = {u.key for u in iunits.load_units(toolchains=signals)}
+    assert iunits.PIXI_TREE_SITTER_DEPS_KEY in keys
 
 
 def _plan_with_toolchains(root, toolchains: frozenset) -> irec.Plan:

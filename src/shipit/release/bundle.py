@@ -988,7 +988,7 @@ class Composition:
     ``package.json`` is GENERATED into ``pkg/``, never tracked, so the node
     manifest signal is absent (issue #788 review). ``shipit install`` unions
     this signal into the detected toolchains off the declared composition
-    (:func:`shipit.verbs.install._composition_signals`), delivering the
+    (:func:`shipit.verbs.install._declared_signals`), delivering the
     node-deps block wherever the composition is declared; ``None`` (every
     composition but wasm-pack) adds nothing.
     """

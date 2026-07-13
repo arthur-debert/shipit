@@ -146,7 +146,15 @@ PIXI_LAUNCHER_DEPS_ANCHOR = "[dependencies]"
 # Rust, and the lint-feature rust block is invisible to the release runs'
 # default env — TOL02-WS17 open hole 1, closed by #801). The python signal
 # delivers the release-side publish tool (twine, the pypi endpoint's uploader
-# — open hole 2, #801). All the release-side blocks anchor under
+# — open hole 2, #801). The tree-sitter signal delivers the grammar
+# toolchain's own CLI (`tree-sitter-cli` — `tree-sitter generate` at build,
+# the corpus `tree-sitter test` lane; #890 closes open hole 7). Unlike the
+# manifest-detected signals it fires off the DECLARATION — a `.shipit.toml`
+# [toolchains] tree-sitter leg, no manifest signals a grammar — via the same
+# union mechanics as the wasm-pack→node-deps delivery
+# (:attr:`shipit.tools.registry.Toolchain.provisions_signal`, read by
+# :func:`shipit.verbs.install._declared_signals`). All the release-side
+# blocks anchor under
 # `[dependencies]`, NOT the lint feature, because the wf-release stages
 # execute shipit in the DEFAULT pixi env (`pixi run --locked ./bin/shipit`)
 # and the tools must be on THAT run's PATH. Each single-purpose block is
@@ -169,6 +177,7 @@ TOOLCHAIN_RUST = "rust"
 TOOLCHAIN_GO = "go"
 TOOLCHAIN_NODE = "node"
 TOOLCHAIN_PYTHON = "python"
+TOOLCHAIN_TREE_SITTER = "tree-sitter"
 PIXI_RUST_DEPS_KEY = "pixi.toml#shipit-rust-lint-toolchain"
 PIXI_RUST_DEPS_OPEN = "# >>> shipit-managed rust lint toolchain (do not edit; regenerate via `shipit install`) >>>"
 PIXI_RUST_DEPS_CLOSE = "# <<< shipit-managed rust lint toolchain <<<"
@@ -190,6 +199,10 @@ PIXI_RUST_RELEASE_TOOLCHAIN_CLOSE = "# <<< shipit-managed rust release toolchain
 PIXI_PYTHON_RELEASE_DEPS_KEY = "pixi.toml#shipit-python-release-deps"
 PIXI_PYTHON_RELEASE_DEPS_OPEN = "# >>> shipit-managed python release deps (do not edit; regenerate via `shipit install`) >>>"
 PIXI_PYTHON_RELEASE_DEPS_CLOSE = "# <<< shipit-managed python release deps <<<"
+PIXI_TREE_SITTER_DEPS_KEY = "pixi.toml#shipit-tree-sitter-release-deps"
+PIXI_TREE_SITTER_DEPS_OPEN = "# >>> shipit-managed tree-sitter release deps (do not edit; regenerate via `shipit install`) >>>"
+PIXI_TREE_SITTER_DEPS_CLOSE = "# <<< shipit-managed tree-sitter release deps <<<"
+PIXI_TREE_SITTER_DEPS_ANCHOR = "[dependencies]"
 # (unit key, toolchain signal, open, close, anchor, packaged data file) — the
 # catalog rows :func:`load_units` appends per requested toolchain, in this order.
 TOOLCHAIN_UNITS = (
@@ -240,6 +253,14 @@ TOOLCHAIN_UNITS = (
         PIXI_NODE_DEPS_CLOSE,
         PIXI_NODE_DEPS_ANCHOR,
         "pixi-node-deps-block.toml",
+    ),
+    (
+        PIXI_TREE_SITTER_DEPS_KEY,
+        TOOLCHAIN_TREE_SITTER,
+        PIXI_TREE_SITTER_DEPS_OPEN,
+        PIXI_TREE_SITTER_DEPS_CLOSE,
+        PIXI_TREE_SITTER_DEPS_ANCHOR,
+        "pixi-tree-sitter-release-deps-block.toml",
     ),
 )
 
@@ -569,7 +590,10 @@ def load_units(*, toolchains: frozenset[str] = frozenset()) -> list[Unit]:
     blocks to include — any of :data:`TOOLCHAIN_RUST` / :data:`TOOLCHAIN_GO` /
     :data:`TOOLCHAIN_NODE` / :data:`TOOLCHAIN_PYTHON`, as detected from the
     consumer's tracked manifests
-    (:func:`shipit.install.reconcile.detect_toolchains`). The zero-arg call
+    (:func:`shipit.install.reconcile.detect_toolchains`), or
+    :data:`TOOLCHAIN_TREE_SITTER`, unioned off the consumer's DECLARED
+    tree-sitter toolchain leg (#890 — no manifest signals a grammar;
+    :func:`shipit.verbs.install._declared_signals`). The zero-arg call
     returns the unconditional catalog — which since #794 includes the
     launcher-deps block (uv for the pinned ``bin/shipit``, #758): every
     consumer's managed tasks resolve through the launcher, so its
