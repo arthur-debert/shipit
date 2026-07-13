@@ -272,6 +272,16 @@ logic is thin YAML) is stated in [./architecture.lex#3].
     stage outputs — that is the consumer-owned wiring ADR-0040 forbids, and
     exactly what WS06 proved unwireable.
 
+    The caller's secret grants are UNIFORM across its stage jobs (#896):
+    every stage job forwards the SAME plan-required secret set as `full`,
+    trimmed only to the names its block declares (GitHub refuses a caller
+    forwarding an undeclared secret). wf-prepare declares the full universe
+    — preflight re-derives and re-validates the WHOLE plan's secret set at
+    every prepare entry, so a standalone `prepare` needs exactly `full`'s
+    set; wf-sign-mac declares the whole Apple/notary set; wf-publish the
+    endpoint tokens; wf-build nothing. `shipit wf test` lints a stage-choice
+    caller against this rule and refuses the drifting shape.
+
     Sharp edges, by design:
 
     - Facts travel all-or-none: supplying `stages` while omitting
@@ -294,3 +304,10 @@ logic is thin YAML) is stated in [./architecture.lex#3].
       `wf-sign-mac` and `wf-publish` deliberately declare NO `permissions:`
       key — a called workflow can only downgrade the caller's token, and a
       key would strip that grant.
+    - A too-narrow per-stage secret grant is INVISIBLE to every green
+      full-chain run — wf-release forwards the secrets internally — and
+      kills only the standalone dispatch (the #896 live fire: a `prepare`
+      forwarding RELEASE_TOKEN alone fails preflight's whole-plan secret
+      validation on any plan with sign or registry endpoints, and a `sign`
+      job omitting ASC_API_KEY_BASE64 dies at notarize). The uniform grant
+      rule above is the guard, and `shipit wf test` enforces it.

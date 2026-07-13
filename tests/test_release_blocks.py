@@ -676,9 +676,11 @@ def test_dispatch_caller_forwards_the_stage_input_contract_verbatim():
     # The aligned standalone contract (#780): `full`/`prepare` dispatch on
     # `version`; `build`/`sign`/`publish` on `tag` alone (ADR-0041 — the
     # version is read off the tag), plus `run-id` on the artifact-consuming
-    # stages. Secrets: RELEASE_TOKEN only, to the stages that push (shipit's
-    # plan is gh-release-only — GITHUB_TOKEN — with no sign stage, so no
-    # endpoint or Apple names are forwarded anywhere).
+    # stages. Secrets follow the uniform per-stage grant rule (#896): every
+    # stage job forwards the SAME plan-required set as `full`, trimmed to
+    # its block's declared names — shipit's plan-required set is exactly
+    # RELEASE_TOKEN, so `release`/`prepare` forward it and the other stages
+    # forward nothing ONLY because their blocks don't declare it.
     jobs = _load(DISPATCH_CALLER)["jobs"]
     withs = {job_id: set(job.get("with", {})) for job_id, job in jobs.items()}
     assert withs["release"] == {"version", "unsigned"}
@@ -701,6 +703,45 @@ def test_dispatch_caller_grants_cross_run_download_permissions():
     # and publish's gh-release.
     doc = _load(DISPATCH_CALLER)
     assert doc["permissions"] == {"contents": "write", "actions": "read"}
+
+
+def _declared_secrets(name: str) -> set[str]:
+    return set(_load(name)["on"]["workflow_call"].get("secrets") or {})
+
+
+def test_caller_secret_rule_trims_are_pinned_to_the_blocks():
+    # The uniform per-stage grant rule (#896) trims `full`'s set by each
+    # block's DECLARED secret surface; wf.py carries those surfaces as
+    # constants so the lint stays pure/offline. This pin is what keeps the
+    # constants honest against the block files themselves:
+    # - wf-sign-mac / wf-publish: the constants ARE the declarations;
+    # - wf-build declares nothing (its plan job runs secret-free);
+    # - wf-prepare declares the same full universe as wf-release — the
+    #   premise that makes "prepare's set EQUALS full's" the checkable rule
+    #   (preflight re-validates the whole plan's secrets at prepare entry).
+    assert set(wf.SIGN_BLOCK_SECRETS) == _declared_secrets("wf-sign-mac.yml")
+    assert set(wf.PUBLISH_BLOCK_SECRETS) == _declared_secrets("wf-publish.yml")
+    assert _declared_secrets("wf-build.yml") == set()
+    assert _declared_secrets("wf-prepare.yml") == _declared_secrets("wf-release.yml")
+    # …and the universe really is the union of every stage surface plus the
+    # prepare-push token, so no declared name escapes the rule's reach.
+    assert _declared_secrets("wf-prepare.yml") == (
+        {"RELEASE_TOKEN"} | set(wf.SIGN_BLOCK_SECRETS) | set(wf.PUBLISH_BLOCK_SECRETS)
+    )
+
+
+def test_dispatch_caller_passes_its_own_secret_lint():
+    # Dogfood (#896): the model caller must be recognized as the blessed
+    # stage-choice shape and hold the uniform grant rule it teaches.
+    doc = _load(DISPATCH_CALLER)
+    assert wf.stage_caller_jobs(doc) == {
+        "release": "full",
+        "prepare": "prepare",
+        "build": "build",
+        "sign": "sign",
+        "publish": "publish",
+    }
+    assert wf.caller_secret_drift(doc) == []
 
 
 # --------------------------------------------------------------------------
