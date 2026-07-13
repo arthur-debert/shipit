@@ -438,18 +438,30 @@ def _restore_committing_writes(
     idempotent and sit outside the managed-set/manifest state that decides
     :attr:`Plan.nothing_to_do`, so a rerun re-activates them cleanly.
 
-    Raises :class:`OSError` if a restore write/chmod/unlink itself fails; the
-    caller wraps this so a rollback failure never masks the ``SelfCertError``
-    that triggered it.
+    Best-effort per path: a failure on one entry does NOT abort the rest — this
+    is an emergency rollback, so every path that CAN be restored is, and only
+    then is a combined :class:`OSError` raised naming the paths that could not be
+    (chained from the first cause). The caller wraps that raise so a rollback
+    failure never masks the ``SelfCertError`` that triggered it and logs it as a
+    partial rollback.
     """
+    failures: list[tuple[str, OSError]] = []
     for rel, cell in snapshot.items():
         dest = root / rel
-        if cell is None:
-            dest.unlink(missing_ok=True)
-            continue
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(cell.data)
-        dest.chmod(cell.mode)
+        try:
+            if cell is None:
+                dest.unlink(missing_ok=True)
+                continue
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(cell.data)
+            dest.chmod(cell.mode)
+        except OSError as exc:
+            failures.append((rel, exc))
+    if failures:
+        names = ", ".join(rel for rel, _ in failures)
+        raise OSError(f"could not roll back staged writes for: {names}") from failures[
+            0
+        ][1]
 
 
 def _restore_caller_branch(cwd: str, original_ref: str | None) -> None:

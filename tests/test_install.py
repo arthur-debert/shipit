@@ -3918,6 +3918,24 @@ def test_restore_committing_writes_is_a_transaction(tmp_path):
     assert not (tmp_path / "sub" / "new.txt").exists()
 
 
+def test_restore_committing_writes_is_best_effort_across_files(tmp_path):
+    # #838 review (minor): an emergency rollback restores every path it can — a
+    # single failing path does not abort the rest — then raises a combined
+    # OSError naming the unrecoverable path(s) (the caller logs it as a partial
+    # rollback). The failing entry is FIRST so the assertion proves the loop
+    # continued past it.
+    (tmp_path / "blocked").mkdir()  # write_bytes onto a dir -> IsADirectoryError
+    (tmp_path / "ok.txt").write_bytes(b"MUTATED\n")
+    snapshot = {
+        "blocked": iapply._SnapshotCell(b"never lands\n", 0o644),
+        "ok.txt": iapply._SnapshotCell(b"restored\n", 0o644),
+    }
+    with pytest.raises(OSError, match="blocked"):
+        iapply._restore_committing_writes(tmp_path, snapshot)
+    # The later path was still restored despite the earlier failure.
+    assert (tmp_path / "ok.txt").read_bytes() == b"restored\n"
+
+
 def test_restore_committing_writes_restores_the_original_mode(tmp_path):
     # #838 review (major): the snapshot carries permission bits, so a rollback
     # returns BOTH content and mode — a write that flipped the executable bit
