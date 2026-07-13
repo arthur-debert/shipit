@@ -162,13 +162,18 @@ PROVISIONING: dict[str, tuple[Provisioned, ...]] = {
     ),
     "tree-sitter": (
         Provisioned(
-            "tree-sitter",
-            CONSUMER_OWNED,
-            hole=True,
-            note="tree-sitter CLI drives generate/corpus/tarball (#792); not "
-            "on conda-forge (a WS12–WS16 composition tool), so the "
-            "consumer's own env provides it — open hole until a fleet "
-            "tree-sitter release consumer pins it (ADP02 rc proof)",
+            "tree-sitter-cli",
+            PIXI_MANAGED,
+            pin="0.25.*",
+            test="test_missing_tree_sitter_gets_the_reconcile_remedy",
+            note="tree-sitter CLI drives generate/corpus/tarball (#792); "
+            "conda-forge DOES carry it (#890 closes hole 7, found on the "
+            "first consumer rc's missing-binary death) — the "
+            "tree-sitter-release-deps block rides the DECLARED [toolchains] "
+            "leg (Toolchain.provisions_signal: no manifest signals a "
+            "grammar), pinned in parity with the consumer devDependency "
+            "line (^0.25.0 — the generated parser follows the CLI's minor "
+            "line, bump both together)",
         ),
     ),
     "npm": (
@@ -480,6 +485,8 @@ def test_pins_agree_with_their_one_authority():
     assert rust_toolchain["rust"] == rust_lint["rust"]
     python_release = _block_toml("pixi-python-release-deps-block.toml")
     assert _row("twine", "twine").pin == python_release["twine"]
+    tree_sitter = _block_toml("pixi-tree-sitter-release-deps-block.toml")
+    assert _row("tree-sitter", "tree-sitter-cli").pin == tree_sitter["tree-sitter-cli"]
     launcher = _block_toml("pixi-launcher-deps-block.toml")
     assert _row("uv", "uv").pin == launcher["uv"]
     node = _block_toml("pixi-node-deps-block.toml")

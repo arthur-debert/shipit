@@ -71,29 +71,40 @@ from ._tool import load_config
 logger = logging.getLogger("shipit.install")
 
 
-def _composition_signals(root: Path) -> set[str]:
-    """Toolchain signals a DECLARED bundle composition needs beyond the
-    consumer's tracked manifests (issue #788 review).
+def _declared_signals(root: Path) -> set[str]:
+    """Toolchain signals the consumer's DECLARATIONS need beyond its tracked
+    manifests (issue #788 review; #890).
 
     :func:`~shipit.install.reconcile.detect_toolchains` reads manifests only
-    (a tracked ``package.json`` → the node signal that delivers ``npm``). A
-    ``wasm-pack`` composition runs ``npm pack`` at bundle
-    (:mod:`shipit.release.bundle`) so it NEEDS ``npm``, yet it rides the RUST
-    signal and the crate's npm ``package.json`` is generated into ``pkg/``,
-    never tracked — a rust-only wasm crate would get ``wasm-pack`` without
-    ``npm`` and fail the bundle. The DECLARED composition is the signal: each
-    registry entry names the signal it provisions
-    (:attr:`shipit.release.bundle.Composition.provisions_signal`), read off
-    the artifact map here and unioned into the detected set so the node-deps
-    block ships wherever the composition is declared. Degrades to ``set()``
-    when the config is absent or unparseable — the toolchain augmentation
-    never itself fails install (the config's own parse errors surface on the
-    verbs that read the map, not here).
+    (a tracked ``package.json`` → the node signal that delivers ``npm``).
+    Two declaration surfaces union more signals off ``.shipit.toml``:
+
+    - a declared BUNDLE COMPOSITION (#788): a ``wasm-pack`` composition runs
+      ``npm pack`` at bundle (:mod:`shipit.release.bundle`) so it NEEDS
+      ``npm``, yet it rides the RUST signal and the crate's npm
+      ``package.json`` is generated into ``pkg/``, never tracked — a
+      rust-only wasm crate would get ``wasm-pack`` without ``npm`` and fail
+      the bundle. Each registry entry names the signal it provisions
+      (:attr:`shipit.release.bundle.Composition.provisions_signal`), read off
+      the artifact map here so the node-deps block ships wherever the
+      composition is declared;
+    - a declared TOOLCHAIN leg (#890): a tree-sitter grammar has NO manifest
+      for the walk to find, so its ``[toolchains]`` declaration is the only
+      signal — the registry entry names the signal its own CLI rides
+      (:attr:`shipit.tools.registry.Toolchain.provisions_signal`), delivering
+      the ``tree-sitter-cli`` block wherever a tree-sitter leg is declared.
+
+    Degrades to ``set()`` when the config is absent or unparseable — the
+    toolchain augmentation never itself fails install (the config's own parse
+    errors surface on the verbs that read the map, not here).
     """
     from ..release import bundle as bundle_registry  # lazy — keep install import-light
+    from ..tools import registry as toolchain_registry
 
     try:
-        artifacts = config.load_artifacts(load_config(Path(root)))
+        cfg = load_config(Path(root))
+        artifacts = config.load_artifacts(cfg)
+        entries = config.load_toolchains(cfg)
     except config.ConfigError:
         return set()
     signals: set[str] = set()
@@ -103,6 +114,10 @@ def _composition_signals(root: Path) -> set[str]:
         comp = bundle_registry.composition(artifact.bundle.composition)
         if comp is not None and comp.provisions_signal is not None:
             signals.add(comp.provisions_signal)
+    for entry in entries:
+        tc = toolchain_registry.toolchain(entry.toolchain)
+        if tc is not None and tc.provisions_signal is not None:
+            signals.add(tc.provisions_signal)
     return signals
 
 
@@ -192,9 +207,11 @@ def run(
         # The catalog is signal-conditional (#547 Layer 1): a consumer whose
         # tracked manifests declare a toolchain (Cargo.toml/go.mod/package.json)
         # gets the matching pinned pixi dep block alongside the unconditional set.
-        # A declared wasm-pack bundle composition unions the node signal too — its
-        # `npm pack` needs npm, which no tracked manifest signals (issue #788).
-        toolchains = detect_toolchains(Path(path or ".")) | _composition_signals(
+        # Declarations union more signals — a wasm-pack bundle composition needs
+        # npm for its `npm pack`, which no tracked manifest signals (issue #788),
+        # and a declared tree-sitter [toolchains] leg needs its own CLI, which no
+        # manifest can signal at all (#890).
+        toolchains = detect_toolchains(Path(path or ".")) | _declared_signals(
             Path(path or ".")
         )
         units = load_units(toolchains=toolchains)

@@ -221,15 +221,55 @@ def test_multi_leg_passthrough_without_selector_is_usage_rc2(tauri_repo, capsys)
 
 
 def test_missing_builder_is_hard_127_never_a_skip(tauri_repo, capsys):
+    # cargo is a pixi-managed builder, so the hard 127 names the install
+    # reconcile that provisions it (#890 wired the prepare/publish loops'
+    # translation into the build stage) — never a raw missing-binary note.
     boom = execrun.ExecError(["cargo"], rc=None, cause=execrun.CAUSE_MISSING_BINARY)
     rec = _Recorder(outcomes={"cargo": boom})
     rc = build_verb.run((), run_step=rec)
     assert rc == 1
     out = capsys.readouterr().out
-    assert "not found on PATH" in out
+    assert "pixi.toml#shipit-rust-release-toolchain" in out
+    assert "`shipit install --pr`" in out
     assert "BUILD: FAILED (rust (.) [app])" in out
     # The other step still ran: one broken step never silences the rest.
     assert any(argv[0] == "npm" for argv, _, _ in rec.calls)
+
+
+def test_missing_unmanaged_builder_keeps_the_generic_provision_note(go_repo, capsys):
+    # go is NOT a pixi-managed tool (open hole 4): its missing-binary death
+    # keeps the generic hard-fail note — the reconcile remedy is scoped to
+    # the tools the managed pixi surface actually delivers.
+    boom = execrun.ExecError(["go"], rc=None, cause=execrun.CAUSE_MISSING_BINARY)
+    rec = _Recorder(outcomes={"go": boom})
+    rc = build_verb.run((), run_step=rec)
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "not found on PATH" in out
+    assert "shipit install" not in out
+
+
+def test_missing_tree_sitter_gets_the_reconcile_remedy(tmp_path, monkeypatch, capsys):
+    """#890 (TOL02-WS17 hole 7, the WS16 first live fire): `tree-sitter
+    generate` dying missing-binary at build names the tree-sitter-release-deps
+    block's COMMITTING install reconcile — never a raw 127 that tells the
+    operator nothing, and never a run-time install (#582)."""
+    (tmp_path / ".shipit.toml").write_text(
+        '[toolchains]\n"." = "tree-sitter"\n', encoding="utf-8"
+    )
+    monkeypatch.chdir(tmp_path)
+    boom = execrun.ExecError(
+        ["tree-sitter"], rc=None, cause=execrun.CAUSE_MISSING_BINARY
+    )
+    rec = _Recorder(outcomes={"tree-sitter": boom})
+    rc = build_verb.run((), run_step=rec)
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "pixi.toml#shipit-tree-sitter-release-deps" in out
+    assert "`shipit install --pr`" in out
+    assert "`shipit install --local`" in out
+    assert "pixi.lock" in out
+    assert "BUILD: FAILED" in out
 
 
 # --------------------------------------------------------------------------

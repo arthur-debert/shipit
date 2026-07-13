@@ -49,7 +49,7 @@ the runner its block pins; the DEFAULT pixi env is the PATH that run sees):
 | `npm` (`nodejs`) | prepare (`npm version`), bundle (`npm pack` of the wasm-pack tree, #788), build (`npm run build`), publish (`npm publish`) | pixi-managed (`pixi.toml#shipit-node-deps`) — delivered on the node manifest signal AND on a declared `wasm-pack` composition (#788: its `npm pack` needs npm, but wasm-pack rides the rust signal and the crate's npm `package.json` is generated, never tracked, so install unions the node signal off the declaration — `Composition.provisions_signal`) | `nodejs` `26.*`, `pnpm` `11.*` | `test_missing_npm_gets_the_reconcile_remedy` (#801, closed hole 3), `test_wasm_pack_composition_delivers_the_node_deps_block` (#788) |
 | `go` | build (`go build`) | runner image (ubuntu images still carry Go) | floats | none (see holes) |
 | `pytest` | test lane (not a release stage) | consumer env | consumer's | — |
-| `tree-sitter` | test lane (corpus tests, `tree-sitter test`); build (`tree-sitter generate`); bundle (tarball composition) | consumer-owned (not on conda-forge — see holes) | consumer's | — (open hole 7) |
+| `tree-sitter` (`tree-sitter-cli`) | test lane (corpus tests, `tree-sitter test`); build (`tree-sitter generate`); bundle (tarball composition reads the generate output) | pixi-managed (`pixi.toml#shipit-tree-sitter-release-deps`, #890 — delivered on the DECLARED tree-sitter `[toolchains]` leg, `Toolchain.provisions_signal`: no manifest signals a grammar, the wasm-pack→node-deps union mechanics) | `0.25.*` (parity with the grammar consumer's `tree-sitter-cli` devDependency line — the generated parser follows the CLI's minor line, bump both together) | `test_missing_tree_sitter_gets_the_reconcile_remedy` (build-stage remedy, the #890 death site), `test_tree_sitter_toolchain_delivers_the_cli_block` |
 | `twine` | publish (pypi endpoint) | pixi-managed (`pixi.toml#shipit-python-release-deps`, #801 — the python toolchain signal, closed hole 2) | `6.2.*` | `test_missing_twine_gets_the_reconcile_remedy` |
 | `ruby` | publish (brew formula `ruby -c` syntax check) | runner image (ubuntu) | floats | — |
 | `vsce` | bundle (vsix composition `vsce package --target`), publish (vscode-marketplace `vsce publish`) | consumer-owned (the extension repo's `@vscode/vsce` devDependency; no fleet block) | consumer's | — (open hole 6) |
@@ -118,14 +118,16 @@ to one line each) so the guard notes' numbering stays stable:
    cuts an rc through the pipeline as ADP02 resumes — either onboarding a
    managed node block or ratifying consumer-owned as the deliberate posture;
    `ovsx` stays wired-but-off until that consumer's `OVSX_PAT` verifies.
-7. **`tree-sitter` CLI on release runners.** The generate/corpus/tarball
-   composition (TOL02-WS16 #792) shells out to `tree-sitter`, which is not on
-   conda-forge (a WS12–WS16 composition tool), so no managed pixi block can
-   carry it — the consumer's own env provides it today (consumer-owned). When
-   the first fleet tree-sitter release consumer (lex-fmt/tree-sitter-lex)
-   onboards, its rc proof pins the CLI (self-provision via `cargo install
-   tree-sitter-cli`, the cargo-deb precedent, or a consumer-declared pixi
-   dep); the hole closes then. Deferred to ADP02 per the issue.
+7. **CLOSED (#890): `tree-sitter` CLI on release runners.** The premise was
+   stale — conda-forge DOES carry `tree-sitter-cli` (all five fleet
+   platforms), found when the first consumer rc (lex-fmt/tree-sitter-lex,
+   WS16's live fire) died missing-binary at `tree-sitter generate`. The
+   `pixi.toml#shipit-tree-sitter-release-deps` block delivers it in the
+   default env, unioned off the declared tree-sitter `[toolchains]` leg
+   (`Toolchain.provisions_signal` — no manifest signals a grammar, the
+   #788 wasm-pack mechanics), pinned `0.25.*` in parity with the consumer's
+   own devDependency line; a missing CLI at build fails loudly naming the
+   reconcile.
 
 With holes 1–3 closed, a stock consumer needs ZERO consumer-side
 provisioning to traverse prepare → publish: every release-stage tool is
@@ -139,7 +141,8 @@ hole 6) — a marketplace-shaped consumer, not the stock rust/python one.
 Future composition tools (WS14–WS15: `electron-builder`, `tauri`; notary
 tooling beyond `xcrun notarytool`) are not Exec tools yet — WS12's
 `wasm-pack`, WS13's `vsce`/`ovsx` (open hole 6), and WS16's `tree-sitter`
-(open hole 7) have all landed, their rows in the inventory above. When the
+(hole 7, closed by #890) have all landed, their rows in the inventory above.
+When the
 remaining workstreams land argv for their tools, the drift guard fails until
 the tool gets a provisioning row — that is the guard doing its job; do not
 allowlist around it.
