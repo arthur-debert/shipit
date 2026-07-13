@@ -41,11 +41,11 @@ the runner its block pins; the DEFAULT pixi env is the PATH that run sees):
 | `gh` | prepare reads; publish gh-release (adapter `shipit/gh.py`) | runner image + ambient `GITHUB_TOKEN` | floats | — (image contract) |
 | `pixi` | every stage (the blocks' setup-pixi step; adapter `pixienv/`) | setup-pixi action | `v0.71.0` = Layer 0 `PIXI_PIN` | `test_setup_dev_env_pixi_pin_agrees_with_ci`; wf-release family pinned by the guard |
 | `uv` | every stage (`bin/shipit` launcher, ADR-0033); build/bundle for python (`uv build`) | pixi-managed (`pixi.toml#shipit-launcher-deps`, closes #758) | `0.11.*` = Layer 0 `UV_PIN` minor line | `test_launcher_deps_uv_pin_agrees_with_layer0_uv_pin`, `test_load_units_includes_the_launcher_deps_block` |
-| `cargo` (the binary itself) | prepare (subcommand dispatch), build (`cargo build`), publish (`cargo publish`, `cargo metadata`) | pixi-managed (`pixi.toml#shipit-rust-release-toolchain`, #801 — its own single-key block, see closed hole 1) | `rust` `1.96.*` (lockstep with the rust lint block) | `test_missing_cargo_binary_gets_the_reconcile_remedy` |
+| `cargo` (the binary itself) | prepare (subcommand dispatch), build (`cargo build`), publish (`cargo publish`, `cargo metadata`) | pixi-managed (`pixi.toml#shipit-rust-release-toolchain`, #801 — the sysroot-only block, see closed hole 1) | `rust` `1.96.*` (lockstep with the rust lint block) | `test_missing_cargo_binary_gets_the_reconcile_remedy` |
 | cargo-edit (`cargo set-version` / `cargo update`) | prepare (rust bump) | pixi-managed (`pixi.toml#shipit-rust-release-deps`, #793/#797) | `0.13.11.*` | `test_missing_cargo_set_version_gets_the_reconcile_remedy` |
 | `cargo-deb` (`cargo deb`) | bundle (deb composition) | self-provisioned (`cargo install`, #784/#785 — not on conda-forge) | `CARGO_DEB_VERSION = 3.7.0` | `test_deb_self_provisions_cargo_deb_when_missing` |
 | `wasm-pack` | bundle (wasm-pack composition, TOL02-WS12 #788) | pixi-managed (`pixi.toml#shipit-rust-release-deps`, rust signal; WS10 #798) | `0.15.*` (#846: conda-forge never carried a 0.13 build) | `test_pins_agree_with_their_one_authority` (pin lockstep) |
-| `rust-std-wasm32-unknown-unknown` (no argv — the wasm32 target std in the managed rust sysroot) | bundle (`wasm-pack build` compiles against it) | pixi-managed (`pixi.toml#shipit-rust-release-deps`, rust signal, #853 — conda-forge's `wasm-pack` does NOT pull it; the WS12 claim that it did was false) | `1.96.*` (lockstep with the `rust` toolchain line) | `test_pins_agree_with_their_one_authority` (pin + rust lockstep) |
+| `rust-std-wasm32-unknown-unknown` (no argv — the wasm32 target std in the managed rust sysroot) | bundle (`wasm-pack build` compiles against it) | pixi-managed (`pixi.toml#shipit-rust-release-toolchain`, #853 — conda-forge's `wasm-pack` does NOT pull it (the WS12 claim that it did was false); a sysroot component, so it rides beside `rust` and is skipped WITH it when a consumer owns its own `rust` pin, who then self-provisions the matching std, the #759 rule) | `1.96.*` (lockstep with the `rust` line, same block) | `test_pins_agree_with_their_one_authority` (pin + rust lockstep) |
 | `npm` (`nodejs`) | prepare (`npm version`), bundle (`npm pack` of the wasm-pack tree, #788), build (`npm run build`), publish (`npm publish`) | pixi-managed (`pixi.toml#shipit-node-deps`) — delivered on the node manifest signal AND on a declared `wasm-pack` composition (#788: its `npm pack` needs npm, but wasm-pack rides the rust signal and the crate's npm `package.json` is generated, never tracked, so install unions the node signal off the declaration — `Composition.provisions_signal`) | `nodejs` `26.*`, `pnpm` `11.*` | `test_missing_npm_gets_the_reconcile_remedy` (#801, closed hole 3), `test_wasm_pack_composition_delivers_the_node_deps_block` (#788) |
 | `go` | build (`go build`) | runner image (ubuntu images still carry Go) | floats | none (see holes) |
 | `pytest` | test lane (not a release stage) | consumer env | consumer's | — |
@@ -82,10 +82,12 @@ to one line each) so the guard notes' numbering stays stable:
 
 1. **CLOSED (#801): `cargo`/`rust` on release runners.** Promoted into the
    default-env `pixi.toml#shipit-rust-release-toolchain` block — deliberately
-   a SINGLE-KEY block separate from `cargo-edit`'s, so a consumer already
-   pinning `rust` consumer-side (padz/lex, the pre-#801 workaround) trips the
-   `PixiKeyConflict` first-splice guard on exactly that block and keeps both
-   its pin AND its cargo-edit delivery. A missing `cargo` at prepare/publish
+   the sysroot-only block, separate from `cargo-edit`'s, so a consumer
+   already pinning `rust` consumer-side (padz/lex, the pre-#801 workaround)
+   trips the `PixiKeyConflict` first-splice guard on exactly that block and
+   keeps both its pin AND its cargo-edit delivery (#853 adds the wasm32
+   target std to the same block: a sysroot component, delivered and skipped
+   with the sysroot it must match). A missing `cargo` at prepare/publish
    fails loudly naming the reconcile
    (`shipit.release.provisioning.missing_tool_remedy`).
 2. **CLOSED (#801): `twine` on wf-publish.** The python toolchain signal

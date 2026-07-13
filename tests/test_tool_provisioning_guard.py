@@ -195,12 +195,12 @@ PROVISIONING: dict[str, tuple[Provisioned, ...]] = {
             "rust-std-wasm32-unknown-unknown",
             PIXI_MANAGED,
             pin="1.96.*",
-            test="test_pins_agree_with_their_one_authority",
             note="the wasm32 target std for the managed rust sysroot (#853): "
             "conda-forge's wasm-pack does NOT pull it (the WS12 claim that "
             "it did was false — its only deps are __glibc/libgcc), so it "
-            "rides the same rust-release-deps block, pinned in lockstep "
-            "with the rust toolchain line",
+            "rides the rust-release-toolchain block beside `rust`, in "
+            "lockstep with it — and is skipped WITH it for a consumer that "
+            "owns its own rust pin",
         ),
     ),
     "uv": (
@@ -463,16 +463,17 @@ def test_pins_agree_with_their_one_authority():
     rust_release = _block_toml("pixi-rust-release-deps-block.toml")
     assert _row("cargo", "cargo-edit").pin == rust_release["cargo-edit"]
     assert _row("wasm-pack", "wasm-pack").pin == rust_release["wasm-pack"]
-    assert (
-        _row("wasm-pack", "rust-std-wasm32-unknown-unknown").pin
-        == rust_release["rust-std-wasm32-unknown-unknown"]
-    )
     rust_toolchain = _block_toml("pixi-rust-release-toolchain-block.toml")
     assert _row("cargo", "cargo").pin == rust_toolchain["rust"]
+    assert (
+        _row("wasm-pack", "rust-std-wasm32-unknown-unknown").pin
+        == rust_toolchain["rust-std-wasm32-unknown-unknown"]
+    )
     # The wasm32 std is the managed rust toolchain's OWN sysroot component
-    # (#853): its pin moves in lockstep with the `rust` line, or wasm builds
-    # solve a std that misses the delivered sysroot version.
-    assert rust_release["rust-std-wasm32-unknown-unknown"] == rust_toolchain["rust"]
+    # (#853): it rides the toolchain block and its pin moves in lockstep with
+    # the `rust` line, or wasm builds solve a std that misses the delivered
+    # sysroot version.
+    assert rust_toolchain["rust-std-wasm32-unknown-unknown"] == rust_toolchain["rust"]
     # ...and the two managed rust surfaces (release default-env toolchain,
     # lint-feature toolchain) move in lockstep — one rust, two envs (#801).
     rust_lint = _block_toml("pixi-rust-lint-deps-block.toml")
