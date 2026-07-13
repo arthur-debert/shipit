@@ -186,10 +186,11 @@ PROVISIONING: dict[str, tuple[Provisioned, ...]] = {
         Provisioned(
             "wasm-pack",
             PIXI_MANAGED,
-            pin="0.13.*",
+            pin="0.15.*",
             note="the wasm/npm bundle composition's builder (TOL02-WS12 #788); "
             "rides the rust-release-deps block (rust signal), pinned from "
-            "conda-forge — provisions wasm-pack + the wasm32 target (WS10 #798)",
+            "conda-forge — provisions wasm-pack + the wasm32 target (WS10 "
+            "#798); 0.15.* per #846 (conda-forge never carried 0.13)",
         ),
     ),
     "uv": (
