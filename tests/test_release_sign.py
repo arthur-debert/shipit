@@ -1037,6 +1037,18 @@ def test_parse_keychain_list_keeps_a_path_with_an_embedded_quote_whole():
     ]
 
 
+def test_parse_keychain_list_keeps_a_path_with_an_embedded_newline_whole():
+    # Same unescaped-output hazard as the embedded quote: a path containing a
+    # newline must parse as one entry, not be split into fragments that get
+    # silently dropped — a dropped keychain would vanish from the user's
+    # search list when teardown restores the snapshot.
+    out = '    "/tmp/my\nnewline.keychain"\n    "/Library/Keychains/extra.keychain"\n'
+    assert sign_mod._parse_keychain_list(out) == [
+        "/tmp/my\nnewline.keychain",
+        "/Library/Keychains/extra.keychain",
+    ]
+
+
 def test_sign_bundle_invalid_notarization_fetches_the_log_and_fails(tmp_path):
     _fixture_tree(tmp_path)
     recorder = SignRecorder(tmp_path, statuses=("Invalid",))

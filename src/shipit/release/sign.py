@@ -1019,16 +1019,18 @@ def _parse_keychain_list(stdout: str) -> list[str]:
     """The keychain paths out of ``security list-keychains`` output (one
     quoted path per line, whitespace-indented), order preserved — the user
     search list :func:`_sign_paths` snapshots before splicing the temporary
-    keychain in, and restores on teardown. Parsed per line, stripping the
-    surrounding quotes — a path-scanning regex would truncate a path with an
-    embedded ``"`` (``security`` prints paths unescaped) and the teardown
-    would then restore a corrupted search list. Pure."""
-    paths = []
-    for line in stdout.splitlines():
-        stripped = line.strip()
-        if len(stripped) >= 2 and stripped.startswith('"') and stripped.endswith('"'):
-            paths.append(stripped[1:-1])
-    return paths
+    keychain in, and restores on teardown. Each entry is matched from its
+    opening quote at the start of a line to the closing quote that ends a
+    line: ``security`` prints paths unescaped, so an embedded ``"`` must not
+    truncate the path and an embedded newline must not split it — either
+    corruption would be restored into the user's search list on teardown.
+    Pure."""
+    return [
+        match.group(1)
+        for match in re.finditer(
+            r'^[ \t]*"(.*?)"[ \t]*$', stdout, re.MULTILINE | re.DOTALL
+        )
+    ]
 
 
 def _decode_b64(value: str, what: str) -> bytes:
