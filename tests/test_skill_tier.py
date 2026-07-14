@@ -114,7 +114,7 @@ def test_session_status_skill_is_in_the_managed_set():
 
 def test_planning_leg_dry_run_renders_in_the_flow_view(tmp_path, capsys):
     """The whole tier, externally: the emission sequence a planning leg's
-    skills script (grill -> ADR -> Spec -> epic/WS minting) through the real
+    skills script (Spec -> grill/ADR -> epic/WS minting) through the real
     emit verb + logging pipeline, read back with the reader the session-status
     skill wraps — the intent opens the story, every milestone renders."""
     logsetup.configure_logging(
@@ -122,9 +122,9 @@ def test_planning_leg_dry_run_renders_in_the_flow_view(tmp_path, capsys):
     )
     leg = [
         ("session.intent", "planning session: reviewer symmetry"),
+        ("planning.spec.written", "Spec: docs/spec/reviewer-symmetry.md"),
         ("planning.grill.started", None),
         ("planning.adr.written", "ADR-0031: engine as sole requester"),
-        ("planning.spec.written", "Spec: docs/spec/reviewer-symmetry.md"),
         ("planning.epic.minted", "RVW01: Reviewer symmetry (#387)"),
         ("planning.ws.minted", "RVW01-WS01: walking skeleton (#388)"),
     ]
