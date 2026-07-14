@@ -140,6 +140,9 @@ class _FakeStoreGit:
         self.calls.append(("clone", url, dest))
         Path(dest).mkdir(parents=True)
 
+    def configure_identity(self, name: str, email: str, *, cwd: str) -> None:
+        self.calls.append(("configure_identity", name, email))
+
     def add(self, paths: list[str], *, cwd: str) -> None:
         self.calls.append(("add", tuple(paths)))
         self.captured_text = (Path(cwd) / paths[0]).read_text(encoding="utf-8")
@@ -186,6 +189,10 @@ def test_write_to_store_commits_valid_inbox_opportunity_without_github():
     assert ("commit", result.commit_message, (result.path,)) in fake.calls
     assert ("push", "main", "origin") in fake.calls
     assert "status: inbox" in fake.captured_text
+    # A throwaway clone commits on a runner that may carry no global git
+    # identity: the store writer must state a local one before committing.
+    op_names = [call[0] for call in fake.calls]
+    assert op_names.index("configure_identity") < op_names.index("commit")
 
 
 def test_write_to_store_rebases_and_retries_failed_push():

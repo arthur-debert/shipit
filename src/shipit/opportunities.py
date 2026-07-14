@@ -20,6 +20,16 @@ from .identity import Repo, repo_from_slug
 SCHEMA_VERSION = 1
 LIFECYCLE_INBOX = "inbox"
 
+#: Local committer identity stated in the throwaway store clone before its
+#: capture commit. A fresh clone commits on a runner that may carry no global
+#: git identity, so — exactly as the release tap push does (publish.py) — we
+#: set a local identity to keep the commit from dying on "Author identity
+#: unknown" without touching any global state.
+OPPORTUNITY_COMMITTER = (
+    "shipit opportunities",
+    "shipit-opportunities@users.noreply.github.com",
+)
+
 
 class OpportunityError(RuntimeError):
     """Opportunity capture failed with a user-actionable message."""
@@ -59,6 +69,8 @@ class StoreGitBoundary(Protocol):
 
     def clone(self, url: str, dest: str) -> None: ...
 
+    def configure_identity(self, name: str, email: str, *, cwd: str) -> None: ...
+
     def add(self, paths: list[str], *, cwd: str) -> None: ...
 
     def commit(self, message: str, paths: list[str], *, cwd: str) -> None: ...
@@ -74,6 +86,7 @@ class RealStoreGitBoundary:
     """Real Git-backed store boundary over :mod:`shipit.git`."""
 
     clone = staticmethod(git.clone)
+    configure_identity = staticmethod(git.configure_identity)
     add = staticmethod(git.add)
     commit = staticmethod(git.commit)
     pull_rebase = staticmethod(git.pull_rebase)
@@ -211,6 +224,8 @@ def write_to_store(
         root = Path(tmp) / "store"
         try:
             boundary.clone(store_clone_url(store.repo), str(root))
+            name, email = OPPORTUNITY_COMMITTER
+            boundary.configure_identity(name, email, cwd=str(root))
             path = allocate_inbox_path(root, capture, token_factory=token_factory)
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content, encoding="utf-8")
