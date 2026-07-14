@@ -717,6 +717,59 @@ def test_sync_secrets_optional_absent_trio_does_not_satisfy_notary_requirement(
     assert set(fake_gh.secrets) == set(_SIGN_BASE_NAMES)
 
 
+def test_sync_secrets_passwordless_p12_with_no_password_source_syncs_clean(
+    fake_gh, monkeypatch
+):
+    """#892 on the PROVISIONING side: APPLE_CERTIFICATE_PASSWORD is empty-valid,
+    so a passwordless-.p12 signing repo that declares NO source for it syncs
+    clean — no `failed` missing-source outcome. Preflight already accepts the
+    empty value; gh-setup now agrees, so the two authorities cannot drift."""
+    names = ("RELEASE_TOKEN", "APPLE_CERTIFICATE", *_APPLE_ID_TRIO)
+    for name in names:
+        monkeypatch.setenv(f"VAR_{name}", f"value-{name}")
+    monkeypatch.delenv("VAR_APPLE_CERTIFICATE_PASSWORD", raising=False)
+    outcomes = ghsetup.sync_secrets(
+        "o/r",
+        _signing_artifacts(),
+        [_env_source(n) for n in names],
+        reviewers=(),
+        dry_run=False,
+        prompt=None,
+    )
+    assert [(o.name, o.action) for o in outcomes] == [(n, "set") for n in names]
+    assert not any(o.action == "failed" for o in outcomes)
+    assert "APPLE_CERTIFICATE_PASSWORD" not in fake_gh.secrets
+
+
+def test_sync_secrets_passwordless_p12_optional_absent_password_skips_not_fails(
+    fake_gh, monkeypatch
+):
+    """#892: an OPTIONAL-and-absent APPLE_CERTIFICATE_PASSWORD source resolves
+    to `skipped`, not `failed` — the empty-valid name is left optional, never
+    forced non-optional like an ordinary required source, so a passwordless
+    repo need not invent a non-empty dummy password to sync clean."""
+    present = ("RELEASE_TOKEN", "APPLE_CERTIFICATE", *_APPLE_ID_TRIO)
+    for name in present:
+        monkeypatch.setenv(f"VAR_{name}", f"value-{name}")
+    monkeypatch.delenv("VAR_APPLE_CERTIFICATE_PASSWORD", raising=False)
+    sources = [
+        *[_env_source(n) for n in present],
+        SecretSource(
+            "APPLE_CERTIFICATE_PASSWORD",
+            "env",
+            "VAR_APPLE_CERTIFICATE_PASSWORD",
+            True,  # optional
+        ),
+    ]
+    outcomes = ghsetup.sync_secrets(
+        "o/r", _signing_artifacts(), sources, reviewers=(), dry_run=False, prompt=None
+    )
+    by_name = {o.name: o.action for o in outcomes}
+    assert by_name["APPLE_CERTIFICATE_PASSWORD"] == "skipped"
+    assert not any(o.action == "failed" for o in outcomes)
+    assert "APPLE_CERTIFICATE_PASSWORD" not in fake_gh.secrets
+
+
 def test_sync_secrets_no_complete_notary_trio_fails_with_one_diagnostic(
     fake_gh, monkeypatch
 ):

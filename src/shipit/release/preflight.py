@@ -51,7 +51,11 @@ Presence validation (story 28) is :func:`missing_secrets` over an injected
 environment mapping: the workflow's caller injects each GitHub secret as a
 same-named env var, so presence-at-preflight proves publish will not starve.
 The verb hard-fails on a non-empty result — declared signing with missing
-signing secrets can never silently ship unsigned.
+signing secrets can never silently ship unsigned. A required name whose EMPTY
+value is legitimately valid (:data:`shipit.release.secretreq.EMPTY_VALID_SECRETS`
+— today APPLE_CERTIFICATE_PASSWORD for a passwordless ``.p12``, #892) is exempt
+from the non-empty demand: preflight defers to the signer's own empty-accepting
+contract rather than refuse a repo the sign stage would sign.
 
 The ``@vN`` pin gate (#917) lives in the shell, not here: the verb enumerates
 the caller's reusable-workflow pins (:func:`shipit.checks.workflow_pin_refs`)
@@ -380,13 +384,34 @@ def missing_secrets(
 ) -> tuple[str, ...]:
     """The plan's required secret names absent (or empty) in ``env`` — story
     28's hard-fail set, checked over exactly what the plan uses (a
-    non-signing plan never checks the Apple names). An alternative-set
-    requirement (#746) is satisfied by ANY complete alternative present in
-    ``env``; when none is, the set contributes ONE rendered diagnostic
-    naming what is missing from every alternative (never its names one by
-    one). Pure; the shell injects the real environment."""
-    missing = [name for name in release_plan.secrets if not env.get(name)]
-    present = {name for name, value in env.items() if value}
+    non-signing plan never checks the Apple names).
+
+    A name in :data:`shipit.release.secretreq.EMPTY_VALID_SECRETS` is EXEMPT
+    from the non-empty demand (#892): its empty value is valid presence, so it
+    never counts as missing — the one authority for what "present" means per
+    name lives beside the requirement declaration, and preflight consumes it
+    rather than contradict the signer. Today that is
+    ``APPLE_CERTIFICATE_PASSWORD``: the signer treats a passwordless ``.p12``
+    (empty password) as legal PKCS#12, so refusing an empty value here would
+    strand a repo the sign stage would sign fine.
+
+    An alternative-set requirement (#746) is satisfied by ANY complete
+    alternative present in ``env``; when none is, the set contributes ONE
+    rendered diagnostic naming what is missing from every alternative (never
+    its names one by one). Pure; the shell injects the real environment."""
+    missing = [
+        name
+        for name in release_plan.secrets
+        if name not in secretreq.EMPTY_VALID_SECRETS and not env.get(name)
+    ]
+    # Empty-valid names count as present for alternative-set satisfaction too:
+    # an empty/absent value IS valid presence per the one authority (#892), so a
+    # future AlternativeSet naming one must not fail on its emptiness. No live
+    # set names such a secret today, so this is defensive — but it keeps the
+    # empty-valid contract consistent across BOTH plain names and either-sets.
+    present = {
+        name for name, value in env.items() if value
+    } | secretreq.EMPTY_VALID_SECRETS
     missing.extend(
         alt.describe_gap(present)
         for alt in release_plan.secret_alternatives

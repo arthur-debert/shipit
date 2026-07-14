@@ -452,13 +452,44 @@ def test_missing_secrets_reports_absent_and_empty_names_in_plan_order():
         "RELEASE_TOKEN": "t",
         "CARGO_REGISTRY_TOKEN": "",  # empty is absent — an empty token cannot publish
         "APPLE_CERTIFICATE": "c",
+        "APPLE_CERTIFICATE_PASSWORD": "pw",  # non-empty here — not the name under test
         **_ASC_ENV,
     }
+    # APPLE_CERTIFICATE_PASSWORD is NOT reported: an empty value is valid for it
+    # (#892), but here it is set anyway; the empty-value assertion is the
+    # dedicated test below.
     assert preflight.missing_secrets(plan, env) == (
         "CARGO_REGISTRY_TOKEN",
         "HOMEBREW_TAP_TOKEN",
-        "APPLE_CERTIFICATE_PASSWORD",
     )
+
+
+def test_missing_secrets_accepts_an_empty_apple_certificate_password():
+    # sign.py's contract: a passwordless .p12 is legal PKCS#12, so an EMPTY
+    # APPLE_CERTIFICATE_PASSWORD is valid presence — preflight must not demand
+    # it non-empty or it would strand a repo the signer would sign fine (#892).
+    plan = preflight.plan(RUST_CLI, _resolved("1.2.3"))
+    empty = {**_SIGNING_BASE_ENV, **_ASC_ENV, "APPLE_CERTIFICATE_PASSWORD": ""}
+    assert preflight.missing_secrets(plan, empty) == ()
+    # Even entirely ABSENT (the caller forwarded nothing) is accepted — the
+    # signer defaults it to empty and never fails on it.
+    absent = {k: v for k, v in empty.items() if k != "APPLE_CERTIFICATE_PASSWORD"}
+    assert preflight.missing_secrets(plan, absent) == ()
+    # But its non-empty-required counterpart APPLE_CERTIFICATE is still demanded.
+    no_cert = {k: v for k, v in empty.items() if k != "APPLE_CERTIFICATE"}
+    assert "APPLE_CERTIFICATE" in preflight.missing_secrets(plan, no_cert)
+
+
+def test_empty_valid_secrets_are_pinned_to_the_signer_contract():
+    # ONE authority for what "present" means per name (#892): the empty-valid
+    # set must name exactly the signer's empty-accepting password secret, so
+    # preflight and sign.py can never drift back into contradiction.
+    from shipit.release import sign
+
+    assert secretreq.EMPTY_VALID_SECRETS == frozenset({sign.CERT_PASSWORD_SECRET})
+    # And an empty-valid name is still a genuine requirement (synced/forwarded),
+    # just one whose VALUE check is relaxed — never dropped from the set.
+    assert sign.CERT_PASSWORD_SECRET in secretreq.SIGN_MAC_CERT_SECRETS
 
 
 def test_missing_secrets_is_empty_when_the_plan_is_fully_provisioned():
