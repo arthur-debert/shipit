@@ -17,6 +17,7 @@ ambiguous text.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
@@ -32,6 +33,19 @@ class Inline:
     data: Mapping[str, object]
 
 
+def _quote(text: str) -> str:
+    """Render ``text`` as a TOML basic string with full escaping.
+
+    A TOML basic string and a JSON string share escape syntax for every case
+    creation emits — ``\\"``, ``\\\\``, and ``\\uXXXX`` for control characters
+    such as newlines/tabs — so :func:`json.dumps` is the correct, complete
+    escaper. A naive quote/backslash ``replace`` would emit a literal newline
+    inside a basic string (invalid TOML that breaks parsing); this does not.
+    ``ensure_ascii=False`` keeps non-ASCII literal, which basic strings allow.
+    """
+    return json.dumps(text, ensure_ascii=False)
+
+
 def _render_scalar(value: object) -> str:
     """Render a leaf value (string, bool, int/float, string array, inline table)."""
     if isinstance(value, Inline):
@@ -42,8 +56,7 @@ def _render_scalar(value: object) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, str):
-        escaped = value.replace("\\", "\\\\").replace('"', '\\"')
-        return f'"{escaped}"'
+        return _quote(value)
     if isinstance(value, (int, float)):
         return str(value)
     if isinstance(value, Sequence):
@@ -60,8 +73,7 @@ def _render_key(key: str) -> str:
     """
     if all(part and _is_bare(part) for part in key.split(".")):
         return key
-    escaped = key.replace("\\", "\\\\").replace('"', '\\"')
-    return f'"{escaped}"'
+    return _quote(key)
 
 
 def _is_bare(part: str) -> bool:

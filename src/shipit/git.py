@@ -711,19 +711,28 @@ def init_main(*, cwd: str) -> None:
     _git(["init", "-b", "main"], cwd=cwd)
 
 
-def config_get(key: str, *, cwd: str) -> str | None:
-    """The value of git config ``key`` for the checkout at ``cwd``, or ``None``.
+def author_name(*, cwd: str) -> str | None:
+    """Git's fully resolved author display name for ``cwd``, or ``None``.
 
-    A probe read: an unset key is a NORMAL answer (``None``), never an
-    exception. ``shipit repo new`` reads ``user.name`` through it to attribute
-    the generated MIT ``LICENSE`` to the resolved Git author; an absent identity
-    is a creation preflight failure the caller raises, not a git error here.
+    Runs ``git var GIT_AUTHOR_IDENT``, which resolves the SAME author identity a
+    commit will use — honoring ``GIT_AUTHOR_NAME``/``GIT_AUTHOR_EMAIL``, the
+    ``author.*``/``user.*`` config chain, and git's own precedence — and fails
+    exactly where ``git commit`` would (e.g. ``user.useConfigOnly`` with nothing
+    configured, or a missing email). A probe read: git's failure is a NORMAL
+    answer (``None``), not an exception. ``shipit repo new`` attributes the
+    generated MIT ``LICENSE`` to the returned name; an unresolvable author is a
+    creation preflight failure the caller raises, never a template placeholder.
     """
-    result = _probe(["config", "--get", key], cwd=cwd)
+    result = _probe(["var", "GIT_AUTHOR_IDENT"], cwd=cwd)
     if not result.ok:
         return None
-    value = result.stdout.strip()
-    return value or None
+    # `GIT_AUTHOR_IDENT` is `Name <email> <timestamp> <tz>`; the display name is
+    # everything before the ` <email>` bracket (a name never contains ``<``).
+    ident = result.stdout.strip()
+    marker = ident.rfind(" <")
+    if marker <= 0:
+        return None
+    return ident[:marker].strip() or None
 
 
 def commit(

@@ -72,17 +72,21 @@ class CreationResult:
 def _preflight(parent: Path, name_value: str) -> tuple[Path, Path]:
     """Validate the parent and derive+validate the destination (ADR-0059).
 
-    The parent must already exist as a writable directory (a symlink resolving
-    to one is accepted); creation never creates missing parent structure. The
-    destination is always ``parent/name`` and must be absent or an empty
-    directory — a file, a symlink, or a directory containing ANY entry
+    The parent must already exist as a writable, traversable directory (a
+    symlink resolving to one is accepted); creation never creates missing parent
+    structure. The destination is always ``parent/name`` and must be absent or an
+    empty directory — a file, a symlink, or a directory containing ANY entry
     (including a hidden one) is refused before anything is written.
     """
     resolved = parent.resolve() if parent.is_symlink() else parent
     if not resolved.is_dir():
         raise CreationError(f"parent {parent} is not an existing directory")
-    if not os.access(resolved, os.W_OK):
-        raise CreationError(f"parent {parent} is not writable")
+    # Both write AND traverse (execute) are required: creation creates the
+    # staging sibling under the parent and stats/renames entries within it, and
+    # a non-traversable parent (W_OK without X_OK) would accept preflight only to
+    # fail mid-creation.
+    if not os.access(resolved, os.W_OK | os.X_OK):
+        raise CreationError(f"parent {parent} is not a writable, traversable directory")
     dest = resolved / name_value
     _assert_absent_or_empty(dest)
     return resolved, dest
@@ -119,6 +123,14 @@ def default_installer(root: Path) -> None:
     toolchain catalog is signal-conditional off the tracked Cargo manifest, so
     the scaffold must already be ``git add``-ed when this runs (creation stages
     before installing) for the managed Rust block to ship.
+
+    ``MODE_TREE`` degrades a failed ``lefthook install`` to a warning
+    (``hooks_activated is False``) rather than aborting — right for install's
+    own working-tree refresh, wrong for creation, whose contract is that the
+    managed baseline INCLUDING active hooks is in place before the initial
+    commit (so that commit runs the hooks). So creation fails CLOSED here: a
+    false activation raises :class:`CreationError`, the staging sibling is
+    cleaned up, and nothing is published.
     """
     from ..install.apply import MODE_TREE
     from ..install.apply import apply as apply_plan
@@ -137,7 +149,12 @@ def default_installer(root: Path) -> None:
     retired_hooks = load_retired_hooks()
     state = gather(root, units, retired, retired_hooks)
     plan = reconcile(units, retired, state, retired_hooks)
-    apply_plan(plan, MODE_TREE)
+    result = apply_plan(plan, MODE_TREE)
+    if result.hooks_activated is False:
+        raise CreationError(
+            "managed git hooks did not activate during creation "
+            f"({result.hooks_detail.strip()}); the Repo was not published"
+        )
 
 
 def default_provisioner(root: Path) -> None:
@@ -176,15 +193,23 @@ def default_verifier(root: Path) -> None:
 def default_author(root: Path) -> str:
     """The resolved Git author name for the MIT ``LICENSE`` copyright holder.
 
-    Reads ``user.name`` from ``root`` (after ``git init``, so the global
-    identity resolves). A missing identity is a creation PREFLIGHT failure
-    (``docs/spec/repo-new.md``: never a template placeholder), raised here.
+    Resolves the author through :func:`git.author_name` (``git var
+    GIT_AUTHOR_IDENT``) from ``root`` (after ``git init``), so it uses the SAME
+    identity the ``Initial commit`` will — honoring ``GIT_AUTHOR_NAME``/
+    ``GIT_AUTHOR_EMAIL`` and the full ``user.*`` config chain, not one config
+    key — and fails wherever ``git commit`` would (missing name OR email, or
+    ``user.useConfigOnly`` with nothing set). An unresolvable identity is a
+    creation PREFLIGHT failure (``docs/spec/repo-new.md``: never a template
+    placeholder), raised here BEFORE any effect rather than as a raw commit-time
+    git error mid-creation.
     """
-    name = git.config_get("user.name", cwd=str(root))
+    name = git.author_name(cwd=str(root))
     if not name:
         raise CreationError(
-            "git identity is not configured (user.name); set it before creating "
-            'a Repo — e.g. `git config --global user.name "Your Name"`'
+            "git could not resolve an author identity; configure it before "
+            'creating a Repo — e.g. `git config --global user.name "Your Name"` '
+            'and `git config --global user.email "you@example.com"` (or set '
+            "GIT_AUTHOR_NAME/GIT_AUTHOR_EMAIL)"
         )
     return name
 
@@ -220,6 +245,14 @@ def create_repo(
     creation_year = year if year is not None else datetime.date.today().year
 
     staging = Path(tempfile.mkdtemp(dir=resolved_parent, prefix=".shipit-repo-new-"))
+    # `mkdtemp` hard-codes 0o700, and `os.rename` publishes the directory mode
+    # verbatim — so a published Repo would be `rwx------`, breaking shared
+    # workspaces and container mounts and diverging from `git init`/`cargo new`,
+    # which respect the user's umask. Widen the staging root to the umask-derived
+    # mode (typically 0o755) before it is published.
+    umask = os.umask(0o022)
+    os.umask(umask)
+    staging.chmod(0o777 & ~umask)
     logger.info(
         "staging new Repo",
         extra={"staging": str(staging), "destination": str(dest)},

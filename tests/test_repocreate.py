@@ -108,6 +108,12 @@ def test_tomlio_escapes_strings():
     assert tomlio.dumps({"t": {"k": 'a"b\\c'}}) == '[t]\nk = "a\\"b\\\\c"\n'
 
 
+def test_tomlio_escapes_control_characters():
+    # A literal newline/tab must become a TOML escape, never a raw control
+    # character that breaks the basic string (and thus TOML parsing).
+    assert tomlio.dumps({"t": {"k": "a\nb\tc"}}) == '[t]\nk = "a\\nb\\tc"\n'
+
+
 def test_tomlio_rejects_unserializable_value():
     with pytest.raises(TypeError):
         tomlio.dumps({"t": {"k": object()}})
@@ -293,8 +299,9 @@ def test_create_publishes_verified_repo(tmp_path, git_identity):
     assert git.status_porcelain(cwd=str(dest)) == []
     # The three public Checks ran, install/provision before them, in order.
     assert order == ["install", "provision", "verify"]
-    # No staging siblings survive under the parent.
-    assert [p.name for p in tmp_path.iterdir()] == ["hello"]
+    # No staging siblings survive under the parent (iterdir order is
+    # filesystem-dependent, so compare as a sorted list).
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["hello"]
 
 
 def test_create_accepts_empty_destination_directory(tmp_path, git_identity):
@@ -302,6 +309,18 @@ def test_create_accepts_empty_destination_directory(tmp_path, git_identity):
     result = _fake_create(tmp_path, [])
     assert result.destination == tmp_path / "hello"
     assert (tmp_path / "hello" / "Cargo.toml").is_file()
+
+
+def test_create_published_repo_respects_umask(tmp_path, git_identity):
+    # `mkdtemp` stages at 0o700; the published Repo must instead respect the
+    # user's umask like `git init`/`cargo new` (0o755 under a 0o022 umask), not
+    # ship `rwx------` and break shared workspaces / container mounts.
+    old = os.umask(0o022)
+    try:
+        _fake_create(tmp_path, [])
+    finally:
+        os.umask(old)
+    assert (tmp_path / "hello").stat().st_mode & 0o777 == 0o755
 
 
 def test_create_failed_check_rolls_back_and_leaves_destination_absent(
@@ -346,9 +365,57 @@ def test_create_refuses_symlink_destination(tmp_path):
 
 
 def test_default_author_raises_without_git_identity(tmp_path, monkeypatch):
-    monkeypatch.setattr(create_mod.git, "config_get", lambda key, *, cwd: None)
+    monkeypatch.setattr(create_mod.git, "author_name", lambda *, cwd: None)
     with pytest.raises(CreationError):
         create_mod.default_author(tmp_path)
+
+
+def _stub_install_pipeline(monkeypatch, *, hooks_activated, hooks_detail=""):
+    """Stub the in-process install pipeline so ``default_installer`` can be
+    driven without a real gather/reconcile/apply, forcing a chosen activation
+    outcome from ``apply``."""
+    from shipit.install import apply as apply_mod
+    from shipit.install import reconcile as reconcile_mod
+    from shipit.install import units as units_mod
+
+    monkeypatch.setattr(reconcile_mod, "detect_toolchains", lambda root: ())
+    monkeypatch.setattr(units_mod, "load_units", lambda *, toolchains: ())
+    monkeypatch.setattr(reconcile_mod, "load_retired", lambda: ())
+    monkeypatch.setattr(reconcile_mod, "load_retired_hooks", lambda: ())
+    monkeypatch.setattr(reconcile_mod, "gather", lambda *a, **k: None)
+    monkeypatch.setattr(reconcile_mod, "reconcile", lambda *a, **k: "PLAN")
+    monkeypatch.setattr(
+        apply_mod,
+        "apply",
+        lambda plan, mode: apply_mod.InstallResult(
+            plan="PLAN",
+            mode=mode,
+            hooks_activated=hooks_activated,
+            hooks_detail=hooks_detail,
+        ),
+    )
+
+
+def test_default_installer_fails_closed_when_hooks_do_not_activate(
+    tmp_path, monkeypatch
+):
+    # A degraded MODE_TREE activation returns hooks_activated=False; creation's
+    # contract (active hooks before the initial commit) means that must abort,
+    # not publish a Repo with dormant hooks.
+    _stub_install_pipeline(
+        monkeypatch, hooks_activated=False, hooks_detail="lefthook not found"
+    )
+    with pytest.raises(CreationError, match="hooks did not activate"):
+        create_mod.default_installer(tmp_path)
+
+
+@pytest.mark.parametrize("hooks_activated", [True, None])
+def test_default_installer_accepts_activated_or_no_op_hooks(
+    tmp_path, monkeypatch, hooks_activated
+):
+    # True (activated) and None (nothing to activate) are both success.
+    _stub_install_pipeline(monkeypatch, hooks_activated=hooks_activated)
+    create_mod.default_installer(tmp_path)  # does not raise
 
 
 # --------------------------------------------------------------------------
@@ -395,14 +462,22 @@ def test_run_new_maps_creation_error_to_exit_one(capsys, tmp_path):
     reason="set SHIPIT_REPO_NEW_E2E=1 to run the full pixi+cargo certification",
 )
 def test_create_real_toolchain_end_to_end(tmp_path, git_identity):
-    result = create_repo("hello", tmp_path, ("rust",))
+    # A HYPHENATED canonical name exercises the crate/package naming boundary —
+    # notably `CARGO_BIN_EXE_<bin>`, which Cargo sets under the binary-target
+    # name verbatim (`my-tool`, dash preserved), the spelling the black-box test
+    # references. A dashless name would never surface a hyphen regression.
+    result = create_repo("my-tool", tmp_path, ("rust",))
     dest = result.destination
     assert (dest / "Cargo.toml").is_file()
     assert (dest / "pixi.lock").is_file()
     assert git.current_branch(cwd=str(dest)) == "main"
-    run = subprocess.run(
-        ["pixi", "run", "--manifest-path", str(dest / "pixi.toml"), "build"],
-        capture_output=True,
-        text=True,
-    )
-    assert run.returncode == 0, run.stderr
+    # Re-run every public Check against the published Repo — the full
+    # certification contract the module documents (lint, test, build), not just
+    # build — proving the generated Repo stands on its own.
+    for task in ("lint", "test", "build"):
+        run = subprocess.run(
+            ["pixi", "run", "--manifest-path", str(dest / "pixi.toml"), task],
+            capture_output=True,
+            text=True,
+        )
+        assert run.returncode == 0, f"pixi run {task} failed:\n{run.stderr}"
