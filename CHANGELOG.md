@@ -4,6 +4,8 @@
 
 ## Unreleased
 
+## 1.1.1 - 2026-07-14
+
 - The standing sign e2e (#899): `shipit wf verify-canary` dispatches
   shipit-canary's blessed release caller through the full sign proof matrix
   on live GitHub — the composed `stage=full` chain (sign+notarize on a real
@@ -24,6 +26,15 @@
   the signal, the same union mechanics as the wasm-pack→node-deps delivery.
   A pixi-managed builder missing at `shipit build` now fails naming the
   install reconcile that provisions it, instead of a bare not-found note.
+
+### Fixed
+
+- Standalone `wf-build` dispatches are now a relay-complete source run for the
+  sign/publish stages: a new standalone-only `notes` job re-derives the
+  `release-notes` artifact at the tag via the new read-only
+  `shipit release notes` verb, so a staged chain whose sign/publish names a
+  build run as its source no longer fails `carry-notes` with
+  `Artifact not found for name: release-notes` (#898).
 
 ## 1.1.0 - 2026-07-13
 
