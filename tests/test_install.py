@@ -4085,6 +4085,60 @@ def test_preclean_no_hooks_dir_is_a_noop(tmp_path):
     iapply._preclean_stale_hook_backups(tmp_path)  # no .git/hooks yet
 
 
+def test_preclean_removes_a_dangling_hook_symlink(tmp_path):
+    # #912: a managed hook path that is a symlink to a target that no longer
+    # resolves (a legacy `pre-commit -> ../../scripts/ci.sh` whose target is
+    # gone) defeats `lefthook install` with ENOENT. The dead link is unlinked so
+    # lefthook writes a fresh shim into the now-empty slot.
+    hooks = tmp_path / ".git" / "hooks"
+    hooks.mkdir(parents=True)
+    (hooks / "pre-commit").symlink_to("../../scripts/does-not-exist")
+    assert (hooks / "pre-commit").is_symlink()
+    iapply._preclean_dangling_hook_symlinks(tmp_path)
+    assert not (hooks / "pre-commit").is_symlink()
+    assert not (hooks / "pre-commit").exists()
+
+
+def test_preclean_preserves_a_live_hook_symlink(tmp_path):
+    # Conservative by construction: a symlink whose target RESOLVES is a working
+    # consumer hook — left untouched, so install never destroys a live hook.
+    hooks = tmp_path / ".git" / "hooks"
+    hooks.mkdir(parents=True)
+    target = tmp_path / "real-hook.sh"
+    target.write_text("#!/bin/sh\necho live\n")
+    (hooks / "pre-commit").symlink_to(target)
+    iapply._preclean_dangling_hook_symlinks(tmp_path)
+    assert (hooks / "pre-commit").is_symlink()
+    assert (hooks / "pre-commit").resolve() == target.resolve()
+
+
+def test_preclean_leaves_a_real_hook_file_untouched(tmp_path):
+    # A real (non-symlink) file at a managed hook path — a live shim or a
+    # hand-written consumer hook — is never a dangling link, so it is untouched.
+    hooks = tmp_path / ".git" / "hooks"
+    hooks.mkdir(parents=True)
+    (hooks / "pre-commit").write_text(_LEFTHOOK_SHIM)
+    iapply._preclean_dangling_hook_symlinks(tmp_path)
+    assert (hooks / "pre-commit").read_text() == _LEFTHOOK_SHIM
+
+
+def test_preclean_dangling_symlink_no_hooks_dir_is_a_noop(tmp_path):
+    # A consumer whose `.git/hooks` does not exist must not raise.
+    iapply._preclean_dangling_hook_symlinks(tmp_path)  # no .git/hooks yet
+
+
+def test_pr_install_precleans_a_dangling_hook_symlink_before_activation(tmp_path, rec):
+    # #912 end-to-end: a writing `install --pr` clears the dead link as part of
+    # its activation step, so `lefthook install` never ENOENTs on the missing
+    # symlink target (and every managed hook activates cleanly).
+    hooks = tmp_path / ".git" / "hooks"
+    hooks.mkdir(parents=True)
+    (hooks / "pre-commit").symlink_to("../../scripts/does-not-exist")
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    _apply(tmp_path, iapply.MODE_PR)
+    assert not (hooks / "pre-commit").is_symlink()
+
+
 def test_pr_install_precleans_a_stale_lefthook_backup_before_activation(tmp_path, rec):
     # Mode 2 end-to-end: a writing `install --pr` clears the colliding backup as
     # part of its activation step, so `lefthook install` never fails the rename

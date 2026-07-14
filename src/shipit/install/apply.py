@@ -95,6 +95,17 @@ PIXI_LOCK = "pixi.lock"
 HOOK_BACKUP_SUFFIX = ".old"
 LEFTHOOK_SHIM_MARKERS = ("LEFTHOOK", "call_lefthook")
 
+#: The git-hook slots the managed ``lefthook.yml`` activates a shim into — the
+#: paths ``lefthook install`` writes and therefore the only ones a pre-existing
+#: obstruction can block (#912). A pre-existing DANGLING symlink at any of these
+#: paths defeats ``lefthook install``: lefthook's existence ``stat`` FOLLOWS the
+#: link, sees the dead target as absent, skips its move-to-``.old`` step, and
+#: goes straight to ``open(<hook>, O_CREATE|O_WRONLY)`` — which also follows the
+#: dead link and tries to create the missing target in a directory that does not
+#: exist → ``ENOENT``. :func:`_preclean_dangling_hook_symlinks` unlinks the dead
+#: link at these paths so lefthook writes a fresh shim.
+MANAGED_HOOK_NAMES = ("pre-commit", "pre-push", "post-commit")
+
 #: The PR-body renderer apply calls at the boundary moment (``MODE_PR`` only):
 #: ``(override_before, hooks_activated, rerendered, stamped_pin, lint_debt) ->
 #: body``. Injected by the verb so the body's sections stay a pure renderer
@@ -361,6 +372,53 @@ def _preclean_stale_hook_backups(root: Path) -> None:
             "removed a stale lefthook-generated .old hook-backup file before "
             "activation (#777 mode 2)",
             extra={"root": str(root), "backup": backup.name},
+        )
+
+
+def _preclean_dangling_hook_symlinks(root: Path) -> None:
+    """Remove a pre-existing DANGLING symlink at a managed hook path before
+    ``lefthook install`` re-runs — the #912 fix.
+
+    A repo carrying a legacy ``.git/hooks/<hook>`` symlink whose target no longer
+    resolves defeats ``lefthook install``: lefthook decides a hook already exists
+    with a ``stat`` that FOLLOWS the link, so a dangling link reads as absent;
+    lefthook then skips its normal move-to-``.old`` step and goes straight to
+    ``open(<hook>, O_CREATE|O_WRONLY)``, which ALSO follows the dead link and
+    tries to create the missing target in a directory that does not exist →
+    ``ENOENT`` ("no such file or directory"). lefthook cannot self-heal this, so
+    that one hook never activates while the others do. Unlinking the dead link
+    here lets lefthook write a fresh shim into the now-empty slot.
+
+    Same category as :func:`_preclean_stale_hook_backups` (a leftover blocking
+    activation), and held to the same conservative bar: only a DANGLING symlink
+    (:meth:`~pathlib.Path.is_symlink` true AND :meth:`~pathlib.Path.exists`
+    false — the link resolves to nothing) is removed. A symlink whose target
+    resolves is a working consumer hook and is left untouched, as is a real
+    (non-symlink) file. Best-effort: an unremovable link is logged and skipped,
+    never fatal — the worst case is today's degraded activation warning.
+    """
+    hooks_dir = root / ".git" / "hooks"
+    if not hooks_dir.is_dir():
+        return
+    for name in MANAGED_HOOK_NAMES:
+        hook = hooks_dir / name
+        # Dangling: the path IS a symlink but does not resolve. `exists()`
+        # follows the link, so a live link (target resolves) and a real file
+        # both read as existing and are left alone; only a dead link is removed.
+        if not (hook.is_symlink() and not hook.exists()):
+            continue
+        try:
+            hook.unlink()
+        except OSError:
+            logger.warning(
+                "could not remove a dangling git-hook symlink before activation",
+                exc_info=True,
+                extra={"root": str(root), "hook": name},
+            )
+            continue
+        logger.info(
+            "removed a dangling git-hook symlink before activation (#912)",
+            extra={"root": str(root), "hook": name},
         )
 
 
@@ -702,8 +760,13 @@ def apply(
         # Clear any stale lefthook `.old` backup first (#777 mode 2) so the
         # rename `lefthook install` performs never collides — a collision fails
         # the whole activation, which then fails self-cert closed on a virgin
-        # ex-release consumer.
+        # ex-release consumer. Same for a pre-existing DANGLING hook symlink
+        # (#912): lefthook's stat follows the dead link, reads it as absent, and
+        # then ENOENTs trying to create its missing target — so that one hook
+        # never activates. Both are leftovers that block activation; clear them
+        # before `lefthook install` writes its fresh shims.
         _preclean_stale_hook_backups(root)
+        _preclean_dangling_hook_symlinks(root)
         hooks_activated, hooks_detail = _activate(root, activate)
         if not hooks_activated:
             # Degraded-but-continuing: the config shipped, only local activation
