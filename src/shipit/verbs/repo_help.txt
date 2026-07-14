@@ -1,0 +1,5 @@
+`shipit repo` groups repository-level operations.
+
+Today it carries one verb, `repo new`, which creates a new local
+shipit-managed Repo with a complete, verified development baseline. See
+`shipit repo new help` for the full guide.
