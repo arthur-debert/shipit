@@ -27,9 +27,9 @@ access-level verify pass (#739) uses: :func:`is_reusable_workflow` /
 the local checkout or via the contents API — same loader, same YAML-1.1
 ``on:`` gotcha handling. And the CONSUMER side of the same grammar:
 :func:`workflow_pin_refs` enumerates the ``owner/repo/wf.yml@vN`` pins the
-local caller workflows dispatch, so the release preflight pin gate (#917) can
-verify each ``@vN`` resolves on its publisher before GitHub emits a raw HTTP
-422 at dispatch.
+RELEASE CALLER (:data:`RELEASE_CALLER_WORKFLOW`) dispatches, so the release
+preflight pin gate (#917) can verify each ``@vN`` resolves on its publisher
+before GitHub emits a raw HTTP 422 at dispatch.
 """
 
 from __future__ import annotations
@@ -78,8 +78,22 @@ for _ch in "tTfF":
 _USES_RE = re.compile(
     r"^(?P<owner>[^/]+)/(?P<repo>[^/]+)/(?P<path>[^@]+\.ya?ml)@(?P<ref>.+)$"
 )
+# The floating v-major ref shape (ADR-0010): `v1`, `v2`, … — a BRANCH
+# advance-major.yml force-moves onto each stable tag. The pin gate enumerates
+# ONLY these (a `@main`, a SHA, a `@v1.2.3` release tag is outside the
+# bootstrap contract and gets no phantom "bootstrap the v-major branch"
+# remediation — #917, workflows.lex §10).
+_VN_RE = re.compile(r"^v\d+$")
 # GitHub caps reusable-workflow nesting at 4; the same cap bounds the recursion.
 _MAX_NESTING = 4
+
+#: The blessed stage-choice release-caller filename (workflows.lex §8, the
+#: shape `shipit wf test` lints) shipit installs and dogfoods — the ONE
+#: workflow a release dispatch resolves its ``@vN`` stage pins from. The pin
+#: gate scopes to it, NOT every ``.github/workflows`` file: an unrelated
+#: CI/manual/experimental workflow's stale cross-repo ref is not part of the
+#: release dispatch and must never block a cut (#917).
+RELEASE_CALLER_WORKFLOW = "shipit-release.yml"
 
 
 # --------------------------------------------------------------------------
@@ -295,41 +309,54 @@ def pr_workflow_paths(workflows_dir: str) -> list[str]:
     return paths
 
 
-def workflow_pin_refs(workflows_dir: str) -> list[tuple[str, str]]:
-    """The cross-repo reusable-workflow pins the local caller workflows
-    dispatch, as sorted-unique ``(owner/repo, ref)`` tuples.
+def workflow_pin_refs(caller_path: str) -> list[tuple[str, str]]:
+    """The floating-major ``@vN`` reusable-workflow pins the RELEASE CALLER
+    dispatches, as sorted-unique ``(owner/repo, ref)`` tuples.
 
-    Walks every ``.github/workflows/*.y{a,}ml`` file and collects each job's
-    ``uses: owner/repo/path@ref`` — the pinned reference GitHub resolves at
-    dispatch (the release caller's ``wf-*.yml@vN`` stage pins, #917). NOT a
-    pin, so skipped: a repo-local ``./…`` ``uses:`` (resolved against the
-    caller's own repo — no remote ref to miss) and a step/job ``uses:`` naming
-    an ACTION rather than a workflow (``actions/checkout@v6`` — no ``.yml``
-    path, so :data:`_USES_RE` does not match). A file that will not parse
+    Reads the ONE release caller workflow (``caller_path`` — the blessed
+    :data:`RELEASE_CALLER_WORKFLOW` shape) and collects each job's
+    ``uses: owner/repo/path@vN`` — the pins GitHub resolves when it dispatches
+    that caller (#917). Scoped to the caller, NOT every ``.github/workflows``
+    file: an unrelated CI/manual/experimental workflow with a stale cross-repo
+    ref is not part of the release dispatch, so a missing ref there must never
+    block a cut. The caller's OWN direct pins are sufficient to catch the
+    missing-``@vN`` failure — the whole stage chain rides the SAME floating
+    ``@vN`` branch, so if that branch is absent the caller's very first pin
+    already fails at GitHub's workflow-resolution step.
+
+    Filtered to the ``@vN`` shape (:data:`_VN_RE`): the gate's refusal and the
+    §10 bootstrap contract are floating-v-major-BRANCH specific (advance-major
+    force-moves a ``vN`` branch — ADR-0010), so a non-``vN`` pin (``@main``, a
+    SHA, a ``@v1.2.3`` release tag) is outside this contract and gets no
+    phantom "bootstrap the v-major branch" remediation. NOT a pin either, so
+    skipped: a repo-local ``./…`` ``uses:`` (resolved against the caller's own
+    repo — no remote ref to miss) and a step/job ``uses:`` naming an ACTION
+    rather than a workflow (``actions/checkout@v6`` — no ``.yml`` path, so
+    :data:`_USES_RE` does not match). A caller that is absent or will not parse
     contributes nothing (the same tolerance :func:`pr_workflow_paths` keeps).
 
     Reuses the reusable-workflow ref grammar (:data:`_USES_RE`), the same
     parser :func:`_fetch_called_workflow` resolves ``uses:`` targets with, so a
     preflight pin gate enumerates exactly the refs a dispatch will resolve."""
+    try:
+        doc = _load_yaml_file(caller_path)
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
+        return []
+    jobs = doc.get("jobs") if isinstance(doc, dict) else None
+    if not isinstance(jobs, dict):
+        return []
     pins: set[tuple[str, str]] = set()
-    for ext in ("*.yml", "*.yaml"):
-        for path in sorted(glob.glob(os.path.join(workflows_dir, ext))):
-            try:
-                doc = _load_yaml_file(path)
-            except (OSError, UnicodeDecodeError, yaml.YAMLError):
-                continue
-            jobs = doc.get("jobs") if isinstance(doc, dict) else None
-            if not isinstance(jobs, dict):
-                continue
-            for job in jobs.values():
-                uses = job.get("uses") if isinstance(job, dict) else None
-                if not isinstance(uses, str) or uses.startswith("./"):
-                    continue
-                match = _USES_RE.match(uses)
-                if match is None:
-                    continue
-                fields = match.groupdict()
-                pins.add((f"{fields['owner']}/{fields['repo']}", fields["ref"]))
+    for job in jobs.values():
+        uses = job.get("uses") if isinstance(job, dict) else None
+        if not isinstance(uses, str) or uses.startswith("./"):
+            continue
+        match = _USES_RE.match(uses)
+        if match is None:
+            continue
+        fields = match.groupdict()
+        if not _VN_RE.match(fields["ref"]):
+            continue
+        pins.add((f"{fields['owner']}/{fields['repo']}", fields["ref"]))
     return sorted(pins)
 
 

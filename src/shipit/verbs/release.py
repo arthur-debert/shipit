@@ -278,8 +278,8 @@ def run_preflight(
     refusals (phantom release, nothing-to-break-glass) and the presence
     failure are :class:`~shipit.release.ReleaseError` → exit 1.
 
-    The ``@vN`` PIN GATE (#917): every reusable-workflow pin the caller
-    workflows dispatch (``uses: owner/repo/wf.yml@vN`` —
+    The ``@vN`` PIN GATE (#917): every floating-major reusable-workflow pin the
+    RELEASE CALLER dispatches (``uses: owner/repo/wf.yml@vN`` —
     :func:`shipit.checks.workflow_pin_refs`) must resolve on its publisher, or
     GitHub rejects the WHOLE dispatch with a raw HTTP 422 at its
     workflow-resolution step, before any stage runs. Preflight resolves each
@@ -335,14 +335,18 @@ def run_preflight(
                 "cannot run to publish; failing now, before prepare writes "
                 "any history"
             )
-        # The @vN pin gate (#917): resolve every reusable-workflow pin the
-        # caller workflows dispatch against its publisher — a missing floating
-        # v-major branch would otherwise die as a raw HTTP 422 at GitHub's
-        # workflow-resolution step, before any stage runs. Network-cheap (one
-        # probe per unique pin) and skipped under plan_only (that job runs
-        # inside an already-resolved dispatch).
+        # The @vN pin gate (#917): resolve every floating-major reusable-
+        # workflow pin the RELEASE CALLER dispatches against its publisher — a
+        # missing v-major branch would otherwise die as a raw HTTP 422 at
+        # GitHub's workflow-resolution step, before any stage runs. Scoped to
+        # the caller (not every workflow file — an unrelated CI/manual workflow
+        # is not part of the dispatch), network-cheap (one probe per unique
+        # pin), and skipped under plan_only (that job runs inside an already-
+        # resolved dispatch).
         resolve = resolve_ref or gh.workflow_ref_resolves
-        pins = checks.workflow_pin_refs(str(root / ".github" / "workflows"))
+        pins = checks.workflow_pin_refs(
+            str(root / ".github" / "workflows" / checks.RELEASE_CALLER_WORKFLOW)
+        )
         unresolved = [(repo, ref) for repo, ref in pins if not resolve(repo, ref)]
         if unresolved:
             raise ReleaseError(preflight_mod.missing_pin_refusal(unresolved))

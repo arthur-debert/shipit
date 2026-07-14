@@ -60,7 +60,7 @@ from dataclasses import dataclass
 
 import click
 
-from .. import gh
+from .. import checks, gh
 from ._errors import cli_errors
 
 logger = logging.getLogger("shipit.wf")
@@ -76,7 +76,9 @@ CANARY_REPO = "arthur-debert/shipit-canary"
 
 #: The canary's blessed stage-choice caller file — the same name shipit's own
 #: dogfood caller wears (workflows.lex §8; the shape `shipit wf test` lints).
-CALLER_WORKFLOW = "shipit-release.yml"
+#: One source of truth: the pin gate resolves this same caller's ``@vN`` pins
+#: (:data:`shipit.checks.RELEASE_CALLER_WORKFLOW`).
+CALLER_WORKFLOW = checks.RELEASE_CALLER_WORKFLOW
 
 #: The proof modes: the composed chain, the standalone-dispatch relay, or
 #: both (the default — the runbook rule requires BOTH cited green).

@@ -405,9 +405,11 @@ logic is thin YAML) is stated in [./architecture.lex#3].
       branch, tag, or SHA, the same resolution the dispatch makes). A pin that
       does not resolve is a loud refusal
       (`shipit.release.preflight.missing_pin_refusal`) naming the ONE bootstrap
-      command, never GitHub's opaque 422. The resolver is CONSERVATIVE: a clean
-      404 refuses, but any degraded probe (auth, transport) is treated as
-      unknown-not-missing so it never blocks a cut on a phantom pin.
+      command, never GitHub's opaque 422. The resolver is CONSERVATIVE: a
+      confirmed absent ref refuses — either an `HTTP 404 Not Found` (a missing
+      branch or tag) or the `HTTP 422 No commit found for SHA` a SHA-shaped
+      miss returns — but any degraded probe (auth, transport, rate limit) is
+      treated as unknown-not-missing so it never blocks a cut on a phantom pin.
     - The bootstrap is paid ONCE, by hand, at the intended stable commit:
       `git push git@github.com:<owner>/<repo>.git <stable-sha>:refs/heads/vN`.
       From the next stable tag on, advance-major maintains `vN` — provided the

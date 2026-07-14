@@ -683,16 +683,36 @@ def workflow_ref_resolves(repo: str, ref: str) -> bool:
 
     Probe (``repos/{repo}/commits/{ref}``, which resolves a branch, a tag, OR a
     SHA — exactly what an ``@ref`` pin accepts): an absent ref is a NORMAL
-    answer the preflight pin gate branches on, so a CONFIRMED 404 is a clean
-    ``False``. Any OTHER probe failure (auth, rate-limit, transport) is
-    UNKNOWN, not missing — it returns ``True`` so a degraded probe can never be
-    read as an absent ref and block a cut with a phantom bootstrap
-    instruction."""
+    answer the preflight pin gate branches on, and GitHub reports it two ways
+    on this endpoint, both a CONFIRMED-missing ``False``:
+
+    - a missing branch/tag is ``HTTP 404 Not Found``;
+    - a SHA-shaped ref that matches no commit is ``HTTP 422 No commit found for
+      SHA`` — the shape that would otherwise slip through and let the dispatch
+      hit GitHub's raw 422 anyway (#917).
+
+    Matched on those EXACT shapes (``http 404`` / ``no commit found``), never a
+    bare ``404`` substring — an unrelated error line (a rate-limit remaining
+    count, a timestamp) can carry the digits ``404`` without meaning a missing
+    ref. Any OTHER probe failure (auth, rate-limit, transport) is UNKNOWN, not
+    missing — it returns ``True`` so a degraded probe can never be read as an
+    absent ref and block a cut with a phantom bootstrap instruction, and is
+    logged (LOG02) so a masked misconfiguration is not swallowed silently."""
     result = _run_probe(["gh", "api", f"repos/{repo}/commits/{ref}"])
     if result.rc == 0:
         return True
     stderr = (result.stderr or "").lower()
-    return not ("404" in stderr or "not found" in stderr)
+    if "http 404" in stderr or "no commit found" in stderr:
+        return False
+    logger.warning(
+        "workflow ref probe degraded for %s@%s (rc=%s) — treating as "
+        "unknown-not-missing, not an absent ref: %s",
+        repo,
+        ref,
+        result.rc,
+        (result.stderr or "").strip(),
+    )
+    return True
 
 
 def release_create(
