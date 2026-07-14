@@ -29,11 +29,14 @@ def render_text(template: str, context: dict[str, str]) -> str:
     Every placeholder must resolve to a context key (StrictUndefined): an
     unknown key raises :class:`CreationError` naming it, so a template typo
     fails creation loudly instead of writing a broken file. The renderer also
-    fails closed on any ``{{``/``}}`` that survives substitution: a malformed
-    placeholder the identifier pattern rejects (e.g. ``{{ cli-pkg }}``, whose
-    hyphen is not an identifier char) would otherwise ship a literal brace pair
-    into a generated file, contradicting this module's no-unrendered-braces
-    contract.
+    fails closed on any ``{{``/``}}`` in the TEMPLATE that the identifier
+    pattern rejects (e.g. ``{{ cli-pkg }}``, whose hyphen is not an identifier
+    char) — such a malformed placeholder would otherwise ship a literal brace
+    pair into a generated file, contradicting this module's no-unrendered-braces
+    contract. The malformed-brace scan runs over the template with its valid
+    placeholders stripped out, NOT over the rendered output: a substituted
+    context value may legitimately contain ``{{``/``}}`` (e.g. a code snippet),
+    and scanning the output would wrongly reject those value contents.
     """
 
     def _resolve(match: re.Match[str]) -> str:
@@ -45,13 +48,16 @@ def render_text(template: str, context: dict[str, str]) -> str:
             )
         return context[key]
 
-    rendered = _PLACEHOLDER.sub(_resolve, template)
-    leftover = re.search(r"\{\{|\}\}", rendered)
+    # Scan the template (minus its valid placeholders) for malformed brace pairs
+    # before substituting, so we catch template defects without restricting what
+    # a context value may contain.
+    stripped = _PLACEHOLDER.sub("", template)
+    leftover = re.search(r"\{\{|\}\}", stripped)
     if leftover is not None:
-        near = rendered[leftover.start() : leftover.start() + 40]
+        near = stripped[leftover.start() : leftover.start() + 40]
         raise CreationError(
             f"template left an unrendered brace pair near {near!r}; "
             "placeholder keys must be identifiers "
             "([A-Za-z_][A-Za-z0-9_]*)"
         )
-    return rendered
+    return _PLACEHOLDER.sub(_resolve, template)

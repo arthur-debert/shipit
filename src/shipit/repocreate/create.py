@@ -99,15 +99,31 @@ def _preflight(parent: Path, name_value: str) -> tuple[Path, Path]:
 
 
 def _assert_absent_or_empty(dest: Path) -> None:
-    """Refuse a destination that is not absent or an empty directory."""
-    if not dest.exists() and not dest.is_symlink():
-        return
-    if dest.is_symlink():
-        raise CreationError(f"destination {dest} is a symlink; refusing")
-    if not dest.is_dir():
-        raise CreationError(f"destination {dest} already exists; refusing")
-    if any(dest.iterdir()):
-        raise CreationError(f"destination {dest} is a non-empty directory; refusing")
+    """Refuse a destination that is not absent or an empty directory.
+
+    Every probe here (``exists``/``is_symlink``/``is_dir``/``iterdir``) hits the
+    filesystem and can raise ``OSError`` — e.g. a destination that exists but is
+    not readable/traversable raises ``PermissionError`` (``EACCES`` propagates
+    from the stat-based checks too, not just ``iterdir``). Any such error is
+    re-raised as :class:`CreationError` so an uninspectable destination stays on
+    the verb's ``error: …`` + exit-1 refusal contract rather than escaping as a
+    raw traceback.
+    """
+    try:
+        if not dest.exists() and not dest.is_symlink():
+            return
+        if dest.is_symlink():
+            raise CreationError(f"destination {dest} is a symlink; refusing")
+        if not dest.is_dir():
+            raise CreationError(f"destination {dest} already exists; refusing")
+        if any(dest.iterdir()):
+            raise CreationError(
+                f"destination {dest} is a non-empty directory; refusing"
+            )
+    except OSError as exc:
+        raise CreationError(
+            f"destination {dest} could not be inspected: {exc}"
+        ) from exc
 
 
 def _write_plan(plan: CreationPlan, root: Path) -> None:
@@ -268,17 +284,20 @@ def create_repo(
     # read the umask-derived bits straight back off it. Preserve any high-order
     # bits `mkdtemp` inherited from the parent (e.g. an SGID group-inheritance
     # bit on a shared workspace) by only rewriting the low 9 permission bits.
-    probe = staging / ".shipit-umask-probe"
-    probe.mkdir(mode=0o777)
-    umask_mode = probe.stat().st_mode & 0o777
-    probe.rmdir()
-    current_mode = staging.stat().st_mode
-    staging.chmod((current_mode & ~0o777) | umask_mode)
-    logger.info(
-        "staging new Repo",
-        extra={"staging": str(staging), "destination": str(dest)},
-    )
+    # Guard EVERYTHING after the staging root exists — including the umask probe
+    # and chmod below — so any filesystem error (permissions, disk) removes the
+    # temporary sibling instead of leaking it.
     try:
+        probe = staging / ".shipit-umask-probe"
+        probe.mkdir(mode=0o777)
+        umask_mode = probe.stat().st_mode & 0o777
+        probe.rmdir()
+        current_mode = staging.stat().st_mode
+        staging.chmod((current_mode & ~0o777) | umask_mode)
+        logger.info(
+            "staging new Repo",
+            extra={"staging": str(staging), "destination": str(dest)},
+        )
         git.init_main(cwd=str(staging))
         author = author_reader(staging)
         plan = build_plan(name, profiles, author=author, year=creation_year)

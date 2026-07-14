@@ -143,6 +143,14 @@ def test_render_text_fails_closed_on_malformed_placeholder():
         render_text("pkg {{ cli-pkg }}", {"cli-pkg": "x"})
 
 
+def test_render_text_allows_brace_pairs_in_context_values():
+    # The malformed-brace scan runs over the TEMPLATE (minus valid placeholders),
+    # not the rendered output: a substituted value may legitimately contain
+    # `{{`/`}}` (e.g. a code snippet), and that must not be rejected.
+    out = render_text("body {{ snippet }}", {"snippet": "let x = vec![{{1}}];"})
+    assert out == "body let x = vec![{{1}}];"
+
+
 # --------------------------------------------------------------------------
 # profiles — the closed registry (ADR-0056/0063)
 # --------------------------------------------------------------------------
@@ -333,6 +341,21 @@ def test_create_published_repo_respects_umask(tmp_path, git_identity):
     assert (tmp_path / "hello").stat().st_mode & 0o777 == 0o755
 
 
+def test_create_cleans_staging_when_umask_stage_fails(
+    tmp_path, git_identity, monkeypatch
+):
+    # The umask probe/chmod runs right after the staging sibling is created; a
+    # filesystem error there must still remove the sibling. The try/cleanup guard
+    # wraps it, so no partial `.shipit-repo-new-*` directory leaks.
+    def deny(self, mode):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(Path, "chmod", deny)
+    with pytest.raises(OSError):
+        _fake_create(tmp_path, [])
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_create_reports_destination_through_a_symlink_parent(tmp_path, git_identity):
     # A symlink parent is accepted, but the reported destination stays
     # `<parent>/<name>` (a path *through* the link), not the resolved real path.
@@ -385,6 +408,22 @@ def test_create_refuses_symlink_destination(tmp_path):
     (tmp_path / "hello").symlink_to(target)
     with pytest.raises(CreationError):
         _fake_create(tmp_path, [])
+
+
+def test_create_maps_uninspectable_destination_to_creation_error(tmp_path, monkeypatch):
+    # A destination that exists but cannot be listed (e.g. not readable) makes
+    # `iterdir` raise `PermissionError`; the stat-based probes can raise the same
+    # on `EACCES`. Either way the refusal must stay a handled CreationError (the
+    # verb's `error:` + exit-1 contract), never a raw traceback.
+    dest = tmp_path / "hello"
+    dest.mkdir()
+
+    def deny(self):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(Path, "iterdir", deny)
+    with pytest.raises(CreationError):
+        create_mod._assert_absent_or_empty(dest)
 
 
 def test_default_author_raises_without_git_identity(tmp_path, monkeypatch):
