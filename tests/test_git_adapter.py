@@ -3,7 +3,12 @@
 These pin the parsing/mapping the registry, hooks, and Tree planner rely on —
 the ahead/behind left-right order, upstream-absent → ``None`` / ``(0, 0)``, the
 exact-ref ``ls-remote`` equality, and the porcelain line parse — by patching
-only the Exec seam (``_git`` / ``_probe``), never a real subprocess. Most
+only the Exec seam (``_git`` / ``_probe``), never a real subprocess. The one
+deliberate exception is
+``test_hooks_dir_resolves_the_shared_common_dir_in_a_real_worktree``, which
+shells out to real ``git`` end-to-end: a linked worktree's ``.git``-file →
+shared-common-dir resolution (#914) is exactly the behaviour a fake seam can't
+prove, so it drives an actual ``git worktree`` checkout. Most
 registry reads are PROBES (``check=False`` through the Exec runner, ADR-0028):
 a nonzero exit is a normal answer for a scan over the fleet, so the fakes
 return an :class:`ExecResult` with the rc under test rather than raising.
