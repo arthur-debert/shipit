@@ -348,9 +348,14 @@ def _preclean_stale_hook_backups(root: Path) -> None:
     an unreadable/unremovable backup is logged and skipped, never fatal — the
     worst case is the pre-existing collision, which the activation degrades on
     as before.
+
+    Resolves the hooks dir through the git adapter (:func:`shipit.git.hooks_dir`,
+    #914) so a linked-worktree consumer — whose ``.git`` is a *file* and whose
+    hooks live in the shared common dir — is cleaned too, not silently skipped by
+    a hardcoded ``root / ".git" / "hooks"`` that does not exist there.
     """
-    hooks_dir = root / ".git" / "hooks"
-    if not hooks_dir.is_dir():
+    hooks_dir = git.hooks_dir(cwd=str(root))
+    if hooks_dir is None or not hooks_dir.is_dir():
         return
     for backup in sorted(hooks_dir.glob(f"*{HOOK_BACKUP_SUFFIX}")):
         try:
@@ -410,9 +415,14 @@ def _preclean_dangling_hook_symlinks(root: Path) -> None:
     directory would otherwise crash the install), so an unclassifiable or
     unremovable link is logged and skipped, never fatal — the worst case is
     today's degraded activation warning.
+
+    Resolves the hooks dir through the git adapter (:func:`shipit.git.hooks_dir`,
+    #914) so a linked-worktree consumer — whose ``.git`` is a *file* and whose
+    hooks live in the shared common dir — is cleaned too, not silently skipped by
+    a hardcoded ``root / ".git" / "hooks"`` that does not exist there.
     """
-    hooks_dir = root / ".git" / "hooks"
-    if not hooks_dir.is_dir():
+    hooks_dir = git.hooks_dir(cwd=str(root))
+    if hooks_dir is None or not hooks_dir.is_dir():
         return
     for name in MANAGED_HOOK_NAMES:
         hook = hooks_dir / name

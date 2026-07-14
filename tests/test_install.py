@@ -4122,12 +4122,26 @@ _LEFTHOOK_SHIM = (
 )
 
 
+def _hooks_repo(root: Path) -> Path:
+    """A REAL git checkout so `git.hooks_dir` resolves worktree-correctly (#914)
+    — returns the (already git-init'd) `.git/hooks` dir the precleans read.
+
+    The precleans now route through `git rev-parse --git-path hooks`, so a
+    fabricated bare `.git/hooks` dir (no valid gitdir) reads as "not a repo" and
+    the resolver returns None; a genuine `git init` is what these unit tests must
+    stand on to exercise the real hook-path resolution.
+    """
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    hooks = root / ".git" / "hooks"
+    hooks.mkdir(parents=True, exist_ok=True)  # `git init` already created it
+    return hooks
+
+
 def test_preclean_removes_a_stale_lefthook_shim_backup(tmp_path):
     # Mode 2: a stale `<hook>.old` left by a prior (release-era) `lefthook
     # install` is what collides with the next activation's rename. A backup
     # positively identified as a lefthook shim (both markers) is removed.
-    hooks = tmp_path / ".git" / "hooks"
-    hooks.mkdir(parents=True)
+    hooks = _hooks_repo(tmp_path)
     (hooks / "pre-commit.old").write_text(_LEFTHOOK_SHIM)
     (hooks / "pre-push.old").write_text(_LEFTHOOK_SHIM)
     iapply._preclean_stale_hook_backups(tmp_path)
@@ -4139,8 +4153,7 @@ def test_preclean_preserves_a_non_lefthook_backup(tmp_path):
     # Conservative by construction: a `.old` that is NOT a lefthook shim (a
     # hand-written consumer hook backup) is left untouched — install only removes
     # backups it can positively identify as tool-authored.
-    hooks = tmp_path / ".git" / "hooks"
-    hooks.mkdir(parents=True)
+    hooks = _hooks_repo(tmp_path)
     consumer = "#!/bin/sh\necho my own pre-commit\nexit 0\n"
     (hooks / "pre-commit.old").write_text(consumer)
     # A file that carries only ONE marker is still not a shim — require both.
@@ -4153,16 +4166,16 @@ def test_preclean_preserves_a_non_lefthook_backup(tmp_path):
 def test_preclean_leaves_the_live_hooks_untouched(tmp_path):
     # The pre-clean targets ONLY `.old` backups — a live `pre-commit` shim (no
     # `.old` suffix) is never removed, even though it is a lefthook shim.
-    hooks = tmp_path / ".git" / "hooks"
-    hooks.mkdir(parents=True)
+    hooks = _hooks_repo(tmp_path)
     (hooks / "pre-commit").write_text(_LEFTHOOK_SHIM)
     iapply._preclean_stale_hook_backups(tmp_path)
     assert (hooks / "pre-commit").read_text() == _LEFTHOOK_SHIM
 
 
 def test_preclean_no_hooks_dir_is_a_noop(tmp_path):
-    # A consumer whose `.git/hooks` does not exist must not raise.
-    iapply._preclean_stale_hook_backups(tmp_path)  # no .git/hooks yet
+    # A path that is not even a git checkout: the resolver reads None and the
+    # preclean no-ops without raising (the same disposition as an absent dir).
+    iapply._preclean_stale_hook_backups(tmp_path)  # not a repo → no hooks dir
 
 
 def test_preclean_removes_a_dangling_hook_symlink(tmp_path):
@@ -4170,8 +4183,7 @@ def test_preclean_removes_a_dangling_hook_symlink(tmp_path):
     # resolves (a legacy `pre-commit -> ../../scripts/ci.sh` whose target is
     # gone) defeats `lefthook install` with ENOENT. The dead link is unlinked so
     # lefthook writes a fresh shim into the now-empty slot.
-    hooks = tmp_path / ".git" / "hooks"
-    hooks.mkdir(parents=True)
+    hooks = _hooks_repo(tmp_path)
     (hooks / "pre-commit").symlink_to("../../scripts/does-not-exist")
     assert (hooks / "pre-commit").is_symlink()
     iapply._preclean_dangling_hook_symlinks(tmp_path)
@@ -4182,8 +4194,7 @@ def test_preclean_removes_a_dangling_hook_symlink(tmp_path):
 def test_preclean_preserves_a_live_hook_symlink(tmp_path):
     # Conservative by construction: a symlink whose target RESOLVES is a working
     # consumer hook — left untouched, so install never destroys a live hook.
-    hooks = tmp_path / ".git" / "hooks"
-    hooks.mkdir(parents=True)
+    hooks = _hooks_repo(tmp_path)
     target = tmp_path / "real-hook.sh"
     target.write_text("#!/bin/sh\necho live\n")
     (hooks / "pre-commit").symlink_to(target)
@@ -4200,8 +4211,7 @@ def test_preclean_preserves_a_symlink_whose_stat_fails_non_enoent(tmp_path):
     # target) must be LEFT UNTOUCHED, or the preclean would destroy a live hook
     # it cannot see. The classification is also OSError-guarded, so this never
     # crashes the install — the call returns cleanly with the link intact.
-    hooks = tmp_path / ".git" / "hooks"
-    hooks.mkdir(parents=True)
+    hooks = _hooks_repo(tmp_path)
     loop = hooks / "pre-commit"
     loop.symlink_to("pre-commit")  # self-referential → stat() raises ELOOP
     assert loop.is_symlink()
@@ -4212,36 +4222,63 @@ def test_preclean_preserves_a_symlink_whose_stat_fails_non_enoent(tmp_path):
 def test_preclean_leaves_a_real_hook_file_untouched(tmp_path):
     # A real (non-symlink) file at a managed hook path — a live shim or a
     # hand-written consumer hook — is never a dangling link, so it is untouched.
-    hooks = tmp_path / ".git" / "hooks"
-    hooks.mkdir(parents=True)
+    hooks = _hooks_repo(tmp_path)
     (hooks / "pre-commit").write_text(_LEFTHOOK_SHIM)
     iapply._preclean_dangling_hook_symlinks(tmp_path)
     assert (hooks / "pre-commit").read_text() == _LEFTHOOK_SHIM
 
 
 def test_preclean_dangling_symlink_no_hooks_dir_is_a_noop(tmp_path):
-    # A consumer whose `.git/hooks` does not exist must not raise.
-    iapply._preclean_dangling_hook_symlinks(tmp_path)  # no .git/hooks yet
+    # A path that is not even a git checkout: the resolver reads None and the
+    # preclean no-ops without raising (the same disposition as an absent dir).
+    iapply._preclean_dangling_hook_symlinks(tmp_path)  # not a repo → no hooks dir
 
 
 def test_pr_install_precleans_a_dangling_hook_symlink_before_activation(tmp_path, rec):
     # #912 end-to-end: a writing `install --pr` clears the dead link as part of
     # its activation step, so `lefthook install` never ENOENTs on the missing
     # symlink target (and every managed hook activates cleanly).
-    hooks = tmp_path / ".git" / "hooks"
-    hooks.mkdir(parents=True)
+    hooks = _hooks_repo(tmp_path)
     (hooks / "pre-commit").symlink_to("../../scripts/does-not-exist")
     (tmp_path / "AGENTS.md").write_text("# Acme\n")
     _apply(tmp_path, iapply.MODE_PR)
     assert not (hooks / "pre-commit").is_symlink()
 
 
+def test_preclean_reaches_the_shared_hooks_dir_from_a_linked_worktree(tmp_path):
+    # #914: in a LINKED worktree `.git` is a FILE and the managed hooks live in
+    # the main checkout's SHARED common dir. Run against the worktree, the
+    # preclean must still find and clear a dangling link there — the hardcoded
+    # `<worktree>/.git/hooks` (a nonexistent dir) made this a silent no-op before,
+    # so a worktree consumer's dead hook link never got cleaned.
+    main = tmp_path / "main"
+    main.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=main, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t.co"], cwd=main, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=main, check=True)
+    subprocess.run(
+        ["git", "commit", "--allow-empty", "-qm", "init"], cwd=main, check=True
+    )
+    wt = tmp_path / "wt"
+    subprocess.run(["git", "worktree", "add", "-q", str(wt)], cwd=main, check=True)
+    assert (wt / ".git").is_file()  # a linked worktree — hooks live in the common dir
+
+    shared = main / ".git" / "hooks"
+    (shared / "pre-commit").symlink_to("../../scripts/does-not-exist")
+    # The old hardcoded path a worktree does NOT have — proving the resolver, not
+    # this literal, is what finds the real hooks dir.
+    assert not (wt / ".git" / "hooks").exists()
+
+    iapply._preclean_dangling_hook_symlinks(wt)
+    assert not (shared / "pre-commit").is_symlink()
+    assert not (shared / "pre-commit").exists()
+
+
 def test_pr_install_precleans_a_stale_lefthook_backup_before_activation(tmp_path, rec):
     # Mode 2 end-to-end: a writing `install --pr` clears the colliding backup as
     # part of its activation step, so `lefthook install` never fails the rename
     # (and self-cert never fails closed on it).
-    hooks = tmp_path / ".git" / "hooks"
-    hooks.mkdir(parents=True)
+    hooks = _hooks_repo(tmp_path)
     (hooks / "pre-commit.old").write_text(_LEFTHOOK_SHIM)
     (tmp_path / "AGENTS.md").write_text("# Acme\n")
     _apply(tmp_path, iapply.MODE_PR)

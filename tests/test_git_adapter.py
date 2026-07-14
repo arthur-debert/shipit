@@ -12,6 +12,8 @@ return an :class:`ExecResult` with the rc under test rather than raising.
 from __future__ import annotations
 
 import logging
+import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -200,6 +202,56 @@ def test_head_commit_unresolvable_or_malformed_is_none(monkeypatch):
     assert git.head_commit(cwd="/x") is None
     monkeypatch.setattr(git, "_probe", lambda args, *, cwd: _ok("not-a-sha\n"))
     assert git.head_commit(cwd="/x") is None
+
+
+def test_hooks_dir_resolves_a_relative_answer_against_cwd(monkeypatch):
+    # A normal checkout: `rev-parse --git-path hooks` prints the path RELATIVE to
+    # the queried checkout, so the adapter joins it onto cwd to an absolute path.
+    monkeypatch.setattr(git, "_probe", lambda args, *, cwd: _ok(".git/hooks\n"))
+    assert git.hooks_dir(cwd="/repo") == Path("/repo/.git/hooks")
+
+
+def test_hooks_dir_keeps_an_absolute_worktree_answer_verbatim(monkeypatch):
+    # A linked worktree: git prints the ABSOLUTE shared common-dir hooks path, so
+    # os.path.join keeps it as-is rather than prefixing cwd (#914 — the whole
+    # point: a worktree's hooks live outside its own `.git` file).
+    monkeypatch.setattr(git, "_probe", lambda args, *, cwd: _ok("/main/.git/hooks\n"))
+    assert git.hooks_dir(cwd="/main/wt") == Path("/main/.git/hooks")
+
+
+def test_hooks_dir_none_when_not_a_repo(monkeypatch):
+    # A probe: a not-a-repo nonzero answer AND a launch-level ExecError both
+    # degrade to None so a best-effort caller no-ops rather than crashing.
+    monkeypatch.setattr(git, "_probe", lambda args, *, cwd: _fail("not a git repo"))
+    assert git.hooks_dir(cwd="/x") is None
+
+    def _raise(args, *, cwd):
+        raise ExecError(["git"], rc=None, cause=CAUSE_MISSING_BINARY)
+
+    monkeypatch.setattr(git, "_probe", _raise)
+    assert git.hooks_dir(cwd="/x") is None
+
+
+def test_hooks_dir_resolves_the_shared_common_dir_in_a_real_worktree(tmp_path):
+    # End-to-end over REAL git (no seam patch): a linked worktree's `.git` is a
+    # FILE and its hooks live in the main checkout's shared common dir, so the
+    # adapter must resolve to `<main>/.git/hooks` — exactly what the hardcoded
+    # `<worktree>/.git/hooks` (a nonexistent dir) missed before #914.
+    main = tmp_path / "main"
+    main.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=main, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t.co"], cwd=main, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=main, check=True)
+    subprocess.run(
+        ["git", "commit", "--allow-empty", "-qm", "init"], cwd=main, check=True
+    )
+    wt = tmp_path / "wt"
+    subprocess.run(["git", "worktree", "add", "-q", str(wt)], cwd=main, check=True)
+    assert (wt / ".git").is_file()  # a linked worktree points at the common dir
+
+    shared_hooks = (main / ".git" / "hooks").resolve()
+    assert git.hooks_dir(cwd=str(main)).resolve() == shared_hooks
+    assert git.hooks_dir(cwd=str(wt)).resolve() == shared_hooks
 
 
 def test_upstream_ref_returns_tracking_ref(monkeypatch):

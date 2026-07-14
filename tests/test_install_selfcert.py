@@ -11,6 +11,7 @@ fail-closed contract (no git, no PR) on the recorded boundary.
 from __future__ import annotations
 
 import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -395,15 +396,54 @@ def test_hooks_check_requires_a_successful_activation(staged):
 
 
 def test_hooks_check_requires_the_hook_files_on_disk(staged):
+    # A REAL checkout so the postcondition resolves `.git/hooks` through the git
+    # adapter (#914) rather than a fabricated bare dir the resolver reads as
+    # not-a-repo. `git init` seeds only `*.sample` hooks, so the managed
+    # pre-commit/pre-push are genuinely absent until written below.
+    subprocess.run(["git", "init", "-q"], cwd=staged, check=True)
     plan = _plan_with_writes(staged)
     check = selfcert._check_hooks(staged, plan, hooks_activated=True)
     assert not check.ok  # activation claimed success but .git/hooks is empty
 
     hooks = staged / ".git" / "hooks"
-    hooks.mkdir(parents=True)
     (hooks / "pre-commit").write_text("#!/bin/sh\n# lefthook\n")
     (hooks / "pre-push").write_text("#!/bin/sh\n# lefthook\n")
     assert selfcert._check_hooks(staged, plan, hooks_activated=True).ok
+
+
+def test_hooks_check_fails_when_the_hooks_dir_cannot_be_resolved(staged, monkeypatch):
+    # #914: the postcondition resolves `.git/hooks` through the git adapter; when
+    # that returns None (not a resolvable checkout) an activation that reported
+    # success has nothing to verify against, so the check fails CLOSED rather than
+    # passing a live-hooks claim it never checked.
+    monkeypatch.setattr(git, "hooks_dir", lambda *, cwd: None)
+    plan = _plan_with_writes(staged)
+    check = selfcert._check_hooks(staged, plan, hooks_activated=True)
+    assert not check.ok
+    assert "could not be resolved" in check.detail
+
+
+def test_hooks_check_reads_the_shared_hooks_dir_from_a_linked_worktree(tmp_path):
+    # #914 end-to-end: run against a LINKED worktree (its `.git` is a file), the
+    # check must read the managed hooks in the main checkout's SHARED common dir —
+    # the hardcoded `<worktree>/.git/hooks` does not exist, so the old code would
+    # have failed a worktree install that genuinely HAS live hooks.
+    main = tmp_path / "main"
+    main.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=main, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t.co"], cwd=main, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=main, check=True)
+    subprocess.run(
+        ["git", "commit", "--allow-empty", "-qm", "init"], cwd=main, check=True
+    )
+    wt = tmp_path / "wt"
+    subprocess.run(["git", "worktree", "add", "-q", str(wt)], cwd=main, check=True)
+    shared = main / ".git" / "hooks"
+    (shared / "pre-commit").write_text("#!/bin/sh\n# lefthook\n")
+    (shared / "pre-push").write_text("#!/bin/sh\n# lefthook\n")
+
+    plan = _plan_with_writes(wt)
+    assert selfcert._check_hooks(wt, plan, hooks_activated=True).ok
 
 
 def test_hooks_check_is_vacuous_when_the_plan_activates_nothing(tmp_path, rec):
@@ -517,8 +557,11 @@ def _dispatching_runner(pin: str):
 
 
 def _live_hooks(root: Path) -> None:
+    # A REAL checkout so the `hooks` postcondition resolves `.git/hooks` through
+    # the git adapter (#914); `git init` seeds the dir, into which the managed
+    # pre-commit/pre-push shims are written to stand in for a live activation.
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
     hooks = root / ".git" / "hooks"
-    hooks.mkdir(parents=True, exist_ok=True)
     (hooks / "pre-commit").write_text("#!/bin/sh\n")
     (hooks / "pre-push").write_text("#!/bin/sh\n")
 
