@@ -87,7 +87,13 @@ def _preflight(parent: Path, name_value: str) -> tuple[Path, Path]:
     # fail mid-creation.
     if not os.access(resolved, os.W_OK | os.X_OK):
         raise CreationError(f"parent {parent} is not a writable, traversable directory")
-    dest = resolved / name_value
+    # Anchor the destination to the user-supplied `parent`, NOT its resolved
+    # target: when `parent` is a symlink to a directory we accept it, but the
+    # created/reported path must stay `parent/name` (a path *through* the symlink)
+    # so it matches the docstring and the CLI's `<parent>/<name>` contract rather
+    # than surprising the caller with the real path behind the link. Staging still
+    # uses the resolved parent so the publish rename stays same-filesystem.
+    dest = parent / name_value
     _assert_absent_or_empty(dest)
     return resolved, dest
 
@@ -254,11 +260,13 @@ def create_repo(
     # workspaces and container mounts and diverging from `git init`/`cargo new`,
     # which respect the user's umask. Widen the staging root to the umask-derived
     # mode (typically 0o755) before it is published. Read the current umask with
-    # the standard set-to-0/restore probe (never imposing a specific value on
-    # files other threads may create in the window), and preserve any high-order
-    # bits `mkdtemp` inherited from the parent (e.g. an SGID group-inheritance
-    # bit on a shared workspace) by only rewriting the low 9 permission bits.
-    umask = os.umask(0)
+    # a fail-secure set-to-0o077/restore probe: `os.umask` can only read by
+    # writing, so the momentary value it imposes on any file other threads create
+    # in the window must be maximally restrictive (0o077, owner-only) rather than
+    # 0 (which would make such files world-writable). Preserve any high-order bits
+    # `mkdtemp` inherited from the parent (e.g. an SGID group-inheritance bit on a
+    # shared workspace) by only rewriting the low 9 permission bits.
+    umask = os.umask(0o077)
     os.umask(umask)
     current_mode = staging.stat().st_mode
     staging.chmod((current_mode & ~0o777) | (0o777 & ~umask))

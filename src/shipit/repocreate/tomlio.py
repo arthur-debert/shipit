@@ -82,7 +82,10 @@ def _render_key(key: str) -> str:
 
 
 def _is_bare(part: str) -> bool:
-    return all(c.isalnum() or c in "-_" for c in part)
+    # TOML bare keys are ASCII-only (A-Za-z0-9-_); `str.isalnum()` alone would
+    # accept non-ASCII letters (e.g. accented or CJK characters) and emit them
+    # unquoted, producing invalid TOML — so require ASCII before alnum.
+    return all((c.isascii() and c.isalnum()) or c in "-_" for c in part)
 
 
 def _is_table(value: object) -> bool:

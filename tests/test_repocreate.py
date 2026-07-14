@@ -325,6 +325,19 @@ def test_create_published_repo_respects_umask(tmp_path, git_identity):
     assert (tmp_path / "hello").stat().st_mode & 0o777 == 0o755
 
 
+def test_create_reports_destination_through_a_symlink_parent(tmp_path, git_identity):
+    # A symlink parent is accepted, but the reported destination stays
+    # `<parent>/<name>` (a path *through* the link), not the resolved real path.
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    result = _fake_create(link, [])
+    assert result.destination == link / "hello"
+    # It nonetheless materializes behind the link.
+    assert (real / "hello" / "Cargo.toml").is_file()
+
+
 def test_create_failed_check_rolls_back_and_leaves_destination_absent(
     tmp_path, git_identity
 ):
