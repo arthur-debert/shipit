@@ -43,7 +43,7 @@ from contextlib import redirect_stdout
 from dataclasses import dataclass
 from pathlib import Path
 
-from .. import config, execrun, pixienv
+from .. import config, execrun, git, pixienv
 from .reconcile import Plan
 from .units import HOOK_RECOVERY_CMD, LINT_ENV, PIXI_FILE, SHIPIT_LAUNCHER_FILE
 
@@ -230,7 +230,13 @@ def _check_delivered_lint(root: Path, plan: Plan, runner) -> CertCheck:
 
 
 def _check_hooks(root: Path, plan: Plan, hooks_activated: bool | None) -> CertCheck:
-    """Postcondition 3: the checks install configured are LIVE where it ran."""
+    """Postcondition 3: the checks install configured are LIVE where it ran.
+
+    The live-hook paths are resolved through the git adapter
+    (:func:`shipit.git.hooks_dir`, #914) so this postcondition reads the SHARED
+    common-dir hooks in a linked worktree (``.git`` is a file there), not a
+    hardcoded ``root / ".git" / "hooks"`` that does not exist — which would let a
+    worktree install pass a hooks check it never actually verified."""
     if not (plan.writes and plan.activates_hooks):
         # Mirror apply's activation predicate exactly (apply.py): it only runs
         # `lefthook install` on a WRITING install that manages the hooks. A plan
@@ -247,7 +253,14 @@ def _check_hooks(root: Path, plan: Plan, hooks_activated: bool | None) -> CertCh
             f"its checks LIVE, never dormant; re-run `{HOOK_RECOVERY_CMD}` "
             "to activate them",
         )
-    hooks_dir = root / ".git" / "hooks"
+    hooks_dir = git.hooks_dir(cwd=str(root))
+    if hooks_dir is None:
+        return CertCheck(
+            CHECK_HOOKS,
+            False,
+            "activation reported success but the git hooks directory could not "
+            "be resolved",
+        )
     missing = [h for h in ("pre-commit", "pre-push") if not (hooks_dir / h).is_file()]
     if missing:
         return CertCheck(

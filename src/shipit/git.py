@@ -33,6 +33,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from . import execrun
@@ -117,6 +118,40 @@ def repo_root(*, cwd: str | None = None) -> str | None:
     if not result.ok:
         return None
     return result.stdout.strip() or None
+
+
+def hooks_dir(*, cwd: str) -> Path | None:
+    """The checkout's git hooks directory, resolved WORKTREE-correctly, or ``None``.
+
+    ``git rev-parse --git-path hooks`` (ADR-0028: every git argv lives HERE) — the
+    ONE place install resolves ``.git/hooks``. In a normal checkout that is
+    ``<root>/.git/hooks``; in a LINKED worktree ``.git`` is a *file* (a ``gitdir:``
+    pointer) and the hooks live under the SHARED common dir, so the old hardcoded
+    ``root / ".git" / "hooks"`` guarded by ``.is_dir()`` reads the absent dir as
+    "no hooks" and every install path that touches ``.git/hooks`` (the two
+    activation preclean passes, the self-cert ``hooks`` postcondition) silently
+    no-ops for a worktree consumer (#914). Routing them all through this one
+    resolver fixes the whole module in one place rather than re-deriving
+    lefthook's own resolution piecemeal.
+
+    git returns the path RELATIVE to the queried checkout for a normal repo and
+    ABSOLUTE for a worktree's shared common dir, so the answer is resolved against
+    ``cwd`` (``os.path.join`` keeps an already-absolute answer verbatim). A probe:
+    ``None`` when ``cwd`` is not a checkout (a normal nonzero answer) or a
+    launch-level failure (missing git, timeout) — a best-effort read whose callers
+    degrade to "no hooks dir" (the same no-op the old absent-dir guard produced)
+    rather than crashing the install.
+    """
+    try:
+        result = _probe(["rev-parse", "--git-path", "hooks"], cwd=cwd)
+    except ExecError:
+        return None
+    if not result.ok:
+        return None
+    out = result.stdout.strip()
+    if not out:
+        return None
+    return Path(os.path.join(cwd, out))
 
 
 def head_commit(*, cwd: str) -> Sha | None:
