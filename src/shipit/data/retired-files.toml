@@ -127,6 +127,102 @@ pristine = [
   "sha256:587438fb75447ae974d3c7fbc0d1d9deddbd6488a6ead6880fccc8bf4777f4fd",
 ]
 
+# The shipit-own skill store moved out of the top-level `skills/` dir (#921):
+# `skills/` collides with the PUBLIC skills convention a repo uses to publish its
+# own skills, so `shipit install` used to pollute a consumer's `skills/`. The
+# store is now `.shipit-skills/` (dedicated, dot-prefixed, non-colliding). These
+# entries retire the old `skills/<name>/…` copies shipit previously delivered so
+# a consumer sheds them on the next install — while leaving ANY consumer-authored
+# `skills/` file untouched (it is not in this manifest). Each `pristine` list
+# carries the current content hash AND, where it differs, the last-shipped
+# (pinned) hash, so a consumer on either version gets the clean delete; a locally
+# edited copy is surfaced and kept, never destroyed.
+
+[[retired]]
+# Moved to `.shipit-skills/coordinating/SKILL.md`.
+path = "skills/coordinating/SKILL.md"
+pristine = [
+  "sha256:065a793b117dcfbb1e97fea0a80b405c69995850af9a350061dbcc1f4ea4976a",
+  "sha256:d39855cd948076fd3d25b10ba345efd4e0f6f8eea26fcc546723cc063c4511bc",
+]
+
+[[retired]]
+# Moved to `.shipit-skills/grill-me-with-docs/ADR-FORMAT.md`.
+path = "skills/grill-me-with-docs/ADR-FORMAT.md"
+pristine = [
+  "sha256:f1f36cd3f8d3b6474ddd5855da4e233bfc4ae1a1c5024909ccf11871819a41b2",
+]
+
+[[retired]]
+# Moved to `.shipit-skills/grill-me-with-docs/CONTEXT-FORMAT.md`.
+path = "skills/grill-me-with-docs/CONTEXT-FORMAT.md"
+pristine = [
+  "sha256:d7f1244807b547de07073244e67279eda8bb0fd681428114bce8452c979ab72c",
+]
+
+[[retired]]
+# Moved to `.shipit-skills/grill-me-with-docs/SKILL.md`.
+path = "skills/grill-me-with-docs/SKILL.md"
+pristine = [
+  "sha256:a4eefcb8f9af47b5b2f99a85bde5e52c4b2275c6660c964021f6d186f05b72fd",
+  "sha256:a7e8a73594379e378ca2700cd8cb5c8a0b91c32aeaad919b487a52461f1b5c4c",
+]
+
+[[retired]]
+# Moved to `.shipit-skills/implementing/SKILL.md`.
+path = "skills/implementing/SKILL.md"
+pristine = [
+  "sha256:fd7d90eff365955e096dbdf2c72ac6bf32a33b12609d7749aa8a544b8cb259a0",
+  "sha256:02040db0bd1aedce096473bdbc9d65ec741a81c989f97121fedc242e172a4932",
+]
+
+[[retired]]
+# Moved to `.shipit-skills/lex-primer/SKILL.md`.
+path = "skills/lex-primer/SKILL.md"
+pristine = [
+  "sha256:eb7c4d13f980dbbf0fdc81998ce6d8815783af5f13fabb18decb7e834bfddee0",
+  "sha256:ff616c1c447661298fb8e06a8a8a6ce60400d838c7c881b9e8bd526128e32901",
+]
+
+[[retired]]
+# Moved to `.shipit-skills/planning/SKILL.md`.
+path = "skills/planning/SKILL.md"
+pristine = [
+  "sha256:e26fe5ef4bba7d0bffd09f2dbbf61ba9ea8b0a8aa77a50bb794481766f8fa791",
+  "sha256:172678dc99e45431970d2cdd31c6c910622590e7e6893b26026a282fcdc49919",
+]
+
+[[retired]]
+# Moved to `.shipit-skills/shepherding-prs/SKILL.md`.
+path = "skills/shepherding-prs/SKILL.md"
+pristine = [
+  "sha256:8f627079f3d9846069742dd77cf4987eb550ff9a6c5e575f751ea8edf958ee2b",
+  "sha256:b7250030fa91282fa6d7d5a65073363edbc4522e31984dd8983994dcf9a5aa85",
+]
+
+[[retired]]
+# Moved to `.shipit-skills/shipit-session-status/SKILL.md`.
+path = "skills/shipit-session-status/SKILL.md"
+pristine = [
+  "sha256:4720ad9b381d57c32dfd2aca6cb2a4b338dfa69cac90eedd85a71f7f2f8db962",
+]
+
+[[retired]]
+# Moved to `.shipit-skills/to-spec/SKILL.md`.
+path = "skills/to-spec/SKILL.md"
+pristine = [
+  "sha256:9f7e5216675070146daabdc0f63ddb8cc8ecf37843ab5d3290354bf57d8097c0",
+  "sha256:c614f7c42621a51dc5c4f9b27d0d74c52e43d87483fc56d45ce9127a8a6e2484",
+]
+
+[[retired]]
+# Moved to `.shipit-skills/to-tickets/SKILL.md`.
+path = "skills/to-tickets/SKILL.md"
+pristine = [
+  "sha256:38df45b1560de0e10be3ab8f7ef4113114ee851e3790ac9087b4c9560c7dc6df",
+  "sha256:271ffbaaa98315c752ddf9c2d01e504b041140bdc9c5a21fc7ac152891931b16",
+]
+
 # Retired HOOK ENTRIES (#619) — consumer-local entries in a hooks-event array
 # that `shipit install` removes fleet-wide (the retired-files idea, extended to
 # entries inside a file shipit does not own outright). An entry is identified
