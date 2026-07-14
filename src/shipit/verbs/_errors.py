@@ -37,6 +37,7 @@ from ..prstate.errors import PrStateError
 from ..prstate.flip import NotReady
 from ..prstate.reviewers_config import RequiredReviewersConfigError
 from ..release import ReleaseError
+from ..repocreate import CreationError
 from ..review.cell import CellError
 from ..review.diff import ReviewError
 from ..review.groundtruth import FixtureError
@@ -91,6 +92,7 @@ KNOWN_ERRORS: tuple[type[Exception], ...] = (
     CellError,
     FixtureError,
     ResumeError,
+    CreationError,
 )
 
 

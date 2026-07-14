@@ -674,6 +674,91 @@ def add(paths: list[str], *, cwd: str) -> None:
     _git(["add", "-f", "--", *paths], cwd=cwd)
 
 
+def add_all(*, cwd: str) -> None:
+    """``git add -A`` — stage every change in the working tree.
+
+    The whole-tree counterpart of :func:`add` (which stages named pathspecs):
+    ``shipit repo new`` stages the entire freshly-generated Repo — consumer
+    scaffold, managed baseline, and the resolved ``pixi.lock`` — for its single
+    ``Initial commit``, so it needs the sweep rather than an enumerated list.
+    """
+    _git(["add", "-A"], cwd=cwd)
+
+
+def commit_all(message: str, *, cwd: str, no_verify: bool = False) -> None:
+    """``git commit -m <message>`` — commit everything already staged.
+
+    The whole-tree counterpart of :func:`commit` (which scopes to pathspecs):
+    ``shipit repo new`` stages the whole Repo with :func:`add_all` and commits
+    it as one root ``Initial commit``. ``no_verify`` is left at its default
+    ``False`` by creation so the installed hooks run on that commit exactly as
+    they would for any consumer (ADR-0062).
+    """
+    args = ["commit"]
+    if no_verify:
+        args.append("--no-verify")
+    _git([*args, "-m", message], cwd=cwd)
+
+
+def init_main(*, cwd: str) -> None:
+    """``git init -b main`` — initialize a repository on the ``main`` branch.
+
+    ``shipit repo new`` creates the local Repo on ``main`` (the portfolio's
+    primary branch, ``docs/spec/repo-new.md``) before staging and committing it.
+    ``-b main`` names the initial branch directly so no post-init rename is
+    needed on an unborn HEAD.
+    """
+    _git(["init", "-b", "main"], cwd=cwd)
+
+
+def _ident_name(var: str, *, cwd: str) -> str | None:
+    """The display name from ``git var <var>`` (an IDENT string), or ``None``.
+
+    ``git var GIT_AUTHOR_IDENT``/``GIT_COMMITTER_IDENT`` resolves the SAME
+    identity a commit will use — honoring the matching ``GIT_*_NAME``/
+    ``GIT_*_EMAIL`` env vars, the ``author.*``/``committer.*``/``user.*`` config
+    chain, and git's own precedence — and fails exactly where ``git commit``
+    would (e.g. ``user.useConfigOnly`` with nothing configured, or a missing
+    email). A probe read: git's failure is a NORMAL answer (``None``), not an
+    exception.
+    """
+    result = _probe(["var", var], cwd=cwd)
+    if not result.ok:
+        return None
+    # An IDENT is `Name <email> <timestamp> <tz>`; the display name is
+    # everything before the ` <email>` bracket (a name never contains ``<``).
+    ident = result.stdout.strip()
+    marker = ident.rfind(" <")
+    if marker <= 0:
+        return None
+    return ident[:marker].strip() or None
+
+
+def author_name(*, cwd: str) -> str | None:
+    """Git's fully resolved author display name for ``cwd``, or ``None``.
+
+    Resolves ``GIT_AUTHOR_IDENT`` (see :func:`_ident_name`) — the SAME author
+    identity the commit will use. ``shipit repo new`` attributes the generated
+    MIT ``LICENSE`` to the returned name; an unresolvable author is a creation
+    preflight failure the caller raises, never a template placeholder.
+    """
+    return _ident_name("GIT_AUTHOR_IDENT", cwd=cwd)
+
+
+def committer_name(*, cwd: str) -> str | None:
+    """Git's fully resolved committer display name for ``cwd``, or ``None``.
+
+    Resolves ``GIT_COMMITTER_IDENT`` (see :func:`_ident_name`) — the identity
+    ``git commit`` records as the committer, which git resolves INDEPENDENTLY of
+    the author (``GIT_COMMITTER_*`` env / ``committer.*`` config, else the
+    ``user.*`` fallback). ``shipit repo new`` probes this alongside
+    :func:`author_name` so a setup that resolves an author but no committer
+    (e.g. only ``GIT_AUTHOR_NAME``/``GIT_AUTHOR_EMAIL`` set) is caught as a
+    creation preflight failure rather than a raw ``Initial commit`` error.
+    """
+    return _ident_name("GIT_COMMITTER_IDENT", cwd=cwd)
+
+
 def commit(
     message: str, paths: list[str], *, cwd: str, no_verify: bool = False
 ) -> None:

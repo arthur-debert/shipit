@@ -32,6 +32,7 @@ from .verbs.logevent import log as log_group
 from .verbs.pr import pr as pr_group
 from .verbs.provision import provision as provision_group
 from .verbs.release import release as release_group
+from .verbs.repo import repo as repo_group
 from .verbs.review import review as review_group
 from .verbs.session import session as session_group
 from .verbs.spawn import spawn as spawn_group
@@ -315,6 +316,12 @@ root.add_command(logs.logs_cmd)
 root.add_command(provision_group)
 
 
+# The top-level `repo` group (GEN01) — repository-level operations. `repo new`
+# creates a new local shipit-managed Repo with a complete, verified baseline;
+# the CLI is a thin parser/renderer over the deep `shipit.repocreate` module.
+root.add_command(repo_group)
+
+
 # The nested `pr` group (PR flow) is a click.Group assembled in its own package
 # (verbs/pr/), so its verbs register there rather than as inline commands here;
 # attach the whole group to the root.
@@ -404,6 +411,8 @@ _HELP_RESOURCES = {
     ("logs",): ("shipit.verbs", "logs_help.txt"),
     ("provision",): ("shipit.verbs", "provision_help.txt"),
     ("provision", "lexd"): ("shipit.verbs", "provision_lexd_help.txt"),
+    ("repo",): ("shipit.verbs", "repo_help.txt"),
+    ("repo", "new"): ("shipit.verbs", "repo_new_help.txt"),
     ("pr",): ("shipit.verbs.pr", "pr_help.txt"),
     ("pr", "status"): ("shipit.verbs.pr", "pr_status_help.txt"),
     ("pr", "review"): ("shipit.verbs.pr", "pr_review_help.txt"),

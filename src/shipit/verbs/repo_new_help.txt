@@ -1,0 +1,40 @@
+`shipit repo new` creates a new local Repo with a complete, verified,
+shipit-managed development baseline.
+
+Usage:
+
+    shipit repo new --stack rust <name> [parent]
+
+The destination is always `<parent>/<name>`; `parent` defaults to the current
+directory and must already exist as a writable, traversable directory. The
+destination must be absent or an empty directory — a file, a symlink, or a
+directory containing any entry (including a hidden one) is refused before
+anything is written.
+
+`<name>` is canonical lowercase kebab-case (an ASCII lowercase letter followed
+by lowercase alphanumeric segments joined by single hyphens, e.g. `hello`,
+`my-tool`). It spells the destination, the CLI package, and the executable; the
+library package is `lib<name>`.
+
+`--stack` selects a Creation profile and is repeatable so the request can later
+describe a multi-toolchain Repo; at least one selection is mandatory. v1
+supports one profile: `rust`.
+
+What a Rust Repo receives:
+
+  * a virtual two-member Cargo workspace — the `<name>` CLI package/executable
+    and the library-only `lib<name>` package the CLI consumes;
+  * exactly one black-box test that runs the CLI and asserts `Hello, world!`;
+  * shipit's managed baseline (agent guidance, skills, hooks, launchers, lint
+    config, pixi integration) delivered by `shipit install`;
+  * pixi provisioning of Rust and `cargo-nextest`, with a committed `pixi.lock`;
+  * working `pixi run lint`, `pixi run test`, and `pixi run build` tasks;
+  * a minimal README, an MIT LICENSE attributed to your resolved Git author,
+    and a thin generic CI caller.
+
+Creation stages the whole Repo in a temporary sibling under the parent, installs
+the managed baseline, resolves the lockfile, runs the three public Checks, and
+creates a single `Initial commit` on `main`. Only after every step succeeds does
+one atomic rename publish the Repo at its destination; any failure removes the
+staging sibling and leaves the destination untouched. Creation is local only —
+it never creates a GitHub Repo, remote, or release policy.

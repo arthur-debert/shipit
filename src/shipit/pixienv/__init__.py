@@ -67,6 +67,7 @@ from .run import (
     install,
     run_argv,
     run_in_env,
+    run_task,
 )
 from .scrub import (
     BUILD_ENV_VARS,
@@ -112,6 +113,7 @@ __all__ = [
     "read_fingerprint",
     "run_argv",
     "run_in_env",
+    "run_task",
     "scrub_env",
     "shell_hook",
 ]
