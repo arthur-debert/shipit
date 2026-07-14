@@ -104,7 +104,7 @@ def test_session_status_skill_wraps_the_flow_view():
 
 def test_session_status_skill_is_in_the_managed_set():
     keys = {u.key for u in install_units.load_units()}
-    assert "skills/shipit-session-status/SKILL.md" in keys
+    assert ".shipit-skills/shipit-session-status/SKILL.md" in keys
 
 
 # ==========================================================================

@@ -296,7 +296,8 @@ def test_delivered_lint_fails_closed_when_a_planned_file_is_missing(staged):
 
 
 # --------------------------------------------------------------------------
-# Postcondition 2, managed skills (#777) — the delivered skill/*.md content is
+# Postcondition 2, managed skills (#777) — the delivered `.shipit-skills/*.md`
+# content is
 # no longer exempt from the delivered markdownlint gate, so self-cert's
 # delivered-lint CATCHES a skill-content defect that would otherwise ride the
 # managed set into a consumer's markdownlint gate (modes 4+6). These route the
@@ -307,8 +308,9 @@ def test_delivered_lint_fails_closed_when_a_planned_file_is_missing(staged):
 
 def _skill_only_plan(root) -> irec.Plan:
     """A plan whose write set is JUST the managed skill files, so a scoped
-    delivered-lint routes only markdownlint over the shipped skill/*.md."""
-    skills = [u for u in iunits.load_units() if u.key.startswith("skills/")]
+    delivered-lint routes only markdownlint over the shipped
+    `.shipit-skills/*.md`."""
+    skills = [u for u in iunits.load_units() if u.key.startswith(".shipit-skills/")]
     decisions = tuple(
         irec.Decision(
             unit=u,
@@ -344,15 +346,15 @@ def _unwrapping_real_runner():
 
 
 def test_managed_skill_files_are_in_the_delivered_lint_set(staged):
-    # The root-cause guard (no binary): every managed skill/*.md is a whole-file
+    # The root-cause guard (no binary): every managed `.shipit-skills/*.md` is a whole-file
     # unit, so it is in scope for the delivered-lint check — the blindness was
     # only the shipped `.markdownlintignore` exempting `skills/`, now removed.
     paths = selfcert.delivered_lint_paths(_skill_only_plan(staged))
-    assert "skills/grill-me-with-docs/SKILL.md" in paths
-    assert "skills/to-spec/SKILL.md" in paths
+    assert ".shipit-skills/grill-me-with-docs/SKILL.md" in paths
+    assert ".shipit-skills/to-spec/SKILL.md" in paths
     # The delivered ignore no longer blanket-exempts the managed skills tree.
     ignore = (staged / ".markdownlintignore").read_text().splitlines()
-    assert "skills/" not in {line.strip() for line in ignore}
+    assert ".shipit-skills/" not in {line.strip() for line in ignore}
 
 
 @pytest.mark.skipif(shutil.which("markdownlint") is None, reason="no markdownlint")
@@ -370,14 +372,14 @@ def test_delivered_skill_files_pass_the_delivered_config_real(staged):
 def test_delivered_lint_catches_a_planted_skill_defect_real(staged):
     # Plant an MD040 bare-fence defect (mode 4's exact class) into a delivered
     # skill file: self-cert must now CATCH it — the defect can no longer ship.
-    skill = staged / "skills" / "grill-me-with-docs" / "SKILL.md"
+    skill = staged / ".shipit-skills" / "grill-me-with-docs" / "SKILL.md"
     skill.write_text(skill.read_text() + "\n```\nplanted bare fence\n```\n")
     check = selfcert._check_delivered_lint(
         staged, _skill_only_plan(staged), _unwrapping_real_runner()
     )
     assert not check.ok
     assert "MD040" in check.detail
-    assert "skills/grill-me-with-docs/SKILL.md" in check.detail
+    assert ".shipit-skills/grill-me-with-docs/SKILL.md" in check.detail
 
 
 # --------------------------------------------------------------------------

@@ -556,14 +556,17 @@ def skills_root():
     """The bundled skills tree — wheel package data, or the repo root in dev.
 
     Returns a Traversable (installed wheel) or a :class:`Path` (editable/source
-    checkout, where skills/ lives at the repo root and is force-included only
-    into the built wheel). Both honor the ``iterdir`` / ``is_dir`` / ``is_file`` /
-    ``read_bytes`` protocol :func:`walk_files` uses.
+    checkout, where the store lives at the repo root as ``.shipit-skills/`` — a
+    dedicated, non-colliding dir, force-included into the built wheel as
+    ``shipit/data/skills``). Both honor the ``iterdir`` / ``is_dir`` / ``is_file``
+    / ``read_bytes`` protocol :func:`walk_files` uses. The dot-prefix keeps
+    shipit's OWN skill store from colliding with the public ``skills/`` convention
+    a repo uses to publish its own skills (#921).
     """
     bundled = resources.files("shipit.data").joinpath("skills")
     if bundled.is_dir():
         return bundled
-    return Path(__file__).resolve().parents[3] / "skills"
+    return Path(__file__).resolve().parents[3] / ".shipit-skills"
 
 
 def agents_root():
@@ -622,8 +625,8 @@ def load_units(*, toolchains: frozenset[str] = frozenset()) -> list[Unit]:
     for rel, content in walk_files(skills_root()):
         units.append(
             Unit(
-                key=f"skills/{rel}",
-                dest=f"skills/{rel}",
+                key=f".shipit-skills/{rel}",
+                dest=f".shipit-skills/{rel}",
                 kind="file",
                 content=content,
             )
