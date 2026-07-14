@@ -166,6 +166,8 @@ path = "skills/grill-me-with-docs/SKILL.md"
 pristine = [
   "sha256:a4eefcb8f9af47b5b2f99a85bde5e52c4b2275c6660c964021f6d186f05b72fd",
   "sha256:a7e8a73594379e378ca2700cd8cb5c8a0b91c32aeaad919b487a52461f1b5c4c",
+  # Content also changed by #929 (grill reframed as the ADR step) in this same train.
+  "sha256:06428ff9352d2765056d1af43f9a21592b0ea6e59ab7b72f200710678fcdddea",
 ]
 
 [[retired]]
@@ -190,6 +192,8 @@ path = "skills/planning/SKILL.md"
 pristine = [
   "sha256:e26fe5ef4bba7d0bffd09f2dbbf61ba9ea8b0a8aa77a50bb794481766f8fa791",
   "sha256:172678dc99e45431970d2cdd31c6c910622590e7e6893b26026a282fcdc49919",
+  # Content also changed by #929 (Spec → ADR → ticket reorder) in this same train.
+  "sha256:843d0a0c3dddb6d1ba1b5db6d494e650fdbc40035cb98def47b964d264b8e57c",
 ]
 
 [[retired]]
@@ -213,6 +217,8 @@ path = "skills/to-spec/SKILL.md"
 pristine = [
   "sha256:9f7e5216675070146daabdc0f63ddb8cc8ecf37843ab5d3290354bf57d8097c0",
   "sha256:c614f7c42621a51dc5c4f9b27d0d74c52e43d87483fc56d45ce9127a8a6e2484",
+  # Content also changed by #929 (to-spec runs first now) in this same train.
+  "sha256:eafedcd9b9797aa3d9e97ee466e40000cc74de2d86f86e855f6e1e36219d3cce",
 ]
 
 [[retired]]
@@ -221,6 +227,8 @@ path = "skills/to-tickets/SKILL.md"
 pristine = [
   "sha256:38df45b1560de0e10be3ab8f7ef4113114ee851e3790ac9087b4c9560c7dc6df",
   "sha256:271ffbaaa98315c752ddf9c2d01e504b041140bdc9c5a21fc7ac152891931b16",
+  # Content also changed by #929 (ticket = the "how" step) in this same train.
+  "sha256:d922c867458135ebf665233149268b25ba8ea3147a59e5b7ffcc9c3748fda3d5",
 ]
 
 # Retired HOOK ENTRIES (#619) — consumer-local entries in a hooks-event array
