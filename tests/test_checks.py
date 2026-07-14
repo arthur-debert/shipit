@@ -102,6 +102,95 @@ def _write_workflow(tmp_path, name, text):
     (wfdir / name).write_text(text, encoding="utf-8")
 
 
+_RELEASE_CALLER = """\
+on:
+  workflow_dispatch:
+jobs:
+  release:
+    uses: arthur-debert/shipit/.github/workflows/wf-release.yml@v1
+  prepare:
+    uses: arthur-debert/shipit/.github/workflows/wf-prepare.yml@v1
+  local:
+    uses: ./.github/workflows/wf-local.yml
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+"""
+
+
+def _caller_path(tmp_path):
+    return str(tmp_path / ".github" / "workflows" / checks.RELEASE_CALLER_WORKFLOW)
+
+
+def test_workflow_pin_refs_enumerates_cross_repo_vn_pins(tmp_path):
+    # The @vN stage pins the release caller dispatches — deduped and sorted;
+    # a `./` local ref and a step `actions/checkout@v6` (no .yml path) are not
+    # pins and never appear (#917).
+    _write_workflow(tmp_path, checks.RELEASE_CALLER_WORKFLOW, _RELEASE_CALLER)
+    pins = checks.workflow_pin_refs(_caller_path(tmp_path))
+    assert pins == [("arthur-debert/shipit", "v1")]
+
+
+def test_workflow_pin_refs_dedupes_across_jobs_and_keeps_distinct_refs(tmp_path):
+    # Deduped over the caller's jobs; distinct @vN refs are kept distinct.
+    _write_workflow(
+        tmp_path,
+        checks.RELEASE_CALLER_WORKFLOW,
+        "on: workflow_dispatch\njobs:\n"
+        "  x:\n    uses: o/r/.github/workflows/wf.yml@v1\n"
+        "  y:\n    uses: o/r/.github/workflows/wf.yml@v1\n"
+        "  z:\n    uses: o/r/.github/workflows/wf.yml@v2\n",
+    )
+    pins = checks.workflow_pin_refs(_caller_path(tmp_path))
+    assert pins == [("o/r", "v1"), ("o/r", "v2")]
+
+
+def test_workflow_pin_refs_scoped_to_caller_ignores_other_workflows(tmp_path):
+    # The gate is release-specific: an unrelated CI/manual workflow with a
+    # stale cross-repo pin is NOT part of the release dispatch and must never
+    # block a cut (#917). `workflow_pin_refs` reads ONLY the caller path.
+    _write_workflow(
+        tmp_path,
+        checks.RELEASE_CALLER_WORKFLOW,
+        "on: workflow_dispatch\njobs:\n"
+        "  release:\n    uses: o/r/.github/workflows/wf-release.yml@v1\n",
+    )
+    _write_workflow(
+        tmp_path,
+        "experimental.yml",
+        "on: workflow_dispatch\njobs:\n"
+        "  x:\n    uses: other/repo/.github/workflows/stale.yml@v9\n",
+    )
+    pins = checks.workflow_pin_refs(_caller_path(tmp_path))
+    assert pins == [("o/r", "v1")]  # the unrelated @v9 never appears
+
+
+def test_workflow_pin_refs_filters_to_the_vn_shape(tmp_path):
+    # Only floating-major @vN refs are gated: a @main, a SHA, and a @v1.2.3
+    # release tag are outside the bootstrap contract (advance-major moves a
+    # v-major BRANCH — ADR-0010) and must not draw the phantom "bootstrap the
+    # v-major branch" remediation (#917, copilot finding).
+    _write_workflow(
+        tmp_path,
+        checks.RELEASE_CALLER_WORKFLOW,
+        "on: workflow_dispatch\njobs:\n"
+        "  a:\n    uses: o/r/.github/workflows/wf.yml@v1\n"
+        "  b:\n    uses: o/r/.github/workflows/wf.yml@main\n"
+        "  c:\n    uses: o/r/.github/workflows/wf.yml@v1.2.3\n"
+        "  d:\n    uses: o/r/.github/workflows/wf.yml@0123456789abcdef\n",
+    )
+    pins = checks.workflow_pin_refs(_caller_path(tmp_path))
+    assert pins == [("o/r", "v1")]
+
+
+def test_workflow_pin_refs_skips_unparseable_and_absent_caller(tmp_path):
+    # An absent caller file → no pins (a different failure, not this gate's).
+    assert checks.workflow_pin_refs(_caller_path(tmp_path)) == []
+    _write_workflow(tmp_path, checks.RELEASE_CALLER_WORKFLOW, "on: [unclosed\n")
+    assert checks.workflow_pin_refs(_caller_path(tmp_path)) == []
+
+
 def test_publishes_reusable_workflows_local_scan(tmp_path):
     _write_workflow(tmp_path, "ci.yml", "on:\n  pull_request:\njobs:\n  ci: {}\n")
     assert not checks.publishes_reusable_workflows("o/r", toplevel=str(tmp_path))

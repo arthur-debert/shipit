@@ -108,7 +108,7 @@ from typing import Any
 
 import click
 
-from .. import config, events, execrun, gh, git, redact
+from .. import checks, config, events, execrun, gh, git, redact
 from ..changelog import is_prerelease
 from ..release import ReleaseError
 from ..release import bump as bump_mod
@@ -263,6 +263,7 @@ def run_preflight(
     as_json: bool = False,
     gitio: Any = git,
     env: Mapping[str, str] | None = None,
+    resolve_ref: Callable[[str, str], bool] | None = None,
 ) -> int:
     """Run the preflight planner from the current directory. Returns 0/1.
 
@@ -277,11 +278,24 @@ def run_preflight(
     refusals (phantom release, nothing-to-break-glass) and the presence
     failure are :class:`~shipit.release.ReleaseError` → exit 1.
 
-    ``plan_only=True`` skips ONLY the secret-presence hard-fail (the plan
-    facts still compute and refusals still fire): the stage blocks'
-    standalone ``plan`` job (TOL02-WS09 #780) re-derives the plan at the tag
-    in an environment that deliberately carries no secrets — presence was
-    proven by the source run's preflight, and each stage's verb still
+    The ``@vN`` PIN GATE (#917): every floating-major reusable-workflow pin the
+    RELEASE CALLER dispatches (``uses: owner/repo/wf.yml@vN`` —
+    :func:`shipit.checks.workflow_pin_refs`) must resolve on its publisher, or
+    GitHub rejects the WHOLE dispatch with a raw HTTP 422 at its
+    workflow-resolution step, before any stage runs. Preflight resolves each
+    pin (``resolve_ref``, defaulting to :func:`shipit.gh.workflow_ref_resolves`)
+    and REFUSES with the one-command bootstrap
+    (:func:`shipit.release.preflight.missing_pin_refusal`) when a floating
+    v-major ref is missing — so a first cut of a repo/major fails loud and
+    actionable, never dead-on-arrival with an opaque 422. Skipped under
+    ``plan_only``: that job runs INSIDE an already-resolved dispatch, so its
+    pins provably resolve (and it deliberately does no network beyond the plan).
+
+    ``plan_only=True`` skips ONLY the secret-presence hard-fail and the pin
+    gate (the plan facts still compute and refusals still fire): the stage
+    blocks' standalone ``plan`` job (TOL02-WS09 #780) re-derives the plan at
+    the tag in an environment that deliberately carries no secrets — presence
+    was proven by the source run's preflight, and each stage's verb still
     validates its own names before acting. It exists for that job, not for
     laptops planning a fresh release.
     """
@@ -321,6 +335,21 @@ def run_preflight(
                 "cannot run to publish; failing now, before prepare writes "
                 "any history"
             )
+        # The @vN pin gate (#917): resolve every floating-major reusable-
+        # workflow pin the RELEASE CALLER dispatches against its publisher — a
+        # missing v-major branch would otherwise die as a raw HTTP 422 at
+        # GitHub's workflow-resolution step, before any stage runs. Scoped to
+        # the caller (not every workflow file — an unrelated CI/manual workflow
+        # is not part of the dispatch), network-cheap (one probe per unique
+        # pin), and skipped under plan_only (that job runs inside an already-
+        # resolved dispatch).
+        resolve = resolve_ref or gh.workflow_ref_resolves
+        pins = checks.workflow_pin_refs(
+            str(root / ".github" / "workflows" / checks.RELEASE_CALLER_WORKFLOW)
+        )
+        unresolved = [(repo, ref) for repo, ref in pins if not resolve(repo, ref)]
+        if unresolved:
+            raise ReleaseError(preflight_mod.missing_pin_refusal(unresolved))
     emit(release_plan, format_preflight, as_json=as_json)
     logger.info(
         "release preflight planned",

@@ -53,6 +53,13 @@ same-named env var, so presence-at-preflight proves publish will not starve.
 The verb hard-fails on a non-empty result — declared signing with missing
 signing secrets can never silently ship unsigned.
 
+The ``@vN`` pin gate (#917) lives in the shell, not here: the verb enumerates
+the caller's reusable-workflow pins (:func:`shipit.checks.workflow_pin_refs`)
+and resolves each on its publisher (:func:`shipit.gh.workflow_ref_resolves`),
+but the REFUSAL TEXT is this module's pure :func:`missing_pin_refusal` — a
+missing ``@vN`` floating-major branch would otherwise die as a raw GitHub HTTP
+422 at dispatch, so preflight refuses first with the one-command bootstrap.
+
 Pure module: no I/O; the effectful shell is ``shipit release preflight``
 (:mod:`shipit.verbs.release`), rendering text or ``--json`` (ADR-0030).
 """
@@ -386,6 +393,36 @@ def missing_secrets(
         if not alt.satisfied(present)
     )
     return tuple(missing)
+
+
+def missing_pin_refusal(missing: Sequence[tuple[str, str]]) -> str:
+    """The refusal text for reusable-workflow ``@vN`` pins that do not resolve
+    on their publisher repo (#917). Pure.
+
+    Each ``(repo, ref)`` is a ``uses: <repo>/…@<ref>`` the release caller
+    dispatches. A ref resolving to no branch/tag/SHA makes GitHub reject the
+    WHOLE dispatch at its workflow-resolution step with an opaque HTTP 422 —
+    before any job (even preflight-in-CI) runs — which is exactly the dead-on-
+    arrival first cut this refusal replaces. It names the one-command bootstrap
+    per missing pin: push the floating v-major BRANCH at the stable commit
+    once, after which ``advance-major.yml`` force-moves it on every later
+    stable tag (ADR-0010), so the chicken-and-egg is paid exactly once."""
+    lines = [
+        "reusable-workflow pin(s) will not resolve on the publisher — GitHub "
+        "would reject this dispatch with a raw HTTP 422 at its "
+        "workflow-resolution step, before any stage runs (#917):"
+    ]
+    lines.extend(f"  - {repo} @ {ref}" for repo, ref in missing)
+    lines.append(
+        "the floating v-major ref does not exist yet. Bootstrap it ONCE on the "
+        "publisher at the intended stable commit (advance-major.yml then "
+        "force-moves it on every later stable tag — ADR-0010):"
+    )
+    lines.extend(
+        f"  git push git@github.com:{repo}.git <stable-sha>:refs/heads/{ref}"
+        for repo, ref in missing
+    )
+    return "\n".join(lines)
 
 
 def _matrix(artifacts: Sequence[Artifact]) -> tuple[MatrixEntry, ...]:

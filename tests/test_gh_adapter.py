@@ -51,6 +51,68 @@ def test_pagination_helper_exists_exactly_once():
     assert definitions == [pathlib.Path("shipit/gh.py")]
 
 
+# --- workflow_ref_resolves — the @vN pin gate's boundary (#917) --------------
+
+
+def _probe_result(monkeypatch, *, rc: int, stderr: str = ""):
+    from shipit import execrun
+
+    calls: list[list[str]] = []
+
+    def fake_probe(args, **kwargs):
+        calls.append(list(args))
+        return execrun.ExecResult(
+            argv=tuple(args), rc=rc, stdout="", stderr=stderr, duration_ms=0
+        )
+
+    monkeypatch.setattr(gh, "_run_probe", fake_probe)
+    return calls
+
+
+def test_workflow_ref_resolves_true_on_probe_success(monkeypatch):
+    calls = _probe_result(monkeypatch, rc=0)
+    assert gh.workflow_ref_resolves("o/r", "v1") is True
+    assert calls == [["gh", "api", "repos/o/r/commits/v1"]]
+
+
+def test_workflow_ref_resolves_false_only_on_a_confirmed_404(monkeypatch):
+    _probe_result(monkeypatch, rc=1, stderr="gh: Not Found (HTTP 404)")
+    assert gh.workflow_ref_resolves("o/r", "v9") is False
+
+
+def test_workflow_ref_resolves_false_on_no_commit_422(monkeypatch):
+    # The SHA-shaped miss: `repos/{repo}/commits/{ref}` reports an unresolved
+    # SHA as HTTP 422 "No commit found for SHA", NOT a 404. It is still a
+    # CONFIRMED-missing ref — the exact shape that would otherwise slip the
+    # gate and let the dispatch hit GitHub's raw 422 anyway (#917).
+    _probe_result(
+        monkeypatch,
+        rc=1,
+        stderr="gh: No commit found for SHA: deadbeef (HTTP 422)",
+    )
+    assert gh.workflow_ref_resolves("o/r", "deadbeef") is False
+
+
+def test_workflow_ref_resolves_true_when_404_appears_only_incidentally(monkeypatch):
+    # The tightening (copilot/agy): a bare "404" substring is NOT a missing
+    # ref — an unrelated error line (here a rate-limit remaining count) can
+    # carry the digits without meaning HTTP 404, so it degrades to UNKNOWN.
+    _probe_result(
+        monkeypatch, rc=1, stderr="gh: API rate limit exceeded (404 of 5000 left)"
+    )
+    assert gh.workflow_ref_resolves("o/r", "v1") is True
+
+
+def test_workflow_ref_resolves_true_on_unknown_probe_failure(monkeypatch, caplog):
+    # An auth/transport failure is UNKNOWN, not missing — a degraded probe must
+    # never read as an absent ref and block a cut with a phantom bootstrap, and
+    # it is logged (LOG02) so a masked misconfiguration is not swallowed.
+    _probe_result(monkeypatch, rc=1, stderr="gh: authentication required")
+    with caplog.at_level("WARNING", logger="shipit.gh"):
+        assert gh.workflow_ref_resolves("o/r", "v1") is True
+    assert any("degraded" in rec.message for rec in caplog.records)
+
+
 # --- the merged REST/GraphQL surface (transport mocked at `_run`) -------------
 
 

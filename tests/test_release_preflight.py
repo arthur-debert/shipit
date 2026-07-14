@@ -651,6 +651,84 @@ def test_run_preflight_outside_a_checkout_is_a_domain_refusal(repo, capsys):
 
 
 # --------------------------------------------------------------------------
+# The @vN pin gate (#917) — a missing floating-major branch fails loud here,
+# never as a raw HTTP 422 at GitHub's dispatch-time workflow resolution.
+# --------------------------------------------------------------------------
+
+
+def _write_caller(repo, ref="v1"):
+    wfdir = repo / ".github" / "workflows"
+    wfdir.mkdir(parents=True, exist_ok=True)
+    (wfdir / "shipit-release.yml").write_text(
+        "on: workflow_dispatch\njobs:\n"
+        f"  release:\n    uses: o/r/.github/workflows/wf-release.yml@{ref}\n",
+        encoding="utf-8",
+    )
+
+
+def _preflight_env():
+    return {"RELEASE_TOKEN": "t", "PYPI_TOKEN": "p"}
+
+
+def test_run_preflight_refuses_when_a_vn_pin_does_not_resolve(repo, capsys):
+    _write_caller(repo)
+    rc = release_verb.run_preflight(
+        parse_spec("1.0.0"),
+        gitio=FakeGit(str(repo)),
+        env=_preflight_env(),
+        resolve_ref=lambda repo_slug, ref: False,  # the floating v1 is missing
+    )
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "HTTP 422" in err and "o/r @ v1" in err
+    # The one-command bootstrap remediation is named.
+    assert "refs/heads/v1" in err
+
+
+def test_run_preflight_passes_when_every_pin_resolves(repo, capsys):
+    _write_caller(repo)
+    seen = []
+    rc = release_verb.run_preflight(
+        parse_spec("1.0.0"),
+        as_json=True,
+        gitio=FakeGit(str(repo)),
+        env=_preflight_env(),
+        resolve_ref=lambda repo_slug, ref: seen.append((repo_slug, ref)) or True,
+    )
+    assert rc == 0
+    assert seen == [("o/r", "v1")]  # the pin was probed exactly once
+    assert json.loads(capsys.readouterr().out)["version"] == "1.0.0"
+
+
+def test_run_preflight_plan_only_skips_the_pin_gate(repo, capsys):
+    # The stage blocks' standalone plan job runs INSIDE an already-resolved
+    # dispatch — its pins provably resolve, so the gate (and its network probe)
+    # is skipped entirely.
+    _write_caller(repo)
+
+    def _boom(repo_slug, ref):
+        raise AssertionError("plan_only must not probe pins")
+
+    rc = release_verb.run_preflight(
+        parse_spec("1.0.0"),
+        plan_only=True,
+        as_json=True,
+        gitio=FakeGit(str(repo)),
+        env={},
+        resolve_ref=_boom,
+    )
+    assert rc == 0
+
+
+def test_missing_pin_refusal_names_every_pin_and_its_bootstrap():
+    text = preflight.missing_pin_refusal([("o/r", "v1"), ("o/r2", "v2")])
+    assert "HTTP 422" in text
+    assert "  - o/r @ v1" in text and "  - o/r2 @ v2" in text
+    assert "refs/heads/v1" in text and "refs/heads/v2" in text
+    assert "advance-major" in text
+
+
+# --------------------------------------------------------------------------
 # The dogfood declaration (#774): shipit's OWN release surface
 # --------------------------------------------------------------------------
 
