@@ -404,7 +404,14 @@ def missing_secrets(
         for name in release_plan.secrets
         if name not in secretreq.EMPTY_VALID_SECRETS and not env.get(name)
     ]
-    present = {name for name, value in env.items() if value}
+    # Empty-valid names count as present for alternative-set satisfaction too:
+    # an empty/absent value IS valid presence per the one authority (#892), so a
+    # future AlternativeSet naming one must not fail on its emptiness. No live
+    # set names such a secret today, so this is defensive — but it keeps the
+    # empty-valid contract consistent across BOTH plain names and either-sets.
+    present = {
+        name for name, value in env.items() if value
+    } | secretreq.EMPTY_VALID_SECRETS
     missing.extend(
         alt.describe_gap(present)
         for alt in release_plan.secret_alternatives
