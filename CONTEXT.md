@@ -328,6 +328,10 @@ _Avoid_: "workspace", "working tree", "sandbox".
 
 ### Build & Release
 
+**Creation profile**:
+A shipit-owned creation-time recipe selected through `repo new --stack`, combining initial project files and declarations for one ecosystem. It is input to creation only; the completed Repo persists Toolchains and Artifacts, not a profile or project Kind.
+_Avoid_: "Toolchain" for the source-layout recipe; persisting "stack" as a Repo type or dispatch label.
+
 **Toolchain**:
 The build, test, and provisioning ecosystem for a path in a repo, such as Rust, npm, MkDocs, Go, or WASM. Shipit dispatches work by toolchain.
 _Avoid_: "kind", "stack", or "project type" as a dispatch label.
