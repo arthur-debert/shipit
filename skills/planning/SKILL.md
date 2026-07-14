@@ -4,7 +4,7 @@ description: Plan a new feature or epic from loose ideas through to issues. Driv
 ---
 # Planning
 
-Conduct a planning session for a **new feature or epic**. This is the orchestrator: it drives the other planning skills in order and keeps the human in the loop at the two checkpoints that matter.
+Conduct a planning session for a **new feature or epic**. This is the orchestrator: it drives the other planning skills in order and keeps the human in the loop at the three checkpoints that matter.
 
 **Two legs, often two sessions.** Leg A turns loose ideas into the **Spec** — `docs/spec/<slug>.md`, authored first, then the **ADRs** that follow from it — locked by a merged docs PR. Leg B turns that Spec into **execution tracking** (epic issue(s) + Work Stream sub-issues). Leg B is independently invocable — it is frequently a separate, later session run directly once the Spec is merged. Run Leg A end-to-end first; only continue into Leg B when asked, or note it as the next session.
 

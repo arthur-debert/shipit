@@ -1,6 +1,6 @@
 ---
 name: to-spec
-description: Turn the current conversation context into an authoritative feature Spec and write it to docs/spec/. Use when user wants to create a Spec from the current context after planning/grilling.
+description: Turn the current conversation context into an authoritative feature Spec and write it to docs/spec/. Use when user wants to create the first planning artifact from ideation or a blessed overview, before the architectural grill (`/grill-me-with-docs`).
 metadata:
     forked-from: https://github.com/mattpocock/skills (skills/engineering/to-prd)
 ---
@@ -82,6 +82,6 @@ Hard boundaries for this Spec.
 
 ## Further Notes
 
-Supersession notes, historical context, links, and follow-up hooks.
+Supersession notes, historical context, links, and follow-up hooks. The grill that follows this Spec (`/grill-me-with-docs`) links each ADR it writes back here, so `/to-tickets` can discover the durable decisions from the Spec's references — leave this section present even if you open it empty.
 
 </spec-template>

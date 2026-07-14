@@ -106,4 +106,6 @@ Each time an ADR file is written, record it in the dev-cycle log (best-effort; c
 shipit log event planning.adr.written --about "ADR-NNNN: <title>"
 ```
 
+**Link every new ADR back into the Spec.** In the planning cycle the Spec was written *before* these ADRs, so it cannot reference them yet — and `/to-tickets` discovers the durable decisions by reading the Spec **plus the ADRs it references**. So each time you write an ADR here, immediately add a link to it in the Spec's **Further Notes** section (`docs/spec/<slug>.md`). Do this before the docs PR is locked; without it the ADRs are orphaned and a later ticketing session reads the authoritative Spec and misses them. (Standalone grill, no Spec — skip this; there is no Spec to update.)
+
 </supporting-info>
