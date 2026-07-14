@@ -51,6 +51,42 @@ def test_pagination_helper_exists_exactly_once():
     assert definitions == [pathlib.Path("shipit/gh.py")]
 
 
+# --- workflow_ref_resolves — the @vN pin gate's boundary (#917) --------------
+
+
+def _probe_result(monkeypatch, *, rc: int, stderr: str = ""):
+    from shipit import execrun
+
+    calls: list[list[str]] = []
+
+    def fake_probe(args, **kwargs):
+        calls.append(list(args))
+        return execrun.ExecResult(
+            argv=tuple(args), rc=rc, stdout="", stderr=stderr, duration_ms=0
+        )
+
+    monkeypatch.setattr(gh, "_run_probe", fake_probe)
+    return calls
+
+
+def test_workflow_ref_resolves_true_on_probe_success(monkeypatch):
+    calls = _probe_result(monkeypatch, rc=0)
+    assert gh.workflow_ref_resolves("o/r", "v1") is True
+    assert calls == [["gh", "api", "repos/o/r/commits/v1"]]
+
+
+def test_workflow_ref_resolves_false_only_on_a_confirmed_404(monkeypatch):
+    _probe_result(monkeypatch, rc=1, stderr="gh: Not Found (HTTP 404)")
+    assert gh.workflow_ref_resolves("o/r", "v9") is False
+
+
+def test_workflow_ref_resolves_true_on_unknown_probe_failure(monkeypatch):
+    # An auth/transport failure is UNKNOWN, not missing — a degraded probe must
+    # never read as an absent ref and block a cut with a phantom bootstrap.
+    _probe_result(monkeypatch, rc=1, stderr="gh: authentication required")
+    assert gh.workflow_ref_resolves("o/r", "v1") is True
+
+
 # --- the merged REST/GraphQL surface (transport mocked at `_run`) -------------
 
 

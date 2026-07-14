@@ -378,3 +378,41 @@ logic is thin YAML) is stated in [./architecture.lex#3].
     every proof — the verb prints the exact `gh release delete <tag> -R
     arthur-debert/shipit-canary --yes --cleanup-tag` lines and never
     deletes what has not been inspected.
+
+10. The @vN bootstrap contract (#917)
+
+    Every stage the release caller dispatches pins its block at the FLOATING
+    v-major ref — `arthur-debert/shipit/.github/workflows/<wf>.yml@vN`. That
+    `@vN` is a BRANCH (§7, ADR-0010) that `advance-major.yml` force-moves onto
+    each new stable tag. But the propagation path only MAINTAINS an existing
+    `vN`; it never CREATES the first one — and a release tag pushed by
+    `GITHUB_TOKEN` (rather than `RELEASE_TOKEN`) does not even fire the push
+    event, so the branch can silently never come into being.
+
+    The chicken-and-egg: the caller needs `@vN` to resolve before it can run
+    the very cut that (via advance-major) would create `@vN`. When `vN` does
+    not yet exist, GitHub rejects the whole dispatch at its
+    workflow-resolution step with a raw, unactionable `HTTP 422 ... reference
+    to workflow should be either a valid branch, tag, or commit` — the cut is
+    dead on arrival with no diagnosis. The FIRST cut of a repo (or of a brand-
+    new major whose `vN` no consumer pins yet) is exactly this hole.
+
+    The contract:
+
+    - `shipit release preflight` GATES on it (`shipit.checks.workflow_pin_refs`
+      enumerates the caller's `owner/repo/wf.yml@vN` pins;
+      `shipit.gh.workflow_ref_resolves` resolves each on its publisher —
+      branch, tag, or SHA, the same resolution the dispatch makes). A pin that
+      does not resolve is a loud refusal
+      (`shipit.release.preflight.missing_pin_refusal`) naming the ONE bootstrap
+      command, never GitHub's opaque 422. The resolver is CONSERVATIVE: a clean
+      404 refuses, but any degraded probe (auth, transport) is treated as
+      unknown-not-missing so it never blocks a cut on a phantom pin.
+    - The bootstrap is paid ONCE, by hand, at the intended stable commit:
+      `git push git@github.com:<owner>/<repo>.git <stable-sha>:refs/heads/vN`.
+      From the next stable tag on, advance-major maintains `vN` — provided the
+      tag push rides `RELEASE_TOKEN` (a `GITHUB_TOKEN` push does not re-trigger
+      workflows, so it would silently skip advance-major and re-open the hole).
+    - Skipped under `preflight --plan-only`: that job runs INSIDE an already-
+      resolved dispatch (its own pins provably resolve) and is deliberately
+      secret- and network-free.

@@ -102,6 +102,56 @@ def _write_workflow(tmp_path, name, text):
     (wfdir / name).write_text(text, encoding="utf-8")
 
 
+_RELEASE_CALLER = """\
+on:
+  workflow_dispatch:
+jobs:
+  release:
+    uses: arthur-debert/shipit/.github/workflows/wf-release.yml@v1
+  prepare:
+    uses: arthur-debert/shipit/.github/workflows/wf-prepare.yml@v1
+  local:
+    uses: ./.github/workflows/wf-local.yml
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+"""
+
+
+def test_workflow_pin_refs_enumerates_cross_repo_vn_pins(tmp_path):
+    # The @vN stage pins the release caller dispatches — deduped and sorted;
+    # a `./` local ref and a step `actions/checkout@v6` (no .yml path) are not
+    # pins and never appear (#917).
+    _write_workflow(tmp_path, "shipit-release.yml", _RELEASE_CALLER)
+    pins = checks.workflow_pin_refs(str(tmp_path / ".github" / "workflows"))
+    assert pins == [("arthur-debert/shipit", "v1")]
+
+
+def test_workflow_pin_refs_dedupes_across_files_and_keeps_distinct_refs(tmp_path):
+    _write_workflow(
+        tmp_path,
+        "a.yml",
+        "on: workflow_dispatch\njobs:\n"
+        "  x:\n    uses: o/r/.github/workflows/wf.yml@v1\n",
+    )
+    _write_workflow(
+        tmp_path,
+        "b.yml",
+        "on: workflow_dispatch\njobs:\n"
+        "  y:\n    uses: o/r/.github/workflows/wf.yml@v1\n"
+        "  z:\n    uses: o/r/.github/workflows/wf.yml@v2\n",
+    )
+    pins = checks.workflow_pin_refs(str(tmp_path / ".github" / "workflows"))
+    assert pins == [("o/r", "v1"), ("o/r", "v2")]
+
+
+def test_workflow_pin_refs_skips_unparseable_and_empty_dir(tmp_path):
+    assert checks.workflow_pin_refs(str(tmp_path / ".github" / "workflows")) == []
+    _write_workflow(tmp_path, "broken.yml", "on: [unclosed\n")
+    assert checks.workflow_pin_refs(str(tmp_path / ".github" / "workflows")) == []
+
+
 def test_publishes_reusable_workflows_local_scan(tmp_path):
     _write_workflow(tmp_path, "ci.yml", "on:\n  pull_request:\njobs:\n  ci: {}\n")
     assert not checks.publishes_reusable_workflows("o/r", toplevel=str(tmp_path))

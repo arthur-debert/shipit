@@ -674,6 +674,27 @@ def release_exists(tag: str, *, cwd: str | None = None) -> bool:
     return _run_probe(["gh", "release", "view", tag, "--json", "name"], cwd=cwd).rc == 0
 
 
+def workflow_ref_resolves(repo: str, ref: str) -> bool:
+    """Whether ``ref`` resolves to a commit on ``repo`` — the branch/tag/SHA
+    resolution a reusable-workflow ``uses: <repo>/…@<ref>`` dispatch makes at
+    GitHub's workflow-resolution step (#917: a missing ``@vN`` floating-major
+    branch made the whole release cut die there with an opaque HTTP 422, before
+    any job ran).
+
+    Probe (``repos/{repo}/commits/{ref}``, which resolves a branch, a tag, OR a
+    SHA — exactly what an ``@ref`` pin accepts): an absent ref is a NORMAL
+    answer the preflight pin gate branches on, so a CONFIRMED 404 is a clean
+    ``False``. Any OTHER probe failure (auth, rate-limit, transport) is
+    UNKNOWN, not missing — it returns ``True`` so a degraded probe can never be
+    read as an absent ref and block a cut with a phantom bootstrap
+    instruction."""
+    result = _run_probe(["gh", "api", f"repos/{repo}/commits/{ref}"])
+    if result.rc == 0:
+        return True
+    stderr = (result.stderr or "").lower()
+    return not ("404" in stderr or "not found" in stderr)
+
+
 def release_create(
     tag: str, *, notes_file: str, prerelease: bool, cwd: str | None = None
 ) -> None:
