@@ -295,7 +295,8 @@ def test_delivered_lint_fails_closed_when_a_planned_file_is_missing(staged):
 
 
 # --------------------------------------------------------------------------
-# Postcondition 2, managed skills (#777) — the delivered skill/*.md content is
+# Postcondition 2, managed skills (#777) — the delivered `.shipit-skills/*.md`
+# content is
 # no longer exempt from the delivered markdownlint gate, so self-cert's
 # delivered-lint CATCHES a skill-content defect that would otherwise ride the
 # managed set into a consumer's markdownlint gate (modes 4+6). These route the
@@ -306,7 +307,8 @@ def test_delivered_lint_fails_closed_when_a_planned_file_is_missing(staged):
 
 def _skill_only_plan(root) -> irec.Plan:
     """A plan whose write set is JUST the managed skill files, so a scoped
-    delivered-lint routes only markdownlint over the shipped skill/*.md."""
+    delivered-lint routes only markdownlint over the shipped
+    `.shipit-skills/*.md`."""
     skills = [u for u in iunits.load_units() if u.key.startswith(".shipit-skills/")]
     decisions = tuple(
         irec.Decision(
@@ -343,7 +345,7 @@ def _unwrapping_real_runner():
 
 
 def test_managed_skill_files_are_in_the_delivered_lint_set(staged):
-    # The root-cause guard (no binary): every managed skill/*.md is a whole-file
+    # The root-cause guard (no binary): every managed `.shipit-skills/*.md` is a whole-file
     # unit, so it is in scope for the delivered-lint check — the blindness was
     # only the shipped `.markdownlintignore` exempting `skills/`, now removed.
     paths = selfcert.delivered_lint_paths(_skill_only_plan(staged))

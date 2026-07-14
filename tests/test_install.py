@@ -4621,20 +4621,42 @@ def test_retired_manifest_carries_the_renamed_skill_history():
         assert retired[path].pristine_hashes == expected_hashes
 
 
+# The ELEVEN skills the #921 store move relocated from `skills/<rel>` to
+# `.shipit-skills/<rel>`. Pinned as an EXPLICIT set — not derived from the
+# current `.shipit-skills/` units — because "every store unit has a retired
+# `skills/<rel>`" is a one-time MIGRATION invariant, not a standing one: a new
+# skill added to the store later was never under `skills/`, so deriving from the
+# live units would force a bogus `skills/<rel>` retirement (which could shed a
+# consumer-authored `skills/<rel>` file whose content matched).
+RELOCATED_SKILL_STORE_PATHS = (
+    "coordinating/SKILL.md",
+    "grill-me-with-docs/ADR-FORMAT.md",
+    "grill-me-with-docs/CONTEXT-FORMAT.md",
+    "grill-me-with-docs/SKILL.md",
+    "implementing/SKILL.md",
+    "lex-primer/SKILL.md",
+    "planning/SKILL.md",
+    "shepherding-prs/SKILL.md",
+    "shipit-session-status/SKILL.md",
+    "to-spec/SKILL.md",
+    "to-tickets/SKILL.md",
+)
+
+
 def test_retired_manifest_carries_the_relocated_skill_store():
-    # The store moved out of `skills/` to `.shipit-skills/` (#921): every skill
-    # shipit now delivers under `.shipit-skills/<rel>` must have its OLD
-    # `skills/<rel>` path retired, carrying the current content hash so a consumer
-    # sheds the polluting old copy on install (leaving consumer-authored `skills/`
-    # files alone — they are not in this manifest).
+    # The store moved out of `skills/` to `.shipit-skills/` (#921): each of the
+    # ELEVEN relocated skills must still be delivered under `.shipit-skills/<rel>`
+    # AND have its OLD `skills/<rel>` path retired, carrying the current content
+    # hash so a consumer sheds the polluting old copy on install (leaving
+    # consumer-authored `skills/` files alone — they are not in this manifest).
     retired = {r.path: r for r in irec.load_retired()}
-    for unit in iunits.load_units():
-        if not unit.key.startswith(".shipit-skills/"):
-            continue
-        rel = unit.key[len(".shipit-skills/") :]
+    units = {u.key: u for u in iunits.load_units()}
+    for rel in RELOCATED_SKILL_STORE_PATHS:
+        new_key = f".shipit-skills/{rel}"
         old_path = f"skills/{rel}"
+        assert new_key in units, f"{new_key} no longer delivered"
         assert old_path in retired, f"{old_path} not retired"
-        assert unit.desired_hash() in retired[old_path].pristine_hashes
+        assert units[new_key].desired_hash() in retired[old_path].pristine_hashes
 
 
 def test_install_deletes_a_pristine_relocated_skill_and_installs_new_store(
