@@ -95,15 +95,20 @@ PIXI_LOCK = "pixi.lock"
 HOOK_BACKUP_SUFFIX = ".old"
 LEFTHOOK_SHIM_MARKERS = ("LEFTHOOK", "call_lefthook")
 
-#: The git-hook slots the managed ``lefthook.yml`` activates a shim into — the
-#: paths ``lefthook install`` writes and therefore the only ones a pre-existing
-#: obstruction can block (#912). A pre-existing DANGLING symlink at any of these
-#: paths defeats ``lefthook install``: lefthook's existence ``stat`` FOLLOWS the
-#: link, sees the dead target as absent, skips its move-to-``.old`` step, and
-#: goes straight to ``open(<hook>, O_CREATE|O_WRONLY)`` — which also follows the
-#: dead link and tries to create the missing target in a directory that does not
-#: exist → ``ENOENT``. :func:`_preclean_dangling_hook_symlinks` unlinks the dead
-#: link at these paths so lefthook writes a fresh shim.
+#: The MANAGED git-hook slots the shipped ``lefthook.yml`` activates a shim into
+#: — the hooks whose activation this module owns (#912). Keep in sync with the
+#: top-level hook keys in ``src/shipit/data/lefthook.yml``. This is the
+#: managed-only set on purpose: a consumer's ``lefthook-local.yml`` can configure
+#: ADDITIONAL hooks, and an obstruction in one of those paths can block
+#: ``lefthook install`` too — but self-healing another tool's hook slot is not
+#: this preclean's job, so it scopes itself to the slots shipit ships.
+#: A pre-existing DANGLING symlink at one of these paths defeats
+#: ``lefthook install``: lefthook's existence ``stat`` FOLLOWS the link, sees the
+#: dead target as absent, skips its move-to-``.old`` step, and goes straight to
+#: ``open(<hook>, O_CREATE|O_WRONLY)`` — which also follows the dead link and
+#: tries to create the missing target in a directory that does not exist →
+#: ``ENOENT``. :func:`_preclean_dangling_hook_symlinks` unlinks the dead link at
+#: these paths so lefthook writes a fresh shim.
 MANAGED_HOOK_NAMES = ("pre-commit", "pre-push", "post-commit")
 
 #: The PR-body renderer apply calls at the boundary moment (``MODE_PR`` only):
@@ -391,21 +396,49 @@ def _preclean_dangling_hook_symlinks(root: Path) -> None:
 
     Same category as :func:`_preclean_stale_hook_backups` (a leftover blocking
     activation), and held to the same conservative bar: only a DANGLING symlink
-    (:meth:`~pathlib.Path.is_symlink` true AND :meth:`~pathlib.Path.exists`
-    false — the link resolves to nothing) is removed. A symlink whose target
-    resolves is a working consumer hook and is left untouched, as is a real
-    (non-symlink) file. Best-effort: an unremovable link is logged and skipped,
-    never fatal — the worst case is today's degraded activation warning.
+    is removed — the path is a symlink (:meth:`~pathlib.Path.is_symlink`, an
+    ``lstat`` that does NOT follow) whose target does not resolve (a following
+    :meth:`~pathlib.Path.stat` raises :class:`FileNotFoundError`). A symlink
+    whose target resolves is a working consumer hook and is left untouched, as is
+    a real (non-symlink) file. The classification stats rather than calling
+    :meth:`~pathlib.Path.exists` on purpose: ``exists`` returns false for ANY
+    ``stat`` failure — including a :class:`PermissionError` reaching an existing
+    target — which would misread a LIVE but momentarily-unreachable link as
+    dangling and destroy it. So ONLY :class:`FileNotFoundError` counts as
+    dangling; any other :class:`OSError` leaves the link untouched. Best-effort:
+    the classification calls are themselves OSError-guarded (a restrictive parent
+    directory would otherwise crash the install), so an unclassifiable or
+    unremovable link is logged and skipped, never fatal — the worst case is
+    today's degraded activation warning.
     """
     hooks_dir = root / ".git" / "hooks"
     if not hooks_dir.is_dir():
         return
     for name in MANAGED_HOOK_NAMES:
         hook = hooks_dir / name
-        # Dangling: the path IS a symlink but does not resolve. `exists()`
-        # follows the link, so a live link (target resolves) and a real file
-        # both read as existing and are left alone; only a dead link is removed.
-        if not (hook.is_symlink() and not hook.exists()):
+        try:
+            # DANGLING = a symlink (lstat, does not follow) whose target does not
+            # resolve (a following stat raises FileNotFoundError). A real file or
+            # an absent path is not a symlink; a link whose target resolves stats
+            # cleanly. Stat rather than `exists()` keeps the bar honest —
+            # `exists()` also reads false on a PermissionError while following the
+            # link, which would destroy a LIVE but unreachable hook — so only
+            # FileNotFoundError is dangling and any other OSError leaves it be.
+            if not hook.is_symlink():
+                continue
+            try:
+                hook.stat()  # follows the link
+            except FileNotFoundError:
+                pass  # dead target → dangling → removed below
+            else:
+                continue  # target resolves → live consumer hook → leave it
+        except OSError:
+            logger.warning(
+                "could not classify a git-hook path before activation; "
+                "leaving it untouched",
+                exc_info=True,
+                extra={"root": str(root), "hook": name},
+            )
             continue
         try:
             hook.unlink()

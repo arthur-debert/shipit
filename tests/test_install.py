@@ -4112,6 +4112,23 @@ def test_preclean_preserves_a_live_hook_symlink(tmp_path):
     assert (hooks / "pre-commit").resolve() == target.resolve()
 
 
+def test_preclean_preserves_a_symlink_whose_stat_fails_non_enoent(tmp_path):
+    # Conservative bar (#912 review): DANGLING means the target does not exist
+    # (a following `stat` raises FileNotFoundError) — NOT any stat failure. A
+    # link whose `stat` raises some OTHER OSError (here a circular self-loop →
+    # ELOOP; in the field a PermissionError reaching a live-but-unreachable
+    # target) must be LEFT UNTOUCHED, or the preclean would destroy a live hook
+    # it cannot see. The classification is also OSError-guarded, so this never
+    # crashes the install — the call returns cleanly with the link intact.
+    hooks = tmp_path / ".git" / "hooks"
+    hooks.mkdir(parents=True)
+    loop = hooks / "pre-commit"
+    loop.symlink_to("pre-commit")  # self-referential → stat() raises ELOOP
+    assert loop.is_symlink()
+    iapply._preclean_dangling_hook_symlinks(tmp_path)  # must not raise
+    assert loop.is_symlink()  # not a FileNotFoundError → left untouched
+
+
 def test_preclean_leaves_a_real_hook_file_untouched(tmp_path):
     # A real (non-symlink) file at a managed hook path — a live shim or a
     # hand-written consumer hook — is never a dangling link, so it is untouched.
