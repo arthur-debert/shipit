@@ -6,9 +6,10 @@ Usage:
     shipit repo new --stack rust <name> [parent]
 
 The destination is always `<parent>/<name>`; `parent` defaults to the current
-directory and must already exist as a writable directory. The destination must
-be absent or an empty directory — a file, a symlink, or a directory containing
-any entry (including a hidden one) is refused before anything is written.
+directory and must already exist as a writable, traversable directory. The
+destination must be absent or an empty directory — a file, a symlink, or a
+directory containing any entry (including a hidden one) is refused before
+anything is written.
 
 `<name>` is canonical lowercase kebab-case (an ASCII lowercase letter followed
 by lowercase alphanumeric segments joined by single hyphens, e.g. `hello`,

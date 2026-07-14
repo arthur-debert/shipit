@@ -28,10 +28,12 @@ def render_text(template: str, context: dict[str, str]) -> str:
 
     Every placeholder must resolve to a context key (StrictUndefined): an
     unknown key raises :class:`CreationError` naming it, so a template typo
-    fails creation loudly instead of writing a broken file. A stray ``{{`` that
-    is not a well-formed placeholder is left verbatim and would surface in the
-    output — creation's own tests over the packaged templates are the guard
-    against that, exactly as they are for any authored source.
+    fails creation loudly instead of writing a broken file. The renderer also
+    fails closed on any ``{{``/``}}`` that survives substitution: a malformed
+    placeholder the identifier pattern rejects (e.g. ``{{ cli-pkg }}``, whose
+    hyphen is not an identifier char) would otherwise ship a literal brace pair
+    into a generated file, contradicting this module's no-unrendered-braces
+    contract.
     """
 
     def _resolve(match: re.Match[str]) -> str:
@@ -43,4 +45,13 @@ def render_text(template: str, context: dict[str, str]) -> str:
             )
         return context[key]
 
-    return _PLACEHOLDER.sub(_resolve, template)
+    rendered = _PLACEHOLDER.sub(_resolve, template)
+    leftover = re.search(r"\{\{|\}\}", rendered)
+    if leftover is not None:
+        near = rendered[leftover.start() : leftover.start() + 40]
+        raise CreationError(
+            f"template left an unrendered brace pair near {near!r}; "
+            "placeholder keys must be identifiers "
+            "([A-Za-z_][A-Za-z0-9_]*)"
+        )
+    return rendered

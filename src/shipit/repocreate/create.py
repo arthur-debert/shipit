@@ -259,17 +259,21 @@ def create_repo(
     # verbatim — so a published Repo would be `rwx------`, breaking shared
     # workspaces and container mounts and diverging from `git init`/`cargo new`,
     # which respect the user's umask. Widen the staging root to the umask-derived
-    # mode (typically 0o755) before it is published. Read the current umask with
-    # a fail-secure set-to-0o077/restore probe: `os.umask` can only read by
-    # writing, so the momentary value it imposes on any file other threads create
-    # in the window must be maximally restrictive (0o077, owner-only) rather than
-    # 0 (which would make such files world-writable). Preserve any high-order bits
-    # `mkdtemp` inherited from the parent (e.g. an SGID group-inheritance bit on a
-    # shared workspace) by only rewriting the low 9 permission bits.
-    umask = os.umask(0o077)
-    os.umask(umask)
+    # mode (typically 0o755) before it is published. Read the umask WITHOUT
+    # mutating process-global state: an `os.umask` set/restore probe reads only
+    # by writing, imposing its momentary mask on any file a concurrent thread
+    # creates in the window — an unacceptable side effect for an orchestration
+    # library. Instead create a throwaway 0o777 directory inside the staging
+    # root, which the OS masks atomically on creation (`0o777 & ~umask`), and
+    # read the umask-derived bits straight back off it. Preserve any high-order
+    # bits `mkdtemp` inherited from the parent (e.g. an SGID group-inheritance
+    # bit on a shared workspace) by only rewriting the low 9 permission bits.
+    probe = staging / ".shipit-umask-probe"
+    probe.mkdir(mode=0o777)
+    umask_mode = probe.stat().st_mode & 0o777
+    probe.rmdir()
     current_mode = staging.stat().st_mode
-    staging.chmod((current_mode & ~0o777) | (0o777 & ~umask))
+    staging.chmod((current_mode & ~0o777) | umask_mode)
     logger.info(
         "staging new Repo",
         extra={"staging": str(staging), "destination": str(dest)},

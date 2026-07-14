@@ -135,6 +135,14 @@ def test_render_text_raises_on_undefined_variable():
         render_text("hi {{ missing }}", {"name": "x"})
 
 
+def test_render_text_fails_closed_on_malformed_placeholder():
+    # A placeholder the identifier pattern rejects (hyphen) is not substituted;
+    # rather than shipping a literal brace pair into a generated file, render
+    # fails loud so a template typo can never reach a Repo.
+    with pytest.raises(CreationError):
+        render_text("pkg {{ cli-pkg }}", {"cli-pkg": "x"})
+
+
 # --------------------------------------------------------------------------
 # profiles — the closed registry (ADR-0056/0063)
 # --------------------------------------------------------------------------
