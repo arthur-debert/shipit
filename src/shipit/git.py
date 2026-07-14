@@ -711,28 +711,52 @@ def init_main(*, cwd: str) -> None:
     _git(["init", "-b", "main"], cwd=cwd)
 
 
-def author_name(*, cwd: str) -> str | None:
-    """Git's fully resolved author display name for ``cwd``, or ``None``.
+def _ident_name(var: str, *, cwd: str) -> str | None:
+    """The display name from ``git var <var>`` (an IDENT string), or ``None``.
 
-    Runs ``git var GIT_AUTHOR_IDENT``, which resolves the SAME author identity a
-    commit will use — honoring ``GIT_AUTHOR_NAME``/``GIT_AUTHOR_EMAIL``, the
-    ``author.*``/``user.*`` config chain, and git's own precedence — and fails
-    exactly where ``git commit`` would (e.g. ``user.useConfigOnly`` with nothing
-    configured, or a missing email). A probe read: git's failure is a NORMAL
-    answer (``None``), not an exception. ``shipit repo new`` attributes the
-    generated MIT ``LICENSE`` to the returned name; an unresolvable author is a
-    creation preflight failure the caller raises, never a template placeholder.
+    ``git var GIT_AUTHOR_IDENT``/``GIT_COMMITTER_IDENT`` resolves the SAME
+    identity a commit will use — honoring the matching ``GIT_*_NAME``/
+    ``GIT_*_EMAIL`` env vars, the ``author.*``/``committer.*``/``user.*`` config
+    chain, and git's own precedence — and fails exactly where ``git commit``
+    would (e.g. ``user.useConfigOnly`` with nothing configured, or a missing
+    email). A probe read: git's failure is a NORMAL answer (``None``), not an
+    exception.
     """
-    result = _probe(["var", "GIT_AUTHOR_IDENT"], cwd=cwd)
+    result = _probe(["var", var], cwd=cwd)
     if not result.ok:
         return None
-    # `GIT_AUTHOR_IDENT` is `Name <email> <timestamp> <tz>`; the display name is
+    # An IDENT is `Name <email> <timestamp> <tz>`; the display name is
     # everything before the ` <email>` bracket (a name never contains ``<``).
     ident = result.stdout.strip()
     marker = ident.rfind(" <")
     if marker <= 0:
         return None
     return ident[:marker].strip() or None
+
+
+def author_name(*, cwd: str) -> str | None:
+    """Git's fully resolved author display name for ``cwd``, or ``None``.
+
+    Resolves ``GIT_AUTHOR_IDENT`` (see :func:`_ident_name`) — the SAME author
+    identity the commit will use. ``shipit repo new`` attributes the generated
+    MIT ``LICENSE`` to the returned name; an unresolvable author is a creation
+    preflight failure the caller raises, never a template placeholder.
+    """
+    return _ident_name("GIT_AUTHOR_IDENT", cwd=cwd)
+
+
+def committer_name(*, cwd: str) -> str | None:
+    """Git's fully resolved committer display name for ``cwd``, or ``None``.
+
+    Resolves ``GIT_COMMITTER_IDENT`` (see :func:`_ident_name`) — the identity
+    ``git commit`` records as the committer, which git resolves INDEPENDENTLY of
+    the author (``GIT_COMMITTER_*`` env / ``committer.*`` config, else the
+    ``user.*`` fallback). ``shipit repo new`` probes this alongside
+    :func:`author_name` so a setup that resolves an author but no committer
+    (e.g. only ``GIT_AUTHOR_NAME``/``GIT_AUTHOR_EMAIL`` set) is caught as a
+    creation preflight failure rather than a raw ``Initial commit`` error.
+    """
+    return _ident_name("GIT_COMMITTER_IDENT", cwd=cwd)
 
 
 def commit(

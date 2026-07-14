@@ -42,8 +42,13 @@ def _quote(text: str) -> str:
     escaper. A naive quote/backslash ``replace`` would emit a literal newline
     inside a basic string (invalid TOML that breaks parsing); this does not.
     ``ensure_ascii=False`` keeps non-ASCII literal, which basic strings allow.
+
+    One divergence to close by hand: TOML 1.0.0 requires ``U+007F`` (DEL) to be
+    escaped, but JSON only mandates ``U+0000``–``U+001F``, so ``json.dumps``
+    leaves a raw DEL byte literal under ``ensure_ascii=False``. Replace it with
+    its ``\\u007f`` escape so a DEL in a value cannot emit malformed TOML.
     """
-    return json.dumps(text, ensure_ascii=False)
+    return json.dumps(text, ensure_ascii=False).replace("\x7f", "\\u007f")
 
 
 def _render_scalar(value: object) -> str:

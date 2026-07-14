@@ -110,8 +110,10 @@ def test_tomlio_escapes_strings():
 
 def test_tomlio_escapes_control_characters():
     # A literal newline/tab must become a TOML escape, never a raw control
-    # character that breaks the basic string (and thus TOML parsing).
-    assert tomlio.dumps({"t": {"k": "a\nb\tc"}}) == '[t]\nk = "a\\nb\\tc"\n'
+    # character that breaks the basic string (and thus TOML parsing). DEL
+    # (U+007F) is the case where TOML's escaping requirement diverges from
+    # JSON's: `json.dumps` leaves it literal, so `_quote` escapes it by hand.
+    assert tomlio.dumps({"t": {"k": "a\nb\tc\x7f"}}) == '[t]\nk = "a\\nb\\tc\\u007f"\n'
 
 
 def test_tomlio_rejects_unserializable_value():
@@ -366,8 +368,26 @@ def test_create_refuses_symlink_destination(tmp_path):
 
 def test_default_author_raises_without_git_identity(tmp_path, monkeypatch):
     monkeypatch.setattr(create_mod.git, "author_name", lambda *, cwd: None)
+    monkeypatch.setattr(create_mod.git, "committer_name", lambda *, cwd: None)
     with pytest.raises(CreationError):
         create_mod.default_author(tmp_path)
+
+
+def test_default_author_raises_when_only_committer_unresolved(tmp_path, monkeypatch):
+    # git resolves author and committer INDEPENDENTLY: a setup with only
+    # GIT_AUTHOR_* set resolves an author but no committer, and the Initial
+    # commit needs both. `default_author` must catch that as a preflight
+    # failure, never let creation proceed to a raw commit-time git error.
+    monkeypatch.setattr(create_mod.git, "author_name", lambda *, cwd: "Ada Lovelace")
+    monkeypatch.setattr(create_mod.git, "committer_name", lambda *, cwd: None)
+    with pytest.raises(CreationError):
+        create_mod.default_author(tmp_path)
+
+
+def test_default_author_returns_name_when_both_resolve(tmp_path, monkeypatch):
+    monkeypatch.setattr(create_mod.git, "author_name", lambda *, cwd: "Ada Lovelace")
+    monkeypatch.setattr(create_mod.git, "committer_name", lambda *, cwd: "Ada Lovelace")
+    assert create_mod.default_author(tmp_path) == "Ada Lovelace"
 
 
 def _stub_install_pipeline(monkeypatch, *, hooks_activated, hooks_detail=""):

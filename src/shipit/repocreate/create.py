@@ -197,19 +197,23 @@ def default_author(root: Path) -> str:
     GIT_AUTHOR_IDENT``) from ``root`` (after ``git init``), so it uses the SAME
     identity the ``Initial commit`` will — honoring ``GIT_AUTHOR_NAME``/
     ``GIT_AUTHOR_EMAIL`` and the full ``user.*`` config chain, not one config
-    key — and fails wherever ``git commit`` would (missing name OR email, or
-    ``user.useConfigOnly`` with nothing set). An unresolvable identity is a
-    creation PREFLIGHT failure (``docs/spec/repo-new.md``: never a template
-    placeholder), raised here BEFORE any effect rather than as a raw commit-time
-    git error mid-creation.
+    key. It ALSO probes the committer identity (:func:`git.committer_name`,
+    ``git var GIT_COMMITTER_IDENT``), which git resolves INDEPENDENTLY of the
+    author: a setup with only ``GIT_AUTHOR_*`` set resolves an author but no
+    committer, and the ``Initial commit`` needs both. Requiring both here means
+    an unresolvable identity is a creation PREFLIGHT failure
+    (``docs/spec/repo-new.md``: never a template placeholder), raised BEFORE any
+    effect rather than as a raw commit-time git error mid-creation.
     """
     name = git.author_name(cwd=str(root))
-    if not name:
+    committer = git.committer_name(cwd=str(root))
+    if not name or not committer:
         raise CreationError(
-            "git could not resolve an author identity; configure it before "
-            'creating a Repo — e.g. `git config --global user.name "Your Name"` '
-            'and `git config --global user.email "you@example.com"` (or set '
-            "GIT_AUTHOR_NAME/GIT_AUTHOR_EMAIL)"
+            "git could not resolve a full author + committer identity; configure "
+            "it before creating a Repo — e.g. `git config --global user.name "
+            '"Your Name"` and `git config --global user.email "you@example.com"` '
+            "(or set GIT_AUTHOR_NAME/GIT_AUTHOR_EMAIL and GIT_COMMITTER_NAME/"
+            "GIT_COMMITTER_EMAIL)"
         )
     return name
 
@@ -249,10 +253,15 @@ def create_repo(
     # verbatim — so a published Repo would be `rwx------`, breaking shared
     # workspaces and container mounts and diverging from `git init`/`cargo new`,
     # which respect the user's umask. Widen the staging root to the umask-derived
-    # mode (typically 0o755) before it is published.
-    umask = os.umask(0o022)
+    # mode (typically 0o755) before it is published. Read the current umask with
+    # the standard set-to-0/restore probe (never imposing a specific value on
+    # files other threads may create in the window), and preserve any high-order
+    # bits `mkdtemp` inherited from the parent (e.g. an SGID group-inheritance
+    # bit on a shared workspace) by only rewriting the low 9 permission bits.
+    umask = os.umask(0)
     os.umask(umask)
-    staging.chmod(0o777 & ~umask)
+    current_mode = staging.stat().st_mode
+    staging.chmod((current_mode & ~0o777) | (0o777 & ~umask))
     logger.info(
         "staging new Repo",
         extra={"staging": str(staging), "destination": str(dest)},
