@@ -24,9 +24,10 @@ The existing domain model constrains this feature:
   rather than places to reimplement stack logic
   ([ADR-0040](../adr/0040-workflow-blocks-invariants-in-blocks.md)).
 
-This Spec defines the requirements-first shape of repository creation. The
-architectural choices that warrant durable rationale will be resolved afterward
-through a `grill-me-with-docs` session and recorded as ADRs.
+This Spec defines the requirements and accepted design shape of repository
+creation. Durable architectural rationale is recorded in
+[ADR-0055](../adr/0055-repo-creation-orchestrates-install.md) through
+[ADR-0063](../adr/0063-creation-profiles-are-a-closed-registry.md).
 
 ## Problem
 
@@ -374,9 +375,9 @@ depend on an interactive `pixi shell`.
   remain tracked, broad product-output patterns such as `dist/` are not guessed,
   and the install module remains responsible for its managed release-output
   ignore block.
-- Exact rendering technology, rollback mechanics, effect injection, and internal
-  profile representation are deliberately left for the ADR grill where real
-  trade-offs can be recorded.
+- Rendering technology, rollback mechanics, the verification seam, and internal
+  profile representation follow ADR-0055 through ADR-0063; lower-level effect
+  injection remains an implementation detail within those boundaries.
 
 ## Alternatives Considered
 
@@ -410,8 +411,8 @@ depend on an interactive `pixi shell`.
 - A pixi task name defined in multiple enabled environments becomes ambiguous.
   Adding build or Rust test provisioning must preserve unambiguous bare commands.
 - Git initialization, hook activation, dependency solving, verification, and
-  committing cross several effectful systems. The ADR grill must decide failure
-  cleanup for the temporary sibling without weakening the promise that the
+  committing cross several effectful systems. ADR-0059 requires handled failures
+  to clean up the temporary sibling without weakening the promise that the
   requested destination retains its absent-or-empty preflight state on failure.
 - Template extensibility can become a product of its own. V1 needs only the
   universal seed and one Rust contribution.
@@ -497,7 +498,7 @@ depend on an interactive `pixi shell`.
   finish with a fresh-environment acceptance pass.
 
 These are decomposition hints only. `/to-tickets` will choose the actual epic
-and Work Stream topology after the Spec and ADRs are settled.
+and Work Stream topology from the settled Spec and ADRs.
 
 ## Out Of Scope
 
@@ -514,8 +515,8 @@ and Work Stream topology after the Spec and ADRs are settled.
 
 ## Further Notes
 
-This Spec intentionally precedes its ADR grill as an experiment in locking the
+This Spec intentionally preceded its ADR grill as an experiment in locking the
 requirements and observable shape before selecting hard-to-reverse
-implementation details. ADRs created by that grill should explain the chosen
-architecture without turning this Spec into an implementation transcript. If an
-ADR changes an observable requirement, the Spec must be amended explicitly.
+implementation details. ADR-0055 through ADR-0063 explain the chosen
+architecture without turning this Spec into an implementation transcript. If a
+later ADR changes an observable requirement, the Spec must be amended explicitly.
