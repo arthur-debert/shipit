@@ -88,6 +88,23 @@ SIGN_MAC_CERT_SECRETS: tuple[str, ...] = (
     "APPLE_CERTIFICATE_PASSWORD",
 )
 
+#: Required names whose EMPTY value is VALID presence — the one authority for
+#: what "present" means per name, so preflight cannot drift from the signer
+#: (#892). ``APPLE_CERTIFICATE_PASSWORD`` names a ``.p12`` password, and a
+#: passwordless ``.p12`` is legal PKCS#12: the signer
+#: (:data:`shipit.release.sign.CERT_PASSWORD_SECRET`,
+#: :func:`shipit.release.sign.resolve_signing`) accepts an empty — or entirely
+#: absent, defaulting to empty — value and NEVER hard-fails on it. Preflight
+#: presence validation therefore must not DEMAND it non-empty, or it would
+#: refuse a genuinely passwordless repo the signer would happily sign. The
+#: NAME still rides :data:`SIGN_MAC_CERT_SECRETS` (synced by gh-setup,
+#: forwarded by the caller block, listed in the plan's ``secrets``); only its
+#: value check is relaxed — presence-if-set-even-empty, per the sign contract.
+#: Its counterpart ``APPLE_CERTIFICATE`` is NOT here: a missing cert is a hard
+#: fail (:data:`shipit.release.sign.CERT_SECRET` — signing is impossible
+#: without it). The pairing to the signer's name is drift-guarded by test.
+EMPTY_VALID_SECRETS: frozenset[str] = frozenset({"APPLE_CERTIFICATE_PASSWORD"})
+
 #: Notary alternative 1 — the App Store Connect API-key trio. Takes
 #: precedence at the signer when both trios are complete
 #: (:func:`shipit.release.sign.resolve_notary`; the drift-guard test in
