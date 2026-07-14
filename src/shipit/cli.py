@@ -18,7 +18,7 @@ from . import __version__, buildid, events, logcontext
 from .logsetup import configure_logging, reset_logging
 from .verbs import build as build_verb
 from .verbs import e2e as e2e_verb
-from .verbs import gh_setup, install, lint, logs, verify_apps
+from .verbs import gh_setup, install, lint, logs, opportunities, verify_apps
 from .verbs import test as test_verb
 from .verbs._context import resolve_root_context
 from .verbs._help import register_long_help
@@ -343,6 +343,10 @@ root.add_command(lab_group)
 # reader stays the flat `logs` verb above; write and read are separate verbs.
 root.add_command(log_group)
 
+# The nested `opportunities` group (OPP01) — capture out-of-scope, evidenced
+# improvements into a separate GitHub-backed Opportunity store.
+root.add_command(opportunities.opportunities)
+
 # The nested `tree` group (TRE01) — isolated Trees: independent dissociated
 # clones a write-session works in (ADR-0014). Attached like `pr`.
 root.add_command(tree_group)
@@ -431,6 +435,8 @@ _HELP_RESOURCES = {
     ("lab", "report"): ("shipit.verbs.lab", "lab_report_help.txt"),
     ("log",): ("shipit.verbs", "log_help.txt"),
     ("log", "event"): ("shipit.verbs", "log_event_help.txt"),
+    ("opportunities",): ("shipit.verbs", "opportunities_help.txt"),
+    ("opportunities", "create"): ("shipit.verbs", "opportunities_create_help.txt"),
     ("tree",): ("shipit.verbs", "tree_help.txt"),
     ("tree", "create"): ("shipit.verbs", "tree_create_help.txt"),
     ("tree", "list"): ("shipit.verbs", "tree_list_help.txt"),

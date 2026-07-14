@@ -1,0 +1,12 @@
+`shipit opportunities create` captures an evidenced observation.
+
+Configuration comes from `[project.opportunities]` in `.shipit.toml`:
+
+```toml
+[project.opportunities]
+repo = "owner/opportunity-store"
+```
+
+The command writes one markdown file under `inbox/`, commits it directly to the
+store repo, and pushes with a pull/rebase retry if the first push races another
+writer.

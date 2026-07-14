@@ -1,0 +1,4 @@
+`shipit opportunities` captures and manages Opportunities.
+
+The first v1 command is `shipit opportunities create`, which writes an inbox
+Opportunity to the store configured in `.shipit.toml`.

@@ -31,6 +31,7 @@ from ..config import ConfigError
 from ..events import EventNotRecordedError, UnknownEventError
 from ..fleetsweep import SweepError
 from ..install.errors import InstallError
+from ..opportunities import OpportunityError
 from ..provision.lexd import ProvisionError
 from ..prstate.errors import PrStateError
 from ..prstate.flip import NotReady
@@ -78,6 +79,7 @@ KNOWN_ERRORS: tuple[type[Exception], ...] = (
     NotReady,
     SpawnError,
     InstallError,
+    OpportunityError,
     LayoutError,
     RemovalError,
     UnknownEventError,
