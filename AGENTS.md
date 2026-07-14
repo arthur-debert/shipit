@@ -82,7 +82,7 @@ An epic — a feature of multiple PRs — is the SAME coordinator + role-split m
 
 This topology is FIXED policy, not a choice: the coordinator does NOT ask the human to pick a PR strategy (one big PR, one PR per workstream to `main`, an epic branch) — a multi-PR feature runs on the epic branch, full stop.
 
-A feature is planned before execution via `/planning` (ideation -\> ADRs -\> Spec -\> docs PR, then epic/WS decomposition -\> issues).
+A feature is planned before execution via `/planning` (ideation -\> Spec -\> ADRs -\> docs PR, then epic/WS decomposition -\> issues).
 
 Full topology — per-workstream delegation, integration ordering, convergence, the docs pass, the umbrella, changelog/release status. [See](./docs/dev/epics.lex) before running an epic.
 
@@ -122,7 +122,7 @@ Every change ships as an agent-driven PR. The shipit **PR engine is authoritativ
 it reads where a PR stands and emits the **single next action**. Don't carry the policy
 (reviewers, waits, breakers) in your head — run the tool and do what it returns.
 
-**Planning a new feature/epic?** Run `/planning` first — it walks overview → ADRs → Spec → issues, checking in with you at the overview and the docs PR.
+**Planning a new feature/epic?** Run `/planning` first — it walks overview → Spec → ADRs → issues, checking in with you at the overview and the docs PR.
 
 ### Commands
 

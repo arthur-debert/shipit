@@ -15,8 +15,8 @@ are NOT epic-specific — they are the PR-shepherding role split
 in [../../AGENTS.lex], applied here per workstream.
 
 Before execution, a new feature is planned via `/planning` — the
-orchestrator that drives ideation, the overview gate, the ADRs
-(`/grill-me-with-docs`), the Spec under `docs/spec/` (`/to-spec`), the
+orchestrator that drives ideation, the overview gate, the Spec under
+`docs/spec/` (`/to-spec`), the ADRs (`/grill-me-with-docs`), the
 docs PR, then epic/WS decomposition into issues (`/to-tickets`). Each Work
 Stream is a vertical slice — a sub-issue of the epic, with blocked-by
 dependencies.
