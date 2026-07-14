@@ -237,8 +237,8 @@ def run(
         print(
             f"install: invoked from {redirected_from}, a subdirectory of the "
             f"git working tree; operating on the repo root {root_path} instead "
-            f"of bootstrapping a nested consumer (#916). Pass an explicit PATH "
-            f"or `cd` there to silence this.",
+            f"of bootstrapping a nested consumer (#916). Pass the repo root as "
+            f"PATH or `cd` to the repo root to silence this.",
             file=sys.stderr,
         )
     events.emit(

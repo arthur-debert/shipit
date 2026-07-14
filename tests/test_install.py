@@ -2213,7 +2213,11 @@ def test_install_from_subdir_operates_on_git_root_not_a_nested_consumer(
     # #916 regression: install run from a subdirectory of a managed repo must
     # operate on the git root and NEVER seed a nested consumer at the cwd.
     root = _git_repo(tmp_path)
-    (root / ".shipit.toml").write_text('[shipit]\nversion = "abc123"\n')
+    # A managed repo carries a full-sha pin — an abbreviated value validates as
+    # PINLESS (config.shipit_pin's fail-closed sha gate), so the fixture would
+    # otherwise not be the bootstrapped repo it claims to be.
+    root_pin = "0123456789abcdef0123456789abcdef01234567"
+    (root / ".shipit.toml").write_text(f'[shipit]\nversion = "{root_pin}"\n')
     subdir = root / "crates" / "core"
     subdir.mkdir(parents=True)
 
@@ -2226,6 +2230,32 @@ def test_install_from_subdir_operates_on_git_root_not_a_nested_consumer(
     assert "subdirectory of the git working tree" in captured.err
     assert str(root.resolve()) in captured.err
     # No nested consumer files are born in the subdirectory.
+    assert not (subdir / ".shipit.toml").exists()
+    assert not (subdir / "pixi.toml").exists()
+
+
+def test_install_default_invocation_from_subdir_operates_on_git_root(
+    tmp_path, capsys, monkeypatch
+):
+    # #916 regression: the same redirect must hold for the DEFAULT invocation
+    # (PATH omitted, cwd below the repo root) — the most natural way a user
+    # trips this footgun, running `shipit install` from wherever they are.
+    root = _git_repo(tmp_path)
+    root_pin = "0123456789abcdef0123456789abcdef01234567"
+    (root / ".shipit.toml").write_text(f'[shipit]\nversion = "{root_pin}"\n')
+    subdir = root / "crates" / "core"
+    subdir.mkdir(parents=True)
+    monkeypatch.chdir(subdir)
+
+    assert verb.run(dry_run=True) == 0
+
+    captured = capsys.readouterr()
+    # The plan header names the git root, never the cwd subdir.
+    assert f"install: {root.resolve()} (dry-run)" in captured.out
+    # The redirect is announced loudly on stderr, not performed silently.
+    assert "subdirectory of the git working tree" in captured.err
+    assert str(root.resolve()) in captured.err
+    # No nested consumer files are born in the cwd subdirectory.
     assert not (subdir / ".shipit.toml").exists()
     assert not (subdir / "pixi.toml").exists()
 
