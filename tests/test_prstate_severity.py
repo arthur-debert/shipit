@@ -2,10 +2,11 @@
 
 Table-driven pins on the two seams RVW02-WS02 adds: the engine-side precedence
 chain (`prstate.severity.resolve_finding_severity` — machine marker →
-reviewer-adapter mapping → `major` fail-safe, beaten only by a write-once
-override) and the per-adapter native-format mappings in the reviewer registry
-(each app reviewer's adapter owns mapping its native severity vocabulary to
-the shared 4-tier ladder).
+reviewer-adapter mapping → the adapter's unclassified-severity policy (#743) →
+`major` fail-safe, beaten only by a write-once override) and the per-adapter
+native-format mappings in the reviewer registry (each app reviewer's adapter
+owns mapping its native severity vocabulary to the shared 4-tier ladder — and,
+for a reviewer with no vocabulary at all, its explicit unclassified policy).
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from shipit.prstate.severity import (
     DEFAULT,
     MARKER,
     OVERRIDE,
+    POLICY,
     finding_severity,
     resolve_finding_severity,
 )
@@ -53,9 +55,10 @@ CHAIN_CASES = [
         Severity.MAJOR,
         ADAPTER,
     ),
-    # no marker, no native vocabulary (Copilot) → the `major` fail-safe
-    ("please rename this variable", "Copilot", {}, Severity.MAJOR, DEFAULT),
-    # unknown author (no adapter matches) → the `major` fail-safe too
+    # no marker, no native vocabulary (Copilot) → the adapter's unclassified
+    # policy (#743): minor, so a Copilot-only nit round can fire the Breaker
+    ("please rename this variable", "Copilot", {}, Severity.MINOR, POLICY),
+    # unknown author (no adapter matches, so no policy) → the `major` fail-safe
     ("anything at all", "some-human", {}, Severity.MAJOR, DEFAULT),
     # a marker BEATS the author's adapter mapping (marker is the stronger rung)
     (
@@ -65,10 +68,19 @@ CHAIN_CASES = [
         Severity.NIT,
         MARKER,
     ),
-    # a MALFORMED marker parses to no severity → falls through to the default
+    # a MALFORMED marker parses to no severity → falls through the chain (for
+    # Copilot: no native mapping either, so its unclassified policy decides)
     (
         "<!-- shipit:finding severity=warning -->\nissue: retired vocabulary",
         "Copilot",
+        {},
+        Severity.MINOR,
+        POLICY,
+    ),
+    # ...and all the way to the `major` fail-safe for a no-adapter author
+    (
+        "<!-- shipit:finding severity=warning -->\nissue: retired vocabulary",
+        "some-human",
         {},
         Severity.MAJOR,
         DEFAULT,
@@ -96,8 +108,10 @@ CHAIN_CASES = [
         Severity.CRITICAL,
         OVERRIDE,
     ),
-    # override beats the fail-safe as well
-    ("unparseable", "Copilot", {1: Severity.MINOR}, Severity.MINOR, OVERRIDE),
+    # override beats the policy rung as well (Copilot's policy would say minor)
+    ("unparseable", "Copilot", {1: Severity.CRITICAL}, Severity.CRITICAL, OVERRIDE),
+    # ...and the fail-safe (no-adapter author)
+    ("unparseable", "some-human", {1: Severity.MINOR}, Severity.MINOR, OVERRIDE),
 ]
 
 
@@ -182,8 +196,9 @@ def test_coderabbit_unmappable_is_none():
 
 
 def test_copilot_has_no_native_vocabulary():
-    # Deliberate (ADR-0044): Copilot emits no severity, so its adapter maps
-    # nothing — an unmarked Copilot finding rides the `major` fail-safe.
+    # Deliberate (ADR-0044): Copilot emits no severity anywhere — bodies and
+    # API metadata alike (#743) — so its adapter maps nothing; an unmarked
+    # Copilot finding resolves through the unclassified policy instead.
     assert by_name("copilot").native_severity("anything") is None
 
 
@@ -200,3 +215,24 @@ def test_every_registry_adapter_answers_the_severity_seam():
     # the adapter interface, never a name-branch.
     for adapter in REGISTRY:
         assert adapter.native_severity("plain prose") in (None, *Severity)
+
+
+# --- the unclassified-severity policy rung (#743) ----------------------------
+
+
+def test_copilot_unclassified_policy_is_minor():
+    # The #743 fix: Copilot's unclassified findings resolve `minor` — the
+    # thread still resolves before Ready, but a Copilot-only round of them can
+    # fire the no-major-finding Breaker instead of riding to the round cap.
+    assert by_name("copilot").unclassified_severity is Severity.MINOR
+
+
+def test_every_other_adapter_declares_no_unclassified_policy():
+    # The `major` fail-safe stays the rule: only Copilot (no severity
+    # vocabulary at all) declares a policy. A reviewer WITH a native format
+    # (coderabbit, gemini) or a machine marker (codex, agy) whose finding
+    # nevertheless fails to parse should still force a round.
+    for adapter in REGISTRY:
+        if adapter.name == "copilot":
+            continue
+        assert adapter.unclassified_severity is None

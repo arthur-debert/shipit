@@ -30,8 +30,8 @@ REPO = repo_from_slug("owner/repo")
 HEAD = Sha(hashlib.sha1(b"head").hexdigest())
 
 # One marker-carrying finding (resolves `nit` off the marker) and one unmarked
-# Copilot finding (resolves `major` off the fail-safe) — the list view must
-# show both severities and their source rungs.
+# Copilot finding (resolves `minor` off Copilot's unclassified-severity policy,
+# #743) — the list view must show both severities and their source rungs.
 BODY_1 = "<!-- shipit:finding severity=nit -->\nnitpick: capitalize the sentence"
 BODY_2 = "consider referencing the CLI02 PRD inline"
 
@@ -116,7 +116,7 @@ def test_list_mode_prints_resolved_severities_with_the_override_command(
     assert "101" in out and "202" in out
     # each finding shows its chain-resolved severity + the deciding rung
     assert "nit (marker)" in out
-    assert "major (default)" in out
+    assert "minor (policy)" in out
     assert BODY_2 in out
     assert "shipit pr classify 42 --comment <id> {critical|major|minor|nit}" in out
 
@@ -130,8 +130,8 @@ def test_list_mode_json_carries_ids_severities_and_sources(patched, capsys):
     assert [f["comment_id"] for f in payload["findings"]] == [101, 202]
     assert payload["findings"][0]["severity"] == "nit"
     assert payload["findings"][0]["source"] == "marker"
-    assert payload["findings"][1]["severity"] == "major"
-    assert payload["findings"][1]["source"] == "default"
+    assert payload["findings"][1]["severity"] == "minor"
+    assert payload["findings"][1]["source"] == "policy"
 
 
 def test_list_mode_shows_a_recorded_override_as_the_source(

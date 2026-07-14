@@ -300,6 +300,7 @@ def run_fanout_replay(
     instructions_path: str | None = None,
     dimensions: Sequence[str] | None = None,
     calibrator: CalibratorConfig | None = None,
+    semantic_dedup: bool = False,
     nit_cap: int | None = None,
     invocation_overrides: Mapping[str, Mapping[str, str]] | None = None,
     cell: Mapping[str, Any] | None = None,
@@ -323,7 +324,11 @@ def run_fanout_replay(
     an unnamed set means "the fan-out, stock decomposition", never the
     orchestrator's single-pass default. ``nit_cap`` defaults to ``None``
     (uncapped): an offline experiment records everything; there is no PR to
-    protect from nit churn. When ``calibrator``
+    protect from nit churn. ``semantic_dedup`` (#750) opts the mechanical
+    union dedup into the deterministic same-round near-duplicate collapse —
+    the ``dedup = "semantic"`` Lab treatment, threaded verbatim to the
+    orchestrator (which rejects it alongside a ``calibrator``: the judge does
+    its own dedup). When ``calibrator``
     is set, the role agent-defs are provisioned into the replay checkout first
     (:func:`provision_agent_defs`) so the judge's ``claude --agent reviewer``
     launch works in a clone that never committed them; a filesystem failure
@@ -372,6 +377,7 @@ def run_fanout_replay(
         instructions_path=instructions_path,
         dimensions=dimensions,
         calibrator=calibrator,
+        semantic_dedup=semantic_dedup,
         nit_cap=nit_cap,
         invocation_overrides=invocation_overrides,
         launcher=launcher,

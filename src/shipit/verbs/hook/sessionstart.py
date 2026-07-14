@@ -463,6 +463,21 @@ def _emit_session_started(raw: str) -> None:
         tree = _ephemeral_tree(cwd)
         session = tree.name if tree is not None else None
         sid = _payload_session_id(raw)
+        # Codex's SessionStart payload currently omits its native conversation
+        # id, but the hook process receives the supported CODEX_THREAD_ID env
+        # seam. Persist it on the same session.started record so a *fresh*
+        # ``shipit session codex`` launch can later be resumed by its shipit id.
+        # Claude continues to use the payload's session_id; absent-not-null
+        # keeps the record backend-neutral and avoids leaking other env state.
+        codex_thread = (
+            os.environ.get("CODEX_THREAD_ID")
+            if session is not None and session.startswith("codex-")
+            else None
+        )
+        native_ids = {
+            **({"session_id": sid} if sid else {}),
+            **({"codex_thread": codex_thread} if codex_thread else {}),
+        }
         with logcontext.scoped(
             session=session, tree=str(tree) if tree is not None else None
         ):
@@ -473,7 +488,7 @@ def _emit_session_started(raw: str) -> None:
                 cwd,
                 # The Claude-internal id joins the record to the transcript
                 # (the liveness pidfile's companion); absent-not-null.
-                extra={"session_id": sid} if sid else None,
+                extra=native_ids or None,
             )
     except Exception:  # noqa: BLE001 — fail-open, DEBUG by design: the emit is
         # advisory correlation, nothing durable degrades when it breaks.

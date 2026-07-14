@@ -31,7 +31,17 @@ the durable code is one slim versioned package; and configuration is explicit.
     `pixi build` backend is preview-grade and emits conda packages, not wheels
     or signed installers. shipit keeps the real builders (cargo, tauri,
     electron-builder) and uses pixi to PROVISION and RUN them — never to be the
-    build backend. See [#3].
+    build backend. See [#3]. Re-verified with real probe builds at pixi 0.71.0
+    (TOL02-WS10, [./tol02-ws10-pixi-build-spike.md]): no backend exists for any
+    disputed artifact type, no cross-compilation, and even the escape hatch's
+    output is structurally a conda archive.
+
+    What Work Env does NOT move out of pixi: activation, PATH calculation,
+    environment identity, and run wrapping. Work Env records which existing
+    mechanism a boundary selected (`pixi-run`, `activation-snapshot`, or
+    `ambient`) and the pixi-owned identity facts when available. Exec remains
+    the one external-process seam; Work Env is the shared description of where
+    work runs, not a new executor.
 
 2. The slow/fast split
 
@@ -190,6 +200,23 @@ the durable code is one slim versioned package; and configuration is explicit.
         within one owner, so cross-org consumers (lex-fmt) must list each
         secret explicitly with the mapped name. gh-setup pushes the secrets and
         the workflow caller reads the same map — they cannot diverge.
+
+        WHICH names must exist is never the table's call: gh-setup derives the
+        required set from the repo's declarations — the artifact map's
+        endpoints/sign/prepare traversal plus the `[reviewers]` table, where a
+        declared funnel reviewer (codex/agy) requires its GitHub App credential
+        pair off the Backend registry (#740). A required name with no source
+        fails the sync loud; a declared name nothing requires is an orphan,
+        flagged and not pushed. One requirement is an either-set, not a name
+        conjunction: a signing repo's notary credentials are satisfied by ANY
+        complete alternative trio — the ASC API-key trio or the Apple-ID trio,
+        both first-class CI paths (#746) — so gh-setup pushes whichever the
+        repo sources without demanding or orphaning the unused one, and no
+        complete trio fails as one diagnostic naming what each alternative is
+        missing. The reviewer contribution is provisioning-only:
+        the release-side projections (preflight's plan secrets, the caller's
+        `secrets:` block) never carry App credentials across the workflow-chain
+        boundary.
 
 7. The commit/push checks: one definition
 

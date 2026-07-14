@@ -1,0 +1,306 @@
+name: wf-sign-mac
+
+# The release SIGN stage block (ADR-0010/0040, TOL02-WS06). Routing ONLY
+# around ONE producing verb: `shipit release sign` dispatches on the bundle
+# tree's shape (workflows.lex §3.1 — package(unsigned) ->
+# sign-reopens-and-reseals, never sign -> package): a mac-app tree gets the
+# reopen → codesign (nested inner-first, .app last) → hdiutil reseal →
+# notarize → staple pass; an archive tree (TOL02-WS08 #779) gets the raw
+# darwin CLI binaries codesigned, notarized (zip submit, no staple target on
+# a bare binary), and the tarball re-emitted — both including the
+# temporary-keychain import.
+# The fan is the plan's sign projection (`sign-matrix` — the entries whose
+# preflight sign flag is true), so this block signs exactly what the plan
+# decided, nothing re-derived.
+#
+# Scar #2 lives HERE, inside the block (ADR-0040, workflows.lex §3.2):
+# `shipit release assert-bundle` runs AT ENTRY — before any secret is
+# touched — so a wrong main binary (the gen_fixtures scar: signed and
+# notarized cleanly) can never reach the signer. No consumer wiring can
+# bypass it.
+#
+# Publishing (ADR-0010): consumers call this block as
+#   uses: arthur-debert/shipit/.github/workflows/wf-sign-mac.yml@v1
+# — through the composed wf-release.yml or directly (PRD story 38).
+#
+# Check-name contract (PRD story 42, consumed by ADP02): this block's
+# stable jobs are `plan` and `sign` (surfacing per leg as
+# `<caller-job> / sign (<artifact>, <platform>)`), plus the standalone-only
+# `carry-bundles` (per bundle leg) and `carry-notes`. `plan` and the carry
+# jobs are skipped no-ops on every composed-chain run (the caller supplies
+# the sign projection and shares one run), so existing required checks are
+# untouched. Never renamed casually.
+#
+# Per-stage dispatch (TOL02-WS09 #780): the standalone contract is `tag` +
+# `run-id` — omit `sign-matrix` and the `plan` job re-derives the sign
+# projection at the tag (`release preflight --plan-only`); `run-id` points
+# the bundle download at the SOURCE run whose unsigned trees this dispatch
+# re-signs. The signed-* artifacts land in THIS run, and the `carry-bundles`
+# / `carry-notes` jobs re-upload the base families (every `bundle-*` tree
+# and `release-notes`) from the source run so THIS run is a COMPLETE publish
+# source — a follow-up publish dispatch names THIS run as its single source
+# and finds all three artifact families here (single-source-run rule,
+# workflows.lex §8).
+#
+# act hole (PRD story 41): this block's signer leg is on the printed
+# untestable surface — macOS runner, keychain, codesign/notarytool have no
+# linux analogue; its smoke dry-runs the routing only.
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: The release tag (the checkout ref for config resolution).
+        type: string
+        required: true
+      sign-matrix:
+        description: >-
+          The preflight plan's sign projection: the matrix entries whose
+          sign flag is true (wf-prepare's `sign-matrix` output, verbatim).
+          Optional (per-stage dispatch, #780): omitted, the plan job
+          re-derives it at the tag.
+        type: string
+        required: false
+      run-id:
+        description: >-
+          Per-stage dispatch (#780): the SOURCE run id whose `bundle-*`
+          artifacts this dispatch downloads (a prior run of the same
+          release). Omitted, artifacts resolve within the current run (the
+          composed-chain path). Cross-run download needs `actions: read` on
+          the caller's token — see the permissions note below.
+        type: string
+        required: false
+    secrets:
+      # The mac signing set (shipit.release.secretreq: the cert pair plus
+      # BOTH notary alternatives — the ASC API-key trio OR the Apple-ID trio
+      # satisfies notarization, #746; the signer prefers ASC when both are
+      # complete). Declared optional YAML-side: preflight already proved
+      # presence at plan time (either complete trio), and the verb hard-fails
+      # naming any missing name — the block never re-checks, and forwarding
+      # an unprovisioned trio passes empty, never forcing both.
+      APPLE_CERTIFICATE:
+        required: false
+      APPLE_CERTIFICATE_PASSWORD:
+        required: false
+      ASC_API_KEY_BASE64:
+        required: false
+      ASC_API_KEY_ID:
+        required: false
+      ASC_API_ISSUER_ID:
+        required: false
+      APPLE_ID:
+        required: false
+      APPLE_PASSWORD:
+        required: false
+      APPLE_TEAM_ID:
+        required: false
+
+# NO `permissions:` key, deliberately (per-stage dispatch, #780): a called
+# workflow's permissions can only DOWNGRADE the caller's token, so declaring
+# one here would strip the `actions: read` a standalone dispatch caller
+# grants for the cross-run artifact download. The block inherits the
+# caller's grant verbatim — the composed chain (wf-release: contents:
+# write) and a plain consumer caller are unchanged; the standalone dispatch
+# caller grants `contents: read` + `actions: read`.
+
+jobs:
+  plan:
+    # Standalone re-derivation (per-stage dispatch, #780): runs ONLY when
+    # the caller omitted the sign projection — the composed chain always
+    # passes it, so there this job is a skipped no-op. `--plan-only` skips
+    # the secret-presence hard-fail alone (this job runs before any secret
+    # is touched; the sign verb still hard-fails naming missing names). The
+    # projection is the SAME jq select wf-prepare made — the plan's
+    # per-entry sign decision, read, never remade.
+    if: inputs.sign-matrix == ''
+    runs-on: ubuntu-latest
+    outputs:
+      sign-matrix: ${{ steps.plan.outputs.sign-matrix }}
+      # The full bundle-bearing projection (per-stage dispatch, #780): the
+      # carry-forward jobs re-upload every one of these from the source run
+      # so THIS run becomes a complete publish source (single-source-run
+      # rule, workflows.lex §8). Derived only on the standalone path (this
+      # job runs only when the caller omitted the facts); the composed
+      # chain never carries — its artifacts already share one run.
+      bundle-matrix: ${{ steps.plan.outputs.bundle-matrix }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: prefix-dev/setup-pixi@v0.9.6
+        with:
+          # Lockstep with the Layer 0 bootstrap's PIXI_PIN — see
+          # wf-checks.yml.
+          pixi-version: v0.71.0
+          locked: true
+      - name: Re-derive the sign projection at the tag
+        id: plan
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          # pipefail: same masking hazard as wf-prepare's plan step.
+          set -euo pipefail
+          # ADR-0041: the tag is the version authority (v<version>).
+          version="${TAG#v}"
+          plan="$(pixi run --locked ./bin/shipit release preflight "$version" --json --plan-only | jq -c .)"
+          {
+            printf 'sign-matrix=%s\n' "$(jq -c '[.matrix[] | select(.sign)]' <<<"$plan")"
+            printf 'bundle-matrix=%s\n' "$(jq -c '[.matrix[] | select(.bundle)]' <<<"$plan")"
+          } >> "$GITHUB_OUTPUT"
+
+  sign:
+    needs: plan
+    # An empty sign projection means the plan has no sign stage: skip green.
+    # `!cancelled()` + explicit plan-result checks override the default
+    # needs-semantics (the plan job SKIPS on every fact-supplied call); the
+    # `||` coalescing routes between the two sources of the SAME projection.
+    if: >-
+      ${{ !cancelled() && needs.plan.result != 'failure'
+      && needs.plan.result != 'cancelled'
+      && (inputs.sign-matrix || needs.plan.outputs.sign-matrix) != ''
+      && (inputs.sign-matrix || needs.plan.outputs.sign-matrix) != '[]' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(inputs.sign-matrix || needs.plan.outputs.sign-matrix) }}
+    name: sign (${{ matrix.artifact }}, ${{ matrix.platform }})
+    # The plan names the runner (darwin entries plan mac labels) — the block
+    # never hardcodes one.
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: prefix-dev/setup-pixi@v0.9.6
+        with:
+          # Lockstep with the Layer 0 bootstrap's PIXI_PIN — see
+          # wf-checks.yml.
+          pixi-version: v0.71.0
+          locked: true
+      # The download rides in two variants because `with:` keys cannot be
+      # conditional: the same-run path (composed chain) must NOT pass
+      # `run-id`/`github-token` — that flips the action onto the REST API,
+      # which needs `actions: read` the chain's callers never granted —
+      # while the cross-run path (standalone dispatch, #780) must pass both.
+      - name: Download the unsigned bundle
+        if: inputs.run-id == ''
+        uses: actions/download-artifact@v8
+        with:
+          name: bundle-${{ matrix.artifact }}-${{ matrix.platform }}
+          path: dist
+      - name: Download the unsigned bundle (from the source run)
+        if: inputs.run-id != ''
+        uses: actions/download-artifact@v8
+        with:
+          name: bundle-${{ matrix.artifact }}-${{ matrix.platform }}
+          path: dist
+          run-id: ${{ inputs.run-id }}
+          github-token: ${{ github.token }}
+      - name: "Assert bundle main binary (scar #2, AT ENTRY)"
+        env:
+          ARTIFACT: ${{ matrix.artifact }}
+        # Before any secret is imported: the right-binary guard. The verb
+        # reads the reseal payload in place and hard-fails on a mismatch.
+        run: pixi run --locked ./bin/shipit release assert-bundle dist "$ARTIFACT"
+      - name: Sign, reseal, notarize, staple
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          ASC_API_KEY_BASE64: ${{ secrets.ASC_API_KEY_BASE64 }}
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        # One verb invocation, shape-dispatched: temporary keychain, reopen
+        # the payload (mac-app: sign nested-inner-first/.app-last, reseal the
+        # dmg, notarize + staple) or the archive tarballs (codesign each
+        # Mach-O, notarize each as a zip — no staple on a bare binary —
+        # re-emit the tarball). The signed outputs stage into dist-signed
+        # under their ORIGINAL filenames — exactly the files wf-publish
+        # overlays onto the unsigned tree, whatever the leg produced.
+        run: pixi run --locked ./bin/shipit release sign dist --out dist-signed
+      - name: Upload the signed artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: signed-${{ matrix.artifact }}-${{ matrix.platform }}
+          # Only the signed outputs (the staged-out dir, never the whole
+          # unsigned tree): wf-publish overlays them onto the unsigned tree
+          # (same filenames — the signed .dmg / .tar.gz replaces the
+          # unsigned one).
+          path: dist-signed/*
+          if-no-files-found: error
+
+  # Carry-forward (per-stage dispatch, #780): make THIS sign run a COMPLETE
+  # publish source. A standalone publish names ONE run as its `run-id` and
+  # downloads ALL THREE artifact families from it — `release-notes`,
+  # `bundle-*`, `signed-*` (workflows.lex §8, single-source-run rule). The
+  # sign legs produce signed-* but consume-and-drop the bundles and never
+  # fetch release-notes, so without carry-forward a follow-up publish naming
+  # this run would fail its first cross-run download. These two jobs
+  # re-upload the base families from the SOURCE run under their original
+  # names, so the sign run mirrors what publish expects. Standalone ONLY:
+  # `run-id == ''` (the composed chain — one shared run, nothing to carry)
+  # skips both, so existing required checks are untouched (like `plan`).
+  carry-bundles:
+    needs: plan
+    # Every bundle-bearing tree (signed AND unsigned entries): publish
+    # stages `pattern: bundle-*` and asserts each unsigned leg by exact
+    # name, so the mirror must be the full projection, not just the signed
+    # legs. `!cancelled()` + plan-result checks: the plan job is where the
+    # projection comes from on this path.
+    if: >-
+      ${{ !cancelled() && inputs.run-id != ''
+      && needs.plan.result != 'failure' && needs.plan.result != 'cancelled'
+      && needs.plan.outputs.bundle-matrix != ''
+      && needs.plan.outputs.bundle-matrix != '[]' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.plan.outputs.bundle-matrix) }}
+    name: carry-bundles (${{ matrix.artifact }}, ${{ matrix.platform }})
+    runs-on: ubuntu-latest
+    steps:
+      # Cross-run only (there is nothing to carry within a shared run):
+      # `run-id`/`github-token` flip download-artifact onto the REST API,
+      # which needs the `actions: read` a standalone dispatch caller grants.
+      - name: Download the unsigned bundle (from the source run)
+        if: inputs.run-id != ''
+        uses: actions/download-artifact@v8
+        with:
+          name: bundle-${{ matrix.artifact }}-${{ matrix.platform }}
+          path: bundle
+          run-id: ${{ inputs.run-id }}
+          github-token: ${{ github.token }}
+      - name: Re-upload the unsigned bundle into this run
+        uses: actions/upload-artifact@v7
+        with:
+          name: bundle-${{ matrix.artifact }}-${{ matrix.platform }}
+          path: bundle/*
+          if-no-files-found: error
+
+  carry-notes:
+    needs: plan
+    # The release-notes family (single artifact, no fan). The sign legs
+    # never fetch it, so a standalone sign run would otherwise lack it and
+    # the follow-up publish's first download would fail.
+    if: >-
+      ${{ !cancelled() && inputs.run-id != ''
+      && needs.plan.result != 'failure'
+      && needs.plan.result != 'cancelled' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download the release notes (from the source run)
+        if: inputs.run-id != ''
+        uses: actions/download-artifact@v8
+        with:
+          name: release-notes
+          path: notes
+          run-id: ${{ inputs.run-id }}
+          github-token: ${{ github.token }}
+      - name: Re-upload the release notes into this run
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-notes
+          path: notes/*
+          if-no-files-found: error

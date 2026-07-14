@@ -1,0 +1,249 @@
+name: wf-build
+
+# The release BUILD+BUNDLE stage block (ADR-0010/0040, TOL02-WS06). Routing
+# ONLY: the OS×arch fan is the preflight plan's `matrix` verbatim (PRD story
+# 27 — one strategy.include, nothing re-derived), each leg runs the real
+# producing verbs (`shipit build`, `shipit release bundle`) through the
+# pinned launcher, and the staged bundle tree crosses jobs as ONE artifact
+# per matrix entry.
+#
+# The cross-job artifact is the staged dist tree — the ~tens-of-MB compiled
+# binary/archives plus, on the mac leg, the coupled unsigned .app/.dmg pair
+# and the `<name>.unsigned-app.tar.gz` reseal payload (artifact upload
+# destroys a .app's symlinks and exec bits, so the signer reseals from the
+# tar; workflows.lex §3.1). NEVER the multi-GB target/ tree (workflows.lex
+# §1); the staged unsigned `.app/` directory itself stays on the runner for
+# the same symlink reason — the payload carries it.
+#
+# Publishing (ADR-0010): consumers call this block as
+#   uses: arthur-debert/shipit/.github/workflows/wf-build.yml@v1
+# — through the composed wf-release.yml or directly (PRD story 38).
+#
+# Check-name contract (PRD story 42, consumed by ADP02): this block's
+# stable jobs are `plan` (skipped whenever the caller supplies the facts —
+# every composed-chain run) and `build`, surfacing per leg as
+# `<caller-job> / build (<artifact>, <platform>)`, plus the standalone-only
+# `notes` (#898) — like `plan`, a skipped no-op on every fact-supplied run,
+# so existing required checks are untouched. Never renamed casually.
+#
+# Per-stage dispatch (TOL02-WS09 #780): the plan facts (`version`,
+# `matrix`, `stages`) are OPTIONAL — omit them all and the `plan` job
+# re-derives them at the tag via `release preflight --plan-only` (the same
+# one planner, run in the block, never consumer YAML — ADR-0040's line
+# holds: derivation lives shipit-side). The standalone contract is ONE
+# input: `tag`. Supply the facts all-or-none: a partial set fails loudly at
+# expression evaluation, by design. A standalone run is also a RELAY-
+# COMPLETE source for its successor (#898, workflows.lex §8): the `notes`
+# job re-derives the `release-notes` artifact at the tag, so a follow-up
+# sign/publish dispatch naming THIS run as its single source finds the
+# notes beside the bundle-* trees.
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: >-
+          The concrete semver prepare cut. Optional (per-stage dispatch,
+          #780): omitted, the plan job derives it from the tag (ADR-0041 —
+          the tag is the version authority; v<version> by construction).
+        type: string
+        required: false
+      tag:
+        description: The release tag to build (the checkout ref).
+        type: string
+        required: true
+      matrix:
+        description: >-
+          The preflight plan's `matrix` field (JSON, verbatim). Optional
+          (per-stage dispatch, #780): omitted, the plan job re-derives it
+          at the tag.
+        type: string
+        required: false
+      stages:
+        description: >-
+          The preflight plan's `stages` field (JSON, verbatim). Optional
+          (per-stage dispatch, #780) and carried for contract symmetry —
+          this block's per-entry gate is `matrix.bundle`, never the
+          plan-wide stage.
+        type: string
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    # Standalone re-derivation (per-stage dispatch, #780): runs ONLY when
+    # the caller omitted the plan facts — the composed chain always passes
+    # them, so there this job is a skipped no-op. `--plan-only` skips the
+    # secret-presence hard-fail alone: this block carries no secrets, the
+    # source run's preflight already proved presence, and the facts are a
+    # pure function of the artifact map at the tag (the SAME planner
+    # invocation wf-prepare made — one definition, re-run, never remade).
+    if: inputs.matrix == ''
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: prefix-dev/setup-pixi@v0.9.6
+        with:
+          # Lockstep with the Layer 0 bootstrap's PIXI_PIN — see
+          # wf-checks.yml.
+          pixi-version: v0.71.0
+          locked: true
+      - name: Re-derive the plan at the tag
+        id: plan
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          # pipefail: same masking hazard as wf-prepare's plan step — jq's 0
+          # on empty input must not hide a failed planner.
+          set -euo pipefail
+          # ADR-0041: the tag is the version authority; prepare cut it as
+          # v<version>, so the version is read off the tag, never resolved.
+          version="${TAG#v}"
+          plan="$(pixi run --locked ./bin/shipit release preflight "$version" --json --plan-only | jq -c .)"
+          {
+            printf 'version=%s\n' "$version"
+            printf 'matrix=%s\n' "$(jq -c '.matrix' <<<"$plan")"
+          } >> "$GITHUB_OUTPUT"
+
+  notes:
+    # Relay-completeness (#898, workflows.lex §8): the single-source-run rule
+    # makes every stage's run a SUFFICIENT source for its successor, and the
+    # sign/publish stages download `release-notes` from their ONE `run-id` —
+    # but a build dispatched on the tag alone has no source run to CARRY the
+    # notes from (prepare's run uploaded them). Prepare committed the
+    # changelog roll at/before the tag, so this job RE-DERIVES the identical
+    # text at the tag instead: `shipit release notes` re-emits the committed
+    # section (or a prerelease's fragments) and refuses an uncut tree — read,
+    # never remade (ADR-0009), the same shipit-side-derivation line as `plan`
+    # (ADR-0040). Standalone ONLY (`inputs.matrix == ''`, the same
+    # discriminator as `plan`): a fact-supplied (composed-chain) run shares
+    # prepare's run, which already carries `release-notes` — a second upload
+    # would collide — so there this job is a skipped no-op, keeping the
+    # story-42 check surface additive.
+    if: inputs.matrix == ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: prefix-dev/setup-pixi@v0.9.6
+        with:
+          # Lockstep with the Layer 0 bootstrap's PIXI_PIN — see
+          # wf-checks.yml.
+          pixi-version: v0.71.0
+          locked: true
+      - name: Re-derive the release notes at the tag
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          # ADR-0041: the tag is the version authority (v<version>).
+          version="${TAG#v}"
+          pixi run --locked ./bin/shipit release notes "$version" --out RELEASE_NOTES.md
+      - name: Upload the release notes into this run
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-notes
+          path: RELEASE_NOTES.md
+          if-no-files-found: error
+
+  build:
+    needs: plan
+    # An empty matrix is a legitimate plan (no build-bearing artifact —
+    # "the tag is the release"): the job skips, and a reusable-workflow
+    # caller whose only inner job was if-skipped concludes SKIPPED, not
+    # success (canary-confirmed, issue #745). The composed chain passes that
+    # result verbatim beside the plan's matrix, and the publish verb's gate
+    # accepts the skip because the PLAN proves the stage non-live.
+    #
+    # `!cancelled()` + explicit plan-result checks: the plan job SKIPS on
+    # every fact-supplied call, and default needs-semantics would skip this
+    # job with it — the status function overrides that, and the result
+    # checks still block on a failed/cancelled re-derivation. The
+    # `input-or-plan-output` coalescing (`||` — empty string is falsy in
+    # expressions) is routing between the two sources of the SAME fact,
+    # never a re-derivation.
+    if: >-
+      ${{ !cancelled() && needs.plan.result != 'failure'
+      && needs.plan.result != 'cancelled'
+      && (inputs.matrix || needs.plan.outputs.matrix) != ''
+      && (inputs.matrix || needs.plan.outputs.matrix) != '[]' }}
+    strategy:
+      # Every leg reports (the barrier verdict is wf-publish's verb, which
+      # blocks on ANY failed leg — ADR-0009); cancelling siblings would only
+      # hide how much of the set is broken.
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(inputs.matrix || needs.plan.outputs.matrix) }}
+    name: build (${{ matrix.artifact }}, ${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        # Pin bash on every runner the plan can name (windows-latest's
+        # default is PowerShell) — same rule as wf-checks.yml's lane step.
+        shell: bash
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: prefix-dev/setup-pixi@v0.9.6
+        with:
+          # Lockstep with the Layer 0 bootstrap's PIXI_PIN — see
+          # wf-checks.yml.
+          pixi-version: v0.71.0
+          locked: true
+      - name: Build
+        env:
+          VERSION: ${{ inputs.version || needs.plan.outputs.version }}
+          TARGET: ${{ matrix.target }}
+        # The real builders (cargo/go/uv/npm — including the frontendDist
+        # leg, `build npm`) run inside the consumer's pixi env; the version
+        # rides to the toolchains that stamp it. The matrix triple rides too
+        # (TOL02-WS11): `--target` cross-compiles the rust legs into
+        # target/<triple>/release/ — the ONE plumbing that reaches the cross
+        # platforms a native runner cannot build natively (darwin-x86_64 on the
+        # arm mac, linux-x86_64-musl on the gnu ubuntu). Passed on EVERY lane
+        # (native and cross) so the whole fan is uniform and bundle reads the
+        # same target/<triple>/ dir; the consumer's pixi env provisions the
+        # rustup target (and any musl toolchain) — pixi provisions, shipit
+        # composes (WS10 decision).
+        run: pixi run --locked ./bin/shipit build --version "$VERSION" --target "$TARGET"
+      - name: Bundle
+        # Plan-gated PER ENTRY (never re-derived): the bundle stage is a
+        # plan-wide flag, but the fan includes every build-bearing artifact
+        # whether or not it bundles, so this entry runs bundle only when ITS
+        # artifact declares a composition (`matrix.bundle`). Narrowed to THIS
+        # entry's artifact (the matrix is one artifact × platform per entry):
+        # the cross-job bundle artifact must carry exactly this artifact's
+        # outputs — a whole-map bundle would put every artifact's binary in
+        # every entry's tree and fail wf-publish's per-artifact assert-bundle
+        # on any multi-artifact repo. Gating on `matrix.bundle` (not the
+        # plan-wide stage) is what spares a build-only artifact beside a
+        # bundled one from a passthrough that stages nothing yet trips the
+        # upload's `if-no-files-found: error`.
+        if: matrix.bundle
+        env:
+          TARGET: ${{ matrix.target }}
+          ARTIFACT: ${{ matrix.artifact }}
+        run: pixi run --locked ./bin/shipit release bundle --target "$TARGET" --artifact "$ARTIFACT"
+      - name: Upload the staged bundle tree
+        if: matrix.bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: bundle-${{ matrix.artifact }}-${{ matrix.platform }}
+          # dist/ minus the unsigned .app directory (upload would destroy
+          # its symlinks/exec bits — the reseal payload carries it,
+          # workflows.lex §3.1). The archive staging directory rides along:
+          # it is exactly the compiled-binary + docs hand-off, and the tree
+          # wf-publish's unsigned-path assert-bundle inspects.
+          path: |
+            dist/**
+            !dist/**/*.app/**
+          if-no-files-found: error

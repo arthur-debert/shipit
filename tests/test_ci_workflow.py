@@ -92,3 +92,27 @@ def test_wf_checks_run_job_uses_planner_emitted_provisioning_fields():
     assert rust_cache["if"] == "matrix.caches.rust"
     assert rust_cache["uses"] == "Swatinem/rust-cache@v2"
     assert rust_cache["with"]["workspaces"] == "${{ matrix.rust_workspaces || '' }}"
+
+
+def test_wf_checks_declares_the_optional_lane_token_secret_seam():
+    # The declared-secrets seam (#778, ADR-0040 routing-only): the block grows a
+    # single OPTIONAL named secret input — NOT `secrets: inherit`. A missing
+    # `required: false` would make every caller forward a token or fail.
+    doc = _load("wf-checks.yml")
+    call = doc["on"]["workflow_call"]
+    assert call["secrets"]["lane_token"]["required"] is False
+
+
+def test_wf_checks_run_step_gates_the_lane_token_on_the_planner_allowlist():
+    # The token is bound to $LANE_TOKEN ONLY when this lane's planner-emitted
+    # allowlist opted in — an exact array-membership gate over `matrix.secrets`,
+    # so a lane that never declared it can never receive the credential. The
+    # value comes straight from `secrets.lane_token` (never via the public plan
+    # matrix), keeping the block routing-only.
+    doc = _load("wf-checks.yml")
+    run_step = next(
+        step for step in doc["jobs"]["run"]["steps"] if step.get("name") == "Run lane"
+    )
+    lane_token = run_step["env"]["LANE_TOKEN"]
+    assert "contains(matrix.secrets, 'lane_token')" in lane_token
+    assert "secrets.lane_token" in lane_token

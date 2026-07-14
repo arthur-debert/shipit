@@ -117,6 +117,7 @@ def test_matrix_preserves_declaration_order_and_fills_the_default_runner():
         "envset": "default",
         "caches": {"rust": False, "sccache": False, "uv": False},
         "rust_workspaces": "",
+        "secrets": [],
     }
 
 
@@ -196,6 +197,7 @@ def test_matrix_carries_env_set_and_cache_descriptors_from_the_planner():
         "envset": "lint",
         "caches": {"rust": False, "sccache": False, "uv": False},
         "rust_workspaces": "",
+        "secrets": [],
     }
     assert planned[1].as_matrix_entry() == {
         "name": "test",
@@ -206,7 +208,22 @@ def test_matrix_carries_env_set_and_cache_descriptors_from_the_planner():
         "envset": "test",
         "caches": {"rust": True, "sccache": False, "uv": False},
         "rust_workspaces": "crates/a -> ../../target",
+        "secrets": [],
     }
+
+
+def test_matrix_carries_the_declared_secrets_allowlist_as_a_json_array():
+    # The declared-secrets seam (#778): the lane's allowlist rides the matrix
+    # verbatim as a JSON ARRAY (not a joined string), so the block's
+    # `contains(matrix.secrets, 'lane_token')` gate is an EXACT membership test.
+    # A token-less lane emits `[]` — it can never accidentally match the gate.
+    declared = (
+        _lane("wasm", run="test wasm", required=True, secrets=("lane_token",)),
+        _lane("lint", run="lint", required=True),
+    )
+    planned = lanes.plan(declared, event="pr")
+    assert planned[0].as_matrix_entry()["secrets"] == ["lane_token"]
+    assert planned[1].as_matrix_entry()["secrets"] == []
 
 
 def test_matrix_infers_rust_cache_from_pixi_task_aliases():
@@ -255,6 +272,7 @@ def test_blank_lane_run_keeps_default_provisioning_and_no_cache():
         "envset": "default",
         "caches": {"rust": False, "sccache": False, "uv": False},
         "rust_workspaces": "",
+        "secrets": [],
     }
 
 

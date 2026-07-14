@@ -25,18 +25,18 @@ from pathlib import Path
 import pytest
 import yaml
 
-from shipit import execrun
-from shipit.verbs import lint
+from shipit import execrun, lint
+from shipit.verbs import lint as lint_verb
 
 # The packaged canonical-config paths the gate injects by DEFAULT (WS03 #516),
 # so argv assertions can name what `_canonical_config` resolves without hardcoding
 # a machine-specific path. A tool with no shipped file-config (shellcheck, shfmt,
 # cargo, lexd) injects nothing.
-_RUFF_CFG = lint._data_path("ruff.toml")
-_PRETTIER_CFG = lint._data_path("prettierrc.yaml")
-_MD_CFG = lint._data_path("markdownlint.yaml")
-_YAML_CFG = lint._data_path("yamllint.yaml")
-_ACTIONLINT_CFG = lint._data_path("actionlint.yaml")
+_RUFF_CFG = lint.data_path("ruff.toml")
+_PRETTIER_CFG = lint.data_path("prettierrc.yaml")
+_MD_CFG = lint.data_path("markdownlint.yaml")
+_YAML_CFG = lint.data_path("yamllint.yaml")
+_ACTIONLINT_CFG = lint.data_path("actionlint.yaml")
 
 # --------------------------------------------------------------------------
 # Pure routing
@@ -543,7 +543,7 @@ def test_non_editorconfig_tool_ignores_the_pin():
 
 
 # --------------------------------------------------------------------------
-# The verb — boundary injected
+# The service — boundary injected
 # --------------------------------------------------------------------------
 
 
@@ -753,11 +753,11 @@ def test_fix_mode_reports_the_post_drop_count_in_note_and_log(tmp_path, capsys, 
 
 
 def test_check_mode_still_passes_protected_fixtures_to_the_checkers(tmp_path, capsys):
-    # The guard is MUTATION-only: in check mode the verb still hands the fixture
+    # The guard is MUTATION-only: in check mode the service still hands the fixture
     # to the tool's argv, so the CI gate reports a genuinely-broken fixture.
     # (For MARKDOWN specifically, markdownlint then skips it via the managed
     # `.markdownlintignore` — a separate mechanism in the consumer's tree that
-    # this verb does not model; here we assert only the verb-level behavior:
+    # this service does not model; here we assert only the service-level behavior:
     # check mode does not drop the path.)
     rec = _Recorder()
     rc = lint.run(
@@ -1231,7 +1231,7 @@ class _FakeCargoFmt:
 def test_fix_mode_restores_a_mod_included_rust_fixture_cargo_fmt_rewrote(tmp_path):
     # #502: `cargo fmt --all` takes no file batch and formats a whole crate, so a
     # protected `.rs` reachable via a `mod` decl CANNOT be kept off its argv (and
-    # rustfmt's own `ignore` is nightly-only). The verb snapshots protected `.rs`
+    # rustfmt's own `ignore` is nightly-only). The service snapshots protected `.rs`
     # and restores any the formatter rewrote: the fixture is byte-identical after
     # --fix, while real crate source stays reformatted.
     (tmp_path / "src").mkdir()
@@ -1584,7 +1584,7 @@ def test_malformed_shipit_toml_fails_clean_not_traceback(tmp_path, capsys):
     # exit 1 (the cli_errors shell, ADR-0030), NOT a raw ConfigError traceback
     # escaping mid-gate — the same clean failure every config-reading verb gives.
     (tmp_path / ".shipit.toml").write_text("[lint]\nignore = 42\n")
-    rc = lint.run(
+    rc = lint_verb.run(
         str(tmp_path),
         discover=_fake_discover(["README.md"]),
         run_tool=_Recorder(),
@@ -1987,7 +1987,7 @@ def test_shipped_actionlint_config_declares_the_org_runner_labels():
     # Parse the config and assert gpu_t4 under self-hosted-runner.labels
     # specifically — a raw substring match would also see the explanatory
     # comment above the mapping, staying green if the real label were deleted.
-    body = Path(lint._data_path("actionlint.yaml")).read_text(encoding="utf-8")
+    body = Path(lint.data_path("actionlint.yaml")).read_text(encoding="utf-8")
     config = yaml.safe_load(body)
     assert "gpu_t4" in config["self-hosted-runner"]["labels"]
 
@@ -2022,7 +2022,7 @@ def test_shipped_ruff_toml_matches_the_repo_root_carve_out():
     # (what the gate injects fleet-wide). A drift between them would make the gate and
     # a bare `ruff` disagree, so pin them equal. `pyproject.toml` must carry NO ruff
     # config anymore.
-    data = Path(lint._data_path("ruff.toml")).read_bytes()
+    data = Path(lint.data_path("ruff.toml")).read_bytes()
     repo_root = Path(__file__).resolve().parent.parent
     assert (repo_root / "ruff.toml").read_bytes() == data
     # No `[tool.ruff…]` TABLE header survives in pyproject (a prose mention in a
@@ -2230,7 +2230,7 @@ class _ToolSpec:
     rust (``cargo fmt`` behind clippy) and python (``ruff format`` behind
     ``ruff check``). So each tool gets its OWN fixture + hostile targeting THAT
     tool's ambient config source, and the assertion reads the tool's own
-    :class:`~shipit.verbs.lint.ToolRun` out of ``runs_out`` (:func:`_target_run`),
+    :class:`~shipit.lint.ToolRun` out of ``runs_out`` (:func:`_target_run`),
     so one tool's baseline can never mask another tool's leak.
 
     ``target_check`` is the tool's :attr:`Tool.check` tuple — the identity that

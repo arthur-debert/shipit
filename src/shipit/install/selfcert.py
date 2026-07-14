@@ -130,7 +130,7 @@ def _lint_env_run_tool(
     bound (:data:`pixienv.INSTALL_TIMEOUT`): a ``pixi run``'s worst case is a
     first activation re-solving the env (provisioning-shaped work), which is
     exactly why the pixi-run seam takes that bound rather than the bare-tool
-    :data:`~shipit.verbs.lint.CHECK_TIMEOUT`.
+    :data:`~shipit.lint.CHECK_TIMEOUT`.
     """
     scrubbed = pixienv.scrub_env(os.environ)
 
@@ -153,11 +153,9 @@ def _scoped_lint(root: Path, paths: list[str], runner) -> tuple[int, str]:
     Returns ``(rc, report_text)`` — the report surfaces only on failure (the
     loud diagnostic); a green scoped run stays quiet on install's terminal.
     """
-    # Imported at call time, not module top: `lint` now wears the `_errors`
-    # CLI shell, whose imports lead back through `spawn`/`tree` into
-    # `install.apply` — the very module that pulls in this one. A function-local
-    # import keeps that edge lazy so the install package still imports cleanly.
-    from ..verbs import lint
+    # Imported at call time so install keeps its import graph light; this is the
+    # service, not the CLI error shell.
+    from .. import lint
 
     buffer = io.StringIO()
     with redirect_stdout(buffer):
@@ -170,7 +168,17 @@ def _scoped_lint(root: Path, paths: list[str], runner) -> tuple[int, str]:
 
 
 def _check_manifest(root: Path, runner) -> CertCheck:
-    """Postcondition 1: the stamped config parses; the managed lint env solves."""
+    """Postcondition 1: the stamped config parses; the managed lint env solves.
+
+    The solve is deliberately UNLOCKED (no ``--locked``): a reconcile that
+    edits a managed pixi.toml block (e.g. the #793 cargo-edit release block)
+    leaves the committed ``pixi.lock`` stale, and pixi's workspace-coherent
+    re-solve here is what regenerates it — apply then stages the refreshed
+    lock into the same commit (:data:`shipit.install.apply.PIXI_LOCK`), so no
+    consumer ``pixi run --locked`` (wf-prepare's shipit execution included)
+    ever meets a manifest/lock mismatch. A failing solve fails CLOSED
+    (:class:`~shipit.install.errors.SelfCertError` upstream: no commit, no PR).
+    """
     try:
         config.load(root / config.CONFIG_NAME)
     except config.ConfigError as exc:
@@ -212,7 +220,7 @@ def _check_delivered_lint(root: Path, plan: Plan, runner) -> CertCheck:
         return CertCheck(CHECK_DELIVERED_LINT, True)
     try:
         rc, report = _scoped_lint(root, paths, runner)
-    except execrun.ExecError as exc:
+    except (config.ConfigError, execrun.ExecError) as exc:
         return CertCheck(
             CHECK_DELIVERED_LINT, False, f"scoped lint could not run: {exc}"
         )
@@ -343,7 +351,7 @@ def consumer_debt(root: Path, *, runner=execrun.run) -> int | None:
     ``None`` when the whole-tree run could not complete at all (no verdict is
     not zero debt); an int is the number of failing checks.
     """
-    from ..verbs import lint  # lazy — see `_scoped_lint` (breaks an import cycle)
+    from .. import lint  # lazy — see `_scoped_lint`
 
     runs: list[lint.ToolRun] = []
     try:

@@ -1,7 +1,7 @@
 """The closed toolchain registry — the Tool verbs' dispatch axis (ADR-0007/0039).
 
 A **Toolchain** names the build/test ecosystem of one path in a repo (rust,
-go, python, npm) and carries the DEFAULT producing command per **tool slot**
+go, python, npm, tree-sitter) and carries the DEFAULT producing command per **tool slot**
 (``test`` from WS01, ``build`` from WS02). The registry is CLOSED, the
 lint ``Lang`` set's mirror: adding a toolchain is adding an entry here,
 nothing downstream changes — and a toolchain is never a project-Kind switch
@@ -65,12 +65,22 @@ class Toolchain:
     the registry never changes per repo. The ``build`` argv is the BASE
     command: per-invocation shaping — the artifact's build target args, go's
     env and version injection — belongs to :mod:`shipit.tools.build`, never
-    here.
+    here. ``provisions_signal`` names a toolchain SIGNAL the entry's own CLI
+    needs delivered when a consumer DECLARES this toolchain (#890): the
+    manifest walk (:func:`shipit.install.reconcile.detect_toolchains`) covers
+    the toolchains a tracked manifest signals, but a tree-sitter grammar has
+    no manifest — its ``[toolchains]`` declaration is the only signal, so
+    ``shipit install`` unions this off the declared map
+    (:func:`shipit.verbs.install._declared_signals`), the exact mechanics of
+    :attr:`shipit.release.bundle.Composition.provisions_signal` (the
+    wasm-pack→node-deps precedent, #788). ``None`` (every entry whose tools
+    already ride a manifest signal) adds nothing.
     """
 
     name: str
     test: tuple[str, ...]
     build: tuple[str, ...]
+    provisions_signal: str | None = None
 
     def command(self, tool: str) -> tuple[str, ...]:
         """The default producing argv for ``tool`` (a :data:`TOOLS` slot).
@@ -119,10 +129,34 @@ PYTHON = Toolchain("python", test=("pytest",), build=("uv", "build"))
 #: ``package.json``, so the registry defers to that declaration rather than
 #: picking one for the fleet.
 NPM = Toolchain("npm", test=("npm", "test"), build=("npm", "run", "build"))
+#: tree-sitter: the bespoke generated-parser toolchain (TOL02-WS16 #792;
+#: WS10 NO-GO on pixi-build, #798). The build slot is ``tree-sitter
+#: generate`` — regenerates ``src/parser.c`` (and the ``src/tree_sitter/``
+#: headers, ``node-types.json``) from ``grammar.js``, the whole-leg build a
+#: generated-parser artifact bundles into its tarball (no per-artifact
+#: package narrowing — like ``uv build``, ``tree-sitter generate`` produces
+#: the parser whole, so :mod:`shipit.tools.build` leaves its argv untouched).
+#: The test slot is ``tree-sitter test`` — the CORPUS tests (the
+#: ``test/corpus/`` s-expression assertions), the check a corpus lane runs
+#: (``run = "test tree-sitter"``) to keep the grammar honest against its
+#: fixtures. Legacy ``tree-sitter.yml@v3`` ran the same two commands (npm
+#: publish OFF, corpus tests ON); this is that composition, shipit-side. The
+#: ``tree-sitter`` CLI is pixi-managed (#890 closed the WS17 open hole 7:
+#: conda-forge DOES carry ``tree-sitter-cli``): the
+#: ``pixi.toml#shipit-tree-sitter-release-deps`` block delivers it into the
+#: default env, unioned off this very declaration via ``provisions_signal`` —
+#: no manifest signals a grammar, so the ``[toolchains]`` leg is the signal
+#: (the wasm-pack→node-deps mechanics, #788).
+TREE_SITTER = Toolchain(
+    "tree-sitter",
+    test=("tree-sitter", "test"),
+    build=("tree-sitter", "generate"),
+    provisions_signal="tree-sitter",
+)
 
 #: The closed registry, in a stable order. Adding a toolchain is adding an
 #: entry here (mirror of the lint ``LANGS`` tuple).
-TOOLCHAINS: tuple[Toolchain, ...] = (RUST, GO, PYTHON, NPM)
+TOOLCHAINS: tuple[Toolchain, ...] = (RUST, GO, PYTHON, NPM, TREE_SITTER)
 
 
 def names() -> tuple[str, ...]:

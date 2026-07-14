@@ -69,11 +69,25 @@ def spawn() -> None:
     "--role",
     required=True,
     help=(
-        "The Run's role, passed verbatim to `claude --agent <role>` (ADR-0019 §2) — "
-        "load-bearing: it populates the hook payload so the guard allows the Run's "
-        "own edits. Needs a committed .claude/agents/<role>.md def in the Tree. "
-        "`reviewer` is special: it gets a shared READ-ONLY Tree and posts a review "
-        "through the PR (ADR-0018), not a write Tree."
+        "The Run's role, validated against the fixed Role Profile registry "
+        "(RPE01-WS01) before any Tree work: an unknown role, or one whose profile "
+        "does not support a detached launch (coordinator, explorer), is refused "
+        "loudly. The accepted role rides `claude --agent <role>` (ADR-0019 §2) "
+        "so the guard allows the Run's own edits; it needs a committed "
+        ".claude/agents/<role>.md def in the Tree. `reviewer` gets a shared "
+        "READ-ONLY Tree and posts through the review service (ADR-0018), while "
+        "`shepherd` attaches to an existing writable PR head via --pr."
+    ),
+)
+@click.option(
+    "--pr",
+    "pr",
+    type=int,
+    default=None,
+    help=(
+        "Shepherd shape: existing pull request number to attach to. Valid only "
+        "with --role shepherd; the branch/base are resolved from the PR instead "
+        "of cutting a new issue or work-stream branch."
     ),
 )
 @click.option(
@@ -93,6 +107,7 @@ def subagent_cmd(
     ws: int | None,
     issue: int | None,
     role: str,
+    pr: int | None,
     session: str,
     backend: str,
 ) -> None:
@@ -133,6 +148,7 @@ def subagent_cmd(
             ws=ws,
             issue=issue,
             role=role,
+            pr=pr,
             session=session,
             backend=backend,
         )
@@ -180,6 +196,7 @@ def run(
     epic: str | None = None,
     ws: int | None = None,
     issue: int | None = None,
+    pr: int | None = None,
     session: str = "work",
     backend: str = "claude",
     bounds: subagent.Boundaries | None = None,
@@ -189,7 +206,8 @@ def run(
     ``bounds`` injects the pipeline's effectful edges
     (:class:`~shipit.spawn.subagent.Boundaries`) for direct (test) callers;
     ``None`` is production. Returns 0 on a completed spawn; every pipeline
-    refusal (:class:`~shipit.spawn.subagent.SpawnError` — bad shape, wrong
+    refusal (:class:`~shipit.spawn.subagent.SpawnError` — an unknown role or a
+    role/launch pair the Role Profile registry refuses, bad shape, wrong
     checkout, failed Tree fail-closed, failed launch, failed handshake audit)
     propagates to the :func:`~shipit.verbs._errors.cli_errors` shell: one clean
     ``error: …`` stderr line + exit 1, never a traceback, never a SPAWNED block.
@@ -200,6 +218,7 @@ def run(
         epic=epic,
         ws=ws,
         issue=issue,
+        pr=pr,
         session=session,
         backend=backend,
     )

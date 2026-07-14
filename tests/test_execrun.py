@@ -98,6 +98,219 @@ def test_nonzero_with_check_false_returns_result(monkeypatch):
     assert not result.ok
 
 
+def test_prompt_bearing_argv_is_summarized_for_exec_records():
+    display = execrun._display_argv(
+        [
+            "codex",
+            "exec",
+            "-c",
+            "developer_instructions=SECRET ROLE SLICE",
+            "--model",
+            "gpt-5.5",
+            "SECRET TASK PROMPT",
+        ]
+    )
+
+    joined = " ".join(display)
+    assert "SECRET ROLE SLICE" not in joined
+    assert "SECRET TASK PROMPT" not in joined
+    assert "developer_instructions=<redacted: prompt sha256=" in joined
+    assert joined.count("<redacted: prompt sha256=") == 2
+
+
+def test_every_repeated_prompt_flag_is_summarized():
+    display = execrun._display_argv(
+        ["agy", "--print", "FIRST PROMPT", "--print", "SECOND PROMPT"]
+    )
+    joined = " ".join(display)
+    assert "FIRST PROMPT" not in joined
+    assert "SECOND PROMPT" not in joined
+    assert joined.count("<redacted: prompt sha256=") == 2
+
+
+@pytest.mark.parametrize(
+    "child,payloads",
+    [
+        (["claude", "-p", "CLAUDE TASK"], ["CLAUDE TASK"]),
+        (
+            [
+                "codex",
+                "exec",
+                "-c",
+                "developer_instructions=CODEX ROLE",
+                "CODEX TASK",
+            ],
+            ["CODEX ROLE", "CODEX TASK"],
+        ),
+        (["agy", "--print", "AGY TASK"], ["AGY TASK"]),
+    ],
+)
+@pytest.mark.parametrize("separator", [True, False])
+def test_pixi_run_wrapper_summarizes_nested_backend_prompts(child, payloads, separator):
+    argv = ["pixi", "run", "--manifest-path", "/tree/pixi.toml"]
+    if separator:
+        argv.append("--")
+    argv.extend(child)
+    display = execrun._display_argv(argv)
+    joined = " ".join(display)
+    assert display[:4] == argv[:4]
+    for payload in payloads:
+        assert payload not in joined
+    assert joined.count("<redacted: prompt sha256=") == len(payloads)
+
+
+@pytest.mark.parametrize(
+    "pixi_options",
+    [
+        ["-e", "codex"],
+        ["--environment", "agy"],
+        ["--manifest-path=claude"],
+    ],
+)
+def test_pixi_option_value_named_like_backend_is_not_the_child(pixi_options):
+    prompt = "REAL CLAUDE PROMPT"
+    argv = ["pixi", "run", *pixi_options, "claude", "-p", prompt]
+    display = execrun._display_argv(argv)
+    assert display[: 2 + len(pixi_options)] == argv[: 2 + len(pixi_options)]
+    assert prompt not in " ".join(display)
+
+
+def test_pixi_downstream_separator_does_not_hide_earlier_backend_prompt():
+    prompt = "AGY PROMPT BEFORE DOWNSTREAM SEPARATOR"
+    argv = ["pixi", "run", "agy", "--print", prompt, "--", "--extra"]
+    display = execrun._display_argv(argv)
+    assert prompt not in " ".join(display)
+    assert display[-2:] == ["--", "--extra"]
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["codex", "exec"],
+        ["codex", "exec", "--model", "gpt-5"],
+    ],
+)
+def test_codex_flag_only_argv_keeps_diagnostic_shape(argv):
+    assert execrun._display_argv(argv) == argv
+
+
+def test_codex_boolean_flag_after_developer_instructions_is_not_a_prompt():
+    argv = ["codex", "exec", "-c", "developer_instructions=ROLE", "--json"]
+    display = execrun._display_argv(argv)
+    assert display[-1] == "--json"
+    assert "ROLE" not in " ".join(display)
+
+
+def test_codex_prompt_starting_with_hyphen_is_summarized():
+    argv = [
+        "codex",
+        "exec",
+        "-c",
+        "developer_instructions=ROLE SLICE",
+        "- Please fix the session setup",
+    ]
+    joined = " ".join(execrun._display_argv(argv))
+    assert "ROLE SLICE" not in joined
+    assert "Please fix" not in joined
+    assert joined.count("<redacted: prompt sha256=") == 2
+
+
+def test_codex_failure_never_exposes_prompt_payloads(monkeypatch, caplog):
+    role = "SECRET ROLE SLICE"
+    task = "SECRET TASK PROMPT"
+    argv = [
+        "codex",
+        "exec",
+        "-c",
+        f"developer_instructions={role}",
+        "--model",
+        "gpt-5.5",
+        task,
+    ]
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        _fake_completed(rc=1, stderr=f"launch failed: {role}; task: {task}"),
+    )
+    with caplog.at_level(logging.ERROR, logger="shipit.exec"):
+        with pytest.raises(execrun.ExecError) as excinfo:
+            execrun.run(argv)
+    err = excinfo.value
+    surfaced = " ".join(err.argv) + err.stderr + str(err)
+    rendered = "\n".join(record.getMessage() for record in caplog.records)
+    for leak in (role, task):
+        assert leak not in surfaced
+        assert leak not in rendered
+    assert surfaced.count("<redacted: prompt sha256=") >= 2
+
+
+def test_pixi_wrapped_codex_failure_never_exposes_prompt_payloads(monkeypatch, caplog):
+    role = "WRAPPED SECRET ROLE"
+    task = "WRAPPED SECRET TASK"
+    argv = [
+        "pixi",
+        "run",
+        "--manifest-path",
+        "/tree/pixi.toml",
+        "--",
+        "codex",
+        "exec",
+        "-c",
+        f"developer_instructions={role}",
+        task,
+    ]
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        _fake_completed(rc=1, stderr=f"launch failed: {role}; task: {task}"),
+    )
+    with caplog.at_level(logging.ERROR, logger="shipit.exec"):
+        with pytest.raises(execrun.ExecError) as excinfo:
+            execrun.run(argv)
+    surfaced = (
+        " ".join(excinfo.value.argv)
+        + excinfo.value.stderr
+        + str(excinfo.value)
+        + "\n".join(record.getMessage() for record in caplog.records)
+    )
+    assert role not in surfaced
+    assert task not in surfaced
+
+
+def test_short_prompt_echo_suppresses_ambiguous_failure_stream(monkeypatch):
+    task = "fix"
+    argv = [
+        "codex",
+        "exec",
+        "-c",
+        "developer_instructions=ROLE SLICE",
+        task,
+    ]
+    diagnostic = "prefix: failed to fix process configuration"
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        _fake_completed(rc=1, stderr=diagnostic),
+    )
+    with pytest.raises(execrun.ExecError) as excinfo:
+        execrun.run(argv)
+    err = excinfo.value
+    assert err.stderr == execrun.PROMPT_STREAM_PLACEHOLDER
+    assert diagnostic not in str(err)
+
+
+def test_unrelated_print_equals_argument_does_not_suppress_failure_stream(monkeypatch):
+    diagnostic = "script failed on line 1"
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        _fake_completed(rc=1, stderr=diagnostic),
+    )
+    with pytest.raises(execrun.ExecError) as excinfo:
+        execrun.run(["python", "script.py", "--print=1"])
+    assert excinfo.value.stderr == diagnostic
+
+
 # ---------------------------------------------------------------------------
 # Missing binary / OS normalization
 # ---------------------------------------------------------------------------
@@ -294,6 +507,30 @@ def test_timeout_cause_cmd_is_redacted(monkeypatch, _clean_registry):
     cause = excinfo.value.__cause__
     assert "s3cret-value" not in " ".join(cause.cmd)
     assert "s3cret-value" not in str(cause)
+
+
+def test_timeout_cause_cmd_summarizes_codex_prompts(monkeypatch):
+    role = "SECRET ROLE SLICE"
+    task = "SECRET TASK PROMPT"
+    argv = [
+        "codex",
+        "exec",
+        "-c",
+        f"developer_instructions={role}",
+        task,
+    ]
+
+    def fake_run(child_argv, **kwargs):
+        raise subprocess.TimeoutExpired(child_argv, 0.1)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(execrun.ExecError) as excinfo:
+        execrun.run(argv, timeout=0.1)
+    cause = excinfo.value.__cause__
+    surfaced = " ".join(cause.cmd) + str(cause) + repr(cause)
+    assert role not in surfaced
+    assert task not in surfaced
+    assert surfaced.count("<redacted: prompt sha256=") >= 2
 
 
 def test_timeout_cause_args_tuple_is_sanitized(monkeypatch, _clean_registry):

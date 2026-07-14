@@ -35,6 +35,14 @@ record dicts; the CLI boundary lives in :mod:`shipit.verbs.eval.score`):
    (:class:`Adjudication`), each carrying the banking suggestion that grows
    the fixture (new label, or alias on a near-missed label).
 
+Recall counts DEFECTS, not labels: labels sharing a declared ``defect``
+equivalence family (:attr:`shipit.review.groundtruth.Label.defect_key` — one
+defect with several valid file/site anchors, #673/#751) contribute ONE
+denominator slot per tier and are recalled together when ANY member label
+matches, so equivalent labels and equivalent emissions never double-count.
+Labels without a family keep counting separately — distinct defects and
+repeated instances stay distinguishable.
+
 Recall denominators are per-variant honest: a variant is only measured against
 labels of pins it actually has records for. Any severity tier whose positive
 count is below :data:`UNDERPOWERED_FLOOR` renders with an **underpowered**
@@ -77,7 +85,9 @@ _NO_VARIANT = "(none)"
 
 @dataclass(frozen=True)
 class TierScore:
-    """One severity tier of one variant: recalled / positives (+ the power marker)."""
+    """One severity tier of one variant: recalled / positives (+ the power marker).
+
+    Both counts are DEFECTS (equivalence families count once), not labels."""
 
     severity: Severity
     positives: int
@@ -111,7 +121,12 @@ class Adjudication:
 
 @dataclass(frozen=True)
 class VariantScore:
-    """One Variant's scorecard across every fixture pin it has records for."""
+    """One Variant's scorecard across every fixture pin it has records for.
+
+    ``recalled_label_ids`` lists the individual anchor LABELS that matched
+    (useful for seeing which anchor of a family a review hit); the ``tiers``
+    counts collapse those to defects, so a multi-anchor family recalled at two
+    anchors still scores as one."""
 
     variant: str
     rounds: int
@@ -299,10 +314,20 @@ def score_records(
         tiers = []
         for severity in Severity:
             tier_labels = [lb for lb in in_scope if lb.severity is severity]
-            recalled = sum(1 for lb in tier_labels if lb.id in state["recalled"])
+            # Count DEFECTS, not labels: a declared equivalence family (one
+            # defect, several valid anchors — #673/#751) fills one denominator
+            # slot and is recalled when ANY of its anchor labels matched. A
+            # family never straddles tiers or pins (parse validates severity
+            # and pr coherence), so grouping within the tier is total.
+            defects: dict[str, bool] = {}
+            for lb in tier_labels:
+                key = lb.defect_key
+                defects[key] = defects.get(key, False) or lb.id in state["recalled"]
             tiers.append(
                 TierScore(
-                    severity=severity, positives=len(tier_labels), recalled=recalled
+                    severity=severity,
+                    positives=len(defects),
+                    recalled=sum(defects.values()),
                 )
             )
         variants.append(
@@ -375,6 +400,7 @@ def _adjudication_lines(items: Sequence[Adjudication]) -> list[str]:
             out.append(
                 "      ↳ unknown to the corpus — adjudicate once, then:"
                 " shipit eval bank label … --verdict real|not-real"
+                " (--defect <family> if it re-anchors a banked defect)"
             )
         elif item.kind == "false-positive":
             out.append(f"      ↳ matched banked not-real label {label_id!r}")

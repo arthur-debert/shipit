@@ -24,9 +24,12 @@ What it owns:
 - **The parser** (:func:`parse_comment`, :func:`parse_marker`) that recovers a
   Finding from a posted comment body alone, and the **severity precedence
   chain** (:func:`resolve_severity`): machine marker → reviewer-adapter mapping
-  → ``major`` default, beaten only by a write-once Severity override. The
-  ``major`` default is the fail-safe: an unparseable finding forces a review
-  round rather than slipping past the Breaker.
+  → the adapter's unclassified-severity policy → ``major`` default, beaten only
+  by a write-once Severity override. The ``major`` default is the fail-safe for
+  a reviewer with NO explicit policy: its unparseable finding forces a review
+  round rather than slipping past the Breaker. An adapter whose reviewer emits
+  no severity vocabulary at all (Copilot) instead declares a POLICY for its
+  unclassified findings (#743), so they resolve deliberately, not fail-safely.
 
 Category and confidence ride along **informational-only** — nothing routes on
 them; Severity is the engine's sole routing key.
@@ -86,8 +89,9 @@ class Severity(Enum):
 
 _RANKS: dict[Severity, int] = {s: i for i, s in enumerate(Severity)}
 
-#: The fail-safe severity: an unparseable finding defaults to ``major`` so a
-#: parsing failure forces a review round instead of slipping past the Breaker.
+#: The fail-safe severity: an unparseable finding by a reviewer with NO
+#: explicit unclassified-severity policy defaults to ``major`` so a parsing
+#: failure forces a review round instead of slipping past the Breaker.
 DEFAULT_SEVERITY = Severity.MAJOR
 
 
@@ -186,16 +190,20 @@ def resolve_severity(
     marker: Severity | None = None,
     adapter: Severity | None = None,
     override: Severity | None = None,
+    policy: Severity | None = None,
 ) -> Severity:
     """The severity precedence chain (ADR-0044).
 
-    Machine marker → reviewer-adapter mapping → :data:`DEFAULT_SEVERITY`
-    (``major``, the fail-safe); a write-once Severity ``override`` beats all
-    three.
+    Machine marker → reviewer-adapter native mapping → the adapter's
+    ``policy`` for an unclassified finding (#743: a reviewer that emits NO
+    severity vocabulary anywhere — Copilot — declares what its unclassified
+    findings mean instead of riding the fail-safe) → :data:`DEFAULT_SEVERITY`
+    (``major``, the fail-safe for a reviewer without an explicit policy); a
+    write-once Severity ``override`` beats all four.
     """
     if override is not None:
         return override
-    return marker or adapter or DEFAULT_SEVERITY
+    return marker or adapter or policy or DEFAULT_SEVERITY
 
 
 def order_findings(findings: Iterable[Finding]) -> list[Finding]:

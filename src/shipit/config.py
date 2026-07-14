@@ -24,10 +24,10 @@ import re
 import tomllib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 
-from .identity import Sha
+from .identity import Sha, repo_from_slug
 
 CONFIG_NAME = ".shipit.toml"
 
@@ -266,7 +266,7 @@ def load_lint_ignore(cfg: dict) -> list[str]:
     routing, so one ``ignore`` entry drops a path from every leg (markdownlint,
     shfmt, ruff, …). Patterns are gitignore-style — the SAME syntax as the
     ``.markdownlintignore`` this seam replaces, matched by shipit's own
-    ``.treeinclude`` engine (:func:`shipit.verbs.lint.path_ignored`): ``*`` does
+    ``.treeinclude`` engine (:func:`shipit.lint.path_ignored`): ``*`` does
     not cross ``/``, ``**`` matches any run of segments, a trailing-slash pattern
     matches a directory's whole subtree (``CHANGELOG/`` → every built
     ``CHANGELOG/*.md``), an unanchored name floats to any depth (``CHANGELOG.md``
@@ -328,15 +328,33 @@ def _parse_argv(where: str, value: object) -> tuple[str, ...]:
     return tuple(value)
 
 
+def _reject_path_escape(where: str, value: str) -> None:
+    """Refuse a config path that leaves the checkout — absolute, or carrying a
+    ``..`` segment. Pure.
+
+    Such a path is later joined to the repo root and READ or REWRITTEN (an
+    adapter's leg cwd, a bundle-config bump); an absolute path discards the root
+    and ``..`` climbs above it, so a repo's own ``.shipit.toml`` could steer a
+    release rewrite at a file outside the tree. Rejected at the parse boundary,
+    the one place every value flows through.
+    """
+    pure = PurePosixPath(value)
+    if pure.is_absolute() or ".." in pure.parts:
+        raise ConfigError(
+            f"{where}: must be a repo-relative path inside the checkout — no "
+            f"leading '/', no '..' segment; got {value!r}"
+        )
+
+
 def _parse_toolchain_entry(path: str, spec: object) -> ToolchainEntry:
     """One ``[toolchains]`` entry: a bare toolchain-name string, or a table
     carrying ``toolchain`` plus per-tool argv overrides (see the loader)."""
     from .tools import registry  # lazy — config stays import-light at module load
 
-    if not path or path.startswith("/"):
+    if not path or path.startswith("/") or ".." in PurePosixPath(path).parts:
         raise ConfigError(
-            f"[toolchains] paths are repo-relative ({'empty' if not path else path!r}"
-            f" is not); use '.' for the repo root"
+            f"[toolchains] paths are repo-relative and inside the checkout "
+            f"({'empty' if not path else path!r} is not); use '.' for the repo root"
         )
     if isinstance(spec, str):
         name, overrides = spec, {}
@@ -370,7 +388,13 @@ def _parse_toolchain_entry(path: str, spec: object) -> ToolchainEntry:
             f"[toolchains].{path}: unknown toolchain `{name}`; "
             f"known toolchains: {known}"
         )
-    return ToolchainEntry(path=path, toolchain=name, commands=overrides)
+    # Store the CANONICAL repo-relative form (`./web` -> `web`, `web/` -> `web`):
+    # the leg's pathspecs are matched against `git status --porcelain` output,
+    # which is already canonical, so a non-normalized entry would miss its own
+    # changed files and trip a false `no-op bump` refusal in `release prepare`.
+    return ToolchainEntry(
+        path=str(PurePosixPath(path)), toolchain=name, commands=overrides
+    )
 
 
 def load_toolchains(cfg: dict) -> tuple[ToolchainEntry, ...]:
@@ -415,11 +439,15 @@ def load_toolchains(cfg: dict) -> tuple[ToolchainEntry, ...]:
 # loud errors naming the offending key.
 #
 #     [artifacts.lex-cli]
-#     build     = [{ toolchain = "rust", package = "lex-cli" }]
-#     bundle    = { command = ["tauri", "bundle"] }          # optional
-#     endpoints = ["gh-release", "crates"]                   # closed set
-#     e2e       = { harness = ["bats", "tests/e2e.bats"] }   # optional
-#     sign      = true                                       # default false
+#     build         = [{ toolchain = "rust", package = "lex-cli" }]
+#     platforms     = ["darwin-arm64", "linux-x86_64"]            # closed set
+#     bundle        = { composition = "archive" }                # optional
+#     bundle-config = "src-tauri/tauri.conf.json"                # optional
+#     main-binary   = "lex"                                      # optional
+#     product-name  = "Lex"                                      # optional
+#     endpoints     = ["gh-release", "crates"]                   # closed set
+#     e2e           = { harness = ["bats", "tests/e2e.bats"] }   # optional
+#     sign          = true                                       # default false
 #
 # A build entry may be the bare toolchain name ("python") when the leg's
 # default build produces the artifact whole. An artifact may declare ZERO
@@ -428,10 +456,50 @@ def load_toolchains(cfg: dict) -> tuple[ToolchainEntry, ...]:
 
 
 #: The CLOSED distribution-endpoint registry names an ``endpoints`` list may
-#: use (PRD: one adapter per endpoint; gh-release, crates, pypi, npm, brew).
-#: Adding an endpoint is an adapter plus an entry here; consumed by the
-#: release stages later — WS02 only validates the declaration.
-ENDPOINTS: tuple[str, ...] = ("gh-release", "crates", "pypi", "npm", "brew")
+#: use (PRD: one adapter per endpoint; gh-release, crates, pypi, npm,
+#: vscode-marketplace, open-vsx, brew, notify-downstreams — the two VS Code
+#: marketplace endpoints land with the ``.vsix`` composition (TOL02-WS13 #789),
+#: notify-downstreams the tree-sitter cascade (TOL02-WS16 #792)). Adding an
+#: endpoint is an adapter plus an entry here plus its secret-requirement
+#: declaration
+#: (:data:`shipit.release.secretreq.ENDPOINT_SECRETS`); consumed by the
+#: release planner (``release preflight``, WS02) and by the publish stage's
+#: adapter registry (:mod:`shipit.release.publish`, TOL02-WS05), whose entries
+#: mirror this set one-to-one (asserted in its tests, so the two can never
+#: drift). ``notify-downstreams`` is the cascade endpoint (TOL02-WS16 #792): a
+#: derived, stable-only dispatch that fires ``repository_dispatch`` at the
+#: artifact's declared :attr:`Artifact.downstreams` on a real (non-rc, non-
+#: prerelease) release — the legacy ``tree-sitter.yml`` notify hook, modeled
+#: as a publish-stage action rather than a consumer post-release block so the
+#: rc/prerelease gate is the ONE the release stages already enforce.
+ENDPOINTS: tuple[str, ...] = (
+    "gh-release",
+    "crates",
+    "pypi",
+    "npm",
+    "vscode-marketplace",
+    "open-vsx",
+    "brew",
+    "notify-downstreams",
+)
+
+#: The CLOSED OS×arch platform registry a ``platforms`` list may use — the
+#: release-side build/fan-out axis (TOL02-WS02, the lane planner's release
+#: twin). Each name is one ``<os>-<arch>`` release lane; the per-platform
+#: attributes (target triple, runner label, archive/binary extensions,
+#: packaging arch) live in the release planner's matrix table
+#: (:data:`shipit.release.preflight.PLATFORM_MATRIX`, keyed by exactly this
+#: set — drift-guarded by test). Declared per artifact INSTEAD of the legacy
+#: workflows' darwin/linux/musl/windows inputs; an undeclared list defaults
+#: to the ordinary linux lane at plan time.
+PLATFORMS: tuple[str, ...] = (
+    "darwin-arm64",
+    "darwin-x86_64",
+    "linux-x86_64",
+    "linux-x86_64-musl",
+    "linux-arm64",
+    "windows-x86_64",
+)
 
 
 @dataclass(frozen=True)
@@ -452,17 +520,58 @@ class BuildTarget:
     package: str | None = None
     version_var: str | None = None
 
+    @property
+    def package_basename(self) -> str | None:
+        """The binary name this target's ``package`` yields — its path basename
+        — or ``None`` when it names none: no ``package``, an empty basename, or
+        a bare path-navigation token (``./cmd/padz`` → ``padz``;
+        ``.``/``./``/``..``/``/`` → ``None``). The single source of truth for
+        "does this package name a binary?", shared by the binary-location
+        derivation (:func:`shipit.tools.e2e.binary_location`) and the
+        assert-bundle expected-name chain
+        (:func:`shipit.release.integrity.expected_main_binary`)."""
+        if self.package is None:
+            return None
+        name = PurePosixPath(self.package).name
+        return name if name and name not in (".", "..") else None
+
 
 @dataclass(frozen=True)
 class BundleSpec:
     """An artifact's declared bundle step — the optional composition that
-    combines toolchain outputs into the artifact (``tauri bundle``,
-    ``electron-builder``). ``command`` is the argv, through the one exec seam
-    like every producing command (ADR-0028). Parsed now; RUN by the release
-    ``bundle`` stage later ("package" is retired — the stage word is bundle).
+    combines toolchain outputs into the unsigned distributable, run by
+    ``shipit release bundle`` (TOL02-WS03; "package" is retired — the stage
+    word is bundle).
+
+    ``composition`` names an entry of the CLOSED composition registry
+    (:mod:`shipit.release.bundle` — archive, deb, wheel, wasm-pack, vsix,
+    mac-app, tauri, electron, tarball), the ADR-0007 shape: the bundle step is
+    declared per artifact, keyed off the map, never a project-Kind switch.
+    ``command`` is the declared bundler argv the DECLARED-COMMAND compositions
+    run (``mac-app``'s / ``tauri``'s ``tauri build``, ``electron``'s
+    ``electron-builder`` — the one consumer-specific part of each,
+    workflows.lex §3.1), through the one exec seam like every producing command
+    (ADR-0028); ``source`` is the repo-relative directory that bundler leaves
+    its distributables under (mac-app's coupled ``.app``/``.dmg`` pair, tauri's
+    ``.app``/``.dmg`` on darwin + ``.AppImage``/``.deb`` on linux, electron's
+    per-platform ``.dmg``/``.AppImage``/``.exe`` set). Both are REQUIRED by
+    every declared-command composition (``mac-app``, ``tauri``, ``electron``)
+    and rejected for the registry-assembled ones (archive, deb, wheel, … —
+    their commands are assembled, never declared).
+
+    ``scope`` / ``wasm_target`` are the ``wasm-pack`` composition's optional
+    consumer-specific parts (TOL02-WS12 #788): the npm ``@scope`` (``--scope``,
+    ``None`` for an unscoped package) and wasm-pack's ``--target`` (``None`` =
+    the registry default, ``bundler``). Both are accepted ONLY for
+    ``wasm-pack`` (:attr:`shipit.release.bundle.Composition.option_keys`) and
+    rejected for every other composition.
     """
 
-    command: tuple[str, ...]
+    composition: str
+    command: tuple[str, ...] | None = None
+    source: str | None = None
+    scope: str | None = None
+    wasm_target: str | None = None
 
 
 @dataclass(frozen=True)
@@ -482,15 +591,49 @@ class Artifact:
 
     ``build`` targets are consumed by ``shipit build`` and ``e2e`` by
     ``shipit e2e`` (the harness declaration plus the ``<NAME>_BIN``
-    injection) now; ``bundle`` by the bundle stage, ``endpoints`` by the
-    release stages, and ``sign`` by the sign stage / preflight secrets
-    validation — those later.
+    injection); ``platforms`` (the closed :data:`PLATFORMS` OS×arch set,
+    ``()`` = the default linux lane), ``endpoints``, and ``sign`` by the
+    release planner (``release preflight``, WS02: the OS×arch matrix, the
+    endpoint set, and the derived secret requirements —
+    :mod:`shipit.release.preflight` / :mod:`shipit.release.secretreq`);
+    ``endpoints`` also by ``shipit release publish`` (TOL02-WS05: each name
+    dispatches to its endpoint adapter, release-stage endpoints before derived
+    ones); ``bundle_config`` by ``shipit release prepare`` (the
+    artifact-declared bundle-config hook, ADR-0041/PRD story 25: the
+    repo-root-relative JSON file — ``tauri.conf.json`` — whose top-level
+    ``version`` is bumped in lockstep with the leg adapters, keeping "tauri"
+    out of the bump dispatch registry); ``bundle`` by ``shipit release bundle``
+    (TOL02-WS03: the declared composition into the unsigned distributable);
+    ``main_binary`` / ``product_name`` by ``shipit release assert-bundle``'s
+    expected-name fallback chain (workflows.lex §3.2: mainBinaryName →
+    productName → package name — the scar-#2 integrity guard's inputs); and
+    ``sign`` also by the sign stage — that later. ``downstreams`` is the
+    ``owner/name`` repos the ``notify-downstreams`` endpoint fires
+    ``repository_dispatch`` at on a real release (TOL02-WS16 #792) — REQUIRED
+    by that endpoint and refused without it (a notify with no target is a
+    no-op declaration), and refused WITHOUT the endpoint (a downstreams list
+    that nothing fires is dead config).
+
+    ``sign = true`` requires at least one build target, at least one darwin
+    platform (signing signs a build output, and runs on macOS only), AND a
+    bundle whose composition the signer can reopen (mac-app or archive —
+    :attr:`shipit.release.bundle.Composition.signable`, TOL02-WS08 #779) —
+    refused at parse otherwise, so signing can never silently degrade to an
+    unsigned plan, never route to a signer leg that does not exist, and
+    preflight/gh-setup cannot disagree over it. ``bundle`` follows the
+    same rule for the same reason: it composes build outputs, so a bundle on a
+    no-build artifact is refused at parse rather than silently dropped.
     """
 
     name: str
     build: tuple[BuildTarget, ...] = ()
+    platforms: tuple[str, ...] = ()
     bundle: BundleSpec | None = None
+    bundle_config: str | None = None
+    main_binary: str | None = None
+    product_name: str | None = None
     endpoints: tuple[str, ...] = ()
+    downstreams: tuple[str, ...] = ()
     e2e: E2eSpec | None = None
     sign: bool = False
 
@@ -564,7 +707,7 @@ def _parse_build_target(where: str, spec: object) -> BuildTarget:
 
 def _parse_endpoints(where: str, value: object) -> tuple[str, ...]:
     """The ``endpoints`` list, validated against the closed :data:`ENDPOINTS`
-    registry — a declaration the release stages consume later."""
+    registry — the declaration ``shipit release publish`` dispatches."""
     if not isinstance(value, list) or not all(isinstance(e, str) for e in value):
         raise ConfigError(f"{where}: must be a list of endpoint names")
     for endpoint in value:
@@ -576,16 +719,149 @@ def _parse_endpoints(where: str, value: object) -> tuple[str, ...]:
     return tuple(value)
 
 
+def _parse_downstreams(where: str, value: object) -> tuple[str, ...]:
+    """The ``downstreams`` list — the ``owner/name`` repos the
+    ``notify-downstreams`` endpoint fires ``repository_dispatch`` at
+    (TOL02-WS16 #792). Each entry is normalized through the canonical slug
+    parser (:func:`identity.repo_from_slug`): lowercased to its GitHub
+    identity (owner and name are case-insensitive) and rejected if malformed
+    (not exactly ``owner/name``). Returning the canonical slug means every
+    dispatch targets the same normalized form, and duplicates are refused on
+    that canonical key so a case-only repeat (``Lex-Fmt/vscode`` vs
+    ``lex-fmt/vscode``) is caught, not silently dispatched twice."""
+    if not isinstance(value, list) or not all(isinstance(r, str) for r in value):
+        raise ConfigError(f"{where}: must be a list of `owner/name` repo slugs")
+    seen: set[str] = set()
+    canonical: list[str] = []
+    for slug in value:
+        try:
+            canon = repo_from_slug(slug).slug
+        except ValueError:
+            raise ConfigError(
+                f"{where}: `{slug}` is not an `owner/name` repo slug "
+                f'(e.g. "lex-fmt/vscode")'
+            ) from None
+        if canon in seen:
+            raise ConfigError(f"{where}: duplicate downstream `{canon}`")
+        seen.add(canon)
+        canonical.append(canon)
+    return tuple(canonical)
+
+
+def _parse_platforms(where: str, value: object) -> tuple[str, ...]:
+    """The ``platforms`` list, validated against the closed :data:`PLATFORMS`
+    registry — the release planner's OS×arch fan-out axis (WS02). Duplicates
+    are refused loudly: a repeated platform would mean a repeated matrix
+    entry, never an intent."""
+    if not isinstance(value, list) or not all(isinstance(p, str) for p in value):
+        raise ConfigError(f"{where}: must be a list of platform names")
+    seen: set[str] = set()
+    for platform in value:
+        if platform not in PLATFORMS:
+            known = ", ".join(PLATFORMS)
+            raise ConfigError(
+                f"{where}: unknown platform `{platform}`; known platforms: {known}"
+            )
+        if platform in seen:
+            raise ConfigError(f"{where}: duplicate platform `{platform}`")
+        seen.add(platform)
+    return tuple(value)
+
+
 def _parse_bundle(where: str, spec: object) -> BundleSpec:
+    from .release import bundle as bundle_registry  # lazy — config stays import-light
+
     if not isinstance(spec, dict):
         raise ConfigError(
             f"{where}.bundle: must be a table, e.g. "
-            f'{{ command = ["tauri", "bundle"] }}; got {spec!r}'
+            f'{{ composition = "archive" }}; got {spec!r}'
         )
-    _reject_unknown_keys(f"{where}.bundle", spec, ("command",))
-    if "command" not in spec:
-        raise ConfigError(f"{where}.bundle must declare its command argv")
-    return BundleSpec(command=_parse_argv(f"{where}.bundle.command", spec["command"]))
+    composition = spec.get("composition")
+    if not isinstance(composition, str) or not composition:
+        raise ConfigError(
+            f"{where}.bundle must name its composition, e.g. "
+            f'{{ composition = "archive" }}'
+        )
+    entry = bundle_registry.composition(composition)
+    if entry is None:
+        known = ", ".join(bundle_registry.names())
+        raise ConfigError(
+            f"{where}.bundle: unknown composition `{composition}`; "
+            f"known compositions: {known}"
+        )
+    # The accepted key set is composition-specific: only wasm-pack names
+    # scope/wasm-target (option_keys), so a `scope` on archive is a loud
+    # unknown-key here. command/source stay in the set for EVERY composition so
+    # a registry-assembled composition rejects them with the specific "applies
+    # only to a declared bundler" message below (not a generic unknown-key).
+    _reject_unknown_keys(
+        f"{where}.bundle",
+        spec,
+        ("composition", "command", "source", *entry.option_keys),
+    )
+    command = spec.get("command")
+    source = spec.get("source")
+    if entry.declared_command:
+        # mac-app/tauri: the bundler that produces the platform's bundles (the
+        # mac .app/.dmg pair, tauri's linux .AppImage/.deb) is the one
+        # consumer-specific part (workflows.lex §3.1), so the declaration must
+        # carry it — and say where the bundles land.
+        if command is None:
+            raise ConfigError(
+                f"{where}.bundle: composition `{composition}` runs the "
+                f"artifact's own bundler — declare its argv, e.g. "
+                f'command = ["npm", "run", "tauri", "build"]'
+            )
+        if not isinstance(source, str) or not source:
+            raise ConfigError(
+                f"{where}.bundle: composition `{composition}` needs `source` — "
+                f"the repo-relative directory the bundler leaves its bundles "
+                f"under (the mac .app/.dmg pair, tauri linux .AppImage/.deb), "
+                f'e.g. "src-tauri/target/release/bundle"'
+            )
+        _reject_path_escape(f"{where}.bundle.source", source)
+        normalized = str(PurePosixPath(source))
+        if normalized == ".":
+            # A DEDICATED build-output subdir, never the checkout root: the
+            # bundler writes there and the composition reads it, so a repo-root
+            # `source` is a config mistake — refused loudly here so it can never
+            # reach the compose step (defence in depth beside the non-destructive
+            # collector, which deletes nothing under `source` regardless).
+            raise ConfigError(
+                f"{where}.bundle.source: composition `{composition}` needs a "
+                f"dedicated bundle output subdirectory, not the repo root "
+                f'(`.`) — e.g. "src-tauri/target/release/bundle"'
+            )
+        return BundleSpec(
+            composition=composition,
+            command=_parse_argv(f"{where}.bundle.command", command),
+            source=normalized,
+        )
+    # Registry-assembled compositions (archive, deb, wheel, wasm-pack): their
+    # commands are the registry's one assembly point (ADR-0028) — a declared
+    # argv or source dir would be a second one, refused loudly.
+    for key in ("command", "source"):
+        if key in spec:
+            raise ConfigError(
+                f"{where}.bundle: `{key}` applies only to compositions that "
+                f"run a declared bundler (mac-app, tauri); composition "
+                f"`{composition}` assembles its own commands"
+            )
+    # wasm-pack's optional scope/wasm-target — non-empty strings when present
+    # (already gated to this composition by the option_keys unknown-key check).
+    scope = spec.get("scope")
+    if scope is not None and (not isinstance(scope, str) or not scope):
+        raise ConfigError(f"{where}.bundle: scope must be a non-empty string")
+    wasm_target = spec.get("wasm-target")
+    if wasm_target is not None and (
+        not isinstance(wasm_target, str) or not wasm_target
+    ):
+        raise ConfigError(f"{where}.bundle: wasm-target must be a non-empty string")
+    return BundleSpec(
+        composition=composition,
+        scope=scope,
+        wasm_target=wasm_target,
+    )
 
 
 def _parse_e2e(where: str, spec: object) -> E2eSpec:
@@ -605,7 +881,34 @@ def _parse_artifact(name: str, spec: object) -> Artifact:
     where = f"[artifacts].{name}"
     if not isinstance(spec, dict):
         raise ConfigError(f"{where} must be a table; got {spec!r}")
-    _reject_unknown_keys(where, spec, ("build", "bundle", "endpoints", "e2e", "sign"))
+    _reject_unknown_keys(
+        where,
+        spec,
+        (
+            "build",
+            "platforms",
+            "bundle",
+            "bundle-config",
+            "endpoints",
+            "downstreams",
+            "e2e",
+            "main-binary",
+            "product-name",
+            "sign",
+        ),
+    )
+    bundle_config = spec.get("bundle-config")
+    if bundle_config is not None:
+        if not isinstance(bundle_config, str) or not bundle_config:
+            raise ConfigError(
+                f"{where}.bundle-config: must be a non-empty repo-relative path, "
+                f'e.g. "src-tauri/tauri.conf.json"; got {bundle_config!r}'
+            )
+        _reject_path_escape(f"{where}.bundle-config", bundle_config)
+        # Canonical form (`./x` -> `x`): the release stage stages this path and
+        # matches it against `git status`, so a non-normalized value would read
+        # as a different, unchanged file and trip a false no-op / missing-file.
+        bundle_config = str(PurePosixPath(bundle_config))
     build_spec = spec.get("build", [])
     if not isinstance(build_spec, list):
         raise ConfigError(f"{where}.build: must be a list of build targets")
@@ -616,11 +919,120 @@ def _parse_artifact(name: str, spec: object) -> Artifact:
     sign = spec.get("sign", False)
     if not isinstance(sign, bool):
         raise ConfigError(f"{where}.sign: must be a boolean; got {sign!r}")
+    names = {}
+    for key in ("main-binary", "product-name"):
+        value = spec.get(key)
+        if value is not None and (not isinstance(value, str) or not value):
+            raise ConfigError(f"{where}.{key}: must be a non-empty name; got {value!r}")
+        names[key] = value
+    platforms = _parse_platforms(f"{where}.platforms", spec.get("platforms", []))
+    if sign:
+        # `sign = true` must be a declaration both consumers read the same way:
+        # preflight materializes a sign stage ONLY from a BUILD-BEARING artifact
+        # on a DARWIN lane (:func:`shipit.release.preflight._matrix` skips an
+        # artifact with no build, and signing runs on macOS), while secretreq
+        # demands the Apple secrets from the bare `sign` flag. Missing either the
+        # build target or the darwin lane, the sign stage never materializes yet
+        # gh-setup still demands the Apple secrets — the two disagreeing, silently
+        # shipping UNSIGNED. Refuse both gaps here, at the one boundary both
+        # consumers cross, so `sign = true` always implies a signable darwin build
+        # (an undeclared `platforms` defaults to the linux lane — non-darwin — so
+        # it is refused too).
+        if not build:
+            raise ConfigError(
+                f"{where}: sign = true requires at least one build target "
+                f"(an artifact with no build produces nothing to sign)"
+            )
+        if not any(platform.startswith("darwin") for platform in platforms):
+            raise ConfigError(
+                f"{where}: sign = true requires at least one darwin platform "
+                f"(signing runs on macOS only); declare a darwin lane in "
+                f"`platforms` or drop `sign`"
+            )
+    bundle = _parse_bundle(where, spec["bundle"]) if "bundle" in spec else None
+    if bundle is not None and not build:
+        # The bundle twin of the sign rule: a bundle composes BUILD OUTPUTS
+        # (:mod:`shipit.release.bundle`), so preflight materializes the bundle
+        # stage only from a build-bearing artifact. Declared on a no-build
+        # artifact the stage never materializes yet the declaration reads as
+        # intent — refuse it here rather than silently dropping the bundle.
+        # Ordered AFTER the composition-shape parse so a malformed bundle still
+        # gets its specific error first.
+        raise ConfigError(
+            f"{where}: bundle requires at least one build target "
+            f"(a bundle composes build outputs; an artifact with no build "
+            f"produces nothing to bundle)"
+        )
+    if sign:
+        # The signer reopens what the bundle stage composed (workflows.lex
+        # §3.1) — the mac-app leg's reseal payload or the archive leg's
+        # tarball (TOL02-WS08 #779). A `sign = true` with no bundle (or with
+        # a composition the signer has no leg for — deb, wheel) would emit a
+        # sign matrix entry whose leg has no bundle tree to download, failing
+        # deep in CI while gh-setup demands the Apple secrets up front.
+        # Refused here, at the same boundary as the build/darwin rules.
+        from .release import bundle as bundle_registry  # lazy, like _parse_bundle
+
+        signable = bundle_registry.signable_names()
+        if bundle is None or bundle.composition not in signable:
+            got = (
+                f"composition `{bundle.composition}`"
+                if bundle is not None
+                else "no bundle"
+            )
+            raise ConfigError(
+                f"{where}: sign = true requires a bundle composition the "
+                f"signer can reopen ({', '.join(signable)}); got {got}"
+            )
+    if bundle is not None and len(platforms) > 1:
+        # A platform-independent composition (tarball's generated C source)
+        # emits ONE unqualified `<name>.tar.gz`; `wf-publish.yml` merges every
+        # leg's dist/ into one flat tree (merge-multiple), so the same
+        # unqualified name built on >1 leg would collide (last writer wins, and
+        # tar bytes are not identical across runners). Refuse it here — it must
+        # build on exactly one leg — rather than silently publishing a
+        # nondeterministic asset (TOL02-WS16 #792).
+        from .release import bundle as bundle_registry  # lazy, like _parse_bundle
+
+        if bundle.composition in bundle_registry.platform_independent_names():
+            raise ConfigError(
+                f"{where}: composition `{bundle.composition}` is platform-"
+                f"independent — it emits one unqualified archive, so declaring "
+                f"more than one platform would build colliding assets; declare "
+                f"at most one platform (or none — it defaults to a single lane)"
+            )
+    endpoints = _parse_endpoints(f"{where}.endpoints", spec.get("endpoints", []))
+    downstreams = _parse_downstreams(
+        f"{where}.downstreams", spec.get("downstreams", [])
+    )
+    # The notify-downstreams endpoint and the downstreams list are mutual
+    # preconditions (TOL02-WS16 #792): the endpoint fires repository_dispatch
+    # at the list, so an endpoint with no list is a no-op declaration and a
+    # list with no endpoint is dead config nothing fires. Refuse either gap
+    # here, at parse, so the publish adapter never reaches an under-declared
+    # notify.
+    if "notify-downstreams" in endpoints and not downstreams:
+        raise ConfigError(
+            f"{where}: the notify-downstreams endpoint needs a `downstreams` "
+            f"list — the `owner/name` repos it fires repository_dispatch at "
+            f'(e.g. downstreams = ["lex-fmt/vscode", "lex-fmt/nvim"])'
+        )
+    if downstreams and "notify-downstreams" not in endpoints:
+        raise ConfigError(
+            f"{where}: `downstreams` is declared but the notify-downstreams "
+            f"endpoint is not — add it to `endpoints`, or drop `downstreams` "
+            f"(a list nothing fires is dead config)"
+        )
     return Artifact(
         name=name,
         build=build,
-        bundle=_parse_bundle(where, spec["bundle"]) if "bundle" in spec else None,
-        endpoints=_parse_endpoints(f"{where}.endpoints", spec.get("endpoints", [])),
+        platforms=platforms,
+        bundle=bundle,
+        bundle_config=bundle_config,
+        main_binary=names["main-binary"],
+        product_name=names["product-name"],
+        endpoints=endpoints,
+        downstreams=downstreams,
         e2e=_parse_e2e(where, spec["e2e"]) if "e2e" in spec else None,
         sign=sign,
     )
@@ -659,7 +1071,10 @@ def load_artifacts(cfg: dict) -> tuple[Artifact, ...]:
 #
 # `required` = blocking at merge; `local` = also enforced at commit/push (the
 # required∩local set IS the commit/push checks); `trigger` = which event runs
-# it at all; `runner`/`scope` are routing hints the planner consumes.
+# it at all; `runner`/`scope` are routing hints the planner consumes; `secrets`
+# is the declared-secrets allowlist (#778) — the named block secret slot(s)
+# this lane may be handed (e.g. `secrets = ["lane_token"]`), NOT
+# `secrets: inherit`.
 
 #: The lane triggers the planner routes (glossary: pr / push / nightly /
 #: dispatch). A closed set so a typo (`trigger = "PR"`) dies at parse.
@@ -667,7 +1082,42 @@ LANE_TRIGGERS = frozenset({"pr", "push", "nightly", "dispatch"})
 
 #: The per-lane keys `load_lanes` accepts; anything else is a typo that must
 #: die fast (the same closed-registry philosophy as `_KNOWN_TABLES`).
-_LANE_KEYS = frozenset({"run", "required", "local", "trigger", "runner", "scope"})
+_LANE_KEYS = frozenset(
+    {"run", "required", "local", "trigger", "runner", "scope", "secrets"}
+)
+
+#: A plausible GitHub Actions secret identifier — GitHub's own rule (docs:
+#: "Naming your secrets"): alphanumerics and underscores only, never leading
+#: with a digit. The `GITHUB_` prefix is additionally reserved by GitHub, so a
+#: lane declaring it would name a secret the platform forbids; reject it at
+#: parse (see :func:`_valid_secret_name`) rather than let CI discover it.
+_SECRET_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+
+
+def _valid_secret_name(name: object) -> bool:
+    """Whether ``name`` is a declarable GitHub secret identifier (routing-only).
+
+    This validates the SHAPE of the name the lane routes — the block's optional
+    secret INPUT slot (`lane_token`), not the consumer's underlying repo secret
+    (which the caller forwards and shipit never sees). GitHub's rules: alnum +
+    underscore, no leading digit, and no `GITHUB_` prefix (platform-reserved).
+    """
+    return (
+        isinstance(name, str)
+        and bool(_SECRET_NAME_RE.match(name))
+        and not name.upper().startswith("GITHUB_")
+    )
+
+
+#: The closed registry of secret SLOTS the reusable `wf-checks.yml` block
+#: actually declares and routes. A lane's `secrets` allowlist may name only
+#: these: the block gates exactly `contains(matrix.secrets, 'lane_token')`, so a
+#: well-formed-but-unlisted name (`PRIVATE_TOKEN`, the typo `lane_tokne`) would
+#: parse, ride the matrix, and then receive nothing — a silently-dropped
+#: credential. Validate entries against this set at parse, in lockstep with the
+#: block's declared inputs (ADR-0040 routing-only), rather than let CI discover
+#: the drop. Grow this set and the block's `secrets:` inputs together.
+_LANE_SECRET_SLOTS = frozenset({"lane_token"})
 
 
 @dataclass(frozen=True)
@@ -678,6 +1128,16 @@ class Lane:
     ``"test rust"``); ``required`` blocks at merge; ``local`` also enforces at
     commit/push; ``trigger`` names the event that runs it; ``runner`` and
     ``scope`` are planner routing hints (``None`` = planner default).
+
+    ``secrets`` is the lane's DECLARED-SECRETS ALLOWLIST (#778): the named,
+    scoped secret slot(s) this lane may be handed — NOT ``secrets: inherit``.
+    Each name is one optional secret INPUT the ``wf-checks`` block declares
+    (today just ``lane_token``, a single repo-scoped read token); the planner
+    carries the allowlist into the matrix entry and the block exposes an
+    opted-in slot as env for THIS lane's step only, so a lane that did not
+    declare a slot never sees the credential (least privilege). Empty tuple =
+    the lane receives no secret (the default). The block stays routing-only
+    (ADR-0040): it routes named secrets, it embeds no producing logic.
     """
 
     name: str
@@ -687,6 +1147,7 @@ class Lane:
     trigger: str = "pr"
     runner: str | None = None
     scope: str | None = None
+    secrets: tuple[str, ...] = ()
 
 
 #: The fragment-sync check declared as a Lane (TOL01-WS06, PRD story 18): a PR
@@ -749,6 +1210,7 @@ def _parse_lane(name: str, spec: object) -> Lane:
             raise ConfigError(f"[lanes].{name}: `{key}` must be a non-empty string")
         else:
             cleaned[key] = value.strip()
+    secrets = _parse_lane_secrets(name, spec.get("secrets"))
     return Lane(
         name=name,
         run=run.strip(),
@@ -757,7 +1219,45 @@ def _parse_lane(name: str, spec: object) -> Lane:
         trigger=trigger,
         runner=cleaned["runner"],
         scope=cleaned["scope"],
+        secrets=secrets,
     )
+
+
+def _parse_lane_secrets(name: str, value: object) -> tuple[str, ...]:
+    """Parse a lane's ``secrets`` allowlist into an ordered tuple of names.
+
+    Absent = ``()`` (the lane receives no secret). Present must be a list of
+    strings, each both a plausible GitHub secret identifier
+    (:func:`_valid_secret_name`) AND a slot the `wf-checks.yml` block actually
+    routes (:data:`_LANE_SECRET_SLOTS`); a non-list, a non-string entry, a
+    malformed name, or a well-formed-but-unsupported slot dies at parse — an
+    unroutable secret name must never reach the planner as a silently-dropped CI
+    credential. The result is order-preserving-deduplicated so a repeated name
+    yields a clean matrix payload.
+    """
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise ConfigError(
+            f"[lanes].{name}: `secrets` must be a list of secret names, e.g. "
+            '`secrets = ["lane_token"]`'
+        )
+    for entry in value:
+        if not _valid_secret_name(entry):
+            raise ConfigError(
+                f"[lanes].{name}: `secrets` entry {entry!r} is not a valid GitHub "
+                "secret name (alphanumerics/underscore, no leading digit, no "
+                "`GITHUB_` prefix)"
+            )
+        if entry not in _LANE_SECRET_SLOTS:
+            slots = ", ".join(sorted(_LANE_SECRET_SLOTS))
+            raise ConfigError(
+                f"[lanes].{name}: `secrets` entry {entry!r} is not a "
+                f"workflow-supported secret slot (known slots: {slots}). The "
+                "`wf-checks.yml` block routes only these; a well-formed but "
+                "unlisted name would ride the matrix and receive nothing."
+            )
+    return tuple(dict.fromkeys(value))
 
 
 def load_lanes(cfg: dict) -> list[Lane]:
@@ -767,8 +1267,9 @@ def load_lanes(cfg: dict) -> list[Lane]:
     Declaration order is preserved (TOML table order), so the planner's job
     emission is deterministic from the file. Raises :class:`ConfigError` on any
     malformed entry — an unknown key, a missing/empty ``run``, an
-    out-of-vocabulary ``trigger``, a blank ``runner``/``scope`` — so a typo'd
-    lane dies at parse, never as a silently-unrouted CI job.
+    out-of-vocabulary ``trigger``, a blank ``runner``/``scope``, a
+    non-list/ill-named/unsupported-slot ``secrets`` allowlist — so a typo'd lane
+    dies at parse, never as a silently-unrouted CI job or unroutable secret.
     """
     lanes = cfg.get("lanes", {})
     if not isinstance(lanes, dict):
@@ -901,9 +1402,13 @@ def write_manifest(path: str | Path, *, version: str, managed: dict[str, str]) -
 # The local-reviewer GitHub App credential mappings install seeds into a
 # consumer's ``[secrets]``. Each GitHub secret NAME is sourced from the Doppler
 # github/prd key of the SAME name; the credentials let a CI-side review post as the
-# App bot with the same key the local path sources directly (CI parity). The
-# generic gh-setup push only provisions a secret when its source RESOLVES, so
-# seeding the mapping is safe even before a consumer's GitHub App is installed.
+# App bot with the same key the local path sources directly (CI parity). Seeding
+# the mapping is safe even before a consumer's GitHub App is installed: gh-setup's
+# sync derives an App pair's REQUIREMENT from the consumer's ``[reviewers]``
+# declarations (#740, :func:`shipit.release.secretreq.reviewer_requirements`), so
+# a seeded pair whose reviewer is never opted in is flagged as an orphan (not
+# pushed, not demanded), and one whose reviewer IS declared must resolve or the
+# sync fails loud.
 #
 # The key NAMES are never spelled here: they DERIVE from the Backend registry
 # (:func:`shipit.agent.backend.funnel_backends` → ``doppler_pem_key`` /
@@ -932,8 +1437,9 @@ _SECRETS_SCAFFOLD_HEADER = """\
 # [secrets] — repo Actions secrets. Each table key is the GitHub secret NAME; the
 # value names exactly one source ({ doppler = "KEY" } / { env = "VAR" } /
 # { prompt = true }). Seeded with shipit's local-reviewer (codex/agy) GitHub App
-# credentials, each sourced from Doppler github/prd. `shipit gh-setup` only pushes
-# a secret when its source resolves, so these are safe before the App is installed.
+# credentials, each sourced from Doppler github/prd. `shipit gh-setup` pushes an
+# App credential only when its reviewer is declared in [reviewers]; an undeclared
+# pair is flagged as an orphan (not pushed), so seeding is safe before opt-in.
 [secrets]"""
 
 

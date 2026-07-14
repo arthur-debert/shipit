@@ -297,6 +297,17 @@ def test_instructions_anchored_to_config_dir_not_cwd(tmp_path, monkeypatch):
     )
 
 
+def test_parse_roster_relative_config_path_keeps_instructions_absolute(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    roster = reviewers_config.parse_roster(
+        {"reviewers": {"codex": {"instructions": "review.md"}}},
+        config_path="config/custom-policy.toml",
+    )
+    assert roster.entry("codex").instructions == str(tmp_path / "config" / "review.md")
+
+
 def test_absolute_instructions_kept(tmp_path):
     root = _write(tmp_path, '[reviewers]\ncodex = { instructions = "/abs/rev.md" }\n')
     assert load_roster(root).entry("codex").instructions == "/abs/rev.md"

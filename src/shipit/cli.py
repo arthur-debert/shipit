@@ -31,10 +31,13 @@ from .verbs.lab import lab_group
 from .verbs.logevent import log as log_group
 from .verbs.pr import pr as pr_group
 from .verbs.provision import provision as provision_group
+from .verbs.release import release as release_group
+from .verbs.review import review as review_group
 from .verbs.session import session as session_group
 from .verbs.spawn import spawn as spawn_group
 from .verbs.tree import tree as tree_group
 from .verbs.wf import wf as wf_group
+from .verbs.wf_canary import verify_canary_cmd
 
 #: The CLI entry's own logger — carries the SHIPIT_EXEC announcement's durable
 #: twin (ADR-0033) through the LOG01 pipeline like any subsystem logger.
@@ -229,9 +232,19 @@ def test_cmd(args: tuple[str, ...]) -> None:
     "(go's -ldflags -X, ADR-0041). Supplied, never computed; absent keeps "
     "the embedded default.",
 )
+@click.option(
+    "--target",
+    "target",
+    metavar="TRIPLE",
+    default=None,
+    help="Cross-compile rust legs to TRIPLE (`cargo build --target TRIPLE`), "
+    "landing the binary in target/TRIPLE/release/ (TOL02-WS11). For the cross "
+    "platforms a native runner cannot build natively (darwin-x86_64, musl); "
+    "absent builds native into target/release/. No-op for go/python/npm.",
+)
 @click.argument("args", nargs=-1, type=click.UNPROCESSED)
-def build_cmd(version: str | None, args: tuple[str, ...]) -> None:
-    """Run this repo's build legs: `shipit build [--version VERSION] [LEG] [-- ARGS...]`.
+def build_cmd(version: str | None, target: str | None, args: tuple[str, ...]) -> None:
+    """Run this repo's build legs: `shipit build [--version VERSION] [--target TRIPLE] [LEG] [-- ARGS...]`.
 
     Walks the `.shipit.toml [toolchains]` path->toolchain map and dispatches
     each build leg to its REAL builder (cargo / go build / uv build / the npm
@@ -243,9 +256,11 @@ def build_cmd(version: str | None, args: tuple[str, ...]) -> None:
     (`shipit build npm -- --workspace web`) and require exactly one selected
     leg. `--version` supplies the release version injected where a go target
     declares its var (ADR-0041). Exit: 0 all steps build, 1 any step fails (a
-    missing builder hard-fails, never skips), 2 usage.
+    missing builder hard-fails, never skips), 2 usage. `--target` cross-compiles
+    rust legs to a triple (target/TRIPLE/release/) for the cross platforms a
+    native runner cannot build natively (TOL02-WS11).
     """
-    raise SystemExit(build_verb.run(list(args), version=version))
+    raise SystemExit(build_verb.run(list(args), version=version, target=target))
 
 
 @root.command(name="e2e", context_settings={"ignore_unknown_options": True})
@@ -272,6 +287,15 @@ def e2e_cmd(args: tuple[str, ...]) -> None:
 # `check` (the changelog-sync lane's run) and the cut-time `coalesce`.
 root.add_command(changelog_group)
 
+# The nested `release` group (TOL02) — the release pipeline's independently
+# invocable stages (PRD story 19): `preflight` (WS02: the planner + secrets
+# derivation), `prepare` (WS01: version resolve, bump projection, changelog
+# roll, commit + annotated tag + push, ADR-0041), `bundle` + `assert-bundle`
+# (WS03: unsigned Artifact composition and the scar-#2 integrity guard),
+# `sign` (WS04: the consumer-agnostic mac signer unit, workflows.lex §3.1),
+# and `publish` (WS05: the terminal endpoint-adapter dispatch, scar-#3 gate).
+root.add_command(release_group)
+
 
 # The nested `ci` group (TOL01-WS05) — the PR-time routing surface: `ci plan`
 # is the one lane-planner invocation whose JSON matrix the wf-checks workflow
@@ -295,6 +319,11 @@ root.add_command(provision_group)
 # (verbs/pr/), so its verbs register there rather than as inline commands here;
 # attach the whole group to the root.
 root.add_command(pr_group)
+
+# The top-level `review` group (#826) — backend-agnostic, agent-facing review
+# utilities that touch no PR state (`review validate` is the agent self-check);
+# deliberately NOT under `pr`, whose review subgroup owns the PR-scoped acts.
+root.add_command(review_group)
 
 # The nested `hook` group (Claude Code lifecycle-hook entrypoints) — the binary
 # side of the agent harness (ADR-0012); attached the same way as `pr`.
@@ -341,6 +370,11 @@ root.add_command(fleet_group)
 # The nested `wf` group (TOL01-WS04) — workflow tools: `shipit wf test` runs
 # one workflow/job under act in a container against a crafted event, so a
 # workflow edit is validated locally before any push (PRD stories 40/41).
+# `shipit wf verify-canary` (#899) is the group's LIVE counterpart — the
+# standing sign e2e that dispatches shipit-canary's blessed caller through
+# both proof chains; registered here (not at wf.py's bottom) so the sibling
+# modules stay import-order independent.
+wf_group.add_command(verify_canary_cmd)
 root.add_command(wf_group)
 
 
@@ -357,6 +391,14 @@ _HELP_RESOURCES = {
     ("changelog", "check"): ("shipit.verbs", "changelog_check_help.txt"),
     ("changelog", "render"): ("shipit.verbs", "changelog_render_help.txt"),
     ("changelog", "coalesce"): ("shipit.verbs", "changelog_coalesce_help.txt"),
+    ("release",): ("shipit.verbs", "release_help.txt"),
+    ("release", "preflight"): ("shipit.verbs", "release_preflight_help.txt"),
+    ("release", "prepare"): ("shipit.verbs", "release_prepare_help.txt"),
+    ("release", "notes"): ("shipit.verbs", "release_notes_help.txt"),
+    ("release", "bundle"): ("shipit.verbs", "release_bundle_help.txt"),
+    ("release", "assert-bundle"): ("shipit.verbs", "release_assert_bundle_help.txt"),
+    ("release", "sign"): ("shipit.verbs", "release_sign_help.txt"),
+    ("release", "publish"): ("shipit.verbs", "release_publish_help.txt"),
     ("ci",): ("shipit.verbs", "ci_help.txt"),
     ("ci", "plan"): ("shipit.verbs", "ci_plan_help.txt"),
     ("logs",): ("shipit.verbs", "logs_help.txt"),
@@ -371,6 +413,10 @@ _HELP_RESOURCES = {
     ("pr", "ready"): ("shipit.verbs.pr", "pr_ready_help.txt"),
     ("pr", "classify"): ("shipit.verbs.pr", "pr_classify_help.txt"),
     ("pr", "wait"): ("shipit.verbs.pr", "pr_wait_help.txt"),
+    # The top-level `review` group (#826) — backend-agnostic self-check, moved
+    # OUT of `pr review` (a schema check touches no PR state).
+    ("review",): ("shipit.verbs", "review_help.txt"),
+    ("review", "validate"): ("shipit.verbs", "review_validate_help.txt"),
     ("hook",): ("shipit.verbs.hook", "hook_help.txt"),
     ("hook", "pretooluse"): ("shipit.verbs.hook", "hook_pretooluse_help.txt"),
     ("hook", "stop"): ("shipit.verbs.hook", "hook_stop_help.txt"),
@@ -401,10 +447,12 @@ _HELP_RESOURCES = {
     ("spawn", "brief"): ("shipit.verbs", "spawn_brief_help.txt"),
     ("session",): ("shipit.verbs", "session_help.txt"),
     ("session", "codex"): ("shipit.verbs", "session_codex_help.txt"),
+    ("session", "resume"): ("shipit.verbs", "session_resume_help.txt"),
     ("fleet",): ("shipit.verbs", "fleet_help.txt"),
     ("fleet", "sweep"): ("shipit.verbs", "fleet_sweep_help.txt"),
     ("wf",): ("shipit.verbs", "wf_help.txt"),
     ("wf", "test"): ("shipit.verbs", "wf_test_help.txt"),
+    ("wf", "verify-canary"): ("shipit.verbs", "wf_verify_canary_help.txt"),
 }
 
 register_long_help(root, _HELP_RESOURCES)

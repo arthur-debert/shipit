@@ -316,3 +316,60 @@ def test_check_targets_unambiguous_refuses_a_toolchain_on_multiple_legs():
             [_artifact("x", config.BuildTarget("go", package="./cmd/x"))],
             [_leg("go", path="svc-a"), _leg("go", path="svc-b")],
         )
+
+
+# --------------------------------------------------------------------------
+# Cross `--target <triple>`: the rust-only triple-dir redirect (TOL02-WS11)
+# --------------------------------------------------------------------------
+
+
+def test_target_appends_cargo_target_to_a_whole_leg_rust_build():
+    # `--target <triple>` cross-compiles the whole rust leg — cargo then writes
+    # target/<triple>/release/ (the cross platforms a native runner cannot
+    # build natively: darwin-x86_64, musl). Appended LAST, after the base.
+    (step,) = build_mod.plan_build(
+        [_leg("rust")], [], target="x86_64-unknown-linux-musl"
+    )
+    assert step.argv == (
+        "cargo",
+        "build",
+        "--release",
+        "--target",
+        "x86_64-unknown-linux-musl",
+    )
+
+
+def test_target_appends_cargo_target_after_artifact_narrowing():
+    # The narrowed build (`-p <package>`) still gains --target — the artifact's
+    # unit AND the cross triple both ride the one cargo invocation.
+    (step,) = build_mod.plan_build(
+        [_leg("rust")],
+        [_artifact("lex", config.BuildTarget("rust", package="lex-cli"))],
+        target="x86_64-pc-windows-msvc",
+    )
+    assert step.argv == (
+        "cargo",
+        "build",
+        "--release",
+        "-p",
+        "lex-cli",
+        "--target",
+        "x86_64-pc-windows-msvc",
+    )
+
+
+def test_target_is_a_no_op_for_non_rust_toolchains():
+    # go cross-compiles by GOOS/GOARCH, python/npm have no per-target build —
+    # so --target touches ONLY rust legs; the others pass through untouched.
+    go_step, py_step = build_mod.plan_build(
+        [_leg("go"), _leg("python", path="pkg")], [], target="x86_64-apple-darwin"
+    )
+    assert "--target" not in go_step.argv
+    assert py_step.argv == ("uv", "build")
+
+
+def test_no_target_keeps_the_native_build():
+    # The default (target=None) is the native build — no --target, cargo writes
+    # target/release/ (the native local + native-runner path).
+    (step,) = build_mod.plan_build([_leg("rust")], [])
+    assert "--target" not in step.argv

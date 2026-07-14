@@ -16,6 +16,44 @@ channels = ["conda-forge"]
 platforms = ["linux-64", "osx-arm64", "linux-aarch64"]
 
 [dependencies]
+# >>> shipit-managed launcher deps (do not edit; regenerate via `shipit install`) >>>
+# The pinned `bin/shipit` launcher's one prerequisite (#758, TOL02-WS17
+# #794): every workflow block (wf-checks and the whole wf-release family)
+# runs `pixi run --locked ./bin/shipit ...`, and the ADR-0033 launcher
+# resolves the repo's shipit pin via `uv tool run` — but hosted runners do
+# not carry uv, so without this block the very first `./bin/shipit` dies 127
+# before any verb runs. Provisioned from conda-forge under setup-pixi's
+# lockfile-keyed cache (the #582 doctrine; the spike measured the launcher's
+# uv resolve at 5s cold / 0-3s warm riding this env — no extra cache step).
+# Anchored under [dependencies] — the DEFAULT env — because that is exactly
+# the PATH a bare `pixi run --locked <task>` resolves. Pinned to the minor
+# line of Layer 0's UV_PIN (bin/setup-dev-env.sh), so dev machines and CI
+# provision the same uv; a lockstep drift test (tests/test_install.py) fails
+# when the two move apart. `uv build` (the python bundle composition) rides
+# this same entry.
+uv = "0.11.*"
+# <<< shipit-managed launcher deps <<<
+# >>> shipit-managed python release deps (do not edit; regenerate via `shipit install`) >>>
+# The python RELEASE-side publish tool (#801, closing open hole 2 of the
+# TOL02-WS17 inventory): `shipit release publish`'s pypi endpoint uploads via
+# `twine`, which hosted runner images do not carry and nothing else
+# provisions — the upload died 127 on every stock pypi consumer. Delivered on
+# the python toolchain signal (a tracked pyproject.toml), anchored under
+# [dependencies] — the DEFAULT env — because wf-publish executes shipit via
+# bare `pixi run --locked ./bin/shipit`, and twine must be on THAT run's
+# PATH. Provisioned from conda-forge under setup-pixi's lockfile-keyed cache
+# (the #582 doctrine: the release run NEVER installs at run time — publish
+# fails loudly naming this reconcile instead). Pinned to the minor line; a
+# bump is one data edit, rolled out on each consumer's next `shipit install`
+# reconcile. If this repo no longer ships python (the last pyproject.toml is
+# gone), delete this block and its `pixi.toml#shipit-python-release-deps`
+# entry in .shipit.toml's [managed] table — a reconcile only ADDS toolchain
+# blocks, it never retires one.
+twine = "6.2.*"
+# <<< shipit-managed python release deps <<<
+# (For shipit-self the entry is redundant-but-harmless, like the managed lint
+# block: the dogfood repo's declined bin/shipit execs shipit FROM SOURCE via
+# the pixi env — see [managed.decline] in .shipit.toml.)
 python = "3.13.*"
 
 # The lint toolchain rides in the DEFAULT env (issue #210, option (a)): `shipit
@@ -175,9 +213,10 @@ test = { cmd = "./bin/shipit provision lexd && ./bin/shipit test" }
 # provisioning script anymore.
 [feature.lint.dependencies]
 # >>> shipit-managed lint deps (do not edit; regenerate via `shipit install`) >>>
-# The fleet-pinned lint toolchain (docs/legacy-prd/adoption.md: the managed set owns
-# the consumer environment). Canonical versions live HERE — a bump is one data
-# edit, rolled fleet-wide on each consumer's next `shipit install` reconcile.
+# The fleet-pinned lint toolchain (docs/legacy-prd/adoption.md in the
+# arthur-debert/shipit repo: the managed set owns the consumer environment).
+# Canonical versions live HERE — a bump is one data edit, rolled fleet-wide on
+# each consumer's next `shipit install` reconcile.
 ruff = "0.15.*"
 # shellcheck is PINNED DOWN to 0.10.* (not 0.11): shellcheck 0.11.0 has an SC2218
 # reaching-definitions false positive — a call to an EARLIER-defined function is

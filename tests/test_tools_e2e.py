@@ -158,6 +158,29 @@ def test_rust_binary_without_a_package_is_named_by_the_artifact():
     assert loc.relpath == "target/release/mytool"
 
 
+def test_rust_cross_target_reads_the_triple_release_dir():
+    # A cross build (`shipit build --target <triple>`) redirects cargo to
+    # target/<triple>/release/ — binary_location reads the SAME dir when handed
+    # the triple (TOL02-WS11), so the bundle consumer finds the cross binary.
+    artifact = _artifact("app", build=(config.BuildTarget("rust", package="app-cli"),))
+    loc = e2e_mod.binary_location(
+        artifact, (_entry(".", "rust"),), target_triple="x86_64-unknown-linux-musl"
+    )
+    assert loc == e2e_mod.BinaryLocation(
+        leg_path=".", relpath="target/x86_64-unknown-linux-musl/release/app-cli"
+    )
+
+
+def test_go_cross_target_is_ignored_native_path_stays():
+    # go does not cross-compile by `--target` (it uses GOOS/GOARCH), so the
+    # triple never redirects a go binary's location — the native path stays.
+    artifact = _artifact("dodot", build=(config.BuildTarget("go"),))
+    loc = e2e_mod.binary_location(
+        artifact, (_entry(".", "go"),), target_triple="x86_64-pc-windows-msvc"
+    )
+    assert loc.relpath == "dodot"
+
+
 def test_go_binary_is_the_built_package_basename_in_the_leg_path():
     # `go build ./cmd/padz` writes `padz` into its cwd — the leg's path.
     artifact = _artifact(
@@ -172,14 +195,24 @@ def test_go_binary_without_a_package_is_named_by_the_artifact():
     assert e2e_mod.binary_location(artifact, (_entry(".", "go"),)).relpath == "dodot"
 
 
-@pytest.mark.parametrize("package", [".", "./", "/"])
+@pytest.mark.parametrize("package", [".", "./", "..", "../", "/"])
 def test_ambiguous_go_package_is_refused_with_a_real_diagnosis(package):
-    # `.` / `./` / `/` have no basename to name the binary: fail fast with a
-    # clear ConfigError, never a downstream "built green but no binary at
+    # `.` / `./` / `..` / `/` have no basename to name the binary: fail fast
+    # with a clear ConfigError, never a downstream "built green but no binary at
     # <dir>" (drop `package` to build the module root as the artifact name).
     artifact = _artifact("padz", build=(config.BuildTarget("go", package=package),))
     with pytest.raises(config.ConfigError, match=r"has no binary name.*\./cmd/padz"):
         e2e_mod.binary_location(artifact, (_entry(".", "go"),))
+
+
+@pytest.mark.parametrize("package", [".", "./", "..", "/"])
+def test_ambiguous_rust_package_is_refused_before_a_nonsense_binary_path(package):
+    # A rust `package = "."` would otherwise yield `target/release/.` and a
+    # misleading "no built binary" — refuse it up front with the crate hint,
+    # the same guard go gets (the archive composition consumes this location).
+    artifact = _artifact("app", build=(config.BuildTarget("rust", package=package),))
+    with pytest.raises(config.ConfigError, match=r"has no binary name.*crate name"):
+        e2e_mod.binary_location(artifact, (_entry(".", "rust"),))
 
 
 def test_the_first_binary_producing_target_wins_over_non_binary_ones():

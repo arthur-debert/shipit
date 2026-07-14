@@ -10,18 +10,18 @@ fail-closed contract (no git, no PR) on the recorded boundary.
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import pytest
 
-from shipit import config, execrun, gh, git
+from shipit import config, execrun, gh, git, lint
 from shipit.install import apply as iapply
 from shipit.install import reconcile as irec
 from shipit.install import selfcert
 from shipit.install import units as iunits
 from shipit.install.errors import InstallError, SelfCertError
 from shipit.verbs import install as verb
-from shipit.verbs import lint
 
 #: A syntactically valid full sha for pins the launcher must accept.
 GOOD_SHA = "a" * 40
@@ -152,6 +152,26 @@ def test_manifest_check_solves_the_lint_env(staged):
     assert seen["argv"] == ["pixi", "install", "--environment", "lint"]
 
 
+def test_manifest_solve_is_unlocked_so_managed_block_edits_stay_lock_coherent(
+    staged,
+):
+    # The #793 lock-coherence contract: a reconcile that edits a managed
+    # pixi.toml block (e.g. delivering the cargo-edit release block) makes the
+    # committed pixi.lock stale — every consumer `pixi run --locked` would then
+    # hard-fail. Self-cert's solve deliberately carries NO `--locked`, so pixi
+    # REGENERATES the workspace lock to match the reconciled manifest (and
+    # apply stages it into the same commit — the PIXI_LOCK tests below); a
+    # locked solve here would fail on exactly the edit install just made.
+    seen = {}
+
+    def runner(argv, **kw):
+        seen["argv"] = argv
+        return _exec_ok(argv)
+
+    assert selfcert._check_manifest(staged, runner).ok
+    assert "--locked" not in seen["argv"]
+
+
 def test_manifest_check_solves_under_a_scrubbed_env(staged, monkeypatch):
     # A parent dev session's leaked project pointer must not reach the solve:
     # self-cert hands pixi a scrubbed, complete child env (replace_env), so the
@@ -272,6 +292,91 @@ def test_delivered_lint_fails_closed_when_a_planned_file_is_missing(staged):
     )
     assert not check.ok
     assert "bin/shipit" in check.detail
+
+
+# --------------------------------------------------------------------------
+# Postcondition 2, managed skills (#777) — the delivered skill/*.md content is
+# no longer exempt from the delivered markdownlint gate, so self-cert's
+# delivered-lint CATCHES a skill-content defect that would otherwise ride the
+# managed set into a consumer's markdownlint gate (modes 4+6). These route the
+# REAL markdownlint through selfcert's own `_check_delivered_lint` boundary,
+# scoped to just the skill files so only the markdown leg runs.
+# --------------------------------------------------------------------------
+
+
+def _skill_only_plan(root) -> irec.Plan:
+    """A plan whose write set is JUST the managed skill files, so a scoped
+    delivered-lint routes only markdownlint over the shipped skill/*.md."""
+    skills = [u for u in iunits.load_units() if u.key.startswith("skills/")]
+    decisions = tuple(
+        irec.Decision(
+            unit=u,
+            action=irec.ADD,
+            desired_hash="h",
+            consumer_hash=None,
+            pristine_hash=None,
+        )
+        for u in skills
+    )
+    return irec.Plan(root=str(root), decisions=decisions, retired=(), seeds=())
+
+
+def _unwrapping_real_runner():
+    """A self-cert Exec boundary that unwraps `pixi run ... -- <tool> <args>`
+    and runs the REAL tool. The tests provision the lint toolchain, so this
+    exercises the actual markdownlint gate over the delivered skill files — the
+    delivered `.markdownlint.yaml` (`--config`) and `.markdownlintignore`
+    (auto-discovered from cwd) — without solving a pixi env.
+
+    The caller's kwargs are forwarded verbatim, so the probe stays faithful to
+    production self-cert: it runs under the SCRUBBED env (`scrub_env` keeps PATH,
+    dropping only leaked PIXI_*/conda pointers) and the `INSTALL_TIMEOUT` bound
+    `_lint_env_run_tool` passes — a wedged markdownlint fails on the timeout
+    rather than hanging the suite unbounded."""
+
+    def runner(argv, *, cwd, **kw):
+        real = argv[argv.index("--") + 1 :]
+        kw.setdefault("check", False)
+        return execrun.run(real, cwd=cwd, **kw)
+
+    return runner
+
+
+def test_managed_skill_files_are_in_the_delivered_lint_set(staged):
+    # The root-cause guard (no binary): every managed skill/*.md is a whole-file
+    # unit, so it is in scope for the delivered-lint check — the blindness was
+    # only the shipped `.markdownlintignore` exempting `skills/`, now removed.
+    paths = selfcert.delivered_lint_paths(_skill_only_plan(staged))
+    assert "skills/grill-me-with-docs/SKILL.md" in paths
+    assert "skills/to-spec/SKILL.md" in paths
+    # The delivered ignore no longer blanket-exempts the managed skills tree.
+    ignore = (staged / ".markdownlintignore").read_text().splitlines()
+    assert "skills/" not in {line.strip() for line in ignore}
+
+
+@pytest.mark.skipif(shutil.which("markdownlint") is None, reason="no markdownlint")
+def test_delivered_skill_files_pass_the_delivered_config_real(staged):
+    # The two files #777 fixed (and the whole shipped skills tree) pass the
+    # delivered markdownlint config under self-cert's own scoped run: the managed
+    # set never fails its own checks (the WS09/WS10 canary class, ADR-0033).
+    check = selfcert._check_delivered_lint(
+        staged, _skill_only_plan(staged), _unwrapping_real_runner()
+    )
+    assert check.ok, check.detail
+
+
+@pytest.mark.skipif(shutil.which("markdownlint") is None, reason="no markdownlint")
+def test_delivered_lint_catches_a_planted_skill_defect_real(staged):
+    # Plant an MD040 bare-fence defect (mode 4's exact class) into a delivered
+    # skill file: self-cert must now CATCH it — the defect can no longer ship.
+    skill = staged / "skills" / "grill-me-with-docs" / "SKILL.md"
+    skill.write_text(skill.read_text() + "\n```\nplanted bare fence\n```\n")
+    check = selfcert._check_delivered_lint(
+        staged, _skill_only_plan(staged), _unwrapping_real_runner()
+    )
+    assert not check.ok
+    assert "MD040" in check.detail
+    assert "skills/grill-me-with-docs/SKILL.md" in check.detail
 
 
 # --------------------------------------------------------------------------
@@ -452,6 +557,27 @@ def test_certify_collects_every_miss_never_fail_fast(staged):
     names = {c.name for c in report.failures}
     assert selfcert.CHECK_DELIVERED_LINT in names
     assert selfcert.CHECK_HOOKS in names
+
+
+def test_certify_reports_malformed_config_across_postconditions(staged):
+    # Moving lint behind its service boundary must not let ConfigError escape
+    # self-certification: every postcondition still reports its own failure.
+    (staged / config.CONFIG_NAME).write_text("not = valid = toml\n")
+    _live_hooks(staged)
+
+    report = selfcert.certify(
+        _plan_with_writes(staged),
+        staged,
+        hooks_activated=True,
+        stamped_pin=GOOD_SHA,
+        runner=_dispatching_runner(GOOD_SHA),
+    )
+
+    assert not report.ok
+    failures = {check.name: check.detail for check in report.failures}
+    assert selfcert.CHECK_MANIFEST in failures
+    assert selfcert.CHECK_DELIVERED_LINT in failures
+    assert "scoped lint could not run" in failures[selfcert.CHECK_DELIVERED_LINT]
 
 
 def test_format_failure_names_every_missed_postcondition():

@@ -3,7 +3,9 @@
 ONE definition of "the same claim", tuned in ONE place, shared by its two
 consumers: the Ground-truth **scorer** (:mod:`shipit.review.scorer`, matching an
 emitted finding against a fixture label) and semantic dedup of same-round
-findings (#673, matching two emitted findings against each other). No LLM is
+findings (#673/#750, matching two emitted findings against each other —
+:func:`shipit.review.fanout.dedup_union`'s opt-in near-duplicate collapse,
+which applies :func:`same_claim` at zero line slack). No LLM is
 ever part of this module — a misjudging semantic matcher would be the RVW02
 calibrator failure reproduced inside the ruler itself (ADR-0048); matching is
 pure lexical mechanics, deterministic across runs and free to re-run forever.
@@ -207,7 +209,10 @@ def same_claim(
     The symmetric projection of the label rule for finding-vs-finding
     comparison: same file, lines within ``line_slack`` of each other (a missing
     line on either side falls back to file scope — two file-scoped claims in
-    one file compare on text alone), token overlap ≥ ``threshold``.
+    one file compare on text alone), token overlap ≥ ``threshold``. The
+    same-round union dedup (#750, :func:`shipit.review.fanout.dedup_union`)
+    consumes this with ``line_slack=0`` — within one round every pass reviewed
+    the same head, so there is no drift for the default slack to absorb.
     """
     if a.file != b.file:
         return False

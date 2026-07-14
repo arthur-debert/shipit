@@ -58,6 +58,24 @@ LINT_CONFIG_UNITS = (
     (PRETTIERRC_FILE, "prettierrc.yaml"),
 )
 
+# The managed `.gitignore` release-output block (#906). shipit's OWN release
+# stages write transient artifacts at the repo ROOT — `shipit release notes`
+# writes RELEASE_NOTES.md (shipit/verbs/release.py: DEFAULT_NOTES_FILE), the
+# sign stage stages `dist-signed/` (wf-sign-mac.yml `--out dist-signed`), and
+# compositions write `dist/` (DEFAULT_BUNDLE_DIR). For a consumer whose
+# publishable crate IS the repo root (a single-crate package, not a `crates/`
+# workspace), `cargo publish` runs its VCS-dirty check against that root and
+# ABORTS when these artifacts sit there uncommitted — the simple-gal
+# `v0.20.6-rc.1` failure. So the managed set ignores them fleet-wide: a marker
+# block in the consumer-owned `.gitignore` (comment markers — `#` is a valid
+# gitignore comment; consumer entries outside the block are untouched, spliced
+# in / created at the repo root by the standard block splicer). NOT
+# `--allow-dirty`, which would bake the artifacts into the published .crate.
+GITIGNORE_FILE = ".gitignore"
+GITIGNORE_KEY = ".gitignore#shipit-release-outputs"
+GITIGNORE_OPEN = "# >>> shipit-managed release-output ignores (do not edit; regenerate via `shipit install`) >>>"
+GITIGNORE_CLOSE = "# <<< shipit-managed release-output ignores <<<"
+
 PIXI_FILE = "pixi.toml"
 PIXI_KEY = "pixi.toml#shipit-tasks"
 PIXI_OPEN = (
@@ -110,16 +128,61 @@ PIXI_ENVS_OPEN = "# >>> shipit-managed environments (do not edit; regenerate via
 PIXI_ENVS_CLOSE = "# <<< shipit-managed environments <<<"
 PIXI_ENVS_ANCHOR = "[environments]"
 
+# The UNCONDITIONAL launcher-deps block (#758, closed by TOL02-WS17 #794):
+# `uv` for the pinned ADR-0033 `bin/shipit` launcher, in the DEFAULT env's
+# [dependencies] — every workflow block (wf-checks and the wf-release family)
+# runs `pixi run --locked ./bin/shipit`, and hosted runners carry no uv, so
+# the launcher's one prerequisite must ride the managed pixi surface (the
+# #582 doctrine: provisioning lands in setup-pixi's lockfile-keyed cache,
+# never a run-time install). Unconditional — unlike the per-toolchain blocks
+# below, EVERY consumer's managed tasks resolve through `bin/shipit` — and
+# pinned in lockstep with Layer 0's UV_PIN (bin/setup-dev-env.sh), drift-
+# tested in tests/test_install.py. A consumer that already pins `uv` in its
+# own [dependencies] (the #758 consumer-side workaround) keeps its pin via
+# the PixiKeyConflict first-splice guard, exactly like the cargo-edit
+# precedent (#793) — their entry stays until their own reconcile.
+PIXI_LAUNCHER_DEPS_KEY = "pixi.toml#shipit-launcher-deps"
+PIXI_LAUNCHER_DEPS_OPEN = "# >>> shipit-managed launcher deps (do not edit; regenerate via `shipit install`) >>>"
+PIXI_LAUNCHER_DEPS_CLOSE = "# <<< shipit-managed launcher deps <<<"
+PIXI_LAUNCHER_DEPS_ANCHOR = "[dependencies]"
+
 # The CONDITIONAL per-toolchain dep blocks (#547 Layer 1): a consumer whose
 # tracked manifests signal a toolchain (a `Cargo.toml` anywhere → rust, `go.mod`
-# → go, `package.json` → node — the same per-manifest discovery that makes the
-# corresponding `shipit lint` leg run, see verbs/lint.py) gets that toolchain
+# → go, `package.json` → node, a `pyproject.toml` → python — for the compiled
+# toolchains the same per-manifest discovery that makes the corresponding
+# `shipit lint` leg run, see shipit/lint.py) gets that toolchain
 # pinned through pixi/conda-forge, so the lint legs stop hard-failing (127)
 # wherever the host happens to lack cargo/go/node — the #526 "clippy is
 # local-only" CI gap. rust and go anchor under the lint feature (they provision
 # LINTER toolchains, siblings of the managed lint-deps block above); node
 # anchors under `[dependencies]` — it provisions the repo's OWN node/pnpm
-# runtime, not a linter. Delivered only when :func:`load_units` is passed the
+# runtime, not a linter. The rust signal delivers TWO more blocks in
+# `[dependencies]` (#793/#801, the #784-F2 class): the release-side bump tool
+# (cargo-edit, whose `cargo set-version` is the rust bump adapter's projection
+# command, shipit/release/bump.py) and the rust RELEASE toolchain itself
+# (`rust` — cargo for prepare/build/publish; hosted images no longer carry
+# Rust, and the lint-feature rust block is invisible to the release runs'
+# default env — TOL02-WS17 open hole 1, closed by #801). The python signal
+# delivers the release-side publish tool (twine, the pypi endpoint's uploader
+# — open hole 2, #801). The tree-sitter signal delivers the grammar
+# toolchain's own CLI (`tree-sitter-cli` — `tree-sitter generate` at build,
+# the corpus `tree-sitter test` lane; #890 closes open hole 7). Unlike the
+# manifest-detected signals it fires off the DECLARATION — a `.shipit.toml`
+# [toolchains] tree-sitter leg, no manifest signals a grammar — via the same
+# union mechanics as the wasm-pack→node-deps delivery
+# (:attr:`shipit.tools.registry.Toolchain.provisions_signal`, read by
+# :func:`shipit.verbs.install._declared_signals`). All the release-side
+# blocks anchor under
+# `[dependencies]`, NOT the lint feature, because the wf-release stages
+# execute shipit in the DEFAULT pixi env (`pixi run --locked ./bin/shipit`)
+# and the tools must be on THAT run's PATH. Each single-purpose block is
+# deliberately its OWN unit (never merged into a shared one) so the
+# key-conflict guard below can skip exactly the key a consumer already pins
+# without losing the sibling deliveries.
+# Provisioning rides pixi/conda-forge under setup-pixi's lockfile-keyed cache
+# (the #582 doctrine); the release verbs never install at run time —
+# they fail loudly naming this reconcile instead. Delivered only when
+# :func:`load_units` is passed the
 # toolchain signal (`toolchains=`), so the zero-arg catalog is byte-identical
 # to the pre-#547 one. A consumer who ALREADY pins one of a block's keys in its
 # anchor table keeps their pin: the first splice would duplicate the TOML key
@@ -131,6 +194,8 @@ PIXI_ENVS_ANCHOR = "[environments]"
 TOOLCHAIN_RUST = "rust"
 TOOLCHAIN_GO = "go"
 TOOLCHAIN_NODE = "node"
+TOOLCHAIN_PYTHON = "python"
+TOOLCHAIN_TREE_SITTER = "tree-sitter"
 PIXI_RUST_DEPS_KEY = "pixi.toml#shipit-rust-lint-toolchain"
 PIXI_RUST_DEPS_OPEN = "# >>> shipit-managed rust lint toolchain (do not edit; regenerate via `shipit install`) >>>"
 PIXI_RUST_DEPS_CLOSE = "# <<< shipit-managed rust lint toolchain <<<"
@@ -143,6 +208,19 @@ PIXI_NODE_DEPS_OPEN = (
 )
 PIXI_NODE_DEPS_CLOSE = "# <<< shipit-managed node deps <<<"
 PIXI_NODE_DEPS_ANCHOR = "[dependencies]"
+PIXI_RUST_RELEASE_DEPS_KEY = "pixi.toml#shipit-rust-release-deps"
+PIXI_RUST_RELEASE_DEPS_OPEN = "# >>> shipit-managed rust release deps (do not edit; regenerate via `shipit install`) >>>"
+PIXI_RUST_RELEASE_DEPS_CLOSE = "# <<< shipit-managed rust release deps <<<"
+PIXI_RUST_RELEASE_TOOLCHAIN_KEY = "pixi.toml#shipit-rust-release-toolchain"
+PIXI_RUST_RELEASE_TOOLCHAIN_OPEN = "# >>> shipit-managed rust release toolchain (do not edit; regenerate via `shipit install`) >>>"
+PIXI_RUST_RELEASE_TOOLCHAIN_CLOSE = "# <<< shipit-managed rust release toolchain <<<"
+PIXI_PYTHON_RELEASE_DEPS_KEY = "pixi.toml#shipit-python-release-deps"
+PIXI_PYTHON_RELEASE_DEPS_OPEN = "# >>> shipit-managed python release deps (do not edit; regenerate via `shipit install`) >>>"
+PIXI_PYTHON_RELEASE_DEPS_CLOSE = "# <<< shipit-managed python release deps <<<"
+PIXI_TREE_SITTER_DEPS_KEY = "pixi.toml#shipit-tree-sitter-release-deps"
+PIXI_TREE_SITTER_DEPS_OPEN = "# >>> shipit-managed tree-sitter release deps (do not edit; regenerate via `shipit install`) >>>"
+PIXI_TREE_SITTER_DEPS_CLOSE = "# <<< shipit-managed tree-sitter release deps <<<"
+PIXI_TREE_SITTER_DEPS_ANCHOR = "[dependencies]"
 # (unit key, toolchain signal, open, close, anchor, packaged data file) — the
 # catalog rows :func:`load_units` appends per requested toolchain, in this order.
 TOOLCHAIN_UNITS = (
@@ -153,6 +231,30 @@ TOOLCHAIN_UNITS = (
         PIXI_RUST_DEPS_CLOSE,
         PIXI_LINT_DEPS_ANCHOR,
         "pixi-rust-lint-deps-block.toml",
+    ),
+    (
+        PIXI_RUST_RELEASE_DEPS_KEY,
+        TOOLCHAIN_RUST,
+        PIXI_RUST_RELEASE_DEPS_OPEN,
+        PIXI_RUST_RELEASE_DEPS_CLOSE,
+        PIXI_NODE_DEPS_ANCHOR,
+        "pixi-rust-release-deps-block.toml",
+    ),
+    (
+        PIXI_RUST_RELEASE_TOOLCHAIN_KEY,
+        TOOLCHAIN_RUST,
+        PIXI_RUST_RELEASE_TOOLCHAIN_OPEN,
+        PIXI_RUST_RELEASE_TOOLCHAIN_CLOSE,
+        PIXI_NODE_DEPS_ANCHOR,
+        "pixi-rust-release-toolchain-block.toml",
+    ),
+    (
+        PIXI_PYTHON_RELEASE_DEPS_KEY,
+        TOOLCHAIN_PYTHON,
+        PIXI_PYTHON_RELEASE_DEPS_OPEN,
+        PIXI_PYTHON_RELEASE_DEPS_CLOSE,
+        PIXI_NODE_DEPS_ANCHOR,
+        "pixi-python-release-deps-block.toml",
     ),
     (
         PIXI_GO_DEPS_KEY,
@@ -169,6 +271,14 @@ TOOLCHAIN_UNITS = (
         PIXI_NODE_DEPS_CLOSE,
         PIXI_NODE_DEPS_ANCHOR,
         "pixi-node-deps-block.toml",
+    ),
+    (
+        PIXI_TREE_SITTER_DEPS_KEY,
+        TOOLCHAIN_TREE_SITTER,
+        PIXI_TREE_SITTER_DEPS_OPEN,
+        PIXI_TREE_SITTER_DEPS_CLOSE,
+        PIXI_TREE_SITTER_DEPS_ANCHOR,
+        "pixi-tree-sitter-release-deps-block.toml",
     ),
 )
 
@@ -315,21 +425,31 @@ SETUP_DEV_ENV_FILE = "bin/setup-dev-env.sh"
 # `bin/shipit` (an executable whole-file bootstrap unit at the repo root).
 AGENT_LAUNCHER_FILE = "agent-start"
 
-# The SES01 session-bootstrap set (docs/legacy-prd/session-bootstrap.md, ADR-0027): the
-# `./claude-start` launcher (Layer D; since #627 a compatibility shim that
-# delegates to `./agent-start claude` — convenience only, `claude -w <name>`
-# works without it) and the SessionStart activation hook line (Layer A —
-# `shipit hook sessionstart` writes the repo's toolchain activation into
-# CLAUDE_ENV_FILE). Both join the managed set so adopting a repo turns the
-# capability on with no manual wiring. The launcher ships like `bin/shipit`
-# (a whole-file bootstrap unit); the hook line is one more JSON-hook unit over
-# the same settings.json, owning its event.
-LAUNCHER_FILE = "claude-start"
+# The SES01 session-bootstrap set (docs/legacy-prd/session-bootstrap.md, ADR-0027):
+# the SessionStart activation hook line (Layer A — `shipit hook sessionstart`
+# writes the repo's toolchain activation into CLAUDE_ENV_FILE). It joins the
+# managed set so adopting a repo turns the capability on with no manual wiring.
+# The hook line is one more JSON-hook unit over the same settings.json, owning
+# its event. (The Layer D repo-root launcher is the generic `./agent-start`
+# unit — see AGENT_LAUNCHER_FILE; the agent-specific `claude-start`/`codex-start`
+# shims were retired in #815.)
+#
+# Failure posture (#848, decided — copilot asked whether the missing fail-open
+# guard on the trailing `./bin/shipit hook sessionstart` was deliberate): the
+# ABSENCE cases are fail-open (`cd` failing and the launcher-presence probe both
+# skip with exit 0 — an unprovisioned checkout must never brick a session), but
+# a PRESENT launcher's exit code propagates UNCHANGED, deliberately fail-loud.
+# SessionStart is non-blocking in Claude Code (a non-zero hook surfaces stderr
+# without denying anything), and a launcher that ran and errored is degraded
+# activation the operator must see — wrapping it in `|| exit 0` would hide that
+# behind a green session start. Same split as the additive-hook shape in
+# tests/conftest.py `managed_cc_hook_command`: fail-open is for a runtime that
+# is genuinely absent, never for a hook that ran and errored.
 SETTINGS_SESSIONSTART_KEY = ".claude/settings.json#shipit-sessionstart-hook"
 SETTINGS_SESSIONSTART_MARKER = "shipit hook sessionstart"
 
 # The ADR-0027 WorktreeCreate adapter wiring (#443, Finding B): the managed
-# `claude-start` launcher promises that `claude --worktree` provisions the
+# `agent-start` launcher promises that `claude --worktree` provisions the
 # session Tree via `shipit hook worktreecreate`, and shipit's own settings wire
 # that hook — but the managed settings variant drifted and never did, so a
 # stock consumer's `--worktree` fell through to Claude Code's NATIVE worktree
@@ -376,15 +496,6 @@ CODEX_CONFIG_FILE = ".codex/config.toml"
 CODEX_HOOKS_FILE = ".codex/hooks.json"
 CODEX_SESSIONSTART_KEY = ".codex/hooks.json#shipit-sessionstart-hook"
 CODEX_PRETOOLUSE_KEY = ".codex/hooks.json#shipit-pretooluse-hook"
-
-# The CDX01 `./codex-start` launcher (#604): the `claude-start` sibling for a
-# Codex coordinator session. Since #627 a compatibility shim that delegates to
-# `./agent-start codex`; the Codex launch mechanics (no Claude-style
-# WorktreeCreate seam — the pinned `./bin/shipit session codex` provisions the
-# ephemeral session Tree explicitly, ADR-0027, then execs interactive codex
-# rooted in it) live behind the `agent-start` strategy table. Ships like
-# `claude-start` (an executable whole-file bootstrap unit at the repo root).
-CODEX_LAUNCHER_FILE = "codex-start"
 
 # The settings.json hooks-event arrays each JSON-hook unit owns one entry of.
 EVENT_PRETOOLUSE = "PreToolUse"
@@ -495,9 +606,16 @@ def load_units(*, toolchains: frozenset[str] = frozenset()) -> list[Unit]:
 
     ``toolchains`` (#547 Layer 1) names the conditional per-toolchain pixi dep
     blocks to include — any of :data:`TOOLCHAIN_RUST` / :data:`TOOLCHAIN_GO` /
-    :data:`TOOLCHAIN_NODE`, as detected from the consumer's tracked manifests
-    (:func:`shipit.install.reconcile.detect_toolchains`). The zero-arg call
-    returns the unconditional catalog, byte-identical to the pre-#547 one.
+    :data:`TOOLCHAIN_NODE` / :data:`TOOLCHAIN_PYTHON`, as detected from the
+    consumer's tracked manifests
+    (:func:`shipit.install.reconcile.detect_toolchains`), or
+    :data:`TOOLCHAIN_TREE_SITTER`, unioned off the consumer's DECLARED
+    tree-sitter toolchain leg (#890 — no manifest signals a grammar;
+    :func:`shipit.verbs.install._declared_signals`). The zero-arg call
+    returns the unconditional catalog — which since #794 includes the
+    launcher-deps block (uv for the pinned ``bin/shipit``, #758): every
+    consumer's managed tasks resolve through the launcher, so its
+    prerequisite is signal-independent.
     """
     units: list[Unit] = []
 
@@ -517,6 +635,22 @@ def load_units(*, toolchains: frozenset[str] = frozenset()) -> list[Unit]:
             dest=AGENTS_FILE,
             kind="block",
             content=data_bytes("agents-block.md"),
+        )
+    )
+
+    # The managed `.gitignore` release-output block (#906): a marker block in the
+    # consumer-owned `.gitignore` ignoring shipit's own repo-root release-stage
+    # outputs, so a root-level single-crate `cargo publish` stops aborting on the
+    # dirty tree they create — see the GITIGNORE_* constants' comment. No anchor:
+    # the block appends at EOF (creating `.gitignore` if the consumer has none).
+    units.append(
+        Unit(
+            key=GITIGNORE_KEY,
+            dest=GITIGNORE_FILE,
+            kind="block",
+            content=data_bytes("gitignore-block"),
+            open_marker=GITIGNORE_OPEN,
+            close_marker=GITIGNORE_CLOSE,
         )
     )
 
@@ -558,19 +692,6 @@ def load_units(*, toolchains: frozenset[str] = frozenset()) -> list[Unit]:
             dest=AGENT_LAUNCHER_FILE,
             kind="file",
             content=data_bytes("bootstrap", "agent-start"),
-            executable=True,
-        )
-    )
-
-    # The SES01 `./claude-start` launcher (session-bootstrap Layer D): a repo-root
-    # alias, since #627 a compatibility shim that delegates to
-    # `./agent-start claude`, shipped the same way the bin/shipit bootstrap is.
-    units.append(
-        Unit(
-            key=LAUNCHER_FILE,
-            dest=LAUNCHER_FILE,
-            kind="file",
-            content=data_bytes("bootstrap", "claude-start"),
             executable=True,
         )
     )
@@ -645,12 +766,28 @@ def load_units(*, toolchains: frozenset[str] = frozenset()) -> list[Unit]:
         )
     )
 
-    # The conditional per-toolchain dep blocks (#547 Layer 1): appended only
-    # when the caller detected the signal, so a signal-less consumer's catalog
-    # (and every existing zero-arg call) is unchanged. rust/go splice under the
-    # same `[feature.lint.dependencies]` anchor as the managed lint-deps block
-    # — sibling marker blocks in one table (splice_block places each right
-    # after the anchor header; coexistence is fine).
+    # The unconditional launcher-deps block (#758, TOL02-WS17 #794): uv for
+    # the pinned bin/shipit launcher, in the default env — see the
+    # PIXI_LAUNCHER_DEPS_KEY comment above for the whole story.
+    units.append(
+        Unit(
+            key=PIXI_LAUNCHER_DEPS_KEY,
+            dest=PIXI_FILE,
+            kind="block",
+            content=data_bytes("pixi-launcher-deps-block.toml"),
+            open_marker=PIXI_LAUNCHER_DEPS_OPEN,
+            close_marker=PIXI_LAUNCHER_DEPS_CLOSE,
+            anchor=PIXI_LAUNCHER_DEPS_ANCHOR,
+        )
+    )
+
+    # The conditional per-toolchain dep blocks (#547 Layer 1): the ONLY
+    # signal-gated rows — appended only when the caller detected the signal.
+    # The unconditional catalog above (launcher-deps included) ships on every
+    # call regardless; these rows add only the toolchain-specific blocks.
+    # rust/go splice under the same `[feature.lint.dependencies]` anchor as the
+    # managed lint-deps block — sibling marker blocks in one table (splice_block
+    # places each right after the anchor header; coexistence is fine).
     for key, signal, open_marker, close_marker, anchor, data_file in TOOLCHAIN_UNITS:
         if signal in toolchains:
             units.append(
@@ -730,21 +867,6 @@ def load_units(*, toolchains: frozenset[str] = frozenset()) -> list[Unit]:
                 marker=marker,
             )
         )
-
-    # The CDX01 `./codex-start` launcher (#604): the Codex sibling of the
-    # `claude-start` unit above — same executable whole-file bootstrap shape,
-    # since #627 a compatibility shim that delegates to `./agent-start codex`
-    # (explicit Tree provisioning then codex, behind the strategy table)
-    # instead of riding a pre-launch harness flag.
-    units.append(
-        Unit(
-            key=CODEX_LAUNCHER_FILE,
-            dest=CODEX_LAUNCHER_FILE,
-            kind="file",
-            content=data_bytes("bootstrap", "codex-start"),
-            executable=True,
-        )
-    )
 
     # The CDX01 Codex project layer (#603): the thin whole-file config and the
     # two `.codex/hooks.json` JSON-hook units — the SessionStart hook and the

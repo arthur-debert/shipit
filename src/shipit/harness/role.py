@@ -12,6 +12,14 @@ native and launch-context role still means coordinator.
 `coordinator`, `implementer`, `shepherd`, `explorer`, `reviewer`. Per-consumer
 custom roles are out of scope (the registry ships fixed). Pure: a function of
 the payload plus an optional boundary-supplied role name, no I/O.
+
+This resolver is the deliberately LENIENT hook boundary: an unknown non-empty
+native subagent identity stays an unknown worker (never the coordinator),
+because the hook must govern whatever identity the host hands it. The STRICT
+public/programmatic boundary — where an unknown role or an unsupported
+role/launch pairing fails loud before any provisioning — is the Role Profile
+registry (:mod:`shipit.harness.roleprofile`, RPE01-WS01); the hook's leniency
+never makes an unknown identity spawnable there.
 """
 
 from __future__ import annotations

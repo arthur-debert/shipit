@@ -289,8 +289,9 @@ def test_seeded_secrets_derivation_is_golden():
         "# [secrets] — repo Actions secrets. Each table key is the GitHub secret NAME; the\n"
         '# value names exactly one source ({ doppler = "KEY" } / { env = "VAR" } /\n'
         "# { prompt = true }). Seeded with shipit's local-reviewer (codex/agy) GitHub App\n"
-        "# credentials, each sourced from Doppler github/prd. `shipit gh-setup` only pushes\n"
-        "# a secret when its source resolves, so these are safe before the App is installed.\n"
+        "# credentials, each sourced from Doppler github/prd. `shipit gh-setup` pushes an\n"
+        "# App credential only when its reviewer is declared in [reviewers]; an undeclared\n"
+        "# pair is flagged as an orphan (not pushed), so seeding is safe before opt-in.\n"
         "[secrets]\n"
         'CODEX_REVIEW_APP_PRIVATE_KEY = { doppler = "CODEX_REVIEW_APP_PRIVATE_KEY" }\n'
         'CODEX_REVIEW_APP_ID          = { doppler = "CODEX_REVIEW_APP_ID" }\n'

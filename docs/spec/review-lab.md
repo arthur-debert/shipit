@@ -52,7 +52,11 @@ per-run artifact bundles, robustness fixes, real token/reasoning measurement
   overlap, aliases banked from adjudicated near-misses. No LLM in the
   instrument. Scoring banked records is free, repeatable, CI-runnable. The
   matching primitive is shared with semantic dedup of same-round findings
-  (#673).
+  (#673). One defect with several valid anchors (a cross-file emission
+  family, which aliases cannot bridge) is declared explicitly in the fixture
+  as labels sharing a `defect` equivalence-family id and counts once for
+  recall (#751) — identity is banked data, never inferred cross-file
+  similarity.
 - **Cells and convergence curves** (ADR-0049): declarative one-axis experiment
   files with mandatory baseline/axis fields, idempotent banked results,
   replicates for variance, and K-sweep convergence curves reporting cumulative

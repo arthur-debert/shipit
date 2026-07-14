@@ -11,7 +11,7 @@ axis = "control"
 description = "Union baseline: shipped fan-out, mechanical dedup, blind K=2 sweeps over the three human-confirmed RVW02 pins."
 
 [fixture]
-version = 38
+version = 39
 prs = ["core-440", "app-391", "lex-820"]
 
 [pipeline]

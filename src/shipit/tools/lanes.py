@@ -133,6 +133,15 @@ class Job:
     lane's task. ``caches`` and ``rust_workspaces`` are planner-emitted cache
     descriptors consumed by static gated workflow steps; sccache and uv are
     deliberately explicit false until their separate delivery stories land.
+
+    ``secrets`` is the lane's declared-secrets allowlist (#778) carried verbatim
+    from the :class:`~shipit.config.Lane` — the named block secret slot(s) this
+    lane opted into. It rides the matrix as a JSON array (never a joined string,
+    so the block's ``contains(matrix.secrets, 'lane_token')`` gate is an EXACT
+    membership test, not a substring match) and gates whether the block exposes
+    a slot as env for this lane's step. The token VALUE never enters the matrix
+    — only these non-sensitive slot NAMES do; the block reads the value straight
+    from ``${{ secrets.<slot> }}``.
     """
 
     name: str
@@ -142,16 +151,21 @@ class Job:
     envs: tuple[str, ...] = ("default",)
     caches: CacheDescriptor = CacheDescriptor()
     rust_workspaces: str = ""
+    secrets: tuple[str, ...] = ()
 
     @property
     def envset(self) -> str:
         """Stable env-set identity for cache keys and single-env PATH exports."""
         return "+".join(self.envs)
 
-    def as_matrix_entry(self) -> dict[str, str | bool | dict[str, bool]]:
+    def as_matrix_entry(
+        self,
+    ) -> dict[str, str | bool | list[str] | dict[str, bool]]:
         """The GitHub ``matrix.include`` entry — the JSON hand-off shape the
         ``wf-checks`` plan job surfaces as its output. ``required`` rides along
-        as a JSON boolean so the block's ``continue-on-error`` can read it."""
+        as a JSON boolean so the block's ``continue-on-error`` can read it;
+        ``secrets`` rides as a JSON array so the block's secret-exposure gate is
+        an exact ``contains`` membership test (never a substring false match)."""
         return {
             "name": self.name,
             "run": self.run,
@@ -161,6 +175,7 @@ class Job:
             "envset": self.envset,
             "caches": self.caches.as_matrix_entry(),
             "rust_workspaces": self.rust_workspaces,
+            "secrets": list(self.secrets),
         }
 
 
@@ -402,6 +417,7 @@ def plan(
                 envs=envs,
                 caches=caches,
                 rust_workspaces=rust_workspaces,
+                secrets=lane.secrets,
             )
         )
     return tuple(jobs)

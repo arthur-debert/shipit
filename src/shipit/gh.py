@@ -27,11 +27,13 @@ a repo read returns a :class:`shipit.identity.Repo`, a PR-core read returns a
 through the ONE :func:`shipit.pr.core_from_node` boundary — never an
 adapter-shaped parallel snapshot type. The fleet reads' PR-lifecycle
 projection is this adapter's own small frozen value (:class:`HeadPr`, minted
-by :func:`pr_for_head`) — scan-shaped, not a parallel PR. Raw JSON survives
-only in the documented escapes: the field-list read :func:`pr_view` (whose
-extra fields — head branch name, base oid — feed richer views) and the
-engine-shaped node read :func:`pr_meta`. A data-shape failure on an Exec that
-succeeded
+by :func:`pr_for_head`) — scan-shaped, not a parallel PR. Existing-PR attachment
+uses the sibling :class:`PrAttachment`, minted by :func:`pr_for_number`, because
+the shepherd lifecycle needs the PR's head branch as well as its lifecycle
+fields. Raw JSON survives only in the documented escapes: the field-list read
+:func:`pr_view` (whose extra fields — head branch name, base oid — feed richer
+views) and the engine-shaped node read :func:`pr_meta`. A data-shape failure on
+an Exec that succeeded
 (unparseable/empty JSON, a malformed slug) raises :class:`ValueError` at this
 boundary, the same posture :func:`owner_kind` / :func:`default_branch`
 already take.
@@ -41,6 +43,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -123,6 +126,27 @@ class HeadPr:
         return self.state
 
 
+@dataclass(frozen=True)
+class PrAttachment:
+    """The existing PR a write Run attaches to, including its current head branch.
+
+    Shepherd launch is keyed by PR number, not by an issue/work-stream branch. It
+    needs the same lifecycle/base fields as :class:`HeadPr`, plus ``head_ref`` and
+    writability indicators so the writable Tree can be cut from and pushed back
+    to the PR's current head. This remains a spawn-shaped projection, not a
+    parallel PR core: the PR-state engine's richer identity still lives in
+    :class:`shipit.pr.PR`.
+    """
+
+    number: int
+    state: str
+    is_draft: bool
+    base_ref: str
+    head_ref: str
+    is_cross_repository: bool
+    maintainer_can_modify: bool
+
+
 def _head_pr_from_json(data: dict) -> HeadPr:
     """Build the :class:`HeadPr` from a ``gh pr view --json`` payload — the ONE
     place this wire shape is read.
@@ -164,6 +188,38 @@ def _head_pr_from_json(data: dict) -> HeadPr:
         state=state.strip().upper(),
         is_draft=is_draft,
         base_ref=base_ref.strip(),
+    )
+
+
+def _pr_attachment_from_json(data: dict) -> PrAttachment:
+    """Build the typed existing-PR attachment snapshot from ``gh pr view`` JSON."""
+    head = _head_pr_from_json(data)
+    head_ref = data.get("headRefName")
+    if not isinstance(head_ref, str) or not head_ref.strip():
+        raise ValueError(
+            f"malformed `gh pr view` payload: headRefName must be a non-empty str, "
+            f"got {head_ref!r}"
+        )
+    is_cross_repository = data.get("isCrossRepository")
+    if not isinstance(is_cross_repository, bool):
+        raise ValueError(
+            "malformed `gh pr view` payload: isCrossRepository must be a bool, "
+            f"got {is_cross_repository!r}"
+        )
+    maintainer_can_modify = data.get("maintainerCanModify")
+    if not isinstance(maintainer_can_modify, bool):
+        raise ValueError(
+            "malformed `gh pr view` payload: maintainerCanModify must be a bool, "
+            f"got {maintainer_can_modify!r}"
+        )
+    return PrAttachment(
+        number=head.number,
+        state=head.state,
+        is_draft=head.is_draft,
+        base_ref=head.base_ref,
+        head_ref=head_ref.strip(),
+        is_cross_repository=is_cross_repository,
+        maintainer_can_modify=maintainer_can_modify,
     )
 
 
@@ -602,6 +658,190 @@ def secret_list(repo: str) -> list[str]:
 
 
 # --------------------------------------------------------------------------
+# releases (the publish stage's gh-release endpoint, TOL02-WS05)
+# --------------------------------------------------------------------------
+
+#: Release-asset uploads move real artifact bytes (a .dmg easily runs to
+#: hundreds of MB), so the upload alone gets a larger stated bound than the
+#: adapter's network default (ADR-0028: every Exec states its timeout).
+_UPLOAD_TIMEOUT: float = 1800.0
+
+
+def release_exists(tag: str, *, cwd: str | None = None) -> bool:
+    """Whether the repo already has a GH Release for ``tag`` (probe: a
+    missing release is a NORMAL answer — the publish stage's create-vs-edit
+    branch, its idempotent-resume seam)."""
+    return _run_probe(["gh", "release", "view", tag, "--json", "name"], cwd=cwd).rc == 0
+
+
+def release_create(
+    tag: str, *, notes_file: str, prerelease: bool, cwd: str | None = None
+) -> None:
+    """``gh release create <tag>`` from the coalesced notes file.
+
+    ``--verify-tag`` refuses to mint the tag itself: the tag is the version
+    authority, written and pushed by `release prepare` (ADR-0041) — a publish
+    against an unpushed tag must fail loudly, never invent one.
+    """
+    args = [
+        "gh",
+        "release",
+        "create",
+        tag,
+        "--verify-tag",
+        "--title",
+        tag,
+        "--notes-file",
+        notes_file,
+    ]
+    if prerelease:
+        args.append("--prerelease")
+    _run(args, cwd=cwd)
+
+
+def release_edit(
+    tag: str, *, notes_file: str, prerelease: bool, cwd: str | None = None
+) -> None:
+    """``gh release edit <tag>`` — the resume path of an existing release.
+
+    The prerelease flag is passed EXPLICITLY in both directions
+    (``--prerelease=true|false``): ``gh release edit`` leaves it unchanged
+    unless stated (the legacy release#726 scar), so a resume must re-assert
+    it rather than trust what the first pass set.
+    """
+    _run(
+        [
+            "gh",
+            "release",
+            "edit",
+            tag,
+            "--notes-file",
+            notes_file,
+            f"--prerelease={'true' if prerelease else 'false'}",
+        ],
+        cwd=cwd,
+    )
+
+
+def release_upload(tag: str, files: list[str], *, cwd: str | None = None) -> None:
+    """``gh release upload <tag> <files…> --clobber`` — idempotent asset
+    upload (a re-run replaces same-named assets instead of erroring)."""
+    if not files:
+        return
+    _run(
+        ["gh", "release", "upload", tag, *files, "--clobber"],
+        cwd=cwd,
+        timeout=_UPLOAD_TIMEOUT,
+    )
+
+
+# --------------------------------------------------------------------------
+# workflow-dispatch runs (the `wf verify-canary` dispatcher's surface, #899)
+# --------------------------------------------------------------------------
+
+
+def workflow_run(
+    workflow: str, *, repo: str, ref: str, fields: Mapping[str, str]
+) -> None:
+    """``gh workflow run`` — dispatch one ``workflow_dispatch`` caller run.
+
+    ``fields`` are the caller's typed inputs, passed as ``-f key=value``
+    pairs in the given order (the blessed stage-choice caller's
+    ``stage``/``version``/``tag``/``run-id`` set, workflows.lex §8). The
+    dispatch is fire-and-forget on GitHub's side — discovery of the run it
+    minted is :func:`run_list_dispatched`'s job.
+    """
+    args = ["gh", "workflow", "run", workflow, "-R", repo, "--ref", ref]
+    for key, value in fields.items():
+        args += ["-f", f"{key}={value}"]
+    _run(args)
+
+
+def run_list_dispatched(repo: str, workflow: str, *, limit: int = 20) -> list[dict]:
+    """The workflow's most recent ``workflow_dispatch`` runs, newest first.
+
+    Each entry carries ``databaseId``/``status``/``conclusion``/``url`` — the
+    set a dispatcher needs to discover a freshly-minted run against a
+    baseline snapshot and follow it. Empty output parses to ``[]``.
+    """
+    out = _run(
+        [
+            "gh",
+            "run",
+            "list",
+            "-R",
+            repo,
+            "--workflow",
+            workflow,
+            "--event",
+            "workflow_dispatch",
+            "--json",
+            "databaseId,status,conclusion,url",
+            "--limit",
+            str(limit),
+        ]
+    )
+    return json.loads(out or "[]")
+
+
+def run_verdict(repo: str, run_id: int) -> dict:
+    """One Actions run's verdict read: ``status``/``conclusion``/``url``.
+
+    ``status`` is ``completed`` once the run has a ``conclusion``
+    (``success``/``failure``/…); until then the poller keeps watching.
+    """
+    out = _run(
+        [
+            "gh",
+            "run",
+            "view",
+            str(run_id),
+            "-R",
+            repo,
+            "--json",
+            "status,conclusion,url",
+        ]
+    )
+    return json.loads(out or "{}")
+
+
+def repository_dispatch(
+    slug: str,
+    *,
+    event_type: str,
+    payload: Mapping[str, object],
+    token: str | None = None,
+) -> None:
+    """Fire a ``repository_dispatch`` at ``slug`` (``owner/name``) — the
+    notify-downstreams cascade's one write (TOL02-WS16 #792).
+
+    POSTs ``repos/{slug}/dispatches`` with ``event_type`` and
+    ``client_payload`` (the source repo/tag/version the downstream's
+    ``on.repository_dispatch`` workflow reads). ``token`` authenticates the
+    call as a cross-repo PAT (``DOWNSTREAM_DISPATCH_TOKEN``): the source
+    workflow's ambient ``GITHUB_TOKEN`` cannot dispatch into another repo, so
+    the adapter always passes one. A nonzero rc raises through ``rest`` — a
+    failed dispatch is loud, never a silent drop.
+    """
+    rest(
+        f"repos/{slug}/dispatches",
+        method="POST",
+        body={"event_type": event_type, "client_payload": dict(payload)},
+        token=token,
+    )
+
+
+def repo_is_private(slug: str) -> bool:
+    """Whether the ``owner/name`` repo is private (the brew adapter's
+    download-strategy switch: a private repo's release assets need the
+    token-authenticated strategy inlined into the formula)."""
+    data = rest(f"repos/{slug}")
+    if not isinstance(data, dict) or not isinstance(data.get("private"), bool):
+        raise ValueError(f"malformed repos/{slug} payload: no boolean `private`")
+    return data["private"]
+
+
+# --------------------------------------------------------------------------
 # PR reads/writes (the git side of a head lives in :mod:`shipit.git`)
 # --------------------------------------------------------------------------
 
@@ -655,6 +895,30 @@ def pr_for_head(branch: str, *, cwd: str | None = None) -> HeadPr | None | Unkno
         # this never-crash scan read that means an undetermined state, the same
         # as malformed/non-JSON output above.
         return UNKNOWN
+
+
+def pr_for_number(number: int, *, repo: str | None = None) -> PrAttachment:
+    """The existing PR attachment snapshot for ``number``.
+
+    Unlike :func:`pr_for_head`, this is an explicit attachment read for a single
+    PR and therefore fails loud: a missing/unreadable PR propagates the GitHub
+    transport failure, and malformed JSON raises :class:`ValueError`. Callers
+    convert those into their own domain refusal before launching work.
+    """
+    data = pr_view(
+        str(number),
+        repo=repo,
+        json_fields=[
+            "number",
+            "state",
+            "isDraft",
+            "baseRefName",
+            "headRefName",
+            "isCrossRepository",
+            "maintainerCanModify",
+        ],
+    )
+    return _pr_attachment_from_json(data)
 
 
 #: ``gh`` exits non-zero with this message when a head simply has no associated

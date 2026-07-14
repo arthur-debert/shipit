@@ -22,7 +22,14 @@ regenerable data).
 Integrity (RVW03-WS03): appends are serialized under an exclusive ``flock`` so
 parallel settles from separate processes can never interleave two records into
 one malformed line; readers skip a malformed line LOUDLY (a warning naming the
-file + 1-based line number), never silently.
+file + 1-based line number), never silently. The locking seam is the pair
+:func:`lock_exclusive` / :func:`lock_shared` — ``fcntl`` is imported INSIDE
+them, never at module level, because this module sits on the CLI's import
+chain and ``fcntl`` does not exist on Windows (#893): a module-level import
+crashed ``shipit build`` on win runners at import time. On Windows the pair is
+a documented NO-OP (single-writer assumption): the eval/review stores are
+harness telemetry that never runs on release runners, so a windows process
+that does touch a store is assumed to be the only writer.
 
 ``base_dir`` is the FAMILY root (the dir the per-kind subdirs live under), injected
 by tests (mirroring :mod:`shipit.logsetup`, whose ``resolve_log_dir`` returns an
@@ -39,12 +46,12 @@ stated here without a second state root.
 
 from __future__ import annotations
 
-import fcntl
 import json
 import logging
 import os
+import sys
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import IO, TYPE_CHECKING, Any
 
 import platformdirs
 
@@ -61,6 +68,46 @@ EVAL_KIND = "eval"
 #: review *concluded* (findings with severities and dispositions, coverage, the
 #: range reviewed — :mod:`shipit.review.roundrecord`).
 REVIEW_ROUNDS_KIND = "review-rounds"
+
+
+def lock_exclusive(fh: IO[Any]) -> None:
+    """Take an exclusive advisory lock (``flock LOCK_EX``) on ``fh`` — the writer
+    half of the store-family locking seam (RVW03-WS03).
+
+    ``fcntl`` is imported HERE, not at module level: it is unix-only, and this
+    module sits on the CLI's import chain (#893 — a module-level ``import
+    fcntl`` crashed ``shipit build`` on windows runners at import time). On
+    Windows this is a documented NO-OP under a single-writer assumption: the
+    eval/review stores never run on release runners, so a windows process
+    touching one is assumed to be the only writer — appends are then unguarded
+    against a concurrent-writer interleave that cannot occur there.
+
+    The lock is dropped by the kernel when ``fh`` closes; callers rely on that
+    (see :func:`append_record` for why no explicit unlock).
+    """
+    if sys.platform == "win32":
+        return
+    import fcntl
+
+    fcntl.flock(fh, fcntl.LOCK_EX)
+
+
+def lock_shared(fh: IO[Any]) -> None:
+    """Take a shared advisory lock (``flock LOCK_SH``) on ``fh`` — the reader
+    half of the store-family locking seam (RVW03-WS03).
+
+    Concurrent readers proceed together while a writer's
+    :func:`lock_exclusive` is excluded, so no reader streams a half-flushed
+    line. Same platform contract as :func:`lock_exclusive`: ``fcntl`` is
+    imported here (unix-only, #893) and on Windows this is a documented NO-OP —
+    under the single-writer assumption there is no in-flight append to wait
+    out. Dropped by the kernel when ``fh`` closes.
+    """
+    if sys.platform == "win32":
+        return
+    import fcntl
+
+    fcntl.flock(fh, fcntl.LOCK_SH)
 
 
 def store_dir(base_dir: Path | None = None, *, kind: str = EVAL_KIND) -> Path:
@@ -143,7 +190,8 @@ def append_record(
     store directory on first write. Returns the path so the caller (and tests) can
     assert where the record landed.
 
-    Appends are SERIALIZED under an exclusive file lock (``flock``, RVW03-WS03):
+    Appends are SERIALIZED under an exclusive file lock (:func:`lock_exclusive`,
+    RVW03-WS03; a no-op on Windows — see the single-writer assumption there):
     parallel settles append to the same per-repo file from separate processes, and
     a record larger than the writer's buffer would otherwise flush interleaved
     with a concurrent append's chunks — splicing two records into one malformed
@@ -157,7 +205,7 @@ def append_record(
     path = store_path(repo, base_dir, kind=kind)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as fh:
-        fcntl.flock(fh, fcntl.LOCK_EX)
+        lock_exclusive(fh)
         fh.write(json.dumps(record) + "\n")
         fh.flush()
     return path
@@ -180,7 +228,8 @@ def read_records(
     (RVW03-WS03): a warning names the file and the 1-based line number, so a
     corrupted round can never silently read as "this arm found nothing".
 
-    The read takes a SHARED ``flock`` (``LOCK_SH``) before iterating, so it waits
+    The read takes a SHARED lock (:func:`lock_shared`; a no-op on Windows — see
+    the single-writer assumption there) before iterating, so it waits
     out any in-flight exclusive append instead of streaming a half-flushed final
     line — a torn read would otherwise LOUDLY warn and drop a perfectly valid
     record mid-append (RVW03-WS03). The shared lock lets concurrent readers
@@ -194,7 +243,7 @@ def read_records(
         return []
     records: list[dict[str, Any]] = []
     with path.open(encoding="utf-8") as fh:
-        fcntl.flock(fh, fcntl.LOCK_SH)
+        lock_shared(fh)
         for lineno, line in enumerate(fh, start=1):
             line = line.strip()
             if not line:

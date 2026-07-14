@@ -185,8 +185,22 @@ The function an agent plays in the dev cycle, such as coordinator, implementer, 
 _Avoid_: "agent type" as the domain noun.
 
 **Role Profile**:
-The declared execution shape of a Role: Tree profile, mutation rights, brief surface, generated prompt surface, and enforcement posture.
+The fixed shipit-owned structural profile for a Role: checkout strategy, enforcement posture, generated/brief surfaces, supported launch contexts, and result channel. Role definitions remain the source of behavioral prose.
 _Avoid_: "Role Policy"; policy is operation-specific.
+
+**Checkout strategy**:
+The structured checkout allocation and attachment shape selected by a Role Profile: session Tree, new write Tree, existing-PR write Tree, shared read-only Tree, or ambient WorkingDir. It is the implementation of the older Tree Profile summary, not a consumer-configurable value.
+_Avoid_: using one flat "write" token when implementer and shepherd attachment differ.
+
+**Launch context**:
+The supported way a Role can start, such as host-session, detached spawn, or native subagent. Unsupported Role/launch pairs fail before Tree provisioning or backend launch.
+
+**Result channel**:
+Where a Run's result is expected to appear: the orchestration session, a new draft PR, commits and resolved threads on an existing PR, a posted review, or a coordinator report.
+
+**Enforcement posture**:
+A Role Profile's capability-shaped requirements for checkout mutation, command execution, network access, GitHub mutation, scratch writes, and code authorship. It is a policy input and defense-in-depth description, not a sandbox promise.
+_Avoid_: a single "can mutate" boolean.
 
 **Role definition**:
 The Lex source that defines role behavior once and generates the role-specific prompts and reference docs.
@@ -216,8 +230,8 @@ The versioned, in-repo corpus of pinned historical PR ranges and their Ground-tr
 _Avoid_: "test set", "benchmark" as the noun.
 
 **Ground-truth label**:
-One evidenced verdict in the Ground-truth fixture: a finding (its location, claim, and severity) judged real or not-real, carrying provenance — a fix commit, a confirmed thread, or a banked Adjudication.
-_Avoid_: labels admitted on opinion without provenance.
+One evidenced verdict in the Ground-truth fixture: a finding (its location, claim, and severity) judged real or not-real, carrying provenance — a fix commit, a confirmed thread, or a banked Adjudication. Labels sharing an explicit defect equivalence-family id are anchors of one defect and count once for recall.
+_Avoid_: labels admitted on opinion without provenance; inferring label equivalence from cross-file similarity instead of the declared family.
 
 **Adjudication**:
 The one-time human-confirmed verdict on an emitted finding the fixture does not know, banked into the Ground-truth fixture as a new label or a phrasing alias. It grows the fixture as a side effect of running Cells.
@@ -254,6 +268,10 @@ The configured launch of a Run: Backend, Model, ReasoningLevel, and permission m
 One external binary invocation made by shipit, with argv in and a normalized result or error out. A Run may be launched by an Exec, but the Run is the transcript-bounded agent work.
 _Avoid_: "Run" for subprocess calls.
 
+**EnvIdentity**:
+Pixi-owned environment metadata read from the materialized prefix, such as environment name and lock-file hash. It is not a pixi Run id, not a UUID, and not a full environment snapshot.
+_Avoid_: inventing pixi invocation identities.
+
 **Tool adapter**:
 The boundary that knows one external tool's command shape, output parsing, and semantic errors. Callers should receive shipit domain values instead of parsing tool output themselves.
 
@@ -271,6 +289,10 @@ The central log processor that masks known secret values and credential patterns
 
 **Lifecycle narration**:
 The convention that important subsystem milestones are logged with domain phrasing, correlation keys, and useful levels, not only printed to the user.
+
+**Work Env resolution record**:
+The flat structured-log projection for where work ran and how execution was routed. Stable fields include `work_env_boundary`, `working_dir`, `working_dir_repo`, `working_dir_branch`, `working_dir_commit`, `checkout_strategy`, `routing`, `role`, `lane`, `tree_branch`, `tree_base`, `pixi_activation`, `pixi_environment_name`, and `pixi_environment_lock_hash`, plus boundary fields such as `ci_event`, `runner`, `required`, `fleet_repo`, and `tool`.
+_Avoid_: full environment snapshots, secret values, or fabricated `pixi_run_id` fields.
 
 ### Trees
 
@@ -298,10 +320,10 @@ The rule that real Runs are launched through shipit's spawn verb, which provisio
 The role-keyed rule for who gets a Tree and who provisions it. Coordinators provision Trees for spawned Runs; spawned Runs start inside the Tree they receive and do not self-provision.
 
 **Tree Profile**:
-The declared checkout shape for a Role: session, write, read-only, or ambient. A Role Profile selects a Tree Profile.
+The user-facing summary of a Role's checkout family: session, write, read-only, or ambient. The implementation is the structured Checkout strategy, which preserves allocation, attachment, lifetime, and mutation as separate concerns.
 
 **Work Env**:
-The execution context shipit uses for work: a checkout plus the tools and paths activated for that checkout. A Work Env may be Tree-backed or a direct checkout, but it is not a security sandbox.
+The resolved execution context shipit uses for work: a WorkingDir, optional Tree provenance, Checkout strategy, optional pixi Activation and EnvIdentity, and an execution-routing decision. Work Env describes where and with which activation work runs; Exec, pixi, Tool adapters, Tree provisioning, CI, and fleet code remain the executors and owners of their existing mechanisms.
 _Avoid_: "workspace", "working tree", "sandbox".
 
 ### Build & Release

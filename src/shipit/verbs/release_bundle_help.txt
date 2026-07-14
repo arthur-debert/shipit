@@ -1,0 +1,43 @@
+`shipit release bundle` composes toolchain build outputs into the unsigned,
+distributable Artifacts ("package" is retired as a word — the stage is
+bundle).
+
+It walks the `[artifacts]` map and runs each artifact's DECLARED composition
+(`bundle = { composition = "…" }` in .shipit.toml), from the closed registry:
+
+- archive   a `<name>-<target>/` dist subdir carrying the built binary plus
+            docs (README/CHANGELOG/LICENSE when present), archived as
+            `<name>-<target>.tar.gz` (zip + .exe on windows targets) — the
+            layout brew formulas and GH release assets assume.
+- deb       cargo-deb against the pre-built release binary (no rebuild, no
+            strip); cargo-deb is self-provisioned (`cargo install cargo-deb
+            --version <pin> --locked`, pinned for a reproducible build) when
+            missing. On a native build it reads target/release/ and derives
+            the Debian arch from the host toolchain; on a cross build (an
+            explicit --target) it is pointed at target/<triple>/release/ via
+            --target, deriving the arch from the triple. A run producing no
+            .deb is a hard failure. Linux only.
+- wheel     `uv build` emitting BOTH wheel and sdist into the output tree.
+- mac-app   the declared bundler's coupled unsigned .app/.dmg pair PLUS the
+            inner .app re-emitted as `<name>.unsigned-app.tar.gz` — the
+            symlink/exec-bit-preserving reseal payload the signer rebuilds
+            the .dmg from. A missing payload fails the bundle stage. Mac
+            only.
+
+An artifact with no bundle declaration passes through untouched; a declared
+composition for another platform is skipped (the per-OS matrix runs it
+there). The composed Artifacts all land under the bundle output tree
+(`--out`, default `dist/`); bundle performs NO uploads and NO signing —
+publishing is the publish stage's job, signing the signer's. The one write
+outside `--out` is mac-app's declared bundler, which builds its coupled
+.app/.dmg under the declared `source` dir before bundle copies them into the
+output tree. A failing composition for ANY artifact exits non-zero without
+writing a partial Artifact into the output tree.
+
+`--target TRIPLE` names the platform the bundles are named for (`<name>-<target>`;
+default: derived from this host). An explicit --target is also the cross signal:
+the build was `shipit build --target TRIPLE`, so the archive/deb compositions read
+the binary from `target/TRIPLE/release/` instead of the native `target/release/`.
+Pass the same TRIPLE to build and bundle (wf-build does).
+
+Exit codes: 0 composed (or nothing declared), 1 runtime failure, 2 usage.

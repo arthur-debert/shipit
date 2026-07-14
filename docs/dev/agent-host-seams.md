@@ -28,7 +28,11 @@ Hook verbs
 
 Role policy
 
-: `src/shipit/harness/` — role prompts, the coordinator/subagent policy split, the codepath detection (ADR-0011/ADR-0038). A role means the same thing in every host.
+: `src/shipit/harness/` — Role Profile registry, role prompts, the coordinator/subagent policy split, and codepath detection (ADR-0011/ADR-0038/ADR-0047). A Role means the same thing in every host: its checkout strategy, enforcement posture, supported launch contexts, and result channel come from the fixed registry, never from a host adapter or consumer config.
+
+Work Env
+
+: `src/shipit/workenv.py` — the resolved execution context every launch boundary consumes: WorkingDir, optional Tree provenance, checkout strategy, optional pixi Activation / EnvIdentity, and routing (`pixi-run`, `activation-snapshot`, or `ambient`). Work Env names WHERE work runs and WITH WHICH activation; it does not execute. Exec remains the process seam, pixi owns activation and environment identity, and host adapters only decide how their CLI argv and auth posture reach that shared value.
 
 Liveness
 
@@ -40,7 +44,7 @@ Backend registry
 
 Launcher common path
 
-: `agent-start` — the generic managed launcher (`./agent-start <agent> [args...]`). Usage, the host dispatch, the CLI presence check, and arg forwarding are written once; a change to the common start path cannot be forgotten for one agent. `./claude-start` and `./codex-start` remain as compatibility shims that delegate here and carry no logic of their own.
+: `agent-start` — the generic managed launcher (`./agent-start <agent> [args...]`). Usage, the host dispatch, the CLI presence check, and arg forwarding are written once; a change to the common start path cannot be forgotten for one agent.
 
 ## 2. The host-specific adapters (narrow, named, one per seam)
 
@@ -48,12 +52,12 @@ What a host is ALLOWED to own. Each adapter is small, lives in one place, and is
 
 **Adapter matrix**
 
-| Seam                            | Claude Code                                                                                                                                   | Codex                                                                                                                                                                                                                                                                           |
-| ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Managed host config             | `.claude/settings.json` (five JSON-hook units) + `.claude/agents/` defs                                                                       | `.codex/config.toml` (whole file) + `.codex/hooks.json` (two JSON-hook units)                                                                                                                                                                                                   |
-| Launch strategy                 | `agent-start claude`: mint `sess-<utc>-<pid>`, exec `claude --worktree <id>` — the WorktreeCreate pre-launch seam provisions the session Tree | `agent-start codex`: exec the pinned `./bin/shipit session codex` — explicit Tree provisioning, then exec codex rooted in it                                                                                                                                                    |
-| Hook payload/env adaptation     | Claude supplies the JSON payload on stdin, `$CLAUDE_PROJECT_DIR`, `CLAUDE_ENV_FILE`                                                           | sessionstart entry synthesizes a `{"cwd": <os.getcwd()>}` payload via python; pretooluse entry synthesizes no payload — it resolves the git root via `git rev-parse --show-toplevel` and passes codex's native stdin through; session identity rides `SHIPIT_LOG_CTX_*` exports |
-| Backend CLI argv / auth posture | `spawn/backends/claude.py` (ADR-0020 adapter \#0)                                                                                             | `spawn/backends/codex.py` + `session/bootstrap.py`: sandbox-bypass posture (the Tree IS the isolation), API-billing keys scrubbed so the ChatGPT sign-in stays first-class, `CODEX_ACCESS_TOKEN` passes through                                                                 |
+| Seam                            | Claude Code                                                                                                                                                                                 | Codex                                                                                                                                                                                                                                                                           |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Managed host config             | `.claude/settings.json` (five JSON-hook units) + `.claude/agents/` defs                                                                                                                     | `.codex/config.toml` (whole file) + `.codex/hooks.json` (two JSON-hook units)                                                                                                                                                                                                   |
+| Launch strategy                 | `agent-start claude`: mint `sess-<utc>-<pid>`, exec `claude --worktree <id>` — the WorktreeCreate pre-launch seam provisions the session Tree and resolves the coordinator session Work Env | `agent-start codex`: exec the pinned `./bin/shipit session codex` — explicit Tree provisioning, Work Env resolution, then exec codex rooted in it                                                                                                                               |
+| Hook payload/env adaptation     | Claude supplies the JSON payload on stdin, `$CLAUDE_PROJECT_DIR`, `CLAUDE_ENV_FILE`                                                                                                         | sessionstart entry synthesizes a `{"cwd": <os.getcwd()>}` payload via python; pretooluse entry synthesizes no payload — it resolves the git root via `git rev-parse --show-toplevel` and passes codex's native stdin through; session identity rides `SHIPIT_LOG_CTX_*` exports |
+| Backend CLI argv / auth posture | `spawn/backends/claude.py` (ADR-0020 adapter \#0)                                                                                                                                           | `spawn/backends/codex.py` + `session/bootstrap.py`: sandbox-bypass posture (the Tree IS the isolation), API-billing keys scrubbed so the ChatGPT sign-in stays first-class, `CODEX_ACCESS_TOKEN` passes through                                                                 |
 
 Launch strategy
 
@@ -65,7 +69,7 @@ Managed host config
 
 Backend CLI argv / auth posture
 
-: How a subagent Run (or the coordinator exec) actually invokes the host CLI: `src/shipit/spawn/backends/` holds one launch adapter per backend (ADR-0020), reading names/models off the shared identity registry. Auth posture (what env is scrubbed, what passes through) is defined ONCE on the adapter and reused by the session launch.
+: How a subagent Run (or the coordinator exec) actually invokes the host CLI: `src/shipit/spawn/backends/` holds one launch adapter per backend (ADR-0020), reading names/models off the shared identity registry. Auth posture (what env is scrubbed, what passes through) is defined ONCE on the adapter and reused by the session launch. Role Profile preflight happens before any Tree provisioning or backend launch; the backend adapter never decides whether a Role is allowed in a launch context.
 
 ## 3. Rules for adding a host
 

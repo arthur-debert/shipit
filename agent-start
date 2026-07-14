@@ -18,9 +18,8 @@
 #   ephemeral session Tree explicitly and then execs codex rooted in it.
 #
 # Convenience only, never a requirement: `claude -w <name>` and
-# `./bin/shipit session codex` work identically without this file. The
-# `./claude-start` / `./codex-start` siblings are compatibility shims that
-# delegate here. Extra args are forwarded to the agent CLI verbatim.
+# `./bin/shipit session codex` work identically without this file. Extra args
+# are forwarded to the agent CLI verbatim.
 #
 # The common path scrubs the worker's agent-identity log-context keys before
 # dispatch — SHIPIT_LOG_CTX_ROLE, plus the paired AGENT and RUN spawn ids: a
@@ -36,7 +35,14 @@
 # Do not edit — `shipit install` overwrites this file.
 set -euo pipefail
 
-repo="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo="$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+# Launch FROM the repo root (#848): the launcher may be invoked from any cwd,
+# but the coordinator session it starts must be rooted in the checkout this
+# launcher belongs to — claude roots its session (and the WorktreeCreate seam)
+# in the cwd, and codex resolves the project from it. Under `set -e` a failed
+# cd aborts the launch instead of dispatching from the wrong directory.
+cd -- "$repo"
 
 # Launch-seam agent-identity scrub (see header): the session being started is a
 # coordinator, whatever shell it was started from — a worker Run's exported

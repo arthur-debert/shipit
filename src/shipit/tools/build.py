@@ -8,6 +8,21 @@ executes: the join between the path→toolchain map (the leg axis) and the
 
 - a leg with NO artifact build targets runs its base build command once —
   the whole-leg build (a repo needs no artifact map to ``shipit build``);
+- a CROSS ``--target <triple>`` (TOL02-WS11) narrows a rust leg's build to
+  one platform: the base command gains ``--target <triple>`` and cargo writes
+  the binary to ``target/<triple>/release/`` (not the native
+  ``target/release/``). Supplied only for the cross platforms a native runner
+  cannot build natively — darwin-x86_64 on the arm mac, linux-x86_64-musl on
+  the gnu ubuntu (:data:`shipit.release.preflight.PLATFORM_MATRIX`); the
+  wf-build block passes the matrix triple to every rust lane, so the native
+  lanes also land under ``target/<triple>/release/`` and the whole fan is
+  uniform. Only rust consumes it — go cross-compiles by ``GOOS``/``GOARCH``
+  env, python/npm have no per-target build, so the flag is a no-op for them.
+  The triple-dir contract's ONE owner is this flag (issue #785 deferral,
+  resolved by #787): with ``--target`` the binary lives under
+  ``target/<triple>/``, and every downstream consumer (bundle's archive/deb
+  compositions, :func:`shipit.tools.e2e.binary_location`) reads the SAME dir
+  by being handed the same triple — never a native/cross guess;
 - a leg WITH matching targets runs once per target, the base command
   narrowed to that artifact's unit: rust appends ``-p <package>``, go builds
   ONE package — the declared package path (last, after every flag) or, when
@@ -16,8 +31,10 @@ executes: the join between the path→toolchain map (the leg axis) and the
   whole-tree ``./...`` target it supersedes (go discards binaries when
   several packages compile at once, so ``./...`` in a binary-producing step
   would build green yet write nothing), npm appends ``--workspace
-  <package>``, python takes no narrowing (``uv build`` builds the project
-  whole);
+  <package>``, python and tree-sitter take no narrowing (``uv build`` builds
+  the project whole; ``tree-sitter generate`` regenerates the parser whole
+  from ``grammar.js`` — a generated-parser artifact is one grammar, never a
+  workspace of packages);
 - go legs get ``CGO_ENABLED=0`` in the env — the legacy static-by-default
   contract (cgo was opt-in and warned against);
 - a SUPPLIED version (ADR-0041: supplied, never computed) is injected into a
@@ -53,6 +70,11 @@ GO_BUILD_ENV: tuple[tuple[str, str], ...] = (("CGO_ENABLED", "0"),)
 #: The ldflags flag whose VALUE version injection extends — go replaces (not
 #: merges) a repeated ``-ldflags``, so ``-X`` must ride the existing value.
 _LDFLAGS = "-ldflags"
+
+#: cargo's cross-compilation flag — ``--target <triple>`` redirects the build
+#: to ``target/<triple>/release/`` (TOL02-WS11). Only rust legs consume a
+#: cross target; go/python/npm ignore it (see the module docstring).
+_CARGO_TARGET = "--target"
 
 #: go's whole-tree package target — the registry default's last token (every
 #: package, the test slot's form). An artifact-narrowed build SUPERSEDES it:
@@ -231,11 +253,30 @@ def check_targets_unambiguous(
         )
 
 
+def _cross(
+    argv: tuple[str, ...], leg: legs_mod.Leg, target: str | None
+) -> tuple[str, ...]:
+    """``argv`` with cargo's ``--target <triple>`` appended when a cross
+    ``target`` is set and the leg is rust — every other toolchain (and a
+    ``None`` target) passes through untouched.
+
+    Appended LAST: cargo accepts ``--target`` anywhere before a ``--``
+    separator, and a build never forwards one (passthrough is the builder's
+    own flags), so trailing it never fights ``-p <package>`` or forwarded
+    args. This is the sole owner of the triple-dir redirect — the step's
+    output lands under ``target/<triple>/release/`` (see the module docstring).
+    """
+    if target is None or leg.toolchain != "rust":
+        return argv
+    return (*argv, _CARGO_TARGET, target)
+
+
 def plan_build(
     legs: Sequence[legs_mod.Leg],
     artifacts: Sequence[config.Artifact],
     *,
     version: str | None = None,
+    target: str | None = None,
 ) -> tuple[BuildStep, ...]:
     """The ordered build steps for the planned ``legs`` (already selected and
     passthrough-shaped by :func:`~shipit.tools.legs.plan_legs`), joined with
@@ -243,7 +284,12 @@ def plan_build(
 
     Leg order is the outer order (map declaration order); within a leg, steps
     follow artifact declaration order. ``version`` is the caller-SUPPLIED
-    release version (ADR-0041), consumed only by go version injection. A leg
+    release version (ADR-0041), consumed only by go version injection.
+    ``target`` is the caller-supplied cross triple (TOL02-WS11) appended to
+    every rust step as ``--target <triple>`` — cargo then writes
+    ``target/<triple>/release/`` and the bundle/e2e consumers read the same
+    dir (see the module docstring); ``None`` keeps the native
+    ``target/release/`` build. A leg
     no artifact target names runs once, un-narrowed — including when an
     artifact map IS present but declares nothing for this leg's toolchain: the
     leg axis is orthogonal to the artifact axis (ADR-0007), so declaring one
@@ -264,19 +310,25 @@ def plan_build(
     steps: list[BuildStep] = []
     for leg in legs:
         matched = [
-            (artifact.name, target)
+            (artifact.name, build_target)
             for artifact in artifacts
-            for target in artifact.build
-            if target.toolchain == leg.toolchain
+            for build_target in artifact.build
+            if build_target.toolchain == leg.toolchain
         ]
         if not matched:
-            steps.append(BuildStep(leg=leg, argv=_whole_leg_argv(leg), env=_env(leg)))
-            continue
-        for name, target in matched:
             steps.append(
                 BuildStep(
                     leg=leg,
-                    argv=_narrow(leg, target, version),
+                    argv=_cross(_whole_leg_argv(leg), leg, target),
+                    env=_env(leg),
+                )
+            )
+            continue
+        for name, build_target in matched:
+            steps.append(
+                BuildStep(
+                    leg=leg,
+                    argv=_cross(_narrow(leg, build_target, version), leg, target),
                     artifact=name,
                     env=_env(leg),
                 )

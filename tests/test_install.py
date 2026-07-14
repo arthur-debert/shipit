@@ -26,6 +26,7 @@ from pathlib import Path
 import pytest
 import yaml
 from conftest import (
+    LOCAL_BIN_PATH_LEG,
     PIXI_ABSENCE_GUARD,
     managed_cc_hook_command,
     managed_pretooluse_hook_command,
@@ -38,7 +39,7 @@ from shipit.install import apply as iapply
 from shipit.install import reconcile as irec
 from shipit.install import selfcert, splice
 from shipit.install import units as iunits
-from shipit.install.errors import InstallError
+from shipit.install.errors import InstallError, SelfCertError
 from shipit.verbs import install as verb
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -273,7 +274,7 @@ def test_load_units_includes_the_lint_env_blocks():
     assert envs.anchor == "[environments]"
     assert tomllib.loads(envs.desired_inner()) == {"lint": ["lint"]}
 
-    # Four sibling blocks in ONE consumer file: their marker fences must be
+    # Five sibling blocks in ONE consumer file: their marker fences must be
     # pairwise distinct or extract/splice would bleed across regions.
     fences = {
         units[k].open_marker
@@ -282,9 +283,44 @@ def test_load_units_includes_the_lint_env_blocks():
             iunits.PIXI_TEST_TASK_KEY,
             iunits.PIXI_LINT_DEPS_KEY,
             iunits.PIXI_ENVS_KEY,
+            iunits.PIXI_LAUNCHER_DEPS_KEY,
         )
     }
-    assert len(fences) == 4
+    assert len(fences) == 5
+
+
+def test_load_units_includes_the_launcher_deps_block():
+    # #758, closed by TOL02-WS17 (#794): uv — the pinned bin/shipit launcher's
+    # one prerequisite (ADR-0033) — rides the managed pixi surface. The block
+    # is UNCONDITIONAL (zero-arg catalog: every consumer's managed tasks
+    # resolve through the launcher) and anchors in the DEFAULT env, the PATH a
+    # bare `pixi run --locked <task>` on a hosted runner actually resolves.
+    units = {u.key: u for u in iunits.load_units()}
+    launcher = units[iunits.PIXI_LAUNCHER_DEPS_KEY]
+    assert launcher.kind == "block"
+    assert launcher.dest == "pixi.toml"
+    assert launcher.anchor == "[dependencies]"
+    assert set(tomllib.loads(launcher.desired_inner())) == {"uv"}
+
+
+def test_launcher_deps_uv_pin_agrees_with_layer0_uv_pin():
+    # The two uv provisioning paths — Layer 0's reconcile-to-pin bootstrap
+    # (bin/setup-dev-env.sh, dev machines/cloud sessions) and the managed
+    # launcher-deps block (hosted CI runners, via setup-pixi) — must move in
+    # lockstep, or dev and CI run different uvs (the ci-cache-spike "second uv
+    # pin" caveat, docs/dev/ci-cache-spike.md §4).
+    script = iunits.data_bytes("bootstrap", "setup-dev-env.sh").decode("utf-8")
+    uv_pin = next(
+        line.split('"')[1] for line in script.splitlines() if line.startswith("UV_PIN=")
+    )
+    block = tomllib.loads(
+        iunits.data_bytes("pixi-launcher-deps-block.toml").decode("utf-8")
+    )
+    major, minor, *_ = uv_pin.split(".")
+    assert block["uv"] == f"{major}.{minor}.*", (
+        f"managed uv spec {block['uv']!r} is not the minor line of "
+        f"Layer 0's UV_PIN {uv_pin!r}"
+    )
 
 
 def test_packaged_lint_env_agrees_with_shipits_own_manifest():
@@ -318,8 +354,20 @@ def test_shipits_own_pixi_manifest_reconciles_to_noop():
     # otherwise every fresh Tree would splice a drift commit (or a duplicate
     # `lint` key under [environments]) into shipit's own manifest.
     root = Path(__file__).resolve().parents[1]
-    units = {u.key: u for u in iunits.load_units()}
-    for key in (iunits.PIXI_KEY, iunits.PIXI_LINT_DEPS_KEY, iunits.PIXI_ENVS_KEY):
+    # shipit's own tracked pyproject.toml signals the python toolchain (#801),
+    # so the real install's catalog includes the python release-deps block —
+    # dogfooded verbatim like every other managed pixi block.
+    units = {
+        u.key: u
+        for u in iunits.load_units(toolchains=frozenset({iunits.TOOLCHAIN_PYTHON}))
+    }
+    for key in (
+        iunits.PIXI_KEY,
+        iunits.PIXI_LINT_DEPS_KEY,
+        iunits.PIXI_ENVS_KEY,
+        iunits.PIXI_LAUNCHER_DEPS_KEY,
+        iunits.PIXI_PYTHON_RELEASE_DEPS_KEY,
+    ):
         unit = units[key]
         assert irec.consumer_hash(root, unit) == unit.desired_hash(), key
 
@@ -704,21 +752,25 @@ def test_managed_yamllint_config_extends_default_with_three_relaxations():
 
 
 def test_managed_markdownlintignore_covers_managed_paths_and_testdata():
-    """The ignore file excludes the managed/vendored markdown (skills/, AGENTS.md)
-    plus the test-data conventions (#500) — never other consumer-authored prose
-    (a consumer's README.md is theirs; shipit's own README is skipped only
-    because it is a lex projection, which `shipit lint` routes to the lexd leg
-    with no ignore entry — tested in test_lint.py). The test-data globs match
+    """The ignore file excludes the managed AGENTS.md block plus the test-data
+    conventions (#500) — never other consumer-authored prose (a consumer's
+    README.md is theirs; shipit's own README is skipped only because it is a lex
+    projection, which `shipit lint` routes to the lexd leg with no ignore entry —
+    tested in test_lint.py). The managed skills/ tree is deliberately NOT exempt
+    (#777): it is shipped content that must pass the delivered markdownlint gate,
+    so self-cert and this repo lint it at source. The test-data globs match
     lint.PROTECTED_TESTDATA_GLOBS: the fixer refuses to auto-rewrite them AND
     check mode skips these deliberately-malformed fixtures too."""
-    from shipit.verbs import lint
+    from shipit import lint
 
     entries = [
         line
         for line in iunits.data_bytes("markdownlintignore").decode().splitlines()
         if line and not line.startswith("#")
     ]
-    assert entries == ["skills/", "AGENTS.md", *lint.PROTECTED_TESTDATA_GLOBS]
+    # #777 — shipped skills are gated, not exempt (the exhaustive equality below
+    # locks it in: `skills/` is absent from the managed ignore entries).
+    assert entries == ["AGENTS.md", *lint.PROTECTED_TESTDATA_GLOBS]
 
 
 def test_shipits_own_lint_configs_reconcile_to_noop():
@@ -754,6 +806,89 @@ def test_lint_config_units_reconcile_add_noop_override(tmp_path, rec):
     (tmp_path / iunits.YAMLLINT_FILE).write_text("extends: relaxed\n")
     assert actions()[iunits.YAMLLINT_FILE] == irec.OVERRIDE
     assert actions()[iunits.MARKDOWNLINT_FILE] == irec.NOOP
+
+
+# --------------------------------------------------------------------------
+# The managed .gitignore release-output block (#906) — a root-level single-crate
+# `cargo publish` aborts its VCS-dirty check when shipit's own release-stage
+# outputs (RELEASE_NOTES.md, dist-signed/, dist/) sit uncommitted at the repo
+# root, so the managed set ignores them fleet-wide via a marker block in the
+# consumer-owned .gitignore.
+# --------------------------------------------------------------------------
+
+
+def test_load_units_includes_the_gitignore_release_block():
+    unit = {u.key: u for u in iunits.load_units()}[iunits.GITIGNORE_KEY]
+    assert unit.kind == "block"
+    assert unit.dest == iunits.GITIGNORE_FILE == ".gitignore"
+    assert unit.open_marker == iunits.GITIGNORE_OPEN
+    assert unit.close_marker == iunits.GITIGNORE_CLOSE
+    assert unit.anchor is None  # no anchor: appends at EOF / creates the file
+    assert unit.content == iunits.data_bytes("gitignore-block")
+
+
+def test_managed_gitignore_block_covers_the_release_stage_outputs():
+    """The block ignores exactly the transient repo-root artifacts the issue
+    names (#906): the RELEASE_NOTES.md the notes stage writes, the dist-signed/
+    the sign stage stages, and dist/ for parity — the trio that dirties a
+    root-level crate's `cargo publish`. Each entry is ROOT-ANCHORED (leading
+    slash) so it matches only the repo-root artifact, never a same-named nested
+    path such as crates/foo/dist/."""
+    entries = [
+        line
+        for line in iunits.data_bytes("gitignore-block").decode().splitlines()
+        if line and not line.startswith("#")
+    ]
+    assert entries == ["/RELEASE_NOTES.md", "/dist/", "/dist-signed/"]
+
+
+def test_gitignore_block_add_noop_override_and_preserves_consumer_entries(
+    tmp_path, rec
+):
+    """A consumer with their own .gitignore keeps it: the block is spliced in
+    (ADD), their entries survive, a re-install NOOPs, and an edit to the managed
+    block surfaces as OVERRIDE — never silently kept."""
+
+    def action():
+        return next(
+            d.action
+            for d in _plan(tmp_path).decisions
+            if d.unit.key == iunits.GITIGNORE_KEY
+        )
+
+    (tmp_path / ".gitignore").write_text("# consumer\nnode_modules/\n")
+    assert action() == irec.ADD
+    _apply(tmp_path)
+    body = (tmp_path / ".gitignore").read_text()
+    assert "node_modules/" in body  # the consumer's own entry is untouched
+    assert iunits.GITIGNORE_OPEN in body and "/dist-signed/" in body
+    assert action() == irec.NOOP
+    # A consumer edit INSIDE the managed block is an OVERRIDE, not a silent keep.
+    edited = body.replace("/dist-signed/", "/dist-signed/\ncoverage/")
+    (tmp_path / ".gitignore").write_text(edited)
+    assert action() == irec.OVERRIDE
+
+
+def test_gitignore_block_creates_the_file_when_the_consumer_has_none(tmp_path, rec):
+    """A consumer with no .gitignore at all (the stock case) gets one created,
+    carrying just the managed block."""
+    assert not (tmp_path / ".gitignore").exists()
+    _apply(tmp_path)
+    body = (tmp_path / ".gitignore").read_text()
+    assert iunits.GITIGNORE_OPEN in body
+    assert splice.extract_block(
+        body, iunits.GITIGNORE_OPEN, iunits.GITIGNORE_CLOSE
+    ) == iunits.data_bytes("gitignore-block").decode().strip("\n")
+
+
+def test_shipits_own_gitignore_reconciles_to_noop():
+    """The dogfood drift check (the WS01 pattern): shipit self-installs at Tree
+    provisioning, so its own committed .gitignore must carry the managed block
+    BYTE-IDENTICAL — a block edit is one data-file change mirrored into shipit's
+    own .gitignore (or this test fails)."""
+    root = Path(__file__).resolve().parents[1]
+    unit = {u.key: u for u in iunits.load_units()}[iunits.GITIGNORE_KEY]
+    assert irec.consumer_hash(root, unit) == unit.desired_hash()
 
 
 def test_load_units_has_skills_agents_and_bootstrap():
@@ -1147,9 +1282,8 @@ def test_hook_units_coexist_on_one_settings_file():
 
 # --------------------------------------------------------------------------
 # The session-bootstrap launcher units — the generic ./agent-start launcher
-# (CDX01 #627), its ./claude-start / ./codex-start compatibility shims, and
-# the SessionStart activation hook (docs/legacy-prd/session-bootstrap.md Layers A &
-# D, issue #218)
+# (CDX01 #627) and the SessionStart activation hook
+# (docs/legacy-prd/session-bootstrap.md Layers A & D, issue #218)
 # --------------------------------------------------------------------------
 
 
@@ -1176,51 +1310,23 @@ def test_load_units_includes_the_agent_start_launcher():
     # worker-role export before dispatch, so a coordinator launched from a
     # spawned Run's shell cannot silently disarm the edit guard.
     assert "unset SHIPIT_LOG_CTX_ROLE" in text
+    # #848 hardening (copilot on vscode#157, gemini on mkdocs-lex#22): resolve
+    # the launcher's own directory symlink- and dash-safely (`cd -P --` /
+    # `dirname --`), and launch FROM the repo root wherever invoked from.
+    assert 'cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")"' in text
+    assert 'cd -- "$repo"' in text
 
 
-def test_load_units_includes_the_claude_start_launcher():
-    units = {u.key: u for u in iunits.load_units()}
-    assert iunits.LAUNCHER_FILE in units
-    unit = units[iunits.LAUNCHER_FILE]
-    assert unit.kind == "file"
-    assert unit.dest == "claude-start"  # repo root, memorable entry point
-    assert unit.executable is True
-    text = unit.content.decode("utf-8")
-    # Since #627 a compatibility shim: it delegates to `agent-start claude`
-    # and carries no launch logic of its own.
-    assert 'exec "$repo/agent-start" claude "$@"' in text
-    assert "--worktree" not in text
-
-
-def test_load_units_includes_the_codex_start_launcher():
-    units = {u.key: u for u in iunits.load_units()}
-    assert iunits.CODEX_LAUNCHER_FILE in units
-    unit = units[iunits.CODEX_LAUNCHER_FILE]
-    assert unit.kind == "file"
-    assert unit.dest == "codex-start"
-    assert unit.executable is True
-    text = unit.content.decode("utf-8")
-    # Since #627 a compatibility shim: it delegates to `agent-start codex`
-    # and carries no launch logic of its own.
-    assert 'exec "$repo/agent-start" codex "$@"' in text
-    assert "session codex" not in text
-
-
-def test_launchers_match_shipits_own_copies():
+def test_launcher_matches_shipits_own_copy():
     # The bootstrap dogfood guarantee (the bin/shipit pattern): shipit-self
-    # commits byte-identical, executable copies of all three launcher units at
-    # the managed paths, so its own Tree provisioning reconciles them to NOOP
-    # instead of splicing drift.
+    # commits a byte-identical, executable copy of the `agent-start` launcher
+    # unit at the managed path, so its own Tree provisioning reconciles it to
+    # NOOP instead of splicing drift.
     units = {u.key: u for u in iunits.load_units()}
-    root = Path(__file__).resolve().parents[1]
-    for key in (
-        iunits.AGENT_LAUNCHER_FILE,
-        iunits.LAUNCHER_FILE,
-        iunits.CODEX_LAUNCHER_FILE,
-    ):
-        own = root / units[key].dest
-        assert own.read_bytes() == units[key].content, key
-        assert os.access(own, os.X_OK), key
+    unit = units[iunits.AGENT_LAUNCHER_FILE]
+    own = Path(__file__).resolve().parents[1] / unit.dest
+    assert own.read_bytes() == unit.content
+    assert os.access(own, os.X_OK)
 
 
 def test_managed_settings_hooks_agree_with_shipits_own_settings():
@@ -1248,7 +1354,7 @@ def test_managed_settings_hooks_agree_with_shipits_own_settings():
 
 
 def test_load_units_includes_the_worktreecreate_adapter_hook():
-    # #443 Finding B: the managed `claude-start` bootstrap promises that
+    # #443 Finding B: the managed `agent-start` bootstrap promises that
     # `claude --worktree` provisions the session Tree via shipit's WorktreeCreate
     # hook (ADR-0027) — the managed settings must wire it, or a stock consumer's
     # `--worktree` falls through to Claude Code's native worktree.
@@ -1612,6 +1718,9 @@ def test_load_units_includes_the_setup_dev_env_bootstrap():
     assert "astral.sh/uv/install" not in text
     # Provisioning never mutates pixi.lock: the env solve is `--locked` only.
     assert "pixi install --locked" in text
+    # #848 hardening (same family as the agent-start finding): the repo root
+    # resolves symlink- and dash-safely.
+    assert 'cd -P -- "$(dirname -- "$SELF")/.."' in text
 
 
 def test_setup_dev_env_matches_shipits_own_copy():
@@ -1760,6 +1869,52 @@ def test_managed_sessionstart_hook_exports_local_bin_before_the_launcher():
         assert path_leg not in other
 
 
+def test_hook_commands_share_one_guarded_local_bin_path_leg():
+    # #848 (gemini on tree-sitter-lex#89, copilot on supage#171): the codex
+    # hook pair shipped with NO ~/.local/bin prepend while their Claude twins
+    # carried one — `pixi` (the PreToolUse guard chain) and `bin/shipit` (needs
+    # uv) live exactly where Layer 0 provisions them. Every hook command that
+    # resolves the Layer 0 install dir now carries the SAME leg byte-for-byte
+    # (conftest.LOCAL_BIN_PATH_LEG), guarded for an unset $HOME (gemini on
+    # mkdocs-lex#22: an unguarded prepend pushes a literal "/.local/bin" onto
+    # PATH in HOME-less hook shells), so parity cannot drift twin-by-twin again.
+    units = {u.key: u for u in iunits.load_units()}
+    for key in (
+        iunits.SETTINGS_KEY,
+        iunits.SETTINGS_SESSIONSTART_KEY,
+        iunits.CODEX_PRETOOLUSE_KEY,
+        iunits.CODEX_SESSIONSTART_KEY,
+    ):
+        command = json.loads(units[key].desired_inner())["hooks"][0]["command"]
+        assert LOCAL_BIN_PATH_LEG in command, (
+            f"{key} lacks the shared guarded ~/.local/bin PATH leg"
+        )
+    # The leg lands BEFORE its consumer: the pixi resolution in the codex
+    # guard, and (after the setup-dev-env leg that populates ~/.local/bin) the
+    # pinned-launcher probe in the codex sessionstart entry.
+    guard_cmd = json.loads(units[iunits.CODEX_PRETOOLUSE_KEY].desired_inner())["hooks"][
+        0
+    ]["command"]
+    assert guard_cmd.index(LOCAL_BIN_PATH_LEG) < guard_cmd.index("pixi run")
+    session_cmd = json.loads(units[iunits.CODEX_SESSIONSTART_KEY].desired_inner())[
+        "hooks"
+    ][0]["command"]
+    assert (
+        session_cmd.index("setup-dev-env.sh")
+        < session_cmd.index(LOCAL_BIN_PATH_LEG)
+        < session_cmd.index('test -x "$repo/bin/shipit"')
+    )
+    # The three additive hooks that resolve nothing from ~/.local/bin at
+    # session-start time stay leg-less (the #601 test above pins the same).
+    for key in (
+        iunits.SETTINGS_STOP_KEY,
+        iunits.SETTINGS_SUBAGENTSTOP_KEY,
+        iunits.SETTINGS_WORKTREECREATE_KEY,
+    ):
+        other = json.loads(units[key].desired_inner())["hooks"][0]["command"]
+        assert LOCAL_BIN_PATH_LEG not in other
+
+
 def test_load_units_toolchain_blocks_are_conditional():
     # The zero-arg catalog is byte-identical to the pre-#547 one: no toolchain
     # key sneaks in without its signal, and each signal adds EXACTLY its block.
@@ -1767,15 +1922,41 @@ def test_load_units_toolchain_blocks_are_conditional():
     base = {u.key for u in iunits.load_units()}
     assert not (base & toolchain_keys)
 
-    for key, signal, *_ in iunits.TOOLCHAIN_UNITS:
+    # Per-signal: each signal adds exactly ITS blocks — one for
+    # go/node/python/tree-sitter, THREE for rust (the lint toolchain + the
+    # release-side cargo-edit block #793 + the release toolchain block #801).
+    for signal in (
+        iunits.TOOLCHAIN_RUST,
+        iunits.TOOLCHAIN_GO,
+        iunits.TOOLCHAIN_NODE,
+        iunits.TOOLCHAIN_PYTHON,
+        iunits.TOOLCHAIN_TREE_SITTER,
+    ):
+        expected = {key for key, sig, *_ in iunits.TOOLCHAIN_UNITS if sig == signal}
         keys = {u.key for u in iunits.load_units(toolchains=frozenset({signal}))}
-        assert keys - base == {key}, signal
+        assert keys - base == expected, signal
+    assert (
+        len(
+            {
+                key
+                for key, sig, *_ in iunits.TOOLCHAIN_UNITS
+                if sig == iunits.TOOLCHAIN_RUST
+            }
+        )
+        == 3
+    )
 
     all_keys = {
         u.key
         for u in iunits.load_units(
             toolchains=frozenset(
-                {iunits.TOOLCHAIN_RUST, iunits.TOOLCHAIN_GO, iunits.TOOLCHAIN_NODE}
+                {
+                    iunits.TOOLCHAIN_RUST,
+                    iunits.TOOLCHAIN_GO,
+                    iunits.TOOLCHAIN_NODE,
+                    iunits.TOOLCHAIN_PYTHON,
+                    iunits.TOOLCHAIN_TREE_SITTER,
+                }
             )
         )
     }
@@ -1787,7 +1968,13 @@ def test_toolchain_block_units_have_the_right_shape():
         u.key: u
         for u in iunits.load_units(
             toolchains=frozenset(
-                {iunits.TOOLCHAIN_RUST, iunits.TOOLCHAIN_GO, iunits.TOOLCHAIN_NODE}
+                {
+                    iunits.TOOLCHAIN_RUST,
+                    iunits.TOOLCHAIN_GO,
+                    iunits.TOOLCHAIN_NODE,
+                    iunits.TOOLCHAIN_PYTHON,
+                    iunits.TOOLCHAIN_TREE_SITTER,
+                }
             )
         )
     }
@@ -1808,6 +1995,58 @@ def test_toolchain_block_units_have_the_right_shape():
     assert node.anchor == "[dependencies]"
     assert tomllib.loads(node.desired_inner()) == {"nodejs": "26.*", "pnpm": "11.*"}
 
+    # rust ALSO gets the release-side bump tool (#793): cargo-edit anchors in
+    # the DEFAULT env — wf-prepare runs shipit via bare `pixi run --locked
+    # ./bin/shipit`, which resolves [dependencies], not the lint feature — so
+    # `cargo set-version` is on exactly the PATH `release prepare` executes
+    # with. Pinned to conda-forge 0.13.11 (the issue's decided pin). wasm-pack
+    # rides the same rust-signal block (TOL02-WS12 #788): the wasm/npm bundle
+    # composition's builder, on conda-forge in the DEFAULT release env —
+    # pinned to 0.15.* (#846: conda-forge never carried a 0.13 build). NOT
+    # here: the wasm32 target std (#853) — a sysroot component, it rides the
+    # toolchain block below so a consumer-owned `rust` pin skips it too.
+    rust_release = units[iunits.PIXI_RUST_RELEASE_DEPS_KEY]
+    assert rust_release.dest == "pixi.toml"
+    assert rust_release.anchor == "[dependencies]"
+    assert tomllib.loads(rust_release.desired_inner()) == {
+        "cargo-edit": "0.13.11.*",
+        "wasm-pack": "0.15.*",
+    }
+
+    # The rust RELEASE toolchain (#801, TOL02-WS17 hole 1): cargo itself in
+    # the default env — the sysroot-only block, deliberately separate from
+    # the cargo-edit block so a consumer-side `rust` pin conflicts the
+    # sysroot alone (the PixiKeyConflict guard skips per block) without
+    # losing cargo-edit. The wasm32 target std rides HERE (#853): conda's
+    # wasm-pack does NOT pull it, and as a sysroot component it must be
+    # delivered — and skipped — with the `rust` line it moves in lockstep
+    # with, never handed to a consumer that owns its own rust pin.
+    rust_toolchain = units[iunits.PIXI_RUST_RELEASE_TOOLCHAIN_KEY]
+    assert rust_toolchain.dest == "pixi.toml"
+    assert rust_toolchain.anchor == "[dependencies]"
+    assert tomllib.loads(rust_toolchain.desired_inner()) == {
+        "rust": "1.96.*",
+        "rust-std-wasm32-unknown-unknown": "1.96.*",
+    }
+
+    # The python release-side publish tool (#801, TOL02-WS17 hole 2): twine
+    # for the pypi endpoint, in the default env — the PATH wf-publish's bare
+    # `pixi run --locked ./bin/shipit` resolves.
+    python_release = units[iunits.PIXI_PYTHON_RELEASE_DEPS_KEY]
+    assert python_release.dest == "pixi.toml"
+    assert python_release.anchor == "[dependencies]"
+    assert tomllib.loads(python_release.desired_inner()) == {"twine": "6.2.*"}
+
+    # The tree-sitter toolchain's CLI (#890, TOL02-WS17 hole 7): conda-forge
+    # tree-sitter-cli in the default env — the PATH the release stages'
+    # `pixi run --locked ./bin/shipit` resolves for `tree-sitter generate`
+    # and the corpus lane. Pinned 0.25.* in parity with the grammar
+    # consumer's own devDependency line (^0.25.0).
+    tree_sitter = units[iunits.PIXI_TREE_SITTER_DEPS_KEY]
+    assert tree_sitter.dest == "pixi.toml"
+    assert tree_sitter.anchor == "[dependencies]"
+    assert tomllib.loads(tree_sitter.desired_inner()) == {"tree-sitter-cli": "0.25.*"}
+
     # Sibling blocks in one consumer file: fences pairwise distinct, or
     # extract/splice would bleed across regions (the lint-env blocks' rule).
     fences = {
@@ -1815,11 +2054,34 @@ def test_toolchain_block_units_have_the_right_shape():
         for k in (
             iunits.PIXI_LINT_DEPS_KEY,
             iunits.PIXI_RUST_DEPS_KEY,
+            iunits.PIXI_RUST_RELEASE_DEPS_KEY,
+            iunits.PIXI_RUST_RELEASE_TOOLCHAIN_KEY,
             iunits.PIXI_GO_DEPS_KEY,
             iunits.PIXI_NODE_DEPS_KEY,
+            iunits.PIXI_PYTHON_RELEASE_DEPS_KEY,
+            iunits.PIXI_TREE_SITTER_DEPS_KEY,
         )
     }
-    assert len(fences) == 4
+    assert len(fences) == 8
+
+
+def test_rust_release_toolchain_pin_agrees_with_the_rust_lint_block():
+    # One rust, two envs (#801): the default-env release toolchain and the
+    # lint-feature toolchain must pin the same line, or a consumer lints with
+    # a different rust than it releases with. The wasm32 std (#853) is a
+    # component of that same sysroot, so it rides this block on the same
+    # lockstep line — exhaustive equality, so a key that drifts in OR out of
+    # the sysroot block fails here by name.
+    toolchain = tomllib.loads(
+        iunits.data_bytes("pixi-rust-release-toolchain-block.toml").decode("utf-8")
+    )
+    lint = tomllib.loads(
+        iunits.data_bytes("pixi-rust-lint-deps-block.toml").decode("utf-8")
+    )
+    assert toolchain == {
+        "rust": lint["rust"],
+        "rust-std-wasm32-unknown-unknown": lint["rust"],
+    }
 
 
 def test_packaged_rust_pin_agrees_with_shipits_own_test_toolchain():
@@ -1869,6 +2131,48 @@ def test_rust_block_coexists_with_lint_deps_block_under_one_anchor():
     assert merged["ruff"] == tomllib.loads(deps.desired_inner())["ruff"]
 
 
+def test_rust_release_block_coexists_with_node_block_under_dependencies():
+    # The [dependencies] sibling pair (#793): a rust+node consumer gets BOTH
+    # the cargo-edit release block and the node runtime block under the ONE
+    # [dependencies] header — sibling regions, no bleed, one merged table.
+    units = {
+        u.key: u
+        for u in iunits.load_units(
+            toolchains=frozenset({iunits.TOOLCHAIN_RUST, iunits.TOOLCHAIN_NODE})
+        )
+    }
+    release = units[iunits.PIXI_RUST_RELEASE_DEPS_KEY]
+    node = units[iunits.PIXI_NODE_DEPS_KEY]
+
+    text = '[workspace]\nname = "acme"\n'
+    text = splice.splice_block(
+        text, node.desired_inner(), node.open_marker, node.close_marker, node.anchor
+    )
+    text = splice.splice_block(
+        text,
+        release.desired_inner(),
+        release.open_marker,
+        release.close_marker,
+        release.anchor,
+    )
+
+    assert (
+        splice.extract_block(text, node.open_marker, node.close_marker)
+        == node.desired_inner()
+    )
+    assert (
+        splice.extract_block(text, release.open_marker, release.close_marker)
+        == release.desired_inner()
+    )
+    # ONE header line (both blocks' comments mention the table by name, so
+    # count actual header lines, not substring occurrences).
+    headers = [ln for ln in text.splitlines() if ln.strip() == "[dependencies]"]
+    assert len(headers) == 1
+    merged = tomllib.loads(text)["dependencies"]
+    assert merged["cargo-edit"] == "0.13.11.*"
+    assert merged["nodejs"] == "26.*"
+
+
 def _git_repo(tmp_path: Path) -> Path:
     root = tmp_path / "repo"
     root.mkdir()
@@ -1885,9 +2189,10 @@ def test_detect_toolchains_reads_tracked_manifests(tmp_path):
     (root / "crates" / "core" / "deep" / "Cargo.toml").write_text("[package]\n")
     (root / "web").mkdir()
     (root / "web" / "package.json").write_text("{}\n")
+    (root / "pyproject.toml").write_text("[project]\n")
     subprocess.run(["git", "add", "."], cwd=root, check=True)
     assert irec.detect_toolchains(root) == frozenset(
-        {iunits.TOOLCHAIN_RUST, iunits.TOOLCHAIN_NODE}
+        {iunits.TOOLCHAIN_RUST, iunits.TOOLCHAIN_NODE, iunits.TOOLCHAIN_PYTHON}
     )
 
 
@@ -1909,6 +2214,107 @@ def test_detect_toolchains_falls_back_to_root_manifests_off_git(tmp_path):
 
 def test_detect_toolchains_clean_root_is_empty(tmp_path):
     assert irec.detect_toolchains(tmp_path) == frozenset()
+
+
+def test_declared_signals_unions_node_for_a_declared_wasm_pack(tmp_path):
+    # A rust-only wasm crate declares a wasm-pack composition but tracks no
+    # package.json (wasm-pack GENERATES the npm package.json into pkg/). Its
+    # `npm pack` still needs npm, so install unions the node signal off the
+    # DECLARATION, not off a manifest (issue #788).
+    (tmp_path / ".shipit.toml").write_text(
+        '[artifacts.wasm]\nbuild = ["rust"]\nbundle = { composition = "wasm-pack" }\n'
+    )
+    assert verb._declared_signals(tmp_path) == {iunits.TOOLCHAIN_NODE}
+
+
+def test_declared_signals_empty_without_a_wasm_pack_composition(tmp_path):
+    # A non-wasm composition (archive) provisions no extra signal: a plain
+    # rust/node repo's delivered blocks stay byte-identical to pre-#788.
+    (tmp_path / ".shipit.toml").write_text(
+        '[artifacts.cli]\nbuild = ["rust"]\nbundle = { composition = "archive" }\n'
+    )
+    assert verb._declared_signals(tmp_path) == set()
+
+
+def test_declared_signals_empty_without_config(tmp_path):
+    # No .shipit.toml → no extra signals; the augmentation never itself fails
+    # install (an absent map is a missing MAP, not this function's concern).
+    assert verb._declared_signals(tmp_path) == set()
+
+
+def test_declared_signals_empty_on_unparseable_config(tmp_path):
+    # Malformed TOML degrades to no extra signals here — the config's own
+    # parse error surfaces on the verbs that read the map, not the toolchain
+    # augmentation (issue #788).
+    (tmp_path / ".shipit.toml").write_text("this is not = valid = toml\n")
+    assert verb._declared_signals(tmp_path) == set()
+
+
+def test_wasm_pack_composition_delivers_the_node_deps_block(tmp_path):
+    # End to end at the install seam: a rust-only wasm-pack repo (Cargo.toml,
+    # NO tracked package.json) gets the node-deps block off the composition
+    # signal, so bundle-time `npm pack` has npm (issue #788).
+    root = _git_repo(tmp_path)
+    (root / "crates" / "wasm").mkdir(parents=True)
+    (root / "crates" / "wasm" / "Cargo.toml").write_text("[package]\n")
+    (root / ".shipit.toml").write_text(
+        '[artifacts.wasm]\nbuild = ["rust"]\nbundle = { composition = "wasm-pack" }\n'
+    )
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+
+    signals = irec.detect_toolchains(root) | verb._declared_signals(root)
+    assert signals == {iunits.TOOLCHAIN_RUST, iunits.TOOLCHAIN_NODE}
+    keys = {u.key for u in iunits.load_units(toolchains=signals)}
+    assert iunits.PIXI_NODE_DEPS_KEY in keys
+
+
+def test_plain_rust_repo_gets_no_node_deps_block(tmp_path):
+    # The no-wasm control: a rust repo whose only composition is archive keeps
+    # exactly the pre-#788 delivery — the node union fires ONLY on wasm-pack.
+    root = _git_repo(tmp_path)
+    (root / "Cargo.toml").write_text("[package]\n")
+    (root / ".shipit.toml").write_text(
+        '[artifacts.cli]\nbuild = ["rust"]\nbundle = { composition = "archive" }\n'
+    )
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+
+    signals = irec.detect_toolchains(root) | verb._declared_signals(root)
+    assert signals == {iunits.TOOLCHAIN_RUST}
+    keys = {u.key for u in iunits.load_units(toolchains=signals)}
+    assert iunits.PIXI_NODE_DEPS_KEY not in keys
+    assert iunits.PIXI_TREE_SITTER_DEPS_KEY not in keys
+
+
+def test_declared_signals_unions_tree_sitter_for_a_declared_toolchain_leg(tmp_path):
+    # A grammar repo has NO manifest for the toolchain walk to find — the
+    # `[toolchains]` declaration is the only signal, so install unions it off
+    # the registry entry's provisions_signal (#890, the wasm-pack mechanics
+    # on the toolchain axis).
+    (tmp_path / ".shipit.toml").write_text('[toolchains]\n"." = "tree-sitter"\n')
+    assert verb._declared_signals(tmp_path) == {iunits.TOOLCHAIN_TREE_SITTER}
+
+
+def test_tree_sitter_toolchain_delivers_the_cli_block(tmp_path):
+    # End to end at the install seam (#890, closing TOL02-WS17 open hole 7):
+    # a declared tree-sitter grammar repo gets the tree-sitter-release-deps
+    # block in the default env, so the release run's `tree-sitter generate`
+    # (and the corpus `tree-sitter test` lane) has the CLI — the WS16 first
+    # live fire died missing-binary exactly here.
+    root = _git_repo(tmp_path)
+    (root / "grammar.js").write_text("module.exports = grammar({});\n")
+    (root / ".shipit.toml").write_text(
+        "[toolchains]\n"
+        '"." = "tree-sitter"\n'
+        "[artifacts.tree-sitter-demo]\n"
+        'build = ["tree-sitter"]\n'
+        'bundle = { composition = "tarball" }\n'
+    )
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+
+    signals = irec.detect_toolchains(root) | verb._declared_signals(root)
+    assert signals == {iunits.TOOLCHAIN_TREE_SITTER}
+    keys = {u.key for u in iunits.load_units(toolchains=signals)}
+    assert iunits.PIXI_TREE_SITTER_DEPS_KEY in keys
 
 
 def _plan_with_toolchains(root, toolchains: frozenset) -> irec.Plan:
@@ -2021,6 +2427,42 @@ def test_key_conflict_guard_covers_the_nested_lint_feature_anchor(tmp_path):
             keys=("rust",),
         ),
     )
+
+
+def test_consumer_rust_pin_conflicts_the_toolchain_block_alone(tmp_path):
+    # THE design constraint the #801 rust promotion was shaped around (the
+    # TOL02-WS17 hole-1 blocker): a consumer already pinning `rust` in its own
+    # [dependencies] (padz/lex, the pre-#801 workaround) keeps its pin via the
+    # first-splice guard — and because the release toolchain is its OWN
+    # single-key block, ONLY that block is skipped: the cargo-edit release
+    # block still delivers. A shared block would have lost both.
+    (tmp_path / "pixi.toml").write_text(
+        '[workspace]\nchannels = ["conda-forge"]\nname = "acme"\n'
+        'platforms = ["linux-64"]\n\n[dependencies]\nrust = "1.90.*"\n'
+    )
+    plan = _plan_with_toolchains(tmp_path, frozenset({iunits.TOOLCHAIN_RUST}))
+
+    assert plan.pixi_key_conflicts == (
+        irec.PixiKeyConflict(
+            unit_key=iunits.PIXI_RUST_RELEASE_TOOLCHAIN_KEY,
+            anchor=iunits.PIXI_NODE_DEPS_ANCHOR,
+            keys=("rust",),
+        ),
+    )
+    keys = {d.unit.key for d in plan.decisions}
+    assert iunits.PIXI_RUST_RELEASE_TOOLCHAIN_KEY not in keys
+    assert iunits.PIXI_RUST_RELEASE_DEPS_KEY in keys  # cargo-edit still lands
+    assert iunits.PIXI_RUST_DEPS_KEY in keys  # so does the lint toolchain
+    # The wasm32 std moves WITH the skipped sysroot (#853): it rides the
+    # toolchain block, not the release-deps block, so a consumer that owns
+    # its `rust` pin is never handed a std pinned to the MANAGED rust
+    # version — the consumer self-provisions the matching std (#759 rule).
+    deps = next(
+        d.unit
+        for d in plan.decisions
+        if d.unit.key == iunits.PIXI_RUST_RELEASE_DEPS_KEY
+    )
+    assert "rust-std-wasm32-unknown-unknown" not in tomllib.loads(deps.desired_inner())
 
 
 # --------------------------------------------------------------------------
@@ -2161,17 +2603,6 @@ def test_fresh_install_lays_down_the_session_bootstrap_set_idempotently(tmp_path
     assert "--worktree" in agent_launcher.read_text()
     assert "session codex" in agent_launcher.read_text()
 
-    # The compatibility shims landed beside it, executable, delegating.
-    launcher = tmp_path / "claude-start"
-    assert launcher.is_file()
-    assert os.access(launcher, os.X_OK)
-    assert "agent-start" in launcher.read_text()
-
-    codex_launcher = tmp_path / "codex-start"
-    assert codex_launcher.is_file()
-    assert os.access(codex_launcher, os.X_OK)
-    assert "agent-start" in codex_launcher.read_text()
-
     # The SessionStart activation hook landed in .claude/settings.json.
     settings = json.loads((tmp_path / ".claude" / "settings.json").read_text())
     entries = settings["hooks"]["SessionStart"]
@@ -2179,48 +2610,35 @@ def test_fresh_install_lays_down_the_session_bootstrap_set_idempotently(tmp_path
         splice.is_shipit_hook(e, iunits.SETTINGS_SESSIONSTART_MARKER) for e in entries
     )
 
-    # All three recorded a pristine hash in the manifest.
+    # Both recorded a pristine hash in the manifest.
     managed = config.load_managed(config.load(tmp_path / ".shipit.toml"))
     assert iunits.AGENT_LAUNCHER_FILE in managed
-    assert iunits.LAUNCHER_FILE in managed
-    assert iunits.CODEX_LAUNCHER_FILE in managed
     assert iunits.SETTINGS_SESSIONSTART_KEY in managed
 
     # Idempotent: a second reconcile decides NOOP for everything — nothing to
     # apply, no git, no PR, artifacts byte-identical.
     rec.calls.clear()
     agent_launcher_before = agent_launcher.read_bytes()
-    launcher_before = launcher.read_bytes()
-    codex_launcher_before = codex_launcher.read_bytes()
     settings_before = (tmp_path / ".claude" / "settings.json").read_bytes()
     again = _plan(tmp_path)
     assert again.nothing_to_do
     assert rec.calls == []
     assert agent_launcher.read_bytes() == agent_launcher_before
-    assert launcher.read_bytes() == launcher_before
-    assert codex_launcher.read_bytes() == codex_launcher_before
     assert (tmp_path / ".claude" / "settings.json").read_bytes() == settings_before
 
 
-def _lay_down_launchers(tmp_path: Path) -> dict[str, Path]:
-    """Write the three shipped launcher units into ``tmp_path``, executable.
+def _lay_down_launcher(tmp_path: Path) -> Path:
+    """Write the shipped ``agent-start`` launcher unit into ``tmp_path``,
+    executable, and return its path.
 
-    The shims delegate to the sibling ``agent-start`` at their own dirname, so
-    behavior tests need the whole set on disk — exactly what a real install
-    lays down.
+    The generic ``agent-start`` launcher carries the host strategy table, so
+    behavior tests need it on disk — exactly what a real install lays down.
     """
-    units = {u.key: u for u in iunits.load_units()}
-    laid: dict[str, Path] = {}
-    for key in (
-        iunits.AGENT_LAUNCHER_FILE,
-        iunits.LAUNCHER_FILE,
-        iunits.CODEX_LAUNCHER_FILE,
-    ):
-        path = tmp_path / units[key].dest
-        path.write_bytes(units[key].content)
-        path.chmod(0o755)
-        laid[key] = path
-    return laid
+    unit = {u.key: u for u in iunits.load_units()}[iunits.AGENT_LAUNCHER_FILE]
+    path = tmp_path / unit.dest
+    path.write_bytes(unit.content)
+    path.chmod(0o755)
+    return path
 
 
 def _fake_cli(tmp_path: Path, name: str) -> dict[str, str]:
@@ -2237,12 +2655,12 @@ def _fake_cli(tmp_path: Path, name: str) -> dict[str, str]:
 def test_agent_start_claude_execs_claude_with_a_minted_session_id(tmp_path: Path):
     # The claude row of the strategy table: exec `claude --worktree <minted-id>`
     # forwarding the remaining args, with a fresh `sess-`-prefixed id per launch.
-    launchers = _lay_down_launchers(tmp_path)
+    agent_start = _lay_down_launcher(tmp_path)
     env = _fake_cli(tmp_path, "claude")
 
     def launch(*args: str) -> list[str]:
         proc = subprocess.run(
-            [str(launchers[iunits.AGENT_LAUNCHER_FILE]), "claude", *args],
+            [str(agent_start), "claude", *args],
             env=env,
             capture_output=True,
             text=True,
@@ -2264,7 +2682,7 @@ def test_agent_start_codex_execs_the_pinned_launcher(tmp_path: Path):
     # The codex row of the strategy table: exec `./bin/shipit session codex`,
     # forwarding the remaining args — never codex directly (codex has no
     # WorktreeCreate-style pre-launch seam; the pinned launcher provisions).
-    launchers = _lay_down_launchers(tmp_path)
+    agent_start = _lay_down_launcher(tmp_path)
     env = _fake_cli(tmp_path, "codex")
     bindir = tmp_path / "bin"
     bindir.mkdir()
@@ -2273,7 +2691,7 @@ def test_agent_start_codex_execs_the_pinned_launcher(tmp_path: Path):
     fake_shipit.chmod(0o755)
 
     proc = subprocess.run(
-        [str(launchers[iunits.AGENT_LAUNCHER_FILE]), "codex", "--model", "foo"],
+        [str(agent_start), "codex", "--model", "foo"],
         env=env,
         capture_output=True,
         text=True,
@@ -2295,7 +2713,7 @@ def test_agent_start_scrubs_the_inherited_worker_agent_identity_exports(
     # task-correlation key like PR still rides — it describes the work, not who
     # is doing it. The scrub lives in the common path, so one fake CLI (claude)
     # covers every host row.
-    launchers = _lay_down_launchers(tmp_path)
+    agent_start = _lay_down_launcher(tmp_path)
     env = _fake_cli(tmp_path, "claude")
     fake = tmp_path / "fakepath" / "claude"
     fake.write_text(
@@ -2307,7 +2725,7 @@ def test_agent_start_scrubs_the_inherited_worker_agent_identity_exports(
     )
 
     proc = subprocess.run(
-        [str(launchers[iunits.AGENT_LAUNCHER_FILE]), "claude"],
+        [str(agent_start), "claude"],
         env={
             **env,
             "SHIPIT_LOG_CTX_ROLE": "implementer",
@@ -2328,9 +2746,32 @@ def test_agent_start_scrubs_the_inherited_worker_agent_identity_exports(
     ]
 
 
+def test_agent_start_launches_from_the_repo_root(tmp_path: Path):
+    # #848 (copilot on vscode#157): the launcher computes `repo=` from its own
+    # location but used to dispatch from the CALLER's cwd — invoked from
+    # outside the checkout, the coordinator session rooted itself in whatever
+    # directory the caller happened to be in. The common path now cd's to the
+    # repo root before dispatch, so every host launches from the checkout.
+    agent_start = _lay_down_launcher(tmp_path)
+    env = _fake_cli(tmp_path, "claude")
+    (tmp_path / "fakepath" / "claude").write_text("#!/usr/bin/env bash\npwd -P\n")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+
+    proc = subprocess.run(
+        [str(agent_start), "claude"],
+        env=env,
+        cwd=elsewhere,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == os.path.realpath(tmp_path)
+
+
 def test_agent_start_rejects_an_unknown_or_missing_agent(tmp_path: Path):
-    launchers = _lay_down_launchers(tmp_path)
-    agent_start = launchers[iunits.AGENT_LAUNCHER_FILE]
+    agent_start = _lay_down_launcher(tmp_path)
 
     proc = subprocess.run(
         [str(agent_start), "goose"], capture_output=True, text=True, timeout=10
@@ -2345,41 +2786,8 @@ def test_agent_start_rejects_an_unknown_or_missing_agent(tmp_path: Path):
     assert "usage:" in proc.stderr
 
 
-def test_start_shims_delegate_to_agent_start(tmp_path: Path):
-    # The #627 compatibility contract: `./claude-start [args]` behaves exactly
-    # like `./agent-start claude [args]` (and codex likewise) — the shims carry
-    # no launch logic, so the common start path cannot drift per entry point.
-    launchers = _lay_down_launchers(tmp_path)
-    env = _fake_cli(tmp_path, "claude")
-
-    proc = subprocess.run(
-        [str(launchers[iunits.LAUNCHER_FILE]), "extra"],
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
-    assert proc.returncode == 0, proc.stderr
-    argv = proc.stdout.splitlines()
-    assert argv[0] == "--worktree"
-    assert argv[1].startswith("sess-")
-    assert argv[2:] == ["extra"]
-
-    # A shim with no sibling agent-start fails loud toward the reconcile.
-    launchers[iunits.AGENT_LAUNCHER_FILE].unlink()
-    proc = subprocess.run(
-        [str(launchers[iunits.CODEX_LAUNCHER_FILE])],
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
-    assert proc.returncode == 127
-    assert "agent-start is missing" in proc.stderr
-    assert "shipit install" in proc.stderr
-
-
 def test_agent_start_fails_loud_when_the_cli_is_not_on_path(tmp_path: Path):
-    launchers = _lay_down_launchers(tmp_path)
+    agent_start = _lay_down_launcher(tmp_path)
 
     # A minimal PATH carrying `bash` (the shebang's interpreter) and `dirname`
     # (the launcher's own repo-root probe needs it; without it, bash ≥5.2 turns
@@ -2395,7 +2803,7 @@ def test_agent_start_fails_loud_when_the_cli_is_not_on_path(tmp_path: Path):
         assert binary is not None
         (bindir / tool).symlink_to(binary)
     proc = subprocess.run(
-        [str(launchers[iunits.AGENT_LAUNCHER_FILE]), "claude"],
+        [str(agent_start), "claude"],
         env={"PATH": str(bindir)},
         capture_output=True,
         text=True,
@@ -2552,6 +2960,12 @@ class _GhRecorder:
     def switch_create(self, branch, *, cwd):
         self.calls.append(("switch", branch))
 
+    def switch(self, branch, *, cwd):
+        # The MODE_PR caller-branch restore (#777 mode 1) — recorded under its
+        # own name so a test can assert the checkout is returned to the branch
+        # it started on after the PR flow.
+        self.calls.append(("switch_back", branch))
+
     def add(self, paths, *, cwd):
         self.calls.append(("add", tuple(paths)))
 
@@ -2584,6 +2998,7 @@ def rec(monkeypatch):
     r = _GhRecorder()
     for name in (
         "switch_create",
+        "switch",
         "add",
         "commit",
         "push",
@@ -2643,8 +3058,17 @@ def test_fresh_install_writes_set_and_opens_draft_pr(tmp_path, rec):
     # A DRAFT PR was opened; the rendered body lists the additions.
     assert ("pr_create", True) in rec.calls
     assert "### Added" in rec.pr_body
-    # Order: branch -> add -> commit -> push -> pr.
-    assert rec.names() == ["switch", "add", "commit", "push", "pr_create"]
+    # Order: branch -> add -> commit -> push -> pr -> restore the caller's branch
+    # (#777 mode 1: the flow returns the checkout to where it started).
+    assert rec.names() == [
+        "switch",
+        "add",
+        "commit",
+        "push",
+        "pr_create",
+        "switch_back",
+    ]
+    assert ("switch_back", "main") in rec.calls
 
 
 def test_fresh_install_provisions_agent_defs_and_settings_hook(tmp_path, rec):
@@ -3025,8 +3449,10 @@ def test_fresh_consumer_without_pixi_manifest_gets_a_valid_seed(tmp_path, rec):
     assert manifest["tasks"]["test"] == "./bin/shipit test"
     assert set(manifest["feature"]["lint"]["dependencies"]) == set(LINT_TOOLS)
     assert manifest["environments"]["lint"] == ["lint"]
+    # ...and the launcher's uv (#758): the managed tasks all ride ./bin/shipit.
+    assert "uv" in manifest["dependencies"]
 
-    # The seed is scaffold, not a managed unit: only the four block units are
+    # The seed is scaffold, not a managed unit: only the five block units are
     # recorded, so the [workspace] table is consumer-owned from here on.
     managed = config.load_managed(config.load(tmp_path / ".shipit.toml"))
     pixi_keys = {k for k in managed if k.startswith("pixi.toml")}
@@ -3035,6 +3461,7 @@ def test_fresh_consumer_without_pixi_manifest_gets_a_valid_seed(tmp_path, rec):
         iunits.PIXI_TEST_TASK_KEY,
         iunits.PIXI_LINT_DEPS_KEY,
         iunits.PIXI_ENVS_KEY,
+        iunits.PIXI_LAUNCHER_DEPS_KEY,
     }
 
     # The PR body tells the merger the table was seeded and is theirs to edit.
@@ -3180,7 +3607,14 @@ def test_pr_mode_on_virgin_repo_with_lint_debt_reaches_the_pr_leg(tmp_path, rec)
     # The hooks were armed by this very run…
     assert rec.hook_activations == [tmp_path]
     # …and the push/PR leg still ran, both git write ops bypassing the hooks.
-    assert rec.names() == ["switch", "add", "commit", "push", "pr_create"]
+    assert rec.names() == [
+        "switch",
+        "add",
+        "commit",
+        "push",
+        "pr_create",
+        "switch_back",
+    ]
     assert rec.commit_no_verify is True
     assert rec.push_no_verify is True
     assert result.pr_url == "https://github.com/acme/repo/pull/1"
@@ -3596,6 +4030,247 @@ def test_activation_output_joins_streams_with_newline(tmp_path):
 
 
 # --------------------------------------------------------------------------
+# #777 install --pr flow-robustness (modes 1-3): caller-branch restore, the
+# stale-lefthook-backup pre-clean, and the transactional fail-closed rollback.
+# --------------------------------------------------------------------------
+
+# A minimal lefthook-generated shim: carries BOTH markers the pre-clean keys on.
+_LEFTHOOK_SHIM = (
+    "#!/bin/sh\n"
+    'if [ "$LEFTHOOK" = "0" ]; then\n  exit 0\nfi\n'
+    'call_lefthook run "pre-commit" "$@"\n'
+)
+
+
+def test_preclean_removes_a_stale_lefthook_shim_backup(tmp_path):
+    # Mode 2: a stale `<hook>.old` left by a prior (release-era) `lefthook
+    # install` is what collides with the next activation's rename. A backup
+    # positively identified as a lefthook shim (both markers) is removed.
+    hooks = tmp_path / ".git" / "hooks"
+    hooks.mkdir(parents=True)
+    (hooks / "pre-commit.old").write_text(_LEFTHOOK_SHIM)
+    (hooks / "pre-push.old").write_text(_LEFTHOOK_SHIM)
+    iapply._preclean_stale_hook_backups(tmp_path)
+    assert not (hooks / "pre-commit.old").exists()
+    assert not (hooks / "pre-push.old").exists()
+
+
+def test_preclean_preserves_a_non_lefthook_backup(tmp_path):
+    # Conservative by construction: a `.old` that is NOT a lefthook shim (a
+    # hand-written consumer hook backup) is left untouched — install only removes
+    # backups it can positively identify as tool-authored.
+    hooks = tmp_path / ".git" / "hooks"
+    hooks.mkdir(parents=True)
+    consumer = "#!/bin/sh\necho my own pre-commit\nexit 0\n"
+    (hooks / "pre-commit.old").write_text(consumer)
+    # A file that carries only ONE marker is still not a shim — require both.
+    (hooks / "pre-push.old").write_text("#!/bin/sh\n# mentions LEFTHOOK in a comment\n")
+    iapply._preclean_stale_hook_backups(tmp_path)
+    assert (hooks / "pre-commit.old").read_text() == consumer
+    assert (hooks / "pre-push.old").is_file()
+
+
+def test_preclean_leaves_the_live_hooks_untouched(tmp_path):
+    # The pre-clean targets ONLY `.old` backups — a live `pre-commit` shim (no
+    # `.old` suffix) is never removed, even though it is a lefthook shim.
+    hooks = tmp_path / ".git" / "hooks"
+    hooks.mkdir(parents=True)
+    (hooks / "pre-commit").write_text(_LEFTHOOK_SHIM)
+    iapply._preclean_stale_hook_backups(tmp_path)
+    assert (hooks / "pre-commit").read_text() == _LEFTHOOK_SHIM
+
+
+def test_preclean_no_hooks_dir_is_a_noop(tmp_path):
+    # A consumer whose `.git/hooks` does not exist must not raise.
+    iapply._preclean_stale_hook_backups(tmp_path)  # no .git/hooks yet
+
+
+def test_pr_install_precleans_a_stale_lefthook_backup_before_activation(tmp_path, rec):
+    # Mode 2 end-to-end: a writing `install --pr` clears the colliding backup as
+    # part of its activation step, so `lefthook install` never fails the rename
+    # (and self-cert never fails closed on it).
+    hooks = tmp_path / ".git" / "hooks"
+    hooks.mkdir(parents=True)
+    (hooks / "pre-commit.old").write_text(_LEFTHOOK_SHIM)
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    _apply(tmp_path, iapply.MODE_PR)
+    assert not (hooks / "pre-commit.old").exists()
+
+
+def test_pr_flow_restores_the_caller_branch(tmp_path, rec):
+    # Mode 1: MODE_PR stages onto `shipit/install`, then returns the caller's
+    # checkout to the branch it started on (the recorder's `current_branch` is
+    # "main"). Without this the operator is stranded off-main with no notice.
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    _apply(tmp_path, iapply.MODE_PR)
+    assert rec.calls[-1] == ("switch_back", "main")
+
+
+def test_pr_flow_restores_the_caller_branch_even_when_a_git_step_fails(
+    tmp_path, rec, monkeypatch
+):
+    # Mode 1: the restore rides a `finally`, so a git/gh failure mid-flow still
+    # returns the caller to their branch rather than stranding them on the
+    # scratch branch on top of the error.
+    def boom(*a, **k):
+        raise ExecError(["git", "push"], rc=1, stderr="denied")
+
+    monkeypatch.setattr(git, "push", boom)
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    with pytest.raises(ExecError):
+        _apply(tmp_path, iapply.MODE_PR)
+    assert ("switch_back", "main") in rec.calls
+
+
+def test_pr_flow_from_detached_head_does_not_restore(tmp_path, rec, monkeypatch):
+    # Nothing to restore to (detached HEAD → current_branch is None): the flow
+    # still stages the PR but attempts no switch-back.
+    monkeypatch.setattr(git, "current_branch", lambda *, cwd: None)
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    _apply(tmp_path, iapply.MODE_PR)
+    assert not any(name == "switch_back" for name, _ in rec.calls)
+
+
+def test_restore_caller_branch_skips_none_and_the_scratch_branch(tmp_path, rec):
+    # The guard: no branch to restore to (None) and a checkout already on the
+    # scratch branch both no-op — there is nowhere sensible to switch.
+    iapply._restore_caller_branch(str(tmp_path), None)
+    iapply._restore_caller_branch(str(tmp_path), iapply.INSTALL_BRANCH)
+    assert not any(name == "switch_back" for name, _ in rec.calls)
+
+
+def test_restore_committing_writes_is_a_transaction(tmp_path):
+    # Mode 3 primitive: an existing path is restored to its pre-write bytes
+    # verbatim; a path absent before the writes (snapshot cell None) is unlinked.
+    # The now-empty parent dir is left behind — inert (git does not track empty
+    # dirs and reconcile reads files), which is why the rollback restores file
+    # state only.
+    (tmp_path / "kept.txt").write_bytes(b"MUTATED\n")  # was b"before\n"
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "new.txt").write_text("added by the failed apply\n")
+    snapshot = {
+        "kept.txt": iapply._SnapshotCell(b"before\n", 0o644),
+        "sub/new.txt": None,
+    }
+    iapply._restore_committing_writes(tmp_path, snapshot)
+    assert (tmp_path / "kept.txt").read_bytes() == b"before\n"
+    assert not (tmp_path / "sub" / "new.txt").exists()
+
+
+def test_restore_committing_writes_is_best_effort_across_files(tmp_path):
+    # #838 review (minor): an emergency rollback restores every path it can — a
+    # single failing path does not abort the rest — then raises a combined
+    # OSError naming the unrecoverable path(s) (the caller logs it as a partial
+    # rollback). The failing entry is FIRST so the assertion proves the loop
+    # continued past it.
+    (tmp_path / "blocked").mkdir()  # write_bytes onto a dir -> IsADirectoryError
+    (tmp_path / "ok.txt").write_bytes(b"MUTATED\n")
+    snapshot = {
+        "blocked": iapply._SnapshotCell(b"never lands\n", 0o644),
+        "ok.txt": iapply._SnapshotCell(b"restored\n", 0o644),
+    }
+    with pytest.raises(OSError, match="blocked"):
+        iapply._restore_committing_writes(tmp_path, snapshot)
+    # The later path was still restored despite the earlier failure.
+    assert (tmp_path / "ok.txt").read_bytes() == b"restored\n"
+
+
+def test_restore_committing_writes_restores_the_original_mode(tmp_path):
+    # #838 review (major): the snapshot carries permission bits, so a rollback
+    # returns BOTH content and mode — a write that flipped the executable bit
+    # (write_unit chmods managed executables to 0755) never leaves a mode-only
+    # dirty file after the content is restored.
+    victim = tmp_path / "bin" / "shipit"
+    victim.parent.mkdir(parents=True)
+    victim.write_bytes(b"consumer launcher\n")
+    victim.chmod(0o644)
+    cell = iapply._snapshot_cell(victim)
+    assert cell == iapply._SnapshotCell(b"consumer launcher\n", 0o644)
+    # Simulate the apply: new bytes AND the managed-executable chmod.
+    victim.write_bytes(b"MANAGED launcher\n")
+    victim.chmod(0o755)
+    iapply._restore_committing_writes(tmp_path, {"bin/shipit": cell})
+    assert victim.read_bytes() == b"consumer launcher\n"
+    assert stat.S_IMODE(victim.stat().st_mode) == 0o644
+
+
+def test_pr_selfcert_failure_rolls_the_staged_writes_back(tmp_path, rec):
+    # Mode 3: a failed self-cert must leave NOTHING half-applied. Before this fix
+    # the fail-closed run had already written the managed set AND stamped
+    # `.shipit.toml`, so a rerun read "nothing to do" and exited 0 over an
+    # unrecoverable partial state.
+    (tmp_path / "AGENTS.md").write_text("# Acme\n\nConsumer text.\n")
+    original_agents = (tmp_path / "AGENTS.md").read_text()
+
+    def failing_cert(plan, root, **kw):
+        return selfcert.CertReport(
+            checks=(selfcert.CertCheck(name="planted", ok=False, detail="boom"),)
+        )
+
+    with pytest.raises(SelfCertError):
+        _apply(tmp_path, iapply.MODE_PR, certify=failing_cert)
+
+    # Fail-closed BEFORE any git side effect (no branch switch, no commit, no PR)…
+    assert rec.names() == []
+    # …and the managed content apply staged is gone: no manifest stamp, no
+    # written units, the consumer's own AGENTS.md un-spliced. (The rollback
+    # restores file STATE; an emptied managed directory is inert — git does not
+    # track it and reconcile reads files, not dirs.)
+    assert not (tmp_path / ".shipit.toml").exists()
+    assert not (tmp_path / "skills" / "to-spec" / "SKILL.md").exists()
+    assert not (tmp_path / "bin" / "shipit").exists()
+    assert (tmp_path / "AGENTS.md").read_text() == original_agents
+
+    # The decisive property the half-applied state broke: a rerun still has real
+    # work to do — reconcile does NOT collapse to nothing_to_do.
+    again = _plan(tmp_path)
+    assert not again.nothing_to_do
+    assert again.writes
+
+
+def test_pr_selfcert_failure_restores_an_executable_managed_files_mode(tmp_path, rec):
+    # #838 review (major), end-to-end: an existing `bin/shipit` that diverges
+    # from the managed launcher is an OVERRIDE — write_unit rewrites it AND
+    # chmods it 0755. A failed self-cert must roll back BOTH its content and its
+    # original mode, never leaving a mode-only dirty (executable) file.
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    launcher = tmp_path / "bin" / "shipit"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text("# the consumer's own launcher\n")
+    launcher.chmod(0o644)
+
+    def failing_cert(plan, root, **kw):
+        return selfcert.CertReport(
+            checks=(selfcert.CertCheck(name="planted", ok=False),)
+        )
+
+    with pytest.raises(SelfCertError):
+        _apply(tmp_path, iapply.MODE_PR, certify=failing_cert)
+
+    # Content AND mode are exactly as apply found them.
+    assert launcher.read_text() == "# the consumer's own launcher\n"
+    assert stat.S_IMODE(launcher.stat().st_mode) == 0o644
+
+
+def test_local_selfcert_failure_also_rolls_back(tmp_path, rec):
+    # The transaction covers every committing mode, not just PR: MODE_LOCAL
+    # (Tree provisioning) fails closed and rolls back identically.
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+
+    def failing_cert(plan, root, **kw):
+        return selfcert.CertReport(
+            checks=(selfcert.CertCheck(name="planted", ok=False),)
+        )
+
+    with pytest.raises(SelfCertError):
+        _apply(tmp_path, iapply.MODE_LOCAL, certify=failing_cert)
+    assert rec.names() == []
+    assert not (tmp_path / ".shipit.toml").exists()
+    assert not (tmp_path / "bin" / "shipit").exists()
+    assert not _plan(tmp_path).nothing_to_do
+
+
+# --------------------------------------------------------------------------
 # Retired files (docs/legacy-prd/rvw01-sole-requester.md, ADR-0031)
 # --------------------------------------------------------------------------
 
@@ -3793,6 +4468,55 @@ def test_retired_manifest_carries_the_renamed_skill_history():
 
     for path, expected_hashes in RETIRED_SKILL_HASHES.items():
         assert retired[path].pristine_hashes == expected_hashes
+
+
+# The agent-specific launcher shims (#815): repo-root whole-file units shipit
+# used to distribute, retired now that all launch logic lives in `agent-start`.
+# The fixtures snapshot the last-shipped pristine bytes so the upgrade path —
+# an install shedding a stale shim while keeping a locally edited one — is
+# covered end-to-end.
+PRISTINE_CLAUDE_START = Path(__file__).parent / "data" / "claude-start-pristine"
+PRISTINE_CODEX_START = Path(__file__).parent / "data" / "codex-start-pristine"
+RETIRED_LAUNCHER_SHIMS = {
+    "claude-start": PRISTINE_CLAUDE_START,
+    "codex-start": PRISTINE_CODEX_START,
+}
+
+
+def test_retired_manifest_carries_the_launcher_shim_history():
+    # Both agent-specific shims are retired, each with its last-shipped pristine
+    # hash from this repo's git history (the fixtures snapshot those bytes).
+    retired = {r.path: r for r in irec.load_retired()}
+    for path, fixture in RETIRED_LAUNCHER_SHIMS.items():
+        entry = retired[path]
+        assert all(h.startswith("sha256:") for h in entry.pristine_hashes)
+        assert config.content_hash(fixture.read_bytes()) in entry.pristine_hashes
+
+
+@pytest.mark.parametrize("path", sorted(RETIRED_LAUNCHER_SHIMS))
+def test_install_deletes_a_pristine_retired_launcher_shim(tmp_path, rec, path):
+    # A consumer that already installed the shim sheds it on upgrade, while the
+    # surviving generic `agent-start` launcher is (re)installed.
+    victim = tmp_path / path
+    victim.write_bytes(RETIRED_LAUNCHER_SHIMS[path].read_bytes())
+
+    plan = _plan(tmp_path)
+    assert path in [d.retired.path for d in plan.retire_deletes]
+    _apply(tmp_path)
+    assert not victim.exists()
+    assert (tmp_path / iunits.AGENT_LAUNCHER_FILE).is_file()
+
+
+@pytest.mark.parametrize("path", sorted(RETIRED_LAUNCHER_SHIMS))
+def test_install_keeps_a_modified_retired_launcher_shim(tmp_path, rec, path):
+    # A locally edited shim is never destroyed: kept on disk, warned loudly.
+    victim = tmp_path / path
+    victim.write_bytes(RETIRED_LAUNCHER_SHIMS[path].read_bytes() + b"# local\n")
+
+    plan = _plan(tmp_path)
+    assert [d.retired.path for d in plan.retire_keeps] == [path]
+    _apply(tmp_path)
+    assert victim.exists()
 
 
 def test_install_deletes_a_pristine_retired_file(tmp_path, rec):

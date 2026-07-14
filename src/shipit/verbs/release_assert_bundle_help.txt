@@ -1,0 +1,24 @@
+`shipit release assert-bundle` asserts that a bundle tree's MAIN binary is
+the expected app — the integrity guard.
+
+Signing is not integrity: a crate with multiple binaries and no declared
+main once shipped a dev tool as the app's main executable, and it signed
+and notarized cleanly. This check exists so that can never happen again; it
+runs at the signer's entry and on the unsigned publish path.
+
+The expected name resolves through the fallback chain over the ARTIFACT's
+declaration in .shipit.toml: `main-binary` -> `product-name` -> the build
+target's package name -> the artifact name. ARTIFACT may be omitted when
+the repo declares exactly one; `--expected NAME` bypasses the map entirely.
+
+The check is pure over the tree — no network, no toolchain: every `.app`
+(its Info.plist CFBundleExecutable), every `*.unsigned-app.tar.gz` reseal
+payload, every plain `.tar.gz`/`.zip` archive and every `.deb` (all read in
+place — the exec bit inside an archive's or a deb's data.tar headers
+survives the artifact transport that strips a loose file's), or — when the
+tree bundles none of those — the loose executables, must be named exactly
+the expected name. A tree with nothing to assert fails loudly.
+
+Exit codes: 0 the main binary matches; 1 it does not (the verdict with
+expected/actual names prints on stderr; `--json` renders the typed verdict
+on stdout); 2 usage.

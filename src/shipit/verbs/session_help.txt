@@ -1,5 +1,9 @@
-`shipit session` launches isolated top-level coordinator sessions.
+`shipit session` launches and resumes isolated top-level coordinator sessions.
 
 Claude sessions ride the host worktree hook seam. `shipit session codex` is the
 Codex counterpart: it provisions the ephemeral session Tree explicitly, then
 execs codex rooted in that Tree.
+
+`shipit session resume` resolves a shipit session id, backend-native id, or
+`--last --repo owner/name` from durable shipit logs and launches the matching
+backend resume path in a fresh session Tree.

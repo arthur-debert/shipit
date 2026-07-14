@@ -8,17 +8,32 @@ values → domain → render) plus pure-renderer assertions that freeze the text
 surface.
 """
 
+import re
 from typing import Any
 
 import pytest
 
-from shipit import execrun, ghsetup
+from shipit import config, execrun, ghsetup, redact
 from shipit.config import SecretSource
 from shipit.identity import Revision, WorkingDir, repo_from_slug
 from shipit.verbs import gh_setup as gh_setup_verb
 from shipit.verbs._context import RootContext
 
 REPO = repo_from_slug("o/r")
+
+
+@pytest.fixture(autouse=True)
+def _clean_redactor_registry():
+    """Secret resolution must not leak process-lifetime redactor state.
+
+    Production deliberately retains every fetched value for the process lifetime,
+    but this module resolves many synthetic values across otherwise independent
+    tests.  Clear the test seam around each case so short fixtures such as an App
+    id cannot redact unrelated later records (for example, timestamp digits).
+    """
+    redact.clear_registered_secrets()
+    yield
+    redact.clear_registered_secrets()
 
 
 def get_rule(ruleset: dict[str, Any], rule_type: str) -> dict[str, Any]:
@@ -196,18 +211,26 @@ def test_existing_ruleset_id():
 
 
 class FakeGh:
-    """Records calls and serves canned ruleset-list responses."""
+    """Records calls and serves canned ruleset-list / repo-info responses."""
 
     def __init__(self, existing_rulesets=None):
         self.calls = []
         self._rulesets = existing_rulesets or []
         self.secrets = {}
         self.labels = []
+        # Pass (d) inputs: a public user-owned repo by default, so the access
+        # verify is typed not-applicable and never reaches the access endpoint.
+        self.repo_info = {"private": False, "owner": {"type": "User"}}
+        self.access_level = "none"
 
     def rest(self, path, *, method=None, body=None, paginate=False):
         self.calls.append(("rest", path, method))
         if path.endswith("/rulesets") and method is None:
             return self._rulesets
+        if path.endswith("/actions/permissions/access"):
+            return {"access_level": self.access_level}
+        if re.fullmatch(r"repos/[^/]+/[^/]+", path):
+            return self.repo_info
         return None
 
     def label_create(self, repo, name, *, description, color):
@@ -346,24 +369,396 @@ def test_setup_dry_run_reports_and_mutates_nothing(fake_gh, monkeypatch):
     assert not any(m in ("POST", "PUT") for (_, _, m) in fake_gh.calls)
 
 
-def test_setup_pushes_configured_secrets(fake_gh, monkeypatch, tmp_path):
+def test_setup_pushes_the_derived_requirement_set(fake_gh, monkeypatch, tmp_path):
+    """The sync consumes the derivation (TOL02-WS02, story 44): required and
+    sourced → pushed; declared-but-unrequired → orphan, NOT pushed."""
+    monkeypatch.setattr(ghsetup.gh, "default_branch", lambda repo: "main")
+    monkeypatch.setattr(ghsetup.checks_mod, "discover", lambda *a, **k: ["c / check"])
+    monkeypatch.setenv("VAR_A", "secret-a")
+    monkeypatch.setenv("VAR_B", "secret-b")
+    cfg = tmp_path / ".shipit.toml"
+    cfg.write_text(
+        '[artifacts.dist]\nbuild = ["python"]\nendpoints = ["gh-release", "pypi"]\n'
+        "[secrets]\n"
+        'RELEASE_TOKEN = { env = "VAR_A" }\n'
+        'PYPI_TOKEN = { env = "VAR_B" }\n'
+        'NPM_TOKEN = { env = "VAR_B" }\n',  # no npm endpoint → orphan
+        encoding="utf-8",
+    )
+
+    report = ghsetup.setup(REPO, config_path=str(cfg), dry_run=False)
+    assert report.secrets_error is None
+    assert [(s.name, s.action) for s in report.secrets] == [
+        ("RELEASE_TOKEN", "set"),
+        ("PYPI_TOKEN", "set"),
+        ("NPM_TOKEN", "orphan"),
+    ]
+    assert (report.secrets_set, report.secrets_failed, report.secrets_orphaned) == (
+        2,
+        0,
+        1,
+    )
+    # Never over-provisions: the orphan is flagged, not pushed.
+    assert fake_gh.secrets == {"RELEASE_TOKEN": "secret-a", "PYPI_TOKEN": "secret-b"}
+    assert report.ruleset.action == "created"
+    assert ("rest", "repos/o/r/rulesets", "POST") in fake_gh.calls
+
+
+def test_setup_missing_source_fails_naming_the_requiring_entry(
+    fake_gh, monkeypatch, tmp_path
+):
+    """Story 45: a derived requirement with no [secrets] source is a
+    SYNC-TIME error naming the requiring registry entry — drift is caught at
+    gh-setup, not at release."""
     monkeypatch.setattr(ghsetup.gh, "default_branch", lambda repo: "main")
     monkeypatch.setattr(ghsetup.checks_mod, "discover", lambda *a, **k: ["c / check"])
     monkeypatch.setenv("VAR_A", "secret-a")
     cfg = tmp_path / ".shipit.toml"
-    cfg.write_text('[secrets]\nA = { env = "VAR_A" }\n', encoding="utf-8")
+    cfg.write_text(
+        '[artifacts.dist]\nbuild = ["python"]\nendpoints = ["gh-release", "pypi"]\n'
+        '[secrets]\nRELEASE_TOKEN = { env = "VAR_A" }\n',
+        encoding="utf-8",
+    )
+
+    report = ghsetup.setup(REPO, config_path=str(cfg), dry_run=False)
+    failed = [s for s in report.secrets if s.action == "failed"]
+    assert [(s.name, s.source) for s in failed] == [("PYPI_TOKEN", "none")]
+    assert "required by endpoint pypi (artifact dist)" in failed[0].reason
+    assert report.secrets_failed == 1  # → the verb's rc 1
+
+
+def test_setup_reads_reviewers_and_provisions_their_credentials(
+    fake_gh, monkeypatch, tmp_path
+):
+    """#740 end-to-end: the [reviewers] table is the third derivation input —
+    a declared funnel reviewer's sourced credential pair is pushed."""
+    monkeypatch.setattr(ghsetup.gh, "default_branch", lambda repo: "main")
+    monkeypatch.setattr(ghsetup.checks_mod, "discover", lambda *a, **k: ["c / check"])
+    monkeypatch.setenv("VAR_PEM", "pem")
+    monkeypatch.setenv("VAR_ID", "42")
+    # A direct caller may supply any filename; all policy tables must come from
+    # that exact file rather than re-discovering a sibling `.shipit.toml`.
+    cfg = tmp_path / "custom-policy.toml"
+    cfg.write_text(
+        "[reviewers]\ncodex = {}\n"
+        "[secrets]\n"
+        'CODEX_REVIEW_APP_PRIVATE_KEY = { env = "VAR_PEM" }\n'
+        'CODEX_REVIEW_APP_ID = { env = "VAR_ID" }\n',
+        encoding="utf-8",
+    )
 
     report = ghsetup.setup(REPO, config_path=str(cfg), dry_run=False)
     assert report.secrets_error is None
-    assert [(s.name, s.action) for s in report.secrets] == [("A", "set")]
-    assert (report.secrets_set, report.secrets_skipped, report.secrets_failed) == (
-        1,
-        0,
-        0,
+    assert [(s.name, s.action) for s in report.secrets] == [
+        ("CODEX_REVIEW_APP_PRIVATE_KEY", "set"),
+        ("CODEX_REVIEW_APP_ID", "set"),
+    ]
+    assert fake_gh.secrets == {
+        "CODEX_REVIEW_APP_PRIVATE_KEY": "pem",
+        "CODEX_REVIEW_APP_ID": "42",
+    }
+
+
+def test_setup_declared_reviewer_with_pruned_secrets_fails_the_sync(
+    fake_gh, monkeypatch, tmp_path
+):
+    """#740's deliberate behavior change, end-to-end: reviewers declared +
+    broken/pruned [secrets] → failed outcomes → rc 1, loud at sync time."""
+    monkeypatch.setattr(ghsetup.gh, "default_branch", lambda repo: "main")
+    monkeypatch.setattr(ghsetup.checks_mod, "discover", lambda *a, **k: ["c / check"])
+    cfg = tmp_path / ".shipit.toml"
+    cfg.write_text("[reviewers]\ncodex = {}\n[secrets]\n", encoding="utf-8")
+
+    report = ghsetup.setup(REPO, config_path=str(cfg), dry_run=False)
+    failed = [s for s in report.secrets if s.action == "failed"]
+    assert [s.name for s in failed] == [
+        "CODEX_REVIEW_APP_PRIVATE_KEY",
+        "CODEX_REVIEW_APP_ID",
+    ]
+    assert "reviewer codex ([reviewers] declaration)" in failed[0].reason
+    assert report.secrets_failed == 2  # → the verb's rc 1
+
+
+def test_setup_malformed_reviewers_degrades_like_a_config_error(
+    fake_gh, monkeypatch, tmp_path
+):
+    """A bad [reviewers] table is the same degraded-but-continuing posture as a
+    malformed [secrets]: ruleset/labels applied, the failure a report fact."""
+    monkeypatch.setattr(ghsetup.gh, "default_branch", lambda repo: "main")
+    monkeypatch.setattr(ghsetup.checks_mod, "discover", lambda *a, **k: ["c / check"])
+    cfg = tmp_path / "custom-policy.toml"
+    cfg.write_text("[reviewers]\nnotareviewer = {}\n", encoding="utf-8")
+
+    report = ghsetup.setup(REPO, config_path=str(cfg), dry_run=False)
+    assert report.secrets == ()
+    assert report.secrets_error is not None
+    assert "notareviewer" in report.secrets_error
+    assert str(cfg) in report.secrets_error
+    assert ".shipit.toml" not in report.secrets_error
+    assert report.ruleset.action == "created"  # the earlier passes still ran
+
+
+def test_sync_secrets_dry_run_reports_the_same_derivation(fake_gh, monkeypatch):
+    """Dry-run previews the derived sync — would-push, missing, orphan — with
+    zero resolution side effects (no doppler, no prompt, no env read)."""
+    artifacts = config.load_artifacts(
+        {"artifacts": {"dist": {"build": ["python"], "endpoints": ["pypi"]}}}
     )
-    assert fake_gh.secrets == {"A": "secret-a"}
-    assert report.ruleset.action == "created"
-    assert ("rest", "repos/o/r/rulesets", "POST") in fake_gh.calls
+    sources = [
+        SecretSource("RELEASE_TOKEN", "env", "VAR_A", False),
+        SecretSource("NPM_TOKEN", "env", "VAR_B", False),  # orphan
+    ]
+    outcomes = ghsetup.sync_secrets(
+        "o/r", artifacts, sources, reviewers=(), dry_run=True, prompt=None
+    )
+    assert [(o.name, o.action) for o in outcomes] == [
+        ("RELEASE_TOKEN", "dry-run"),
+        ("PYPI_TOKEN", "failed"),  # missing source is a fact, dry or real
+        ("NPM_TOKEN", "orphan"),
+    ]
+    assert fake_gh.secrets == {}
+
+
+def test_sync_secrets_declared_reviewer_app_secrets_are_required_and_pushed(
+    fake_gh, monkeypatch
+):
+    """#740 (option C): a declared funnel reviewer's credential pair rides the
+    derived required set — sourced → pushed, exactly like an endpoint token."""
+    monkeypatch.setenv("VAR_PEM", "pem")
+    monkeypatch.setenv("VAR_ID", "42")
+    sources = [
+        SecretSource("CODEX_REVIEW_APP_PRIVATE_KEY", "env", "VAR_PEM", False),
+        SecretSource("CODEX_REVIEW_APP_ID", "env", "VAR_ID", False),
+    ]
+    outcomes = ghsetup.sync_secrets(
+        "o/r", (), sources, reviewers=("codex",), dry_run=False, prompt=None
+    )
+    assert [(o.name, o.action) for o in outcomes] == [
+        ("CODEX_REVIEW_APP_PRIVATE_KEY", "set"),
+        ("CODEX_REVIEW_APP_ID", "set"),
+    ]
+    assert fake_gh.secrets == {
+        "CODEX_REVIEW_APP_PRIVATE_KEY": "pem",
+        "CODEX_REVIEW_APP_ID": "42",
+    }
+
+
+def test_sync_secrets_undeclared_seeded_app_secrets_are_orphans(fake_gh, monkeypatch):
+    """#740: the extra_required orphan exemption is gone — a seeded App pair
+    whose reviewer is NOT in [reviewers] is a normal orphan: flagged, never
+    resolved, never pushed."""
+    monkeypatch.setenv("VAR_APP", "pem")
+    (app_name, *_rest) = config.seeded_app_secrets()
+    sources = [SecretSource(app_name, "env", "VAR_APP", False)]
+    outcomes = ghsetup.sync_secrets(
+        "o/r", (), sources, reviewers=(), dry_run=False, prompt=None
+    )
+    assert [(o.name, o.action) for o in outcomes] == [(app_name, "orphan")]
+    assert fake_gh.secrets == {}
+
+
+def test_sync_secrets_declared_reviewer_without_sources_fails_loud(fake_gh):
+    """#740's deliberate behavior change: reviewers declared + pruned [secrets]
+    source → the sync FAILS naming the declaring reviewer (rc 1 at gh-setup,
+    not a delayed break at review-posting time)."""
+    outcomes = ghsetup.sync_secrets(
+        "o/r", (), [], reviewers=("agy",), dry_run=False, prompt=None
+    )
+    assert [(o.name, o.action) for o in outcomes] == [
+        ("AGY_REVIEW_APP_PRIVATE_KEY", "failed"),
+        ("AGY_REVIEW_APP_ID", "failed"),
+    ]
+    assert all(
+        "reviewer agy ([reviewers] declaration)" in (o.reason or "") for o in outcomes
+    )
+    assert fake_gh.secrets == {}
+
+
+def test_sync_secrets_reviewer_credential_cannot_be_optional_skipped(
+    fake_gh, monkeypatch
+):
+    """A hand-edited `optional = true` on a declared reviewer's credential can
+    no longer sync "clean" while the value is absent (#740's failure mode):
+    the derivation wins over the flag — failed, not skipped."""
+    monkeypatch.delenv("VAR_MISSING", raising=False)
+    sources = [
+        SecretSource("CODEX_REVIEW_APP_PRIVATE_KEY", "env", "VAR_MISSING", True),
+        SecretSource("CODEX_REVIEW_APP_ID", "env", "VAR_MISSING", True),
+    ]
+    outcomes = ghsetup.sync_secrets(
+        "o/r", (), sources, reviewers=("codex",), dry_run=False, prompt=None
+    )
+    assert [(o.name, o.action) for o in outcomes] == [
+        ("CODEX_REVIEW_APP_PRIVATE_KEY", "failed"),
+        ("CODEX_REVIEW_APP_ID", "failed"),
+    ]
+    assert fake_gh.secrets == {}
+
+
+def test_sync_secrets_required_source_cannot_be_optional_skipped(fake_gh, monkeypatch):
+    """A derived-REQUIRED secret marked `optional = true` cannot silently skip
+    when absent (story 44 — the sync never under-provisions): the derivation
+    wins over the flag, so a missing value is `failed`, not `skipped`."""
+    monkeypatch.delenv("VAR_MISSING", raising=False)
+    # A gh-release endpoint makes RELEASE_TOKEN required (prepare's push).
+    artifacts = config.load_artifacts(
+        {"artifacts": {"dist": {"build": ["python"], "endpoints": ["gh-release"]}}}
+    )
+    sources = [SecretSource("RELEASE_TOKEN", "env", "VAR_MISSING", True)]  # optional
+    outcomes = ghsetup.sync_secrets(
+        "o/r", artifacts, sources, reviewers=(), dry_run=False, prompt=None
+    )
+    assert [(o.name, o.action) for o in outcomes] == [("RELEASE_TOKEN", "failed")]
+    assert fake_gh.secrets == {}  # not skipped, not pushed — the sync fails loud
+
+
+def _signing_artifacts():
+    """A minimal signing artifact map (sign = true on a darwin lane, over a
+    signable archive composition)."""
+    return config.load_artifacts(
+        {
+            "artifacts": {
+                "app": {
+                    "build": [{"toolchain": "rust", "package": "app-cli"}],
+                    "platforms": ["darwin-arm64"],
+                    "bundle": {"composition": "archive"},
+                    "endpoints": ["gh-release"],
+                    "sign": True,
+                }
+            }
+        }
+    )
+
+
+def _env_source(name):
+    return SecretSource(name, "env", f"VAR_{name}", False)
+
+
+#: The names a signing repo must source besides a notary trio.
+_SIGN_BASE_NAMES = ("RELEASE_TOKEN", "APPLE_CERTIFICATE", "APPLE_CERTIFICATE_PASSWORD")
+
+_APPLE_ID_TRIO = ("APPLE_ID", "APPLE_PASSWORD", "APPLE_TEAM_ID")
+_ASC_TRIO = ("ASC_API_KEY_BASE64", "ASC_API_KEY_ID", "ASC_API_ISSUER_ID")
+
+
+def test_sync_secrets_apple_id_only_trio_is_pushed_without_demanding_asc(
+    fake_gh, monkeypatch
+):
+    """#746: the Apple-ID trio is a first-class provisioning path — a repo
+    sourcing it (and no ASC key) syncs clean: pushed, the ASC trio neither
+    demanded name-by-name nor flagged."""
+    names = (*_SIGN_BASE_NAMES, *_APPLE_ID_TRIO)
+    for name in names:
+        monkeypatch.setenv(f"VAR_{name}", f"value-{name}")
+    outcomes = ghsetup.sync_secrets(
+        "o/r",
+        _signing_artifacts(),
+        [_env_source(n) for n in names],
+        reviewers=(),
+        dry_run=False,
+        prompt=None,
+    )
+    assert [(o.name, o.action) for o in outcomes] == [(n, "set") for n in names]
+    assert set(fake_gh.secrets) == set(names)
+
+
+def test_sync_secrets_partial_asc_beside_complete_apple_id_is_accepted(
+    fake_gh, monkeypatch
+):
+    """#746: a partial ASC trio never poisons a complete Apple-ID trio — the
+    declared partial names are still accepted (pushed), not orphaned, and no
+    diagnostic fires."""
+    names = (*_SIGN_BASE_NAMES, "ASC_API_KEY_ID", *_APPLE_ID_TRIO)
+    for name in names:
+        monkeypatch.setenv(f"VAR_{name}", f"value-{name}")
+    outcomes = ghsetup.sync_secrets(
+        "o/r",
+        _signing_artifacts(),
+        [_env_source(n) for n in names],
+        reviewers=(),
+        dry_run=False,
+        prompt=None,
+    )
+    assert [(o.name, o.action) for o in outcomes] == [(n, "set") for n in names]
+
+
+def test_sync_secrets_optional_absent_trio_does_not_satisfy_notary_requirement(
+    fake_gh, monkeypatch
+):
+    """#746: merely declaring a complete trio cannot make sync clean when
+    every optional source resolves absent — satisfaction follows effective
+    provisioning, not config keys."""
+    for name in _SIGN_BASE_NAMES:
+        monkeypatch.setenv(f"VAR_{name}", f"value-{name}")
+    for name in _APPLE_ID_TRIO:
+        monkeypatch.delenv(f"VAR_{name}", raising=False)
+    sources = [
+        *[_env_source(name) for name in _SIGN_BASE_NAMES],
+        *[SecretSource(name, "env", f"VAR_{name}", True) for name in _APPLE_ID_TRIO],
+    ]
+
+    outcomes = ghsetup.sync_secrets(
+        "o/r",
+        _signing_artifacts(),
+        sources,
+        reviewers=(),
+        dry_run=False,
+        prompt=None,
+    )
+
+    assert [(o.name, o.action) for o in outcomes] == [
+        *((name, "set") for name in _SIGN_BASE_NAMES),
+        *((name, "skipped") for name in _APPLE_ID_TRIO),
+        ("notary credentials", "failed"),
+    ]
+    assert "Apple-ID trio (missing: APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID)" in (
+        outcomes[-1].reason or ""
+    )
+    assert set(fake_gh.secrets) == set(_SIGN_BASE_NAMES)
+
+
+def test_sync_secrets_no_complete_notary_trio_fails_with_one_diagnostic(
+    fake_gh, monkeypatch
+):
+    """#746: neither trio complete → ONE failed outcome for the requirement,
+    its reason naming what is missing from EVERY alternative — never six
+    name-by-name failures."""
+    names = (*_SIGN_BASE_NAMES, "ASC_API_KEY_ID")  # one ASC name, no Apple-ID
+    for name in names:
+        monkeypatch.setenv(f"VAR_{name}", f"value-{name}")
+    outcomes = ghsetup.sync_secrets(
+        "o/r",
+        _signing_artifacts(),
+        [_env_source(n) for n in names],
+        reviewers=(),
+        dry_run=False,
+        prompt=None,
+    )
+    failed = [o for o in outcomes if o.action == "failed"]
+    assert [o.name for o in failed] == ["notary credentials"]
+    reason = failed[0].reason or ""
+    assert "required by sign-mac stage (artifact app)" in reason
+    assert "ASC API-key trio (missing: " in reason
+    assert "Apple-ID trio (missing: " in reason
+    # The sourced names still pushed — one gap never strands the others.
+    assert set(fake_gh.secrets) == set(names)
+
+
+def test_sync_secrets_both_trios_sourced_orphans_neither(fake_gh, monkeypatch):
+    """#746: declaring both trios is legal — both pushed, no orphan flag."""
+    names = (*_SIGN_BASE_NAMES, *_ASC_TRIO, *_APPLE_ID_TRIO)
+    for name in names:
+        monkeypatch.setenv(f"VAR_{name}", f"value-{name}")
+    outcomes = ghsetup.sync_secrets(
+        "o/r",
+        _signing_artifacts(),
+        [_env_source(n) for n in names],
+        reviewers=(),
+        dry_run=False,
+        prompt=None,
+    )
+    assert all(o.action == "set" for o in outcomes)
+    assert set(fake_gh.secrets) == set(names)
 
 
 def test_setup_discovery_respects_local_checkout(fake_gh, monkeypatch):
@@ -393,6 +788,233 @@ def test_setup_checks_override_skips_discovery(fake_gh, monkeypatch):
     assert report.ruleset.checks == ("a", "b")
 
 
+# --------------------------------------------------------------------------
+# Pass (d) — the Actions access verify-and-warn (#739). Reads only, no PUT.
+# --------------------------------------------------------------------------
+
+_PUBLISHER_YAML = "on:\n  workflow_call:\n    inputs: {}\njobs:\n  build: {}\n"
+_PR_ONLY_YAML = "on:\n  pull_request:\njobs:\n  ci: {}\n"
+
+
+def _checkout(tmp_path, *files):
+    """A fake local checkout carrying the given (name, text) workflow files."""
+    wfdir = tmp_path / ".github" / "workflows"
+    wfdir.mkdir(parents=True, exist_ok=True)
+    for name, text in files:
+        (wfdir / name).write_text(text, encoding="utf-8")
+    return str(tmp_path)
+
+
+def _rest_fake(monkeypatch, responses):
+    """Patch gh.rest with a canned path→response map; returns the call log.
+
+    A response that is an Exception is raised; an unexpected path fails the
+    test (KeyError) — the seam asserts WHICH endpoints the pass touches.
+    """
+    calls = []
+
+    def rest(path, *, method=None, body=None, paginate=False):
+        assert method is None, "the verify pass must never mutate"
+        calls.append(path)
+        result = responses[path]
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    monkeypatch.setattr(ghsetup.gh, "rest", rest)
+    return calls
+
+
+def test_workflow_access_public_is_not_applicable_without_access_call(monkeypatch):
+    """Public repo → typed not-applicable, and the access endpoint (which 422s
+    on public repos) is NEVER called — nor is any workflow inspected."""
+    calls = _rest_fake(
+        monkeypatch, {"repos/o/r": {"private": False, "owner": {"type": "User"}}}
+    )
+    outcome = ghsetup.verify_workflow_access("o/r", local_checkout=None)
+    assert outcome.status == "not-applicable"
+    assert "public" in outcome.reason
+    assert calls == ["repos/o/r"]
+
+
+def test_workflow_access_private_non_publisher_is_not_applicable(monkeypatch, tmp_path):
+    """A private repo with no workflow_call workflow has nothing callable —
+    not-applicable, access endpoint untouched."""
+    calls = _rest_fake(
+        monkeypatch, {"repos/o/r": {"private": True, "owner": {"type": "User"}}}
+    )
+    checkout = _checkout(tmp_path, ("ci.yml", _PR_ONLY_YAML))
+    outcome = ghsetup.verify_workflow_access("o/r", local_checkout=checkout)
+    assert outcome.status == "not-applicable"
+    assert "not a reusable-workflow publisher" in outcome.reason
+    assert calls == ["repos/o/r"]
+
+
+def test_workflow_access_private_publisher_none_warns_naming_user_fix(
+    monkeypatch, tmp_path
+):
+    _rest_fake(
+        monkeypatch,
+        {
+            "repos/o/r": {"private": True, "owner": {"type": "User"}},
+            "repos/o/r/actions/permissions/access": {"access_level": "none"},
+        },
+    )
+    checkout = _checkout(tmp_path, ("wf-build.yml", _PUBLISHER_YAML))
+    outcome = ghsetup.verify_workflow_access("o/r", local_checkout=checkout)
+    assert outcome.status == "warn"
+    assert outcome.access_level == "none"
+    assert outcome.recommended_level == "user"
+    assert "access_level=user" in outcome.reason
+    assert "never sets" in outcome.reason
+
+
+def test_workflow_access_org_owner_names_organization(monkeypatch, tmp_path):
+    _rest_fake(
+        monkeypatch,
+        {
+            "repos/o/r": {"private": True, "owner": {"type": "Organization"}},
+            "repos/o/r/actions/permissions/access": {"access_level": "none"},
+        },
+    )
+    checkout = _checkout(tmp_path, ("wf-build.yml", _PUBLISHER_YAML))
+    outcome = ghsetup.verify_workflow_access("o/r", local_checkout=checkout)
+    assert outcome.status == "warn"
+    assert outcome.recommended_level == "organization"
+    assert "access_level=organization" in outcome.reason
+
+
+def test_workflow_access_acceptable_level_is_no_warn(monkeypatch, tmp_path):
+    _rest_fake(
+        monkeypatch,
+        {
+            "repos/o/r": {"private": True, "owner": {"type": "User"}},
+            "repos/o/r/actions/permissions/access": {"access_level": "user"},
+        },
+    )
+    checkout = _checkout(tmp_path, ("wf-build.yml", _PUBLISHER_YAML))
+    outcome = ghsetup.verify_workflow_access("o/r", local_checkout=checkout)
+    assert outcome.status == "acceptable"
+    assert outcome.access_level == "user"
+    assert outcome.recommended_level is None
+
+
+def test_workflow_access_repo_read_failure_is_unknown_not_warn(monkeypatch):
+    """An unreadable repo is `unknown` — never a verified `none` (or a clean
+    not-applicable)."""
+    _rest_fake(
+        monkeypatch,
+        {
+            "repos/o/r": execrun.ExecError(
+                ["gh", "api"], rc=1, stderr="HTTP 403 forbidden"
+            )
+        },
+    )
+    outcome = ghsetup.verify_workflow_access("o/r", local_checkout=None)
+    assert outcome.status == "unknown"
+    assert outcome.status != "warn"
+    assert "could not verify Actions access" in outcome.reason
+    assert "403" in outcome.reason
+
+
+def test_workflow_access_access_read_failure_is_unknown(monkeypatch, tmp_path):
+    _rest_fake(
+        monkeypatch,
+        {
+            "repos/o/r": {"private": True, "owner": {"type": "User"}},
+            "repos/o/r/actions/permissions/access": execrun.ExecError(
+                ["gh", "api"], rc=1, stderr="HTTP 401"
+            ),
+        },
+    )
+    checkout = _checkout(tmp_path, ("wf-build.yml", _PUBLISHER_YAML))
+    outcome = ghsetup.verify_workflow_access("o/r", local_checkout=checkout)
+    assert outcome.status == "unknown"
+    assert outcome.access_level is None
+
+
+def test_workflow_access_malformed_access_payload_is_unknown(monkeypatch, tmp_path):
+    _rest_fake(
+        monkeypatch,
+        {
+            "repos/o/r": {"private": True, "owner": {"type": "User"}},
+            "repos/o/r/actions/permissions/access": {"nope": True},
+        },
+    )
+    checkout = _checkout(tmp_path, ("wf-build.yml", _PUBLISHER_YAML))
+    outcome = ghsetup.verify_workflow_access("o/r", local_checkout=checkout)
+    assert outcome.status == "unknown"
+    assert "access_level" in outcome.reason
+
+
+def test_workflow_access_remote_repo_inspects_via_contents_api(monkeypatch):
+    """An explicitly named remote target (no local checkout) detects the
+    publisher through the contents API and still warns on `none`."""
+    import base64
+
+    encoded = base64.b64encode(_PUBLISHER_YAML.encode()).decode()
+    calls = _rest_fake(
+        monkeypatch,
+        {
+            "repos/o/r": {"private": True, "owner": {"type": "User"}},
+            "repos/o/r/contents/.github/workflows": [
+                {"name": "wf-build.yml"},
+                {"name": "README.md"},
+            ],
+            "repos/o/r/contents/.github/workflows/wf-build.yml": {"content": encoded},
+            "repos/o/r/actions/permissions/access": {"access_level": "none"},
+        },
+    )
+    outcome = ghsetup.verify_workflow_access("o/r", local_checkout=None)
+    assert outcome.status == "warn"
+    assert outcome.recommended_level == "user"
+    # The non-workflow file is never fetched.
+    assert "repos/o/r/contents/.github/workflows/README.md" not in calls
+
+
+def test_workflow_access_remote_missing_workflows_dir_is_not_applicable(monkeypatch):
+    """HTTP 404 on the contents listing means no workflows directory — a
+    verified non-publisher, not an inspection failure."""
+    _rest_fake(
+        monkeypatch,
+        {
+            "repos/o/r": {"private": True, "owner": {"type": "User"}},
+            "repos/o/r/contents/.github/workflows": execrun.ExecError(
+                ["gh", "api"], rc=1, stderr="gh: Not Found (HTTP 404)"
+            ),
+        },
+    )
+    outcome = ghsetup.verify_workflow_access("o/r", local_checkout=None)
+    assert outcome.status == "not-applicable"
+    assert "not a reusable-workflow publisher" in outcome.reason
+
+
+@pytest.mark.parametrize("listing", [None, {"name": "wf-build.yml"}])
+def test_workflow_access_remote_malformed_listing_is_unknown(monkeypatch, listing):
+    """A malformed contents response is an inspection failure, never proof
+    that the target has no reusable workflows."""
+    _rest_fake(
+        monkeypatch,
+        {
+            "repos/o/r": {"private": True, "owner": {"type": "User"}},
+            "repos/o/r/contents/.github/workflows": listing,
+        },
+    )
+    outcome = ghsetup.verify_workflow_access("o/r", local_checkout=None)
+    assert outcome.status == "unknown"
+    assert "expected a list" in outcome.reason
+
+
+def test_setup_report_carries_the_workflow_access_outcome(fake_gh, monkeypatch):
+    """setup() threads pass (d) into the report; the fake's default public
+    repo is typed not-applicable — on the dry run too (the pass reads only)."""
+    monkeypatch.setattr(ghsetup.gh, "default_branch", lambda repo: "main")
+    monkeypatch.setattr(ghsetup.checks_mod, "discover", lambda *a, **k: ["c / check"])
+    report = ghsetup.setup(REPO, config_path="/dev/null", dry_run=True)
+    assert report.workflow_access.status == "not-applicable"
+    assert "public" in report.workflow_access.reason
+
+
 def test_report_json_field_set():
     """The exact --json surface: SetupReport.to_dict()'s declared field set."""
     report = ghsetup.SetupReport(
@@ -406,6 +1028,12 @@ def test_report_json_field_set():
             payload={"name": ghsetup.RULESET_NAME},
         ),
         labels=(ghsetup.LabelOutcome(name="bug", action="upserted"),),
+        workflow_access=ghsetup.WorkflowAccessOutcome(
+            status="warn",
+            reason="access level none",
+            access_level="none",
+            recommended_level="user",
+        ),
         secrets=(
             ghsetup.SecretOutcome(name="A", source="env", action="set"),
             ghsetup.SecretOutcome(
@@ -419,8 +1047,15 @@ def test_report_json_field_set():
         "dry_run",
         "ruleset",
         "labels",
+        "workflow_access",
         "secrets",
         "secrets_error",
+    }
+    assert payload["workflow_access"] == {
+        "status": "warn",
+        "reason": "access level none",
+        "access_level": "none",
+        "recommended_level": "user",
     }
     assert set(payload["ruleset"]) == {
         "name",
@@ -460,6 +1095,11 @@ def _report(**overrides) -> ghsetup.SetupReport:
             payload={"name": ghsetup.RULESET_NAME},
         ),
         labels=(ghsetup.LabelOutcome(name="bug", action="upserted"),),
+        workflow_access=ghsetup.WorkflowAccessOutcome(
+            status="not-applicable",
+            reason="repository is public — its reusable workflows are "
+            "callable by any repo (ADR-0053)",
+        ),
         secrets=(),
         secrets_error=None,
     )
@@ -490,6 +1130,9 @@ def test_format_setup_real_run():
         "  ruleset created\n"
         "labels:\n"
         "  label bug\n"
+        "workflow access:\n"
+        "  not applicable: repository is public — its reusable workflows are "
+        "callable by any repo (ADR-0053)\n"
         "secrets:\n"
         "  secret A\n"
         "  skip B (optional source absent)\n"
@@ -521,6 +1164,9 @@ def test_format_setup_dry_run_renders_off_the_same_shape():
         '{\n  "name": "main-branch-protection"\n}\n'
         "labels:\n"
         "  [dry] label bug\n"
+        "workflow access:\n"
+        "  not applicable: repository is public — its reusable workflows are "
+        "callable by any repo (ADR-0053)\n"
         "secrets:\n"
         "  [dry] secret A (from env)\n"
         "  1 secret(s) set, 0 skipped, 0 failed\n"
@@ -554,6 +1200,63 @@ def test_format_setup_config_error_line():
     report = _report(secrets_error="no .shipit.toml at /x")
     out = gh_setup_verb.format_setup(report)
     assert "secrets:\n  no secrets applied: no .shipit.toml at /x\ndone." in out
+
+
+def test_format_setup_workflow_access_warn_line():
+    report = _report(
+        workflow_access=ghsetup.WorkflowAccessOutcome(
+            status="warn",
+            reason="private reusable-workflow publisher with Actions access "
+            "level 'none' — fix: gh api …",
+            access_level="none",
+            recommended_level="user",
+        ),
+    )
+    out = gh_setup_verb.format_setup(report)
+    assert (
+        "workflow access:\n"
+        "  WARN private reusable-workflow publisher with Actions access "
+        "level 'none' — fix: gh api …\n"
+    ) in out
+
+
+def test_format_setup_workflow_access_acceptable_line():
+    report = _report(
+        workflow_access=ghsetup.WorkflowAccessOutcome(
+            status="acceptable",
+            reason="Actions access level is 'user'",
+            access_level="user",
+        ),
+    )
+    out = gh_setup_verb.format_setup(report)
+    assert "workflow access:\n  access level: user (acceptable)\n" in out
+
+
+def test_format_setup_workflow_access_unknown_line():
+    """The inspection failure renders as a warning, NOT as the WARN verdict —
+    "could not look" stays distinct from "looked and it's none"."""
+    report = _report(
+        workflow_access=ghsetup.WorkflowAccessOutcome(
+            status="unknown",
+            reason="could not verify Actions access: HTTP 403",
+        ),
+    )
+    out = gh_setup_verb.format_setup(report)
+    assert (
+        "workflow access:\n  warning: could not verify Actions access: HTTP 403\n"
+    ) in out
+    assert "WARN " not in out
+
+
+def test_format_setup_rejects_unknown_workflow_access_status():
+    report = _report(
+        workflow_access=ghsetup.WorkflowAccessOutcome(
+            status="typo",
+            reason="must not be rendered as not applicable",
+        ),
+    )
+    with pytest.raises(ValueError, match="unknown workflow access status: 'typo'"):
+        gh_setup_verb.format_setup(report)
 
 
 # --------------------------------------------------------------------------
@@ -675,6 +1378,7 @@ def test_cli_json_emits_the_report_dict(stub_setup, monkeypatch, capsys):
         "dry_run",
         "ruleset",
         "labels",
+        "workflow_access",
         "secrets",
         "secrets_error",
     }
@@ -746,7 +1450,7 @@ def test_failed_run_emits_the_failed_event(monkeypatch, capsys, caplog):
         r for r in caplog.records if getattr(r, ev.EXTRA_KEY, None) == "ghsetup.failed"
     ]
     assert len(failed) == 1
-    assert failed[0].step == "setup (ruleset/labels/secrets)"
+    assert failed[0].step == "setup (ruleset/labels/access/secrets)"
     names = _event_names(caplog)
     assert "ghsetup.completed" not in names
 

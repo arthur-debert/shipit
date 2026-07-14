@@ -65,8 +65,8 @@ def test_build_command_carries_bypass_permissions_for_a_write_run():
 def test_reviewer_build_command_drops_skip_permissions():
     # WS04a reviewer posture: a reviewer (read_only=True) OMITS
     # --dangerously-skip-permissions — probe-confirmed agy still runs the network shell
-    # commands (gh pr diff / gh pr review) without it, so the reviewer self-posts, and
-    # read-only rides the chmod'd Tree (ADR-0020 §Decision 3). Everything else
+    # commands (for example, gh pr diff) without it, and read-only rides the chmod'd
+    # Tree (ADR-0020 §Decision 3). Everything else
     # (--add-dir cwd-rooting, model, timeout, --print) is unchanged.
     cmd = AGY.build_command("review it", "reviewer", cwd=TREE, read_only=True)
     assert "--dangerously-skip-permissions" not in cmd

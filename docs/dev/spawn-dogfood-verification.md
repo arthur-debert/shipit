@@ -124,15 +124,13 @@ CDX01 — has its own live runbook:
 [codex-coordinator-dogfood.md](./codex-coordinator-dogfood.md).)
 
 The reviewer Run is **backend-parametrized**: `shipit spawn subagent --role reviewer
---backend codex|antigravity` launches the non-Claude agent through the SAME shared
-read-only Tree (ADR-0018) and the SAME ADR-0020 `BackendAdapter` read-only posture
-(`build_command(..., read_only=True)`) — codex under `--ephemeral --sandbox
-workspace-write -c …network_access=true`, antigravity (`agy`) with
-`--dangerously-skip-permissions` dropped — with the chmod'd Tree as the load-bearing
-FS guard. On this **spawn surface** the reviewer **self-posts** via `gh pr review`
-(ADR-0020 §codex/agy reviewer posture). To dogfood a non-Claude reviewer Run, run the
-reviewer scenario with `--backend codex` (or `antigravity`) and confirm a real review
-lands on the write Run's PR and the shared Tree is reused + non-writable.
+--backend codex|antigravity` delegates the selected funnel backend to the captured
+review service. The service provisions the SAME shared read-only Tree (ADR-0018),
+launches with the ADR-0020 bounded posture, captures structured output, and posts
+through the backend's App identity. The generic self-posting `gh pr review` task is
+not part of this surface. The dogfood reviewer scenario passes `--backend codex`
+explicitly (Claude has no funnel identity) and confirms that a real App-authored
+review lands on the write Run's PR and the shared Tree is reused + non-writable.
 
 ### The funnel **capture** reviewer (TRE05-WS04b) — the `review: <agent>-local` gate
 

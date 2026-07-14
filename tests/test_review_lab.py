@@ -781,6 +781,91 @@ def test_fanout_cell_applies_per_dimension_invocation_overrides(
     assert None not in launch_timeouts and len(launch_timeouts) == 2
 
 
+def test_semantic_dedup_cell_collapses_the_reworded_duplicate_in_the_record(
+    checkout, tmp_path, monkeypatch
+):
+    """`dedup = "semantic"` (#750) resolved end-to-end: the cell's declared
+    treatment reaches the replay driver, and two passes' REWORDINGS of one
+    defect at one location land in the round record as ONE posted canonical
+    plus a merged-away duplicate carrying its `duplicate_of` provenance edge —
+    the exact-claim mechanical key could not have merged them."""
+    monkeypatch.setattr(producer.shutil, "which", lambda binary: f"/usr/bin/{binary}")
+
+    def _review(text):
+        return json.dumps(
+            {
+                "summary": {"status": "COMMENT", "overall_feedback": "ok"},
+                "comments": [
+                    {
+                        "file": "f.txt",
+                        "line": 2,
+                        "text": text,
+                        "severity": "major",
+                        "category": "correctness",
+                        "confidence": 0.9,
+                        "evidence": "e",
+                        "fix": "",
+                    }
+                ],
+            }
+        )
+
+    # The documented #673 shape: one defect, two wordings (claim-token overlap
+    # ~0.7 — above the seam's threshold, invisible to the exact-claim key).
+    # Keyed off the pass PROMPT (deterministic), not launch order.
+    by_pass = {
+        True: _review(
+            "GPU readback failure zero-fills the comparison buffer, so the "
+            "compare silently passes"
+        ),
+        False: _review(
+            "when GPU readback fails the comparison buffer stays zero-filled "
+            "and the compare silently reports a pass"
+        ),
+    }
+
+    def _launch(cmd, *, cwd, env, timeout=None):
+        return LaunchResult(
+            returncode=0, stdout=by_pass["Correctness" in cmd[-1]], stderr=""
+        )
+
+    view = replay.resolve_range("HEAD~1..HEAD", workdir=str(checkout))
+    cell = parse_cell(
+        {
+            "schema": 1,
+            "id": "semdedup",
+            "baseline": "semdedup",
+            "axis": "control",
+            "fixture": {"version": 1, "prs": ["widget-1"]},
+            "pipeline": {
+                "shape": "fanout",
+                "dimensions": ["correctness", "test-quality"],
+                "dedup": "semantic",
+            },
+            "invocation": {"backend": "codex"},
+            "sweeps": {"count": 1},
+        }
+    )
+    state = tmp_path / "state"
+    run_cell(
+        cell,
+        _fixture_for(view),
+        checkouts=[str(checkout)],
+        base_dir=state,
+        launcher=_launch,
+    )
+    [record] = _store_records(state)
+    findings = record["round.findings"]
+    assert len(findings) == 2  # both union findings persist, never erased
+    posted = [
+        f for f in findings if f["disposition"] == "post" and f["duplicate_of"] is None
+    ]
+    assert len(posted) == 1
+    [duplicate] = [f for f in findings if f["duplicate_of"] is not None]
+    assert duplicate["duplicate_of"] == 0  # the lowest-union-id equal-severity twin
+    assert record["round.cell"]["id"] == "semdedup"
+
+
 def test_fanout_rejects_overrides_outside_the_pass_set(checkout):
     view = replay.resolve_range("HEAD~1..HEAD", workdir=str(checkout))
     with pytest.raises(ValueError, match="outside this round's pass set"):
@@ -1443,6 +1528,7 @@ def test_the_committed_cells_load_and_pair_fairly():
         assert treatment.axis != "control"
     # Pin the committed lineage SHAPE: who each treatment measures against.
     assert by_id["fanout-informed"].baseline == "fanout-baseline"
+    assert by_id["fanout-semdedup"].baseline == "fanout-baseline"
     assert by_id["fanout-sevtiers"].baseline == "fanout-baseline"
     assert by_id["sevtiers-informed"].baseline == "fanout-sevtiers"
     assert by_id["singlepass"].baseline == "fanout-baseline"
@@ -1458,6 +1544,7 @@ def test_the_committed_cells_load_and_pair_fairly():
     identity_fields = {"id", "baseline", "axis", "description"}
     allowed_deltas = {
         "fanout-informed": {"sweep_mode"},
+        "fanout-semdedup": {"dedup"},
         "fanout-sevtiers": {"dimensions"},
         "sevtiers-informed": {"sweep_mode"},
         "singlepass": {"shape"},

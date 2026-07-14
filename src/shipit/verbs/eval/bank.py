@@ -4,7 +4,9 @@ The Adjudication write-side (ADR-0048, RVW03-WS06): the scorer's adjudication
 report surfaces near-misses and unmatched emissions; a human rules on each ONE
 time, and this verb banks the verdict — ``bank label`` for an emission the
 corpus did not know (``--verdict real`` grows recall's denominator,
-``--verdict not-real`` makes that false positive measurable forever after),
+``--verdict not-real`` makes that false positive measurable forever after;
+``--defect FAMILY`` banks it as another valid anchor of an already-banked
+defect — the equivalence family counts once for recall, #751),
 ``bank alias`` for a near-miss confirmed to be a known label in new words.
 Either way the fixture VERSION BUMPS (:mod:`shipit.review.groundtruth` owns
 the rules), the file is rewritten canonically, and the diff is reviewed like
@@ -77,6 +79,12 @@ def group() -> None:
     help="KIND:REF — kind one of fix-commit|confirmed-thread|adjudication; "
     "ref a commit SHA, thread URL, or adjudication pointer.",
 )
+@click.option(
+    "--defect",
+    default=None,
+    help="Equivalence-family id when this label is another valid anchor of an "
+    "already-banked defect (family members count once for recall).",
+)
 def label_cmd(
     fixture_path: str | None,
     label_id: str,
@@ -87,6 +95,7 @@ def label_cmd(
     verdict: str,
     claim: str,
     provenance: str,
+    defect: str | None,
 ) -> None:
     """Bank an adjudicated emission as a NEW label (real or not-real)."""
     sev = parse_severity(severity)
@@ -120,6 +129,7 @@ def label_cmd(
             provenance=gt.Provenance(kind=kind.strip(), ref=ref.strip()),
             lines=line_range,
             confirmed=True,
+            defect=defect,
         )
         banked = gt.bank_label(fixture, label)
         gt.save_fixture(banked, path)

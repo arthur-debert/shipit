@@ -1,0 +1,15 @@
+`shipit release prepare VERSION` prepares the release: manifest bumps,
+changelog roll, bump commit, annotated tag, push.
+
+VERSION is a bare semver (`1.2.3`, `1.2.3-rc.1`) or a bump word
+(`major | minor | patch`) resolved against the latest tag. If the tag already
+exists the run resumes: nothing is bumped and the tag's commit SHA is
+re-emitted, so a mid-pipeline failure is re-runnable.
+
+The bump commit stages only the intended files and passes the repo's own
+commit/push checks — there is no bypass path. A prerelease extracts the notes
+without consuming fragments; a `-release-rc` live-fire cut pushes the tag only
+and never advances the branch ref.
+
+Outputs (text or `--json`): version, tag, release SHA, prerelease flag, and
+the notes file path (the same text the tag annotation carries).

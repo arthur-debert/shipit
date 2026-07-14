@@ -13,12 +13,14 @@ the error shell, the byte-stable SPAWNED render) is the thin smoke layer in
 
 from __future__ import annotations
 
+import json
+import logging
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from shipit import execrun, gh, logcontext
+from shipit import events, execrun, gh, git, logcontext
 from shipit.execrun import ExecError
 from shipit.identity import repo_from_slug
 from shipit.spawn import launch
@@ -26,6 +28,7 @@ from shipit.spawn.subagent import (
     Boundaries,
     SpawnError,
     SubagentSpec,
+    _refresh_attached_tree,
     audit_handshake,
     spawn_subagent,
 )
@@ -33,6 +36,15 @@ from shipit.tree import layout
 from shipit.tree.create import Tree
 
 _PR = gh.HeadPr(number=321, state="OPEN", is_draft=True, base_ref="TRE03/umbrella")
+_ATTACHED_PR = gh.PrAttachment(
+    number=321,
+    state="OPEN",
+    is_draft=True,
+    base_ref="TRE03/umbrella",
+    head_ref="TRE03/WS01",
+    is_cross_repository=False,
+    maintainer_can_modify=False,
+)
 
 
 def spec(**overrides) -> SubagentSpec:
@@ -46,15 +58,17 @@ def bounds(
     tmp_path: Path,
     *,
     pr=_PR,
+    attached_pr=_ATTACHED_PR,
     returncode: int = 0,
     umbrella: bool = True,
     org_repo: str = "acme/widget",
     status_lines: list[str] | None = None,
+    create_exists: bool = False,
 ) -> tuple[Boundaries, dict]:
     """Fake every effectful edge as a recording callable; return (bounds, calls).
 
-    The write/readonly creators 'create' a real directory (the launcher needs a
-    real cwd) and resolve branch/base through the REAL pure planner
+    The write creator 'creates' a real directory (the launcher needs a real cwd)
+    and resolves branch/base through the REAL pure planner
     (:func:`shipit.tree.layout.plan`), so the epic-grouped base the pipeline
     audits against is the true one, never a hardcoded string. The runner
     records the launch contract (cmd/cwd/env) and never spawns anything.
@@ -65,24 +79,16 @@ def bounds(
     parent = tmp_path / "repo"
     parent.mkdir(exist_ok=True)
     tree_dir = tmp_path / "tree"
-    review_dir = tmp_path / "review"
 
     def create_tree(tree_spec, *, source_repo, github_url):
         calls["spec"] = tree_spec
         calls["source_repo"] = source_repo
         calls["github_url"] = github_url
+        if create_exists:
+            raise FileExistsError("attached tree already exists")
         tree_dir.mkdir(parents=True, exist_ok=True)
         tp = layout.plan(tree_spec)
         return Tree(path=str(tree_dir), branch=tp.branch, base=tp.base)
-
-    def create_readonly_tree(plan, *, source_repo, github_url):
-        calls["plan"] = plan
-        calls["source_repo"] = source_repo
-        calls["github_url"] = github_url
-        review_dir.mkdir(parents=True, exist_ok=True)
-        return Tree(
-            path=str(review_dir), branch=plan.branch, base=f"origin/{plan.branch}"
-        )
 
     def runner(cmd, *, cwd, env, timeout=None):
         calls["cmd"] = cmd
@@ -96,6 +102,11 @@ def bounds(
         calls["pr_cwd"] = cwd
         return pr
 
+    def pr_for_number(number, *, repo=None):
+        calls["pr_number"] = number
+        calls["pr_repo"] = repo
+        return attached_pr
+
     def remote_branch_exists(branch, *, cwd=None, remote="origin"):
         calls["umbrella_branch"] = branch
         calls["umbrella_cwd"] = cwd
@@ -105,6 +116,16 @@ def bounds(
         calls["status_cwd"] = cwd
         return list(status_lines or [])
 
+    def run_review(backend, target, *, run_id):
+        calls["review_backend"] = backend
+        calls["review_target"] = target
+        calls["review_run_id"] = run_id
+        return {"review": {}, "post": {}}
+
+    def refresh_attached_tree(path, branch):
+        calls["refresh_path"] = path
+        calls["refresh_branch"] = branch
+
     return (
         Boundaries(
             repo_root=lambda: str(parent),
@@ -112,10 +133,12 @@ def bounds(
             remote_url=lambda *, cwd: "git@example:" + org_repo,
             remote_branch_exists=remote_branch_exists,
             create_tree=create_tree,
-            create_readonly_tree=create_readonly_tree,
             pr_for_head=pr_for_head,
+            pr_for_number=pr_for_number,
             status_porcelain=status_porcelain,
+            refresh_attached_tree=refresh_attached_tree,
             runner=runner,
+            run_review=run_review,
         ),
         calls,
     )
@@ -167,6 +190,20 @@ def test_write_spawn_returns_the_typed_result(tmp_path, monkeypatch):
     }
 
 
+def test_write_spawn_emits_bounded_phase_events(tmp_path, caplog):
+    b, _calls = bounds(tmp_path)
+
+    with caplog.at_level(logging.INFO, logger="shipit.spawn"):
+        spawn_subagent(spec(), b)
+
+    phases = [
+        rec.phase
+        for rec in caplog.records
+        if getattr(rec, events.EXTRA_KEY, None) == "agent.phase"
+    ]
+    assert phases == ["tree_provisioning", "agent_running", "pr_audit"]
+
+
 def test_write_spawn_links_pr_from_the_tree_branch(tmp_path):
     # Acceptance #156: the Run↔PR link is resolved from the *Tree's* branch, read
     # inside the Tree (cwd) — the PR on the branch IS the link, no side database.
@@ -178,6 +215,320 @@ def test_write_spawn_links_pr_from_the_tree_branch(tmp_path):
     assert calls["pr_branch"] == "TRE03/WS02"  # link resolved from the Tree branch
     assert calls["pr_cwd"] == str(tmp_path / "tree")  # ...read from inside the Tree
     assert result.pr == 321
+
+
+# --- the happy path: shepherd existing-PR write attachment --------------------
+
+
+def shepherd_spec(**overrides) -> SubagentSpec:
+    """A detached shepherd attaches by PR number, never by issue/work-stream shape."""
+    fields = dict(repo="widget", role="shepherd", pr=321)
+    fields.update(overrides)
+    return SubagentSpec(**fields)
+
+
+def test_shepherd_spawn_attaches_to_existing_pr_head_without_new_pr(tmp_path):
+    attached = gh.PrAttachment(
+        number=321,
+        state="OPEN",
+        is_draft=True,
+        base_ref="TRE03/umbrella",
+        head_ref="TRE03/WS04",
+        is_cross_repository=False,
+        maintainer_can_modify=False,
+    )
+    b, calls = bounds(
+        tmp_path,
+        attached_pr=attached,
+        pr=gh.HeadPr(
+            number=321,
+            state="OPEN",
+            is_draft=True,
+            base_ref="TRE03/umbrella",
+        ),
+    )
+
+    result = spawn_subagent(shepherd_spec(), b)
+
+    assert calls["pr_number"] == 321
+    assert calls["pr_repo"] == "acme/widget"
+    tree_spec = calls["spec"]
+    assert tree_spec.branch == "TRE03/WS04"
+    assert tree_spec.base == "origin/TRE03/WS04"
+    assert tree_spec.agent_hash == "pr321"  # stable identity across rounds
+    assert tree_spec.issue is None and tree_spec.epic is None and tree_spec.ws is None
+    assert calls["pr_branch"] == "TRE03/WS04"
+    assert calls["pr_cwd"] == str(tmp_path / "tree")
+    assert calls["cmd"][calls["cmd"].index("--agent") + 1] == "shepherd"
+    task = calls["cmd"][calls["cmd"].index("-p") + 1]
+    assert "pull request #321" in task
+    assert "git push origin HEAD:refs/heads/TRE03/WS04" in task
+    assert "gh pr create" not in task
+    assert "shipit pr next" in task and "do NOT run `shipit pr next`" in task
+    assert result.to_dict() == {
+        "tree": str(tmp_path / "tree"),
+        "branch": "TRE03/WS04",
+        "base": "origin/TRE03/WS04",
+        "role": "shepherd",
+        "backend": "claude",
+        "pr": 321,
+        "pr_state": "OPEN",
+        "pr_is_draft": True,
+    }
+
+
+def test_shepherd_resume_reuses_stable_tree_and_refreshes_current_head(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("SHIPIT_TREES_ROOT", str(tmp_path / "trees"))
+    attached = gh.PrAttachment(
+        number=321,
+        state="OPEN",
+        is_draft=True,
+        base_ref="TRE03/umbrella",
+        head_ref="TRE03/WS04",
+        is_cross_repository=False,
+        maintainer_can_modify=False,
+    )
+    b, calls = bounds(
+        tmp_path,
+        attached_pr=attached,
+        pr=gh.HeadPr(
+            number=321,
+            state="OPEN",
+            is_draft=True,
+            base_ref="TRE03/umbrella",
+        ),
+        create_exists=True,
+    )
+
+    result = spawn_subagent(shepherd_spec(), b)
+
+    planned = layout.plan(calls["spec"])
+    assert calls["refresh_path"] == str(planned.dir)
+    assert calls["refresh_branch"] == "TRE03/WS04"
+    assert result.tree == str(planned.dir)
+    assert result.branch == "TRE03/WS04"
+
+
+def test_shepherd_refresh_refuses_uncommitted_work_before_mutating(monkeypatch):
+    monkeypatch.setattr(git, "status_porcelain", lambda *, cwd: [" M work.py"])
+    monkeypatch.setattr(
+        git,
+        "fetch",
+        lambda **kwargs: pytest.fail("dirty attachment must not be fetched"),
+    )
+
+    with pytest.raises(ValueError, match="1 uncommitted path"):
+        _refresh_attached_tree("/tree", "TRE03/WS04")
+
+
+@pytest.mark.parametrize("unpushed", [None, ("a" * 40,)])
+def test_shepherd_refresh_refuses_unknown_or_local_only_commits(monkeypatch, unpushed):
+    monkeypatch.setattr(git, "status_porcelain", lambda *, cwd: [])
+    monkeypatch.setattr(git, "fetch", lambda *, cwd: None)
+    monkeypatch.setattr(git, "checkout", lambda branch, *, cwd: None)
+    monkeypatch.setattr(git, "unpushed_shas", lambda *, cwd: unpushed)
+    monkeypatch.setattr(
+        git,
+        "reset_hard",
+        lambda *args, **kwargs: pytest.fail("unsafe attachment must not be reset"),
+    )
+
+    with pytest.raises(ValueError, match="could not determine|local-only commit"):
+        _refresh_attached_tree("/tree", "TRE03/WS04")
+
+
+def test_shepherd_wrong_head_pr_is_refused_before_launch(tmp_path):
+    attached = gh.PrAttachment(
+        number=321,
+        state="OPEN",
+        is_draft=True,
+        base_ref="TRE03/umbrella",
+        head_ref="TRE03/WS04",
+        is_cross_repository=False,
+        maintainer_can_modify=False,
+    )
+    b, calls = bounds(
+        tmp_path,
+        attached_pr=attached,
+        pr=gh.HeadPr(
+            number=654,
+            state="OPEN",
+            is_draft=True,
+            base_ref="TRE03/umbrella",
+        ),
+    )
+
+    with pytest.raises(SpawnError, match="not the requested PR #321"):
+        spawn_subagent(shepherd_spec(), b)
+
+    assert "cmd" not in calls
+
+
+def test_shepherd_existing_pr_does_not_require_draft_handshake(tmp_path):
+    attached = gh.PrAttachment(
+        number=321,
+        state="OPEN",
+        is_draft=False,
+        base_ref="TRE03/umbrella",
+        head_ref="TRE03/WS04",
+        is_cross_repository=False,
+        maintainer_can_modify=False,
+    )
+    b, calls = bounds(
+        tmp_path,
+        attached_pr=attached,
+        pr=gh.HeadPr(
+            number=321,
+            state="OPEN",
+            is_draft=False,
+            base_ref="TRE03/umbrella",
+        ),
+    )
+
+    result = spawn_subagent(shepherd_spec(), b)
+
+    assert calls["cmd"][calls["cmd"].index("--agent") + 1] == "shepherd"
+    assert result.pr == 321
+    assert result.pr_is_draft is False
+
+
+@pytest.mark.parametrize("maintainer_can_modify", [False, True])
+def test_shepherd_fork_pr_is_refused_before_tree(tmp_path, maintainer_can_modify):
+    attached = gh.PrAttachment(
+        number=321,
+        state="OPEN",
+        is_draft=True,
+        base_ref="TRE03/umbrella",
+        head_ref="contributor/branch",
+        is_cross_repository=True,
+        maintainer_can_modify=maintainer_can_modify,
+    )
+    b, calls = bounds(tmp_path, attached_pr=attached)
+
+    with pytest.raises(SpawnError, match="fork-head fetching and pushing"):
+        spawn_subagent(shepherd_spec(), b)
+
+    assert "spec" not in calls and "cmd" not in calls
+
+
+def test_provisioned_write_spawn_launches_through_its_work_env(
+    tmp_path, monkeypatch, caplog
+):
+    # Acceptance (RPE01-WS05): a PROVISIONED implementer write Run resolves a
+    # Work Env and launches through the EXISTING pixi-run wrapping and
+    # environment scrub — the spawn seam supplies the facts (the provisioned-env
+    # sentinel, the on-disk env identity read through the pixi adapter), the
+    # resolver decides purely, and the launch consumes the carried decision.
+    monkeypatch.setenv("PIXI_PROJECT_MANIFEST", "/parent/pixi.toml")
+    b, calls = bounds(tmp_path)
+    tree_dir = tmp_path / "tree"
+    meta = tree_dir / ".pixi" / "envs" / "default" / "conda-meta"
+    meta.mkdir(parents=True)
+    (meta / "pixi").write_text(
+        json.dumps(
+            {
+                "manifest_path": str(tree_dir / "pixi.toml"),
+                "environment_name": "default",
+                "pixi_version": "0.63.2",
+                "environment_lock_file_hash": "99f00798db0ea80c",
+                "resolved_platform": {"subdir": "osx-arm64", "virtual_packages": []},
+            }
+        )
+    )
+
+    with caplog.at_level(logging.INFO, logger="shipit.spawn"):
+        spawn_subagent(spec(), b)
+
+    # The backend argv was re-expressed through the Tree's OWN pixi env — the
+    # same wrapped shape the pixi adapter builds (`pixi run --manifest-path
+    # <tree>/pixi.toml -- <backend argv>`).
+    assert calls["cmd"][:4] == [
+        "pixi",
+        "run",
+        "--manifest-path",
+        str(tree_dir / "pixi.toml"),
+    ]
+    child_argv = calls["cmd"][calls["cmd"].index("--") + 1 :]
+    assert child_argv[child_argv.index("--agent") + 1] == "implementer"
+    # The existing environment scrub still applies on top: the parent's leaked
+    # project pointer never reaches the child (Work Env changed WHO decides the
+    # routing, not what the launch does).
+    assert "PIXI_PROJECT_MANIFEST" not in calls["env"]
+    # The resolution record (spec §Observability): routing decision, checkout
+    # strategy, and the BORROWED pixi env name — never a fabricated run id.
+    record = next(
+        r
+        for r in caplog.records
+        if getattr(r, "work_env_boundary", None) == "spawn.write-run"
+    )
+    assert record.routing == "pixi-run"
+    assert record.checkout_strategy == "new-write-tree"
+    assert record.pixi_environment_name == "default"
+    assert record.pixi_environment_lock_hash == "99f00798db0ea80c"
+    assert record.working_dir_repo == "acme/widget"
+    assert record.tree_branch == "TRE03/WS01"
+    assert record.tree_base == "origin/TRE03/umbrella"
+    assert not hasattr(record, "pixi_run_id")
+
+
+@pytest.mark.parametrize("invalid_identity", ["not json", "[]", "{}", "null"])
+def test_provisioned_write_spawn_tolerates_invalid_optional_env_identity(
+    tmp_path, caplog, invalid_identity
+):
+    # Routing is determined by the provisioned-env sentinel. The identity file
+    # only enriches observability, so malformed optional metadata cannot make an
+    # otherwise launchable write Run fail.
+    b, calls = bounds(tmp_path)
+    tree_dir = tmp_path / "tree"
+    meta = tree_dir / ".pixi" / "envs" / "default" / "conda-meta"
+    meta.mkdir(parents=True)
+    (meta / "pixi").write_text(invalid_identity)
+
+    with caplog.at_level(logging.INFO, logger="shipit.spawn"):
+        spawn_subagent(spec(), b)
+
+    assert calls["cmd"][:4] == [
+        "pixi",
+        "run",
+        "--manifest-path",
+        str(tree_dir / "pixi.toml"),
+    ]
+    warning = next(
+        r for r in caplog.records if "pixi env identity unreadable" in r.message
+    )
+    assert warning.levelno == logging.WARNING
+    record = next(
+        r
+        for r in caplog.records
+        if getattr(r, "work_env_boundary", None) == "spawn.write-run"
+    )
+    assert record.routing == "pixi-run"
+    assert not hasattr(record, "pixi_environment_name")
+
+
+def test_non_pixi_write_spawn_uses_ambient_routing_and_launches_bare(tmp_path, caplog):
+    # Acceptance (RPE01-WS05): a NON-pixi write Run represents absent pixi
+    # activation honestly — the Work Env resolves AMBIENT (no activation, no
+    # env identity extra on the record) — and the existing launch behavior is
+    # preserved: the backend argv stays bare, exactly as before.
+    b, calls = bounds(tmp_path)  # the fake tree dir carries no .pixi env
+
+    with caplog.at_level(logging.INFO, logger="shipit.spawn"):
+        spawn_subagent(spec(), b)
+
+    assert calls["cmd"][0] != "pixi"  # bare backend argv, unrouted
+    assert calls["cmd"][calls["cmd"].index("--agent") + 1] == "implementer"
+    record = next(
+        r
+        for r in caplog.records
+        if getattr(r, "work_env_boundary", None) == "spawn.write-run"
+    )
+    assert record.routing == "ambient"
+    assert record.checkout_strategy == "new-write-tree"
+    # Absent-not-null: no pixi env ⇒ no pixi identity extra on the record at all.
+    assert not hasattr(record, "pixi_environment_name")
 
 
 def test_write_spawn_checks_the_epic_umbrella_on_the_remote(tmp_path):
@@ -234,9 +585,18 @@ def test_reviewer_invalid_epic_is_a_clean_refusal(tmp_path, bad_epic):
     b, calls = bounds(tmp_path)
 
     with pytest.raises(SpawnError, match="epic code"):
-        spawn_subagent(spec(role="reviewer", epic=bad_epic, ws=3, issue=None), b)
+        spawn_subagent(
+            spec(
+                role="reviewer",
+                epic=bad_epic,
+                ws=3,
+                issue=None,
+                backend="codex",
+            ),
+            b,
+        )
 
-    assert "plan" not in calls and "cmd" not in calls
+    assert "review_target" not in calls and "spec" not in calls
 
 
 @pytest.mark.parametrize(
@@ -301,6 +661,91 @@ def test_unsupported_backend_is_refused_before_any_io(tmp_path):
     assert not calls
 
 
+def test_unknown_role_is_refused_before_any_io(tmp_path, caplog):
+    # RPE01-WS01: an arbitrary role string fails the Role Profile registry's
+    # spawn preflight — before repo resolution, Tree provisioning, or launch —
+    # naming the role and the requested (detached) context.
+    def untouchable():
+        raise AssertionError("the role preflight must fire before any I/O")
+
+    caplog.set_level(logging.ERROR, logger="shipit.spawn")
+    b, calls = bounds(tmp_path)
+    with pytest.raises(SpawnError, match="unknown role 'wizard'") as exc:
+        spawn_subagent(spec(role="wizard"), replace(b, repo_root=untouchable))
+    assert "detached" in str(exc.value)  # the refusal names the context
+    assert not calls  # no boundary touched: nothing created, nothing launched
+    refusal = next(
+        record
+        for record in caplog.records
+        if record.levelno == logging.ERROR
+        and getattr(record, "refusal_reason", None) == "role-profile-validation"
+    )
+    assert refusal.requested_role == "wizard"
+    assert refusal.launch_context == "detached"
+    assert "SHIPIT_" not in refusal.getMessage()
+
+
+@pytest.mark.parametrize("role", ["explorer", "coordinator"])
+def test_detached_spawn_of_non_detachable_roles_is_refused(tmp_path, role):
+    # RPE01-WS01: a KNOWN role whose profile does not support a detached launch
+    # refuses before a Tree can be minted — the explorer is ambient (a detached
+    # spawn would hand it a write Tree it must never have), the coordinator is
+    # the host session itself.
+    b, calls = bounds(tmp_path)
+    with pytest.raises(SpawnError) as exc:
+        spawn_subagent(spec(role=role), b)
+    message = str(exc.value)
+    assert role in message and "detached" in message  # role + context named
+    assert not calls  # refused pre-provisioning, pre-launch
+
+
+def test_shepherd_requires_pr_attachment_before_any_tree(tmp_path):
+    b, calls = bounds(tmp_path)
+
+    with pytest.raises(SpawnError, match="existing-PR attachment role"):
+        spawn_subagent(shepherd_spec(pr=None), replace(b, repo_root=lambda: None))
+
+    assert not calls
+
+
+def test_shepherd_refuses_issue_or_epic_shape(tmp_path):
+    b, calls = bounds(tmp_path)
+
+    with pytest.raises(SpawnError, match="--pr only"):
+        spawn_subagent(shepherd_spec(issue=769), b)
+    with pytest.raises(SpawnError, match="--pr only"):
+        spawn_subagent(shepherd_spec(epic="TRE03", ws=4), b)
+
+    assert "spec" not in calls and "cmd" not in calls
+
+
+def test_pr_option_is_only_for_existing_pr_attachment_roles(tmp_path):
+    b, calls = bounds(tmp_path)
+
+    with pytest.raises(SpawnError, match="existing-PR attachment roles"):
+        spawn_subagent(spec(pr=321), b)
+
+    assert "spec" not in calls and "cmd" not in calls
+
+
+def test_role_input_is_normalized_through_the_registry(tmp_path):
+    # The registry parse (strip/lower) is what the pipeline DISPATCHES on, so a
+    # cased '--role Reviewer' rides the read-only reviewer tail — it can never
+    # slip past the dispatch into the write path — and a cased write role
+    # reaches its launch argv normalized.
+    b, calls = bounds(tmp_path)
+    result = spawn_subagent(
+        spec(role="  Reviewer ", ws=3, issue=None, backend="codex"), b
+    )
+    assert result.role == "reviewer"
+    assert "review_target" in calls and "spec" not in calls
+
+    b2, calls2 = bounds(tmp_path)
+    result2 = spawn_subagent(spec(role="IMPLEMENTER"), b2)
+    assert result2.role == "implementer"
+    assert calls2["cmd"][calls2["cmd"].index("--agent") + 1] == "implementer"
+
+
 def test_non_positive_ws_is_refused(tmp_path):
     b, _ = bounds(tmp_path)
     with pytest.raises(SpawnError, match="--ws must be a positive integer"):
@@ -339,7 +784,15 @@ def test_reviewer_without_any_shape_is_refused(tmp_path):
     # a clean refusal naming the ACTUAL problem, not a `None/WS…` branch.
     b, _ = bounds(tmp_path)
     with pytest.raises(SpawnError, match="needs a branch to review"):
-        spawn_subagent(spec(role="reviewer", epic=None, ws=None, issue=None), b)
+        spawn_subagent(
+            spec(
+                role="reviewer",
+                epic=None,
+                ws=None,
+                issue=None,
+            ),
+            b,
+        )
 
 
 # --- identity (stage 2) ----------------------------------------------------------
@@ -556,15 +1009,18 @@ def test_tree_creation_failure_does_not_probe_salvage(tmp_path):
 def test_reviewer_failure_does_not_probe_salvage(tmp_path):
     # A reviewer Run writes nothing (chmod'd read-only Tree) — its failures carry
     # no salvage note and never probe the shared Tree's status.
-    b, _ = bounds(tmp_path, returncode=3)
+    b, _ = bounds(tmp_path)
 
     def no_probe(*, cwd):
         raise AssertionError("the reviewer tail must not run the salvage probe")
 
-    with pytest.raises(SpawnError, match="claude child exited 3") as exc:
+    def fail_review(*args, **kwargs):
+        raise RuntimeError("review backend exited 3")
+
+    with pytest.raises(SpawnError, match="review backend exited 3") as exc:
         spawn_subagent(
-            spec(role="reviewer", ws=3, issue=None),
-            replace(b, status_porcelain=no_probe),
+            spec(role="reviewer", ws=3, issue=None, backend="codex"),
+            replace(b, status_porcelain=no_probe, run_review=fail_review),
         )
     assert "salvageable" not in str(exc.value)
 
@@ -633,38 +1089,28 @@ def test_issue_only_empty_session_is_refused(tmp_path, bad_session):
 # --- the reviewer path (ADR-0018) ---------------------------------------------------
 
 
-def test_reviewer_gets_the_shared_readonly_tree_and_posture(tmp_path, monkeypatch):
-    # Acceptance #157: role reviewer takes the read-only path (create_readonly, NOT
-    # the write create), launches with --agent reviewer + the read-only --tools
-    # allow-list, and returns the SPAWNED coordinates with NO Run↔PR linkage — the
-    # review lands in the EXISTING PR.
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "stale")
+def test_reviewer_delegates_to_the_captured_review_service(tmp_path):
+    # RPE01-WS03: the profile's shared-read-only strategy selects the product
+    # capture-and-post service. The generic spawn runner/self-posting prompt is
+    # never touched; the typed OPEN PR is the service target.
     b, calls = bounds(tmp_path)
 
-    result = spawn_subagent(spec(role="reviewer", ws=3, issue=None), b)
+    result = spawn_subagent(spec(role="reviewer", ws=3, issue=None, backend="codex"), b)
 
-    # The read-only plan is shared per (repo, branch): the WS PR head, no agent hash.
-    plan = calls["plan"]
-    assert plan.branch == "TRE03/WS03"
-    assert plan.dir.name.startswith("tre03-ws03-")
-    assert plan.dir.parent.name == "review"
-    assert calls["source_repo"] == str(tmp_path / "repo")
-    assert "spec" not in calls  # the write creator was never touched
-    # Launch contract for a reviewer: cwd = the read-only Tree, --agent reviewer,
-    # the read-only --tools allow-list (no Write), key scrubbed.
-    assert calls["cwd"] == str(tmp_path / "review")
-    assert calls["cmd"][calls["cmd"].index("--agent") + 1] == "reviewer"
-    allowlist = calls["cmd"][calls["cmd"].index("--tools") + 1]
-    assert "Write" not in allowlist and "Edit" not in allowlist
-    assert "ANTHROPIC_API_KEY" not in calls["env"]
-    # The typed result: role reviewer, no PR block at all.
-    assert result.to_dict() == {
-        "tree": str(tmp_path / "review"),
-        "branch": "TRE03/WS03",
-        "base": "origin/TRE03/WS03",
-        "role": "reviewer",
-        "backend": "claude",
-    }
+    assert calls["pr_branch"] == "TRE03/WS03"
+    assert calls["pr_cwd"] == str(tmp_path / "repo")
+    assert calls["review_backend"].name == "codex"
+    assert calls["review_target"].slug == "acme/widget"
+    assert calls["review_target"].number == 321
+    assert calls["review_run_id"] is None
+    assert "spec" not in calls and "cmd" not in calls
+    assert result.branch == "TRE03/WS03"
+    assert result.base == "origin/TRE03/WS03"
+    assert result.role == "reviewer" and result.backend == "codex"
+    assert result.pr is None
+    result_tree = Path(result.tree)
+    assert result_tree.parent.name == "review"
+    assert result_tree.name.startswith("tre03-ws03-")
 
 
 def test_issue_only_reviewer_pins_the_issue_head(tmp_path):
@@ -672,69 +1118,90 @@ def test_issue_only_reviewer_pins_the_issue_head(tmp_path):
     # standalone-issue head issues/<id>/<session> for the shared read-only Tree.
     b, calls = bounds(tmp_path)
 
-    result = spawn_subagent(spec(role="reviewer", epic=None, ws=None, issue=210), b)
+    result = spawn_subagent(
+        spec(
+            role="reviewer",
+            epic=None,
+            ws=None,
+            issue=210,
+            backend="codex",
+        ),
+        b,
+    )
 
-    assert calls["plan"].branch == "issues/210/work"
+    assert calls["pr_branch"] == "issues/210/work"
     assert result.role == "reviewer"
     assert result.branch == "issues/210/work"
 
 
-def test_codex_reviewer_launches_with_the_read_only_posture(tmp_path, monkeypatch):
-    # #185: a non-Claude reviewer takes the SAME shared read-only Tree path and
-    # launches with the codex reviewer posture — the network-capable
-    # workspace-write sandbox, NOT the write bypass. The chmod'd Tree is the FS
-    # guard.
-    monkeypatch.setenv("OPENAI_API_KEY", "stale")
+@pytest.mark.parametrize(
+    ("backend", "funnel_agent"), [("codex", "codex"), ("antigravity", "agy")]
+)
+def test_reviewer_service_receives_the_registry_backend(
+    tmp_path, backend, funnel_agent
+):
     b, calls = bounds(tmp_path)
 
-    result = spawn_subagent(spec(role="reviewer", ws=3, issue=None, backend="codex"), b)
+    result = spawn_subagent(spec(role="reviewer", ws=3, issue=None, backend=backend), b)
 
-    cmd = calls["cmd"]
-    assert cmd[:2] == ["codex", "exec"]
-    assert cmd[cmd.index("--sandbox") + 1] == "workspace-write"
-    assert "--dangerously-bypass-approvals-and-sandbox" not in cmd
-    assert "--tools" not in cmd
-    assert calls["cwd"] == str(tmp_path / "review")
-    assert "OPENAI_API_KEY" not in calls["env"]
-    assert result.role == "reviewer" and result.backend == "codex"
+    assert calls["review_backend"].funnel_agent == funnel_agent
+    assert result.backend == backend
 
 
-def test_antigravity_reviewer_drops_skip_permissions(tmp_path, monkeypatch):
-    # The agy reviewer path: read_only=True drops --dangerously-skip-permissions
-    # and is rooted in the read-only Tree via --add-dir <Tree> (agy ignores the
-    # process cwd).
-    monkeypatch.setenv("GEMINI_API_KEY", "stale")
+def test_claude_reviewer_is_refused_before_any_io(tmp_path):
+    # Claude has no captured review-service/App identity, so allowing it would
+    # resurrect a second self-posting contract behind the same Role.
     b, calls = bounds(tmp_path)
 
-    spawn_subagent(spec(role="reviewer", ws=3, issue=None, backend="antigravity"), b)
-
-    cmd = calls["cmd"]
-    assert cmd[0] == "agy"
-    assert "--dangerously-skip-permissions" not in cmd
-    assert cmd[cmd.index("--add-dir") + 1] == str(tmp_path / "review")
-    assert "GEMINI_API_KEY" not in calls["env"]
-
-
-def test_reviewer_readonly_tree_failure_fails_closed(tmp_path):
-    # Fail-closed for the reviewer path too: a read-only-Tree error refuses loud,
-    # and the launcher is never reached.
-    b, calls = bounds(tmp_path)
-
-    def boom(plan, *, source_repo, github_url):
-        raise ExecError(["gh"], rc=1, stderr="clone failed")
-
-    with pytest.raises(SpawnError, match="read-only tree creation failed"):
-        spawn_subagent(
-            spec(role="reviewer", ws=3, issue=None),
-            replace(b, create_readonly_tree=boom),
-        )
-    assert "cmd" not in calls
-
-
-def test_reviewer_child_nonzero_exit_is_refused(tmp_path):
-    b, _ = bounds(tmp_path, returncode=3)
-    with pytest.raises(SpawnError, match="claude child exited 3"):
+    with pytest.raises(SpawnError, match="no captured review-service identity"):
         spawn_subagent(spec(role="reviewer", ws=3, issue=None), b)
+    assert calls == {}
+
+
+@pytest.mark.parametrize(
+    ("pr", "message"),
+    [
+        (None, "has no pull request"),
+        (gh.UNKNOWN, "could not determine"),
+        (replace(_PR, state="CLOSED"), "not OPEN"),
+    ],
+)
+def test_reviewer_requires_a_known_open_pr_before_service(tmp_path, pr, message):
+    b, calls = bounds(tmp_path, pr=pr)
+
+    with pytest.raises(SpawnError, match=message):
+        spawn_subagent(spec(role="reviewer", ws=3, issue=None, backend="codex"), b)
+    assert "review_target" not in calls
+
+
+def test_reviewer_service_failure_is_a_clean_refusal(tmp_path):
+    b, _ = bounds(tmp_path)
+
+    def boom(*args, **kwargs):
+        raise ExecError(["codex"], rc=1, stderr="clone or launch failed")
+
+    with pytest.raises(SpawnError, match="captured review service failed"):
+        spawn_subagent(
+            spec(role="reviewer", ws=3, issue=None, backend="codex"),
+            replace(b, run_review=boom),
+        )
+
+
+def test_reviewer_service_failure_records_elapsed_time(tmp_path, caplog):
+    b, _ = bounds(tmp_path)
+
+    def boom(*args, **kwargs):
+        raise ExecError(["codex"], rc=1, stderr="clone or launch failed")
+
+    with caplog.at_level(logging.ERROR, logger="shipit.spawn"):
+        with pytest.raises(SpawnError):
+            spawn_subagent(
+                spec(role="reviewer", ws=3, issue=None, backend="codex"),
+                replace(b, run_review=boom),
+            )
+
+    [refusal] = [record for record in caplog.records if record.levelno == logging.ERROR]
+    assert isinstance(refusal.duration_ms, int)
 
 
 # --- the spawn-seam identity binding + export (LOG04-WS02 / ADR-0032) ---------
@@ -745,7 +1212,7 @@ def test_reviewer_child_nonzero_exit_is_refused(tmp_path):
 # worker cooperation.
 
 
-def test_epic_spawn_exports_all_four_dev_cycle_keys(tmp_path):
+def test_epic_spawn_exports_the_current_spawn_identity(tmp_path):
     b, calls = bounds(tmp_path)
 
     spawn_subagent(spec(), b)
@@ -757,6 +1224,7 @@ def test_epic_spawn_exports_all_four_dev_cycle_keys(tmp_path):
     assert env["SHIPIT_LOG_CTX_EPIC"] == "TRE03"
     assert env["SHIPIT_LOG_CTX_WS"] == "1"
     assert env["SHIPIT_LOG_CTX_ROLE"] == "implementer"
+    assert env["SHIPIT_LOG_CTX_REPO"] == "acme/widget"
     # The agent spawn id IS the Tree dir's disambiguating hash, so the log key
     # and the Tree leaf name agree.
     assert env["SHIPIT_LOG_CTX_AGENT"] == calls["spec"].agent_hash
@@ -766,6 +1234,7 @@ def test_epic_spawn_exports_all_four_dev_cycle_keys(tmp_path):
     bound = logcontext.bound()
     assert bound["epic"] == "TRE03" and bound["ws"] == 1
     assert bound["role"] == "implementer"
+    assert bound["repo"] == "acme/widget"
     assert bound["tree"] == str(tmp_path / "tree")
     assert bound["agent"] == calls["spec"].agent_hash
 
@@ -809,10 +1278,15 @@ def test_reviewer_spawn_exports_identity_with_a_minted_agent_id(tmp_path):
     # own — so the seam mints a fresh agent id for the Run's identity.
     b, calls = bounds(tmp_path)
 
-    spawn_subagent(spec(role="reviewer", ws=3, issue=None), b)
+    spawn_subagent(spec(role="reviewer", ws=3, issue=None, backend="codex"), b)
 
-    env = calls["env"]
-    assert env["SHIPIT_LOG_CTX_EPIC"] == "TRE03"
-    assert env["SHIPIT_LOG_CTX_WS"] == "3"
-    assert env["SHIPIT_LOG_CTX_ROLE"] == "reviewer"
-    assert env["SHIPIT_LOG_CTX_AGENT"]  # minted per Run, non-empty hex
+    # The service is in-process at this boundary; the spawn context is bound for
+    # its capture/post records instead of exported to a generic child environment.
+    bound = logcontext.bound()
+    assert bound["epic"] == "TRE03"
+    assert bound["ws"] == 3
+    assert bound["role"] == "reviewer"
+    assert bound["agent"]
+    assert bound["pr"] == 321
+    assert bound["repo"] == "acme/widget"
+    assert Path(bound["tree"]).parent.name == "review"

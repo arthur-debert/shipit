@@ -13,12 +13,12 @@ NOT from guessed flags. Three facts are load-bearing and non-obvious:
   Tree (ADR-0018) **is**. With the flag the spike landed a real commit; without it the
   Run cannot produce its result. ``--skip-git-repo-check`` lets codex run in the Tree
   without re-litigating that it is a git checkout.
-- **There is NO native ``--agent`` / ``--system-prompt``.** codex cannot be handed a
-  role identity by flag (the way ``claude --agent <role>`` is), and it does **not** run
-  under the shipit harness or its ``PreToolUse`` guard at all — it is a foreign runtime.
-  So the role is conveyed the only native way the spike validated: **prepended to the
-  task prompt** (:func:`_role_preamble`). Writing the role into an ``AGENTS.md`` /
-  ``experimental_instructions_file`` in the Tree was rejected — it would pollute the PR.
+- **There is NO native ``--agent`` flag.** codex does **not** run under the shipit
+  harness or its ``PreToolUse`` guard — it is a foreign runtime. The generated role
+  slice is therefore passed through Codex's native ``developer_instructions`` config
+  override, while the positional prompt contains only the task brief. Writing the role
+  into an ``AGENTS.md`` / ``experimental_instructions_file`` in the Tree remains
+  rejected because it would pollute the PR.
 - **codex auth is ChatGPT OAuth** (tokens in ``~/.codex/auth.json`` / ``$CODEX_HOME``),
   inherited by the child. The spike found a bogus ``OPENAI_API_KEY`` did *not* break
   codex 0.139 on the probe box (it preferred the stored tokens), but the safe
@@ -31,14 +31,12 @@ NOT from guessed flags. Three facts are load-bearing and non-obvious:
   ever written into the Tree.
 
 **Reviewer (read-only) posture — WS04a, probed, NOT the ADR's first guess.** The ADR
-recorded ``--ephemeral --sandbox read-only`` for a reviewer Run, but that decision was
-taken when the reviewer *returned* its findings on stdout (the funnel captured them). In
-the spawn-Tree path the reviewer **self-posts** via ``gh pr review`` — which needs the
-**network**. WS04a probed codex 0.139 directly and found ``--sandbox read-only`` **blocks
-the network** (``curl … → Could not resolve host``), so a read-only-sandbox reviewer
-**cannot post its review**. Per ADR-0020 §Decision 3 the load-bearing read-only guarantee
-is the **chmod'd Tree** (the FS layer), not the native sandbox, so the chosen reviewer
-posture is the *least-privilege codex sandbox that still grants the network*:
+recorded ``--ephemeral --sandbox read-only`` for a reviewer Run, but WS04a probed
+codex 0.139 directly and found ``--sandbox read-only`` **blocks the network**
+(``curl … → Could not resolve host``), so a read-only-sandbox reviewer cannot fetch PR
+context with ``gh pr diff``. Per ADR-0020 §Decision 3 the load-bearing read-only
+guarantee is the **chmod'd Tree** (the FS layer), not the native sandbox, so the chosen
+reviewer posture is the *least-privilege codex sandbox that still grants the network*:
 ``--ephemeral --sandbox workspace-write -c sandbox_workspace_write.network_access=true``
 (probe-confirmed to reach the network). It deliberately does **NOT** carry the write Run's
 ``--dangerously-bypass-approvals-and-sandbox``: the chmod'd Tree makes the workspace
@@ -55,6 +53,8 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from ...agent.backend import CODEX as _IDENTITY
+from ...harness.prompts import load_role_defs, render
+from ...harness.role import Role
 from .base import BackendAdapter
 
 #: The codex auth-env vars :meth:`CodexAdapter.child_env` scrubs (ADR-0020 §codex
@@ -106,10 +106,10 @@ def resolve_model(model: str) -> str:
 
 
 #: The codex ``-c`` override that enables outbound network inside the reviewer's
-#: ``workspace-write`` sandbox (WS04a probe). Without it the sandbox blocks the network a
-#: self-posting reviewer needs for ``gh pr diff`` / ``gh pr review`` (``read-only`` blocks
-#: the network outright, with no override that re-grants it). Value is a TOML literal codex
-#: parses (``foo.bar=true``).
+#: ``workspace-write`` sandbox (WS04a probe). Without it the sandbox blocks the network
+#: a captured reviewer needs for ``gh pr diff`` (``read-only`` blocks the network
+#: outright, with no override that re-grants it). Value is a TOML literal codex parses
+#: (``foo.bar=true``).
 NETWORK_ACCESS_OVERRIDE = "sandbox_workspace_write.network_access=true"
 
 #: The codex ``-c`` config key that pins the model's reasoning effort (RVW03-WS04,
@@ -121,18 +121,34 @@ NETWORK_ACCESS_OVERRIDE = "sandbox_workspace_write.network_access=true"
 #: ``medium`` / ``high``) are valid values verbatim.
 REASONING_EFFORT_KEY = "model_reasoning_effort"
 
+# Codex's developer-level instruction override. Spawned roles use this for the
+# generated role slice (ADR-0011) while the positional prompt stays the filled
+# task brief.
+DEVELOPER_INSTRUCTIONS_KEY = "developer_instructions"
+
 
 def _role_preamble(role: str) -> str:
-    """The role line prepended to a codex prompt (the no-``--agent`` conveyance).
+    """The fallback developer instruction for an unknown/custom role.
 
-    codex has no native agent/system-prompt flag and does not run under the shipit
-    harness, so the role is folded into the task prompt itself (ADR-0020 §codex
-    Role/instruction conveyance — prompt-prepend is the recorded mechanism). The PR
-    contract / draft-and-stop discipline already rides the task text from
-    :func:`shipit.spawn.launch.write_task`; this preamble names the role the child is
-    acting as so its judgement is anchored to it.
+    Known shipit roles use their generated role-scoped prompt. A custom role has
+    no generated slice, so this minimal identity travels through the same Codex
+    ``developer_instructions`` override; it is never prepended to the task prompt.
     """
     return f"You are acting as the '{role}' role for this Run."
+
+
+def _role_instructions(role: str) -> str:
+    """The developer-instruction payload for a spawned Codex role.
+
+    Known shipit roles get the generated role-scoped prompt. Unknown role names
+    keep the old minimal role line so a custom/non-registered worker still has a
+    sane identity without pretending to have a generated slice.
+    """
+    try:
+        known = Role(role)
+    except ValueError:
+        return _role_preamble(role)
+    return render(load_role_defs()).role_prompts[known]
 
 
 class CodexAdapter(BackendAdapter):
@@ -164,9 +180,9 @@ class CodexAdapter(BackendAdapter):
         """The exact ``codex exec`` argv ADR-0020 §codex specifies, per posture.
 
         Common shell: ``codex exec --skip-git-repo-check <posture flags>
-        [-c model_reasoning_effort=<level>] --model <id> "<role-preamble + task>"``.
-        The task prompt is the first positional arg, with the role prepended
-        (:func:`_role_preamble`) because codex has no ``--agent`` flag. The
+        [-c model_reasoning_effort=<level>] -c developer_instructions=<role>
+        --model <id> "<task>"``. The generated role slice travels through Codex's
+        developer-instruction channel; the positional prompt is the task only. The
         reasoning override (:data:`REASONING_EFFORT_KEY`, RVW03-WS04) appears only
         when this instance pins a level — codex's native ReasoningLevel knob,
         common to both postures.
@@ -179,12 +195,11 @@ class CodexAdapter(BackendAdapter):
           needs the unsandboxed posture; the chmod'd Tree (ADR-0018) is the external sandbox
           that flag documents.
         - **reviewer** (``read_only=True``): ``--ephemeral --sandbox workspace-write
-          -c sandbox_workspace_write.network_access=true``. WS04a probed codex 0.139: a
-          reviewer **self-posts** via ``gh pr review``, which needs the network, but
-          ``--sandbox read-only`` (the ADR's first guess, taken when the funnel captured
-          stdout) **blocks the network** — so the reviewer uses the least-privilege sandbox
-          that still grants the network. It deliberately omits the write bypass flag: the
-          chmod'd Tree is the load-bearing read-only guard (ADR-0020 §Decision 3), and
+          -c sandbox_workspace_write.network_access=true``. WS04a probed codex 0.139:
+          ``--sandbox read-only`` blocks the network a captured reviewer needs for
+          ``gh pr diff``, so the reviewer uses the least-privilege sandbox that still
+          grants the network. It deliberately omits the write bypass flag: the chmod'd
+          Tree is the load-bearing read-only guard (ADR-0020 §Decision 3), and
           ``workspace-write`` confines any escape to ``[workdir, /tmp, $TMPDIR]`` as
           best-effort defense-in-depth. ``--ephemeral`` skips session persistence.
 
@@ -197,11 +212,10 @@ class CodexAdapter(BackendAdapter):
         ``--output-schema <path>`` so codex enforces its structured output against the
         review JSON schema natively. It is the funnel **capture** reviewer's robustness
         win (ADR-0020 §migration-cost: *keep ``--output-schema`` on the codex reviewer*);
-        the self-posting spawn-surface reviewer leaves it ``None`` and so omits the flag.
         It is never added to a WRITE Run (a write Run emits no captured JSON).
         """
         del cwd  # codex roots via the process cwd; no path belongs in its argv.
-        prompt = f"{_role_preamble(role)}\n\n{task}"
+        prompt = task
         posture = (
             [
                 "--ephemeral",
@@ -226,6 +240,8 @@ class CodexAdapter(BackendAdapter):
             "--skip-git-repo-check",
             *posture,
             *reasoning,
+            "-c",
+            f"{DEVELOPER_INSTRUCTIONS_KEY}={_role_instructions(role)}",
             "--model",
             self.model,
             prompt,

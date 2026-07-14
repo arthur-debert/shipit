@@ -29,6 +29,7 @@ only the body composes.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass
@@ -36,31 +37,34 @@ from importlib import resources
 from pathlib import Path
 
 from .role import Role
+from .roleprofile import profile_for
 
 #: The harness subsystem's logger. Regeneration mutates the working tree (the
 #: agent-defs, the bundled generated docs), so each write gets a durable record
 #: (LOG03) — the ``regenerated <path>`` print stays as the user-facing surface.
 logger = logging.getLogger("shipit.harness")
 
-#: The subagent roles — every role EXCEPT the coordinator, which is the top-level
-#: session and has no agent-def (ADR-0011). These are the roles that get a
-#: ``.claude/agents/<role>.md`` body; the coordinator's prompt rides the injected
-#: context + the PreToolUse deny reason instead.
-SUBAGENT_ROLES: tuple[Role, ...] = (
-    Role.IMPLEMENTER,
-    Role.SHEPHERD,
-    Role.EXPLORER,
-    Role.REVIEWER,
+#: The subagent roles — every role whose Role Profile DECLARES a generated
+#: agent-def (``generates_agent_def``), DERIVED from the registry rather than
+#: re-listed here (RPE01-WS02), so the set can never drift from the structural
+#: source. Today that is every role except the coordinator, which is the
+#: top-level session and has no agent-def (ADR-0011): its prompt rides the
+#: injected context + the PreToolUse deny reason instead. Enum order is stable,
+#: so the derived tuple keeps its historical ordering.
+SUBAGENT_ROLES: tuple[Role, ...] = tuple(
+    role for role in Role if profile_for(role).generates_agent_def
 )
 
 #: The roles whose spawn/cold briefs have a bundled BRIEF TEMPLATE (RVW02): the
 #: task-specific half the coordinator fills at spawn/brief time — the general
 #: half is the role prompt composed below. Authored as `<role>-brief.lex` beside
 #: the role fragments (mirrored to `.md` by the same regen pipeline), read back
-#: via :func:`load_brief_template`, printed by `shipit spawn brief <role>`.
-BRIEF_ROLES: tuple[Role, ...] = (
-    Role.IMPLEMENTER,
-    Role.SHEPHERD,
+#: via :func:`load_brief_template`, printed by `shipit spawn brief <role>`. DERIVED
+#: from each Role Profile's ``has_brief_template`` (RPE01-WS02) — the same
+#: structural source the `spawn brief` CLI choices read — so brief availability
+#: cannot drift from the registry.
+BRIEF_ROLES: tuple[Role, ...] = tuple(
+    role for role in Role if profile_for(role).has_brief_template
 )
 
 #: The MANDATORY brief slots — literal `{{slot}}` placeholders the coordinator
@@ -98,41 +102,39 @@ _GENERATED_REL = ("roles", "generated")
 _COORDINATOR_SLICE_NAME = "coordinator-prompt.md"
 _UNION_NAME = "agents-union.md"
 
-#: Per-subagent-role agent-def frontmatter. `description` is the "when to use"
-#: line Claude Code shows in the agent picker; `tools` is set for the read-only
-#: roles — the explorer and the reviewer are denied the mutating tools (no
-#: `Write`/`Edit`), so their read-only posture rides the tool allow-list, not just
-#: the prompt. The write roles inherit the full toolset and are governed by their
-#: prompt + (for any code edit) the PreToolUse guard.
-_AGENT_FRONTMATTER: dict[Role, dict[str, str]] = {
-    Role.IMPLEMENTER: {
-        "description": (
-            "Implements one unit of work with tests and opens a single draft PR, "
-            "then stops at PR-open. Use to build a change; not for review rounds."
-        ),
-    },
-    Role.SHEPHERD: {
-        "description": (
-            "Owns addressing for one PR across its review rounds; parked "
-            "between rounds. Use one per PR: briefed cold with the PR number on "
-            "round 1, resume the SAME agent for later rounds."
-        ),
-    },
-    Role.EXPLORER: {
-        "description": (
-            "Read-only, search-scoped investigator: searches and reports "
-            "findings, mutates nothing. Use to answer a question about the code."
-        ),
-        "tools": "Read, Grep, Glob, Bash",
-    },
-    Role.REVIEWER: {
-        "description": (
-            "Read-only, branch-pinned reviewer: reads a PR head in a shared "
-            "read-only Tree and posts one review, mutates nothing. Use to review "
-            "a PR."
-        ),
-        "tools": "Read, Grep, Glob, Bash",
-    },
+#: The read-only agent-def tool allow-list — the exact tools Claude Code grants a
+#: role whose profile posture forbids checkout mutation (no `Write`/`Edit`), so a
+#: read-only role's posture rides the tool allow-list, not just the prompt. A role
+#: gets this line IFF ``not profile.enforcement.checkout_mutation`` (RPE01-WS02):
+#: the structural tool posture DERIVES from the Role Profile, never a per-role
+#: table, so it cannot disagree with the registry's enforcement posture.
+_READ_ONLY_TOOLS = "Read, Grep, Glob, Bash"
+
+#: Per-subagent-role agent-def DESCRIPTION — the "when to use" line Claude Code
+#: shows in the agent picker. This is behavioral prose (the one authored field in
+#: the frontmatter); the STRUCTURAL tool posture is derived from the Role Profile
+#: in :func:`_frontmatter`, not stored here. Every :data:`SUBAGENT_ROLES` role
+#: must have an entry — a test pins that, so a Role declaring a generated agent-def
+#: can never ship without its description (RPE01-WS02).
+_AGENT_DESCRIPTIONS: dict[Role, str] = {
+    Role.IMPLEMENTER: (
+        "Implements one unit of work with tests and opens a single draft PR, "
+        "then stops at PR-open. Use to build a change; not for review rounds."
+    ),
+    Role.SHEPHERD: (
+        "Owns addressing for one PR across its review rounds; parked "
+        "between rounds. Use one per PR: briefed cold with the PR number on "
+        "round 1, resume the SAME agent for later rounds."
+    ),
+    Role.EXPLORER: (
+        "Read-only, search-scoped investigator: searches and reports "
+        "findings, mutates nothing. Use to answer a question about the code."
+    ),
+    Role.REVIEWER: (
+        "Read-only, branch-pinned reviewer: reads a PR head in a shared "
+        "read-only Tree and emits one structured review result for shipit to "
+        "post, mutates nothing. Use to review a PR."
+    ),
 }
 
 
@@ -289,11 +291,20 @@ def load_coordinator_slice() -> str:
 
 
 def _frontmatter(role: Role) -> str:
-    """The YAML agent-def frontmatter block for a subagent ``role``."""
-    fields = _AGENT_FRONTMATTER[role]
-    lines = ["---", f"name: {role.value}"]
-    for key, value in fields.items():
-        lines.append(f"{key}: {value}")
+    """The YAML agent-def frontmatter block for a subagent ``role``.
+
+    ``name`` and ``description`` are always emitted; the ``tools`` allow-list is
+    emitted IFF the role's Role Profile posture forbids checkout mutation — the
+    structural read-only posture DERIVES from the registry (RPE01-WS02), so the
+    generated frontmatter and the enforcement posture cannot drift apart.
+    """
+    lines = [
+        "---",
+        f"name: {role.value}",
+        f"description: {json.dumps(_AGENT_DESCRIPTIONS[role])}",
+    ]
+    if not profile_for(role).enforcement.checkout_mutation:
+        lines.append(f"tools: {_READ_ONLY_TOOLS}")
     lines.append("---")
     return "\n".join(lines)
 

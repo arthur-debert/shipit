@@ -54,8 +54,9 @@ import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from .. import logcontext
+from .. import logcontext, pixienv
 from ..agent.backend import CODEX
+from ..harness import activation as harness_activation
 from ..spawn.backends.codex import CodexAdapter
 from ..spawn.launch import scrub_tree_env
 
@@ -110,8 +111,39 @@ def codex_argv(tree: str | Path, extra: Sequence[str] = ()) -> list[str]:
     return [CODEX.binary, "--cd", str(tree), BYPASS_FLAG, *extra]
 
 
+def codex_resume_argv(
+    tree: str | Path, thread_id: str, extra: Sequence[str] = ()
+) -> list[str]:
+    """The first-class Codex resume argv, deliberately re-rooted in ``tree``.
+
+    ``codex resume --cd <tree> <thread-id>`` preserves Codex's conversation
+    identity while making shipit's session Tree identity explicit. The same
+    low-friction coordinator posture is carried so a resumed coordinator can
+    still commit, push, and run ``gh`` inside the replacement Tree.
+    """
+    return [CODEX.binary, "resume", "--cd", str(tree), BYPASS_FLAG, thread_id, *extra]
+
+
+def activation_for_tree(tree: str | Path, *, runner=None) -> pixienv.Activation | None:
+    """Capture pixi activation for ``tree`` when it has an activatable toolchain.
+
+    Codex has no ``CLAUDE_ENV_FILE`` preamble, so the launch path applies the
+    same pixi activation snapshot directly to the child env before ``execvpe``.
+    Missing/non-pixi toolchains are a clean no-op; pixi failures propagate to
+    the verb, which logs them and falls back to an unactivated launch.
+    """
+    toolchain = harness_activation.detect_toolchain(Path(tree))
+    if toolchain is None:
+        return None
+    return pixienv.shell_hook(toolchain.manifest, runner=runner)
+
+
 def codex_env(
-    parent_env: Mapping[str, str], *, session_id: str, tree: str | Path
+    parent_env: Mapping[str, str],
+    *,
+    session_id: str,
+    tree: str | Path,
+    activation: pixienv.Activation | None = None,
 ) -> dict[str, str]:
     """The Codex session's COMPLETE child environment (for ``execvpe``).
 
@@ -124,16 +156,11 @@ def codex_env(
        (:func:`shipit.spawn.launch.scrub_tree_env` — leaked ``PIXI_*``/Conda
        activation vars out, so the session's own ``pixi``/``shipit`` calls resolve
        the Tree, not the parent checkout);
-    3. the launch-seam agent-identity scrub: the inherited agent-identity keys
-       ``SHIPIT_LOG_CTX_ROLE``/``_AGENT``/``_RUN`` (a coordinator started from
-       inside a spawned worker Run's shell) are dropped — the session being
-       launched IS a coordinator, a fresh agent. The pretooluse edit guard's
-       ROLE fallback would otherwise silently resolve it to the worker's role
-       and disarm; the worker's AGENT/RUN spawn ids would mis-tag the new
-       coordinator's own log records with the worker's identity. Task-correlation
-       keys (``PR``/``EPIC``/…) may still inherit — they describe the work, not
-       who is doing it. The managed ``agent-start`` launcher scrubs the same
-       keys; this covers a direct ``shipit session codex``;
+    3. the launch-seam log-context scrub: every inherited
+       ``SHIPIT_LOG_CTX_*`` domain key is dropped. A global resume may target a
+       different repository/task from the shell that invoked it; the fresh
+       session must establish its own correlation rather than inherit stale
+       PR/epic/role identity;
     4. the ``SHIPIT_LOG_CTX_SESSION``/``_TREE`` exports (names from
        :data:`shipit.logcontext.ENV_PREFIX`, values matching what the SessionStart
        hook would export for this Tree — the leaf IS the session id, ADR-0027),
@@ -143,8 +170,9 @@ def codex_env(
     Returns a fresh dict, never the caller's mapping.
     """
     env = scrub_tree_env(CodexAdapter().child_env(parent_env))
-    for key in ("ROLE", "AGENT", "RUN"):
-        env.pop(logcontext.ENV_PREFIX + key, None)
+    if activation is not None:
+        env = pixienv.activated_env(env, activation)
+    env = logcontext.scrub_env(env)
     env[logcontext.ENV_PREFIX + "SESSION"] = session_id
     env[logcontext.ENV_PREFIX + "TREE"] = str(tree)
     return env

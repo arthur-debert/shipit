@@ -97,6 +97,20 @@ nit_cap = 3
 [toolchains]
 "." = "python"
 
+# [artifacts] — shipit's OWN release surface (#774, the 1.0.0 cutover): ONE
+# no-build artifact whose sole endpoint is the GitHub release. shipit is
+# consumed via the git pin (`[shipit] version`, ADR-0033) and `@v1` workflow
+# refs (ADR-0010) — the TAG is the payload — so the minimal HONEST declaration
+# is the zero-build shape ("the tag is the release"): preflight plans stages
+# preflight → prepare → publish with an EMPTY matrix (nothing builds, bundles,
+# or signs), and publish creates the tag's GH release carrying the coalesced
+# notes. A `wheel` composition is deliberately NOT declared: nothing consumes
+# a shipit wheel (the launcher installs from the git pin), and a phantom asset
+# would be a dishonest release surface. gh-release rides the workflow's own
+# GITHUB_TOKEN, so this declaration adds nothing to the [secrets] map.
+[artifacts.shipit]
+endpoints = ["gh-release"]
+
 # [lanes] — the declared CI test units (docs/legacy-prd/tol01-ci-tools.md story 14):
 # `{ run, required, local, trigger, runner, scope }`, keyed by lane name. The
 # lane planner (`shipit ci plan`, TOL01-WS05) maps these + the CI event + a
@@ -226,6 +240,8 @@ claude-start = "sha256:8a658d5d88269a0444e9843d5cddbf133e4ac9fb2e6862701980991bb
 "pixi.toml#shipit-tasks" = "sha256:d02ea7ec3c772affa6d9510007e434115e1d75b5f7231567c38fb96c05d1a02b"
 "pixi.toml#shipit-lint-deps" = "sha256:2cb6e4ec4d7ea2453a3367c9fa293122ac9cee96daa75a1b0f2ef43d5450e5d2"
 "pixi.toml#shipit-environments" = "sha256:c54b53e3bb55cd59aaabf9daea85c81cffe3cbae8978e41cbef5db0f16b3838b"
+"pixi.toml#shipit-launcher-deps" = "sha256:fe4ac42c0543a35b0c845404c0a21d6a64e2ecabeb2f15f4c8b9229506e62da7"
+"pixi.toml#shipit-python-release-deps" = "sha256:c5c9985aceaba7a3f4754fbf92cb027faa93dda4407493913968ddb3b4f8c60d"
 ".claude/agents/explorer.md" = "sha256:9b32730d6a744d7ff2b5201b7a9f09ea9081f98d315e5534d975e9178e6afc08"
 ".claude/agents/implementer.md" = "sha256:18b16a9383e160ffdcdb62e798292605738f6366691bc8e59e77645ed605bb19"
 ".claude/agents/reviewer.md" = "sha256:9b5d9e3739583dcd55c2218984f6f37f47f8ae5ec0663d0e1bafd635ccb9b859"

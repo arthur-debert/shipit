@@ -25,7 +25,11 @@ is the effectful shell over that plan, sharing its rim with ``shipit test``
   the parent's, ``check=False`` (a nonzero rc is the build's verdict) and a
   stated :data:`BUILD_TIMEOUT` — builds are legitimate long-runners, so the
   bound is deliberately generous. A missing builder binary HARD-fails the
-  step (127 + a provision note), never a silent skip.
+  step (127 + a provision note), never a silent skip; when the builder is a
+  pixi-managed tool (``cargo``, ``tree-sitter`` — #890) the note is the
+  install-reconcile remedy
+  (:func:`shipit.release.provisioning.missing_tool_remedy`), the same
+  translation prepare and publish apply.
 - the uniform exit contract (ADR-0030): 0 = every step built, 1 = any step
   failed (or could not run), 2 = usage. A missing/malformed map raises
   :class:`~shipit.config.ConfigError`, mapped by the shared
@@ -47,6 +51,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .. import config, execrun
+from ..release import provisioning as provisioning_mod
 from ..tools import build as build_mod
 from ..tools import legs as legs_mod
 from ._errors import cli_errors
@@ -113,6 +118,7 @@ def run(
     args: Sequence[str] = (),
     *,
     version: str | None = None,
+    target: str | None = None,
     run_step: (
         Callable[[Sequence[str], Path, Mapping[str, str]], execrun.ExecResult] | None
     ) = None,
@@ -124,7 +130,12 @@ def run(
     :func:`~._tool.split_args`); ``version`` is the caller-supplied release
     version (ADR-0041 — never computed here), which must be whitespace-free (it
     rides go's ``-ldflags`` value, a single token the go tool re-splits on
-    whitespace — a rc-2 usage error otherwise). ``run_step`` injects the Exec
+    whitespace — a rc-2 usage error otherwise). ``target`` is the cross triple
+    (TOL02-WS11) appended to every rust step as ``--target <triple>`` so cargo
+    cross-compiles into ``target/<triple>/release/`` — the wf-build fan passes
+    its matrix triple here for the cross platforms (darwin-x86_64, musl) a
+    native runner cannot build natively; ``None`` keeps the native build.
+    ``run_step`` injects the Exec
     boundary for tests; ``runs_out``, when given, receives every
     :class:`StepRun` outcome — the typed per-step verdicts behind the exit
     code.
@@ -162,7 +173,7 @@ def run(
         return 2
 
     build_mod.check_targets_unambiguous(artifacts, planned)
-    steps = build_mod.plan_build(planned, artifacts, version=version)
+    steps = build_mod.plan_build(planned, artifacts, version=version, target=target)
     run_step = run_step or _run_step
     # Accumulate into a fresh list so the verdict is this invocation's alone; a
     # caller-supplied `runs_out` is an OUTPUT sink, extended at the end (never
@@ -179,7 +190,12 @@ def run(
             # HARD-fail signal: 127 + a clear note, never a silent skip.
             rc = 127
             if exc.cause == execrun.CAUSE_MISSING_BINARY:
-                out = (
+                # A pixi-managed builder absent from the runner (`cargo`,
+                # `tree-sitter` — the #890 live-fire death) names the install
+                # reconcile that provisions it, the prepare/publish loops'
+                # exact translation (#801); an unmanaged head keeps the
+                # generic provision note.
+                out = provisioning_mod.missing_tool_remedy(step.argv, exc.cause) or (
                     f"{step.argv[0]}: not found on PATH "
                     "(the check is hard — provision it)"
                 )

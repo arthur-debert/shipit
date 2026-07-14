@@ -1,0 +1,54 @@
+`shipit release publish` is the TERMINAL release stage: it walks the
+`[artifacts]` map and dispatches each artifact's declared Distribution
+endpoints (`endpoints = [...]` in .shipit.toml) through the closed adapter
+registry:
+
+- gh-release  create-or-edit the GitHub Release from the one coalesced
+              notes text prepare wrote; upload the staged bundle assets
+              (--clobber). The prerelease flag derives from the semver
+              suffix and is re-asserted on the resume/edit path.
+- crates      workspace crates in topological dependency order; an
+              already-uploaded crate version is success, so a re-run after
+              a mid-workspace failure resumes.
+- pypi        twine-style upload of the staged wheel+sdist with
+              --skip-existing; `--testpypi` reroutes to test.pypi.org
+              (staging lane, TESTPYPI_TOKEN).
+- npm         publishes the prebuilt package tree without rebuilding
+              (--ignore-scripts); publish-over-existing is success.
+- brew        DERIVED endpoint: renders the shared formula template against
+              the final release-asset URLs/sha256s (incl. the private-repo
+              download strategy when the source repo is private),
+              syntax-checks it (ruby -c), and pushes it to the
+              homebrew-tools tap. Stable channel only — a prerelease never
+              moves the tap formula. An unchanged formula is a no-op push.
+
+The stage-wide invariants live in the VERB, so they hold identically for
+the wf-publish workflow block and a laptop invocation:
+
+- Refusal first (scar #3): publish takes the upstream stage results as
+  explicit inputs (--build-result/--bundle-result/--sign-result) and
+  refuses unless every LIVE stage succeeded and sign
+  succeeded-or-was-skipped. Liveness is a plan fact, passed verbatim
+  (--matrix/--stages): a plan-proven non-live build/bundle (empty matrix /
+  no bundle stage — "the tag is the release") may be skipped; omitted
+  facts keep the strict success-only contract. A failed (or cancelled)
+  stage blocks everything, live or not.
+- RC guard, central: a `-release-rc` VERSION publishes ONLY to the GH
+  release (as prerelease); every external endpoint — crates, pypi, npm,
+  brew — is skipped, making live-fire pipeline verification safe from a
+  laptop.
+- Two-stage ordering: `release` endpoints complete before `derived` ones
+  (brew needs the final asset URLs/SHAs).
+- Idempotent-resumable: external endpoints cannot roll back, so publish
+  converges on re-run instead of erroring — already-published is success,
+  create becomes edit, an unchanged formula pushes nothing.
+
+Each adapter's required secret name comes from the one derivation authority
+(CARGO_REGISTRY_TOKEN, PYPI_TOKEN, NPM_TOKEN, HOMEBREW_TAP_TOKEN — the same
+map gh-setup syncs and preflight validates); a missing token for a planned
+endpoint fails loudly BEFORE the first dispatch, never as a silent adapter
+skip. gh-release rides gh's ambient auth.
+
+VERSION is the concrete semver `release prepare` cut — never a bump word
+(publish must not re-resolve the version). An endpoint name outside the
+closed registry is a hard error naming the known set.

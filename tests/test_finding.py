@@ -97,21 +97,27 @@ def test_order_findings_is_highest_severity_first_and_stable():
 
 
 @pytest.mark.parametrize(
-    ("marker", "adapter", "override", "expected"),
+    ("marker", "adapter", "policy", "override", "expected"),
     [
         # marker wins over adapter
-        (Severity.NIT, Severity.CRITICAL, None, Severity.NIT),
+        (Severity.NIT, Severity.CRITICAL, None, None, Severity.NIT),
         # no marker → adapter mapping
-        (None, Severity.MINOR, None, Severity.MINOR),
-        # nothing parseable → the major fail-safe (forces a round)
-        (None, None, None, Severity.MAJOR),
-        # the write-once override beats all three
-        (Severity.NIT, Severity.MINOR, Severity.CRITICAL, Severity.CRITICAL),
-        (None, None, Severity.NIT, Severity.NIT),
+        (None, Severity.MINOR, None, None, Severity.MINOR),
+        # no marker, no mapping → the adapter's unclassified policy (#743)
+        (None, None, Severity.MINOR, None, Severity.MINOR),
+        # ...which the marker and the native mapping each beat
+        (Severity.NIT, None, Severity.CRITICAL, None, Severity.NIT),
+        (None, Severity.NIT, Severity.CRITICAL, None, Severity.NIT),
+        # nothing parseable, no policy → the major fail-safe (forces a round)
+        (None, None, None, None, Severity.MAJOR),
+        # the write-once override beats all four
+        (Severity.NIT, Severity.MINOR, None, Severity.CRITICAL, Severity.CRITICAL),
+        (None, None, Severity.MINOR, Severity.CRITICAL, Severity.CRITICAL),
+        (None, None, None, Severity.NIT, Severity.NIT),
     ],
 )
-def test_resolve_severity_precedence_chain(marker, adapter, override, expected):
-    assert resolve_severity(marker, adapter, override) == expected
+def test_resolve_severity_precedence_chain(marker, adapter, policy, override, expected):
+    assert resolve_severity(marker, adapter, override, policy) == expected
 
 
 def test_default_severity_is_major():

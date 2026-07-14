@@ -3,3 +3,9 @@
 It applies and verifies repository rulesets, labels, secrets, and required
 checks from `.shipit.toml` or explicit options. The command is idempotent, so it
 is suitable for first setup and later drift repair.
+
+Secrets are synced as a DERIVED set: the artifact map's declarations (endpoints,
+signing, the prepare push) decide which names must exist, and the `[secrets]`
+table only says where each value comes from (doppler/env/prompt). A required
+name with no declared source fails the run naming the requiring entry; a
+declared secret nothing requires is flagged as an orphan and not pushed.

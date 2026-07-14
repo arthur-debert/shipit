@@ -1,6 +1,6 @@
 """`shipit gh-setup` — ADR-0030 glue + renderer over the gh-setup domain.
 
-The verb is click glue and a renderer (CLI02-WS04): the three setup passes
+The verb is click glue and a renderer (CLI02-WS04): the four setup passes
 live in :mod:`shipit.ghsetup` and return one typed
 :class:`~shipit.ghsetup.SetupReport`; this module resolves the ambient identity
 (the root context — never a per-run API shellout), threads it as values, and
@@ -69,7 +69,9 @@ def cmd(
     dry_run: bool,
     as_json: bool,
 ) -> None:
-    """Make REPO conform to the portfolio standard (ruleset, labels, secrets).
+    """Make REPO conform to the portfolio standard (ruleset, labels, secrets)
+    and verify the Actions access level of a private workflow publisher
+    (warn-only — never set; #739).
 
     REPO is owner/name; omitted, it defaults to the current checkout's repo.
     Idempotent — safe to re-run for both install and update.
@@ -101,7 +103,7 @@ def run(
     as_json: bool = False,
     prompt=None,
 ) -> int:
-    """Resolve identity → run the three passes → render. Returns an exit code.
+    """Resolve identity → run the four passes → render. Returns an exit code.
 
     ``repo`` arrives as a value: the shared REPO argument mints it at parse
     (explicit slug) or defaults it to the ambient repo from the root context;
@@ -110,7 +112,9 @@ def run(
     ``error: …`` + exit 1 via the shell.
 
     0 when every pass applied (dry or real); 1 when any secret failed — the
-    exit contract derives from the report. Local workflow auto-discovery is
+    exit contract derives from the report. The workflow-access pass is
+    advisory (verify-and-warn, #739): a warn or unknown outcome renders in
+    the report but never changes the exit code. Local workflow auto-discovery is
     enabled only when the target IS the ambient checkout's repo; the config
     default is the ambient checkout's ``.shipit.toml`` either way.
     """
@@ -150,7 +154,7 @@ def run(
             "gh-setup failed for %s: %s",
             target.slug,
             exc,
-            extra={"step": "setup (ruleset/labels/secrets)"},
+            extra={"step": "setup (ruleset/labels/access/secrets)"},
         )
         raise
     if not report.ruleset.checks:
@@ -201,6 +205,19 @@ def format_setup(report: SetupReport) -> str:
         prefix = "[dry] label" if label.action == "dry-run" else "label"
         lines.append(f"  {prefix} {label.name}")
 
+    wa = report.workflow_access
+    lines.append("workflow access:")
+    if wa.status == "warn":
+        lines.append(f"  WARN {wa.reason}")
+    elif wa.status == "unknown":
+        lines.append(f"  warning: {wa.reason}")
+    elif wa.status == "acceptable":
+        lines.append(f"  access level: {wa.access_level} (acceptable)")
+    elif wa.status == "not-applicable":
+        lines.append(f"  not applicable: {wa.reason}")
+    else:
+        raise ValueError(f"unknown workflow access status: {wa.status!r}")
+
     lines.append("secrets:")
     if report.secrets_error is not None:
         lines.append(f"  no secrets applied: {report.secrets_error}")
@@ -211,16 +228,21 @@ def format_setup(report: SetupReport) -> str:
             lines.append(f"  FAIL {secret.name}: {secret.reason}")
         elif secret.action == "skipped":
             lines.append(f"  skip {secret.name} ({secret.reason})")
+        elif secret.action == "orphan":
+            lines.append(f"  ORPHAN {secret.name}: {secret.reason}")
         else:
             lines.append(f"  secret {secret.name}")
     if report.secrets:
         # The historical summary counts a dry secret as "set" — it is the
         # number of secrets the run WOULD push.
         would_set = sum(1 for s in report.secrets if s.action in ("set", "dry-run"))
-        lines.append(
+        summary = (
             f"  {would_set} secret(s) set, "
             f"{report.secrets_skipped} skipped, {report.secrets_failed} failed"
         )
+        if report.secrets_orphaned:
+            summary += f", {report.secrets_orphaned} orphaned"
+        lines.append(summary)
 
     lines.append("done.")
     return "\n".join(lines)

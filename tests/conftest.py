@@ -70,6 +70,19 @@ PIXI_ABSENCE_GUARD = (
     'wherever pixi is provisioned)."; exit 0; }; '
 )
 
+#: The guarded ``~/.local/bin`` PATH-prepend leg (#601, #848) shared by every
+#: managed hook command that must resolve Layer 0's install dir (setup-dev-env.sh
+#: provisions pinned pixi/uv exactly there): the idempotent case-guard idiom,
+#: wrapped for an unset ``$HOME`` (an unguarded prepend pushes a literal
+#: "/.local/bin" onto PATH in HOME-less hook shells). SINGLE source of the
+#: expected string — the claude and codex twins must carry it byte-identically,
+#: so a parity drift (the codex pair shipped with NO prepend at all: gemini on
+#: tree-sitter-lex#89, copilot on supage#171) shows up in exactly one place here.
+LOCAL_BIN_PATH_LEG = (
+    'if [ -n "${HOME:-}" ]; then case ":$PATH:" in *":$HOME/.local/bin:"*) ;; '
+    '*) export PATH="$HOME/.local/bin:$PATH" ;; esac; fi; '
+)
+
 
 def managed_cc_hook_command(phase: str) -> str:
     """The exact managed ``.claude/settings.json`` hook command for ``phase`` (#491).
@@ -115,7 +128,9 @@ def managed_cc_hook_command(phase: str) -> str:
     the first session start in an environment where ``~/.local/bin`` is not
     already on PATH installed uv and then immediately failed the
     ``./bin/shipit hook sessionstart`` on the same command line with "uv is not
-    on PATH" (exit 127; the ADR-0033 launcher hard-requires uv).
+    on PATH" (exit 127; the ADR-0033 launcher hard-requires uv). Since #848 the
+    leg is the shared :data:`LOCAL_BIN_PATH_LEG` — guarded for an unset
+    ``$HOME`` and byte-identical across every hook command that carries it.
     """
     setup_leg = ""
     if phase == "sessionstart":
@@ -123,8 +138,7 @@ def managed_cc_hook_command(phase: str) -> str:
             "if [ -x ./bin/setup-dev-env.sh ]; then ./bin/setup-dev-env.sh || echo "
             '"shipit: setup-dev-env.sh reported a problem — continuing '
             '(base-system provisioning is best-effort)." >&2; fi; '
-            'case ":$PATH:" in *":$HOME/.local/bin:"*) ;; '
-            '*) export PATH="$HOME/.local/bin:$PATH" ;; esac; '
+            f"{LOCAL_BIN_PATH_LEG}"
         )
     return (
         f'cd "$CLAUDE_PROJECT_DIR" || exit 0; {setup_leg}test -x ./bin/shipit || {{ echo '
@@ -176,9 +190,15 @@ def managed_pretooluse_hook_command() -> str:
     unresolved) rather than the pre-#529 unguarded allow — the correct direction
     per the never-silent-allow invariant, but the pixi-less mechanics (how such a
     consumer gets a working guard at all) are left for a follow-up.
+
+    #848: the command opens with the shared :data:`LOCAL_BIN_PATH_LEG` — a
+    PreToolUse process never sources ``CLAUDE_ENV_FILE``, so on a bare hook
+    PATH the Layer 0 pixi (``~/.local/bin``) was unresolvable and the guard
+    fail-closed on checkouts whose ONLY pixi is the provisioned pin. The leg
+    makes the guard runnable there; resolution failing anyway still blocks.
     """
     return (
-        'cd "$CLAUDE_PROJECT_DIR" && pixi run --manifest-path '
+        f'{LOCAL_BIN_PATH_LEG}cd "$CLAUDE_PROJECT_DIR" && pixi run --manifest-path '
         '"$CLAUDE_PROJECT_DIR"/pixi.toml -- ./bin/shipit hook pretooluse; '
         "rc=$?; "
         'if [ "$rc" -ne 0 ]; then echo "shipit: PreToolUse guard could not run '

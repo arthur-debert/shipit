@@ -60,9 +60,10 @@ dependencies.
     Parallel implementation, serialized integration. Subagents implement
     eligible workstreams concurrently per the dependency graph, but the
     coordinator merges into the epic branch one at a time. After each merge,
-    in-flight WS branches pull the new epic head and re-green before their own PR
-    flips READY. Workstreams may overlap files; contention is resolved at merge
-    time, never by pre-partitioning.
+    in-flight WS branches MERGE the new epic head in (never rebase — see the
+    currency rule in §3) and re-green before their own PR flips READY.
+    Workstreams may overlap files; contention is resolved at merge time, never
+    by pre-partitioning.
 
 3. Integration
 
@@ -81,6 +82,26 @@ dependencies.
     rather than waiting to be woken; reviewer waits are never left unwatched —
     `shipit pr wait` (ADR-0034) is the blocking watch (CLI02 retro: an 8-minute
     dead gap between a merge and the resulting conflict being handled).
+
+    Epic-branch currency is MERGE-only: a WS branch takes the new epic head by
+    merging `EPIC/umbrella` in, NEVER by rebasing onto it. The reason is
+    review-thread anchor preservation. A rebase rewrites the WS branch's
+    already-reviewed commits, so every review thread anchored to them is
+    orphaned; a merge leaves those commits — and their anchors — intact.
+    Ancestry splits the same way and drives which round the engine runs
+    (Re-review rounds are head-strict incremental, each reviewing only
+    `last-reviewed-head..new-head` — ADR-0043): after a rebase the
+    last-reviewed head is no longer an ancestor of the new one, so the engine
+    drops off the incremental path onto a full-PR re-review — a
+    `merge-base(EPIC/umbrella, WS)..WS` diff that EXCLUDES already-landed
+    sibling code, but re-reviews the whole WS change from scratch — whereas
+    after a merge the last-reviewed head stays an ancestor and the round stays
+    incremental. Merging is not free: that incremental round is a two-dot
+    `last-reviewed-head..merge` diff, so the umbrella changes the merge brings
+    in DO appear in it — already-landed sibling code shows up transiently
+    (merging narrows the history, not the diff) until the squash-merge at
+    integration erases the merge commits. That dirty round is the accepted
+    cost of keeping the review anchors intact; do NOT rebase to avoid it.
 
 4. Convergence — clearing the fallouts
 
@@ -112,7 +133,11 @@ dependencies.
     exploration agent to find what the feature changed in the docs — out-of-code
     docs under `docs/` and docstrings, especially module-level ones that capture
     design, trade-offs, and pointers — and to make those changes on a dedicated
-    PR.
+    PR. For execution-model epics, the pass explicitly reconciles the glossary,
+    agent-host seams, Tree and spawn guidance, pixi execution reference, CI/Lane
+    and fleet evidence, development-cycle role guidance, and generated Role
+    references. Preserve historical PRDs as history; point readers at the
+    merged Spec and ADRs as the authoritative feature definition and decisions.
 
 6. The umbrella PR
 
