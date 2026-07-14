@@ -172,8 +172,8 @@ The PR lifecycle (draft -> ready -> stop):
     human to pick a PR strategy (one big PR, one PR per workstream to `main`, an
     epic branch) — a multi-PR feature runs on the epic branch, full stop.
 
-    A feature is planned before execution via `/planning` (ideation -> ADRs
-    -> Spec -> docs PR, then epic/WS decomposition -> issues).
+    A feature is planned before execution via `/planning` (ideation -> Spec
+    -> ADRs -> docs PR, then epic/WS decomposition -> issues).
 
     Full topology — per-workstream delegation, integration ordering, convergence,
     the docs pass, the umbrella, changelog/release status. See [./docs/dev/epics.lex]

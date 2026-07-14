@@ -6,7 +6,7 @@ This document [expands](../../AGENTS.lex) §2 (the always-on summary) with the f
 
 An epic — a feature comprising multiple PRs — is the SAME coordinator + role-split model as the single-task cycle [in](../../AGENTS.lex), differing only in branch/merge topology. There is one overarching feature branch (the **epic branch**) and one umbrella PR; the execution is a series of those same single-task cycles, whose workstream PRs merge into the epic branch, and the umbrella PR finally merges the epic branch to `main`. Delegation, the implementer-stops-at-open rule, and the shepherd-per-PR round loop (ADR-0035) are NOT epic-specific — they are the PR-shepherding role split [in](../../AGENTS.lex), applied here per workstream.
 
-Before execution, a new feature is planned via `/planning` — the orchestrator that drives ideation, the overview gate, the ADRs (`/grill-me-with-docs`), the Spec under `docs/spec/` (`/to-spec`), the docs PR, then epic/WS decomposition into issues (`/to-tickets`). Each Work Stream is a vertical slice — a sub-issue of the epic, with blocked-by dependencies.
+Before execution, a new feature is planned via `/planning` — the orchestrator that drives ideation, the overview gate, the Spec under `docs/spec/` (`/to-spec`), the ADRs (`/grill-me-with-docs`), the docs PR, then epic/WS decomposition into issues (`/to-tickets`). Each Work Stream is a vertical slice — a sub-issue of the epic, with blocked-by dependencies.
 
 ## 1. Information gathering
 

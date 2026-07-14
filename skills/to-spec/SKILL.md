@@ -4,7 +4,9 @@ description: Turn the current conversation context into an authoritative feature
 metadata:
     forked-from: https://github.com/mattpocock/skills (skills/engineering/to-prd)
 ---
-This skill takes the current conversation context and codebase understanding and produces a Spec. Do NOT re-run the requirements interview - that happened earlier, in `/grill-me-with-docs`; synthesize the Spec from what you already know. This is not a fully AFK skill, though: step 2 still expects a short confirmation of the module boundaries and test scope with the user. That scoped confirmation is not a requirements interview.
+This skill takes the current conversation context and codebase understanding and produces a Spec. It runs **FIRST** in the planning cycle — **before** the grill — so synthesize the Spec from the ideation and the blessed overview you already have. The deep architectural interview does NOT happen here; it happens **afterward**, in `/grill-me-with-docs`, which grills this Spec to produce the ADRs. This is not a fully AFK skill, though: step 2 still expects a short confirmation of the module boundaries and test scope with the user. That scoped confirmation is not a requirements interview.
+
+The Spec is the *why & general-what* — the first artifact, at the highest altitude. It does NOT capture the durable architectural decisions or the alternatives they beat; those are the **ADRs**, written by the grill that follows this skill. Keep the Spec general enough that the grill still has real decisions to crystallize.
 
 The issue tracker and triage label vocabulary should have been provided to you - run `/setup-matt-pocock-skills` if not.
 
@@ -57,25 +59,6 @@ The high-level solution. This should be understandable before reading module det
 A numbered list of stories covering actors, workflows, failure modes, and operator needs. Each story should usually use:
 
 1. As an <actor>, I want a <feature>, so that <benefit>
-
-## Design Decisions
-
-The durable implementation-facing choices. This can include:
-
-- Module boundaries
-- Value objects, APIs, or state machines
-- Data contracts
-- CLI surfaces
-- Persistence or logging behavior
-- Compatibility and migration choices
-
-Do NOT include incidental file paths or code snippets. They may end up being outdated very quickly.
-
-Exception: if a prototype produced a snippet that encodes a decision more precisely than prose can (state machine, reducer, schema, type shape), inline it within the relevant decision and note briefly that it came from a prototype. Trim to the decision-rich parts - not a working demo, just the important bits.
-
-## Alternatives Considered
-
-The credible rejected options and why they lose in this context.
 
 ## Risks And Rabbit Holes
 

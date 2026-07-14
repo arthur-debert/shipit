@@ -9,6 +9,8 @@ name: grill-me-with-docs
 ---
 <what-to-do>
 
+**Read the Spec first.** In the planning cycle the grill runs **after** `/to-spec` — the Spec (`docs/spec/<slug>.md`) already pins the *why and general-what* of the feature. Your job here is the next altitude down: crystallize the **specific, durable architectural decisions the Spec implies** and write the **ADRs** for them — not to discover the feature from scratch. Grill against the **Spec + `CONTEXT.md` + the existing ADRs**. (If no Spec exists yet — the grill invoked standalone, outside a planning cycle — grill against `CONTEXT.md` and the existing domain model as before.)
+
 Before the first question, record the grill in the dev-cycle log (best-effort — ADR-0032; on any error continue silently, a skipped emission is a missing event, never a broken step):
 
 ```sh
