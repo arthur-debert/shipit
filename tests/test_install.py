@@ -2180,6 +2180,86 @@ def _git_repo(tmp_path: Path) -> Path:
     return root
 
 
+def test_consumer_root_redirects_subdir_to_git_root(tmp_path):
+    # #916: a subdirectory invocation resolves UP to the git working-tree root,
+    # reporting the requested path so the caller can announce the redirect.
+    root = _git_repo(tmp_path)
+    subdir = root / "crates" / "core"
+    subdir.mkdir(parents=True)
+    resolved, redirected = verb._consumer_root(str(subdir))
+    assert resolved == root.resolve()
+    assert redirected == subdir.resolve()
+
+
+def test_consumer_root_is_noop_at_the_git_root(tmp_path):
+    # At the root itself the toplevel equals the requested path — no redirect.
+    root = _git_repo(tmp_path)
+    resolved, redirected = verb._consumer_root(str(root))
+    assert resolved == root.resolve()
+    assert redirected is None
+
+
+def test_consumer_root_bootstraps_in_place_off_git(tmp_path):
+    # A standalone non-git directory has no working-tree root to redirect to,
+    # so it bootstraps at the requested path exactly as before.
+    resolved, redirected = verb._consumer_root(str(tmp_path))
+    assert resolved == tmp_path.resolve()
+    assert redirected is None
+
+
+def test_install_from_subdir_operates_on_git_root_not_a_nested_consumer(
+    tmp_path, capsys
+):
+    # #916 regression: install run from a subdirectory of a managed repo must
+    # operate on the git root and NEVER seed a nested consumer at the cwd.
+    root = _git_repo(tmp_path)
+    # A managed repo carries a full-sha pin — an abbreviated value validates as
+    # PINLESS (config.shipit_pin's fail-closed sha gate), so the fixture would
+    # otherwise not be the bootstrapped repo it claims to be.
+    root_pin = "0123456789abcdef0123456789abcdef01234567"
+    (root / ".shipit.toml").write_text(f'[shipit]\nversion = "{root_pin}"\n')
+    subdir = root / "crates" / "core"
+    subdir.mkdir(parents=True)
+
+    assert verb.run(str(subdir), dry_run=True) == 0
+
+    captured = capsys.readouterr()
+    # The plan header names the git root, never the subdir.
+    assert f"install: {root.resolve()} (dry-run)" in captured.out
+    # The redirect is announced loudly on stderr, not performed silently.
+    assert "subdirectory of the git working tree" in captured.err
+    assert str(root.resolve()) in captured.err
+    # No nested consumer files are born in the subdirectory.
+    assert not (subdir / ".shipit.toml").exists()
+    assert not (subdir / "pixi.toml").exists()
+
+
+def test_install_default_invocation_from_subdir_operates_on_git_root(
+    tmp_path, capsys, monkeypatch
+):
+    # #916 regression: the same redirect must hold for the DEFAULT invocation
+    # (PATH omitted, cwd below the repo root) — the most natural way a user
+    # trips this footgun, running `shipit install` from wherever they are.
+    root = _git_repo(tmp_path)
+    root_pin = "0123456789abcdef0123456789abcdef01234567"
+    (root / ".shipit.toml").write_text(f'[shipit]\nversion = "{root_pin}"\n')
+    subdir = root / "crates" / "core"
+    subdir.mkdir(parents=True)
+    monkeypatch.chdir(subdir)
+
+    assert verb.run(dry_run=True) == 0
+
+    captured = capsys.readouterr()
+    # The plan header names the git root, never the cwd subdir.
+    assert f"install: {root.resolve()} (dry-run)" in captured.out
+    # The redirect is announced loudly on stderr, not performed silently.
+    assert "subdirectory of the git working tree" in captured.err
+    assert str(root.resolve()) in captured.err
+    # No nested consumer files are born in the cwd subdirectory.
+    assert not (subdir / ".shipit.toml").exists()
+    assert not (subdir / "pixi.toml").exists()
+
+
 def test_detect_toolchains_reads_tracked_manifests(tmp_path):
     # Depth-agnostic: git's default pathspec `*` crosses `/` (fnmatch without
     # FNM_PATHNAME; only `:(glob)` magic changes that), so `*/Cargo.toml`
