@@ -674,6 +674,58 @@ def add(paths: list[str], *, cwd: str) -> None:
     _git(["add", "-f", "--", *paths], cwd=cwd)
 
 
+def add_all(*, cwd: str) -> None:
+    """``git add -A`` — stage every change in the working tree.
+
+    The whole-tree counterpart of :func:`add` (which stages named pathspecs):
+    ``shipit repo new`` stages the entire freshly-generated Repo — consumer
+    scaffold, managed baseline, and the resolved ``pixi.lock`` — for its single
+    ``Initial commit``, so it needs the sweep rather than an enumerated list.
+    """
+    _git(["add", "-A"], cwd=cwd)
+
+
+def commit_all(message: str, *, cwd: str, no_verify: bool = False) -> None:
+    """``git commit -m <message>`` — commit everything already staged.
+
+    The whole-tree counterpart of :func:`commit` (which scopes to pathspecs):
+    ``shipit repo new`` stages the whole Repo with :func:`add_all` and commits
+    it as one root ``Initial commit``. ``no_verify`` is left at its default
+    ``False`` by creation so the installed hooks run on that commit exactly as
+    they would for any consumer (ADR-0062).
+    """
+    args = ["commit"]
+    if no_verify:
+        args.append("--no-verify")
+    _git([*args, "-m", message], cwd=cwd)
+
+
+def init_main(*, cwd: str) -> None:
+    """``git init -b main`` — initialize a repository on the ``main`` branch.
+
+    ``shipit repo new`` creates the local Repo on ``main`` (the portfolio's
+    primary branch, ``docs/spec/repo-new.md``) before staging and committing it.
+    ``-b main`` names the initial branch directly so no post-init rename is
+    needed on an unborn HEAD.
+    """
+    _git(["init", "-b", "main"], cwd=cwd)
+
+
+def config_get(key: str, *, cwd: str) -> str | None:
+    """The value of git config ``key`` for the checkout at ``cwd``, or ``None``.
+
+    A probe read: an unset key is a NORMAL answer (``None``), never an
+    exception. ``shipit repo new`` reads ``user.name`` through it to attribute
+    the generated MIT ``LICENSE`` to the resolved Git author; an absent identity
+    is a creation preflight failure the caller raises, not a git error here.
+    """
+    result = _probe(["config", "--get", key], cwd=cwd)
+    if not result.ok:
+        return None
+    value = result.stdout.strip()
+    return value or None
+
+
 def commit(
     message: str, paths: list[str], *, cwd: str, no_verify: bool = False
 ) -> None:
