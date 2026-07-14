@@ -45,10 +45,11 @@ logger = logging.getLogger("shipit.repocreate")
 #: (``docs/spec/repo-new.md``): the same public pixi tasks a user runs.
 CHECKS: tuple[str, ...] = ("lint", "test", "build")
 
-#: pixi's long-runner bound (30 minutes) — a cold provision or a first-activation
-#: Check re-solve is provisioning-shaped work, so it shares that budget rather
-#: than the Exec runner's 5-minute default.
-_LONG_TIMEOUT: float = 30 * 60.0
+#: pixi's long-runner bound — a cold provision or a first-activation Check
+#: re-solve is provisioning-shaped work, so it shares pixi's own budget rather
+#: than the Exec runner's 5-minute default. Aliased to the single source of
+#: truth (:data:`shipit.pixienv.INSTALL_TIMEOUT`) so the two cannot drift.
+_LONG_TIMEOUT: float = pixienv.INSTALL_TIMEOUT
 
 # Seam type aliases — each takes the staged Repo root and performs its effect.
 Effect = Callable[[Path], None]

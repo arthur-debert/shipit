@@ -689,6 +689,67 @@ def test_run_in_env_pins_a_non_default_environment(tmp_path: Path):
     )
 
 
+def test_run_task_invokes_the_named_pixi_task_through_the_staged_manifest(
+    tmp_path: Path,
+):
+    seen: dict = {}
+    result = pixienv.run_task(
+        "lint",
+        tmp_path,
+        env={"PATH": "/usr/bin"},
+        check=False,
+        runner=_capture_runner(seen, stdout="ok\n"),
+    )
+    # A named TASK runs directly (`pixi run <task>`), NOT wrapped behind
+    # `pixi run … -- <argv>`, and always with an explicit --manifest-path so
+    # inherited pixi activation cannot select a different manifest.
+    assert seen["cmd"] == [
+        "pixi",
+        "run",
+        "--manifest-path",
+        str(tmp_path / "pixi.toml"),
+        "lint",
+    ]
+    assert seen["cwd"] == str(tmp_path)
+    # A given env is the COMPLETE child environment: replace, never merge.
+    assert seen["env"] == {"PATH": "/usr/bin"}
+    assert seen["replace_env"] is True
+    assert seen["check"] is False
+    # A first `pixi run` may re-solve the env before the task runs — provisioning-
+    # shaped work, so the default bound is pixi's long-runner timeout.
+    assert seen["timeout"] == pixienv.INSTALL_TIMEOUT
+    assert result.stdout == "ok\n"
+
+
+def test_run_task_without_env_inherits_the_environment(tmp_path: Path):
+    seen: dict = {}
+    pixienv.run_task("test", tmp_path, runner=_capture_runner(seen))
+    assert seen["env"] is None
+    assert seen["replace_env"] is False
+
+
+def test_run_task_pins_a_non_default_environment(tmp_path: Path):
+    seen: dict = {}
+    pixienv.run_task("lint", tmp_path, environment="lint", runner=_capture_runner(seen))
+    assert seen["cmd"] == [
+        "pixi",
+        "run",
+        "--manifest-path",
+        str(tmp_path / "pixi.toml"),
+        "--environment",
+        "lint",
+        "lint",
+    ]
+
+
+def test_run_task_propagates_an_explicit_timeout(tmp_path: Path):
+    seen: dict = {}
+    pixienv.run_task("build", tmp_path, timeout=90.0, runner=_capture_runner(seen))
+    assert seen["timeout"] == 90.0
+    # check defaults to True — a task's nonzero rc raises like any checked Exec.
+    assert seen["check"] is True
+
+
 def test_cache_dir_honors_overrides_else_platform_default(monkeypatch):
     monkeypatch.setenv("PIXI_CACHE_DIR", "/override/pixi")
     assert pixienv.cache_dir() == Path("/override/pixi")
