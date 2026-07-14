@@ -35,7 +35,7 @@ from pathlib import Path
 
 import click
 
-from .. import config, events
+from .. import config, events, git
 from ..install.apply import (
     MODE_LOCAL,
     MODE_PR,
@@ -146,7 +146,11 @@ def _declared_signals(root: Path) -> set[str]:
 def cmd(path: str | None, pr: bool, push: bool, local: bool, dry_run: bool) -> None:
     """Vendor + reconcile shipit's managed set into the consumer at PATH.
 
-    PATH defaults to the current directory. By default install refreshes the
+    PATH defaults to the current directory. A consumer lives at its git root,
+    so when PATH (or the cwd) sits inside a git working tree BELOW its root,
+    install redirects UP to that root rather than bootstrapping a nested
+    consumer at the subdirectory (#916); a standalone non-git directory
+    bootstraps in place as before. By default install refreshes the
     managed set IN THE WORKING TREE and stops — no commit, no branch, no push,
     no PR — so a mid-workstream refresh lands in the caller's own commit, never
     in a stray parallel PR (#359). Re-running with no changes is a clean no-op.
@@ -161,6 +165,39 @@ def cmd(path: str | None, pr: bool, push: bool, local: bool, dry_run: bool) -> N
     if sum((pr, push, local)) > 1:
         raise click.UsageError("--pr, --push, and --local are mutually exclusive.")
     raise SystemExit(run(path, dry_run=dry_run, pr=pr, push=push, local=local))
+
+
+def _consumer_root(path: str | None) -> tuple[Path, Path | None]:
+    """Resolve the consumer root install operates on, redirecting a
+    subdirectory invocation up to the git working-tree root (#916).
+
+    A consumer lives at its git ROOT: ``.shipit.toml``, the managed set, and
+    the activated hooks all hang off the top of the checkout. Running install
+    from a SUBDIRECTORY used to bootstrap a brand-new nested consumer rooted at
+    the cwd (a fresh ``pixi.toml`` / ``.shipit.toml`` seeded and pinned from
+    pinless), which is never the intent and is a footgun — a duplicate managed
+    set, a stray pin, and a polluted ``git status`` inside the real repo.
+
+    So the effective root is the git working-tree root of the requested path
+    whenever that path sits inside a checkout:
+
+    - a SUBDIRECTORY invocation is redirected UP to the root — the second
+      element of the return is the requested path, so the caller can announce
+      the redirect on stderr rather than acting silently;
+    - a ROOT or virgin-repo invocation is unchanged (the toplevel equals the
+      requested path, so the redirect field is ``None``);
+    - a path that is not inside any git checkout (a genuinely standalone
+      directory) bootstraps at the requested path exactly as before — there is
+      no working-tree root to redirect to.
+    """
+    requested = Path(path or ".").resolve()
+    toplevel = git.repo_root(cwd=str(requested))
+    if toplevel is None:
+        return requested, None
+    root = Path(toplevel).resolve()
+    if root == requested:
+        return requested, None
+    return root, requested
 
 
 @cli_errors
@@ -192,7 +229,18 @@ def run(
     ``shipit logs --flow`` instead of leaving only a session-end record.
     """
     mode = MODE_LOCAL if local else MODE_PUSH if push else MODE_PR if pr else MODE_TREE
-    root = str(Path(path or ".").resolve())
+    # A consumer lives at its git root; a subdirectory invocation is redirected
+    # UP to that root rather than bootstrapping a nested consumer (#916).
+    root_path, redirected_from = _consumer_root(path)
+    root = str(root_path)
+    if redirected_from is not None:
+        print(
+            f"install: invoked from {redirected_from}, a subdirectory of the "
+            f"git working tree; operating on the repo root {root_path} instead "
+            f"of bootstrapping a nested consumer (#916). Pass an explicit PATH "
+            f"or `cd` there to silence this.",
+            file=sys.stderr,
+        )
     events.emit(
         logger,
         "install.started",
@@ -211,13 +259,11 @@ def run(
         # npm for its `npm pack`, which no tracked manifest signals (issue #788),
         # and a declared tree-sitter [toolchains] leg needs its own CLI, which no
         # manifest can signal at all (#890).
-        toolchains = detect_toolchains(Path(path or ".")) | _declared_signals(
-            Path(path or ".")
-        )
+        toolchains = detect_toolchains(root_path) | _declared_signals(root_path)
         units = load_units(toolchains=toolchains)
         retired = load_retired()
         retired_hooks = load_retired_hooks()
-        state = gather(Path(path or "."), units, retired, retired_hooks)
+        state = gather(root_path, units, retired, retired_hooks)
         plan = reconcile(units, retired, state, retired_hooks)
 
         emit(plan, lambda p: format_plan(p, dry_run=dry_run))
