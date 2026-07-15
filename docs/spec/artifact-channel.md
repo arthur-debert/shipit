@@ -165,11 +165,19 @@ prefix-scoped IAM (leak-prone under UBLA), a capability URL (leaks via
   green:
   1. the public bucket exists (WS03 — `shipit-artifacts-public`);
   2. `lex-fmt/lex` has published a stable `lexd` release through the `conda`
-     endpoint, so its per-repo channel holds `lexd` for the served subdirs
-     (`osx-arm64`, `linux-64`, `linux-aarch64`); and
-  3. the channel serves `repodata.json` authless — verify with
-     `curl -fsS <host>/shipit-artifacts-public/lex-fmt/lex/osx-arm64/repodata.json`
-     (`<host>` = `https://storage.googleapis.com`).
+     endpoint, so its per-repo channel holds `lexd` for **every** served subdir
+     of the closed platform matrix (`osx-arm64`, `linux-64`, `linux-aarch64`,
+     `win-64` — no osx-64, no musl); and
+  3. the channel serves `repodata.json` authless for **each** served subdir —
+     repodata is per-subdir, so a single probe can miss a partial publish;
+     repeat the check for all four subdirs (`<host>` =
+     `https://storage.googleapis.com`):
+
+     ```sh
+     for subdir in osx-arm64 linux-64 linux-aarch64 win-64; do
+       curl -fsS "<host>/shipit-artifacts-public/lex-fmt/lex/$subdir/repodata.json"
+     done
+     ```
 
   Until all three hold, the cutover stays blocked and shipit keeps provisioning
   `lexd` via the pinned fetcher so its own gate self-hosts.
