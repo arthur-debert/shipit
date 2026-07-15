@@ -153,6 +153,22 @@ jobs:
 #: catalog; ``lint``/``test`` still arrive through their managed blocks.
 _BUILD_TASK = "./bin/shipit build"
 
+#: The generated Repo's CI policy: the standard, universal, required lint and
+#: test lanes, rendered into the consumer-owned ``.shipit.toml [lanes]`` (spec
+#: §CI: "the new Repo follows the existing pattern with required lint and test
+#: lanes only"). Each is a ``(name, run)`` pair whose ``run`` names the generic
+#: shipit verb (ADR-0039) the managed pixi task of that name wraps, so a lane's
+#: CI job, a lefthook hook, and a laptop run are ONE implementation. Both lanes
+#: are ``required`` (merge-blocking) and ``local`` (so the required∩local
+#: commit/push checks derive as lint+test too — one definition for lefthook and
+#: CI, ``shipit.tools.lanes.commit_push_checks``). There is deliberately NO
+#: ``build`` lane: build stays reachable through the ``build`` task and later
+#: artifact/release flows, never as a default PR lane (spec §CI; ADR-0060 —
+#: the caller is consumer-owned policy over the existing Lane/Tool model, not a
+#: new one). These are stack-neutral universal-seed policy, not a profile
+#: contribution: lint and test are generic Tool verbs, not Rust behavior.
+_REQUIRED_LANES: tuple[tuple[str, str], ...] = (("lint", "lint"), ("test", "test"))
+
 
 @dataclass(frozen=True)
 class CreationPlan:
@@ -214,13 +230,21 @@ def _pixi_manifest(name: ProjectName, deps: dict[str, str]) -> str:
 
 
 def _shipit_manifest(contributions: tuple[Contribution, ...]) -> str:
-    """Render the consumer-owned ``.shipit.toml`` Artifact declarations.
+    """Render the consumer-owned ``.shipit.toml`` CI-policy and Artifact tables.
 
-    Each profile's Artifact becomes one ``[artifacts.<name>]`` table with a
-    single Rust build target (ADR-0057). ``shipit install`` later seeds the
-    policy tables (``[toolchains]`` from the detected Cargo manifest, etc.) and
-    stamps ``[managed]`` alongside, preserving this consumer-owned table.
+    ``[lanes]`` carries the universal CI policy — the standard required lint and
+    test lanes, no build lane (:data:`_REQUIRED_LANES`) — so the generated Repo
+    plugs into the existing Lane/Tool model and its thin ``wf-checks`` caller
+    fans out real merge-blocking checks. ``[artifacts]`` carries each profile's
+    Artifact as one ``[artifacts.<name>]`` table with a single Rust build target
+    (ADR-0057). ``shipit install`` later seeds the remaining policy tables
+    (``[toolchains]`` from the detected Cargo manifest, etc.) and stamps
+    ``[managed]`` alongside, preserving these consumer-owned tables.
     """
+    lanes: dict[str, object] = {
+        name: {"run": run, "required": True, "local": True}
+        for name, run in _REQUIRED_LANES
+    }
     artifacts: dict[str, object] = {}
     for contribution in contributions:
         for artifact in contribution.artifacts:
@@ -234,10 +258,11 @@ def _shipit_manifest(contributions: tuple[Contribution, ...]) -> str:
                 ]
             }
     header = (
-        "# shipit policy config. Owns the primary product declaration for build;\n"
-        "# `shipit install` seeds the policy/pristine tables alongside.\n"
+        "# shipit policy config. Owns the required lint/test CI lanes and the\n"
+        "# primary product declaration for build; `shipit install` seeds the\n"
+        "# policy/pristine tables alongside.\n"
     )
-    return header + tomlio.dumps({"artifacts": artifacts})
+    return header + tomlio.dumps({"lanes": lanes, "artifacts": artifacts})
 
 
 def _gitignore(contributions: tuple[Contribution, ...]) -> str:
