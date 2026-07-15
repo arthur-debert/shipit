@@ -391,8 +391,17 @@ def bump_lua_version(text: str, version: str) -> str:
     assignment — a plugin that never declared a bumpable version, which this
     projection cannot express (fail loud, never a silent no-op that would then
     trip prepare's no-op-bump guard with a confusing message).
+
+    The replacement is a CALLABLE, not a template string: ``version`` is dynamic
+    input, and a template (``rf"\\g<head>{version}\\g<tail>"``) would have
+    :meth:`re.Pattern.subn` re-parse the version for backreferences (``\\1``,
+    ``\\g<…>``) — a ``\\`` in the value could raise or silently corrupt the
+    output (round 1, agy). A callable inserts the captured groups + the raw
+    version literally, sidestepping replacement-string escaping entirely.
     """
-    replaced = _LUA_VERSION_RE.subn(rf"\g<head>{version}\g<tail>", text, count=1)
+    replaced = _LUA_VERSION_RE.subn(
+        lambda m: f"{m.group('head')}{version}{m.group('tail')}", text, count=1
+    )
     if replaced[1] == 0:
         raise ReleaseError(
             'lua entry file has no `M.version = "…"` line to bump — a Neovim '

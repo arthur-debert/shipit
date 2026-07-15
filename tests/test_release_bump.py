@@ -215,6 +215,16 @@ def test_bump_lua_version_skips_a_version_inside_a_string():
     assert out == 'local doc = "M.version = 9.9.9"\nM.version = "0.2.0"\n'
 
 
+def test_bump_lua_version_inserts_the_value_literally_not_as_a_backreference():
+    """The replacement is a callable, so a version carrying regex-replacement
+    metachars (a backslash, `\\g<...>`) is inserted VERBATIM rather than
+    re-parsed as a backreference (round 1, agy). Real semver never contains
+    these, but the rewrite must not depend on that."""
+    assert bump.bump_lua_version('M.version = "0.0.0"\n', r"1.0.0-\g<head>") == (
+        'M.version = "1.0.0-\\g<head>"\n'
+    )
+
+
 def test_bump_lua_version_bumps_an_indented_assignment():
     """The line anchor allows leading indentation and preserves it."""
     assert bump.bump_lua_version('\tM.version = "0.1.0"\n', "0.2.0") == (
