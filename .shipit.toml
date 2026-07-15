@@ -179,6 +179,7 @@ lex = [
   { repo = "lex-fmt/tree-sitter-lex", path = "lex-fmt/tree-sitter-lex" },
   { repo = "lex-fmt/vscode", path = "lex-fmt/vscode" },
 ]
+lookma = [{ repo = "arthur-debert/lookma", path = "lookma" }]
 padz = [{ repo = "arthur-debert/padz", path = "padz" }]
 rustloc = [{ repo = "arthur-debert/rustloc", path = "rustloc" }]
 shipit = [
