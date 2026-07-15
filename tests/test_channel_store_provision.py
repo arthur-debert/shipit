@@ -205,7 +205,9 @@ class FakeRunner:
         return [c for c in self.calls if verb in c]
 
 
-def test_provision_on_empty_project_creates_everything():
+def test_provision_creates_everything_when_nothing_exists_yet():
+    # "Nothing exists yet" = empty project STATE (no buckets/SA), NOT an empty
+    # project id — the empty-id input guard is test_provision_refuses_empty_project.
     runner = FakeRunner(existing=set())
     report = sp.provision("supage-prod", "US", runner=runner)
 
@@ -284,16 +286,19 @@ def test_provision_stops_on_a_non_not_found_probe_and_creates_nothing():
     )
 
 
-def test_provision_does_not_fake_not_found_from_a_404_in_the_resource_name():
-    """A project literally named …-404 echoes ``404`` into the error URI; a
-    PERMISSION_DENIED probe must still STOP the run, not read 404 as an absence."""
+def test_provision_does_not_fake_not_found_from_a_marker_in_the_resource_name():
+    """A project name that literally contains a not-found WORD marker (here
+    ``notfound``) echoes that marker into the error URI. Only the argv-stripping
+    in ``_looks_not_found`` keeps a PERMISSION_DENIED probe from reading it as an
+    absence — so this test would FAIL if that stripping were broken/removed (a
+    real marker, not the retired bare ``404``, is what makes it non-trivial)."""
 
     def runner(argv, *, check=True, **kw):
         rc = 0
         stderr = ""
         if "describe" in argv:
             rc = 1
-            # gcloud echoes the resource URI (which contains 404) into the error.
+            # gcloud echoes the resource URI (which contains "notfound") into the error.
             uri = next((a for a in argv if a.startswith("gs://") or "@" in a), "res")
             stderr = f"ERROR: PERMISSION_DENIED on {uri}"
         return execrun.ExecResult(
@@ -307,7 +312,7 @@ def test_provision_does_not_fake_not_found_from_a_404_in_the_resource_name():
         return runner(argv, check=check, **kw)
 
     with pytest.raises(sp.ProvisionError, match="PERMISSION_DENIED"):
-        sp.provision("my-project-404", runner=recording)
+        sp.provision("my-project-notfound", runner=recording)
     assert not any(
         v in c for c in calls for v in ("create", "update", "add-iam-policy-binding")
     )
@@ -439,22 +444,28 @@ def test_verify_surfaces_the_actual_error_on_a_non_not_found_scoped_read():
 
 
 def test_verify_scoped_not_found_marker_is_not_faked_from_the_resource_uri():
-    # The private bucket URI is echoed into the argv; a marker like 404 living in
-    # a project NAME must not fake a not-found classification for a real denial.
+    # The object URI is echoed into the argv; a live WORD marker ("notfound")
+    # living in a project NAME must not fake a not-found classification for a real
+    # denial. Uses a real marker (not the retired bare 404) so the test actually
+    # exercises the argv-stripping in _looks_not_found rather than passing
+    # trivially. The stderr echoes the FULL object URI (the argv token stripped).
     http = {
-        sp.public_object_url("p404-artifact-channel-public", "r"): 200,
-        sp.public_object_url("p404-artifact-channel-private", "r"): 403,
+        sp.public_object_url("pnotfound-artifact-channel-public", "r"): 200,
+        sp.public_object_url("pnotfound-artifact-channel-private", "r"): 403,
     }
     report = sp.verify(
-        "p404",
+        "pnotfound",
         "r",
         runner=_verify_runner(
             scoped_ok=False,
-            scoped_stderr="ERROR: PERMISSION_DENIED on gs://p404-artifact-channel-private",
+            scoped_stderr=(
+                "ERROR: PERMISSION_DENIED on "
+                "gs://pnotfound-artifact-channel-private/r/repodata.json"
+            ),
         ),
         http_get=lambda url: http[url],
     )
-    # The 404 in the URI is stripped before marker-matching → NOT read as absent.
+    # The URI (with "notfound") is stripped before marker-matching → NOT absent.
     assert any("PERMISSION_DENIED" in n for n in report.notes)
     assert not any("publish it" in n for n in report.notes)
 

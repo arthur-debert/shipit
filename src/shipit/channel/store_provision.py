@@ -488,7 +488,12 @@ def _looks_not_found(result: execrun.ExecResult, argv: list[str]) -> bool:
     ``PERMISSION_DENIED`` error read as an absence.
     """
     haystack = f"{result.stderr}\n{result.stdout}".lower()
-    for arg in argv:
+    # Strip longest-first so a short GENERIC token ("iam", "describe") can't mangle
+    # a longer RESOURCE token (the SA email "…@proj.iam.gserviceaccount.com", the
+    # bucket URI) before that resource token — the one carrying a name that might
+    # collide with a marker — is itself stripped. Empty args are skipped: a
+    # ``str.replace("", …)`` would inject a space between every character.
+    for arg in sorted((a for a in argv if a), key=len, reverse=True):
         haystack = haystack.replace(arg.lower(), " ")
     return any(marker in haystack for marker in _NOT_FOUND_MARKERS)
 
