@@ -110,9 +110,12 @@ def supports_agent_flag(*, binary: str = "agy") -> bool:
 
     Probes ``agy --help`` and reports whether ``--agent`` appears in its usage —
     a capability check, NOT a version parse (the flag's presence is the fact that
-    matters; version strings drift). Returns ``False`` when the binary is missing
-    or the probe cannot run, so the caller (:func:`require_agent_support`) turns
-    that into an actionable upgrade error rather than crashing. Pure of side
+    matters; version strings drift). Returns ``False`` when the binary is missing,
+    the probe cannot run, OR ``--help`` exits non-zero — a failed help invocation
+    is not a trustworthy capability signal (it may still print ``--agent`` in an
+    error banner), so only a CLEAN (rc 0) ``--help`` whose output mentions the
+    flag counts as support. The caller (:func:`require_agent_support`) turns a
+    ``False`` into an actionable upgrade error rather than crashing. Pure of side
     effects beyond the read-only ``--help`` invocation.
     """
     if shutil.which(binary) is None:
@@ -120,6 +123,8 @@ def supports_agent_flag(*, binary: str = "agy") -> bool:
     try:
         result = execrun.run([binary, "--help"], check=False, timeout=30)
     except execrun.ExecError:
+        return False
+    if not result.ok:
         return False
     return "--agent" in f"{result.stdout or ''}\n{result.stderr or ''}"
 

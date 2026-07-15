@@ -186,6 +186,28 @@ def test_supports_agent_flag_false_when_binary_missing(monkeypatch):
     assert agy_backend.supports_agent_flag() is False
 
 
+def test_supports_agent_flag_false_when_help_exits_nonzero(monkeypatch):
+    # A NON-ZERO `agy --help` is not a trustworthy capability signal even if
+    # `--agent` appears (e.g. in an error banner): only a clean rc-0 help counts,
+    # so a failed probe reads as unsupported rather than a false positive that
+    # would pass preflight and then fail mid-run when `--agent` is actually used.
+    from shipit import execrun
+
+    monkeypatch.setattr(agy_backend.shutil, "which", lambda _b: "/usr/bin/agy")
+    monkeypatch.setattr(
+        agy_backend.execrun,
+        "run",
+        lambda *a, **k: execrun.ExecResult(
+            argv=("agy", "--help"),
+            rc=2,
+            stdout="",
+            stderr="error: unknown flag; usage mentions --agent\n",
+            duration_ms=0,
+        ),
+    )
+    assert agy_backend.supports_agent_flag() is False
+
+
 def test_build_command_never_emits_a_tools_flag():
     # agy has no native tool allow-list (the read-only signal is the read_only flag, not
     # a tool tuple): no --tools flag appears in either posture — read-only rides the
