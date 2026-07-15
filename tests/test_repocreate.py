@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -593,6 +594,209 @@ def test_default_installer_accepts_activated_or_no_op_hooks(
     # True (activated) and None (nothing to activate) are both success.
     _stub_install_pipeline(monkeypatch, hooks_activated=hooks_activated)
     create_mod.default_installer(tmp_path)  # does not raise
+
+
+# --------------------------------------------------------------------------
+# identity + ignore hygiene (GEN01-WS03)
+#
+# The universal seed's consumer-owned identity (README, LICENSE, Cargo metadata)
+# and hygiene (.gitignore) surfaces, locked as CONTRACTS: the README's shape, the
+# canonical MIT text with real attribution and no placeholder, the inherited Cargo
+# metadata parsed as DATA (proving format-aware serialization, ADR-0058), and —
+# per the acceptance criteria — the ignore behavior proven through REAL Git
+# (`git add`/`git ls-files`/`git check-ignore`), not rendered-text matching alone.
+# --------------------------------------------------------------------------
+
+
+def _plan_files(name="hello", author="Ada Lovelace", year=2026):
+    return {f.path: f.text for f in _plan(name=name, author=author, year=year).files}
+
+
+def test_readme_names_project_lists_commands_without_badges_or_urls():
+    readme = _plan_files(name="my-tool")["README.md"]
+    # Names the project and lists the three canonical public commands.
+    assert "# my-tool" in readme
+    for command in ("pixi run lint", "pixi run test", "pixi run build"):
+        assert command in readme
+    # No badges and no repository URLs (spec §Proposed Shape): no image/badge
+    # markdown, no shields, and no link back to a source-host repo.
+    assert "![" not in readme
+    assert "shields.io" not in readme
+    assert "badge" not in readme.lower()
+    assert "github.com" not in readme
+
+
+def test_license_is_canonical_mit_with_attribution_and_no_placeholder():
+    license_text = _plan_files(author="Grace Hopper", year=1999)["LICENSE"]
+    # The canonical MIT text — its distinctive opening and warranty clauses.
+    assert license_text.startswith("MIT License")
+    assert "Permission is hereby granted, free of charge" in license_text
+    assert 'THE SOFTWARE IS PROVIDED "AS IS"' in license_text
+    # Real attribution: the local creation year and resolved Git author name.
+    assert "Copyright (c) 1999 Grace Hopper" in license_text
+    # No unrendered placeholder and no alternate-license prompt/choice (spec:
+    # V1 offers no license selection — the one permitted license is MIT).
+    assert "{{" not in license_text and "}}" not in license_text
+    for alt in ("Apache", "GPL", "BSD", "choose", "SPDX"):
+        assert alt not in license_text
+
+
+def test_cargo_metadata_declares_versions_and_is_inherited_by_members():
+    files = _plan_files(name="my-tool")
+    # Parsing with a real TOML reader proves the manifests are serialized as
+    # DATA (ADR-0058), not text templates that merely happen to look like TOML.
+    workspace = tomllib.loads(files["Cargo.toml"])
+    assert workspace["workspace"]["resolver"] == "3"
+    package = workspace["workspace"]["package"]
+    assert package == {"version": "0.1.0", "edition": "2024", "license": "MIT"}
+    # Both members inherit version/edition/license from the workspace rather than
+    # restating literals (`version.workspace = true` → {"workspace": True}).
+    for member in ("crates/my-tool/Cargo.toml", "crates/libmy-tool/Cargo.toml"):
+        inherited = tomllib.loads(files[member])["package"]
+        assert inherited["version"] == {"workspace": True}
+        assert inherited["edition"] == {"workspace": True}
+        assert inherited["license"] == {"workspace": True}
+
+
+def _stage_repo_with_representative_tree(root: Path) -> None:
+    """Write the generated plan into ``root`` and synthesize the paths that real
+    Rust/pixi/Node/Python/agent activity produces, so a single ``git add`` proves
+    what the generated ``.gitignore`` keeps out of the index and what it lets in.
+    """
+    git.init_main(cwd=str(root))
+    for path, text in _plan_files().items():
+        dest = root / path
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(text, encoding="utf-8")
+
+    def touch(rel: str) -> None:
+        p = root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("x", encoding="utf-8")
+
+    # Generated build/environment output + cross-stack caches that MUST be ignored.
+    for ignored in (
+        "target/debug/hello",  # Rust build (profile /target/)
+        ".pixi/envs/default/bin/hello",  # pixi environment
+        ".direnv/env",
+        ".env",
+        ".env.local",  # local environment files
+        ".DS_Store",  # OS
+        "notes.swp",
+        "backup~",  # editor
+        ".todos.db",
+        ".claude/worktrees/w/scratch",  # agent worktree
+        "node_modules/pkg/index.js",
+        ".npm/cache",
+        ".pnpm-store/x",  # Node
+        "__pycache__/mod.cpython-313.pyc",
+        "stale.pyc",
+        ".venv/bin/python",
+        "hello.egg-info/PKG-INFO",  # Python
+        ".pytest_cache/x",
+        ".mypy_cache/x",
+        ".ruff_cache/x",
+        ".coverage",
+        "coverage/lcov.info",
+        "htmlcov/index.html",
+    ):
+        touch(ignored)
+
+    # Files that MUST stay tracked: source, ecosystem lockfiles, managed agent
+    # config, the `.env.example` negation, and a broad product-output dir (`dist/`)
+    # the seed deliberately does NOT guess.
+    for tracked in (
+        "Cargo.lock",
+        "pixi.lock",  # ecosystem lockfiles are never ignored
+        ".claude/agents/implementer.md",  # managed agent configuration
+        ".env.example",  # re-included by the `!.env.example` negation
+        "dist/hello",  # dist/ is not guessed, so it is tracked, not ignored
+    ):
+        touch(tracked)
+
+
+def test_git_add_ignores_generated_output_and_tracks_source(tmp_path):
+    # The acceptance contract proven through Git itself: after `git add -A`, the
+    # index (git ls-files) must EXCLUDE every generated build/environment/cache
+    # path and INCLUDE source, manifests, ecosystem lockfiles, `.shipit.toml`, and
+    # managed agent configuration.
+    _stage_repo_with_representative_tree(tmp_path)
+    git.add_all(cwd=str(tmp_path))
+    tracked = set(git.ls_files(cwd=str(tmp_path)))
+
+    for path in (
+        "target/debug/hello",
+        ".pixi/envs/default/bin/hello",
+        ".direnv/env",
+        ".env",
+        ".env.local",
+        ".DS_Store",
+        "notes.swp",
+        "backup~",
+        ".todos.db",
+        ".claude/worktrees/w/scratch",
+        "node_modules/pkg/index.js",
+        ".npm/cache",
+        ".pnpm-store/x",
+        "__pycache__/mod.cpython-313.pyc",
+        "stale.pyc",
+        ".venv/bin/python",
+        "hello.egg-info/PKG-INFO",
+        ".pytest_cache/x",
+        ".mypy_cache/x",
+        ".ruff_cache/x",
+        ".coverage",
+        "coverage/lcov.info",
+        "htmlcov/index.html",
+    ):
+        assert path not in tracked, f"{path} should be ignored but was tracked"
+
+    for path in (
+        "crates/hello/src/main.rs",
+        "crates/hello/tests/cli.rs",
+        "crates/libhello/src/lib.rs",
+        "Cargo.toml",
+        "pixi.toml",
+        ".shipit.toml",
+        "README.md",
+        "LICENSE",
+        ".gitignore",
+        ".github/workflows/ci.yml",
+        "Cargo.lock",
+        "pixi.lock",
+        ".claude/agents/implementer.md",
+        ".env.example",
+        "dist/hello",  # not guessed → tracked, proving no broad output ignore
+    ):
+        assert path in tracked, f"{path} should be tracked but was ignored"
+
+
+def test_git_check_ignore_keeps_managed_config_and_honors_env_negation(tmp_path):
+    # Targeted `git check-ignore` proof of the two subtle boundaries: the
+    # `.claude/` split (managed agent config tracked, only `worktrees/` ignored)
+    # and the `.env.*` / `!.env.example` negation.
+    git.init_main(cwd=str(tmp_path))
+    (tmp_path / ".gitignore").write_text(_plan_files()[".gitignore"], encoding="utf-8")
+
+    def ignored(rel: str) -> bool:
+        return (
+            subprocess.run(
+                ["git", "-C", str(tmp_path), "check-ignore", "-q", rel]
+            ).returncode
+            == 0
+        )
+
+    # Only the agent-worktree subtree is ignored under `.claude/`; managed config
+    # (agents, skills) stays tracked so reconciliation keeps its authority.
+    assert ignored(".claude/worktrees/w/scratch")
+    assert not ignored(".claude/agents/implementer.md")
+    assert not ignored(".claude/skills/coordinating.md")
+    # `.env` and its variants are ignored, but the example template is re-included.
+    assert ignored(".env")
+    assert ignored(".env.local")
+    assert not ignored(".env.example")
+    # A broad product-output directory is NOT guessed by the consumer seed.
+    assert not ignored("dist/hello")
 
 
 # --------------------------------------------------------------------------
