@@ -600,11 +600,28 @@ def test_main_binary_names_must_be_non_empty_strings(key, value):
         _load(f"[artifacts.x]\n{key} = {value}\n")
 
 
-def test_e2e_harness_must_be_an_argv_list():
+def test_e2e_harness_string_names_a_registered_harness():
+    # A STRING selects a registered harness by name (electron / tauri / bats),
+    # captured as harness_name; the name is resolved by the planner (config
+    # does not import the registry), so any non-empty string parses here.
+    (artifact,) = _load('[artifacts.x]\ne2e = { harness = "electron" }\n')
+    assert artifact.e2e == config.E2eSpec(harness_name="electron")
+
+
+def test_e2e_empty_harness_string_is_refused():
+    # The empty string names no harness — refused at the boundary with a
+    # message that points at both the named and the raw-argv forms.
+    with pytest.raises(config.ConfigError, match=r"named harness must be a non-empty"):
+        _load('[artifacts.x]\ne2e = { harness = "" }\n')
+
+
+def test_e2e_harness_that_is_neither_string_nor_list_must_be_an_argv():
+    # A number/bool/table is neither a registry name nor a raw argv — the
+    # argv-list error (the list branch's `_parse_argv`).
     with pytest.raises(
         config.ConfigError, match=r"e2e.harness must be a non-empty argv"
     ):
-        _load('[artifacts.x]\ne2e = { harness = "bats tests" }\n')
+        _load("[artifacts.x]\ne2e = { harness = 3 }\n")
 
 
 def test_sign_must_be_a_boolean():

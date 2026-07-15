@@ -72,6 +72,105 @@ def test_bare_e2e_table_opts_in_with_the_registry_default_harness():
     assert job.label == "padz"
 
 
+# --------------------------------------------------------------------------
+# The harness registry — named GUI harnesses (TOL03-WS04)
+# --------------------------------------------------------------------------
+
+
+def test_the_registry_is_indexed_by_unique_name():
+    # The closed registry and its by-name index agree; every entry is
+    # reachable by name (the resolution point for a named declaration).
+    assert set(e2e_mod.HARNESS_BY_NAME) == {"bats", "electron", "tauri"}
+    assert all(
+        e2e_mod.HARNESS_BY_NAME[name].name == name for name in e2e_mod.HARNESS_BY_NAME
+    )
+    assert e2e_mod.HARNESS_BY_NAME["bats"] is e2e_mod.DEFAULT_HARNESS
+
+
+def test_duplicate_harness_name_is_refused_loudly_not_an_assert():
+    # The uniqueness invariant is enforced with a real exception, not an
+    # `assert` (which `python -O` strips): a duplicate name would silently
+    # shadow an entry, so building the index over one must raise ConfigError.
+    dupe = (
+        e2e_mod.BATS,
+        e2e_mod.Harness("bats", argv=("other",)),
+    )
+    with pytest.raises(config.ConfigError, match=r"duplicate e2e harness name 'bats'"):
+        e2e_mod._index_by_name(dupe)
+
+
+def test_bats_default_carries_no_injected_env():
+    # The legacy default injects only <NAME>_BIN — no E2E_* env, so the
+    # consumer suites (padz, dodot) keep working unchanged.
+    assert e2e_mod.BATS.env == ()
+    artifacts = (_artifact("padz", e2e=config.E2eSpec()),)
+    (job,) = e2e_mod.plan_e2e(artifacts)
+    assert job.harness == ("bin/check-e2e",)
+    assert job.env == ()
+
+
+def test_named_electron_harness_resolves_to_playwright_argv_and_e2e_env():
+    # `harness = "electron"` selects the registry entry: the Playwright runner
+    # (ridden through the consumer's npm devDependency) AND the shared E2E_*
+    # launch env the window.__e2e contract prescribes.
+    artifacts = (_artifact("gal", e2e=config.E2eSpec(harness_name="electron")),)
+    (job,) = e2e_mod.plan_e2e(artifacts)
+    assert job.harness == ("npm", "exec", "--", "playwright", "test")
+    assert job.env == (
+        ("E2E", "1"),
+        ("E2E_HIDE_WINDOW", "1"),
+        ("E2E_DISABLE_PERSISTENCE", "1"),
+    )
+    assert job.env_var == "GAL_BIN"
+
+
+def test_named_tauri_harness_resolves_to_webdriver_launch_and_the_same_env():
+    # `harness = "tauri"` is the SAME window.__e2e / E2E_* contract over a
+    # different launch: WebdriverIO + tauri-driver instead of Playwright.
+    artifacts = (_artifact("app", e2e=config.E2eSpec(harness_name="tauri")),)
+    (job,) = e2e_mod.plan_e2e(artifacts)
+    assert job.harness == ("npm", "exec", "--", "wdio", "run", "wdio.conf.ts")
+    assert job.env == e2e_mod.ELECTRON.env  # the shared GUI trio
+    assert job.env_var == "APP_BIN"
+
+
+def test_named_bats_harness_selects_the_default_by_name():
+    # The default is reachable by name too — `harness = "bats"` is the bats
+    # runner argv with no injected env.
+    artifacts = (_artifact("cli", e2e=config.E2eSpec(harness_name="bats")),)
+    (job,) = e2e_mod.plan_e2e(artifacts)
+    assert job.harness == ("bin/check-e2e",)
+    assert job.env == ()
+
+
+def test_unknown_named_harness_is_a_config_error_naming_the_registered_ones():
+    # A named harness that names no registry entry is a declaration
+    # inconsistency (ConfigError, rc 1), never a quiet fallback — the message
+    # names the registered harnesses.
+    artifacts = (_artifact("x", e2e=config.E2eSpec(harness_name="qt")),)
+    with pytest.raises(config.ConfigError, match=r"unknown e2e harness 'qt'.*electron"):
+        e2e_mod.plan_e2e(artifacts)
+
+
+def test_raw_argv_override_runs_with_no_injected_e2e_env():
+    # A raw argv override is consumer DATA: it replaces the argv but carries no
+    # E2E_* env (only the named registry harnesses do).
+    artifacts = (
+        _artifact("a", e2e=config.E2eSpec(harness=("npx", "playwright", "test"))),
+    )
+    (job,) = e2e_mod.plan_e2e(artifacts)
+    assert job.harness == ("npx", "playwright", "test")
+    assert job.env == ()
+
+
+def test_named_harness_env_survives_passthrough_append():
+    # Passthrough appends to the argv but leaves the harness's E2E_* env intact.
+    artifacts = (_artifact("gal", e2e=config.E2eSpec(harness_name="electron")),)
+    (job,) = e2e_mod.plan_e2e(artifacts, passthrough=("--grep", "smoke"))
+    assert job.harness == ("npm", "exec", "--", "playwright", "test", "--grep", "smoke")
+    assert job.env == e2e_mod.ELECTRON.env
+
+
 def test_declared_harness_replaces_the_default_for_that_artifact_only():
     artifacts = (
         _artifact("a", e2e=config.E2eSpec(harness=("bats", "tests/e2e.bats"))),

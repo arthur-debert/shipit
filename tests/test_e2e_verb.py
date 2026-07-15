@@ -175,6 +175,64 @@ def test_declared_harness_replaces_the_default_and_gets_passthrough(
     assert env == {"LEX_CLI_BIN": str(binary)}  # `-` -> `_`, legacy contract
 
 
+def test_gui_harness_injects_the_e2e_env_alongside_name_bin(
+    tmp_path, monkeypatch, capsys
+):
+    # A named electron harness runs the Playwright runner with the shared E2E_*
+    # launch env AND the <NAME>_BIN injection merged (the resolved binary path
+    # layered last so it always wins), and the display line shows the exact
+    # injected env in that order — the window.__e2e / E2E_* contract end to end.
+    root = _repo(
+        tmp_path,
+        monkeypatch,
+        "[toolchains]\n"
+        '"." = "rust"\n'
+        "[artifacts.gal]\n"
+        'build = [{ toolchain = "rust", package = "gal" }]\n'
+        'e2e = { harness = "electron" }\n',
+        check_e2e=False,  # the `npm` head resolves on PATH, needs no script
+    )
+    binary = root / "target" / "release" / "gal"
+    rec = _HarnessRecorder()
+    rc = e2e_verb.run((), source=_FakeSource({"gal": binary}), run_harness=rec)
+    assert rc == 0
+    ((argv, cwd, env),) = rec.calls
+    assert argv == ("npm", "exec", "--", "playwright", "test")
+    assert cwd == root
+    assert env == {
+        "E2E": "1",
+        "E2E_HIDE_WINDOW": "1",
+        "E2E_DISABLE_PERSISTENCE": "1",
+        "GAL_BIN": str(binary),
+    }
+    out = capsys.readouterr().out
+    assert (
+        "e2e: gal: npm exec -- playwright test "
+        f"[E2E=1 E2E_HIDE_WINDOW=1 E2E_DISABLE_PERSISTENCE=1 GAL_BIN={binary}]"
+    ) in out
+
+
+def test_unknown_named_harness_is_one_clean_config_error(tmp_path, monkeypatch, capsys):
+    # A named harness that names no registry entry is a declaration
+    # inconsistency: ConfigError through the cli_errors shell — `error: …` + rc
+    # 1, refused before any build or harness runs, naming the registered ones.
+    _repo(
+        tmp_path,
+        monkeypatch,
+        '[toolchains]\n"." = "rust"\n[artifacts.x]\n'
+        'build = [{ toolchain = "rust" }]\ne2e = { harness = "qt" }\n',
+        check_e2e=False,
+    )
+    rec = _HarnessRecorder()
+    rc = e2e_verb.run((), source=_FakeSource({}), run_harness=rec)
+    assert rc == 1
+    assert rec.calls == []
+    err = capsys.readouterr().err
+    assert err.startswith("error: ")
+    assert "unknown e2e harness 'qt'" in err
+    assert "electron" in err
+
+
 def test_harness_output_prints_verbatim_even_when_green(tmp_path, monkeypatch, capsys):
     root = _repo(tmp_path, monkeypatch, PADZ_TOML)
     # Verbatim: an internal blank line and trailing whitespace survive

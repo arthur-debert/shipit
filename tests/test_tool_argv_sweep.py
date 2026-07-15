@@ -63,7 +63,11 @@ def _parsed(path: pathlib.Path) -> ast.Module:
 #:   ``cargo`` and ``npm`` gain a third: the closed bump-adapter registry
 #:   (:mod:`shipit.release.bump`, TOL02-WS01) — the release-side projection
 #:   commands (``cargo set-version``/``cargo update``, ``npm version``),
-#:   ADR-0041's one assembly point for the manifest bumps. ``cargo``,
+#:   ADR-0041's one assembly point for the manifest bumps. ``npm`` gains a
+#:   further home in the closed e2e harness registry
+#:   (:mod:`shipit.tools.e2e`, TOL03-WS04): the electron/tauri GUI harnesses run
+#:   the consumer's Playwright/WebdriverIO devDependency via
+#:   ``npm exec -- <tool>``. ``cargo``,
 #:   ``uv`` and ``npm`` gain the bundle-composition registry
 #:   (:mod:`shipit.release.bundle`, TOL02-WS03) — the bundle-side composition
 #:   commands (``cargo deb``, ``uv build --out-dir``, ``npm pack`` of the
@@ -121,6 +125,11 @@ _ADAPTER_HOMES: dict[str, tuple[str, ...]] = {
         "release/bump.py",
         "release/bundle.py",
         "release/publish.py",
+        # The GUI e2e harnesses (TOL03-WS04): electron/tauri run the consumer's
+        # Playwright/WebdriverIO devDependency through `npm exec -- <tool>` —
+        # the node-tool head shipit already provisions (the vsce/ovsx path),
+        # assembled in the closed harness registry (:mod:`shipit.tools.e2e`).
+        "tools/e2e.py",
     ),
     # wasm-pack: the wasm/npm bundle composition's builder (TOL02-WS12 #788) —
     # assembled ONLY in the closed composition registry, like every other

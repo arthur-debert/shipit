@@ -13,11 +13,18 @@ module is the pure half of that tool, in one place:
   reports "no e2e declared" and exits 0. Opting out is the absence of
   config, never a flag.
 - **the harness registry** mirrors the toolchain registry: a
-  :class:`Harness` names what runs; the CLOSED :data:`HARNESSES` set has one
-  entry today, :data:`BATS` — the bats-run of the repo's ``bin/check-e2e``
-  (the PRD's registry default, the legacy ``bats-e2e.yml`` runner script).
-  A declared ``e2e.harness`` argv replaces the default for that artifact; a
-  future non-bats harness is an ENTRY here, never a fork of the tool.
+  :class:`Harness` names what runs (its argv) and the canonical ``E2E_*``
+  environment it launches under; the CLOSED :data:`HARNESSES` set has three
+  entries — :data:`BATS` (the PRD's default, the bats-run of the repo's
+  ``bin/check-e2e``, no injected env) and the GUI harnesses :data:`ELECTRON`
+  and :data:`TAURI` (TOL03-WS04): the Playwright / WebdriverIO runners that
+  honor the ``window.__e2e`` runtime contract and the shared ``E2E_*`` launch
+  env (the ``electron-e2e-testing`` / ``tauri-e2e-testing`` skills). A
+  declaration selects an entry BY NAME (``e2e = { harness = "electron" }`` →
+  :data:`HARNESS_BY_NAME`) — resolving both its argv and its ``E2E_*`` env —
+  or gives a raw argv (``e2e.harness = [...]``) that replaces the default for
+  that artifact (with no injected env); a future harness is an ENTRY here,
+  never a fork of the tool.
 - **``<NAME>_BIN`` derivation** (:func:`bin_env_var`) is a pure function —
   uppercase, ``-`` → ``_``, ``_BIN`` suffix — kept byte-for-byte compatible
   with the legacy fleet's ``tr '[:lower:]-' '[:upper:]_'`` derivation
@@ -84,11 +91,21 @@ class E2ePlanError(Exception):
 
 @dataclass(frozen=True)
 class Harness:
-    """One harness-registry entry: a name and the argv it runs (from the repo
-    root, through the one exec seam — ADR-0028)."""
+    """One harness-registry entry: a name, the argv it runs (from the repo
+    root, through the one exec seam — ADR-0028), and the canonical ``E2E_*``
+    environment it launches under.
+
+    ``env`` is a tuple of ``(VAR, value)`` pairs the effectful shell
+    (:mod:`shipit.verbs.e2e`) merges into the harness environment ALONGSIDE
+    the per-artifact ``<NAME>_BIN`` injection. The GUI harnesses (electron,
+    tauri) carry the shared ``E2E_*`` contract the desktop e2e skills
+    prescribe (:data:`_GUI_E2E_ENV`); the bats default carries none — its
+    legacy consumers set their own env, and a raw-argv override likewise runs
+    with no injected ``E2E_*`` env."""
 
     name: str
     argv: tuple[str, ...]
+    env: tuple[tuple[str, str], ...] = ()
 
 
 #: The bats harness: the repo's own ``bin/check-e2e`` runner script — the
@@ -97,27 +114,95 @@ class Harness:
 #: script head's ONE assembly point (the argv-sweep pins it here).
 BATS = Harness("bats", argv=("bin/check-e2e",))
 
+#: The canonical ``E2E_*`` launch environment the GUI harnesses inject, shared
+#: by electron and tauri — the ``window.__e2e`` / ``E2E_*`` contract the
+#: ``electron-e2e-testing`` / ``tauri-e2e-testing`` skills prescribe: ``E2E``
+#: is the top-level "running under tests" signal (always set),
+#: ``E2E_HIDE_WINDOW`` suppresses the window/dock on launch (headless CI), and
+#: ``E2E_DISABLE_PERSISTENCE`` gives each run clean state. The situational
+#: ``E2E_*`` vars (``E2E_USE_BUILD``, ``E2E_SKIP_BUILD``, ``E2E_USER_DATA_DIR``,
+#: …) stay the consumer lane's to set — these three are the always-on trio
+#: shipit guarantees every GUI harness launches under.
+_GUI_E2E_ENV: tuple[tuple[str, str], ...] = (
+    ("E2E", "1"),
+    ("E2E_HIDE_WINDOW", "1"),
+    ("E2E_DISABLE_PERSISTENCE", "1"),
+)
+
+#: The electron harness (TOL03-WS04): the consumer's Playwright suite, run
+#: through its local devDependency as ``npm exec -- playwright test`` — the
+#: node-tool head shipit already provisions (the vsce/ovsx precedent), not a
+#: bare-PATH ``npx``. Playwright launches the electron app — its config reads
+#: ``<NAME>_BIN`` (the artifact's built binary — the rust/go companion the app
+#: drives) — honoring the ``window.__e2e`` runtime contract; shipit injects the
+#: shared ``E2E_*`` env (:data:`_GUI_E2E_ENV`). A consumer whose runner differs
+#: overrides with a raw ``e2e.harness`` argv.
+ELECTRON = Harness(
+    "electron", argv=("npm", "exec", "--", "playwright", "test"), env=_GUI_E2E_ENV
+)
+
+#: The tauri harness (TOL03-WS04): the SAME ``window.__e2e`` / ``E2E_*``
+#: contract, driven over WebDriver instead of Playwright's electron launcher
+#: (tauri-driver + WebdriverIO — the sister skill's different launch, one shared
+#: runtime contract). ``npm exec -- wdio run wdio.conf.ts`` runs the consumer's
+#: WebdriverIO suite (its config spawns tauri-driver against the ``<NAME>_BIN``
+#: rust binary); the ``wdio.conf.ts`` path is the canonical default, overridable
+#: with a raw ``e2e.harness`` argv.
+TAURI = Harness(
+    "tauri",
+    argv=("npm", "exec", "--", "wdio", "run", "wdio.conf.ts"),
+    env=_GUI_E2E_ENV,
+)
+
 #: The CLOSED harness registry, the toolchain registry's mirror: a future
-#: non-bats harness (a WebDriver runner, …) is an entry here, not a fork of
-#: the e2e tool. Today the declaration side is binary — a declared
-#: ``e2e.harness`` argv, or the default — so the registry carries only the
-#: default; a named-harness declaration would select an entry by name.
-HARNESSES: tuple[Harness, ...] = (BATS,)
+#: harness (another WebDriver runner, …) is an entry here, not a fork of the
+#: e2e tool. A declaration selects an entry BY NAME
+#: (:data:`HARNESS_BY_NAME` — ``e2e = { harness = "electron" }``), resolving
+#: both its argv and its ``E2E_*`` env; a raw ``e2e.harness`` argv overrides the
+#: argv for one artifact (with no injected env).
+HARNESSES: tuple[Harness, ...] = (BATS, ELECTRON, TAURI)
+
+
+def _index_by_name(harnesses: tuple[Harness, ...]) -> dict[str, Harness]:
+    """The registry indexed by name — the resolution point for a named-harness
+    declaration. Names MUST be unique: a duplicate would silently shadow an
+    entry (the last wins), so it is refused loudly at import with a real
+    :class:`~shipit.config.ConfigError`, NOT an ``assert`` (which ``python -O``
+    strips — a closed-registry invariant must hold in every build)."""
+    index: dict[str, Harness] = {}
+    for harness in harnesses:
+        if harness.name in index:
+            raise config.ConfigError(
+                f"duplicate e2e harness name {harness.name!r} in HARNESSES — "
+                f"each registry entry's name must be unique (it is the "
+                f"selection key for a named `e2e.harness` declaration)"
+            )
+        index[harness.name] = harness
+    return index
+
+
+#: The registry indexed by name. Adding a harness is one entry in
+#: :data:`HARNESSES`; this index and the planner pick it up.
+HARNESS_BY_NAME: dict[str, Harness] = _index_by_name(HARNESSES)
 
 #: The registry default when an artifact declares ``e2e = {}`` with no
-#: ``harness`` argv (PRD: "registry default: bats-run check-e2e").
+#: ``harness`` (PRD: "registry default: bats-run check-e2e").
 DEFAULT_HARNESS = BATS
 
 
 @dataclass(frozen=True)
 class E2eJob:
     """One planned e2e run: an e2e-declaring artifact, the COMPLETE harness
-    argv (declared or registry default, passthrough already appended), and
-    the ``<NAME>_BIN`` env var the resolved binary is injected under."""
+    argv (declared or registry default, passthrough already appended), the
+    harness's contributed ``E2E_*`` environment (``env`` — empty for bats and
+    for a raw-argv override, the shared GUI trio for electron/tauri), and the
+    ``<NAME>_BIN`` env var the resolved binary is injected under (the effectful
+    shell merges ``env`` and this injection into the harness environment)."""
 
     artifact: config.Artifact
     harness: tuple[str, ...]
     env_var: str
+    env: tuple[tuple[str, str], ...] = ()
 
     @property
     def label(self) -> str:
@@ -127,6 +212,33 @@ class E2eJob:
 
 def _jobs_list(jobs: Sequence[E2eJob]) -> str:
     return ", ".join(job.label for job in jobs)
+
+
+def _resolve_harness(
+    spec: config.E2eSpec,
+) -> tuple[tuple[str, ...], tuple[tuple[str, str], ...]]:
+    """The ``(argv, env)`` an e2e declaration resolves to.
+
+    A raw ``harness`` argv override runs with NO injected ``E2E_*`` env; a
+    ``harness_name`` resolves to that registry entry's argv AND its canonical
+    ``E2E_*`` env (:data:`HARNESS_BY_NAME`); an absent harness is the bats
+    default. An unknown name is a loud :class:`~shipit.config.ConfigError`
+    naming the registered harnesses — validated HERE (the registry lives in
+    this module, not at config's parse boundary), on the same footing as
+    :func:`binary_location`'s declaration-consistency refusals.
+    """
+    if spec.harness is not None:
+        return spec.harness, ()
+    if spec.harness_name is not None:
+        harness = HARNESS_BY_NAME.get(spec.harness_name)
+        if harness is None:
+            raise config.ConfigError(
+                f"unknown e2e harness {spec.harness_name!r} — the registered "
+                f"harnesses are {', '.join(sorted(HARNESS_BY_NAME))}; or declare "
+                f'a raw argv list (e.g. ["bats", "tests/e2e.bats"])'
+            )
+        return harness.argv, harness.env
+    return DEFAULT_HARNESS.argv, DEFAULT_HARNESS.env
 
 
 def plan_e2e(
@@ -150,20 +262,26 @@ def plan_e2e(
     receives it, so passthrough selecting several jobs raises
     :class:`E2ePlanError` — and so does passthrough over a repo that declares
     no e2e at all (zero jobs), which is a usage error, never the clean no-op.
+
+    Each declaring artifact's harness is resolved through
+    :func:`_resolve_harness`: a named harness (``e2e = { harness = "electron" }``)
+    that names no registry entry is a :class:`~shipit.config.ConfigError` — a
+    declaration inconsistency (rc 1), NOT a usage error, mirroring
+    :func:`binary_location`.
     """
-    jobs = [
-        E2eJob(
-            artifact=artifact,
-            harness=(
-                artifact.e2e.harness
-                if artifact.e2e.harness is not None
-                else DEFAULT_HARNESS.argv
-            ),
-            env_var=bin_env_var(artifact.name),
+    jobs = []
+    for artifact in artifacts:
+        if artifact.e2e is None:
+            continue
+        argv, env = _resolve_harness(artifact.e2e)
+        jobs.append(
+            E2eJob(
+                artifact=artifact,
+                harness=argv,
+                env=env,
+                env_var=bin_env_var(artifact.name),
+            )
         )
-        for artifact in artifacts
-        if artifact.e2e is not None
-    ]
     if selector is None:
         # The bare invocation over a repo with no e2e lane is the ONLY clean
         # empty exit ("no e2e declared", exit 0) — never an error. That no-op
