@@ -349,9 +349,10 @@ def _cleanup(staging: Path) -> str | None:
 
     Returns ``None`` when the sibling is gone, or a one-line report of the
     cleanup failure when it could not be removed. A cleanup failure never
-    publishes the partial Repo: the report is logged AND handed back to
-    :func:`create_repo` to travel alongside the primary failure (ADR-0059), while
-    the original failure continues to propagate (creation still returns
+    publishes the partial Repo: the failure is logged (via
+    :meth:`logging.Logger.exception`) AND the report string is handed back to
+    :func:`create_repo` to travel alongside the primary failure (ADR-0059),
+    while the original failure continues to propagate (creation still returns
     non-zero). A leaked ``.shipit-repo-new-*`` sibling is thus surfaced, never a
     silent orphan and never a published Repo.
     """

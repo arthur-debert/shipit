@@ -745,11 +745,13 @@ def test_create_failed_stage_rolls_back_and_publishes_nothing(
 def test_create_commit_failure_preserves_git_policy_and_prevents_publication(
     tmp_path, git_identity, monkeypatch
 ):
-    # A commit failure — a missing identity, an INVALID SIGNING config, or any
-    # other `git commit` error — must prevent publication WITHOUT creation
-    # synthesizing an identity, disabling signing, or bypassing hooks. Creation
-    # reports the underlying git error unchanged (ADR-0062) and rolls back: the
-    # destination stays absent and the staging sibling is removed.
+    # A commit failure — an INVALID SIGNING config or any other `git commit`
+    # error — must prevent publication WITHOUT creation synthesizing an
+    # identity, disabling signing, or bypassing hooks. (A missing identity is
+    # not a commit-time failure: `create_repo` preflights it via `author_reader`
+    # BEFORE any effect, raising `CreationError` earlier — see `default_author`.)
+    # Creation reports the underlying git error unchanged (ADR-0062) and rolls
+    # back: the destination stays absent and the staging sibling is removed.
     from shipit.execrun import ExecError
 
     def failing_commit(message, *, cwd, no_verify=False):
@@ -920,6 +922,39 @@ def test_command_refuses_concurrent_destination_and_preserves_it(
     assert (dest / "other").read_text(encoding="utf-8") == "concurrent"
     assert not (dest / "Cargo.toml").exists()
     assert sorted(p.name for p in tmp_path.iterdir()) == ["hello"]
+
+
+def test_command_reports_cleanup_failure_alongside_primary_on_stderr(
+    tmp_path, capsys, git_identity, monkeypatch
+):
+    # The cleanup-failure report must reach the USER, not just the raw exception:
+    # when rollback's `rmtree` fails, `create_repo` attaches the report as a note
+    # (ADR-0059), and the shared CLI error shell folds `__notes__` into the single
+    # `error:` line — otherwise the leaked `.shipit-repo-new-*` sibling would be
+    # silently orphaned on the public `repo new` path (only the primary error
+    # would show). This is the public-path counterpart to the effect-seam test
+    # `test_create_cleanup_failure_is_reported_alongside_primary_and_never_publishes`.
+    def failing_rmtree(path, ignore_errors=False):
+        raise OSError(39, "Directory not empty")
+
+    monkeypatch.setattr(create_mod.shutil, "rmtree", failing_rmtree)
+    rc, err = _run_new_with_seams(
+        monkeypatch,
+        tmp_path,
+        capsys,
+        verifier=_Recorder([], "verify", raises=CreationError("lint failed")),
+    )
+    assert rc == 1
+    assert err.startswith("error:")
+    # Both the primary failure and the cleanup report ride the one stderr line.
+    assert "lint failed" in err
+    assert "could not be removed" in err
+    # The leaked sibling is named in the output — exactly the path the user must
+    # clean up by hand — and it really did leak (rmtree could not remove it).
+    leaked = [p for p in tmp_path.iterdir() if p.name.startswith(".shipit-repo-new-")]
+    assert leaked
+    assert leaked[0].name in err
+    assert not (tmp_path / "hello").exists()
 
 
 # --------------------------------------------------------------------------
