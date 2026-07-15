@@ -688,7 +688,7 @@ def test_vsix_stage_destination_may_not_escape_the_checkout(dest):
     # letter would stage outside the extension. `vsce package` runs on the
     # win32-x64 leg too (#974), so the guard must catch the Windows vectors a
     # POSIX-only check misses, not just the unix ones.
-    with pytest.raises(config.ConfigError, match="must be a repo-relative path"):
+    with pytest.raises(config.ConfigError, match="must be a repo-relative"):
         _load(
             "[artifacts.ext]\n"
             'build = ["npm"]\n'

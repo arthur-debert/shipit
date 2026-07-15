@@ -359,8 +359,9 @@ def _reject_path_escape(where: str, value: str) -> None:
         or ".." in windows.parts
     ):
         raise ConfigError(
-            f"{where}: must be a repo-relative path inside the checkout — no "
-            f"leading '/' or '\\', no drive letter, no '..' segment; got {value!r}"
+            f"{where}: must be a repo-relative POSIX path inside the checkout — "
+            f"no leading '/', no '\\' anywhere, no drive letter, no '..' segment; "
+            f"got {value!r}"
         )
 
 

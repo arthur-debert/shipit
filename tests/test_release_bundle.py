@@ -1832,6 +1832,53 @@ def test_vsix_stage_missing_materialized_binary_points_at_install(tmp_path):
     assert recorder.calls == []
 
 
+@pytest.mark.parametrize("kind", ["file", "dir"])
+def test_vsix_stage_refuses_a_pre_existing_destination(tmp_path, kind):
+    # Staging must target a FRESH path: overwriting a tracked/checked-in resource
+    # and then cleaning it up would DELETE committed content. A collision (a
+    # pre-existing file, or a directory the copy would land a child under) is a
+    # loud refusal, and the pre-existing content is left untouched — so cleanup
+    # only ever removes files staging itself created.
+    (artifact,) = _artifacts(
+        {
+            "ext": {
+                "build": ["npm"],
+                "bundle": {
+                    "composition": "vsix",
+                    "stage": {"lexd-lsp": "resources/lexd-lsp"},
+                },
+            }
+        }
+    )
+    entries = _entries({"editors/vscode": "npm"})
+    dep = _dep("lexd-lsp")
+    _materialize_dep_bin(tmp_path, dep)
+    tracked = tmp_path / "editors/vscode" / "resources/lexd-lsp"
+    tracked.parent.mkdir(parents=True, exist_ok=True)
+    if kind == "file":
+        tracked.write_bytes(b"TRACKED-COMMITTED")
+    else:
+        tracked.mkdir()
+    recorder = RunRecorder({"npm": _vsce_writes_out})
+    with pytest.raises(ReleaseError, match="already exists"):
+        bundle_mod.VSIX.compose(
+            _request(
+                tmp_path,
+                artifact,
+                entries,
+                target=MAC,
+                run_cmd=recorder,
+                artifact_deps=(dep,),
+            )
+        )
+    assert recorder.calls == []  # refused before packaging
+    # The pre-existing content survives — never clobbered, never cleaned up.
+    if kind == "file":
+        assert tracked.read_bytes() == b"TRACKED-COMMITTED"
+    else:
+        assert tracked.is_dir()
+
+
 def test_vsix_without_a_stage_map_stages_nothing(tmp_path):
     # The base per-platform vsix (no `stage`) is unchanged: no copy, just the
     # single `vsce package` — the pre-#974 contract still holds.
