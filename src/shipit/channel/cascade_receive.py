@@ -308,9 +308,10 @@ def _parse(text: str) -> dict:
 #: shipit launcher (the same setup-pixi bootstrap the wf-* blocks use), and runs
 #: `shipit channel receive` with the client payload passed via ENV (never a
 #: `${{ }}`-into-`run:` splice, which would be a shell-injection seam). The
-#: token defaults to the ambient GITHUB_TOKEN; a repo that needs the bump PR to
-#: TRIGGER its own CI supplies a PAT as SHIPIT_CASCADE_TOKEN (a GITHUB_TOKEN-
-#: opened PR does not start further workflow runs — a GitHub constraint).
+#: token defaults to the ambient Actions token (`github.token`, the fleet
+#: convention); a repo that needs the bump PR to TRIGGER its own CI supplies a
+#: PAT as SHIPIT_CASCADE_TOKEN (a `github.token`-opened PR does not start
+#: further workflow runs — a GitHub constraint).
 _WORKFLOW_BODY = """\
 # Managed by shipit; do not edit. Regenerate via `shipit install`.
 #
@@ -340,9 +341,11 @@ jobs:
       - name: Bump artifact-deps and open the draft PR
         env:
           # The client payload rides ENV, never a `${{ }}` splice into `run:`
-          # (shell-injection safe). Token: ambient GITHUB_TOKEN by default; set
+          # (shell-injection safe). Token: the ambient Actions token
+          # (`github.token`, the fleet convention — see wf-prepare.yml's
+          # `secrets.RELEASE_TOKEN || github.token`) by default; set
           # SHIPIT_CASCADE_TOKEN to a PAT if the bump PR must trigger CI.
-          GH_TOKEN: ${{ secrets.SHIPIT_CASCADE_TOKEN || secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.SHIPIT_CASCADE_TOKEN || github.token }}
           UPSTREAM: ${{ github.event.client_payload.upstream }}
           VERSION: ${{ github.event.client_payload.version }}
         run: |
@@ -508,8 +511,12 @@ def receive(
     # this guards). Everything else install may touch is version-independent
     # (see `_BUMP_OWNED`), so this triple is the complete rollback set.
     snapshot = _snapshot(root, _BUMP_OWNED)
-    toml_path.write_text(result.text, encoding="utf-8")
     try:
+        # The write is INSIDE the try so a failure mid-write (full disk,
+        # permission error, interrupted syscall) that could leave `.shipit.toml`
+        # empty or half-written also triggers the rollback — `_restore` rewrites
+        # every bump-owned file from the snapshot taken above.
+        toml_path.write_text(result.text, encoding="utf-8")
         reinstall(root)
     except Exception:
         _restore(root, snapshot)
