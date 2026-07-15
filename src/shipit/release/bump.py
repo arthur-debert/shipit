@@ -255,14 +255,20 @@ _JSON_VERSION_RE = re.compile(
 
 #: A Neovim plugin's ``M.version = "…"`` assignment in its entry ``init.lua``
 #: (TOL03-WS01 #972). ``M`` is the conventional module table a plugin returns
-#: (``local M = {}`` … ``return M``); the ``\b`` before ``M`` keeps the match
-#: from firing inside a longer identifier (``someM.version``). The quote char
-#: is captured (``q``) and back-referenced for the close, so a Lua single- or
-#: double-quoted string bumps and keeps its own style; the value spans no quote
-#: char, so a semver (no embedded quote) is matched whole. Matched textually,
-#: first occurrence — the rewrite preserves the file's formatting byte-for-byte.
+#: (``local M = {}`` … ``return M``). ANCHORED to a real assignment LINE
+#: (``re.MULTILINE`` + ``^[ \t]*``): the ``M.version`` must open the line after
+#: only leading indentation, so a leading Lua comment (``-- M.version = "…"``)
+#: or a ``M.version`` embedded in a string / longer identifier
+#: (``someM.version``, ``local s = "M.version = 1"``) is NOT bumped — only the
+#: statement that actually sets the version. The leading indentation is part of
+#: ``head`` so the rewrite preserves it. The quote char is captured (``q``) and
+#: back-referenced for the close, so a Lua single- or double-quoted string bumps
+#: and keeps its own style; the value spans no quote char, so a semver (no
+#: embedded quote) is matched whole. First matching line only — the rewrite
+#: preserves the file's formatting byte-for-byte.
 _LUA_VERSION_RE = re.compile(
-    r"(?P<head>\bM\.version[ \t]*=[ \t]*(?P<q>[\"']))(?P<value>[^\"']*)(?P<tail>(?P=q))"
+    r"(?P<head>^[ \t]*M\.version[ \t]*=[ \t]*(?P<q>[\"']))(?P<value>[^\"']*)(?P<tail>(?P=q))",
+    re.MULTILINE,
 )
 
 
@@ -374,8 +380,10 @@ def bump_lua_version(text: str, version: str) -> str:
     ``version``. Pure.
 
     Toolchain-free, the python bump's spirit (TOL03-WS01 #972): a targeted
-    rewrite of the FIRST ``M.version = "…"`` assignment that preserves the rest
-    of the file byte-for-byte (no Lua parse/emit — that would reflow the
+    rewrite of the first ``M.version = "…"`` ASSIGNMENT LINE (anchored to line
+    start after indentation, so a leading comment ``-- M.version = "…"`` or a
+    ``M.version`` inside a string is never mistaken for it) that preserves the
+    rest of the file byte-for-byte (no Lua parse/emit — that would reflow the
     source). The value is written VERBATIM: a Lua version string is arbitrary
     text, so unlike the python manifest there is no PEP 440 constraint to
     normalize toward — the semver the tag names is written as-is (the npm

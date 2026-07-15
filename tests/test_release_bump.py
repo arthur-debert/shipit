@@ -190,6 +190,38 @@ def test_bump_lua_version_bumps_only_the_first_occurrence():
     )
 
 
+def test_bump_lua_version_skips_a_leading_comment_line():
+    """A commented-out `-- M.version = ...` before the real assignment must NOT
+    be bumped — the regex anchors to a real assignment line, not the first
+    textual occurrence (round 1, codex)."""
+    text = (
+        '-- M.version = "0.0.1" (old, kept as a note)\n'
+        "local M = {}\n"
+        'M.version = "0.1.0"\n'
+        "return M\n"
+    )
+    out = bump.bump_lua_version(text, "0.2.0")
+    assert '-- M.version = "0.0.1" (old, kept as a note)' in out  # comment untouched
+    assert 'M.version = "0.2.0"' in out
+    assert out == text.replace('M.version = "0.1.0"', 'M.version = "0.2.0"')
+
+
+def test_bump_lua_version_skips_a_version_inside_a_string():
+    """A `M.version = ...` embedded in a string literal before the real line is
+    not an assignment and must not be bumped."""
+    text = 'local doc = "M.version = 9.9.9"\nM.version = "0.1.0"\n'
+    out = bump.bump_lua_version(text, "0.2.0")
+    assert 'local doc = "M.version = 9.9.9"' in out  # the string is untouched
+    assert out == 'local doc = "M.version = 9.9.9"\nM.version = "0.2.0"\n'
+
+
+def test_bump_lua_version_bumps_an_indented_assignment():
+    """The line anchor allows leading indentation and preserves it."""
+    assert bump.bump_lua_version('\tM.version = "0.1.0"\n', "0.2.0") == (
+        '\tM.version = "0.2.0"\n'
+    )
+
+
 def test_bump_lua_version_ignores_a_longer_identifier():
     """The `\\b` guard keeps the rewrite off `someM.version` — only the module
     table `M`'s version is the plugin's declared version."""

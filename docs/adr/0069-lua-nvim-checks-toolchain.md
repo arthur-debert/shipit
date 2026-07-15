@@ -32,7 +32,13 @@ so a consumer's managed env solves them without a luarocks side-channel.
   and note why"), not a quality judgement. stylua is the one lua `--fix` leg
   (`--check` verifies, the bare form formats in place); selene is check-only (no
   autofix) and reads the consumer's own `selene.toml` (rule set + the neovim
-  `std`), which a nvim plugin already ships.
+  `std`), which a nvim plugin already ships. Because lua is a **hard-fail** lint
+  leg, a managed **signal-gated `pixi-lua-lint-deps-block`** (`stylua` `2.*` +
+  `selene` `0.31.*`, under the lint feature like the rust/go lint blocks)
+  provisions them so a consumer with `.lua` files never hits rc 127. A nvim
+  plugin has no manifest to detect, so the block fires off the **declared
+  `[toolchains]` lua leg** via the registry entry's `provisions_signal` (the
+  tree-sitter mechanics on the lint axis) — non-lua repos are untouched.
 
 - **Version bump — a pure `M.version` rewrite** (`src/shipit/release/bump.py`).
   A nvim plugin freezes its version as a string on its module table
@@ -71,12 +77,16 @@ still builds the real one.
 - lex-fmt/nvim (#104) can express its checks through managed lanes (drop the
   inline `luacheck` job) and its version bumps again — the WS's consumer-side
   payoff, verified when ADP02 resumes (epic TOL03 WS06).
-- The lua LINT tools (stylua/selene) are conda-forge-provisionable but are NOT
-  yet wired into a managed pixi lint block (the per-language `rust-lint` /
-  `go-lint` blocks' analogue, delivered on manifest detection). shipit's own
-  tree has no `.lua`, so its gate is unaffected; a `pixi-lua-lint-deps-block`
-  delivered on a lua signal is the natural **follow-up** for fleet provisioning
-  — noted here so the gap is stated, not silent.
+- The lua LINT tools (stylua/selene) ARE provisioned: the signal-gated
+  `pixi-lua-lint-deps-block` (above) delivers them under the lint feature on a
+  declared lua leg, so a nvim consumer's `shipit lint` never dies rc 127 on a
+  missing linter. shipit's own tree has no `.lua`, so it never signals lua and
+  its own manifest is unaffected — the dogfood no-op reconcile is preserved. The
+  one deferred item is a **canonical shipped stylua/selene config** (the ADR-0037
+  `--config-path` injection, to own even the repo's cwd config); until then
+  stylua/selene honor the consumer's own cwd config, and are already blind to the
+  ancestor/`$HOME`/env ambient sources the hermeticity pin exists to close
+  (proven by the lint hermeticity gate).
 - The registries stay CLOSED and mirrored: `tools.registry` (6 toolchains),
   `lint.LANGS` (9 langs), and `release.bump.ADAPTERS` (one per toolchain, the
   `test_registry_mirrors_the_toolchain_set` invariant) all gain their lua entry

@@ -59,6 +59,15 @@ def test_buildless_lua_leg_is_skipped_but_sibling_legs_still_build():
     assert [step.argv for step in steps] == [("uv", "build")]
 
 
+def test_artifact_targeting_a_buildless_toolchain_is_a_loud_error():
+    # The skip is UNTARGETED-only (round 1, codex): an [artifacts] build target
+    # naming the buildless lua toolchain would otherwise be silently dropped
+    # (no step, no diagnostic). Refuse loudly instead — the config is wrong.
+    artifact = _artifact("plugin", config.BuildTarget(toolchain="lua", package=None))
+    with pytest.raises(config.ConfigError, match="buildless toolchain 'lua'"):
+        build_mod.plan_build([_leg("lua")], [artifact])
+
+
 def test_go_leg_without_artifacts_builds_every_package():
     # #608 (supage's red build cell): a bare `go build` compiles only the root
     # package — "no Go files in ." on a repo whose packages live under cmd/…

@@ -171,10 +171,17 @@ TREE_SITTER = Toolchain(
 #: build analogue of the go/tree-sitter zero-file bump adapters). busted is NOT
 #: on conda-forge (a luarocks package): like ``pytest`` it rides the test lane
 #: in the consumer's own env, never a release stage, so it needs no managed
-#: pixi block and declares no ``provisions_signal`` (the tool-provisioning
-#: inventory records it CONSUMER_ENV). The lua LINT tools (stylua + selene, both
-#: on conda-forge) live in the lint ``LANGS`` registry, not here.
-LUA = Toolchain("lua", test=("busted",), build=())
+#: pixi block (the tool-provisioning inventory records busted CONSUMER_ENV). The
+#: lua LINT tools (stylua + selene, both on conda-forge) live in the lint
+#: ``LANGS`` registry, not here — but their MANAGED provisioning rides THIS
+#: entry's ``provisions_signal``: a nvim plugin has no manifest the toolchain
+#: walk can find (:func:`shipit.install.reconcile.detect_toolchains`), so a
+#: declared ``[toolchains]`` lua leg is the only signal, and ``shipit install``
+#: unions the ``lua`` signal off it (:func:`shipit.verbs.install._declared_signals`)
+#: to deliver the ``pixi-lua-lint-deps-block`` (stylua/selene) — the exact
+#: tree-sitter mechanics (#890), on the lint axis. So the lua lint legs stop
+#: hard-failing (127) on a host without stylua/selene.
+LUA = Toolchain("lua", test=("busted",), build=(), provisions_signal="lua")
 
 #: The closed registry, in a stable order. Adding a toolchain is adding an
 #: entry here (mirror of the lint ``LANGS`` tuple).
