@@ -197,27 +197,56 @@ underneath it and how a repo gets onto shipit. Domain vocabulary:
 
 3. Getting a repo onto shipit
 
-    One command, for fresh installs and updates alike:
-        $ shipit install <path>
+    Two entry points, chosen by whether the repository exists yet: create a
+    fresh one, or adopt an existing one.
 
-    :: sh ::
+    3.1. Creating a fresh repo
 
-    It provisions the pinned toolchain via pixi, sets up the GitHub repo
-    (labels, ruleset, secrets from doppler), copies the skills and the
-    lefthook config, installs the git hooks, splices the dev-workflow section
-    into AGENTS.md, and stamps `.shipit.toml` with the shipit pin (the full
-    commit SHA the repo locks to — ADR-0033) plus per-file pristine hashes.
+        `shipit repo new` creates a new local Repo with a complete, verified, shipit-managed baseline:
+            $ shipit repo new --stack rust <name> [parent]
 
-    Install does NOT touch the consumer's main branch: it stages the changes
-    on a branch and opens a PR for a human to merge — shipit eats its own dog
-    food. Reconciliation is pull-not-push (ADR-0003): on re-install, each
-    managed file is hash-compared against its pristine hash; unchanged files
-    are overwritten silently, consumer-edited ones are surfaced in the PR,
-    never clobbered. Fast-moving code ships through the pinned `shipit`
-    package instead, so it lands without per-repo file churn — the slow/fast
-    split; see [./docs/dev/architecture.lex] §2. The `--push` flag is the logged
-    break-glass exception, reserved for bootstrapping a repo that cannot yet
-    run the PR loop.
+        :: sh ::
+
+        The destination is `<parent>/<name>` — `parent` defaults to the
+        current directory — and `--stack` selects the Creation profile; it is
+        repeatable so a request can later compose several toolchains, though
+        v1 supports one, `rust`. It scaffolds a two-crate Cargo workspace (a
+        `<name>` CLI over a `lib<name>` library), applies shipit's managed
+        baseline through the same `shipit install` path, resolves the pixi
+        lockfile, and certifies the Repo by running its lint, test, and build
+        Checks. The verified local result is exactly one initial commit on
+        `main`; creation stages the whole Repo in a sibling directory and
+        publishes it with a single atomic rename only after every Check
+        passes, so any failure leaves the destination untouched.
+
+        Creation is local only: it creates no GitHub repository, remote,
+        publishing endpoint, or release policy — those remain a later,
+        separate step. See [./docs/spec/repo-new.md] for the exhaustive
+        contract.
+
+    3.2. Adopting an existing repo
+
+        One command, for first-time adoption and later updates alike:
+            $ shipit install <path>
+
+        :: sh ::
+
+        It provisions the pinned toolchain via pixi, sets up the GitHub repo
+        (labels, ruleset, secrets from doppler), copies the skills and the
+        lefthook config, installs the git hooks, splices the dev-workflow section
+        into AGENTS.md, and stamps `.shipit.toml` with the shipit pin (the full
+        commit SHA the repo locks to — ADR-0033) plus per-file pristine hashes.
+
+        Install does NOT touch the consumer's main branch: it stages the changes
+        on a branch and opens a PR for a human to merge — shipit eats its own dog
+        food. Reconciliation is pull-not-push (ADR-0003): on re-install, each
+        managed file is hash-compared against its pristine hash; unchanged files
+        are overwritten silently, consumer-edited ones are surfaced in the PR,
+        never clobbered. Fast-moving code ships through the pinned `shipit`
+        package instead, so it lands without per-repo file churn — the slow/fast
+        split; see [./docs/dev/architecture.lex] §2. The `--push` flag is the logged
+        break-glass exception, reserved for bootstrapping a repo that cannot yet
+        run the PR loop.
 
 See Also
 

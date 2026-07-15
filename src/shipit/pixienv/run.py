@@ -155,6 +155,46 @@ def run_in_env(
     )
 
 
+def run_task(
+    task: str,
+    root: str | Path,
+    *,
+    environment: str | None = None,
+    env: Mapping[str, str] | None = None,
+    check: bool = True,
+    timeout: float | None = INSTALL_TIMEOUT,
+    runner=None,
+) -> execrun.ExecResult:
+    """Run the pixi TASK ``task`` in ``root`` (``pixi run <task>``), one Exec.
+
+    Unlike :func:`run_in_env` — which wraps an arbitrary argv behind ``pixi run
+    … -- <argv>`` (a COMMAND) — this invokes a named pixi TASK directly, exactly
+    as a user typing ``pixi run lint`` would. ``shipit repo new`` certifies a
+    staged Repo through this seam (ADR-0062): the three public ``lint``/``test``/
+    ``build`` tasks run from a child rooted in the staged Repo, with an explicit
+    ``--manifest-path`` so inherited pixi activation cannot select a different
+    manifest. ``env`` follows :func:`install`'s contract (complete child env when
+    given — a scrubbed snapshot — inherit when ``None``); ``check=False`` makes a
+    nonzero task a normal :class:`ExecResult` for callers that read the rc as a
+    verdict. The ``timeout`` shares provisioning's long-runner bound: a first
+    ``pixi run`` may re-solve the env before the task runs.
+    """
+    if runner is None:
+        runner = execrun.run
+    cmd = ["pixi", "run", "--manifest-path", str(Path(root) / MANIFEST_NAME)]
+    if environment is not None:
+        cmd += ["--environment", environment]
+    cmd.append(task)
+    return runner(
+        cmd,
+        cwd=str(root),
+        env=None if env is None else dict(env),
+        replace_env=env is not None,
+        check=check,
+        timeout=timeout,
+    )
+
+
 def cache_dir() -> Path:
     """The directory pixi/rattler caches downloaded packages in.
 

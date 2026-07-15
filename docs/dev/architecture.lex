@@ -128,6 +128,8 @@ the durable code is one slim versioned package; and configuration is explicit.
 
     - install — provision + reconcile the managed files in the working
       tree (`--pr` opens the standalone reconcile draft PR).
+    - repo new — create a new local Repo: the creation orchestrator over
+      consumer-owned scaffolding plus managed installation.
     - gh-setup — labels, ruleset, secrets.
     - lint — run the standardized checks.
     - pr status / pr next — the PR-lifecycle state machine.
