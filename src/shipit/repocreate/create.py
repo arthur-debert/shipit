@@ -33,7 +33,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from .. import execrun, git, pixienv
+from .. import execrun, git, pixienv, redact
 from .errors import CreationError
 from .names import validate_name
 from .plan import CreationPlan, build_plan
@@ -230,11 +230,20 @@ def _check_failure_message(task: str, result: execrun.ExecResult) -> str:
     :data:`execrun.TAIL_CHARS` — the same tail budget an :class:`ExecError`
     carries — so an enormous build log cannot swamp the message; an empty stream
     is omitted so a tool that writes only to stderr reads cleanly.
+
+    Each bounded tail is run through :func:`redact.redact_text` — the SAME
+    masking an :class:`ExecError` applies to its own captured streams — because
+    the staged Check inherits the caller's scrubbed-but-still-secret-bearing
+    environment (:func:`pixienv.scrub_env` drops pixi/Conda selection, not the
+    user's secrets), so a failing tool that echoes a token or PEM would
+    otherwise leak it straight onto the unredacted ``CreationError`` /
+    ``error:`` CLI surface. The tail is sliced before masking so redaction runs
+    on the bounded window, not the whole build log.
     """
     tails = [
-        f"{label}:\n{stream[-execrun.TAIL_CHARS :].strip()}"
+        f"{label}:\n{tail}"
         for label, stream in (("stdout", result.stdout), ("stderr", result.stderr))
-        if stream.strip()
+        if (tail := redact.redact_text(stream[-execrun.TAIL_CHARS :].strip()))
     ]
     output = ("\n" + "\n".join(tails)) if tails else ""
     return (

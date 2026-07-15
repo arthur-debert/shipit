@@ -26,7 +26,7 @@ from pathlib import Path
 
 import pytest
 
-from shipit import execrun, git, pixienv
+from shipit import execrun, git, pixienv, redact
 from shipit.repocreate import (
     CreationError,
     build_plan,
@@ -1187,6 +1187,50 @@ def test_default_verifier_retains_failing_check_output_and_stops(tmp_path, monke
     assert seen == ["lint", "test"]
 
 
+def test_default_verifier_redacts_secrets_in_failing_check_output(
+    tmp_path, monkeypatch
+):
+    # The staged Check inherits the caller's scrubbed-but-still-secret-bearing
+    # environment, so a failing tool that echoes a registered secret must NOT
+    # leak it onto the CreationError / `error:` CLI surface. The retained tails
+    # are masked with the SAME redactor an ExecError applies to its own streams,
+    # over BOTH stdout and stderr.
+    stdout_secret = "tok_stdout_5up3rs3cr3t"
+    stderr_secret = "tok_stderr_p3mk3yl34k"
+
+    def fake_run(argv, **kwargs):
+        task = argv[-1]
+        if task == "test":
+            return execrun.ExecResult(
+                argv=tuple(argv),
+                rc=101,
+                stdout=f"dumping env: {stdout_secret}\n",
+                stderr=f"leaked PEM: {stderr_secret}\n",
+                duration_ms=1,
+            )
+        return execrun.ExecResult(
+            argv=tuple(argv), rc=0, stdout="", stderr="", duration_ms=1
+        )
+
+    monkeypatch.setattr(execrun, "run", fake_run)
+
+    redact.register_secret(stdout_secret)
+    redact.register_secret(stderr_secret)
+    try:
+        with pytest.raises(CreationError) as excinfo:
+            create_mod.default_verifier(tmp_path)
+    finally:
+        redact.clear_registered_secrets()
+
+    message = str(excinfo.value)
+    assert stdout_secret not in message
+    assert stderr_secret not in message
+    assert redact.MASK in message
+    # The surrounding, non-secret diagnostics still surface for the reader.
+    assert "dumping env:" in message
+    assert "leaked PEM:" in message
+
+
 def test_create_failed_check_leaves_no_repo_and_reports_output(tmp_path, git_identity):
     # End to end through the orchestrator: a failing verifier (carrying the
     # certification's real message) rolls back and publishes nothing, so a hidden
@@ -1234,7 +1278,8 @@ def test_create_real_toolchain_end_to_end(tmp_path, git_identity):
     # lockfile — so mocked command execution cannot conceal a missing dependency.
     for task in ("lint", "test", "build"):
         run = subprocess.run(
-            ["pixi", "run", "--manifest-path", str(dest / "pixi.toml"), task],
+            ["pixi", "run", task],
+            cwd=str(dest),
             capture_output=True,
             text=True,
         )
