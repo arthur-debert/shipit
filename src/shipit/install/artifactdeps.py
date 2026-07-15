@@ -10,18 +10,23 @@ dependency and a ``version`` bump re-resolves transparently.
 Two halves, kept apart so the projection stays a PURE, network-free core:
 
 - **tier derivation** (:func:`channel_url`) — the access tier is DERIVED from
-  the producing repo's visibility (ADR-0065), never declared. WS02 serves the
-  PUBLIC tier only: a public producing repo resolves to its authless HTTPS
-  per-repo channel URL; a private one is refused with a pointer to WS04 (the
-  private-tier ``[s3-options]`` + credentials workstream). The one
-  network-touching read — the repo's visibility — lives in the install verb
-  glue (``gh.repo_is_private``); this module maps an ALREADY-resolved boolean
-  to a URL, so a test exercises it without a round-trip.
+  the producing repo's visibility (ADR-0065), never declared. A PUBLIC
+  producing repo resolves to its authless HTTPS per-repo channel URL; a PRIVATE
+  one resolves to an ``s3://<bucket>/<repo>`` channel reached over GCS's
+  S3-interop endpoint, whose ``[s3-options]`` config and env-var credentials the
+  consumer supplies (ARF01-WS04 #953). The one network-touching read — the
+  repo's visibility — lives in the install verb glue (``gh.repo_is_private``);
+  this module maps an ALREADY-resolved boolean to a URL, so a test exercises it
+  without a round-trip.
 - **projection** (:func:`project`) — pure over ``(ArtifactDep, channel_url)``
   pairs: it emits the managed :class:`~shipit.install.units.Unit` blocks the
   reconcile then treats exactly like every other managed block (four-case
   hash-compare, idempotent reconcile-to-noop, ADD/UPDATE on a bump). No
-  filesystem, no network — the projection is exercised entirely on values.
+  filesystem, no network — the projection is exercised entirely on values. A
+  PRIVATE channel (an ``s3://`` URL) additionally emits the reserved
+  ``[s3-options.<bucket>]`` block (endpoint-url / region / force-path-style)
+  templated DIRECTLY into TOML — never ``pixi config set s3-options.*``, a
+  silent no-op in pixi 0.71.0 (ADR-0065).
 
 Projection shape (the WS02 design, documented for the shepherd): each distinct
 TARGET (a declared ``feature`` name, or the default target when ``feature`` is
@@ -52,7 +57,8 @@ from ..config import ArtifactDep
 from .units import PIXI_FILE, Unit
 
 #: The public-tier Artifact channel host + bucket (ADR-0065 — the public-read,
-#: authless tier; the private tier is WS04). The per-repo channel root is
+#: authless tier; the private tier's bucket is :data:`PRIVATE_ARTIFACT_BUCKET`
+#: below). The per-repo channel root is
 #: ``<bucket>/<owner/name>`` (each repo the sole writer of its own repodata,
 #: ADR-0064), reached over the authless HTTPS object-storage URL. These MIRROR
 #: the producer-side constants the ``conda`` endpoint publishes to
@@ -62,6 +68,34 @@ from .units import PIXI_FILE, Unit
 #: writes to.
 PUBLIC_CHANNEL_HOST = "https://storage.googleapis.com"
 PUBLIC_ARTIFACT_BUCKET = "shipit-artifacts-public"
+
+#: The private-tier Artifact channel bucket (ADR-0065 — the credentialed,
+#: no-public-access bucket). A private producing repo's channel is reached as an
+#: S3-compatible conda channel — ``s3://<bucket>/<repo>`` — over GCS's interop
+#: endpoint, NOT the authless HTTPS URL. MIRRORS the producer-side constant the
+#: ``conda`` endpoint writes to (:data:`shipit.release.publish.PRIVATE_ARTIFACT_BUCKET`);
+#: the same drift test that pins the public pair pins this one, so the consumer
+#: can never read from a private bucket the producer never writes to.
+PRIVATE_ARTIFACT_BUCKET = "shipit-artifacts-private"
+
+#: The S3-interop scheme a private-tier channel URL carries. The projection keys
+#: tier off this prefix — an ``s3://`` channel is private and needs the
+#: ``[s3-options]`` block below; an ``https://`` channel is public and authless.
+PRIVATE_CHANNEL_SCHEME = "s3://"
+
+#: The validated ``[s3-options.<bucket>]`` values (ADR-0065, live-proven):
+#: ``region = "auto"`` and ``force-path-style = true`` are load-bearing for GCS
+#: interop, and the endpoint is the global ``storage.googleapis.com`` (the same
+#: host the public tier reads over — :data:`PUBLIC_CHANNEL_HOST`). These are
+#: templated DIRECTLY into the consumer's pixi TOML — never via ``pixi config
+#: set s3-options.*``, a silent no-op in pixi 0.71.0. The read credentials
+#: (``AWS_ACCESS_KEY_ID`` / ``AWS_SECRET_ACCESS_KEY`` — a GCS HMAC interop key —
+#: or a ``RATTLER_AUTH_FILE``) arrive as ENV VARS (Doppler locally, the sccache
+#: credential path in CI), never ``pixi auth login`` (unwired for S3 in 0.71.0),
+#: so they are NOT projected into the committed manifest.
+S3_OPTIONS_ENDPOINT_URL = PUBLIC_CHANNEL_HOST
+S3_OPTIONS_REGION = "auto"
+S3_OPTIONS_FORCE_PATH_STYLE = True
 
 #: The reserved pixi feature name the DEFAULT target's channel+pins land in, and
 #: the environment prefix a NAMED feature target's isolated feature/env carry.
@@ -82,10 +116,21 @@ ENVIRONMENTS_OPEN = (
 )
 ENVIRONMENTS_CLOSE = "# <<< shipit-managed artifact-dep environments <<<"
 
+#: The managed ``[s3-options]`` block's unit key. One consolidated block carries
+#: an ``[s3-options.<bucket>]`` table per DISTINCT private bucket present — a
+#: fresh reserved top-level table appended at EOF (anchor-less, like a feature
+#: block), so it never re-declares a table the consumer owns. Emitted ONLY when
+#: a private channel is projected; a purely-public consumer never gets it.
+S3_OPTIONS_KEY = f"{PIXI_FILE}#shipit-artifact-deps-s3-options"
+S3_OPTIONS_OPEN = (
+    "# >>> shipit-managed artifact-dep s3-options "
+    "(do not edit; regenerate via `shipit install`) >>>"
+)
+S3_OPTIONS_CLOSE = "# <<< shipit-managed artifact-dep s3-options <<<"
+
 
 class ArtifactChannelError(RuntimeError):
-    """A cross-repo artifact-dep cannot be projected (e.g. a private-tier
-    producing repo, which is WS04)."""
+    """A cross-repo artifact-dep cannot be projected."""
 
 
 def public_channel_url(repo_slug: str) -> str:
@@ -97,23 +142,27 @@ def public_channel_url(repo_slug: str) -> str:
     return f"{PUBLIC_CHANNEL_HOST}/{PUBLIC_ARTIFACT_BUCKET}/{repo_slug}"
 
 
+def private_channel_url(repo_slug: str) -> str:
+    """The S3-interop per-repo channel URL for a PRIVATE producing repo.
+
+    ``s3://<bucket>/<owner/name>`` (ADR-0065) — the S3-compatible conda channel
+    a consumer lists; pixi resolves it over GCS's interop endpoint using the
+    ``[s3-options.<bucket>]`` config the projection templates and the env-var
+    credentials the consumer supplies out of band.
+    """
+    return f"{PRIVATE_CHANNEL_SCHEME}{PRIVATE_ARTIFACT_BUCKET}/{repo_slug}"
+
+
 def channel_url(repo_slug: str, *, private: bool) -> str:
     """Derive the channel URL from the producing repo's visibility (ADR-0065).
 
     ``private`` is the ALREADY-resolved visibility (the verb glue reads it once
-    via ``gh.repo_is_private``); the tier is DERIVED from it, never declared.
-    WS02 serves the public tier only, so a private producing repo is refused
-    loudly with a pointer to WS04 rather than projecting an unauthenticated URL
-    that would silently fail to resolve.
+    via ``gh.repo_is_private``); the tier is DERIVED from it, never declared. A
+    public repo resolves to its authless HTTPS URL; a private one to its
+    ``s3://`` S3-interop channel (which additionally makes the projection emit
+    the ``[s3-options]`` block — see :func:`project`).
     """
-    if private:
-        raise ArtifactChannelError(
-            f"artifact-dep on `{repo_slug}`: the producing repo is PRIVATE, whose "
-            f"Artifact channel needs the private tier (S3-interop + credentials) — "
-            f"not yet supported (ARF01-WS04). Only public producing repos are "
-            f"consumable today."
-        )
-    return public_channel_url(repo_slug)
+    return private_channel_url(repo_slug) if private else public_channel_url(repo_slug)
 
 
 def _feature_name(feature: str | None) -> str:
@@ -223,6 +272,54 @@ def _environments_unit(features: Sequence[str | None]) -> Unit:
     )
 
 
+def _s3_bucket(url: str) -> str | None:
+    """The bucket of a PRIVATE (``s3://<bucket>/<repo>``) channel URL, or
+    ``None`` for a public (``https://``) one — the projection's tier probe.
+
+    The channel URL string is the tier witness: a private repo resolves to an
+    ``s3://`` channel (see :func:`private_channel_url`), so the projection reads
+    the tier off the URL without a second visibility parameter — the derivation
+    stays entirely in :func:`channel_url`.
+    """
+    if not url.startswith(PRIVATE_CHANNEL_SCHEME):
+        return None
+    return url[len(PRIVATE_CHANNEL_SCHEME) :].split("/", 1)[0]
+
+
+def _s3_options_block(buckets: Sequence[str]) -> str:
+    """One ``[s3-options.<bucket>]`` table per private bucket (ADR-0065's
+    validated GCS-interop shape), templated DIRECTLY into TOML."""
+    force = "true" if S3_OPTIONS_FORCE_PATH_STYLE else "false"
+    tables = [
+        "\n".join(
+            [
+                f"[s3-options.{_toml_key(bucket)}]",
+                f'endpoint-url = "{S3_OPTIONS_ENDPOINT_URL}"',
+                f'region = "{S3_OPTIONS_REGION}"',
+                f"force-path-style = {force}",
+            ]
+        )
+        for bucket in buckets
+    ]
+    return "\n\n".join(tables)
+
+
+def _s3_options_unit(buckets: Sequence[str]) -> Unit:
+    """The one consolidated ``[s3-options]`` block for every private bucket in
+    play — a fresh reserved top-level table appended at EOF (anchor-less)."""
+    return Unit(
+        key=S3_OPTIONS_KEY,
+        dest=PIXI_FILE,
+        kind="block",
+        content=_s3_options_block(buckets).encode("utf-8"),
+        open_marker=S3_OPTIONS_OPEN,
+        close_marker=S3_OPTIONS_CLOSE,
+        # No anchor: each `[s3-options.<bucket>]` is a fresh reserved table
+        # appended at EOF, so it never re-declares a table the consumer owns.
+        anchor=None,
+    )
+
+
 def project(resolved: Sequence[tuple[ArtifactDep, str]]) -> list[Unit]:
     """Project resolved ``(ArtifactDep, channel_url)`` pairs into managed pixi
     :class:`~shipit.install.units.Unit` blocks — the pure, network-free core.
@@ -233,6 +330,12 @@ def project(resolved: Sequence[tuple[ArtifactDep, str]]) -> list[Unit]:
     declaring no artifact pin projects nothing). The reconcile treats these
     exactly like every other managed block: idempotent reconcile-to-noop, and a
     ``version`` bump changes a feature block's inner text into a single UPDATE.
+
+    A PRIVATE channel (an ``s3://`` URL, ADR-0065) additionally emits ONE
+    consolidated ``[s3-options]`` block carrying an ``[s3-options.<bucket>]``
+    table per distinct private bucket (first-seen order) — the endpoint-url /
+    region / force-path-style config pixi's S3 backend needs, templated directly
+    into TOML. A purely-public consumer never gets that block.
     """
     if not resolved:
         return []
@@ -241,4 +344,11 @@ def project(resolved: Sequence[tuple[ArtifactDep, str]]) -> list[Unit]:
         groups.setdefault(dep.feature, []).append((dep, url))
     units = [_feature_unit(feature, pairs) for feature, pairs in groups.items()]
     units.append(_environments_unit(list(groups)))
+    buckets: list[str] = []
+    for _, url in resolved:
+        bucket = _s3_bucket(url)
+        if bucket is not None and bucket not in buckets:
+            buckets.append(bucket)
+    if buckets:
+        units.append(_s3_options_unit(buckets))
     return units

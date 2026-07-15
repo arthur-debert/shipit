@@ -31,7 +31,7 @@ def _dep(package="lexd", repo="lex-fmt/lex", version="0.19.3", feature=None):
 
 
 # --------------------------------------------------------------------------
-# Tier derivation from visibility (ADR-0065) — public only in WS02
+# Tier derivation from visibility (ADR-0065) — public HTTPS vs private S3-interop
 # --------------------------------------------------------------------------
 
 
@@ -48,9 +48,20 @@ def test_public_repo_resolves_to_the_public_url():
     )
 
 
-def test_private_repo_is_refused_pointing_at_ws04():
-    with pytest.raises(ad.ArtifactChannelError, match=r"PRIVATE.*WS04"):
-        ad.channel_url("lex-fmt/lex", private=True)
+def test_private_channel_url_is_the_s3_interop_per_repo_root():
+    assert (
+        ad.private_channel_url("phos/private")
+        == "s3://shipit-artifacts-private/phos/private"
+    )
+
+
+def test_private_repo_resolves_to_the_s3_url():
+    # WS04: a private producing repo is no longer refused — it resolves to its
+    # `s3://` S3-interop channel (ADR-0065), which drives the `[s3-options]`
+    # projection below.
+    assert ad.channel_url("phos/private", private=True) == ad.private_channel_url(
+        "phos/private"
+    )
 
 
 # --------------------------------------------------------------------------
@@ -176,6 +187,116 @@ def test_bare_safe_names_stay_unquoted():
 
 
 # --------------------------------------------------------------------------
+# Private tier (ADR-0065) — s3:// channel + the validated [s3-options] block
+# --------------------------------------------------------------------------
+
+
+def _project_private(deps):
+    return ad.project([(d, ad.channel_url(d.repo, private=True)) for d in deps])
+
+
+def test_private_dep_channel_is_the_s3_url():
+    units = _project_private([_dep(repo="phos/private")])
+    feat = next(u for u in units if u.key == "pixi.toml#shipit-artifacts")
+    inner = feat.desired_inner()
+    assert 'channels = ["s3://shipit-artifacts-private/phos/private"]' in inner
+
+
+def test_private_dep_projects_the_validated_s3_options_block():
+    units = _project_private([_dep(repo="phos/private")])
+    s3 = next(u for u in units if u.key == ad.S3_OPTIONS_KEY)
+    # Anchor-less: a fresh reserved top-level table appended at EOF.
+    assert s3.anchor is None
+    inner = s3.desired_inner()
+    assert "[s3-options.shipit-artifacts-private]" in inner
+    assert 'endpoint-url = "https://storage.googleapis.com"' in inner
+    assert 'region = "auto"' in inner
+    assert "force-path-style = true" in inner
+
+
+def test_public_dep_projects_no_s3_options_block():
+    # A purely-public consumer never gets the private-tier block.
+    units = _project([_dep()])
+    assert not any(u.key == ad.S3_OPTIONS_KEY for u in units)
+
+
+def test_one_s3_options_table_per_distinct_private_bucket():
+    # Every private repo shares the single private bucket, so however many
+    # private pins are declared, exactly ONE [s3-options.<bucket>] table appears.
+    units = _project_private(
+        [_dep(package="a", repo="phos/one"), _dep(package="b", repo="phos/two")]
+    )
+    s3 = next(u for u in units if u.key == ad.S3_OPTIONS_KEY)
+    assert s3.desired_inner().count("[s3-options.") == 1
+
+
+def test_private_blocks_splice_into_a_seed_manifest_as_valid_toml():
+    manifest = iunits.pixi_manifest_seed("downstream")
+    units = _project_private([_dep(repo="phos/private")])
+    for unit in units:
+        manifest = splice.splice_block(
+            manifest,
+            unit.desired_inner(),
+            unit.open_marker,
+            unit.close_marker,
+            unit.anchor,
+        )
+    parsed = tomllib.loads(manifest)  # must parse — no duplicate tables/keys
+    s3 = parsed["s3-options"]["shipit-artifacts-private"]
+    assert s3["endpoint-url"] == "https://storage.googleapis.com"
+    assert s3["region"] == "auto"
+    assert s3["force-path-style"] is True
+    assert parsed["feature"]["shipit-artifacts"]["channels"] == [
+        "s3://shipit-artifacts-private/phos/private"
+    ]
+
+
+def test_private_projection_embeds_no_credentials():
+    # The no-creds negative at the highest SAFE (offline) fidelity: the private
+    # channel is genuinely access-controlled precisely because the COMMITTED
+    # manifest carries NO credential material — reads need `AWS_ACCESS_KEY_ID` /
+    # `AWS_SECRET_ACCESS_KEY` (or `RATTLER_AUTH_FILE`) supplied as ENV VARS out of
+    # band (ADR-0065). If the projection ever baked a key in, a consumer would
+    # resolve without creds and the access control would be a fiction. (The LIVE
+    # no-creds-403 proof against a real GCS bucket is ADR-0065's; see PR Context.)
+    manifest = _splice_all(
+        iunits.pixi_manifest_seed("x"), _project_private([_dep(repo="phos/private")])
+    )
+    lowered = manifest.lower()
+    for secret_marker in (
+        "access-key",
+        "access_key",
+        "secret-key",
+        "secret_key",
+        "aws_",
+        "rattler_auth",
+        "password",
+    ):
+        assert secret_marker not in lowered
+
+
+def test_private_s3_options_reconcile_is_idempotent():
+    manifest = _splice_all(
+        iunits.pixi_manifest_seed("x"), _project_private([_dep(repo="phos/private")])
+    )
+    s3 = next(
+        u
+        for u in _project_private([_dep(repo="phos/private")])
+        if u.key == ad.S3_OPTIONS_KEY
+    )
+    current = splice.extract_block(manifest, s3.open_marker, s3.close_marker)
+    assert current is not None
+    assert (
+        irec.decide(
+            consumer_hash=config.content_hash(current.encode("utf-8")),
+            pristine_hash=config.content_hash(current.encode("utf-8")),
+            desired_hash=s3.desired_hash(),
+        )
+        == irec.NOOP
+    )
+
+
+# --------------------------------------------------------------------------
 # Reconcile idempotency + version bump (the managed-block contract)
 # --------------------------------------------------------------------------
 
@@ -238,13 +359,19 @@ def test_version_bump_is_a_single_update():
 
 
 def test_consumer_bucket_matches_the_producer_endpoint():
-    # The `conda` endpoint (WS01) publishes to this bucket over GCS S3-interop;
-    # the consumer reads from the same bucket's authless HTTPS mirror. If these
-    # drift, a consumer resolves against a bucket the producer never wrote to.
+    # The `conda` endpoint (WS01) publishes to these buckets over GCS S3-interop;
+    # the consumer reads from the same buckets (the public tier over its authless
+    # HTTPS mirror, the private tier over the same s3:// interop rail). If either
+    # drifts, a consumer resolves against a bucket the producer never wrote to.
     from shipit.release import publish
 
     assert ad.PUBLIC_ARTIFACT_BUCKET == publish.PUBLIC_ARTIFACT_BUCKET
+    assert ad.PRIVATE_ARTIFACT_BUCKET == publish.PRIVATE_ARTIFACT_BUCKET
     assert ad.PUBLIC_CHANNEL_HOST == publish.CONDA_S3_ENDPOINT
+    # The private-tier `[s3-options]` endpoint/region are the same GCS-interop
+    # constants the producer writes over — the S3 backend on both sides.
+    assert ad.S3_OPTIONS_ENDPOINT_URL == publish.CONDA_S3_ENDPOINT
+    assert ad.S3_OPTIONS_REGION == publish.CONDA_S3_REGION
 
 
 # --------------------------------------------------------------------------
@@ -294,15 +421,20 @@ def test_verb_stays_offline_with_no_artifact_deps(tmp_path):
     assert verb._artifact_dep_units(tmp_path, is_private=boom) == []
 
 
-def test_verb_fails_loud_on_a_private_producing_repo(tmp_path):
+def test_verb_projects_a_private_producing_repo_over_s3(tmp_path):
+    # WS04: a private producing repo now projects an s3:// channel + the
+    # [s3-options] block (was refused with a WS04 pointer in WS02).
     from shipit.verbs import install as verb
 
     _write_config(
         tmp_path,
         '[artifact-deps.phos-tool]\nrepo = "phos/private"\nversion = "1.0"\n',
     )
-    with pytest.raises(ad.ArtifactChannelError, match=r"WS04"):
-        verb._artifact_dep_units(tmp_path, is_private=lambda slug: True)
+    units = verb._artifact_dep_units(tmp_path, is_private=lambda slug: True)
+    keys = {u.key for u in units}
+    assert ad.S3_OPTIONS_KEY in keys
+    feat = next(u for u in units if u.key == "pixi.toml#shipit-artifacts")
+    assert "s3://shipit-artifacts-private/phos/private" in feat.desired_inner()
 
 
 def test_verb_fails_loud_on_a_malformed_entry(tmp_path):
