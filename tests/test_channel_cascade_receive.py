@@ -403,18 +403,54 @@ def test_receive_force_pushes_the_deterministic_bump_branch(tmp_path, rec):
     assert "pr_create" not in rec.names()  # the forced push refreshed the open PR
 
 
-def test_receive_rolls_shipit_toml_back_when_the_re_render_fails(tmp_path, rec):
-    # Atomicity: a re-render failure after the pins are written must restore the
-    # original .shipit.toml, never strand a half-edited tree (bumped pins, stale
-    # pixi block).
+def test_receive_rolls_the_whole_triple_back_when_the_re_render_fails(tmp_path, rec):
+    # Atomicity across the WHOLE bump-owned triple: `reinstall` is the real
+    # `shipit install` (MODE_TREE), which rewrites pixi.toml/pixi.lock BEFORE it
+    # can fail — so a failure that has already touched them must restore all
+    # three, not just .shipit.toml, or the tree is left pin-vs-projection
+    # desynced. The stub here mutates pixi.toml AND pixi.lock, then raises.
     root = _consumer(tmp_path)
-    before = (root / ".shipit.toml").read_text()
+    (root / "pixi.lock").write_text("version: 6\nold-lock\n")
+    before = {
+        p: (root / p).read_text() for p in (".shipit.toml", "pixi.toml", "pixi.lock")
+    }
 
-    def _boom(_root):
+    def _boom(r: Path):
+        # Simulate install's partial writes landing before the failure.
+        (r / "pixi.toml").write_text("[workspace]\nname = 'demo'\n# re-rendered\n")
+        (r / "pixi.lock").write_text("version: 6\nnew-lock\n")
         raise CascadeError("re-render failed")
 
     with pytest.raises(CascadeError, match="re-render failed"):
         cr.receive(root, "lex-fmt/lex", "0.20.1", reinstall=_boom)
 
-    assert (root / ".shipit.toml").read_text() == before  # rolled back
+    # Every bump-owned file is byte-restored to its pre-bump state.
+    for p, text in before.items():
+        assert (root / p).read_text() == text
     assert rec.calls == []  # no branch, no commit, no PR
+
+
+def test_receive_rollback_deletes_files_the_re_render_created(tmp_path, rec):
+    # A pixi.lock that did not exist before must be DELETED on rollback (the
+    # failed re-render's solve created it), not left behind as orphaned state.
+    root = _consumer(tmp_path)  # writes .shipit.toml + pixi.toml, no pixi.lock
+    assert not (root / "pixi.lock").is_file()
+
+    def _boom(r: Path):
+        (r / "pixi.lock").write_text("version: 6\n")  # created by the solve
+        raise CascadeError("re-render failed")
+
+    with pytest.raises(CascadeError, match="re-render failed"):
+        cr.receive(root, "lex-fmt/lex", "0.20.1", reinstall=_boom)
+
+    assert not (root / "pixi.lock").is_file()  # created-then-failed → removed
+
+
+def test_receive_missing_shipit_toml_is_a_clean_refusal(tmp_path, rec):
+    # A de-shipit'd repo whose cascade workflow still fires: no .shipit.toml to
+    # bump. The read must be a loud CascadeError (mapped to error: … + exit 1 by
+    # the CLI shell), never a raw FileNotFoundError traceback in the workflow log.
+    root = tmp_path  # no .shipit.toml on disk
+    with pytest.raises(CascadeError, match="no .shipit.toml"):
+        cr.receive(root, "lex-fmt/lex", "0.20.1", reinstall=lambda r: None)
+    assert rec.calls == []

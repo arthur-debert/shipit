@@ -388,8 +388,8 @@ def _default_reinstall(root: Path) -> None:
     if rc != 0:
         raise CascadeError(
             f"cascade bump: re-rendering the managed pixi block via `shipit "
-            f"install` failed (exit {rc}); not opening a PR (the .shipit.toml "
-            f"bump is rolled back by :func:`receive`, leaving the tree clean)"
+            f"install` failed (exit {rc}); not opening a PR (the bump-owned "
+            f"triple is rolled back by :func:`receive`, leaving the tree clean)"
         )
 
 
@@ -398,6 +398,39 @@ def _branch_name(payload: CascadePayload) -> str:
     slug's ``/`` and any non-``[A-Za-z0-9._-]`` char collapse to ``-``)."""
     slug = re.sub(r"[^A-Za-z0-9._-]+", "-", f"{payload.upstream}-{payload.version}")
     return f"{BRANCH_PREFIX}/{slug}"
+
+
+#: The files a bump + re-render OWN — the pin/projection/lock triple. The pins
+#: live in ``.shipit.toml``; the managed pixi BLOCK projected FROM them (its
+#: pinned version/URL) lives in ``pixi.toml``; the solve's resolution lives in
+#: ``pixi.lock``. These are the ONLY files whose content depends on the bumped
+#: version, so snapshotting this triple and restoring it fully undoes a bump.
+#: Every other file ``shipit install`` (the ``reinstall`` seam) may touch — the
+#: managed cascade workflow, policy seeds, retired deletes — is version-
+#: INDEPENDENT: a bump never changes it, and any later install re-converges it
+#: idempotently, so it is never part of a half-edited-bump hazard.
+_BUMP_OWNED: tuple[str, ...] = (config.CONFIG_NAME, "pixi.toml", "pixi.lock")
+
+
+def _snapshot(root: Path, names: tuple[str, ...]) -> dict[str, bytes | None]:
+    """Capture each named file's bytes for a rollback — ``None`` when it is
+    absent, so :func:`_restore` can delete a file the failed step created."""
+    return {
+        name: (root / name).read_bytes() if (root / name).is_file() else None
+        for name in names
+    }
+
+
+def _restore(root: Path, snapshot: dict[str, bytes | None]) -> None:
+    """Restore a :func:`_snapshot`: rewrite each captured file's bytes and delete
+    any that did not exist when the snapshot was taken (the failed step created
+    them), leaving the working tree byte-identical to the pre-bump state."""
+    for name, data in snapshot.items():
+        path = root / name
+        if data is None:
+            path.unlink(missing_ok=True)
+        else:
+            path.write_bytes(data)
 
 
 def _pr_title(payload: CascadePayload) -> str:
@@ -439,15 +472,27 @@ def receive(
     the pixi block → branch/commit/push → draft PR). An unknown upstream or an
     already-current version bumps nothing and returns a clean no-op (no write, no
     branch, no PR) — so a redundant or misdirected dispatch is inert, never a
-    corrupt ``.shipit.toml`` or an empty PR. The bump is ATOMIC: a re-render
-    (``reinstall``) that fails rolls the ``.shipit.toml`` write back before
-    propagating, so a failed run never strands a half-edited tree. Every
-    world-touching step goes through the ``git`` / ``gh`` adapters and the
-    injectable ``reinstall`` seam, so the whole flow is recorded in tests with no
-    network.
+    corrupt ``.shipit.toml`` or an empty PR. The bump is ATOMIC: the whole
+    bump-owned triple (``.shipit.toml`` + the re-render's ``pixi.toml`` /
+    ``pixi.lock``, :data:`_BUMP_OWNED`) is snapshotted BEFORE the write, and a
+    re-render (``reinstall``) that fails restores every one of them before
+    propagating — so a failed run leaves the tree byte-identical to how it was
+    found, never pin-vs-projection desynced. Every world-touching step goes
+    through the ``git`` / ``gh`` adapters and the injectable ``reinstall`` seam,
+    so the whole flow is recorded in tests with no network.
     """
     payload = parse_payload(upstream, version)
     toml_path = root / config.CONFIG_NAME
+    if not toml_path.is_file():
+        # Loud at the boundary (ADR-0030): a de-shipit'd repo whose cascade
+        # workflow still fires has no config to bump. Raise a CascadeError so the
+        # `cli_errors` shell maps it to `error: …` + exit 1, never a raw
+        # FileNotFoundError traceback in the workflow log.
+        raise CascadeError(
+            f"cascade receive: no {config.CONFIG_NAME} at {root} — the repo has "
+            f"no shipit config to bump (deleted, or the repo was de-shipit'd "
+            f"while the cascade workflow lingered)"
+        )
     text = toml_path.read_text(encoding="utf-8")
 
     result = bump_artifact_deps(text, payload)
@@ -455,16 +500,19 @@ def receive(
         # Unknown upstream or already current: nothing to write, nothing to open.
         return ReceiveResult(bumped=(), branch=None, url=None)
 
+    # Snapshot the whole bump-owned triple BEFORE the write + re-render: the
+    # re-render (`reinstall` — real `shipit install` in MODE_TREE) rewrites
+    # `pixi.toml`/`pixi.lock` and can raise AFTER some of those writes land, so a
+    # failure must restore every bump-owned file, not just `.shipit.toml` — else
+    # the tree is left pin-vs-projection desynced (the exact half-edited hazard
+    # this guards). Everything else install may touch is version-independent
+    # (see `_BUMP_OWNED`), so this triple is the complete rollback set.
+    snapshot = _snapshot(root, _BUMP_OWNED)
     toml_path.write_text(result.text, encoding="utf-8")
     try:
         reinstall(root)
     except Exception:
-        # Atomicity (the `run_receive` contract: `.shipit.toml` is never left
-        # half-edited): the pins are already written, but the re-render failed,
-        # so restore the original text before propagating. Otherwise a failed
-        # reinstall would strand the checkout with bumped pins but a stale pixi
-        # block — a partially-updated tree the operator never asked for.
-        toml_path.write_text(text, encoding="utf-8")
+        _restore(root, snapshot)
         raise
 
     cwd = str(root)

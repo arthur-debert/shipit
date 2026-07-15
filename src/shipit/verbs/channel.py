@@ -69,9 +69,11 @@ def receive_cmd(upstream: str, version: str, path: str | None) -> None:
 @cli_errors
 def run_receive(*, upstream: str, version: str, path: str | None = None) -> int:
     """Parse → bump → render. Returns an exit code (refusals map to 1 via the
-    shell). A malformed payload or an unrewritable entry raises
-    :class:`~shipit.channel.cascade_receive.CascadeError`, mapped to ``error: …``
-    + exit 1; ``.shipit.toml`` is never left half-edited."""
+    shell). A malformed payload, a missing ``.shipit.toml``, or an unrewritable
+    entry raises :class:`~shipit.channel.cascade_receive.CascadeError`, mapped to
+    ``error: …`` + exit 1; the bump-owned triple (``.shipit.toml`` + the
+    re-render's ``pixi.toml`` / ``pixi.lock``) is never left half-edited — a
+    failed re-render restores all three."""
     root = Path(path or ".").resolve()
     result = cascade_receive.receive(root, upstream, version)
     emit(result, format_receive)
