@@ -40,12 +40,17 @@ target's channel URL(s) and version pin(s), wired into an ENVIRONMENT:
   dedicated ``shipit-artifacts-<F>`` environment.
 
 Reserved ``shipit-artifacts*`` feature/env names and EOF-appended feature
-tables keep the projection collision-free: it never re-declares a table the
-consumer or another managed block already owns, and never merges into an
-existing array (which a marker block cannot do). BINDING a pin into a
-pre-existing consumer environment (an array merge on that env's feature list or
-on ``[workspace].channels``) is deliberately out of WS02 scope — see the PR
-Context handoff.
+tables keep the FEATURE/ENV projection collision-free: it never re-declares a
+feature/env table the consumer or another managed block already owns, and never
+merges into an existing array (which a marker block cannot do). The one
+non-reserved table the projection emits is the private-tier
+``[s3-options.<bucket>]`` block (ARF01-WS04): a consumer may already declare it
+by hand (the documented manual runbook), so its first splice is guarded by the
+reconcile's :class:`~shipit.install.reconcile.PixiTableConflict` — a
+pre-existing table skips the block rather than redeclaring it into an
+unparseable manifest. BINDING a pin into a pre-existing consumer environment (an
+array merge on that env's feature list or on ``[workspace].channels``) is
+deliberately out of WS02 scope — see the PR Context handoff.
 """
 
 from __future__ import annotations
@@ -118,19 +123,21 @@ ENVIRONMENTS_CLOSE = "# <<< shipit-managed artifact-dep environments <<<"
 
 #: The managed ``[s3-options]`` block's unit key. One consolidated block carries
 #: an ``[s3-options.<bucket>]`` table per DISTINCT private bucket present — a
-#: fresh reserved top-level table appended at EOF (anchor-less, like a feature
-#: block), so it never re-declares a table the consumer owns. Emitted ONLY when
-#: a private channel is projected; a purely-public consumer never gets it.
+#: top-level table appended at EOF (anchor-less, like a feature block). UNLIKE
+#: the reserved ``shipit-artifacts*`` feature tables, ``[s3-options.<bucket>]``
+#: reuses a NON-reserved name a consumer may already declare by hand (the
+#: documented manual private-tier runbook), so a first splice over a
+#: pre-existing table would REDECLARE it and make ``pixi.toml`` unparseable —
+#: the reconcile's :class:`~shipit.install.reconcile.PixiTableConflict` guard
+#: catches that ADD and skips the block, leaving the consumer's own table
+#: authoritative. Emitted ONLY when a private channel is projected; a
+#: purely-public consumer never gets it.
 S3_OPTIONS_KEY = f"{PIXI_FILE}#shipit-artifact-deps-s3-options"
 S3_OPTIONS_OPEN = (
     "# >>> shipit-managed artifact-dep s3-options "
     "(do not edit; regenerate via `shipit install`) >>>"
 )
 S3_OPTIONS_CLOSE = "# <<< shipit-managed artifact-dep s3-options <<<"
-
-
-class ArtifactChannelError(RuntimeError):
-    """A cross-repo artifact-dep cannot be projected."""
 
 
 def public_channel_url(repo_slug: str) -> str:
@@ -314,8 +321,11 @@ def _s3_options_unit(buckets: Sequence[str]) -> Unit:
         content=_s3_options_block(buckets).encode("utf-8"),
         open_marker=S3_OPTIONS_OPEN,
         close_marker=S3_OPTIONS_CLOSE,
-        # No anchor: each `[s3-options.<bucket>]` is a fresh reserved table
-        # appended at EOF, so it never re-declares a table the consumer owns.
+        # No anchor: each `[s3-options.<bucket>]` is a top-level table appended
+        # at EOF. The name is NOT in the reserved `shipit-artifacts*` namespace
+        # (the manual runbook may have declared it by hand), so a first splice
+        # over a pre-existing table would redeclare it — the reconcile's
+        # PixiTableConflict guard skips the block in that case.
         anchor=None,
     )
 

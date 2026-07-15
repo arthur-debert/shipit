@@ -18,10 +18,12 @@ import tomllib
 import pytest
 
 from shipit import config
+from shipit.install import apply as iapply
 from shipit.install import artifactdeps as ad
 from shipit.install import reconcile as irec
 from shipit.install import splice
 from shipit.install import units as iunits
+from shipit.verbs import install as verb
 
 
 def _dep(package="lexd", repo="lex-fmt/lex", version="0.19.3", feature=None):
@@ -294,6 +296,138 @@ def test_private_s3_options_reconcile_is_idempotent():
         )
         == irec.NOOP
     )
+
+
+# --------------------------------------------------------------------------
+# The table-redeclaration guard (ARF01-WS04) — a consumer's hand-written
+# [s3-options.<bucket>] table must not be redeclared into an unparseable manifest
+# --------------------------------------------------------------------------
+
+
+#: A consumer that already carries the private-tier `[s3-options.<bucket>]` table
+#: by hand (the documented manual runbook), so a first splice of the managed
+#: block would redeclare it.
+_CONSUMER_PIXI_WITH_MANUAL_S3 = iunits.pixi_manifest_seed("downstream") + (
+    "\n[s3-options.shipit-artifacts-private]\n"
+    'endpoint-url = "https://storage.googleapis.com"\n'
+    'region = "auto"\n'
+    "force-path-style = true\n"
+)
+
+
+def _reconcile_private(root):
+    units = _project_private([_dep(repo="phos/private")])
+    state = irec.gather(root, units, irec.load_retired())
+    return units, irec.reconcile(units, irec.load_retired(), state)
+
+
+def test_preexisting_s3_options_table_is_a_table_conflict(tmp_path):
+    # The redeclaration guard: a consumer who already declares
+    # [s3-options.shipit-artifacts-private] must NOT get the managed s3-options
+    # block spliced in — a second identical table header makes pixi.toml
+    # unparseable. The consumer's own table stays authoritative.
+    (tmp_path / "pixi.toml").write_text(_CONSUMER_PIXI_WITH_MANUAL_S3)
+    _units, plan = _reconcile_private(tmp_path)
+
+    assert plan.pixi_table_conflicts == (
+        irec.PixiTableConflict(
+            unit_key=ad.S3_OPTIONS_KEY,
+            tables=("s3-options.shipit-artifacts-private",),
+        ),
+    )
+    # The conflicted block never reaches the plan; the feature + env wiring does.
+    keys = {d.unit.key for d in plan.decisions}
+    assert ad.S3_OPTIONS_KEY not in keys
+    assert ad.ENVIRONMENTS_KEY in keys
+    assert "pixi.toml#shipit-artifacts" in keys
+    # Warn-only, and worded off the one formatter (never a broken write).
+    warnings = verb.format_plan_warnings(plan)
+    assert "pixi block skipped" in warnings
+    assert "s3-options.shipit-artifacts-private" in warnings
+
+
+def test_skipping_the_s3_options_conflict_keeps_pixi_toml_parseable(tmp_path):
+    # End to end: apply on a conflicted consumer leaves a pixi.toml pixi can
+    # still parse, the consumer's own table intact, and no [managed] entry for
+    # the skipped block (nothing delivered, so nothing tracked). The feature and
+    # env wiring — reserved names, no clash — still land.
+    (tmp_path / "AGENTS.md").write_text("# Downstream\n")
+    (tmp_path / "pixi.toml").write_text(_CONSUMER_PIXI_WITH_MANUAL_S3)
+    _units, plan = _reconcile_private(tmp_path)
+    iapply.apply(plan, iapply.MODE_TREE)
+
+    manifest = tomllib.loads((tmp_path / "pixi.toml").read_text(encoding="utf-8"))
+    # The consumer's hand-written table is untouched and NOT duplicated.
+    assert manifest["s3-options"]["shipit-artifacts-private"]["region"] == "auto"
+    assert (tmp_path / "pixi.toml").read_text().count(
+        "[s3-options.shipit-artifacts-private]"
+    ) == 1
+    assert ad.S3_OPTIONS_OPEN not in (tmp_path / "pixi.toml").read_text()
+    managed = config.load_managed(config.load(tmp_path / ".shipit.toml"))
+    assert ad.S3_OPTIONS_KEY not in managed
+    assert ad.ENVIRONMENTS_KEY in managed
+
+
+def test_a_spliced_s3_options_block_is_not_a_table_conflict(tmp_path):
+    # Contrast with a clean consumer: the block IS delivered, and once its
+    # markers are in, a re-reconcile reads the table as the block's own (NOOP),
+    # never as a conflict with itself.
+    (tmp_path / "AGENTS.md").write_text("# Downstream\n")
+    (tmp_path / "pixi.toml").write_text(iunits.pixi_manifest_seed("downstream"))
+    _units, plan = _reconcile_private(tmp_path)
+    assert plan.pixi_table_conflicts == ()
+    iapply.apply(plan, iapply.MODE_TREE)
+
+    _again_units, again = _reconcile_private(tmp_path)
+    assert again.pixi_table_conflicts == ()
+    s3 = next(d for d in again.decisions if d.unit.key == ad.S3_OPTIONS_KEY)
+    assert s3.action == irec.NOOP
+
+
+def test_an_unrelated_consumer_feature_table_is_no_conflict(tmp_path):
+    # The guard checks the LEAF table each block declares, not a shared
+    # super-table: a consumer `[feature.foo]` sits under the same `[feature]`
+    # super-table as the reserved `[feature.shipit-artifacts]`, but is NOT a
+    # clash — the feature block must still deliver.
+    (tmp_path / "pixi.toml").write_text(
+        iunits.pixi_manifest_seed("downstream")
+        + '\n[feature.foo.dependencies]\ncmake = "*"\n'
+    )
+    _units, plan = _reconcile_private(tmp_path)
+    assert plan.pixi_table_conflicts == ()
+    feat = next(d for d in plan.decisions if d.unit.key == "pixi.toml#shipit-artifacts")
+    assert feat.action == irec.ADD
+
+
+def test_toml_table_headers_honor_quoted_dotted_segments():
+    # A dotted segment is quoted at emission (_toml_key), so the header parser
+    # must read a quoted dot as a literal name char, not a path separator —
+    # else `[s3-options."my.bucket"]` would walk the wrong path and miss a clash.
+    inner = '[s3-options."my.bucket"]\nregion = "auto"\n\n[feature.plain]\n'
+    assert irec._toml_table_headers(inner) == (
+        ("s3-options", "my.bucket"),
+        ("feature", "plain"),
+    )
+    # Array-of-tables and non-header lines are ignored.
+    assert irec._toml_table_headers("[[x]]\nk = 1\n") == ()
+
+
+def test_table_declared_matches_only_the_full_leaf_path():
+    manifest = {"s3-options": {"shipit-artifacts-private": {"region": "auto"}}}
+    assert irec._table_declared(manifest, ("s3-options", "shipit-artifacts-private"))
+    # A shared super-table alone is NOT a declared leaf table for the block.
+    assert irec._table_declared(manifest, ("s3-options",))  # itself a table
+    assert not irec._table_declared(manifest, ("s3-options", "other"))
+    assert not irec._table_declared(manifest, ())
+
+
+def test_table_conflict_guard_fails_open_on_an_unparseable_pixi_toml(tmp_path):
+    # Best-effort like the key-conflict guard: a consumer who already broke their
+    # own TOML hears it from pixi, not from a guard that only inspects.
+    (tmp_path / "pixi.toml").write_text("[[[ not toml\n")
+    units = _project_private([_dep(repo="phos/private")])
+    state = irec.gather(tmp_path, units, irec.load_retired())
+    assert state.pixi_table_conflicts == ()
 
 
 # --------------------------------------------------------------------------
