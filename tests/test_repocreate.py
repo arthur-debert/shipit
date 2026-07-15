@@ -704,6 +704,225 @@ def test_default_installer_accepts_activated_or_no_op_hooks(
 
 
 # --------------------------------------------------------------------------
+# failure-atomic publication + Git policy (GEN01-WS05)
+#
+# The atomic-publish contract (ADR-0059) and the untouched Git policy (ADR-0062;
+# spec §"Design Decisions" and §Risks): every stage that can fail — managed
+# install, lockfile generation, the lint/test/build Checks, and the root commit
+# (missing identity, invalid signing, any other commit failure) — must return
+# non-zero, publish NOTHING, and leave the requested destination in its preflight
+# state (absent stays absent; a pre-existing empty directory stays empty) with no
+# `.shipit-repo-new-*` sibling leaked. The pre-publish recheck refuses a
+# destination that content appeared in mid-creation without replacing or merging.
+# A cleanup failure is reported ALONGSIDE the primary failure and still never
+# publishes. Exercised at both the effect seam and the public command, through
+# observable filesystem, exit-status, output, and Git outcomes.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "kwarg,label", [("installer", "install"), ("provisioner", "provision")]
+)
+def test_create_failed_stage_rolls_back_and_publishes_nothing(
+    tmp_path, git_identity, kwarg, label
+):
+    # A failure at the managed-install or lockfile-generation stage aborts before
+    # the commit ever runs: the destination is never created and the staging
+    # sibling is removed, so no initial commit lands at the requested path.
+    # (The verify/Check stage is covered by
+    # `test_create_failed_check_rolls_back_and_leaves_destination_absent`.)
+    order: list[str] = []
+    with pytest.raises(CreationError):
+        _fake_create(
+            tmp_path,
+            order,
+            **{kwarg: _Recorder(order, label, raises=CreationError(f"{label} failed"))},
+        )
+    assert not (tmp_path / "hello").exists()
+    assert list(tmp_path.iterdir()) == []  # no destination, no leaked sibling
+
+
+def test_create_commit_failure_preserves_git_policy_and_prevents_publication(
+    tmp_path, git_identity, monkeypatch
+):
+    # A commit failure — a missing identity, an INVALID SIGNING config, or any
+    # other `git commit` error — must prevent publication WITHOUT creation
+    # synthesizing an identity, disabling signing, or bypassing hooks. Creation
+    # reports the underlying git error unchanged (ADR-0062) and rolls back: the
+    # destination stays absent and the staging sibling is removed.
+    from shipit.execrun import ExecError
+
+    def failing_commit(message, *, cwd, no_verify=False):
+        # `no_verify` must stay False — creation never bypasses the hooks that a
+        # signing/identity policy runs through.
+        assert no_verify is False
+        raise ExecError(
+            ["git", "commit", "-m", message],
+            rc=128,
+            stderr="error: gpg failed to sign the data",
+        )
+
+    monkeypatch.setattr(create_mod.git, "commit_all", failing_commit)
+    with pytest.raises(ExecError) as exc:
+        _fake_create(tmp_path, [])
+    # The git error is surfaced unchanged (its own argv/message), not reworded
+    # into a synthetic success or a weakened error.
+    assert "git commit" in str(exc.value)
+    assert not (tmp_path / "hello").exists()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_create_failure_leaves_pre_existing_empty_destination_empty(
+    tmp_path, git_identity
+):
+    # The other half of the rollback contract: when the destination pre-existed
+    # as an EMPTY directory at preflight, a handled failure leaves it present and
+    # still empty (not removed, not populated with the partial staged Repo).
+    dest = tmp_path / "hello"
+    dest.mkdir()
+    order: list[str] = []
+    with pytest.raises(CreationError):
+        _fake_create(
+            tmp_path,
+            order,
+            verifier=_Recorder(order, "verify", raises=CreationError("lint failed")),
+        )
+    assert dest.is_dir()
+    assert list(dest.iterdir()) == []  # still empty
+    # Only the untouched empty destination remains — no leaked staging sibling.
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["hello"]
+
+
+def test_create_refuses_destination_that_appeared_during_creation(
+    tmp_path, git_identity
+):
+    # The concurrent-publication race: a rival creator populates the destination
+    # AFTER preflight, while the staged Repo is being verified. The pre-publish
+    # recheck (ADR-0059) must refuse rather than rename over it — the concurrent
+    # content is neither replaced nor merged into, and the staging sibling is
+    # removed.
+    dest = tmp_path / "hello"
+    order: list[str] = []
+
+    def racing_verify(root: Path) -> None:
+        order.append("verify")
+        dest.mkdir()
+        (dest / "other").write_text("concurrent", encoding="utf-8")
+
+    with pytest.raises(CreationError):
+        _fake_create(tmp_path, order, verifier=racing_verify)
+    # The rival's content survives intact; the staged Repo was NOT published over
+    # it (no Cargo.toml appeared), and no staging sibling leaked.
+    assert (dest / "other").read_text(encoding="utf-8") == "concurrent"
+    assert not (dest / "Cargo.toml").exists()
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["hello"]
+
+
+def test_create_cleanup_failure_is_reported_alongside_primary_and_never_publishes(
+    tmp_path, git_identity, monkeypatch
+):
+    # When rollback itself fails, the primary failure still propagates (nothing is
+    # published) AND the cleanup failure rides alongside it as a note (ADR-0059),
+    # so a leaked `.shipit-repo-new-*` sibling is surfaced rather than silently
+    # orphaned or mistaken for success.
+    def failing_rmtree(path, ignore_errors=False):
+        raise OSError(39, "Directory not empty")
+
+    monkeypatch.setattr(create_mod.shutil, "rmtree", failing_rmtree)
+    order: list[str] = []
+    with pytest.raises(CreationError) as exc:
+        _fake_create(
+            tmp_path,
+            order,
+            verifier=_Recorder(order, "verify", raises=CreationError("lint failed")),
+        )
+    # Nothing published: the destination never came into being.
+    assert not (tmp_path / "hello").exists()
+    # The cleanup failure is attached to the in-flight primary failure.
+    notes = getattr(exc.value, "__notes__", [])
+    assert any("could not be removed" in note for note in notes)
+    # The sibling did leak (cleanup could not remove it) — exactly what the note
+    # reports, and never a published Repo.
+    leaked = [
+        p.name for p in tmp_path.iterdir() if p.name.startswith(".shipit-repo-new-")
+    ]
+    assert leaked
+
+
+# --- WS05 through the public command ------------------------------------------
+#
+# The verb wraps `create_repo` in the shared `error:`+exit-1 shell (ADR-0030).
+# These drive the real `run_new` for a POST-preflight failure — a failed Check
+# and the concurrent-publication race — with injected effect seams (the same
+# `repo_verb.create_repo` monkeypatch the happy-path verb test uses), observing
+# exit status, the `error:` line, and the untouched filesystem.
+
+
+def _run_new_with_seams(monkeypatch, tmp_path, capsys, *, verifier):
+    """Drive the real `repo new` command with injected effect seams.
+
+    Neutralizes install/provision so no toolchain is needed and routes the given
+    ``verifier`` through the real `create_repo` (and thus the real staging,
+    commit, atomic-publish, and rollback path). Returns ``(rc, stderr)``.
+    """
+    from shipit.verbs import repo as repo_verb
+
+    order: list[str] = []
+
+    def wired(name, parent, stacks):
+        return create_repo(
+            name,
+            parent,
+            stacks,
+            installer=_Recorder(order, "install", writes="MANAGED.md"),
+            provisioner=_Recorder(order, "provision", writes="pixi.lock"),
+            verifier=verifier,
+            author_reader=lambda root: "Test Author",
+            year=2026,
+        )
+
+    monkeypatch.setattr(repo_verb, "create_repo", wired)
+    rc = repo_verb.run_new(stacks=("rust",), name="hello", parent=tmp_path)
+    return rc, capsys.readouterr().err
+
+
+def test_command_reports_failed_check_and_leaves_destination_absent(
+    tmp_path, capsys, git_identity, monkeypatch
+):
+    rc, err = _run_new_with_seams(
+        monkeypatch,
+        tmp_path,
+        capsys,
+        verifier=_Recorder(
+            [], "verify", raises=CreationError("staged Check `pixi run lint` failed")
+        ),
+    )
+    assert rc == 1
+    assert err.startswith("error:")
+    assert "pixi run lint" in err  # the failing stage is named in the output
+    assert not (tmp_path / "hello").exists()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_command_refuses_concurrent_destination_and_preserves_it(
+    tmp_path, capsys, git_identity, monkeypatch
+):
+    dest = tmp_path / "hello"
+
+    def racing_verify(root: Path) -> None:
+        dest.mkdir()
+        (dest / "other").write_text("concurrent", encoding="utf-8")
+
+    rc, err = _run_new_with_seams(monkeypatch, tmp_path, capsys, verifier=racing_verify)
+    assert rc == 1
+    assert err.startswith("error:")
+    # The concurrent content is preserved, never overwritten or merged into.
+    assert (dest / "other").read_text(encoding="utf-8") == "concurrent"
+    assert not (dest / "Cargo.toml").exists()
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["hello"]
+
+
+# --------------------------------------------------------------------------
 # identity + ignore hygiene (GEN01-WS03)
 #
 # The universal seed's consumer-owned identity (README, LICENSE, Cargo metadata)

@@ -315,8 +315,15 @@ def create_repo(
         if head is None:
             raise CreationError("Initial commit did not produce a resolvable HEAD")
         _publish(staging, dest)
-    except BaseException:
-        _cleanup(staging)
+    except BaseException as primary:
+        # Roll back on ANY handled failure, then let the primary failure keep
+        # propagating (creation still returns non-zero and publishes nothing). A
+        # cleanup failure is REPORTED ALONGSIDE the primary (ADR-0059) — attached
+        # as a note to the in-flight exception so it travels with it wherever the
+        # primary surfaces — but never converts the failure into a publish.
+        cleanup_report = _cleanup(staging)
+        if cleanup_report is not None:
+            primary.add_note(cleanup_report)
         raise
     return CreationResult(
         destination=dest,
@@ -337,16 +344,25 @@ def _publish(staging: Path, dest: Path) -> None:
     logger.info("published new Repo", extra={"destination": str(dest)})
 
 
-def _cleanup(staging: Path) -> None:
+def _cleanup(staging: Path) -> str | None:
     """Remove the temporary sibling on a handled failure; report if it cannot.
 
-    A cleanup failure never publishes the partial Repo — it is logged and the
-    original failure continues to propagate (creation still returns non-zero).
+    Returns ``None`` when the sibling is gone, or a one-line report of the
+    cleanup failure when it could not be removed. A cleanup failure never
+    publishes the partial Repo: the report is logged AND handed back to
+    :func:`create_repo` to travel alongside the primary failure (ADR-0059), while
+    the original failure continues to propagate (creation still returns
+    non-zero). A leaked ``.shipit-repo-new-*`` sibling is thus surfaced, never a
+    silent orphan and never a published Repo.
     """
     try:
         shutil.rmtree(staging, ignore_errors=False)
-    except OSError:
+        return None
+    except OSError as exc:
         logger.exception(
             "failed to remove staging directory after a creation failure",
             extra={"staging": str(staging)},
+        )
+        return (
+            f"additionally, the staging sibling {staging} could not be removed: {exc}"
         )
