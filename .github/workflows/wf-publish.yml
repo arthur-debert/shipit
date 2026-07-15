@@ -177,6 +177,14 @@ on:
       # an unskipped notify-downstreams dispatch (a real, non-rc release).
       DOWNSTREAM_DISPATCH_TOKEN:
         required: false
+      # The conda Artifact-channel endpoint's write-credential pair (ARF01-WS01
+      # #950, ADR-0065): the GCS HMAC interop key that authorizes the per-repo
+      # channel write+reindex. Optional like every endpoint token — the verb
+      # validates it only when the plan keeps an unskipped conda dispatch.
+      ARTIFACT_CHANNEL_KEY_ID:
+        required: false
+      ARTIFACT_CHANNEL_SECRET_KEY:
+        required: false
 
 # NO `permissions:` key, deliberately (per-stage dispatch, #780): a called
 # workflow's permissions can only DOWNGRADE the caller's token, so declaring
@@ -456,6 +464,8 @@ jobs:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
           OVSX_PAT: ${{ secrets.OVSX_PAT }}
           DOWNSTREAM_DISPATCH_TOKEN: ${{ secrets.DOWNSTREAM_DISPATCH_TOKEN }}
+          ARTIFACT_CHANNEL_KEY_ID: ${{ secrets.ARTIFACT_CHANNEL_KEY_ID }}
+          ARTIFACT_CHANNEL_SECRET_KEY: ${{ secrets.ARTIFACT_CHANNEL_SECRET_KEY }}
         # Scar #3 is the verb's first act (pure gate before any I/O), fed
         # the stage results AND the plan's liveness facts verbatim (issue #745
         # — the verb, never this YAML, decides that an empty-matrix

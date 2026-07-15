@@ -278,6 +278,8 @@ PUBLISH_BLOCK_SECRETS = frozenset(
         "VSCE_PAT",
         "OVSX_PAT",
         "DOWNSTREAM_DISPATCH_TOKEN",
+        "ARTIFACT_CHANNEL_KEY_ID",
+        "ARTIFACT_CHANNEL_SECRET_KEY",
     }
 )
 

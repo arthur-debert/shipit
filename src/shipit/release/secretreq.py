@@ -228,6 +228,16 @@ ENDPOINT_SECRETS: dict[str, tuple[str, ...]] = {
     # the downstreams' `contents:write`/`metadata` — declared here so
     # gh-setup syncs it and preflight validates its presence.
     "notify-downstreams": ("DOWNSTREAM_DISPATCH_TOKEN",),
+    # conda (the Artifact channel producer, ARF01-WS01 #950, ADR-0064/0065)
+    # WRITES the repackaged `.conda` + reindexed repodata to the tier's
+    # object-storage bucket, so publish needs WRITE creds to that bucket — a
+    # GCS HMAC interop key pair (ADR-0065: the channel is reached S3-compat
+    # over GCS's interop endpoint, so writes ride the same S3-interop rail the
+    # private-tier consumer reads over). The pair is the endpoint's write
+    # credential; gh-setup syncs both names and preflight validates their
+    # presence. The public bucket needs no READ creds (consumers are authless)
+    # — this write pair is the producer's, not the consumer's.
+    "conda": ("ARTIFACT_CHANNEL_KEY_ID", "ARTIFACT_CHANNEL_SECRET_KEY"),
 }
 
 #: The pypi adapter's testpypi flag adds this name to the pypi entry's
