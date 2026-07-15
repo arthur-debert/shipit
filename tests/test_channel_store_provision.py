@@ -470,6 +470,30 @@ def test_verify_scoped_not_found_marker_is_not_faked_from_the_resource_uri():
     assert not any("publish it" in n for n in report.notes)
 
 
+def test_verify_scoped_not_found_marker_is_not_faked_from_a_bare_flag_value():
+    # gcloud may echo the BARE value of a --flag=value arg (here the SA email
+    # from --impersonate-service-account=…, which contains the project name and
+    # thus the "notfound" marker) rather than the whole token. _looks_not_found
+    # must strip that bare value too, else a real denial reads as an absence.
+    # This fails if the --flag=value value-extraction is removed.
+    sa_email = sp.reader_sa_email("pnotfound")  # …@pnotfound.iam.gserviceaccount.com
+    http = {
+        sp.public_object_url("pnotfound-artifact-channel-public", "r"): 200,
+        sp.public_object_url("pnotfound-artifact-channel-private", "r"): 403,
+    }
+    report = sp.verify(
+        "pnotfound",
+        "r",
+        runner=_verify_runner(
+            scoped_ok=False,
+            scoped_stderr=f"ERROR: PERMISSION_DENIED impersonating {sa_email}",
+        ),
+        http_get=lambda url: http[url],
+    )
+    assert any("PERMISSION_DENIED" in n for n in report.notes)
+    assert not any("publish it" in n for n in report.notes)
+
+
 def test_verify_refuses_empty_project_or_repo():
     with pytest.raises(sp.ProvisionError):
         sp.verify("", "r", runner=_verify_runner(), http_get=lambda url: 200)

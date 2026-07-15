@@ -126,7 +126,7 @@ def bucket_name(project: str, tier: str) -> str:
     unknown tier (a mistyped tier must never resolve to a real bucket).
     """
     if tier not in TIERS:
-        raise ProvisionError(f"store provision: unknown tier {tier!r}")
+        raise ProvisionError(f"store: unknown tier {tier!r}")
     return f"{project}-{_BUCKET_INFIX}-{tier}"
 
 
@@ -308,7 +308,10 @@ def _load_json(text: str, what: str) -> object:
     try:
         return json.loads(text)
     except json.JSONDecodeError as exc:
-        raise ProvisionError(f"store provision: unreadable {what} JSON: {exc}") from exc
+        # Neutral "store:" prefix — this reader is shared by the verdict readers
+        # (reached from verify()), so a "store provision:" prefix would mislabel a
+        # verify-time unreadable-JSON failure as a provision failure.
+        raise ProvisionError(f"store: unreadable {what} JSON: {exc}") from exc
 
 
 def ubla_enabled(describe_json: str) -> bool:
@@ -353,23 +356,23 @@ def has_public_binding(iam_policy_json: str) -> bool:
     data = _load_json(iam_policy_json, "iam policy")
     if not isinstance(data, dict):
         raise ProvisionError(
-            f"store verify: malformed iam policy JSON: expected an object, "
+            f"store: malformed iam policy JSON: expected an object, "
             f"got {type(data).__name__}"
         )
     bindings = data.get("bindings", [])
     if not isinstance(bindings, list):
         raise ProvisionError(
-            "store verify: malformed iam policy JSON: 'bindings' is not a list"
+            "store: malformed iam policy JSON: 'bindings' is not a list"
         )
     for binding in bindings:
         if not isinstance(binding, dict):
             raise ProvisionError(
-                "store verify: malformed iam policy JSON: a binding is not an object"
+                "store: malformed iam policy JSON: a binding is not an object"
             )
         members = binding.get("members", [])
         if not isinstance(members, list):
             raise ProvisionError(
-                "store verify: malformed iam policy JSON: 'members' is not a list"
+                "store: malformed iam policy JSON: 'members' is not a list"
             )
         # Compare by == against the two literal public members — never set()/hash
         # a member, so an unhashable (malformed) element can't raise TypeError.
@@ -488,13 +491,26 @@ def _looks_not_found(result: execrun.ExecResult, argv: list[str]) -> bool:
     ``PERMISSION_DENIED`` error read as an absence.
     """
     haystack = f"{result.stderr}\n{result.stdout}".lower()
-    # Strip longest-first so a short GENERIC token ("iam", "describe") can't mangle
-    # a longer RESOURCE token (the SA email "…@proj.iam.gserviceaccount.com", the
-    # bucket URI) before that resource token — the one carrying a name that might
-    # collide with a marker — is itself stripped. Empty args are skipped: a
-    # ``str.replace("", …)`` would inject a space between every character.
-    for arg in sorted((a for a in argv if a), key=len, reverse=True):
-        haystack = haystack.replace(arg.lower(), " ")
+    # Collect the tokens to strip: every argv element, PLUS the bare value of each
+    # ``--flag=value`` arg — gcloud often echoes the bare value (the SA email, a
+    # URI) rather than the whole ``--impersonate-service-account=…`` token, and a
+    # marker inside that value (a project literally named "…notfound") must not
+    # survive to fake an absence. Empty tokens are skipped: a ``str.replace("", …)``
+    # would inject a space between every character.
+    tokens: set[str] = set()
+    for arg in argv:
+        if not arg:
+            continue
+        tokens.add(arg.lower())
+        if arg.startswith("--") and "=" in arg:
+            value = arg.split("=", 1)[1]
+            if value:
+                tokens.add(value.lower())
+    # Longest-first so a short GENERIC token ("iam", "describe") can't mangle a
+    # longer RESOURCE token before that resource token — the one carrying a name
+    # that might collide with a marker — is itself stripped.
+    for token in sorted(tokens, key=len, reverse=True):
+        haystack = haystack.replace(token, " ")
     return any(marker in haystack for marker in _NOT_FOUND_MARKERS)
 
 
