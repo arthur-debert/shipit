@@ -4,6 +4,27 @@
 
 ## Unreleased
 
+- Local **AGY reviews** are faster: the `agy` reviewer backend now runs through
+  a native reviewer agent on Gemini 3.5 Flash, cutting local review latency
+  (#989, #990).
+- `install --pr` reconcile now reliably **publishes retired-file deletions**
+  (#991, #992). The MODE_PR commit previously staged deletions into the index
+  with `git rm --cached` but then committed with a pathspec `git commit --
+  <paths>` — git's partial-commit mode, which builds the tree from the WORKING
+  TREE of the named paths and disregards the index, silently negating the
+  staged deletions. A retired file whose working-tree copy survived reappeared
+  in the commit, so every reconciled consumer kept stale files alongside their
+  replacements — most visibly the `skills/` → `.shipit-skills/` skill-store
+  move, where all 11 retired `skills/*` files were left behind. The reconcile
+  commit is now built on an **isolated scratch index** seeded from
+  `origin/<base>` (`read-tree`) into which only the managed paths are staged —
+  writes via `git add`, retired-path deletions via `git rm --cached` — and
+  published with a whole-index commit. This honors the deletions, keeps the
+  scoping that excludes unrelated dirty consumer files, and is correct
+  regardless of the Tree's cut point (a stale `shipit/install` head can no
+  longer squash unrelated commits into the reconcile), all while leaving the
+  operator's real index untouched.
+
 ## 1.2.1 - 2026-07-15
 
 - `install --pr` builds its reconcile commit from an authoritative
