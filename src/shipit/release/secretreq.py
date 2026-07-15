@@ -238,6 +238,14 @@ ENDPOINT_SECRETS: dict[str, tuple[str, ...]] = {
     # presence. The public bucket needs no READ creds (consumers are authless)
     # — this write pair is the producer's, not the consumer's.
     "conda": ("ARTIFACT_CHANNEL_KEY_ID", "ARTIFACT_CHANNEL_SECRET_KEY"),
+    # zed (the Zed-extension registry endpoint, TOL03-WS02 #973, ADR-0068)
+    # requires NOTHING: it RENDERS the `zed-industries/extensions` registry
+    # coordinates (extensions.toml bump + submodule rev) for a manually-gated
+    # registry PR and performs no cross-repo push — the tag is the release, and
+    # opening the PR into the foreign review-gated registry is a human step. An
+    # empty tuple like gh-release, so a Zed-only repo needs only the ambient
+    # RELEASE_TOKEN for the prepare push.
+    "zed": (),
 }
 
 #: The pypi adapter's testpypi flag adds this name to the pypi entry's
