@@ -208,48 +208,49 @@ def test_default_branch_probes_common_names_when_the_symref_is_absent(monkeypatc
     assert git.default_branch(cwd="/x") == "master"
 
 
-def test_has_staged_changes_is_true_when_the_cached_diff_is_nonempty(monkeypatch):
-    # #852 review: the MODE_PR "nothing to publish" guard reads a scoped
-    # `git diff --cached --quiet`. A nonzero exit means at least one pathspec
-    # differs from HEAD — there ARE staged changes.
+def test_staged_paths_scopes_the_cached_diff_and_parses_the_names(monkeypatch):
+    # #984 review: the MODE_PR commit pathspec reads a scoped
+    # `git diff --cached --name-only`, parsed to the staged names. A path the
+    # diff omits (matched nothing, or matches HEAD) simply never appears.
     seen = {}
 
     def fake(args, *, cwd):
         seen["args"] = args
-        return _fail("", rc=1)
+        return "a\n\nb/c\n"
 
-    monkeypatch.setattr(git, "_probe", fake)
-    assert git.has_staged_changes(["a", "b"], cwd="/x") is True
-    assert seen["args"] == ["diff", "--cached", "--quiet", "--", "a", "b"]
-
-
-def test_has_staged_changes_is_false_on_a_clean_index(monkeypatch):
-    # Exit 0 (the pathspecs match HEAD) means nothing is staged.
-    monkeypatch.setattr(git, "_probe", lambda args, *, cwd: _ok())
-    assert git.has_staged_changes(["a"], cwd="/x") is False
+    monkeypatch.setattr(git, "_git", fake)
+    assert git.staged_paths(["a", "b/c", "gone"], cwd="/x") == ["a", "b/c"]
+    assert seen["args"] == ["diff", "--cached", "--name-only", "--", "a", "b/c", "gone"]
 
 
-def test_has_staged_changes_surfaces_a_git_failure_rather_than_masking_it(monkeypatch):
-    # #984 review: `git diff --quiet` is three-valued — rc 0 (clean), rc 1
-    # (staged diff), rc >1 (git could not run the diff at all: bad pathspec,
-    # unreadable index). An rc >1 is a genuine failure, NOT "changes exist";
-    # collapsing it into True would mask a real git failure as a staged diff and
-    # push MODE_PR into a murkier later failure. It must surface as ExecError.
-    monkeypatch.setattr(
-        git, "_probe", lambda args, *, cwd: _fail("fatal: bad pathspec", rc=128)
-    )
+def test_staged_paths_is_empty_on_a_clean_index(monkeypatch):
+    # No staged diff for the named pathspecs — the MODE_PR "nothing to publish"
+    # case, which skips the commit rather than crashing an empty pathspec commit.
+    monkeypatch.setattr(git, "_git", lambda args, *, cwd: "")
+    assert git.staged_paths(["a"], cwd="/x") == []
+
+
+def test_staged_paths_surfaces_a_git_failure_rather_than_masking_it(monkeypatch):
+    # #984 review: unlike `--quiet` (rc 1 = diff present, rc >1 = failure),
+    # `--name-only` exits 0 on any successful diff and nonzero ONLY on a genuine
+    # failure (bad pathspec magic, unreadable index) — which `_git` raises. A
+    # real git failure can never be masked as a staged path.
+    def boom(args, *, cwd):
+        raise ExecError(args, rc=128, stdout="", stderr="fatal", duration_ms=1)
+
+    monkeypatch.setattr(git, "_git", boom)
     with pytest.raises(ExecError):
-        git.has_staged_changes(["a"], cwd="/x")
+        git.staged_paths(["a"], cwd="/x")
 
 
-def test_has_staged_changes_on_empty_paths_never_probes(monkeypatch):
-    # An empty pathspec is a vacuous "no staged changes" — never a bare unscoped
-    # `git diff --cached` that would answer for the whole index.
+def test_staged_paths_on_empty_paths_never_probes(monkeypatch):
+    # An empty pathspec is a vacuous "nothing staged" — never a bare unscoped
+    # `git diff --cached --name-only` answering for the whole index.
     def boom(*a, **k):
         raise AssertionError("must not probe on an empty pathspec")
 
-    monkeypatch.setattr(git, "_probe", boom)
-    assert git.has_staged_changes([], cwd="/x") is False
+    monkeypatch.setattr(git, "_git", boom)
+    assert git.staged_paths([], cwd="/x") == []
 
 
 def test_reset_index_unstages_everything_to_head(monkeypatch):

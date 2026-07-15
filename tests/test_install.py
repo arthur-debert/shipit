@@ -3117,6 +3117,7 @@ class _GhRecorder:
         self.commit_no_verify = None
         self.push_no_verify = None
         self.default_branch_after_fetch = None
+        self.staged_query = ()
 
     def activate_hooks(self, root):
         # Stand in for `lefthook install`: record the call, mutate nothing.
@@ -3155,13 +3156,18 @@ class _GhRecorder:
     def add(self, paths, *, cwd):
         self.calls.append(("add", tuple(paths)))
 
-    def has_staged_changes(self, paths, *, cwd):
-        # The MODE_PR "nothing to publish" guard (#852 review): after the reset
-        # onto origin/<default> the staged managed set can already match the
-        # base. A pure query (like current_branch/default_branch), so it is not
-        # recorded in `calls`. Defaults to True (the commit proceeds); a test
-        # sets `_no_staged` to exercise the clean no-op.
-        return not getattr(self, "_no_staged", False)
+    def staged_paths(self, paths, *, cwd):
+        # The MODE_PR commit pathspec (#984 review): the shipit-owned universe
+        # members that carry a staged diff against origin/<default>. A pure query
+        # (like current_branch/default_branch), so it is not recorded in `calls`;
+        # the queried universe is captured so a test can assert what the commit
+        # must carry. The real adapter reads the index — the recorder returns the
+        # whole queried set (everything staged) unless a test sets `_no_staged`
+        # to exercise the clean "nothing to publish" no-op.
+        self.staged_query = tuple(paths)
+        if getattr(self, "_no_staged", False):
+            return []
+        return sorted(paths)
 
     def reset_index(self, *, cwd):
         # The MODE_PR caller-restore unstages the soft-reset index when the
@@ -3200,7 +3206,7 @@ def rec(monkeypatch):
         "switch_create",
         "switch",
         "add",
-        "has_staged_changes",
+        "staged_paths",
         "reset_index",
         "commit",
         "push",
@@ -3357,14 +3363,49 @@ def test_pr_mode_commits_the_full_managed_universe_including_noop_units(tmp_path
     assert noop.dest in rec.commit_paths
 
 
+def test_pr_mode_commit_universe_carries_retired_paths_and_the_changelog(tmp_path, rec):
+    # #984 agy review (major): the SAME drop-out class the full-managed-universe
+    # fix closes for NOOP managed units also hits retired files, retired-hook
+    # files, and a previously-rendered CHANGELOG.md. A retired path absent at the
+    # cut point is a NOOP that never joins the write-scoped `changed_paths`, yet
+    # after the reset onto origin/<default> the index stages its deletion against
+    # a base that still carries it — so it MUST ride the commit pathspec, or the
+    # pathspec `git commit` (unlisted paths come from HEAD) silently REVERTS it
+    # to the base state in the refreshed PR. The commit is scoped to the members
+    # of the shipit-owned universe that carry a staged diff, so assert that
+    # universe — what `staged_paths` is asked about — carries the retired paths
+    # and the on-disk changelog, not just the managed writes.
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    # A previously-rendered changelog on disk that this run does NOT re-render:
+    # absent from `changed_paths`, but present on the base, so it must be carried.
+    (tmp_path / iapply.CHANGELOG_FILE).write_text("# Changelog\n")
+
+    plan = _plan(tmp_path)
+    retired_paths = {d.retired.path for d in plan.retired}
+    assert retired_paths, "the manifest must declare retired files to exercise this"
+    # Every retired entry is absent here → NOOP, so none join `changed_paths`…
+    assert retired_paths.isdisjoint(plan.changed_paths)
+    assert iapply.CHANGELOG_FILE not in plan.changed_paths
+
+    _apply(tmp_path, iapply.MODE_PR)
+    # …yet the commit universe carries every retired path, every retired-hook
+    # file, and the on-disk changelog, so the reset onto origin/<default> can
+    # never silently revert them in the refreshed PR.
+    universe = set(rec.staged_query)
+    assert retired_paths <= universe
+    assert iapply.CHANGELOG_FILE in universe
+    assert {d.retired.file for d in plan.retired_hooks} <= universe
+
+
 def test_pr_mode_reports_no_changes_when_the_managed_set_already_matches_base(
     tmp_path, rec
 ):
     # #852 review (major): after the `reset --soft origin/<default>` the staged
     # managed set can already match the base (a stale Tree duplicating an
     # already-merged reconcile). A pathspec `git commit` over an empty diff fails
-    # with "nothing to commit" (exit 1) — so apply checks `has_staged_changes`
-    # and cleanly skips the commit/PR rather than crashing the install.
+    # with "nothing to commit" (exit 1) — so apply skips the commit/PR when
+    # `staged_paths` returns no shipit-owned diff, rather than crashing the
+    # install.
     rec._no_staged = True
     (tmp_path / "AGENTS.md").write_text("# Acme\n")
     result = _apply(tmp_path, iapply.MODE_PR)

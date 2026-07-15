@@ -1007,7 +1007,7 @@ def apply(
         try:
             git.switch_create(INSTALL_BRANCH, cwd=cwd)
             git.reset_soft(f"origin/{base_branch}", cwd=cwd)
-            # Commit the FULL managed universe, not just the pre-reset writes:
+            # Stage the FULL managed universe, not just the pre-reset writes:
             # `changed_paths` is computed against the Tree's cut point, where a
             # managed file already at desired content is a NOOP and drops out of
             # the write set. After the reset onto origin/<base> that same file may
@@ -1015,20 +1015,44 @@ def apply(
             # head), so a changed_paths-only commit would silently DROP it from
             # the refreshed PR (#852 review). Staging every managed destination
             # makes the commit deterministically origin/<base> + the whole managed
-            # set, whatever HEAD the Tree was cut from — the pathspec commit still
-            # takes everything else from HEAD, so a NOOP already matching the base
-            # contributes no diff.
-            pr_paths = sorted(
+            # set, whatever HEAD the Tree was cut from. These paths are all
+            # present in the working tree (a managed write) or tracked in the
+            # index (a retired file apply deleted from the tree, carried by
+            # `changed_paths`), so `git add` resolves every one.
+            add_paths = sorted(
                 set(changed_paths) | {d.unit.dest for d in plan.decisions}
             )
-            git.add(pr_paths, cwd=cwd)
-            if not git.has_staged_changes(pr_paths, cwd=cwd):
+            git.add(add_paths, cwd=cwd)
+            # The commit pathspec must carry MORE than the writes. The SAME
+            # drop-out class hits retired files, retired-hook files, and a
+            # previously-rendered CHANGELOG.md (#984 agy review): a retired path
+            # already absent at the cut point is a NOOP that never joins
+            # `changed_paths`, yet after the reset onto origin/<base> the index
+            # still stages its difference against the base (e.g. the deletion of
+            # a retired file the base still carries). Omit it from the commit
+            # pathspec and the pathspec `git commit` — which takes UNLISTED paths
+            # from HEAD — silently REVERTS it to the base state in the refreshed
+            # PR. So widen the universe to the full shipit-owned path set, then
+            # scope the commit to the members that ACTUALLY carry a staged diff:
+            # a retired path absent from the tree, the index AND the base has
+            # nothing to carry, and `git commit` aborts on a pathspec that
+            # matches nothing (the same crash the #578 changelog phantom-drop
+            # above guards against — `git.staged_paths` never lists it).
+            universe = sorted(
+                set(add_paths)
+                | {d.retired.path for d in plan.retired}
+                | {d.retired.file for d in plan.retired_hooks}
+                | ({CHANGELOG_FILE} if (root / CHANGELOG_FILE).is_file() else set())
+            )
+            pr_paths = git.staged_paths(universe, cwd=cwd)
+            if not pr_paths:
                 # After the reset the managed set already matches origin/<base> —
-                # a stale Tree duplicating an already-merged reconcile. A pathspec
-                # `git commit` over an empty diff fails with "nothing to commit"
-                # (exit 1); report the clean no-op and skip the commit/PR rather
-                # than crashing the install (#852 review). The `finally` still
-                # restores the caller's branch.
+                # a stale Tree duplicating an already-merged reconcile. Nothing
+                # in the shipit-owned universe is staged, so a pathspec
+                # `git commit` over an empty diff would fail with "nothing to
+                # commit" (exit 1); report the clean no-op and skip the
+                # commit/PR rather than crashing the install (#852 review). The
+                # `finally` still restores the caller's branch.
                 logger.info(
                     "install PR: the managed set is already current on "
                     "origin/%s — nothing to publish",

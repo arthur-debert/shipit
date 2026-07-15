@@ -60,10 +60,10 @@ class _GhRecorder:
     def add(self, paths, *, cwd):
         pass
 
-    def has_staged_changes(self, paths, *, cwd):
-        # The MODE_PR "nothing to publish" guard (#852 review); True so the
-        # commit proceeds.
-        return True
+    def staged_paths(self, paths, *, cwd):
+        # The MODE_PR commit pathspec (#984 review); the whole queried set so
+        # the commit proceeds.
+        return sorted(paths)
 
     def reset_index(self, *, cwd):
         pass
@@ -90,7 +90,7 @@ def rec(monkeypatch):
     for name in (
         "switch_create",
         "add",
-        "has_staged_changes",
+        "staged_paths",
         "reset_index",
         "commit",
         "push",

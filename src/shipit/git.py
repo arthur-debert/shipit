@@ -879,39 +879,34 @@ def commit(
     _git([*args, "-m", message, "--", *paths], cwd=cwd)
 
 
-def has_staged_changes(paths: list[str], *, cwd: str) -> bool:
-    """Whether the index holds a staged diff for ``paths`` against HEAD.
+def staged_paths(paths: list[str], *, cwd: str) -> list[str]:
+    """The subset of ``paths`` that carry a staged diff against HEAD.
 
-    ``git diff --cached --quiet -- <paths>`` is a THREE-VALUED probe, not a
-    boolean: exit 0 means the named pathspecs match HEAD (nothing staged), exit
-    1 means at least one differs, and exit >1 means git could not run the diff
-    at all (bad pathspec, unreadable index) — a genuine failure, not an answer.
-    Collapsing >1 into "changes exist" (the old ``not …ok``) would MASK a real
-    git failure as a staged diff and push the MODE_PR flow into a murkier later
-    failure (#984 review), so an rc >1 surfaces as the transport
-    :class:`ExecError` instead.
+    ``git diff --cached --name-only -- <paths>`` — the pathspec-scoped index
+    diff, parsed to the changed names (the adapter owns output parsing, like
+    :func:`diff_name_only`). The MODE_PR staging flow reads this AFTER
+    ``reset --soft`` + ``git add`` (#984 review) to build the pathspec
+    :func:`commit` carries: the writes it just staged PLUS the deletions the
+    reset staged for retired paths the base still carries. A pathspec that
+    matches nothing in the working tree, the index AND HEAD is simply never
+    listed (``git diff`` skips it, exit 0), so the commit never receives a
+    pathspec it would abort on — unlike ``git add``/``git commit``, which fail
+    on a pathspec that matches nothing.
 
-    The MODE_PR staging flow asks this AFTER ``reset --soft`` + ``git add``
-    (#852 review): once the staging branch is reset onto ``origin/<default>``
-    the managed set can already match the base (a Tree duplicating an
-    already-merged reconcile), and a pathspec :func:`commit` over an empty diff
-    fails ``git commit`` with "nothing to commit" — so apply checks here and
-    skips the commit rather than crashing. An empty ``paths`` is a vacuous "no
-    staged changes" (never a bare unscoped diff)."""
+    An empty return means the named set already matches HEAD — the MODE_PR
+    "nothing to publish" case (the staging branch is a stale Tree duplicating an
+    already-merged reconcile), where a pathspec :func:`commit` over an empty
+    diff would otherwise crash with "nothing to commit". A genuine git failure
+    (bad pathspec magic, unreadable index) still surfaces as the transport
+    :class:`ExecError`: ``--name-only`` signals a real error through a nonzero
+    exit, not through the diff-present rc=1 that ``--quiet`` overloads, so
+    :func:`_git`'s raise-on-nonzero cannot mask one as "changes exist" (#984
+    review). An empty ``paths`` never probes (a scoped read, never a bare
+    unscoped ``git diff --cached`` answering for the whole index)."""
     if not paths:
-        return False
-    result = _probe(["diff", "--cached", "--quiet", "--", *paths], cwd=cwd)
-    if result.rc == 0:
-        return False
-    if result.rc == 1:
-        return True
-    raise ExecError(
-        result.argv,
-        rc=result.rc,
-        stdout=result.stdout,
-        stderr=result.stderr,
-        duration_ms=result.duration_ms,
-    )
+        return []
+    out = _git(["diff", "--cached", "--name-only", "--", *paths], cwd=cwd)
+    return [line for line in out.splitlines() if line.strip()]
 
 
 def reset_index(*, cwd: str) -> None:
