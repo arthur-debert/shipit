@@ -317,6 +317,45 @@ def test_reset_soft_moves_only_the_branch_pointer(monkeypatch):
     assert seen["args"] == ["reset", "--soft", "origin/main"]
 
 
+def test_rm_cached_purges_the_index_without_touching_the_working_tree(monkeypatch):
+    # #986 review: MODE_PR stages retired-path deletions from the INDEX with
+    # `git rm --cached --ignore-unmatch` — `--cached` never touches the working
+    # tree (a consumer file that reappeared at the path is preserved), and
+    # `--ignore-unmatch` makes an absent/untracked pathspec a no-op rather than
+    # the exit-128 crash `git add` would raise.
+    seen = {}
+
+    def fake(args, *, cwd, timeout=None):
+        seen["args"] = args
+        return ""
+
+    monkeypatch.setattr(git, "_git", fake)
+    git.rm_cached(["a.txt", "b/c.txt"], cwd="/x")
+    assert seen["args"] == [
+        "rm",
+        "--cached",
+        "--ignore-unmatch",
+        "--",
+        "a.txt",
+        "b/c.txt",
+    ]
+
+
+def test_rm_cached_on_empty_paths_never_shells(monkeypatch):
+    # An empty removal set is a no-op: never a bare `git rm` (which would abort
+    # with "no pathspec given"), mirroring the empty-list guard on `add`.
+    called = False
+
+    def fake(args, *, cwd, timeout=None):
+        nonlocal called
+        called = True
+        return ""
+
+    monkeypatch.setattr(git, "_git", fake)
+    git.rm_cached([], cwd="/x")
+    assert called is False
+
+
 def test_submodule_update_init_syncs_then_recursively_inits_on_the_network_bound(
     monkeypatch,
 ):

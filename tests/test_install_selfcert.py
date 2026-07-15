@@ -81,6 +81,11 @@ class _GhRecorder:
     def add(self, paths, *, cwd):
         self.calls.append(("add", tuple(paths)))
 
+    def rm_cached(self, paths, *, cwd):
+        # The MODE_PR retired-removal staging (#986 review): retired paths are
+        # purged from the index, never handed to `git add`.
+        self.calls.append(("rm_cached", tuple(paths)))
+
     def staged_paths(self, paths, *, cwd):
         # The MODE_PR commit pathspec (#984 review); a pure query, not recorded.
         # Returns the whole queried set (everything staged) so the commit
@@ -120,6 +125,7 @@ def rec(monkeypatch):
     for name in (
         "switch_create",
         "add",
+        "rm_cached",
         "staged_paths",
         "reset_index",
         "commit",
@@ -757,6 +763,7 @@ def test_healthy_install_certifies_then_opens_the_pr(tmp_path, rec):
         "switch",
         "reset",
         "add",
+        "rm_cached",
         "commit",
         "push",
         "pr_create",

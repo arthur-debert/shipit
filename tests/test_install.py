@@ -85,6 +85,25 @@ def _apply(root, mode: str = iapply.MODE_TREE, **kw) -> iapply.InstallResult:
     )
 
 
+def _apply_plan(plan, root, mode: str = iapply.MODE_TREE, **kw) -> iapply.InstallResult:
+    """apply a PRE-BUILT plan (unlike :func:`_apply`, which re-plans), so a test
+    can mutate the tree in the gather→apply window between `_plan` and `apply`.
+    The verb's PR-body renderer is injected exactly as `run()` wires it."""
+    return iapply.apply(
+        plan,
+        mode,
+        pr_body=lambda before, hooks, rerendered, pin, debt: verb.format_pr_body(
+            plan,
+            before,
+            hooks,
+            rerendered=rerendered,
+            stamped_version=pin,
+            lint_debt=debt,
+        ),
+        **kw,
+    )
+
+
 def _cert_ok(plan, root, **kw) -> selfcert.CertReport:
     """A passing certification — the injected default for tests that are not
     about self-certification (no pixi solve, no scoped lint, no launcher run)."""
@@ -3114,6 +3133,7 @@ class _GhRecorder:
         self.pr_body = None
         self.hook_activations = []
         self.commit_paths = ()
+        self.rm_cached_paths = ()
         self.commit_no_verify = None
         self.push_no_verify = None
         self.default_branch_after_fetch = None
@@ -3155,6 +3175,15 @@ class _GhRecorder:
 
     def add(self, paths, *, cwd):
         self.calls.append(("add", tuple(paths)))
+
+    def rm_cached(self, paths, *, cwd):
+        # The MODE_PR retired-removal staging (#986 review): `git rm --cached
+        # --ignore-unmatch` purges retired paths from the index so their base-side
+        # deletion is published, without ever touching the working tree. Record
+        # both the ordered call and the queried set so a test can assert which
+        # retired paths were staged for removal.
+        self.calls.append(("rm_cached", tuple(paths)))
+        self.rm_cached_paths = tuple(paths)
 
     def staged_paths(self, paths, *, cwd):
         # The MODE_PR commit pathspec (#984 review): the shipit-owned universe
@@ -3206,6 +3235,7 @@ def rec(monkeypatch):
         "switch_create",
         "switch",
         "add",
+        "rm_cached",
         "staged_paths",
         "reset_index",
         "commit",
@@ -3279,6 +3309,7 @@ def test_fresh_install_writes_set_and_opens_draft_pr(tmp_path, rec):
         "switch",
         "reset",
         "add",
+        "rm_cached",
         "commit",
         "push",
         "pr_create",
@@ -3369,16 +3400,17 @@ def test_pr_mode_commit_universe_carries_retired_deletes_noops_and_the_changelog
     # #984 review (major): the SAME drop-out class the full-managed-universe fix
     # closes for NOOP managed units also hits the retired paths and a
     # previously-rendered CHANGELOG.md. A retired path absent from `changed_paths`
-    # (or a changelog no longer on disk) whose deletion the reset stages against a
-    # base that still carries it MUST ride the commit pathspec, or the pathspec
-    # `git commit` (unlisted paths come from HEAD) silently REVERTS it to the base
-    # state — RESURRECTING the retired file in the refreshed PR. This holds for
-    # BOTH retired DELETES (pristine copy apply unlinks) AND retired NOOPS (a
-    # retired path already absent locally): both are absent after apply, and a
-    # base that still carries either needs the deletion published. The round-4
-    # filter to DELETE alone dropped the NOOP-vs-base deletions (#984 agy review),
-    # so assert the queried universe carries a DELETE, a NOOP, and the changelog
-    # even when the changelog is NOT on disk.
+    # (or a changelog no longer on disk) whose deletion is staged against a base
+    # that still carries it (via `git rm --cached` for retired paths, #986) MUST
+    # ride the commit pathspec, or the pathspec `git commit` (unlisted paths come
+    # from HEAD) silently REVERTS it to the base state — RESURRECTING the retired
+    # file in the refreshed PR. This holds for BOTH retired DELETES (pristine copy
+    # apply unlinks) AND retired NOOPS (a retired path already absent locally):
+    # both must publish the path's absence, and a base that still carries either
+    # needs the deletion published. The round-4 filter to DELETE alone dropped the
+    # NOOP-vs-base deletions (#984 agy review), so assert the queried universe
+    # carries a DELETE, a NOOP, and the changelog even when the changelog is NOT
+    # on disk.
     (tmp_path / "AGENTS.md").write_text("# Acme\n")
     # A pristine retired workflow on disk → a DELETE decision apply carries.
     victim = tmp_path / RETIRED_WORKFLOW_PATH
@@ -3425,9 +3457,6 @@ def test_pr_mode_commit_universe_excludes_a_kept_retired_file(tmp_path, rec):
     plan = _plan(tmp_path)
     assert [d.retired.path for d in plan.retire_keeps] == [RETIRED_WORKFLOW_PATH]
     assert not plan.retire_deletes
-    # The KEEP is excluded from the carried set even though other retired paths
-    # (NOOPs) are in it.
-    assert RETIRED_WORKFLOW_PATH not in {d.retired.path for d in plan.retire_carries}
 
     _apply(tmp_path, iapply.MODE_PR)
     # The KEEP path is never in the queried universe, so it can never be
@@ -3435,6 +3464,136 @@ def test_pr_mode_commit_universe_excludes_a_kept_retired_file(tmp_path, rec):
     assert RETIRED_WORKFLOW_PATH not in set(rec.staged_query)
     assert victim.is_file()
     assert "# local tweak" in victim.read_text()
+
+
+def test_pr_mode_preserves_a_consumer_file_reappearing_at_a_noop_retired_path(
+    tmp_path, rec
+):
+    # #986 codex review (critical): a retired NOOP means the path was ABSENT at
+    # gather — it does NOT prove that a file appearing there before apply is
+    # shipit's to delete. If a consumer CREATES their own file at a retired path
+    # in the gather→apply window, apply must PRESERVE it (never inspect, unlink,
+    # or `git add` it), while still publishing the base-side deletion of shipit's
+    # old copy from the index.
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+
+    # Plan while the retired path is absent → a NOOP decision.
+    plan = _plan(tmp_path)
+    noop_paths = [d.retired.path for d in plan.retired if d.action == irec.NOOP]
+    assert noop_paths, "the manifest must declare a retired path that reconciles NOOP"
+    victim_rel = noop_paths[0]
+    assert victim_rel not in {d.retired.path for d in plan.retire_deletes}
+
+    # The gather→apply window: a consumer writes their OWN (non-pristine) file at
+    # the NOOP path.
+    victim = tmp_path / victim_rel
+    victim.parent.mkdir(parents=True, exist_ok=True)
+    victim.write_text("# consumer's own file, never shipit's\n")
+
+    _apply_plan(plan, tmp_path, iapply.MODE_PR)
+
+    # apply NEVER destroyed the consumer's file…
+    assert victim.is_file()
+    assert "consumer's own file" in victim.read_text()
+    # …never staged it as a working-tree WRITE (a `git add` that would crash on an
+    # untracked path, and here would publish consumer content)…
+    add_payloads = [paths for name, paths in rec.calls if name == "add"]
+    assert all(victim_rel not in p for p in add_payloads)
+    # …yet STILL published the base-side deletion of shipit's old copy, from the
+    # index and in the commit scope.
+    assert victim_rel in rec.rm_cached_paths
+    assert victim_rel in set(rec.staged_query)
+
+
+def test_pr_mode_stages_retired_deletions_via_rm_cached_not_git_add(tmp_path, rec):
+    # #986 review (agy/copilot major): retired-path removals are staged from the
+    # INDEX with `git rm --cached --ignore-unmatch`, never handed to `git add`.
+    # `git add` on a retired path crashes when the path is absent+untracked (a
+    # consumer `git rm --cached` that left it on disk, or a file deleted unstaged
+    # in the gather→apply window) and cannot stage an unstaged deletion at all —
+    # both resurrect the retired file against the base. The index purge is a safe
+    # no-op on any of those, so it always publishes the deletion.
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    # A pristine retired workflow on disk → a DELETE decision apply carries.
+    victim = tmp_path / RETIRED_WORKFLOW_PATH
+    victim.parent.mkdir(parents=True)
+    victim.write_bytes(PRISTINE_WORKFLOW.read_bytes())
+
+    plan = _plan(tmp_path)
+    assert [d.retired.path for d in plan.retire_deletes] == [RETIRED_WORKFLOW_PATH]
+
+    _apply(tmp_path, iapply.MODE_PR)
+    # The DELETE removal was staged from the index, NOT via `git add`…
+    assert RETIRED_WORKFLOW_PATH in rec.rm_cached_paths
+    add_payloads = [paths for name, paths in rec.calls if name == "add"]
+    assert all(RETIRED_WORKFLOW_PATH not in p for p in add_payloads)
+    # …its base-side deletion still rides the commit scope…
+    assert RETIRED_WORKFLOW_PATH in set(rec.staged_query)
+    # …and apply removed the pristine copy from the working tree.
+    assert not victim.exists()
+
+
+def test_pr_mode_leaves_a_retired_path_that_became_a_directory(tmp_path, rec):
+    # #986 copilot review: if a retired DELETE path turns into a DIRECTORY in the
+    # gather→apply window, the working-tree unlink must NOT fire — it would raise
+    # IsADirectoryError and crash the install. `is_file()` is False for a
+    # directory, so apply leaves the disk alone and still publishes the base-side
+    # deletion from the index.
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    victim = tmp_path / RETIRED_WORKFLOW_PATH
+    victim.parent.mkdir(parents=True)
+    victim.write_bytes(PRISTINE_WORKFLOW.read_bytes())
+
+    plan = _plan(tmp_path)
+    assert [d.retired.path for d in plan.retire_deletes] == [RETIRED_WORKFLOW_PATH]
+
+    # The window: the pristine file is replaced by a directory at the same path.
+    victim.unlink()
+    victim.mkdir()
+    (victim / "consumer.txt").write_text("consumer content\n")
+
+    _apply_plan(plan, tmp_path, iapply.MODE_PR)
+
+    # apply did not crash and left the directory (and its contents) intact…
+    assert victim.is_dir()
+    assert (victim / "consumer.txt").read_text() == "consumer content\n"
+    # …while still staging the base-side deletion from the index.
+    assert RETIRED_WORKFLOW_PATH in rec.rm_cached_paths
+
+
+def test_pr_mode_survives_a_retired_delete_vanishing_between_is_file_and_unlink(
+    tmp_path, rec, monkeypatch
+):
+    # #986 agy review (minor, robustness): the working-tree unlink for a retired
+    # DELETE is guarded by `dest.is_file()`, but the file can still vanish in the
+    # tiny TOC/TOU window between that check and `dest.unlink()`. Without
+    # `missing_ok=True` the unlink raises FileNotFoundError and crashes the
+    # install; the guard must be idempotent. Model the race precisely by wrapping
+    # `Path.unlink` so the victim disappears the instant apply tries to remove it.
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    victim = tmp_path / RETIRED_WORKFLOW_PATH
+    victim.parent.mkdir(parents=True)
+    victim.write_bytes(PRISTINE_WORKFLOW.read_bytes())
+
+    plan = _plan(tmp_path)
+    assert [d.retired.path for d in plan.retire_deletes] == [RETIRED_WORKFLOW_PATH]
+
+    # The file is present through gather AND the `is_file()` check, then vanishes
+    # in the window: the first unlink of the victim finds it already gone.
+    real_unlink = Path.unlink
+
+    def _racy_unlink(self, missing_ok=False):
+        if self == victim and victim.exists():
+            real_unlink(victim)  # a concurrent process removed it in the window
+        return real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", _racy_unlink)
+
+    # apply must NOT crash on the missing-file unlink…
+    _apply_plan(plan, tmp_path, iapply.MODE_PR)
+
+    # …and still stages the base-side deletion from the index.
+    assert RETIRED_WORKFLOW_PATH in rec.rm_cached_paths
 
 
 def test_pr_mode_universe_excludes_a_noop_retired_hook_file(tmp_path, rec, monkeypatch):
@@ -4035,6 +4194,7 @@ def test_pr_mode_on_virgin_repo_with_lint_debt_reaches_the_pr_leg(tmp_path, rec)
         "switch",
         "reset",
         "add",
+        "rm_cached",
         "commit",
         "push",
         "pr_create",
@@ -4968,20 +5128,18 @@ def test_plan_retired_decides_every_manifest_entry():
     ]
 
 
-def test_retire_carries_files_keep_noop_asymmetry_from_hooks():
-    # #984 review: retired FILES and retired HOOKS carry DIFFERENTLY.
-    # Files: the universe carries the paths apply left ABSENT locally — DELETE
-    # (pristine copy unlinked) AND NOOP (already gone) — so a base still carrying
-    # either has its deletion published, never resurrected. Only KEEP (a
-    # preserved locally-modified file) is excluded.
-    retired = irec.plan_retired(
-        [
-            irec.RetiredFile(path="del.yml", pristine_hashes=("h1",)),
-            irec.RetiredFile(path="keep.yml", pristine_hashes=("h2",)),
-            irec.RetiredFile(path="noop.yml", pristine_hashes=("h3",)),
-        ],
-        {"del.yml": "h1", "keep.yml": "edited", "noop.yml": None},
-    )
+def test_retire_hook_deletes_carries_delete_only_never_noop():
+    # #984 round-6 / #986: retired FILES and retired HOOKS carry DIFFERENTLY, and
+    # the hook side is the surviving Plan-level rule — `retire_hook_deletes` names
+    # ONLY the files apply REWROTE (the DELETE decisions), NEVER a NOOP. A
+    # retired-hook NOOP does not mean the hook file is absent (only that the
+    # legacy entry was not found); the file may still hold unrelated consumer
+    # edits, so carrying a NOOP hook file would leak them into the PR. The FILE
+    # side of the asymmetry (a retired DELETE *and* NOOP carried, KEEP excluded)
+    # is no longer a `Plan.retire_carries` enumeration but apply's own recorded
+    # touched-set (#986), proven observably by the MODE_PR tests above
+    # (test_pr_mode_commit_universe_carries_retired_deletes_noops_and_the_changelog,
+    # _excludes_a_kept_retired_file, _universe_excludes_a_noop_retired_hook_file).
     hooks = irec.plan_retired_hooks(
         [
             irec.RetiredHook(file=".claude/settings.json", event="X", marker="gone"),
@@ -4996,20 +5154,13 @@ def test_retire_carries_files_keep_noop_asymmetry_from_hooks():
     plan = irec.Plan(
         root="/x",
         decisions=(),
-        retired=tuple(retired),
+        retired=(),
         seeds=(),
         retired_hooks=tuple(hooks),
     )
 
-    assert {d.retired.path for d in plan.retire_carries} == {"del.yml", "noop.yml"}
-    assert "keep.yml" not in {d.retired.path for d in plan.retire_carries}
-    # Hooks: the universe carries ONLY the files apply REWROTE — the DELETE
-    # decisions (`retire_hook_deletes`), NOT the NOOP. A retired-hook NOOP does
-    # not mean the hook file is absent (only that the legacy entry was not
-    # found); the file may still hold unrelated consumer edits, so carrying a
-    # NOOP hook file would leak them into the PR (#984 round-6 review). Here the
-    # `gone` entry is NOOP and the `present` entry is DELETE, over the same file
-    # → the file is carried by the DELETE, and only once.
+    # Here the `gone` entry is NOOP and the `present` entry is DELETE, over the
+    # same file → the file is carried by the DELETE, and only once.
     assert [d.action for d in plan.retired_hooks] == [irec.NOOP, irec.DELETE]
     assert {d.retired.file for d in plan.retire_hook_deletes} == {
         ".claude/settings.json"
@@ -5323,9 +5474,12 @@ def test_pr_install_commits_the_retired_deletion_and_reports_it(tmp_path, rec):
     assert RETIRED_WORKFLOW_PATH in plan.changed_paths
     _apply(tmp_path, iapply.MODE_PR)
     assert not victim.exists()
-    # The deleted path is staged with the rest of the set, so the PR carries it.
+    # The retired deletion is staged from the INDEX via `git rm --cached` (#986),
+    # never handed to `git add` (which would crash on an absent/untracked
+    # pathspec), so the PR carries the removal without risking a failed stage.
     added = next(paths for name, paths in rec.calls if name == "add")
-    assert RETIRED_WORKFLOW_PATH in added
+    assert RETIRED_WORKFLOW_PATH not in added
+    assert RETIRED_WORKFLOW_PATH in rec.rm_cached_paths
     assert "### Retired files removed" in rec.pr_body
     assert RETIRED_WORKFLOW_PATH in rec.pr_body
 
