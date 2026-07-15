@@ -21,6 +21,12 @@ registry:
               syntax-checks it (ruby -c), and pushes it to the
               homebrew-tools tap. Stable channel only — a prerelease never
               moves the tap formula. An unchanged formula is a no-op push.
+- conda       DERIVED endpoint (Artifact channel): repackages each final
+              release binary into a versioned `.conda` (rattler-build) and
+              pushes+reindexes the producing repo's per-repo channel in a
+              public bucket. Supported subdirs osx-arm64/linux-64/
+              linux-aarch64/win-64 only. rc-inclusive; idempotent via
+              re-upload+reindex.
 
 The stage-wide invariants live in the VERB, so they hold identically for
 the wf-publish workflow block and a laptop invocation:

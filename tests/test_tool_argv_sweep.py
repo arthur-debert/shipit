@@ -88,6 +88,9 @@ def _parsed(path: pathlib.Path) -> ast.Module:
 #:   (TOL01-WS03): the script head is assembled ONLY in the closed harness
 #:   registry (:mod:`shipit.tools.e2e`); a declared ``e2e.harness`` argv is
 #:   consumer DATA, never a second assembly point.
+#: - ``rattler-build`` — the conda endpoint's packager (ARF01-WS01 #950):
+#:   ``rattler-build build``/``publish`` assembled ONLY in the closed
+#:   endpoint-adapter registry (:mod:`shipit.release.publish`).
 _ADAPTER_HOMES: dict[str, tuple[str, ...]] = {
     "gh": ("gh.py",),
     "git": ("git.py",),
@@ -131,6 +134,11 @@ _ADAPTER_HOMES: dict[str, tuple[str, ...]] = {
     # `npm publish` extend those tools' home lists above.
     "twine": ("release/publish.py",),
     "ruby": ("release/publish.py",),
+    # The conda endpoint (ARF01-WS01 #950): rattler-build `build` (repackage
+    # a final release binary into a `.conda`) + `publish` (push+reindex the
+    # per-repo Artifact channel) are assembled ONLY in the closed
+    # endpoint-adapter registry.
+    "rattler-build": ("release/publish.py",),
     # The VS Code marketplace path (TOL02-WS13 #789): vsce/ovsx are the
     # consumer's node_modules/.bin devDependencies, never PATH binaries, so
     # they ride `npm exec -- vsce/ovsx ...` — the argv HEAD is `npm` (covered by

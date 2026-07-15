@@ -19,6 +19,7 @@ import json
 from pathlib import Path
 
 import pytest
+import yaml
 
 from shipit import config, execrun
 from shipit.release import ReleaseError
@@ -319,25 +320,31 @@ def test_is_live_fire(version, live):
 
 def test_registry_mirrors_the_config_endpoint_set_and_stages():
     """The closed registry: exactly the config boundary's ENDPOINTS (now
-    including the two VS Code marketplace endpoints, TOL02-WS13, and the
-    notify-downstreams cascade, TOL02-WS16); brew + notify-downstreams the
-    derived entries and the stable-only pair (#792), gh-release the one the RC
-    guard keeps."""
+    including the two VS Code marketplace endpoints, TOL02-WS13, the
+    notify-downstreams cascade, TOL02-WS16, and the conda Artifact-channel
+    producer, ARF01-WS01); brew + notify-downstreams + conda the derived
+    entries; brew + notify-downstreams the stable-only pair (#792 — conda is
+    rc-inclusive, ADR-0064); gh-release the one the RC guard keeps."""
     assert publish_mod.names() == config.ENDPOINTS
     assert [a.name for a in publish_mod.ADAPTERS if a.stage == "derived"] == [
         "brew",
         "notify-downstreams",
+        "conda",
     ]
     assert [a.name for a in publish_mod.ADAPTERS if not a.external] == ["gh-release"]
+    # conda is external (a -release-rc live-fire stays gh-release-only) but NOT
+    # stable_only — a plain prerelease still publishes it (rc-inclusive).
     assert [a.name for a in publish_mod.ADAPTERS if a.stable_only] == [
         "brew",
         "notify-downstreams",
     ]
     # The repo-reading endpoints: brew (asset URLs) + notify-downstreams
-    # (dispatch payload) — the verb resolves the source slug only for these.
+    # (dispatch payload) + conda (per-repo channel root) — the verb resolves the
+    # source slug only for these.
     assert [a.name for a in publish_mod.ADAPTERS if a.needs_repo] == [
         "brew",
         "notify-downstreams",
+        "conda",
     ]
     # The marketplace endpoints are external (RC-guarded) release-stage entries.
     assert {"vscode-marketplace", "open-vsx"} <= {a.name for a in publish_mod.ADAPTERS}
@@ -1964,3 +1971,378 @@ def test_notify_downstreams_secret_mirrors_the_derivation_authority():
     assert adapter is not None
     assert adapter.secrets == secretreq_mod.ENDPOINT_SECRETS["notify-downstreams"]
     assert adapter.stable_only and adapter.stage == "derived"
+
+
+# --------------------------------------------------------------------------
+# conda (derived) — the Artifact channel producer (ARF01-WS01 #950)
+# --------------------------------------------------------------------------
+
+LINUX_ARM = "aarch64-unknown-linux-gnu"
+WIN = "x86_64-pc-windows-msvc"
+MUSL = "x86_64-unknown-linux-musl"
+
+
+def test_conda_subdir_maps_served_and_drops_unserved():
+    """The closed four-subdir matrix (ADR-0064): the served triples map, the
+    unserved ones (osx-64, musl) are None — no invented subdir, matching
+    today's `provision` refusal for Intel-mac / musl."""
+    assert publish_mod.conda_subdir(MAC_ARM) == "osx-arm64"
+    assert publish_mod.conda_subdir(LINUX) == "linux-64"
+    assert publish_mod.conda_subdir(LINUX_ARM) == "linux-aarch64"
+    assert publish_mod.conda_subdir(WIN) == "win-64"
+    assert publish_mod.conda_subdir(MAC_X64) is None  # osx-64 unserved
+    assert publish_mod.conda_subdir(MUSL) is None  # musl unserved
+
+
+def test_conda_assets_selects_served_archives_by_known_name():
+    """The endpoint repackages the release stage's KNOWN archive names
+    (`<artifact>-<triple>.tar.gz`/`.zip`), not a scrape: served triples land
+    under their subdir; unserved archives and non-archives are dropped."""
+    names = [
+        f"lex-{MAC_ARM}.tar.gz",
+        f"lex-{LINUX}.tar.gz",
+        f"lex-{WIN}.zip",
+        f"lex-{MAC_X64}.tar.gz",  # osx-64 — unserved, dropped
+        f"lex-{MUSL}.tar.gz",  # musl — unserved, dropped
+        "lex-1.0.0.whatever",  # not an archive
+        "sibling-x86_64-pc-windows-msvc.zip",  # other artifact's prefix
+    ]
+    assets = publish_mod.conda_assets("lex", names)
+    assert assets == {
+        "osx-arm64": (MAC_ARM, f"lex-{MAC_ARM}.tar.gz"),
+        "linux-64": (LINUX, f"lex-{LINUX}.tar.gz"),
+        "win-64": (WIN, f"lex-{WIN}.zip"),
+    }
+
+
+def test_conda_package_name_is_the_lowercased_main_binary():
+    """The conda package name doubles as the consumer's `[artifact-deps.<key>]`
+    key (ADR-0064) — the artifact's main-binary name, lowercased to the conda
+    package-name vocabulary."""
+    artifact = _artifacts({"lex": {"endpoints": ["conda"], "main-binary": "LexD"}})[0]
+    assert publish_mod.conda_package_name(artifact) == "lexd"
+
+
+def test_conda_package_name_rejects_a_conda_invalid_derived_name():
+    """A derived name outside the conda vocabulary — a scoped wasm-pack identity
+    (`@scope/name`) or a spaced `product-name` — is a loud ReleaseError pointing
+    at the config fix, never handed to rattler-build as a doomed build."""
+    scoped = _artifacts({"lex": {"endpoints": ["conda"], "main-binary": "@scope/lex"}})[
+        0
+    ]
+    with pytest.raises(ReleaseError, match="not a valid conda package name"):
+        publish_mod.conda_package_name(scoped)
+    spaced = _artifacts({"lex": {"endpoints": ["conda"], "product-name": "My Tool"}})[0]
+    with pytest.raises(ReleaseError, match="not a valid conda package name"):
+        publish_mod.conda_package_name(spaced)
+
+
+def test_render_conda_recipe_repackages_the_prebuilt_binary():
+    """The recipe extracts the local release archive and copies the prebuilt
+    binary onto PATH under $PREFIX — unix into bin, windows into Scripts (the
+    layout is data, the single-runner repackage runs the copy in the host
+    shell)."""
+    unix = publish_mod.render_conda_recipe(
+        package="lexd",
+        version="1.2.3",
+        archive_path="/stage/lexd-aarch64-apple-darwin.tar.gz",
+        source_binary="lexd",
+        install_dir="bin",
+        install_binary="lexd",
+    )
+    assert "name: lexd" in unix
+    assert 'version: "1.2.3"' in unix
+    # The archive path is quoted (survives spaces / `#`) — see the as_posix +
+    # quote fix so a Windows-native or spaced staging path stays one scalar.
+    assert '- path: "/stage/lexd-aarch64-apple-darwin.tar.gz"' in unix
+    assert 'cp "lexd" "${PREFIX}/bin/lexd"' in unix
+    # windows layout: the .exe copied into Scripts (on the win conda PATH).
+    src, install_dir, install_bin = publish_mod._conda_binary_layout("win-64", "lexd")
+    assert (src, install_dir, install_bin) == ("lexd.exe", "Scripts", "lexd.exe")
+    win = publish_mod.render_conda_recipe(
+        package="lexd",
+        version="1.2.3",
+        archive_path="/stage/lexd-x86_64-pc-windows-msvc.zip",
+        source_binary=src,
+        install_dir=install_dir,
+        install_binary=install_bin,
+    )
+    assert 'cp "lexd.exe" "${PREFIX}/Scripts/lexd.exe"' in win
+
+
+def test_render_conda_recipe_escapes_the_archive_path_scalar():
+    """The path scalar is JSON-escaped (a JSON string IS a valid YAML 1.2
+    double-quoted scalar), so a staging path bearing a `"` or `\\` renders as
+    valid YAML that parses back to the EXACT path — bare-quote concatenation
+    would break the recipe or silently re-point the source."""
+    weird = '/weird/pa"th\\dir/lexd.tar.gz'
+    recipe = publish_mod.render_conda_recipe(
+        package="lexd",
+        version="1.2.3",
+        archive_path=weird,
+        source_binary="lexd",
+        install_dir="bin",
+        install_binary="lexd",
+    )
+    # Round-trips through a real YAML parser to the exact input path.
+    doc = yaml.safe_load(recipe)
+    assert doc["source"][0]["path"] == weird
+
+
+class _CondaBuildRecorder(SeamRecorder):
+    """A recorded Exec seam that also MATERIALIZES rattler-build's output — a
+    `rattler-build build` writes the `.conda` its `--output-dir`/`--target-
+    platform` name, so the adapter's post-build glob finds a package (as a live
+    build would) without a real build."""
+
+    def __call__(self, argv, cwd, env=None):
+        argv_s = [str(a) for a in argv]
+        if argv_s[:2] == ["rattler-build", "build"]:
+            out = Path(argv_s[argv_s.index("--output-dir") + 1])
+            subdir = argv_s[argv_s.index("--target-platform") + 1]
+            pkg_dir = out / subdir
+            pkg_dir.mkdir(parents=True, exist_ok=True)
+            (pkg_dir / "lex-1.2.3-h0_0.conda").write_bytes(b"fake-conda")
+        return super().__call__(argv, cwd, env)
+
+
+def _conda_request(tmp_path, *, env=None, assets=None):
+    _staged_assets(
+        tmp_path,
+        assets
+        if assets is not None
+        else [
+            f"lex-{MAC_ARM}.tar.gz",
+            f"lex-{LINUX}.tar.gz",
+            f"lex-{WIN}.zip",
+            f"lex-{MAC_X64}.tar.gz",  # unserved — never packaged
+        ],
+    )
+    artifact = _artifacts({"lex": {"build": ["rust"], "endpoints": ["conda"]}})[0]
+    run_cmd = _CondaBuildRecorder()
+    req = _request(
+        tmp_path,
+        artifact,
+        env=env
+        if env is not None
+        else {
+            "ARTIFACT_CHANNEL_KEY_ID": "chan-key-id",
+            "ARTIFACT_CHANNEL_SECRET_KEY": "chan-secret-key",
+        },
+        run_cmd=run_cmd,
+    )
+    return req, run_cmd
+
+
+def test_conda_builds_each_served_subdir_and_publishes_the_channel(tmp_path):
+    req, run_cmd = _conda_request(tmp_path)
+
+    published = publish_mod._publish_conda(req)
+
+    builds = [
+        argv for argv, _, _ in run_cmd.calls if argv[:2] == ("rattler-build", "build")
+    ]
+    # One build per SERVED subdir (osx-64 dropped), each targeting its subdir.
+    built_subdirs = sorted(argv[argv.index("--target-platform") + 1] for argv in builds)
+    assert built_subdirs == ["linux-64", "osx-arm64", "win-64"]
+    for argv in builds:
+        assert (
+            "--package-format" in argv
+            and argv[argv.index("--package-format") + 1] == "conda"
+        )
+        assert ("--test", "native") == (
+            argv[argv.index("--test")],
+            argv[argv.index("--test") + 1],
+        )
+    # One publish (upload + reindex) of the built packages to the per-repo
+    # S3 channel, with the S3 endpoint/region/creds on the ENV, never argv.
+    publishes = [
+        (argv, env)
+        for argv, _, env in run_cmd.calls
+        if argv[:2] == ("rattler-build", "publish")
+    ]
+    assert len(publishes) == 1
+    pub_argv, pub_env = publishes[0]
+    assert pub_argv[:3] == ("rattler-build", "publish", "--to")
+    assert pub_argv[3] == "s3://shipit-artifacts-public/acme/widget"
+    assert "--force" in pub_argv
+    # The three built .conda files ride as positionals.
+    assert sum(1 for a in pub_argv if a.endswith(".conda")) == 3
+    assert pub_env[publish_mod.CONDA_S3_ENDPOINT_ENV] == publish_mod.CONDA_S3_ENDPOINT
+    assert pub_env[publish_mod.CONDA_S3_REGION_ENV] == "auto"
+    assert pub_env[publish_mod.CONDA_S3_KEY_ID_ENV] == "chan-key-id"
+    assert pub_env[publish_mod.CONDA_S3_SECRET_KEY_ENV] == "chan-secret-key"
+    # The HMAC secret NEVER rides argv (it is env-only, redactor-registered).
+    assert not any("chan-secret-key" in a for a in pub_argv)
+    assert any("published 3 package(s)" in a for a in published.actions)
+
+
+def test_conda_recipe_source_path_matches_the_archive_staging_dir(tmp_path):
+    """The rendered build script copies the binary from the archive's
+    top-level `<artifact>-<triple>/` staging dir — the contract
+    `bundle._compose_archive` emits (`Composed(..., (archive, f"{stem}/"))`,
+    stem == `<artifact>-<triple>`). rattler-build extracts preserving that
+    dir, so copying just `<binary>` from the archive root would miss the file.
+    """
+    req, _ = _conda_request(tmp_path)
+
+    publish_mod._publish_conda(req)
+
+    recipe_root = req.assets_dir / publish_mod.CONDA_RECIPE_SCRATCH / req.artifact.name
+    # osx-arm64 (unix): binary staged at `lex-<triple>/lex`, copied into bin.
+    # The dir prefix IS the archive stem `lex-<triple>` (the `.tar.gz` staging
+    # subdir), never the archive root.
+    unix_recipe = (recipe_root / "osx-arm64" / "recipe.yaml").read_text()
+    assert f'cp "lex-{MAC_ARM}/lex" "${{PREFIX}}/bin/lex"' in unix_recipe
+    # win-64: the `.exe` staged at `lex-<triple>/lex.exe`, copied into Scripts.
+    win_recipe = (recipe_root / "win-64" / "recipe.yaml").read_text()
+    assert f'cp "lex-{WIN}/lex.exe" "${{PREFIX}}/Scripts/lex.exe"' in win_recipe
+
+
+def test_conda_scratch_is_namespaced_per_artifact(tmp_path):
+    """`assets_dir` is stage-wide, so the recipe/channel scratch trees are
+    rooted under the artifact name — a second conda artifact's post-build glob
+    must never capture this one's `.conda` files (cross-artifact leak)."""
+    req, _ = _conda_request(tmp_path)
+
+    publish_mod._publish_conda(req)
+
+    recipe_root = req.assets_dir / publish_mod.CONDA_RECIPE_SCRATCH
+    channel_root = req.assets_dir / publish_mod.CONDA_CHANNEL_SCRATCH
+    # The subdir trees live UNDER `<scratch>/<artifact>/`, not directly under
+    # the shared `<scratch>/` — so a sibling artifact gets its own root.
+    assert (recipe_root / req.artifact.name / "osx-arm64" / "recipe.yaml").is_file()
+    assert (channel_root / req.artifact.name / "osx-arm64").is_dir()
+    assert not (recipe_root / "osx-arm64").exists()
+    assert not (channel_root / "osx-arm64").exists()
+
+
+def test_conda_without_served_archives_refuses(tmp_path):
+    """An unserved-only asset set (osx-64 / musl) publishes nothing — a loud
+    refusal, never a silent empty publish."""
+    req, _ = _conda_request(
+        tmp_path, assets=[f"lex-{MAC_X64}.tar.gz", f"lex-{MUSL}.tar.gz"]
+    )
+    with pytest.raises(ReleaseError, match="no release archive maps to a served"):
+        publish_mod._publish_conda(req)
+
+
+def test_conda_refuses_an_unresolved_source_repo(tmp_path):
+    """The per-repo channel root is `<bucket>/<owner/name>`; a direct caller
+    that omits the slug gets a loud ReleaseError, never a mis-rooted write."""
+    _staged_assets(tmp_path, [f"lex-{MAC_ARM}.tar.gz"])
+    artifact = _artifacts({"lex": {"endpoints": ["conda"]}})[0]
+    req = _request(
+        tmp_path,
+        artifact,
+        env={
+            "ARTIFACT_CHANNEL_KEY_ID": "chan-key-id",
+            "ARTIFACT_CHANNEL_SECRET_KEY": "chan-secret-key",
+        },
+        repo=None,
+    )
+    with pytest.raises(ReleaseError, match="no source repo resolved"):
+        publish_mod._publish_conda(req)
+
+
+def test_conda_requires_the_write_credentials(tmp_path):
+    """The write HMAC pair is the endpoint's secret — a missing key is one loud
+    refusal (the adapter-local belt; the verb validates the plan's tokens
+    first)."""
+    req, _ = _conda_request(tmp_path, env={"ARTIFACT_CHANNEL_KEY_ID": "chan-key-id"})
+    with pytest.raises(ReleaseError, match="ARTIFACT_CHANNEL_SECRET_KEY"):
+        publish_mod._publish_conda(req)
+
+
+def test_conda_secret_pair_mirrors_the_derivation_authority():
+    """conda's write-cred pair IS its `secretreq.ENDPOINT_SECRETS` entry — the
+    one derivation authority gh-setup syncs and preflight validates."""
+    adapter = publish_mod.adapter_for("conda")
+    assert adapter is not None
+    assert adapter.secrets == secretreq_mod.ENDPOINT_SECRETS["conda"]
+    assert (publish_mod.CONDA_KEY_ID_SECRET, publish_mod.CONDA_SECRET_KEY_SECRET) == (
+        secretreq_mod.ENDPOINT_SECRETS["conda"]
+    )
+    # rc-inclusive: external (a -release-rc stays gh-release-only) but not
+    # stable_only, so a plain prerelease still publishes.
+    assert adapter.stage == "derived" and adapter.external and not adapter.stable_only
+    assert adapter.needs_repo
+
+
+def test_plan_prerelease_keeps_conda_but_a_live_fire_skips_it():
+    """rc-inclusive (ADR-0064): a plain prerelease publishes conda (unlike brew,
+    which is stable_only); a -release-rc live-fire cut skips it (external)."""
+    artifacts = _artifacts({"lex": {"endpoints": ["gh-release", "brew", "conda"]}})
+    pre = publish_mod.plan(artifacts, prerelease=True, live_fire=False)
+    verdicts = {d.adapter.name: d.skip for d in pre}
+    assert verdicts["conda"] is None  # rc-inclusive — published
+    assert verdicts["brew"] == publish_mod.SKIP_STABLE_ONLY  # stable-only — skipped
+    live = publish_mod.plan(artifacts, prerelease=True, live_fire=True)
+    assert {d.adapter.name: d.skip for d in live}["conda"] == publish_mod.SKIP_RC_GUARD
+
+
+def test_plan_conda_alone_refuses_without_an_unskipped_gh_release():
+    """conda inherits the gh-release-must-exist invariant (ADR-0064): a channel
+    package for a version with no landed GitHub release advertises a release
+    that never existed — a hard plan refusal, mirroring brew/notify."""
+    artifacts = _artifacts({"lex": {"endpoints": ["conda"]}})
+    with pytest.raises(ReleaseError, match="a conda endpoint publishes"):
+        publish_mod.plan(artifacts, prerelease=False, live_fire=False)
+
+
+def test_plan_conda_live_fire_skip_never_trips_the_gh_release_invariant():
+    """The invariant reads the UNSKIPPED set: a -release-rc live-fire skips
+    conda (external), so a plan without a separate gh-release still holds —
+    conda publishes nothing to strand."""
+    artifacts = _artifacts({"lex": {"endpoints": ["gh-release", "conda"]}})
+    dispatched = publish_mod.plan(artifacts, prerelease=True, live_fire=True)
+    verdicts = {d.adapter.name: d.skip for d in dispatched}
+    assert verdicts["conda"] == publish_mod.SKIP_RC_GUARD
+    assert verdicts["gh-release"] is None
+
+
+def test_missing_rattler_build_gets_the_reconcile_remedy(tmp_path, monkeypatch, capsys):
+    """A missing `rattler-build` (the rust-release-deps block absent from the
+    runner) names the block's COMMITTING install reconcile — never a raw 127,
+    the #801 translation applied to the conda endpoint."""
+    _publish_repo(
+        tmp_path,
+        monkeypatch,
+        toml="""
+[toolchains]
+"." = "rust"
+
+[artifacts.lex]
+build = ["rust"]
+endpoints = ["gh-release", "conda"]
+""",
+        assets=[f"lex-{MAC_ARM}.tar.gz"],
+    )
+
+    def _seam(argv, cwd, env=None):
+        # gh-release rides the gh adapter (FakeGh), so the FIRST run_cmd tool is
+        # rattler-build — die missing-binary on it.
+        if [str(a) for a in argv][:1] == ["rattler-build"]:
+            _raise_missing_binary(argv, cwd, env)
+        return _ok(argv)
+
+    rc = release_verb.run_publish(
+        _spec("1.2.3"),
+        build_result="success",
+        bundle_result="success",
+        sign_result="skipped",
+        run_cmd=_seam,
+        probe=SeamRecorder(),
+        ghio=FakeGh(),
+        gitio=FakeGit(root=tmp_path),
+        env={
+            "ARTIFACT_CHANNEL_KEY_ID": "chan-key-id",
+            "ARTIFACT_CHANNEL_SECRET_KEY": "chan-secret-key",
+        },
+    )
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "[artifacts.lex] conda:" in err
+    assert "pixi.toml#shipit-rust-release-deps" in err
+    assert "`shipit install --pr`" in err

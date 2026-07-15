@@ -82,6 +82,12 @@ on:
       # publish stage — the one consumer of the cascade dispatch.
       DOWNSTREAM_DISPATCH_TOKEN:
         required: false
+      # conda's Artifact-channel write-credential pair (ARF01-WS01 #950),
+      # forwarded to prepare (preflight presence) and publish (the dispatch).
+      ARTIFACT_CHANNEL_KEY_ID:
+        required: false
+      ARTIFACT_CHANNEL_SECRET_KEY:
+        required: false
       APPLE_CERTIFICATE:
         required: false
       APPLE_CERTIFICATE_PASSWORD:
@@ -119,6 +125,8 @@ jobs:
       VSCE_PAT: ${{ secrets.VSCE_PAT }}
       OVSX_PAT: ${{ secrets.OVSX_PAT }}
       DOWNSTREAM_DISPATCH_TOKEN: ${{ secrets.DOWNSTREAM_DISPATCH_TOKEN }}
+      ARTIFACT_CHANNEL_KEY_ID: ${{ secrets.ARTIFACT_CHANNEL_KEY_ID }}
+      ARTIFACT_CHANNEL_SECRET_KEY: ${{ secrets.ARTIFACT_CHANNEL_SECRET_KEY }}
       APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
       APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
       ASC_API_KEY_BASE64: ${{ secrets.ASC_API_KEY_BASE64 }}
@@ -194,3 +202,5 @@ jobs:
       VSCE_PAT: ${{ secrets.VSCE_PAT }}
       OVSX_PAT: ${{ secrets.OVSX_PAT }}
       DOWNSTREAM_DISPATCH_TOKEN: ${{ secrets.DOWNSTREAM_DISPATCH_TOKEN }}
+      ARTIFACT_CHANNEL_KEY_ID: ${{ secrets.ARTIFACT_CHANNEL_KEY_ID }}
+      ARTIFACT_CHANNEL_SECRET_KEY: ${{ secrets.ARTIFACT_CHANNEL_SECRET_KEY }}
