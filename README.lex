@@ -202,8 +202,7 @@ underneath it and how a repo gets onto shipit. Domain vocabulary:
 
     3.1. Creating a fresh repo
 
-        `shipit repo new` creates a new local Repo with a complete,
-        verified, shipit-managed baseline:
+        `shipit repo new` creates a new local Repo with a complete, verified, shipit-managed baseline:
             $ shipit repo new --stack rust <name> [parent]
 
         :: sh ::

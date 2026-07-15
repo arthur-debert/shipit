@@ -96,9 +96,7 @@ Two entry points, chosen by whether the repository exists yet: create a fresh on
 
 ### 3.1. Creating a fresh repo
 
-`shipit repo new` creates a new local Repo with a complete,
-
-**verified, shipit-managed baseline**
+**\`shipit repo new\` creates a new local Repo with a complete, verified, shipit-managed baseline**
 
 ```sh
 $ shipit repo new --stack rust <name> [parent]
