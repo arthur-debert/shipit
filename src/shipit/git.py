@@ -53,10 +53,14 @@ logger = logging.getLogger("shipit.git")
 #: default). Local git plumbing is near-instant and gets a tight bound; the
 #: calls that talk to a remote (clone/fetch/push/ls-remote) get the runner's
 #: generous default; the dissociated clone copies the full object store into
-#: the new checkout (ADR-0014), so it alone gets a larger ceiling.
+#: the new checkout (ADR-0014), and ``git clean -ffdx`` unlinks a fully
+#: materialized environment and build cache — both are bulk-filesystem work
+#: whose runtime scales with on-disk artifacts, not plumbing, so they get a
+#: larger ceiling.
 _NETWORK_TIMEOUT: float = execrun.DEFAULT_TIMEOUT
 _LOCAL_TIMEOUT: float = 60.0
 _CLONE_TIMEOUT: float = 600.0
+_STRIP_TIMEOUT: float = 600.0
 
 
 def _argv(args: list[str], cwd: str | None) -> list[str]:
@@ -720,8 +724,15 @@ def clean_non_committed(*, cwd: str) -> None:
     before the rename publishes only the committed, location-independent tree;
     the destination regenerates its build and environment state fresh on first
     use from the committed lockfiles.
+
+    Unlinking a fully materialized ``.pixi`` environment and Cargo build cache
+    is bulk-filesystem work — tens of thousands of small files — that can run
+    well past the tight local-plumbing bound on slower disks, so this carries
+    the generous ``_STRIP_TIMEOUT`` rather than ``_LOCAL_TIMEOUT``; a spurious
+    timeout here would fail repo creation mid-strip while it was still
+    progressing normally.
     """
-    _git(["clean", "-ffdx"], cwd=cwd)
+    _git(["clean", "-ffdx"], cwd=cwd, timeout=_STRIP_TIMEOUT)
 
 
 def init_main(*, cwd: str) -> None:

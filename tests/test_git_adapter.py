@@ -113,11 +113,17 @@ def test_clean_non_committed_removes_untracked_and_ignored_forcing_nested(monkey
 
     def fake(args, *, cwd, timeout=None):
         seen["args"] = args
+        seen["timeout"] = timeout
         return ""
 
     monkeypatch.setattr(git, "_git", fake)
     git.clean_non_committed(cwd="/x")
     assert seen["args"] == ["clean", "-ffdx"]
+    # Unlinking a materialized .pixi env + build cache is bulk-filesystem work,
+    # not near-instant plumbing, so it carries the generous strip bound — the
+    # tight local-plumbing timeout would spuriously fail a still-progressing
+    # strip on slower disks.
+    assert seen["timeout"] == git._STRIP_TIMEOUT
 
 
 def test_push_default_does_not_bypass_hooks(monkeypatch):
