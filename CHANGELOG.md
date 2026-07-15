@@ -4,6 +4,23 @@
 
 ## Unreleased
 
+- `install --pr` builds its reconcile commit from an authoritative
+  apply-recorded touched-set instead of a hand-enumerated "commit universe"
+  (#986, the design fix behind #852/#984). `apply()` now records the exact set
+  of shipit-owned paths it is responsible for AS it mutates — managed unit
+  destinations (NOOP units included), the re-stamped `.shipit.toml`, a
+  re-rendered `CHANGELOG.md`, rewritten hook files, and every non-KEEP retired
+  path — and the MODE_PR commit publishes exactly that set, scoped to the paths
+  that actually carry a staged diff against `origin/<base>`. Retired-path
+  deletions are staged from the index with a new `git rm --cached
+  --ignore-unmatch` primitive, so a retired file's absence is published as a
+  deletion without ever touching the working tree: a consumer file that
+  reappeared at a retired path is preserved, a NOOP retired path is never
+  unlinked, and an absent or untracked path can no longer crash PR generation.
+  This removes the per-category carry/skip rules (`Plan.retire_carries` and the
+  universe enumeration) whose asymmetries drove the seven-round #984 whack-a-mole,
+  closing the consumer-edit leak surface by construction.
+
 ## 1.2.0 - 2026-07-15
 
 - `shipit repo new --stack rust <name> [parent]` creates a new local Repo
