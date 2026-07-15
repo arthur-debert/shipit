@@ -272,9 +272,25 @@ def test_plan_artifact_carries_no_endpoint_bundle_signing_or_release_policy():
         "publishing",
         "release",
     )
-    flat = str(cfg).lower()
+
+    def _keys(node):
+        # Every mapping key anywhere in the parsed manifest — policy lives in
+        # keys/tables, so traverse the structure instead of stringifying it
+        # (a value like a `release-tool` project name must not trip the check).
+        if isinstance(node, dict):
+            for key, value in node.items():
+                yield key.lower()
+                yield from _keys(value)
+        elif isinstance(node, list):
+            for item in node:
+                yield from _keys(item)
+
+    manifest_keys = list(_keys(cfg))
     for word in forbidden:
-        assert word not in flat, f"unexpected {word!r} policy in .shipit.toml"
+        offenders = [key for key in manifest_keys if word in key]
+        assert not offenders, (
+            f"unexpected {word!r} policy key in .shipit.toml: {offenders}"
+        )
 
 
 def test_plan_shipit_manifest_declares_required_lint_and_test_lanes_only():
