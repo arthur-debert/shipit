@@ -8,9 +8,10 @@ hyphen-to-underscore crate-identifier conversion (``lib-my-tool`` → the crate
 planner, the profiles, and the templates never re-derive a name and can never
 disagree about how ``<name>`` becomes ``lib<name>`` becomes ``lib_<name>``.
 
-Validation is the complete request grammar and destination-safety half of the
-name contract (``docs/spec/repo-new.md`` §Proposed Shape; ADR-0059). Two layers
-compose:
+Validation is the complete request-name grammar and derivation half of the name
+contract (``docs/spec/repo-new.md`` §Proposed Shape; ADR-0059); destination
+safety (the parent/destination preflight) lives in ``create.py``'s
+``_preflight``, not here. Two layers compose:
 
 1. Canonical lowercase kebab-case — an ASCII lowercase letter, then lowercase
    alphanumeric segments joined by single hyphens. This alone refuses

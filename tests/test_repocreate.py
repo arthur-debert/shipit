@@ -644,8 +644,8 @@ def _reject_via_command(tmp_path, capsys, *, stacks, name, seed=None):
 
     ``seed`` optionally prepares destination content (``{relpath: kind}`` where
     kind is ``"dir"``, ``"file"``, or a symlink target ``Path``). Returns the
-    exit code and captured stderr and asserts the parent's contents are byte-for
-    -byte unchanged by the refused run — no destination, no leaked staging
+    exit code and captured stderr and asserts the parent's top-level entries are
+    unchanged by the refused run — no new destination, no leaked staging
     sibling.
     """
     from shipit.verbs import repo as repo_verb
