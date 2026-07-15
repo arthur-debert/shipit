@@ -128,16 +128,22 @@ python -m shipit.channel.store_provision --project <project> verify --repo <owne
 
 Asserts, on the same run (exit 0 only if all pass):
 
-- public authless GET of `<repo>/repodata.json` → **200**;
-- private authless GET → **403** (no creds → denied);
+- public authless GET of `<repo>/<subdir>/repodata.json` → **200** for **every**
+  served subdir (`osx-arm64`, `linux-64`, `linux-aarch64`, `win-64`);
+- private authless GET → **403** for every served subdir (no creds → denied);
 - private read **as the reader SA** (impersonation) → succeeds (scoped cred works);
 - UBLA on **both** buckets;
 - the private bucket has **no** public IAM binding.
 
-The positive scoped read needs a published `<repo>/repodata.json` object in the
-private bucket; until the producer endpoint (a later WS) publishes one, that one
-check is reported in `notes` rather than silently passed — provision + the other
-four checks still verify the access model.
+Repodata is **per-subdir** (ADR-0064): the `conda` endpoint publishes
+`<repo>/<subdir>/repodata.json` for each served subdir and nothing at the repo
+root, so `verify` probes the served-subdir set — the same completeness the
+[readiness gate](../spec/artifact-channel.md) checks — not the repo root (a
+root probe would 404 against a correctly-published channel). The positive scoped
+read needs a published per-subdir repodata object in the private bucket; until
+the producer endpoint publishes one, that one check is reported in `notes`
+rather than silently passed — provision + the other four checks still verify the
+access model.
 
 ## Teardown
 

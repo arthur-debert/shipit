@@ -43,6 +43,24 @@ def test_bucket_name_refuses_unknown_tier():
         sp.bucket_name("sekret")
 
 
+def test_served_subdirs_match_the_producers_published_subdir_set():
+    # SERVED_SUBDIRS (what `verify` probes) is the SAME closed set the producer
+    # publishes to (release.publish.CONDA_SUBDIRS maps each release triple onto
+    # one of these). A drift — the producer serving a subdir verify never probes,
+    # or vice versa — would make verify pass on a channel a consumer cannot fully
+    # resolve, so pin the two together.
+    from shipit.channel import buckets
+    from shipit.release import publish
+
+    assert set(buckets.SERVED_SUBDIRS) == set(publish.CONDA_SUBDIRS.values())
+    assert buckets.SERVED_SUBDIRS == (
+        "osx-arm64",
+        "linux-64",
+        "linux-aarch64",
+        "win-64",
+    )
+
+
 def test_reader_sa_email_is_derived_in_project():
     assert (
         sp.reader_sa_email("supage-prod")
@@ -375,11 +393,20 @@ def _verify_runner(
     return runner
 
 
+def _subdir_http(public_status, private_status):
+    """The per-subdir repodata HTTP-status map `verify` now probes: repodata is
+    per-subdir (ADR-0064), so verify fans out over every served subdir under
+    each bucket (`<repo>/<subdir>/repodata.json`), not the repo root."""
+    m = {}
+    for subdir in sp.buckets.SERVED_SUBDIRS:
+        obj = f"{subdir}/repodata.json"
+        m[sp.public_object_url("shipit-artifacts-public", "r", obj)] = public_status
+        m[sp.public_object_url("shipit-artifacts-private", "r", obj)] = private_status
+    return m
+
+
 def test_verify_all_green():
-    http = {
-        sp.public_object_url("shipit-artifacts-public", "r"): 200,
-        sp.public_object_url("shipit-artifacts-private", "r"): 403,
-    }
+    http = _subdir_http(200, 403)
     report = sp.verify(
         "supage-prod",
         "r",
@@ -394,11 +421,23 @@ def test_verify_all_green():
     assert report.notes == []
 
 
+def test_verify_public_get_fails_when_one_served_subdir_is_missing():
+    # Per-subdir conjunction: a PARTIAL publish (one subdir's repodata absent →
+    # 404) must fail public_get_200, exactly what a root-only probe would miss.
+    http = _subdir_http(200, 403)
+    missing = sp.public_object_url(
+        "shipit-artifacts-public", "r", f"{sp.buckets.SERVED_SUBDIRS[-1]}/repodata.json"
+    )
+    http[missing] = 404
+    report = sp.verify(
+        "p", "r", runner=_verify_runner(), http_get=lambda url: http[url]
+    )
+    assert not report.public_get_200
+    assert not report.ok
+
+
 def test_verify_flags_a_public_binding_on_the_private_bucket():
-    http = {
-        sp.public_object_url("shipit-artifacts-public", "r"): 200,
-        sp.public_object_url("shipit-artifacts-private", "r"): 200,  # leaked!
-    }
+    http = _subdir_http(200, 200)  # private serves authless → leaked
     report = sp.verify(
         "p",
         "r",
@@ -411,10 +450,7 @@ def test_verify_flags_a_public_binding_on_the_private_bucket():
 
 
 def test_verify_notes_a_missing_private_object_instead_of_silently_passing():
-    http = {
-        sp.public_object_url("shipit-artifacts-public", "r"): 200,
-        sp.public_object_url("shipit-artifacts-private", "r"): 403,
-    }
+    http = _subdir_http(200, 403)
     report = sp.verify(
         "p",
         "r",
@@ -431,10 +467,7 @@ def test_verify_surfaces_the_actual_error_on_a_non_not_found_scoped_read():
     # A scoped read that fails for a NON-not-found reason (IAM / impersonation /
     # wrong project) must surface gcloud's real error text, NOT the misleading
     # "publish the object" hint.
-    http = {
-        sp.public_object_url("shipit-artifacts-public", "r"): 200,
-        sp.public_object_url("shipit-artifacts-private", "r"): 403,
-    }
+    http = _subdir_http(200, 403)
     report = sp.verify(
         "p",
         "r",
@@ -455,10 +488,7 @@ def test_verify_scoped_not_found_marker_is_not_faked_from_the_resource_uri():
     # denial. Uses a real marker (not the retired bare 404) so the test actually
     # exercises the argv-stripping in _looks_not_found rather than passing
     # trivially. The stderr echoes the FULL object URI (the argv token stripped).
-    http = {
-        sp.public_object_url("shipit-artifacts-public", "r"): 200,
-        sp.public_object_url("shipit-artifacts-private", "r"): 403,
-    }
+    http = _subdir_http(200, 403)
     report = sp.verify(
         "pnotfound",
         "r",
@@ -466,7 +496,8 @@ def test_verify_scoped_not_found_marker_is_not_faked_from_the_resource_uri():
             scoped_ok=False,
             scoped_stderr=(
                 "ERROR: PERMISSION_DENIED on "
-                "gs://shipit-artifacts-private/r/repodata.json"
+                f"gs://shipit-artifacts-private/r/{sp.buckets.SERVED_SUBDIRS[0]}"
+                "/repodata.json"
             ),
         ),
         http_get=lambda url: http[url],
@@ -483,10 +514,7 @@ def test_verify_scoped_not_found_marker_is_not_faked_from_a_bare_flag_value():
     # must strip that bare value too, else a real denial reads as an absence.
     # This fails if the --flag=value value-extraction is removed.
     sa_email = sp.reader_sa_email("pnotfound")  # …@pnotfound.iam.gserviceaccount.com
-    http = {
-        sp.public_object_url("shipit-artifacts-public", "r"): 200,
-        sp.public_object_url("shipit-artifacts-private", "r"): 403,
-    }
+    http = _subdir_http(200, 403)
     report = sp.verify(
         "pnotfound",
         "r",

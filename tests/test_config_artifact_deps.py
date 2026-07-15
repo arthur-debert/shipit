@@ -146,6 +146,16 @@ def test_malformed_package_key_is_refused():
         )
 
 
+def test_uppercase_package_key_is_refused_matching_conda_lowercase_vocabulary():
+    # The section key IS the conda package name the producer's `conda` endpoint
+    # publishes, and conda's vocabulary (release.publish._CONDA_PACKAGE_NAME_RE)
+    # is lowercase-only. An uppercase key would pass config validation only to
+    # fail unresolved at pin time, so it must die loudly at the boundary
+    # (ADR-0030: construction is validation) — a `feature` stays case-permissive.
+    with pytest.raises(config.ConfigError, match=r"LOWERCASE"):
+        _load('[artifact-deps.LexD]\nrepo = "lex-fmt/lex"\nversion = "0.19.3"\n')
+
+
 def test_artifact_deps_is_a_known_top_level_table():
     # The closed registry accepts it (a typo like [artifact-dep] still dies).
     cfg = tomllib.loads('[artifact-deps.lexd]\nrepo = "a/b"\nversion = "1"\n')

@@ -7,8 +7,10 @@ The RECEIVE end of the artifact-channel Cascade (ADR-0067, docs/spec/artifact-ch
 declares a dependency on it. This module is what the consumer runs when that
 dispatch lands: it bumps **every** ``[artifact-deps]`` entry whose ``repo``
 matches ``upstream`` to ``version``, re-renders the managed pixi block (WS02's
-projection, via ``shipit install``) — whose solve re-resolves ``pixi.lock`` —
-and opens a **draft** bump PR (carrying the bumped pins, re-rendered block, and
+projection, via ``shipit install``) and then re-solves ``pixi.lock`` against the
+bumped pin (:func:`_default_reinstall` — tree-mode ``shipit install`` refreshes
+the block but not the lock, so the re-solve is an explicit second step), and
+opens a **draft** bump PR (carrying the bumped pins, re-rendered block, and
 re-resolved lock) that then rides the normal review loop.
 
 Two halves, kept apart so the decision core stays PURE and network-free:
@@ -26,7 +28,7 @@ Two halves, kept apart so the decision core stays PURE and network-free:
   read ``.shipit.toml`` → bump → write → re-render the pixi block → branch,
   commit, push, open the draft PR. Every world-touching call goes through the
   ``git`` / ``gh`` adapters (recorded in tests) and the injectable ``reinstall``
-  seam (the pixi re-render), so the flow is exercised end-to-end on fakes with
+  seam (the pixi re-render + lock re-solve), so the flow is exercised end-to-end on fakes with
   no network and no real ``shipit install``.
 
 Delivery (ADR-0066/0067): the receive **workflow** itself is a shipit-managed
@@ -38,14 +40,15 @@ no cross-repo pin stays free of a dead workflow.
 
 from __future__ import annotations
 
+import os
 import re
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
-from .. import config, gh, git
+from .. import config, execrun, gh, git, pixienv
 from ..identity import repo_from_slug
-from ..install.units import Unit
+from ..install.units import LINT_ENV, Unit
 
 #: The ``repository_dispatch`` event type the Cascade fires (the shared
 #: WS06/WS07 contract, docs/spec/artifact-channel.md). The receive workflow
@@ -324,8 +327,8 @@ _WORKFLOW_BODY = """\
 # Artifact-channel cascade RECEIVE (ARF01-WS07): when an upstream this repo
 # pins in `.shipit.toml [artifact-deps]` publishes a release, shipit's fan-out
 # fires an `upstream-release` repository_dispatch here. This workflow bumps the
-# matching pins, re-renders the managed pixi block, and opens a DRAFT bump PR
-# that rides the normal review loop and re-resolves `pixi.lock`.
+# matching pins, re-renders the managed pixi block, re-solves `pixi.lock`, and
+# opens a DRAFT bump PR that rides the normal review loop.
 name: shipit-artifact-cascade
 on:
   repository_dispatch:
@@ -400,10 +403,25 @@ def receive_workflow_unit() -> Unit:
 
 
 def _default_reinstall(root: Path) -> None:
-    """Re-render the managed pixi block off the just-bumped ``.shipit.toml`` by
-    running ``shipit install`` in working-tree mode (WS02's projection). The
-    injectable seam :func:`receive` takes so tests exercise the flow without a
-    real reconcile."""
+    """Re-render the managed pixi block off the just-bumped ``.shipit.toml`` AND
+    re-solve ``pixi.lock`` against the new pin. The injectable seam :func:`receive`
+    takes so tests exercise the flow without a real reconcile.
+
+    Two steps, because tree-mode ``shipit install`` does NOT touch the lock.
+    ``shipit install`` in its default working-tree mode (WS02's projection)
+    rewrites the managed pixi BLOCK but returns BEFORE self-certification — only
+    the COMMITTING modes certify, and it is self-cert's unlocked lint-env solve
+    that materializes/refreshes ``pixi.lock`` (``shipit.install.apply.PIXI_LOCK``
+    / ``shipit.install.selfcert``). So tree-mode alone leaves ``pixi.lock``
+    STALE. The cascade then stages that lock into the bump PR whose managed
+    receive-workflow runs ``pixi run --locked``; a stale lock would fail CI on
+    the manifest/lock mismatch or keep resolving the OLD artifact. So after the
+    re-render we run the SAME workspace solve self-cert runs
+    (``pixi install --environment lint``, deliberately unlocked) to re-resolve
+    the whole ``pixi.lock`` against the bumped pin before :func:`receive` stages
+    it. The private-tier S3 credentials a private artifact needs to solve arrive
+    as env vars and ride the inherited environment (``scrub_env`` strips only
+    parent-project pixi/Conda pointers, never credential vars)."""
     from ..verbs import install as install_verb
 
     rc = install_verb.run(str(root))
@@ -413,6 +431,24 @@ def _default_reinstall(root: Path) -> None:
             f"install` failed (exit {rc}); not opening a PR (the bump-owned "
             f"triple is rolled back by :func:`receive`, leaving the tree clean)"
         )
+    # Only re-solve when there is a pixi manifest to solve (a repo with
+    # `[artifact-deps]` always projects one, so this is the normal path; the
+    # guard just keeps a manifest-less tree from hitting an opaque pixi error).
+    if not (root / "pixi.toml").is_file():
+        return
+    try:
+        pixienv.install(
+            root,
+            environment=LINT_ENV,
+            env=pixienv.scrub_env(os.environ),
+        )
+    except execrun.ExecError as exc:
+        raise CascadeError(
+            f"cascade bump: re-solving `pixi.lock` against the bumped pin "
+            f"(`pixi install --environment {LINT_ENV}`) failed: {exc}; not "
+            f"opening a PR (the bump-owned triple is rolled back by "
+            f":func:`receive`, leaving the tree clean)"
+        ) from exc
 
 
 def _branch_name(payload: CascadePayload) -> str:
@@ -471,8 +507,8 @@ def _pr_body(payload: CascadePayload, bumped: tuple[Bumped, ...]) -> str:
     lines += [f"- `{b.package}`: `{b.old_version}` → `{b.new_version}`" for b in bumped]
     lines += [
         "",
-        "The bump commit carries a re-resolved `pixi.lock` (the re-render's "
-        "solve), so CI's `--locked` install is green; this draft PR then rides "
+        "The bump commit carries a re-resolved `pixi.lock` (the receive "
+        "re-solve), so CI's `--locked` install is green; this draft PR then rides "
         "the normal review loop.",
         "",
         "for #956",
@@ -523,7 +559,8 @@ def receive(
         return ReceiveResult(bumped=(), branch=None, url=None)
 
     # Snapshot the whole bump-owned triple BEFORE the write + re-render: the
-    # re-render (`reinstall` — real `shipit install` in MODE_TREE) rewrites
+    # re-render (`reinstall` — real `shipit install` in MODE_TREE, then the
+    # explicit `pixi install` lock re-solve) rewrites
     # `pixi.toml`/`pixi.lock` and can raise AFTER some of those writes land, so a
     # failure must restore every bump-owned file, not just `.shipit.toml` — else
     # the tree is left pin-vs-projection desynced (the exact half-edited hazard
@@ -548,10 +585,11 @@ def receive(
     paths = [config.CONFIG_NAME]
     if (root / "pixi.toml").is_file():
         paths.append("pixi.toml")
-    # The re-render's lint-env solve re-resolves the WHOLE `pixi.lock` (one file,
-    # every environment) against the new pin; stage it so the bump PR carries a
-    # lock matching the bumped block and CI's `--locked` install stays green —
-    # the same laptop/CI-parity move `shipit install` makes (apply.py, #439).
+    # The reinstall seam's `pixi install` re-solve re-resolves the WHOLE
+    # `pixi.lock` (one file, every environment) against the new pin; stage it so
+    # the bump PR carries a lock matching the bumped block and CI's `--locked`
+    # install stays green — the same laptop/CI-parity move self-cert's lint-env
+    # solve makes for `shipit install` (apply.py, #439).
     if (root / "pixi.lock").is_file():
         paths.append("pixi.lock")
 

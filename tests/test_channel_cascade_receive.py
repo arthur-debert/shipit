@@ -9,9 +9,10 @@ matching `[artifact-deps]` pin and opens a draft bump PR. Two layers tested:
   already-current / unknown-upstream entries, layout preservation, and the loud
   refusals (malformed payload, an entry the edit cannot locate) — over strings,
   no IO;
-- the receive ORCHESTRATION (`receive`) — bump → re-render → branch/commit/push
-  → draft PR — with the git/gh adapters and the pixi re-render recorded on
-  fakes, so the whole flow is exercised with no network and no real install.
+- the receive ORCHESTRATION (`receive`) — bump → re-render → re-solve →
+  branch/commit/push → draft PR — with the git/gh adapters and the pixi
+  re-render + lock re-solve recorded on fakes, so the whole flow is exercised
+  with no network and no real install.
 """
 
 from __future__ import annotations
@@ -396,14 +397,69 @@ def test_receive_commits_only_shipit_toml_when_there_is_no_pixi_manifest(tmp_pat
 
 
 def test_receive_stages_the_re_resolved_pixi_lock(tmp_path, rec):
-    # The re-render's solve re-resolves pixi.lock; it rides the bump commit so
-    # CI's `--locked` install stays green against the new pin.
+    # The reinstall seam's re-solve re-resolves pixi.lock; it rides the bump
+    # commit so CI's `--locked` install stays green against the new pin.
     root = _consumer(tmp_path)
     (root / "pixi.lock").write_text("version: 6\n")
 
     cr.receive(root, "lex-fmt/lex", "0.20.1", reinstall=lambda r: None)
 
     assert ("add", (config.CONFIG_NAME, "pixi.toml", "pixi.lock")) in rec.calls
+
+
+def test_default_reinstall_re_solves_the_lock_after_the_tree_render(
+    tmp_path, monkeypatch
+):
+    # The lock-refresh bug guard: tree-mode `shipit install` re-renders the pixi
+    # BLOCK but returns BEFORE self-cert's lint-env solve, so it never touches
+    # pixi.lock. `_default_reinstall` must therefore run an EXPLICIT `pixi
+    # install` re-solve after the render — otherwise the cascade stages a STALE
+    # lock and the bump PR's `pixi run --locked` workflow fails CI / resolves the
+    # OLD artifact. Both the render and the (lock-mutating) solve are faked.
+    root = tmp_path
+    (root / "pixi.toml").write_text("[workspace]\nname = 'demo'\n")
+    (root / "pixi.lock").write_text("version: 6\nstale-lock\n")
+    calls: list[str] = []
+
+    def _fake_install_run(path: str, **_kw) -> int:
+        calls.append(f"render:{path}")
+        return 0
+
+    def _fake_pixi_install(root_arg, *, environment, env):
+        # The real `pixi install` re-solve is what rewrites the lock; the fake
+        # mutates it so the test proves the lock is re-resolved, not just that
+        # the seam is called.
+        calls.append(f"solve:{environment}")
+        (Path(root_arg) / "pixi.lock").write_text("version: 6\nfresh-lock\n")
+
+    monkeypatch.setattr("shipit.verbs.install.run", _fake_install_run)
+    monkeypatch.setattr(cr.pixienv, "install", _fake_pixi_install)
+
+    cr._default_reinstall(root)
+
+    assert calls == [f"render:{root}", f"solve:{cr.LINT_ENV}"]
+    assert (root / "pixi.lock").read_text() == "version: 6\nfresh-lock\n"
+
+
+def test_default_reinstall_raises_a_cascade_error_when_the_re_solve_fails(
+    tmp_path, monkeypatch
+):
+    # A failed re-solve fails the whole receive CLOSED (the bump-owned triple is
+    # rolled back by `receive`): the pixi ExecError becomes a CascadeError, never
+    # a stale lock quietly staged into the bump PR.
+    root = tmp_path
+    (root / "pixi.toml").write_text("[workspace]\nname = 'demo'\n")
+
+    def _boom(root_arg, *, environment, env):
+        raise cr.execrun.ExecError(
+            ["pixi", "install", "--environment", "lint"], rc=1, stderr="solve blew up"
+        )
+
+    monkeypatch.setattr("shipit.verbs.install.run", lambda path, **_kw: 0)
+    monkeypatch.setattr(cr.pixienv, "install", _boom)
+
+    with pytest.raises(CascadeError, match="re-solving `pixi.lock`"):
+        cr._default_reinstall(root)
 
 
 def test_receive_force_pushes_the_deterministic_bump_branch(tmp_path, rec):
@@ -421,7 +477,8 @@ def test_receive_force_pushes_the_deterministic_bump_branch(tmp_path, rec):
 
 def test_receive_rolls_the_whole_triple_back_when_the_re_render_fails(tmp_path, rec):
     # Atomicity across the WHOLE bump-owned triple: `reinstall` is the real
-    # `shipit install` (MODE_TREE), which rewrites pixi.toml/pixi.lock BEFORE it
+    # `shipit install` (MODE_TREE) plus the `pixi install` lock re-solve, which
+    # rewrite pixi.toml/pixi.lock BEFORE it
     # can fail — so a failure that has already touched them must restore all
     # three, not just .shipit.toml, or the tree is left pin-vs-projection
     # desynced. The stub here mutates pixi.toml AND pixi.lock, then raises.

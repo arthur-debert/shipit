@@ -1091,15 +1091,25 @@ def load_artifacts(cfg: dict) -> tuple[Artifact, ...]:
 #: that dies at parse (the same closed-registry philosophy as `_KNOWN_TABLES`).
 _ARTIFACT_DEP_KEYS = ("repo", "version", "feature")
 
-#: The shape a `[artifact-deps.<pkg>]` section key (the conda package name) and
-#: an optional `feature` must take: a leading alphanumeric, then alphanumerics,
-#: `.`, `-`, `_`. Dots are ADMITTED on purpose — the producer's conda-package
-#: vocabulary allows them (`release.publish._CONDA_PACKAGE_NAME_RE`), so a valid
-#: package like `ruamel.yaml` must parse. The pixi-block projection emits any
-#: dotted name as a QUOTED TOML key (`install.artifactdeps._toml_key`) so a dot
-#: is never mis-read as a key-path separator that would splice nested
-#: tables/keys into pixi.toml; rejecting dots here would wrongly refuse valid
-#: packages. Malformed shapes (spaces, a leading dot) still die at parse.
+#: The shape a `[artifact-deps.<pkg>]` section KEY — which doubles as the conda
+#: package name — must take: conda's package-name vocabulary (LOWERCASE letters,
+#: digits, `.`, `-`, `_`; a leading alphanumeric). It is tied to the producer's
+#: `release.publish._CONDA_PACKAGE_NAME_RE` (also lowercase-only): the key IS the
+#: name the producer's `conda` endpoint publishes, so an UPPERCASE key would pass
+#: config validation here only to fail unresolved at pin time — ADR-0030's
+#: "construction is validation" says reject it loudly at the boundary instead.
+#: Dots are ADMITTED on purpose — the producer's vocabulary allows them, so a
+#: valid package like `ruamel.yaml` must parse; the pixi-block projection emits
+#: any dotted name as a QUOTED TOML key (`install.artifactdeps._toml_key`) so a
+#: dot is never mis-read as a key-path separator that would splice nested
+#: tables/keys into pixi.toml. Malformed shapes (spaces, uppercase, a leading
+#: dot) die at parse.
+_CONDA_PKG_KEY_RE = re.compile(r"[a-z0-9][a-z0-9._-]*\Z")
+
+#: The shape an optional `feature` must take: a leading alphanumeric, then
+#: alphanumerics, `.`, `-`, `_`. Case-PERMISSIVE — a `feature` names a pixi
+#: feature/env (the projection's target environment), NOT a conda package, so it
+#: is not bound to conda's lowercase vocabulary the way the package key is.
 _FEATURE_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 
 
@@ -1138,11 +1148,11 @@ def _parse_artifact_dep(package: str, spec: object) -> ArtifactDep:
     value is refused here, not discovered when the channel URL is derived.
     """
     where = f"[artifact-deps].{package}"
-    if not _FEATURE_NAME_RE.match(package):
+    if not _CONDA_PKG_KEY_RE.match(package):
         raise ConfigError(
             f"{where}: the section key is the conda package name and must be a "
-            f"plain package identifier (alphanumerics, '.', '-', '_'); "
-            f"got {package!r}"
+            f"valid conda package identifier (LOWERCASE letters, digits, '.', "
+            f"'-', '_'); got {package!r}"
         )
     if not isinstance(spec, dict):
         raise ConfigError(

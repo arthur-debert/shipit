@@ -44,3 +44,14 @@ PRIVATE_ARTIFACT_BUCKET = "shipit-artifacts-private"
 #: over it directly, and it is the S3-interop endpoint the private tier's
 #: ``[s3-options]`` and the producer's rattler-build S3 backend both point at.
 CHANNEL_HOST = "https://storage.googleapis.com"
+
+#: The CLOSED set of conda subdirs the channel serves (ADR-0064: osx-arm64,
+#: linux-64, linux-aarch64, win-64 — no osx-64, no musl). The SoT for "which
+#: subdirs exist", shared by the producer (``release.publish.CONDA_SUBDIRS``
+#: maps each release triple ONTO one of these; a drift test pins their value set
+#: to this) and the store provisioner (:func:`shipit.channel.store_provision.verify`
+#: probes ``repodata.json`` under EACH of these). Repodata is PER-SUBDIR, so a
+#: root-level probe would miss the real channel layout / a partial publish — the
+#: readiness gate (docs/spec/artifact-channel.md §3) checks all of these, and so
+#: does ``verify``.
+SERVED_SUBDIRS: tuple[str, ...] = ("osx-arm64", "linux-64", "linux-aarch64", "win-64")

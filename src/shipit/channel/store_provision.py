@@ -142,10 +142,12 @@ def reader_sa_email(project: str) -> str:
 def public_object_url(bucket: str, repo: str, obj: str = "repodata.json") -> str:
     """The authless HTTPS URL of ``<repo>/<obj>`` in ``bucket``.
 
-    The per-repo channel root is a subdir keyed by the producing repo
-    (ADR-0065: each repo is the sole writer of its own ``repodata.json``), so the
-    acceptance probe fetches ``<repo>/repodata.json`` — a 200 on the public
-    bucket, a 403 on the private one.
+    The per-repo channel root is a subdir keyed by the producing repo (ADR-0065:
+    each repo is the sole writer of its own subdirs). ``obj`` is the object path
+    UNDER that per-repo root — :func:`verify` passes a per-subdir repodata path
+    (``<subdir>/repodata.json``) since conda repodata is published per served
+    subdir, never at the repo root — and the URL is a 200 on the public bucket,
+    a 403 on the private one.
     """
     return f"{_GCS_HOST}/{bucket}/{repo}/{obj}"
 
@@ -643,17 +645,25 @@ def verify(
 
     Each criterion → one boolean on the :class:`VerifyReport`:
 
-    - public authless GET of ``<repo>/<obj>`` returns **200**;
-    - private authless GET returns **403** (no creds → denied);
-    - private read AS the reader SA succeeds (scoped credential works);
+    - public authless GET of ``<repo>/<subdir>/<obj>`` returns **200** for
+      **every** served subdir (:data:`shipit.channel.buckets.SERVED_SUBDIRS`);
+    - private authless GET returns **403** for every served subdir (no creds →
+      denied);
+    - private read AS the reader SA succeeds for a representative served subdir
+      (scoped credential works — bucket-wide, so one subdir proves it);
     - UBLA is on for **both** buckets;
     - the private bucket has **no** public IAM binding.
 
+    Repodata is PER-SUBDIR (ADR-0064): probing the repo root (where nothing is
+    published) would 404 against a correct channel, so the object checks fan out
+    over the served-subdir set — the same completeness the spec's readiness gate
+    (docs/spec/artifact-channel.md §3) checks with a copy-pasteable curl loop.
+
     ``runner`` (gcloud) and ``http_get`` (an HTTPS GET → status) are injectable
-    so the verdict logic is unit-tested without live cloud. Live, this needs a
-    published ``<repo>/<obj>`` object in each bucket; when the private object is
-    absent the scoped-read positive cannot be asserted and lands in ``notes`` as
-    a "publish it" hint — while a scoped read that fails for any OTHER reason
+    so the verdict logic is unit-tested without live cloud. Live, this needs the
+    published per-subdir repodata in each bucket; when the probed private object
+    is absent the scoped-read positive cannot be asserted and lands in ``notes``
+    as a "publish it" hint — while a scoped read that fails for any OTHER reason
     (impersonation / IAM denial / wrong project) lands in ``notes`` with gcloud's
     actual error text, so the note never misdirects the diagnosis.
 
@@ -672,10 +682,26 @@ def verify(
     sa_email = reader_sa_email(project)
     report = VerifyReport()
 
-    report.public_get_200 = http_get(public_object_url(public, repo, obj)) == 200
-    report.private_get_403 = http_get(public_object_url(private, repo, obj)) == 403
+    # Repodata is PER-SUBDIR (ADR-0064): the conda endpoint publishes
+    # `<repo>/<subdir>/repodata.json` for EACH served subdir and NOTHING at the
+    # repo root, so a root-level probe would 404 against a correctly-published
+    # channel (a false negative) and could miss a partial publish. Probe every
+    # served subdir (:data:`shipit.channel.buckets.SERVED_SUBDIRS` — the spec's
+    # readiness-gate §3 set) and take the conjunction: the public tier serves
+    # authless (200) on ALL of them, the private tier denies (403) on ALL of them.
+    subdir_objs = [f"{subdir}/{obj}" for subdir in buckets.SERVED_SUBDIRS]
+    report.public_get_200 = all(
+        http_get(public_object_url(public, repo, o)) == 200 for o in subdir_objs
+    )
+    report.private_get_403 = all(
+        http_get(public_object_url(private, repo, o)) == 403 for o in subdir_objs
+    )
 
-    scoped_argv = object_read_as_sa_argv(private, repo, sa_email, obj)
+    # The scoped-credential positive is bucket-WIDE — the reader SA's bucket IAM
+    # binding grants object reads regardless of subdir — so ONE representative
+    # served subdir proves it, without every subdir's object having to exist.
+    probe_obj = subdir_objs[0]
+    scoped_argv = object_read_as_sa_argv(private, repo, sa_email, probe_obj)
     scoped = runner(scoped_argv, check=False)
     report.private_scoped_read_ok = scoped.rc == 0
     if scoped.rc != 0:
@@ -686,8 +712,8 @@ def verify(
         # other failure surfaces gcloud's actual error text.
         if _looks_not_found(scoped, scoped_argv):
             report.notes.append(
-                f"private scoped read: {repo}/{obj} not found — publish it under "
-                "the private bucket to assert the scoped-read positive"
+                f"private scoped read: {repo}/{probe_obj} not found — publish it "
+                "under the private bucket to assert the scoped-read positive"
             )
         else:
             detail = (scoped.stderr or scoped.stdout).strip() or f"rc {scoped.rc}"
