@@ -23,6 +23,7 @@ from .verbs import test as test_verb
 from .verbs._context import resolve_root_context
 from .verbs._help import register_long_help
 from .verbs.changelog import changelog as changelog_group
+from .verbs.channel import channel as channel_group
 from .verbs.ci import ci as ci_group
 from .verbs.eval import eval_group
 from .verbs.fleet import fleet as fleet_group
@@ -316,6 +317,13 @@ root.add_command(logs.logs_cmd)
 root.add_command(provision_group)
 
 
+# The nested `channel` group (ARF01) — the Artifact channel's consumer-facing
+# verbs. `channel receive` is the cascade's consumer end (ARF01-WS07): the
+# managed receive-workflow invokes it to bump `[artifact-deps]` pins and open a
+# draft bump PR when an upstream this repo pins publishes a release.
+root.add_command(channel_group)
+
+
 # The top-level `repo` group (GEN01) — repository-level operations. `repo new`
 # creates a new local shipit-managed Repo with a complete, verified baseline;
 # the CLI is a thin parser/renderer over the deep `shipit.repocreate` module.
@@ -412,6 +420,8 @@ _HELP_RESOURCES = {
     ("logs",): ("shipit.verbs", "logs_help.txt"),
     ("provision",): ("shipit.verbs", "provision_help.txt"),
     ("provision", "lexd"): ("shipit.verbs", "provision_lexd_help.txt"),
+    ("channel",): ("shipit.verbs", "channel_help.txt"),
+    ("channel", "receive"): ("shipit.verbs", "channel_receive_help.txt"),
     ("repo",): ("shipit.verbs", "repo_help.txt"),
     ("repo", "new"): ("shipit.verbs", "repo_new_help.txt"),
     ("pr",): ("shipit.verbs.pr", "pr_help.txt"),

@@ -1,0 +1,9 @@
+`shipit channel` contains the Artifact channel's consumer-facing actions.
+
+The Artifact channel lets a repo consume another repo's released build
+artifacts as ordinary, version-pinned pixi dependencies. A repo declares the
+pin in `.shipit.toml [artifact-deps]`, and `shipit install` projects it into a
+managed pixi block so pixi resolves, locks, and fetches it like any dependency.
+
+When the producing repo publishes a release, its fan-out cascades a version
+bump here — see `shipit channel receive`.

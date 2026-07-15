@@ -566,6 +566,9 @@ def test_verb_projects_public_deps_resolving_visibility_once_per_repo(tmp_path):
 
     units = verb._artifact_dep_units(tmp_path, is_private=fake_is_private)
     assert {u.key for u in units} == {
+        # The consumer half also carries the receive-workflow (ARF01-WS07), only
+        # ever delivered when `[artifact-deps]` are declared.
+        ".github/workflows/shipit-artifact-cascade.yml",
         "pixi.toml#shipit-artifacts",
         ad.ENVIRONMENTS_KEY,
     }
