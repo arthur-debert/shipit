@@ -92,7 +92,23 @@ pixi, the substrate
 
 ## 3. Getting a repo onto shipit
 
-**One command, for fresh installs and updates alike**
+Two entry points, chosen by whether the repository exists yet: create a fresh one, or adopt an existing one.
+
+### 3.1. Creating a fresh repo
+
+**\`shipit repo new\` creates a new local Repo with a complete, verified, shipit-managed baseline**
+
+```sh
+$ shipit repo new --stack rust <name> [parent]
+```
+
+The destination is `<parent>/<name>` — `parent` defaults to the current directory — and `--stack` selects the Creation profile; it is repeatable so a request can later compose several toolchains, though v1 supports one, `rust`. It scaffolds a two-crate Cargo workspace (a `<name>` CLI over a `lib<name>` library), applies shipit's managed baseline through the same `shipit install` path, resolves the pixi lockfile, and certifies the Repo by running its lint, test, and build Checks. The verified local result is exactly one initial commit on `main`; creation stages the whole Repo in a sibling directory and publishes it with a single atomic rename only after every Check passes, so any failure leaves the destination untouched.
+
+Creation is local only: it creates no GitHub repository, remote, publishing endpoint, or release policy — those remain a later, separate step. [See](./docs/spec/repo-new.md) for the exhaustive contract.
+
+### 3.2. Adopting an existing repo
+
+**One command, for first-time adoption and later updates alike**
 
 ```sh
 $ shipit install <path>
