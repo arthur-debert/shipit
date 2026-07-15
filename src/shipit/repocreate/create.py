@@ -33,7 +33,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from .. import git, pixienv
+from .. import execrun, git, pixienv, redact
 from .errors import CreationError
 from .names import validate_name
 from .plan import CreationPlan, build_plan
@@ -200,6 +200,17 @@ def default_verifier(root: Path) -> None:
     staged Repo, with a scrubbed environment and an explicit ``--manifest-path``
     so inherited pixi activation cannot select the invoking checkout. The first
     failing Check raises :class:`CreationError`, which prevents publication.
+
+    The Check runs ``check=False`` so a nonzero task is a normal
+    :class:`~shipit.execrun.ExecResult` this function reads as a verdict, then
+    RETAINS the failing command's captured output in the raised message
+    (``docs/spec/repo-new.md`` §Testing acceptance criterion): a mocked verifier
+    could hide a missing generated dependency, but the real staged Check surfaces
+    the tool's own diagnostics — e.g. a ``cargo-nextest: command not found`` — so
+    the failure is actionable rather than a bare rc. The message carries the
+    creation-stage context (``staged Check`` + ``the Repo was not published``)
+    and, because the raise aborts before the ``Initial commit`` and publish, the
+    root commit and atomic rename never happen.
     """
     scrubbed = pixienv.scrub_env(dict(os.environ))
     for task in CHECKS:
@@ -207,10 +218,41 @@ def default_verifier(root: Path) -> None:
             task, root, env=scrubbed, check=False, timeout=_LONG_TIMEOUT
         )
         if not result.ok:
-            raise CreationError(
-                f"staged Check `pixi run {task}` failed (rc={result.rc}); "
-                "the Repo was not published"
-            )
+            raise CreationError(_check_failure_message(task, result))
+
+
+def _check_failure_message(task: str, result: execrun.ExecResult) -> str:
+    """The failure message for a staged Check, retaining its captured output.
+
+    Joins the tails of the failing command's stdout and stderr onto the
+    creation-stage context so a caller (and the ``error:`` verb shell) sees the
+    tool's own diagnostics, not just the return code. Each stream is bounded to
+    :data:`execrun.TAIL_CHARS` — the same tail budget an :class:`ExecError`
+    carries — so an enormous build log cannot swamp the message; an empty stream
+    is omitted so a tool that writes only to stderr reads cleanly.
+
+    Each bounded tail is run through :func:`redact.redact_text` — the SAME
+    masking an :class:`ExecError` applies to its own captured streams — because
+    the staged Check inherits the caller's scrubbed-but-still-secret-bearing
+    environment (:func:`pixienv.scrub_env` drops pixi/Conda selection, not the
+    user's secrets), so a failing tool that echoes a token or PEM would
+    otherwise leak it straight onto the unredacted ``CreationError`` /
+    ``error:`` CLI surface. Redaction runs on the WHOLE stream before the tail
+    is sliced — the SAME order an :class:`ExecError` uses on its own streams —
+    so a secret that straddles the :data:`execrun.TAIL_CHARS` boundary is masked
+    intact; slicing first would tail a half-secret the exact-value and pattern
+    matchers can no longer recognize, leaking the retained fragment.
+    """
+    tails = [
+        f"{label}:\n{tail}"
+        for label, stream in (("stdout", result.stdout), ("stderr", result.stderr))
+        if (tail := redact.redact_text(stream)[-execrun.TAIL_CHARS :].strip())
+    ]
+    output = ("\n" + "\n".join(tails)) if tails else ""
+    return (
+        f"staged Check `pixi run {task}` failed (rc={result.rc}); "
+        f"the Repo was not published{output}"
+    )
 
 
 def default_author(root: Path) -> str:
