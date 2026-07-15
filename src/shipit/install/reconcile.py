@@ -730,10 +730,17 @@ def _feature_tasks_header(feature: str) -> str:
     when it carries a dot (or is otherwise not a bare TOML key) so the rendered
     header is a valid, unambiguous path — an unquoted ``ruamel.yaml`` would read
     as the nested ``ruamel`` → ``yaml`` tables, not the one feature named
-    ``ruamel.yaml``. Bare keys (the common case) render unquoted."""
+    ``ruamel.yaml``. Bare keys (the common case) render unquoted.
+
+    The name is read from the CONSUMER's own ``pixi.toml`` (:func:`_enabled_features`),
+    so it is unbounded: a quoted TOML key is a basic string, so any ``\\`` or ``"``
+    it carries is escaped before interpolation — otherwise the header would be
+    invalid TOML and the conflict message would mis-render the very path it names.
+    """
     if re.fullmatch(r"[A-Za-z0-9_-]+", feature):
         return f"[feature.{feature}.tasks]"
-    return f'[feature."{feature}".tasks]'
+    escaped = feature.replace("\\", "\\\\").replace('"', '\\"')
+    return f'[feature."{escaped}".tasks]'
 
 
 def format_pixi_task_conflict(conflict: PixiTaskConflict) -> str:
