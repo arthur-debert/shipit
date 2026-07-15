@@ -339,22 +339,41 @@ def has_public_binding(iam_policy_json: str) -> bool:
     (or ``allAuthenticatedUsers``) member in ANY binding is public. gcloud
     ``get-iam-policy --format=json`` renders ``{"bindings": [{"members": […]}]}``.
 
-    Fails CLOSED on an unexpected JSON shape: a binding whose ``members`` is not
-    a list (``null``, a scalar) is skipped rather than crashing with a
-    ``TypeError`` — this verdict powers the private bucket's "no public binding"
-    acceptance check, so a malformed shape must degrade to "not observed public",
-    never blow up the report.
+    Fails CLOSED **for the caller**: :func:`verify` reads this as
+    ``private_no_public_binding = not has_public_binding(…)``, so a malformed
+    policy shape must NEVER quietly return ``False`` — that would report the
+    private bucket as safe on an *unreadable* policy (a false PASS, the opposite
+    of the acceptance property). A structurally-malformed policy (``bindings``
+    not a list, a binding not an object, a ``members`` not a list) is therefore a
+    :class:`ProvisionError` refusal, exactly like unparseable JSON. A single
+    non-string member *element* is not a public grant and simply doesn't match —
+    it is compared by ``==`` (never hashed / ``set()``-ed), so an unhashable
+    element can't raise ``TypeError``.
     """
     data = _load_json(iam_policy_json, "iam policy")
-    bindings = data.get("bindings", []) if isinstance(data, dict) else []
+    if not isinstance(data, dict):
+        raise ProvisionError(
+            f"store verify: malformed iam policy JSON: expected an object, "
+            f"got {type(data).__name__}"
+        )
+    bindings = data.get("bindings", [])
     if not isinstance(bindings, list):
-        return False
-    public_members = {ALL_USERS, "allAuthenticatedUsers"}
+        raise ProvisionError(
+            "store verify: malformed iam policy JSON: 'bindings' is not a list"
+        )
     for binding in bindings:
         if not isinstance(binding, dict):
-            continue
+            raise ProvisionError(
+                "store verify: malformed iam policy JSON: a binding is not an object"
+            )
         members = binding.get("members", [])
-        if isinstance(members, list) and public_members & set(members):
+        if not isinstance(members, list):
+            raise ProvisionError(
+                "store verify: malformed iam policy JSON: 'members' is not a list"
+            )
+        # Compare by == against the two literal public members — never set()/hash
+        # a member, so an unhashable (malformed) element can't raise TypeError.
+        if any(m == ALL_USERS or m == "allAuthenticatedUsers" for m in members):
             return True
     return False
 
@@ -448,32 +467,49 @@ class VerifyReport:
 
 
 #: The stderr shapes gcloud uses to say a resource is genuinely absent — the
-#: ONLY nonzero describe outcome :func:`_exists` may read as "not there". Every
+#: ONLY nonzero outcome :func:`_looks_not_found` reads as "not there". Every
 #: other nonzero probe (permission denied, disabled API, wrong account/project,
 #: quota, transient error) is a refusal, not an absence, and must stop the run
 #: rather than silently drive the create path. ``gcloud storage buckets describe``
 #: on a missing bucket says "not found: 404"; ``iam service-accounts describe``
-#: says the SA "does not exist" / "NOT_FOUND".
-_NOT_FOUND_MARKERS = ("not found", "notfound", "not_found", "does not exist", "404")
+#: says the SA "does not exist" / "NOT_FOUND". These are WORD markers on purpose:
+#: a bare numeric ``404`` would collide with a resource NAME (project
+#: ``my-project-404``), and gcloud always pairs the code with the words anyway.
+_NOT_FOUND_MARKERS = ("not found", "notfound", "not_found", "does not exist")
+
+
+def _looks_not_found(result: execrun.ExecResult, argv: list[str]) -> bool:
+    """Whether a nonzero gcloud result is gcloud's genuine not-found answer.
+
+    Strips the command's own argv tokens — the resource URI / SA email, which
+    gcloud echoes verbatim into the error — from the text BEFORE matching
+    :data:`_NOT_FOUND_MARKERS`, so a marker that happens to live in a resource
+    NAME (a project literally named ``my-project-404``) can't make a
+    ``PERMISSION_DENIED`` error read as an absence.
+    """
+    haystack = f"{result.stderr}\n{result.stdout}".lower()
+    for arg in argv:
+        haystack = haystack.replace(arg.lower(), " ")
+    return any(marker in haystack for marker in _NOT_FOUND_MARKERS)
 
 
 def _exists(argv: list[str], runner: Callable[..., execrun.ExecResult]) -> bool:
     """Run a describe probe; True on rc 0, False ONLY on gcloud's not-found shape.
 
     ``check=False`` so we can inspect the outcome: rc 0 → exists; a nonzero exit
-    whose stderr carries a :data:`_NOT_FOUND_MARKERS` token → genuinely absent
-    (create it). Any OTHER nonzero probe — permission denied, disabled API, wrong
-    account/project, quota, a transient gcloud error — is a refusal, not an
-    absence: raise :class:`ProvisionError` so the run STOPS with a clear message
-    instead of blindly creating/configuring over a broken probe. A launch failure
-    (gcloud absent) raises :class:`~shipit.execrun.ExecError` and surfaces the same
-    way through the entrypoint handler.
+    whose text (argv tokens stripped, see :func:`_looks_not_found`) carries a
+    not-found marker → genuinely absent (create it). Any OTHER nonzero probe —
+    permission denied, disabled API, wrong account/project, quota, a transient
+    gcloud error — is a refusal, not an absence: raise :class:`ProvisionError` so
+    the run STOPS with a clear message instead of blindly creating/configuring
+    over a broken probe. A launch failure (gcloud absent) raises
+    :class:`~shipit.execrun.ExecError` and surfaces the same way through the
+    entrypoint handler.
     """
     result = runner(argv, check=False)
     if result.rc == 0:
         return True
-    haystack = f"{result.stderr}\n{result.stdout}".lower()
-    if any(marker in haystack for marker in _NOT_FOUND_MARKERS):
+    if _looks_not_found(result, argv):
         return False
     detail = (result.stderr or result.stdout).strip() or f"rc {result.rc}"
     raise ProvisionError(
@@ -591,7 +627,10 @@ def verify(
     ``runner`` (gcloud) and ``http_get`` (an HTTPS GET → status) are injectable
     so the verdict logic is unit-tested without live cloud. Live, this needs a
     published ``<repo>/<obj>`` object in each bucket; when the private object is
-    absent the scoped-read positive cannot be asserted and lands in ``notes``.
+    absent the scoped-read positive cannot be asserted and lands in ``notes`` as
+    a "publish it" hint — while a scoped read that fails for any OTHER reason
+    (impersonation / IAM denial / wrong project) lands in ``notes`` with gcloud's
+    actual error text, so the note never misdirects the diagnosis.
 
     Fails fast on an empty ``project`` or ``repo`` (as :func:`provision` does on
     an empty project): both key the bucket names / channel-subdir URLs, and an
@@ -610,13 +649,25 @@ def verify(
     report.public_get_200 = http_get(public_object_url(public, repo, obj)) == 200
     report.private_get_403 = http_get(public_object_url(private, repo, obj)) == 403
 
-    scoped = runner(object_read_as_sa_argv(private, repo, sa_email, obj), check=False)
+    scoped_argv = object_read_as_sa_argv(private, repo, sa_email, obj)
+    scoped = runner(scoped_argv, check=False)
     report.private_scoped_read_ok = scoped.rc == 0
     if scoped.rc != 0:
-        report.notes.append(
-            "private scoped read failed — publish a "
-            f"{repo}/{obj} object under the private bucket to assert the positive"
-        )
+        # A nonzero scoped read is NOT necessarily a missing object — it can be an
+        # impersonation / IAM denial / wrong-project failure, and telling the
+        # operator to "publish the object" would then misdirect the diagnosis.
+        # Only the genuine not-found shape gets the publish-the-object note; any
+        # other failure surfaces gcloud's actual error text.
+        if _looks_not_found(scoped, scoped_argv):
+            report.notes.append(
+                f"private scoped read: {repo}/{obj} not found — publish it under "
+                "the private bucket to assert the scoped-read positive"
+            )
+        else:
+            detail = (scoped.stderr or scoped.stdout).strip() or f"rc {scoped.rc}"
+            report.notes.append(
+                f"private scoped read failed (not a not-found result): {detail}"
+            )
 
     report.public_ubla_on = ubla_enabled(runner(describe_bucket_argv(public)).stdout)
     report.private_ubla_on = ubla_enabled(runner(describe_bucket_argv(private)).stdout)

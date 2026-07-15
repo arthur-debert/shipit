@@ -129,16 +129,31 @@ def test_has_public_binding_detects_allusers_and_allauthenticated():
     assert not sp.has_public_binding(json.dumps({}))
 
 
-def test_has_public_binding_fails_closed_on_malformed_shapes():
-    # A binding whose members is null / a scalar, or a non-list bindings, must
-    # NOT raise TypeError — the acceptance verdict degrades to "not observed
-    # public" instead of crashing the report.
-    assert not sp.has_public_binding(json.dumps({"bindings": [{"members": None}]}))
-    assert not sp.has_public_binding(
-        json.dumps({"bindings": [{"members": "allUsers"}]})
-    )
-    assert not sp.has_public_binding(json.dumps({"bindings": ["nonsense"]}))
-    assert not sp.has_public_binding(json.dumps({"bindings": "nope"}))
+def test_has_public_binding_refuses_structurally_malformed_policy():
+    # verify() reads `private_no_public_binding = not has_public_binding(...)`, so
+    # a structurally-malformed policy must be a REFUSAL (ProvisionError), never a
+    # quiet False — a quiet False would report the private bucket safe on an
+    # unreadable policy (a false PASS, the opposite of the acceptance property).
+    for shape in (
+        {"bindings": "nope"},  # bindings not a list
+        {"bindings": ["nonsense"]},  # a binding not an object
+        {"bindings": [{"members": None}]},  # members not a list
+        {"bindings": [{"members": "allUsers"}]},  # members a scalar, not a list
+        ["not", "an", "object"],  # top-level not an object
+    ):
+        with pytest.raises(sp.ProvisionError, match="malformed iam policy"):
+            sp.has_public_binding(json.dumps(shape))
+
+
+def test_has_public_binding_does_not_crash_on_unhashable_member_elements():
+    # A member element that is unhashable (a dict / list — malformed, but the
+    # `members` container is still a list) must NOT raise TypeError: it is simply
+    # not the allUsers/allAuthenticatedUsers literal, so it doesn't match.
+    policy = json.dumps({"bindings": [{"members": [{"weird": 1}, ["also-weird"]]}]})
+    assert not sp.has_public_binding(policy)
+    # A real public member alongside a malformed one is still detected.
+    mixed = json.dumps({"bindings": [{"members": [{"weird": 1}, "allUsers"]}]})
+    assert sp.has_public_binding(mixed)
 
 
 def test_verdict_readers_refuse_unreadable_json():
@@ -269,6 +284,35 @@ def test_provision_stops_on_a_non_not_found_probe_and_creates_nothing():
     )
 
 
+def test_provision_does_not_fake_not_found_from_a_404_in_the_resource_name():
+    """A project literally named …-404 echoes ``404`` into the error URI; a
+    PERMISSION_DENIED probe must still STOP the run, not read 404 as an absence."""
+
+    def runner(argv, *, check=True, **kw):
+        rc = 0
+        stderr = ""
+        if "describe" in argv:
+            rc = 1
+            # gcloud echoes the resource URI (which contains 404) into the error.
+            uri = next((a for a in argv if a.startswith("gs://") or "@" in a), "res")
+            stderr = f"ERROR: PERMISSION_DENIED on {uri}"
+        return execrun.ExecResult(
+            argv=tuple(argv), rc=rc, stdout="", stderr=stderr, duration_ms=1
+        )
+
+    calls: list[list[str]] = []
+
+    def recording(argv, *, check=True, **kw):
+        calls.append(list(argv))
+        return runner(argv, check=check, **kw)
+
+    with pytest.raises(sp.ProvisionError, match="PERMISSION_DENIED"):
+        sp.provision("my-project-404", runner=recording)
+    assert not any(
+        v in c for c in calls for v in ("create", "update", "add-iam-policy-binding")
+    )
+
+
 def test_private_bucket_create_enforces_public_access_prevention():
     runner = FakeRunner(existing=set())
     sp.provision("p", runner=runner)
@@ -284,7 +328,13 @@ def test_private_bucket_create_enforces_public_access_prevention():
 # --------------------------------------------------------------------------
 
 
-def _verify_runner(*, scoped_ok=True, ubla=True, public_binding_on_private=False):
+def _verify_runner(
+    *,
+    scoped_ok=True,
+    ubla=True,
+    public_binding_on_private=False,
+    scoped_stderr="ERROR: the requested object was not found.",
+):
     def stdout_for(argv):
         if "get-iam-policy" in argv:
             members = (
@@ -299,10 +349,16 @@ def _verify_runner(*, scoped_ok=True, ubla=True, public_binding_on_private=False
 
     def runner(argv, *, check=True, **kw):
         rc = 0
-        if "objects" in argv and "describe" in argv:
-            rc = 0 if scoped_ok else 1
+        stderr = ""
+        if "objects" in argv and "describe" in argv and not scoped_ok:
+            rc = 1
+            stderr = scoped_stderr
         return execrun.ExecResult(
-            argv=tuple(argv), rc=rc, stdout=stdout_for(argv), stderr="", duration_ms=1
+            argv=tuple(argv),
+            rc=rc,
+            stdout=stdout_for(argv),
+            stderr=stderr,
+            duration_ms=1,
         )
 
     return runner
@@ -351,12 +407,56 @@ def test_verify_notes_a_missing_private_object_instead_of_silently_passing():
     report = sp.verify(
         "p",
         "r",
-        runner=_verify_runner(scoped_ok=False),
+        runner=_verify_runner(scoped_ok=False),  # default stderr = not-found
         http_get=lambda url: http[url],
     )
     assert not report.ok
     assert not report.private_scoped_read_ok
-    assert any("private scoped read failed" in n for n in report.notes)
+    # A genuine not-found gets the "publish it" hint.
+    assert any("not found — publish it" in n for n in report.notes)
+
+
+def test_verify_surfaces_the_actual_error_on_a_non_not_found_scoped_read():
+    # A scoped read that fails for a NON-not-found reason (IAM / impersonation /
+    # wrong project) must surface gcloud's real error text, NOT the misleading
+    # "publish the object" hint.
+    http = {
+        sp.public_object_url("p-artifact-channel-public", "r"): 200,
+        sp.public_object_url("p-artifact-channel-private", "r"): 403,
+    }
+    report = sp.verify(
+        "p",
+        "r",
+        runner=_verify_runner(
+            scoped_ok=False,
+            scoped_stderr="ERROR: PERMISSION_DENIED: unable to impersonate reader SA",
+        ),
+        http_get=lambda url: http[url],
+    )
+    assert not report.private_scoped_read_ok
+    assert any("PERMISSION_DENIED" in n for n in report.notes)
+    assert not any("publish it" in n for n in report.notes)
+
+
+def test_verify_scoped_not_found_marker_is_not_faked_from_the_resource_uri():
+    # The private bucket URI is echoed into the argv; a marker like 404 living in
+    # a project NAME must not fake a not-found classification for a real denial.
+    http = {
+        sp.public_object_url("p404-artifact-channel-public", "r"): 200,
+        sp.public_object_url("p404-artifact-channel-private", "r"): 403,
+    }
+    report = sp.verify(
+        "p404",
+        "r",
+        runner=_verify_runner(
+            scoped_ok=False,
+            scoped_stderr="ERROR: PERMISSION_DENIED on gs://p404-artifact-channel-private",
+        ),
+        http_get=lambda url: http[url],
+    )
+    # The 404 in the URI is stripped before marker-matching → NOT read as absent.
+    assert any("PERMISSION_DENIED" in n for n in report.notes)
+    assert not any("publish it" in n for n in report.notes)
 
 
 def test_verify_refuses_empty_project_or_repo():
