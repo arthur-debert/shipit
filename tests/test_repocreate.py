@@ -527,6 +527,51 @@ def test_create_publishes_verified_repo(tmp_path, git_identity):
     assert sorted(p.name for p in tmp_path.iterdir()) == ["hello"]
 
 
+def test_create_publishes_only_the_committed_relocatable_tree(tmp_path, git_identity):
+    # Relocatability regression (#942): staged certification (ADR-0062) builds
+    # the Rust workspace and materializes the pixi environment in the temporary
+    # sibling, and BOTH embed that staging path as an absolute location — Cargo
+    # bakes `CARGO_BIN_EXE_<bin>` into the compiled black-box test, and the
+    # conda-based `.pixi` env hard-codes its prefix. Publication (ADR-0059) must
+    # carry ONLY the committed tree, so no such ignored artifact can make the
+    # published Repo resolve the vanished staging path after the atomic rename.
+    order: list[str] = []
+    captured: dict[str, Path] = {}
+
+    def verify_writing_staging_path_artifacts(root: Path) -> None:
+        order.append("verify")
+        captured["staging"] = root
+        # Ignored build/environment output whose CONTENT embeds the staging path,
+        # exactly as a real Rust build + pixi provision bakes it in.
+        for rel in ("target/debug/hello", ".pixi/envs/default/bin/hello"):
+            artifact = root / rel
+            artifact.parent.mkdir(parents=True, exist_ok=True)
+            artifact.write_text(str(root), encoding="utf-8")
+
+    result = _fake_create(
+        tmp_path, order, verifier=verify_writing_staging_path_artifacts
+    )
+    dest = result.destination
+    staging = captured["staging"]
+
+    # The published destination carries none of the ignored certification state:
+    # the strip runs against the abstract root, not a `target`/`.pixi` allowlist.
+    assert not (dest / "target").exists()
+    assert not (dest / ".pixi").exists()
+    # And NOTHING under the destination references the vanished staging path, so
+    # no carried artifact can resolve it (the `.git` store keeps relative paths).
+    for path in dest.rglob("*"):
+        if path.is_file() and ".git" not in path.parts:
+            body = path.read_text(encoding="utf-8", errors="ignore")
+            assert str(staging) not in body, f"{path} still references {staging}"
+    # The committed tree is intact and clean — stripping touched nothing tracked.
+    assert (dest / "Cargo.toml").is_file()
+    assert (dest / "crates/hello/src/main.rs").is_file()
+    assert (dest / "pixi.lock").is_file()
+    assert git.head_commit(cwd=str(dest)).value == result.initial_commit
+    assert git.status_porcelain(cwd=str(dest)) == []
+
+
 def test_create_accepts_empty_destination_directory(tmp_path, git_identity):
     (tmp_path / "hello").mkdir()
     result = _fake_create(tmp_path, [])
