@@ -1751,10 +1751,14 @@ def zed_extension_id(text: str) -> str:
             f"(extensions/<id>) are keyed by the extension id"
         )
     if not _ZED_EXTENSION_ID_RE.fullmatch(ext_id):
+        # Render the untrusted id through ascii() — a rejected id may itself
+        # carry newlines / terminal control sequences, and interpolating it raw
+        # would inject them into the error output (the same untrusted-content
+        # boundary the grammar guards). ascii() escapes them to a safe repr.
         raise ReleaseError(
-            f"zed: {ZED_MANIFEST} id `{ext_id}` is not a valid Zed extension id "
-            f"(one lowercase segment of letters, digits, `-`, `_`; no slashes, "
-            f"dots, spaces, or newlines) — the id becomes both the "
+            f"zed: {ZED_MANIFEST} id {ascii(ext_id)} is not a valid Zed "
+            f"extension id (one lowercase segment of letters, digits, `-`, `_`; "
+            f"no slashes, dots, spaces, or newlines) — the id becomes both the "
             f"`extensions.toml` table key and a scratch filename, so it must not "
             f"escape the scratch dir or break the rendered row"
         )
