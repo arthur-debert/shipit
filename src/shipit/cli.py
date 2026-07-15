@@ -414,6 +414,7 @@ _HELP_RESOURCES = {
     ("release", "assert-bundle"): ("shipit.verbs", "release_assert_bundle_help.txt"),
     ("release", "sign"): ("shipit.verbs", "release_sign_help.txt"),
     ("release", "publish"): ("shipit.verbs", "release_publish_help.txt"),
+    ("release", "cascade"): ("shipit.verbs", "release_cascade_help.txt"),
     ("ci",): ("shipit.verbs", "ci_help.txt"),
     ("ci", "plan"): ("shipit.verbs", "ci_plan_help.txt"),
     ("logs",): ("shipit.verbs", "logs_help.txt"),
