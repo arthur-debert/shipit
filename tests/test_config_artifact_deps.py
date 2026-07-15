@@ -114,6 +114,21 @@ def test_unknown_key_is_refused_naming_it():
         )
 
 
+def test_dotted_package_and_feature_names_are_admitted():
+    # Dots are valid in a conda package name (the producer's vocabulary admits
+    # them), so a `[artifact-deps."foo.bar"]` declaration and a dotted `feature`
+    # must PARSE — the projection quotes them as TOML keys at emission rather
+    # than the parser rejecting them (ARF01-WS02 review).
+    (dep,) = _load(
+        '[artifact-deps."ruamel.yaml"]\n'
+        'repo = "lex-fmt/lex"\n'
+        'version = "0.19.3"\n'
+        'feature = "tools.v2"\n'
+    )
+    assert dep.package == "ruamel.yaml"
+    assert dep.feature == "tools.v2"
+
+
 def test_malformed_feature_name_is_refused():
     with pytest.raises(config.ConfigError, match=r"\.feature must be"):
         _load(

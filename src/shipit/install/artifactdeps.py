@@ -45,6 +45,7 @@ Context handoff.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 
 from ..config import ArtifactDep
@@ -127,10 +128,36 @@ def _env_name(feature: str | None) -> str:
 
 
 def _toml_str_list(values: Sequence[str]) -> str:
-    """A TOML inline array of double-quoted strings (the channel URLs / feature
-    names the projection emits are URL/identifier-safe, so no escaping is
-    needed)."""
+    """A TOML inline array of double-quoted string VALUES (the channel URLs /
+    feature names the projection emits are URL/identifier-safe, so no escaping
+    is needed). Table headers and dependency KEYS go through :func:`_toml_key`
+    instead — a dot is a key-path separator there, but harmless inside a string
+    value."""
     return "[" + ", ".join(f'"{v}"' for v in values) + "]"
+
+
+#: TOML bare-key shape — the identifier chars a table header or dependency key
+#: may carry UNQUOTED (``A-Za-z0-9_-``). A projected name outside this set (a
+#: dotted conda package like ``ruamel.yaml``, or a dotted ``feature``) MUST be
+#: emitted as a QUOTED key, else TOML reads the dot as a key-path separator and
+#: the one name splits into nested tables/keys — a silently wrong pixi manifest
+#: (ARF01-WS02 review). Dots are legitimately valid: the producer's conda
+#: package vocabulary admits them (``release.publish._CONDA_PACKAGE_NAME_RE``),
+#: so ``config._FEATURE_NAME_RE`` deliberately keeps admitting them and quoting
+#: at emission — not rejecting at parse — is what keeps them safe.
+_BARE_KEY_RE = re.compile(r"[A-Za-z0-9_-]+")
+
+
+def _toml_key(name: str) -> str:
+    """One TOML key / table-name segment, double-quoted only when it must be.
+
+    Bare when every char is bare-key-safe; quoted when it carries a dot (or any
+    other non-bare char) so TOML treats it as ONE literal name rather than a
+    dotted key-path. Projected names are constrained by ``config._FEATURE_NAME_RE``
+    to ``[A-Za-z0-9._-]``, so the only unsafe-for-bare char is ``.`` and a quoted
+    key can never need ``"``/``\\``/control-char escaping.
+    """
+    return name if _BARE_KEY_RE.fullmatch(name) else f'"{name}"'
 
 
 def _feature_block(
@@ -142,7 +169,7 @@ def _feature_block(
     Deterministic: channels de-duped in first-seen order (several pins from the
     same producing repo share one channel), pins in declaration order.
     """
-    name = _feature_name(feature)
+    name = _toml_key(_feature_name(feature))
     urls: list[str] = []
     for _, url in resolved:
         if url not in urls:
@@ -153,7 +180,7 @@ def _feature_block(
         "",
         f"[feature.{name}.dependencies]",
     ]
-    lines += [f'{dep.package} = "{dep.version}"' for dep, _ in resolved]
+    lines += [f'{_toml_key(dep.package)} = "{dep.version}"' for dep, _ in resolved]
     return "\n".join(lines)
 
 
@@ -181,7 +208,10 @@ def _feature_unit(
 def _environments_unit(features: Sequence[str | None]) -> Unit:
     """The one consolidated environments block wiring every target's feature
     into its environment, anchored under ``[environments]``."""
-    lines = [f"{_env_name(f)} = {_toml_str_list([_feature_name(f)])}" for f in features]
+    lines = [
+        f"{_toml_key(_env_name(f))} = {_toml_str_list([_feature_name(f)])}"
+        for f in features
+    ]
     return Unit(
         key=ENVIRONMENTS_KEY,
         dest=PIXI_FILE,

@@ -125,6 +125,56 @@ def test_projected_blocks_splice_into_a_seed_manifest_as_valid_toml():
     ]
 
 
+def test_dotted_names_are_emitted_as_quoted_toml_keys():
+    # A dotted conda package (`ruamel.yaml` is a real one — the producer's
+    # vocabulary admits dots) and a dotted `feature` must render as QUOTED keys,
+    # else TOML reads the dot as a key-path separator and the one name splits
+    # into nested tables/keys — a silently wrong manifest (ARF01-WS02 review).
+    units = _project([_dep(package="ruamel.yaml", feature="tools.v2")])
+    feat = next(u for u in units if u.key == "pixi.toml#shipit-artifacts-tools.v2")
+    inner = feat.desired_inner()
+    assert '[feature."shipit-artifacts-tools.v2"]' in inner
+    assert '[feature."shipit-artifacts-tools.v2".dependencies]' in inner
+    assert '"ruamel.yaml" = "0.19.3"' in inner
+    env = next(u for u in units if u.key == ad.ENVIRONMENTS_KEY)
+    assert (
+        env.desired_inner()
+        == '"shipit-artifacts-tools.v2" = ["shipit-artifacts-tools.v2"]'
+    )
+
+
+def test_dotted_names_splice_into_a_seed_manifest_as_valid_toml():
+    # The quoted keys survive a splice round-trip: TOML parses the dotted names
+    # as SINGLE literal feature/package/env names, not nested tables/keys.
+    manifest = iunits.pixi_manifest_seed("downstream")
+    units = _project([_dep(package="ruamel.yaml", feature="tools.v2")])
+    for unit in units:
+        manifest = splice.splice_block(
+            manifest,
+            unit.desired_inner(),
+            unit.open_marker,
+            unit.close_marker,
+            unit.anchor,
+        )
+    parsed = tomllib.loads(manifest)
+    feature = parsed["feature"]["shipit-artifacts-tools.v2"]
+    assert feature["dependencies"]["ruamel.yaml"] == "0.19.3"
+    assert parsed["environments"]["shipit-artifacts-tools.v2"] == [
+        "shipit-artifacts-tools.v2"
+    ]
+
+
+def test_bare_safe_names_stay_unquoted():
+    # Only names that NEED quoting get it — a plain `lexd`/`tools` stays bare so
+    # the common case reads cleanly and existing manifests do not churn.
+    units = _project([_dep(package="lexd", feature="tools")])
+    feat = next(u for u in units if u.key == "pixi.toml#shipit-artifacts-tools")
+    inner = feat.desired_inner()
+    assert "[feature.shipit-artifacts-tools]" in inner
+    assert 'lexd = "0.19.3"' in inner
+    assert '"' not in inner.split("dependencies]")[1].split("=")[0]
+
+
 # --------------------------------------------------------------------------
 # Reconcile idempotency + version bump (the managed-block contract)
 # --------------------------------------------------------------------------

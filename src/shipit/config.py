@@ -1089,9 +1089,15 @@ def load_artifacts(cfg: dict) -> tuple[Artifact, ...]:
 #: that dies at parse (the same closed-registry philosophy as `_KNOWN_TABLES`).
 _ARTIFACT_DEP_KEYS = ("repo", "version", "feature")
 
-#: A pixi feature name shape (pixi's own rule): a lowercase-ish identifier of
-#: alphanumerics, `-` and `_`. Rejected at parse so a malformed `feature`
-#: cannot splice an unparseable `[feature.<name>]` table into pixi.toml.
+#: The shape a `[artifact-deps.<pkg>]` section key (the conda package name) and
+#: an optional `feature` must take: a leading alphanumeric, then alphanumerics,
+#: `.`, `-`, `_`. Dots are ADMITTED on purpose — the producer's conda-package
+#: vocabulary allows them (`release.publish._CONDA_PACKAGE_NAME_RE`), so a valid
+#: package like `ruamel.yaml` must parse. The pixi-block projection emits any
+#: dotted name as a QUOTED TOML key (`install.artifactdeps._toml_key`) so a dot
+#: is never mis-read as a key-path separator that would splice nested
+#: tables/keys into pixi.toml; rejecting dots here would wrongly refuse valid
+#: packages. Malformed shapes (spaces, a leading dot) still die at parse.
 _FEATURE_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 
 
