@@ -170,12 +170,13 @@ prefix-scoped IAM (leak-prone under UBLA), a capability URL (leaks via
      `win-64` — no osx-64, no musl); and
   3. the channel serves `repodata.json` authless for **each** served subdir —
      repodata is per-subdir, so a single probe can miss a partial publish;
-     repeat the check for all four subdirs (`<host>` =
-     `https://storage.googleapis.com`):
+     repeat the check for all four subdirs (the snippet is copy-pasteable —
+     any non-zero exit means the gate is not yet met):
 
      ```sh
+     host="https://storage.googleapis.com"
      for subdir in osx-arm64 linux-64 linux-aarch64 win-64; do
-       curl -fsS "<host>/shipit-artifacts-public/lex-fmt/lex/$subdir/repodata.json"
+       curl -fsS "$host/shipit-artifacts-public/lex-fmt/lex/$subdir/repodata.json" > /dev/null
      done
      ```
 
