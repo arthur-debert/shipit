@@ -87,6 +87,18 @@ def test_the_registry_is_indexed_by_unique_name():
     assert e2e_mod.HARNESS_BY_NAME["bats"] is e2e_mod.DEFAULT_HARNESS
 
 
+def test_duplicate_harness_name_is_refused_loudly_not_an_assert():
+    # The uniqueness invariant is enforced with a real exception, not an
+    # `assert` (which `python -O` strips): a duplicate name would silently
+    # shadow an entry, so building the index over one must raise ConfigError.
+    dupe = (
+        e2e_mod.BATS,
+        e2e_mod.Harness("bats", argv=("other",)),
+    )
+    with pytest.raises(config.ConfigError, match=r"duplicate e2e harness name 'bats'"):
+        e2e_mod._index_by_name(dupe)
+
+
 def test_bats_default_carries_no_injected_env():
     # The legacy default injects only <NAME>_BIN — no E2E_* env, so the
     # consumer suites (padz, dodot) keep working unchanged.

@@ -162,11 +162,28 @@ TAURI = Harness(
 #: argv for one artifact (with no injected env).
 HARNESSES: tuple[Harness, ...] = (BATS, ELECTRON, TAURI)
 
-#: The registry indexed by name — the resolution point for a named-harness
-#: declaration. Adding a harness is one entry in :data:`HARNESSES`; this index
-#: and the planner pick it up. Names are unique (asserted at import).
-HARNESS_BY_NAME: dict[str, Harness] = {h.name: h for h in HARNESSES}
-assert len(HARNESS_BY_NAME) == len(HARNESSES), "duplicate harness name in HARNESSES"
+
+def _index_by_name(harnesses: tuple[Harness, ...]) -> dict[str, Harness]:
+    """The registry indexed by name — the resolution point for a named-harness
+    declaration. Names MUST be unique: a duplicate would silently shadow an
+    entry (the last wins), so it is refused loudly at import with a real
+    :class:`~shipit.config.ConfigError`, NOT an ``assert`` (which ``python -O``
+    strips — a closed-registry invariant must hold in every build)."""
+    index: dict[str, Harness] = {}
+    for harness in harnesses:
+        if harness.name in index:
+            raise config.ConfigError(
+                f"duplicate e2e harness name {harness.name!r} in HARNESSES — "
+                f"each registry entry's name must be unique (it is the "
+                f"selection key for a named `e2e.harness` declaration)"
+            )
+        index[harness.name] = harness
+    return index
+
+
+#: The registry indexed by name. Adding a harness is one entry in
+#: :data:`HARNESSES`; this index and the planner pick it up.
+HARNESS_BY_NAME: dict[str, Harness] = _index_by_name(HARNESSES)
 
 #: The registry default when an artifact declares ``e2e = {}`` with no
 #: ``harness`` (PRD: "registry default: bats-run check-e2e").
