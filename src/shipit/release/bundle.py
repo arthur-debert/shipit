@@ -1141,7 +1141,19 @@ def _stage_vsix_natives(
         # copy2 that dies mid-write (full disk / I/O) still leaves the partial
         # file and its fresh dirs recorded for the caller's cleanup.
         created_dirs.extend(_dirs_staging_will_create(leg_dir, dst.parent))
-        dst.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            # An intermediate component is a FILE, not a dir (a checked-in
+            # `resources` when the dest is `resources/nested/…`): mkdir bubbles a
+            # bare FileExistsError/NotADirectoryError. Re-raise with the same
+            # vsix-stage context every other staging failure carries.
+            raise ReleaseError(
+                f"[artifacts.{req.artifact.name}] vsix stage: cannot create the "
+                f"destination directory for `{package}` at {dst.parent} — an "
+                f"intermediate path component is a file, not a directory; point "
+                f"`{package}` at a path whose parents are dirs the extension owns"
+            ) from exc
         staged.append(dst)
         shutil.copy2(src, dst)
         # Keep the exec bit: the LSP the extension spawns must stay runnable

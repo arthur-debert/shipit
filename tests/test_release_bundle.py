@@ -2026,6 +2026,43 @@ def test_vsix_stage_leaves_no_empty_dir_behind(tmp_path):
     assert [p.name for p in leg_dir.iterdir()] == ["package.json"]
 
 
+def test_vsix_stage_intermediate_component_is_a_file_raises_release_error(tmp_path):
+    # Staging to `resources/nested/…` when `resources` is a checked-in FILE: the
+    # mkdir would bubble a bare FileExistsError/NotADirectoryError — surface it as
+    # a `ReleaseError` with the same vsix-stage context every other failure has.
+    (artifact,) = _artifacts(
+        {
+            "ext": {
+                "build": ["npm"],
+                "bundle": {
+                    "composition": "vsix",
+                    "stage": {"lexd-lsp": "resources/nested/lexd-lsp"},
+                },
+            }
+        }
+    )
+    entries = _entries({"editors/vscode": "npm"})
+    dep = _dep("lexd-lsp")
+    _materialize_dep_bin(tmp_path, dep)
+    leg_dir = tmp_path / "editors/vscode"
+    leg_dir.mkdir(parents=True)
+    (leg_dir / "resources").write_text("i am a file, not a dir")  # blocks the mkdir
+    recorder = RunRecorder({"npm": _vsce_writes_out})
+    with pytest.raises(ReleaseError, match="intermediate path component is a file"):
+        bundle_mod.VSIX.compose(
+            _request(
+                tmp_path,
+                artifact,
+                entries,
+                target=MAC,
+                run_cmd=recorder,
+                artifact_deps=(dep,),
+            )
+        )
+    assert recorder.calls == []  # refused before packaging
+    assert (leg_dir / "resources").read_text() == "i am a file, not a dir"  # untouched
+
+
 def test_vsix_without_a_stage_map_stages_nothing(tmp_path):
     # The base per-platform vsix (no `stage`) is unchanged: no copy, just the
     # single `vsce package` — the pre-#974 contract still holds.
