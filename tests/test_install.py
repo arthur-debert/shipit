@@ -3425,9 +3425,6 @@ def test_pr_mode_commit_universe_excludes_a_kept_retired_file(tmp_path, rec):
     plan = _plan(tmp_path)
     assert [d.retired.path for d in plan.retire_keeps] == [RETIRED_WORKFLOW_PATH]
     assert not plan.retire_deletes
-    # The KEEP is excluded from the carried set even though other retired paths
-    # (NOOPs) are in it.
-    assert RETIRED_WORKFLOW_PATH not in {d.retired.path for d in plan.retire_carries}
 
     _apply(tmp_path, iapply.MODE_PR)
     # The KEEP path is never in the queried universe, so it can never be
@@ -4968,20 +4965,18 @@ def test_plan_retired_decides_every_manifest_entry():
     ]
 
 
-def test_retire_carries_files_keep_noop_asymmetry_from_hooks():
-    # #984 review: retired FILES and retired HOOKS carry DIFFERENTLY.
-    # Files: the universe carries the paths apply left ABSENT locally — DELETE
-    # (pristine copy unlinked) AND NOOP (already gone) — so a base still carrying
-    # either has its deletion published, never resurrected. Only KEEP (a
-    # preserved locally-modified file) is excluded.
-    retired = irec.plan_retired(
-        [
-            irec.RetiredFile(path="del.yml", pristine_hashes=("h1",)),
-            irec.RetiredFile(path="keep.yml", pristine_hashes=("h2",)),
-            irec.RetiredFile(path="noop.yml", pristine_hashes=("h3",)),
-        ],
-        {"del.yml": "h1", "keep.yml": "edited", "noop.yml": None},
-    )
+def test_retire_hook_deletes_carries_delete_only_never_noop():
+    # #984 round-6 / #986: retired FILES and retired HOOKS carry DIFFERENTLY, and
+    # the hook side is the surviving Plan-level rule — `retire_hook_deletes` names
+    # ONLY the files apply REWROTE (the DELETE decisions), NEVER a NOOP. A
+    # retired-hook NOOP does not mean the hook file is absent (only that the
+    # legacy entry was not found); the file may still hold unrelated consumer
+    # edits, so carrying a NOOP hook file would leak them into the PR. The FILE
+    # side of the asymmetry (a retired DELETE *and* NOOP carried, KEEP excluded)
+    # is no longer a `Plan.retire_carries` enumeration but apply's own recorded
+    # touched-set (#986), proven observably by the MODE_PR tests above
+    # (test_pr_mode_commit_universe_carries_retired_deletes_noops_and_the_changelog,
+    # _excludes_a_kept_retired_file, _universe_excludes_a_noop_retired_hook_file).
     hooks = irec.plan_retired_hooks(
         [
             irec.RetiredHook(file=".claude/settings.json", event="X", marker="gone"),
@@ -4996,20 +4991,13 @@ def test_retire_carries_files_keep_noop_asymmetry_from_hooks():
     plan = irec.Plan(
         root="/x",
         decisions=(),
-        retired=tuple(retired),
+        retired=(),
         seeds=(),
         retired_hooks=tuple(hooks),
     )
 
-    assert {d.retired.path for d in plan.retire_carries} == {"del.yml", "noop.yml"}
-    assert "keep.yml" not in {d.retired.path for d in plan.retire_carries}
-    # Hooks: the universe carries ONLY the files apply REWROTE — the DELETE
-    # decisions (`retire_hook_deletes`), NOT the NOOP. A retired-hook NOOP does
-    # not mean the hook file is absent (only that the legacy entry was not
-    # found); the file may still hold unrelated consumer edits, so carrying a
-    # NOOP hook file would leak them into the PR (#984 round-6 review). Here the
-    # `gone` entry is NOOP and the `present` entry is DELETE, over the same file
-    # → the file is carried by the DELETE, and only once.
+    # Here the `gone` entry is NOOP and the `present` entry is DELETE, over the
+    # same file → the file is carried by the DELETE, and only once.
     assert [d.action for d in plan.retired_hooks] == [irec.NOOP, irec.DELETE]
     assert {d.retired.file for d in plan.retire_hook_deletes} == {
         ".claude/settings.json"

@@ -25,7 +25,7 @@ from .. import buildid, config, execrun, gh, git, pixienv
 from ..changelog import CHANGELOG_FILE
 from . import selfcert
 from .errors import InstallError, SelfCertError
-from .reconcile import Plan, consumer_inner, format_lefthook_conflict
+from .reconcile import KEEP, Plan, consumer_inner, format_lefthook_conflict
 from .splice import (
     SETTINGS_MALFORMED,
     remove_retired_hooks,
@@ -746,14 +746,68 @@ def apply(
                 extra={"root": str(root), "path": PIXI_FILE},
             )
 
+    # The authoritative touched-set (#986, the design fix behind #852/#984):
+    # every shipit-owned path this apply is authoritative for, RECORDED here as
+    # apply performs each mutation — never re-derived per path-category after the
+    # fact (the leak the enumerated "commit universe" kept re-opening). The
+    # MODE_PR reconcile commit publishes exactly this set against origin/<base>.
+    # Two views, both built inline below:
+    #
+    # - ``touched`` is the commit SCOPE: `git.staged_paths` filters it to the
+    #   members that actually carry a staged diff against origin/<base>, so no
+    #   consumer-local path outside it can ever leak into the PR.
+    # - ``staged_writes`` is the subset apply left ON DISK — the paths `git add`
+    #   stages from the working tree. A path apply made ABSENT (a retired
+    #   deletion) rides ``touched`` only: the `reset --soft origin/<base>` stages
+    #   its removal against a base that still carries it, and `git add` on an
+    #   absent+untracked path would error.
+    #
+    # Built for every mode (cheap set-building); only MODE_PR consumes them.
+    touched: set[str] = set()
+    staged_writes: set[str] = set()
+
+    # Managed units: the WHOLE managed set is shipit-owned. A NOOP unit writes
+    # nothing — its file already holds the desired content — but is still a
+    # managed destination the PR must assert against the base (a base that lacks
+    # it needs it published, the #852 NOOP-unit drop-out), so record every
+    # decision's dest, present on disk either way, not just the writes.
+    for d in plan.decisions:
+        touched.add(d.unit.dest)
+        staged_writes.add(d.unit.dest)
     for d in plan.writes:
         write_unit(root, d.unit)
+
     rerendered = plan.rerender_changelog and _rerender_changelog(root)
-    for d in plan.retire_deletes:
-        # missing_ok: the decision proved a pristine copy existed at gather
-        # time; if it vanished in the gather→apply window the goal state
-        # ("file absent") already holds, so the unlink stays idempotent.
-        (root / d.retired.path).unlink(missing_ok=True)
+    # The changelog rides the commit SCOPE unconditionally: a CHANGELOG.md the
+    # base still carries but this tree no longer does — deleted since a prior run,
+    # or a re-render skipped in the gather→apply window (#578) — must be published
+    # as a deletion, never reverted to the base copy. It joins ``staged_writes``
+    # only when the re-render actually WROTE it: an absent changelog must not
+    # reach `git add`, which errors on an absent+untracked pathspec (#578 review).
+    touched.add(CHANGELOG_FILE)
+    if rerendered:
+        staged_writes.add(CHANGELOG_FILE)
+
+    for d in plan.retired:
+        # Every retired decision EXCEPT KEEP ends ABSENT locally — DELETE unlinks
+        # the pristine copy, NOOP found it already gone — and that absence must be
+        # published so the reset onto a base that still carries the path DELETES
+        # it rather than resurrecting it (#984). Record the path in the commit
+        # scope; when apply removes a file that is actually PRESENT, also stage
+        # the deletion (a present retired file is tracked at the cut point, so
+        # `git add` stages its removal), leaving an already-absent NOOP to the
+        # reset. KEEP is a locally-modified consumer file apply PRESERVES: never
+        # touched, never recorded, never published (the retired-file invariant).
+        if d.action == KEEP:
+            continue
+        touched.add(d.retired.path)
+        dest = root / d.retired.path
+        if dest.is_file():
+            staged_writes.add(d.retired.path)
+        # missing_ok: the DELETE decision proved a pristine copy existed at gather
+        # time; if it vanished in the gather→apply window the goal state ("file
+        # absent") already holds, so the unlink stays idempotent.
+        dest.unlink(missing_ok=True)
     for d in plan.retire_hook_deletes:
         # Retired hook entries (#619): rewrite the hooks file without the
         # matched consumer-local entries. Runs AFTER the unit writes above, so
@@ -783,6 +837,14 @@ def apply(
                 exc_info=True,
                 extra={"root": str(root), "file": d.retired.file},
             )
+            continue
+        # apply REWROTE this hook file — a present file, so it joins BOTH the
+        # scope and the git-add set. A retired-hook NOOP is deliberately NOT here:
+        # the entry was merely absent, but the file may still hold UNRELATED
+        # consumer edits, so carrying it would leak those into the PR (the
+        # files-vs-hooks asymmetry, #984 round-6). Only a rewrite is apply's own.
+        touched.add(d.retired.file)
+        staged_writes.add(d.retired.file)
     cfg_path = root / config.CONFIG_NAME
     # Seed the consumer-owned policy BEFORE the manifest write, which preserves
     # `[secrets]`/`[reviewers]` textually while it re-stamps `[shipit]`/`[managed]`.
@@ -799,6 +861,9 @@ def apply(
     new_managed = {d.unit.key: d.desired_hash for d in plan.decisions}
     stamped_version = _shipit_version()
     config.write_manifest(cfg_path, version=stamped_version, managed=new_managed)
+    # The re-stamped `.shipit.toml` is always written — record it in both views.
+    touched.add(config.CONFIG_NAME)
+    staged_writes.add(config.CONFIG_NAME)
     # The reconcile milestone: the managed set (and manifest) is on disk.
     logger.info(
         "managed set written",
@@ -1007,75 +1072,33 @@ def apply(
         try:
             git.switch_create(INSTALL_BRANCH, cwd=cwd)
             git.reset_soft(f"origin/{base_branch}", cwd=cwd)
-            # Stage the FULL managed universe, not just the pre-reset writes:
-            # `changed_paths` is computed against the Tree's cut point, where a
-            # managed file already at desired content is a NOOP and drops out of
-            # the write set. After the reset onto origin/<base> that same file may
-            # be ABSENT from the base (a Tree cut from a stale `shipit/install`
-            # head), so a changed_paths-only commit would silently DROP it from
-            # the refreshed PR (#852 review). Staging every managed destination
-            # makes the commit deterministically origin/<base> + the whole managed
-            # set, whatever HEAD the Tree was cut from. These paths are all
-            # present in the working tree (a managed write) or tracked in the
-            # index (a retired file apply deleted from the tree, carried by
-            # `changed_paths`), so `git add` resolves every one.
-            add_paths = sorted(
-                set(changed_paths) | {d.unit.dest for d in plan.decisions}
-            )
-            git.add(add_paths, cwd=cwd)
-            # The commit pathspec must carry MORE than the writes. The SAME
-            # drop-out class hits the retired paths and a previously-rendered
-            # CHANGELOG.md (#984 agy review): a retired path absent at the cut
-            # point never joins `changed_paths`, yet after the reset onto
-            # origin/<base> the index still stages its difference against the
-            # base (e.g. the deletion of a retired file the base still carries).
-            # Omit it from the commit pathspec and the pathspec `git commit` —
-            # which takes UNLISTED paths from HEAD — silently REVERTS it to the
-            # base state, RESURRECTING the retired file in the refreshed PR.
-            #
-            # For retired FILES the universe is the paths apply left ABSENT
-            # locally — every retired decision EXCEPT KEEP (`retire_carries`):
-            # DELETE unlinked the pristine copy, NOOP found it already gone, and
-            # both absences must be published so the reset onto a base that still
-            # carries the path DELETES it, not resurrects it (#984 agy review,
-            # the round-4 regression: filtering to DELETE alone dropped the
-            # NOOP-vs-base deletions). KEEP stays OUT: a locally-modified consumer
-            # file apply PRESERVES, whose post-reset index differs from the base,
-            # so listing it would leak that consumer-local file into the PR (#984
-            # codex review, the retired invariant).
-            #
-            # Retired HOOKS carry ONLY the files apply REWROTE (`retire_hook_deletes`,
-            # the DELETE decisions), NOT the file/NOOP mirror of the retired-file
-            # rule (#984 round-6 review): a retired-hook NOOP does not mean the
-            # hook FILE is absent — only that the legacy entry was not found. The
-            # file (`.claude/settings.json`, `.lefthook-local.yml`) can still be
-            # present with UNRELATED consumer edits, so carrying a NOOP hook file
-            # would sweep those edits across the reset into the PR. Only a rewrite
-            # (a DELETE) is a change apply owns and may publish.
-            #
-            # The changelog is included UNCONDITIONALLY: gating on `is_file()`
-            # would drop the case where it was DELETED (absent from the tree) and
-            # must be published as a deletion — and an absent changelog costs
-            # nothing, since `git diff --cached --name-only` silently skips a path
-            # missing from the tree, the index AND HEAD.
-            #
-            # The universe is then scoped to the members that ACTUALLY carry a
-            # staged diff: a retired path absent from the tree, the index AND the
-            # base has nothing to carry, and `git commit` aborts on a pathspec
-            # that matches nothing (the same crash the #578 changelog
-            # phantom-drop above guards against — `git.staged_paths` never lists
-            # it).
-            universe = sorted(
-                set(add_paths)
-                | {d.retired.path for d in plan.retire_carries}
-                | {d.retired.file for d in plan.retire_hook_deletes}
-                | {CHANGELOG_FILE}
-            )
-            pr_paths = git.staged_paths(universe, cwd=cwd)
+            # The committed-lockfile decision (#439, see PIXI_LOCK): the lint-env
+            # solve during hook activation above materialized/refreshed pixi.lock;
+            # stage it with the managed set so the reconcile lands laptop/CI parity
+            # and never leaves the tree dirty. Present on disk, so it joins BOTH
+            # views (a real staged write).
+            if (root / PIXI_LOCK).is_file():
+                touched.add(PIXI_LOCK)
+                staged_writes.add(PIXI_LOCK)
+            # The reconcile commit is the touched-set (#986), recorded as apply
+            # mutated — no per-category universe to re-derive, no consumer-edit
+            # surface. `git add` stages the paths apply left ON DISK
+            # (`staged_writes`: the managed set incl. NOOP units, the config, a
+            # re-rendered changelog, rewritten hook files, and pixi.lock); the
+            # `reset --soft origin/<base>` already staged every retired deletion
+            # against a base that still carries it. `git.staged_paths` then scopes
+            # the commit to the members of the FULL `touched` set that actually
+            # carry a staged diff — the primitive that keeps a consumer-local path
+            # (a KEPT retired file, a NOOP hook file) OUT of the commit, and that
+            # silently skips a path absent from the tree, the index AND HEAD, so
+            # the commit never receives a pathspec `git commit` would abort on
+            # (the changelog-deletion and empty-diff cases both ride this).
+            git.add(sorted(staged_writes), cwd=cwd)
+            pr_paths = git.staged_paths(sorted(touched), cwd=cwd)
             if not pr_paths:
                 # After the reset the managed set already matches origin/<base> —
                 # a stale Tree duplicating an already-merged reconcile. Nothing
-                # in the shipit-owned universe is staged, so a pathspec
+                # in the shipit-owned touched-set is staged, so a pathspec
                 # `git commit` over an empty diff would fail with "nothing to
                 # commit" (exit 1); report the clean no-op and skip the
                 # commit/PR rather than crashing the install (#852 review). The
