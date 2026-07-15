@@ -113,6 +113,15 @@ PROVISIONING: dict[str, tuple[Provisioned, ...]] = {
         ),
     ),
     "ps": (Provisioned("ps", OS_PROVIDED, note="session liveness probe, dev-side"),),
+    "gcloud": (
+        Provisioned(
+            "gcloud",
+            DEV_HOST,
+            note="Artifact channel store provisioner (ARF01-WS03, "
+            "shipit.channel.store_provision) — the operator's own gcloud, an "
+            "opt-in infra harness, never a release runner",
+        ),
+    ),
     "curl": (
         Provisioned(
             "curl",
@@ -255,6 +264,20 @@ PROVISIONING: dict[str, tuple[Provisioned, ...]] = {
     ),
     "ruby": (
         Provisioned("ruby", RUNNER_IMAGE, note="brew formula `ruby -c` check only"),
+    ),
+    "rattler-build": (
+        Provisioned(
+            "rattler-build",
+            PIXI_MANAGED,
+            pin="0.68.*",
+            test="test_missing_rattler_build_gets_the_reconcile_remedy",
+            note="the conda endpoint's packager (ARF01-WS01 #950, ADR-0064): "
+            "`rattler-build build`/`publish` repackage a final release binary "
+            "into a `.conda` and push+reindex the Artifact channel; rides the "
+            "rust-release-deps block (rust signal — the walking-skeleton "
+            "producer lex-fmt/lex is rust), pinned 0.68.* from conda-forge, "
+            "spike-validated at 0.68.0",
+        ),
     ),
     "vsce": (
         Provisioned(
@@ -468,6 +491,7 @@ def test_pins_agree_with_their_one_authority():
     rust_release = _block_toml("pixi-rust-release-deps-block.toml")
     assert _row("cargo", "cargo-edit").pin == rust_release["cargo-edit"]
     assert _row("wasm-pack", "wasm-pack").pin == rust_release["wasm-pack"]
+    assert _row("rattler-build", "rattler-build").pin == rust_release["rattler-build"]
     rust_toolchain = _block_toml("pixi-rust-release-toolchain-block.toml")
     assert _row("cargo", "cargo").pin == rust_toolchain["rust"]
     assert (

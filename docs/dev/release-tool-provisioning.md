@@ -52,6 +52,7 @@ the runner its block pins; the DEFAULT pixi env is the PATH that run sees):
 | `tree-sitter` (`tree-sitter-cli`) | test lane (corpus tests, `tree-sitter test`); build (`tree-sitter generate`); bundle (tarball composition reads the generate output) | pixi-managed (`pixi.toml#shipit-tree-sitter-release-deps`, #890 — delivered on the DECLARED tree-sitter `[toolchains]` leg, `Toolchain.provisions_signal`: no manifest signals a grammar, the wasm-pack→node-deps union mechanics) | `0.25.*` (parity with the grammar consumer's `tree-sitter-cli` devDependency line — the generated parser follows the CLI's minor line, bump both together) | `test_missing_tree_sitter_gets_the_reconcile_remedy` (build-stage remedy, the #890 death site), `test_tree_sitter_toolchain_delivers_the_cli_block` |
 | `twine` | publish (pypi endpoint) | pixi-managed (`pixi.toml#shipit-python-release-deps`, #801 — the python toolchain signal, closed hole 2) | `6.2.*` | `test_missing_twine_gets_the_reconcile_remedy` |
 | `ruby` | publish (brew formula `ruby -c` syntax check) | runner image (ubuntu) | floats | — |
+| `rattler-build` | publish (conda endpoint — `rattler-build build` repackages a final release binary into a `.conda`, `rattler-build publish` pushes+reindexes the per-repo Artifact channel; ARF01-WS01 #950, ADR-0064) | pixi-managed (`pixi.toml#shipit-rust-release-deps`, rust signal — the walking-skeleton producer lex-fmt/lex is rust; a language-agnostic endpoint-gated home is future work) | `0.68.*` (spike-validated at 0.68.0) | `test_missing_rattler_build_gets_the_reconcile_remedy` |
 | `vsce` | bundle (vsix composition `vsce package --target`), publish (vscode-marketplace `vsce publish`) | consumer-owned (the extension repo's `@vscode/vsce` devDependency; no fleet block) | consumer's | — (open hole 6) |
 | `ovsx` | publish (open-vsx `ovsx publish`) | consumer-owned (the extension repo's `ovsx` devDependency) | consumer's | — (wired-but-off, open hole 6) |
 | `tar` | bundle (archive composition), sign (reseal payload) | runner image (ubuntu + macos) | floats | — |
@@ -71,6 +72,7 @@ ADR-0028 whitelist (they never run on a release runner):
 | Tool | Where | Source | Pin |
 | --- | --- | --- | --- |
 | `ps` | session liveness probe | OS | — |
+| `gcloud` | Artifact channel store provisioner (`shipit.channel.store_provision`, ARF01-WS03) | dev-host (operator's own gcloud, opt-in infra harness — never a release runner) | — |
 | `curl` | `shipit provision lexd` fetch | pixi (shipit's own default env) | `*` |
 | `act` / `docker` | `shipit wf test` harness | pixi test feature (`act = "0.2.*"`) / host daemon | act pinned |
 | `bin/check-e2e` | e2e harness default | repo-local committed script | — |

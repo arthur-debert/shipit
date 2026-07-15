@@ -1,0 +1,37 @@
+`shipit release cascade UPSTREAM VERSION` fires the release-side, artifact-pinned
+Cascade: on an upstream's STABLE release, it tells every portfolio repo that pins
+that upstream to bump (ADR-0067, the Artifact channel's push-with-derived-fan-out).
+
+UPSTREAM is the releasing repo's `owner/name` slug; VERSION is the concrete
+released semver the tag names. The target set is DERIVED, never producer-
+maintained: the consumer's own `[artifact-deps]` declaration is the single source
+of truth, so a consumer added without touching any producer list is still
+reached, and a stale producer list can never misfire. The verb scans the
+portfolio for `[artifact-deps]` entries whose `repo` matches UPSTREAM and fires
+one `repository_dispatch` at each, carrying the shared payload contract exactly:
+
+    { "upstream": "<owner>/<repo>", "version": "<semver>" }
+
+The receiver (each consumer's managed receive-workflow) opens its own draft bump
+PR pinning the new version — permissions stay per-repo; no upstream write-token
+reaches a downstream.
+
+Stable-only: an rc / prerelease VERSION dispatches NOTHING. rc builds are
+published to the channel for manual pin-testing but are never auto-bumped, so a
+prerelease short-circuits before the scan even runs.
+
+Where it runs, and the two capabilities it needs (ADR-0067's cross-repo cost):
+the verb runs from the portfolio home — the shipit checkout that owns
+`[project.portfolio]`, the same home `fleet sweep` runs from. It reads each
+declared repo's LOCAL `.shipit.toml` under `--source-root` (default `~/h`, the
+fleetsweep source layout), so the scan is bounded to exactly the declared
+portfolio — one local file read per entry, never a fleet crawl. A live (non
+`--dry-run`) fan-out fires the dispatch through the cross-repo PAT
+`DOWNSTREAM_DISPATCH_TOKEN` — the workflow's ambient `GITHUB_TOKEN` is scoped to
+the releasing repo and cannot dispatch cross-repo — so the token is required and
+its absence is a loud refusal, never a silent no-op.
+
+`--dry-run` derives and prints the target set but dispatches nothing (and needs
+no token) — the offline rehearsal. `--source-root PATH` overrides where the
+portfolio `path` entries index into. `--json` emits the typed report (the
+derived targets, the exact payload, and what was dispatched).

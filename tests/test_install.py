@@ -2005,12 +2005,17 @@ def test_toolchain_block_units_have_the_right_shape():
     # pinned to 0.15.* (#846: conda-forge never carried a 0.13 build). NOT
     # here: the wasm32 target std (#853) — a sysroot component, it rides the
     # toolchain block below so a consumer-owned `rust` pin skips it too.
+    # rattler-build rides HERE too (ARF01-WS01 #950): the conda endpoint's
+    # packager, on conda-forge in the DEFAULT release env, pinned 0.68.*
+    # (spike-validated) — rust-signal-delivered for the walking-skeleton
+    # producer (lex-fmt/lex → lexd).
     rust_release = units[iunits.PIXI_RUST_RELEASE_DEPS_KEY]
     assert rust_release.dest == "pixi.toml"
     assert rust_release.anchor == "[dependencies]"
     assert tomllib.loads(rust_release.desired_inner()) == {
         "cargo-edit": "0.13.11.*",
         "wasm-pack": "0.15.*",
+        "rattler-build": "0.68.*",
     }
 
     # The rust RELEASE toolchain (#801, TOL02-WS17 hole 1): cargo itself in
@@ -2586,6 +2591,48 @@ def test_test_task_block_is_skipped_when_a_feature_defines_the_task(tmp_path):
     assert "pixi block skipped" in warnings
     assert "[feature.test.tasks]" in warnings
     assert "ambiguous" in warnings
+
+
+def test_task_conflict_message_quotes_a_dotted_feature_name():
+    # ARF01-WS08: a feature name with a dot (e.g. a package-named feature like
+    # `ruamel.yaml`) must render as a QUOTED TOML path — an unquoted
+    # `[feature.ruamel.yaml.tasks]` would read as the nested `ruamel` → `yaml`
+    # tables, misnaming the one feature in the actionable message. Bare names
+    # stay unquoted.
+    dotted = irec.format_pixi_task_conflict(
+        irec.PixiTaskConflict(
+            unit_key=iunits.PIXI_TEST_TASK_KEY,
+            task="test",
+            features=("ruamel.yaml", "plain"),
+        )
+    )
+    assert '[feature."ruamel.yaml".tasks]' in dotted
+    assert "[feature.plain.tasks]" in dotted
+    # No unquoted dotted header leaks through.
+    assert "[feature.ruamel.yaml.tasks]" not in dotted
+
+
+def test_task_conflict_message_escapes_quotes_and_backslashes():
+    # ARF01-WS08 (copilot #966): feature names are read from the CONSUMER's own
+    # pixi.toml, so they are unbounded. A quoted TOML key is a basic string, so a
+    # name carrying a `"` or `\` must be escaped — otherwise the rendered header
+    # is INVALID TOML and the actionable message mis-quotes the path it names.
+    weird = irec.format_pixi_task_conflict(
+        irec.PixiTaskConflict(
+            unit_key=iunits.PIXI_TEST_TASK_KEY,
+            task="test",
+            features=('a"b', "c\\d"),
+        )
+    )
+    assert '[feature."a\\"b".tasks]' in weird
+    assert '[feature."c\\\\d".tasks]' in weird
+    # The rendered headers are valid, parseable TOML.
+    for header, expected in (
+        ('[feature."a\\"b".tasks]', 'a"b'),
+        ('[feature."c\\\\d".tasks]', "c\\d"),
+    ):
+        parsed = tomllib.loads(f"{header}\nx = 1\n")
+        assert parsed["feature"][expected]["tasks"] == {"x": 1}
 
 
 def test_test_task_block_delivers_when_no_feature_defines_it(tmp_path):

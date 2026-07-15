@@ -55,6 +55,25 @@ switch), one adapter per name of :data:`shipit.config.ENDPOINTS`:
   cross-repo). Fires on REAL releases only: the plan skips it on any
   prerelease (and the RC guard on a live-fire cut), so an rc/beta notifies
   no one.
+- **conda** (a *derived* endpoint, ARF01-WS01 #950, ADR-0064/0065) — the
+  Artifact channel's producer. Like brew it consumes the FINAL release assets
+  by their known names (``<artifact>-<triple>.tar.gz``/``.zip``, never a scrape
+  — asset names drift, ADR-0064) and runs after gh-release. For each staged
+  archive whose target triple maps to a supported conda subdir
+  (:data:`CONDA_SUBDIRS` — osx-arm64/linux-64/linux-aarch64/win-64 ONLY; no
+  osx-64, no musl, matching today's ``provision`` refusal) it renders a
+  minimal ``rattler-build`` recipe that repackages the prebuilt binary into a
+  versioned ``.conda`` (no compilation — a single runner produces every
+  subdir), then ``rattler-build publish``es the built packages to the
+  producing repo's per-repo channel — ``s3://<bucket>/<owner/name>`` over GCS's
+  S3-interop endpoint (ADR-0065) — which uploads AND reindexes the remote
+  channel's ``repodata.json`` in one step. Per-repo channel roots make each
+  repo the sole writer of its own repodata, so cross-repo index races are
+  structurally impossible (ADR-0064). rc-INCLUSIVE: unlike brew/notify it is
+  NOT ``stable_only`` (prereleases publish for manual pin-testing, ADR-0064),
+  but it IS external, so a ``-release-rc`` live-fire rehearsal stays
+  gh-release-only. Idempotent-resumable via ``--force`` (a re-run re-uploads
+  and re-indexes; already-published converges, ADR-0009 phase 2).
 
 The stage-wide invariants live HERE as pure cores, so they hold identically
 for the WS06 ``wf-publish`` block and a laptop invocation (ADR-0040):
@@ -87,8 +106,9 @@ create becomes edit, an unchanged formula pushes nothing.
 Effects run through the request's injected seams: ``run_cmd``/``probe`` are
 the one Exec runner (ADR-0028 — the ``cargo publish`` / ``twine`` /
 ``npm publish`` / ``npm exec -- vsce publish`` / ``npm exec -- ovsx publish`` /
-``ruby -c`` argv literals below are those tools' one publish-side assembly
-point, whitelisted in ``tests/test_tool_argv_sweep.py``),
+``ruby -c`` / ``rattler-build build`` / ``rattler-build publish`` argv literals
+below are those tools' one publish-side assembly point, whitelisted in
+``tests/test_tool_argv_sweep.py``),
 ``ghio`` the gh Tool adapter (:mod:`shipit.gh` — the gh-release REST/CLI
 calls), ``gitio`` the git adapter (the tap clone/commit/push). Each adapter's
 required secret NAME comes from the one derivation authority
@@ -118,6 +138,7 @@ from typing import Any
 
 from .. import config, execrun
 from ..changelog import SEMVER_RE
+from ..channel import buckets
 from . import ReleaseError, secretreq
 from . import brew as brew_mod
 from . import integrity as integrity_mod
@@ -160,6 +181,10 @@ VSCE_SECRET = secretreq.ENDPOINT_SECRETS["vscode-marketplace"][0]
 OVSX_SECRET = secretreq.ENDPOINT_SECRETS["open-vsx"][0]
 TAP_SECRET = secretreq.ENDPOINT_SECRETS["brew"][0]
 NOTIFY_SECRET = secretreq.ENDPOINT_SECRETS["notify-downstreams"][0]
+#: conda's write-credential pair (the GCS HMAC interop key, ADR-0065) — sourced
+#: from the one derivation authority like every other endpoint's secret name.
+CONDA_KEY_ID_SECRET = secretreq.ENDPOINT_SECRETS["conda"][0]
+CONDA_SECRET_KEY_SECRET = secretreq.ENDPOINT_SECRETS["conda"][1]
 
 #: The ``repository_dispatch`` event type the notify-downstreams cascade fires
 #: (TOL02-WS16 #792). A downstream repo (lex-fmt/vscode, nvim, lexed) wires
@@ -167,6 +192,69 @@ NOTIFY_SECRET = secretreq.ENDPOINT_SECRETS["notify-downstreams"][0]
 #: freshly-released grammar. ONE stable type across the fleet so a downstream
 #: filters on a single name; the source repo/tag rides the client payload.
 NOTIFY_EVENT_TYPE = "upstream-release"
+
+#: The CLOSED release-triple → conda-subdir map (ARF01-WS01 #950, ADR-0064).
+#: The Artifact channel serves EXACTLY these four subdirs: osx-arm64, linux-64,
+#: linux-aarch64, win-64. A release triple with no entry (``x86_64-apple-
+#: darwin`` → the missing osx-64, ``x86_64-unknown-linux-musl`` → the missing
+#: musl subdir) is UNSERVED — the conda endpoint silently skips its archive,
+#: matching today's ``shipit provision lexd`` refusal for Intel-mac/musl
+#: consumers (no conda subdir, no pinned dep). The keys are a subset of
+#: :data:`shipit.release.preflight.PLATFORM_MATRIX` targets (the release lanes);
+#: a lane the channel does not serve simply produces no package.
+CONDA_SUBDIRS: dict[str, str] = {
+    "aarch64-apple-darwin": "osx-arm64",
+    "x86_64-unknown-linux-gnu": "linux-64",
+    "aarch64-unknown-linux-gnu": "linux-aarch64",
+    "x86_64-pc-windows-msvc": "win-64",
+}
+
+#: The two-tier Artifact channel buckets (ADR-0065 — two dedicated buckets, one
+#: public-read/authless and one private/credentialed). The per-repo channel root
+#: is ``<bucket>/<owner/name>``, so each repo is the sole writer of its own
+#: repodata (cross-repo index races structurally impossible, ADR-0064). WS03
+#: automates the buckets' provisioning. The tier a publish writes to is DERIVED
+#: from the producing repo's visibility (ADR-0065), never declared:
+#: :func:`_publish_conda` routes a private repo to
+#: :data:`PRIVATE_ARTIFACT_BUCKET` and a public one to
+#: :data:`PUBLIC_ARTIFACT_BUCKET`. WRITING always needs the HMAC pair (a
+#: public-read bucket is still write-protected); the tier only changes which
+#: bucket, so the write path is identical for both. These re-export the ONE
+#: source of truth (:mod:`shipit.channel.buckets`) the consumer projection reads
+#: from and the WS03 store provisioner CREATES — a drift test pins all three so
+#: a publish can never write to a bucket the consumer never reads (or the
+#: provisioner never made).
+PUBLIC_ARTIFACT_BUCKET = buckets.PUBLIC_ARTIFACT_BUCKET
+PRIVATE_ARTIFACT_BUCKET = buckets.PRIVATE_ARTIFACT_BUCKET
+
+#: The GCS S3-interop endpoint + region (ADR-0065 — ``region = "auto"`` and the
+#: global ``storage.googleapis.com`` endpoint are load-bearing for GCS
+#: interop). Passed to rattler-build's S3 backend via the env seam below. The
+#: endpoint is the same shared host constant the consumer/provisioner use
+#: (:data:`shipit.channel.buckets.CHANNEL_HOST`).
+CONDA_S3_ENDPOINT = buckets.CHANNEL_HOST
+CONDA_S3_REGION = "auto"
+
+#: The child-process env vars rattler-build's S3 backend READS the channel
+#: endpoint/region/credentials under (``rattler-build upload s3`` / ``publish``
+#: — the ``[env: S3_*]`` bindings of its S3 credentials group). The endpoint
+#: and region are the fixed GCS-interop constants above; the key/secret ride
+#: from the endpoint's secret pair (:data:`CONDA_KEY_ID_SECRET` /
+#: :data:`CONDA_SECRET_KEY_SECRET`), looked up in ``req.env`` and fed here —
+#: never argv, so the HMAC secret is never recorded in an Exec argv line.
+CONDA_S3_ENDPOINT_ENV = "S3_ENDPOINT_URL"
+CONDA_S3_REGION_ENV = "S3_REGION"
+CONDA_S3_KEY_ID_ENV = "S3_ACCESS_KEY_ID"
+CONDA_S3_SECRET_KEY_ENV = "S3_SECRET_ACCESS_KEY"
+
+#: The scratch subdir names under the staged assets tree the conda adapter
+#: renders recipes / stages the built channel into — never top-level files (so
+#: a gh-release re-run can never ship them as assets, the brew scratch prior
+#: art). Each is namespaced by artifact (``<scratch>/<artifact>/<subdir>``)
+#: because ``assets_dir`` is stage-wide: an un-namespaced channel tree would
+#: let one conda artifact's post-build glob capture another's ``.conda``.
+CONDA_RECIPE_SCRATCH = "conda-recipe"
+CONDA_CHANNEL_SCRATCH = "conda-channel"
 
 #: The child-process env var each tool READS the token under — the runtime
 #: feed, tool-specific and distinct from the secret NAME the token is
@@ -440,16 +528,19 @@ def plan(
     endpoint name outside the closed registry is a hard
     :class:`ReleaseError` naming the known set.
 
-    Cross-endpoint invariant: an unskipped brew OR notify-downstreams dispatch
-    REQUIRES an unskipped gh-release in the same plan. brew's formula points at
-    ``releases/download/<tag>/…`` assets that only gh-release creates and
-    uploads, so brew alone would push a tap formula referencing a release this
-    run never produced; notify-downstreams tells the downstream repos to
+    Cross-endpoint invariant: an unskipped brew, notify-downstreams, OR conda
+    dispatch REQUIRES an unskipped gh-release in the same plan. brew's formula
+    points at ``releases/download/<tag>/…`` assets that only gh-release creates
+    and uploads, so brew alone would push a tap formula referencing a release
+    this run never produced; notify-downstreams tells the downstream repos to
     rebuild against this release, so notifying without a landed gh-release
-    points them at a release that never existed. Both derived endpoints are
-    checked against the UNSKIPPED set (a prerelease that skips them never trips
-    the invariant). gh-release is itself idempotent-resumable, so a repair run
-    simply lists it alongside the derived endpoint.
+    points them at a release that never existed; conda publishes a versioned
+    ``.conda`` to the channel for a release consumers can then pin, so a channel
+    package without a landed gh-release advertises a release that never existed.
+    Every derived endpoint is checked against the UNSKIPPED set (a prerelease
+    or live-fire cut that skips it never trips the invariant). gh-release is
+    itself idempotent-resumable, so a repair run simply lists it alongside the
+    derived endpoint.
     """
     dispatches: list[Dispatch] = []
     for stage in ("release", "derived"):
@@ -486,6 +577,15 @@ def plan(
             "endpoint is planned: declare `gh-release` so the release the "
             "downstreams target lands on GitHub before they are notified (both "
             "endpoints are idempotent — a resume converges, nothing is duplicated)"
+        )
+    if "conda" in live and "gh-release" not in live:
+        raise ReleaseError(
+            "publish plan invalid — a conda endpoint publishes a versioned "
+            "`.conda` to the Artifact channel for a release consumers can pin, "
+            "but no unskipped gh-release endpoint is planned: declare "
+            "`gh-release` so the release the channel package represents lands on "
+            "GitHub before it is published (both endpoints are idempotent — a "
+            "resume converges, nothing is duplicated)"
         )
     return tuple(dispatches)
 
@@ -1272,6 +1372,296 @@ def _publish_notify_downstreams(req: PublishRequest) -> Published:
 
 
 # --------------------------------------------------------------------------
+# conda (derived) — the Artifact channel producer
+# --------------------------------------------------------------------------
+
+#: The conda-archive extensions the release stage produces per platform — the
+#: mac/linux tarball and the windows zip (:data:`PLATFORM_MATRIX` ext_archive
+#: values). :func:`conda_assets` strips exactly these to recover the triple.
+CONDA_ASSET_EXTS: tuple[str, ...] = (".tar.gz", ".zip")
+
+#: The conda package-name vocabulary (ADR-0064): lowercase letters, digits,
+#: ``.``, ``_``, ``-``. :func:`conda_package_name` rejects anything else loudly
+#: — a scoped wasm-pack identity (``@scope/name``) or a spaced ``product-name``
+#: would otherwise reach ``rattler-build`` as a doomed build with an opaque
+#: error instead of an actionable config fix.
+_CONDA_PACKAGE_NAME_RE = re.compile(r"[a-z0-9._-]+")
+
+
+def conda_subdir(triple: str) -> str | None:
+    """The conda subdir for a release target ``triple``, or ``None`` when the
+    Artifact channel does not serve it. Pure over :data:`CONDA_SUBDIRS`.
+
+    ``None`` is the UNSERVED verdict (osx-64, musl): the endpoint skips that
+    archive rather than inventing an unsupported subdir — the closed four-subdir
+    matrix (ADR-0064), matching today's ``provision`` refusal for those hosts.
+    """
+    return CONDA_SUBDIRS.get(triple)
+
+
+def conda_assets(
+    artifact_name: str, names: Sequence[str]
+) -> dict[str, tuple[str, str]]:
+    """``{subdir: (triple, asset_name)}`` for the artifact's staged release
+    archives whose triple maps to a SERVED conda subdir. Pure.
+
+    The archive names are the release stage's KNOWN names
+    (``<artifact>-<triple>.tar.gz`` / ``.zip`` — the brew-archive convention),
+    never a scrape by pattern (ADR-0064: asset names drift between releases).
+    An archive whose triple is unserved (:func:`conda_subdir` → ``None``) is
+    dropped, so an osx-64 or musl tarball never lands a package. A triple can
+    map to at most one subdir, so the result is keyed by subdir without
+    collision; iteration over ``names`` sorted keeps it deterministic.
+    """
+    prefix = f"{artifact_name}-"
+    assets: dict[str, tuple[str, str]] = {}
+    for name in sorted(names):
+        if not name.startswith(prefix):
+            continue
+        ext = next((e for e in CONDA_ASSET_EXTS if name.endswith(e)), None)
+        if ext is None:
+            continue
+        triple = name[len(prefix) : -len(ext)]
+        subdir = conda_subdir(triple)
+        if subdir is None:
+            continue
+        assets[subdir] = (triple, name)
+    return assets
+
+
+def conda_package_name(artifact: config.Artifact) -> str:
+    """The conda package name for ``artifact`` — the consumer's
+    ``[artifact-deps.<key>]`` key (ADR-0064: the key doubles as the conda
+    package name). Pure.
+
+    The name IS the artifact's main-binary name
+    (:func:`shipit.release.integrity.expected_main_binary`, the same identity
+    brew renders its formula for), lowercased. WS01 packages single-binary tool
+    artifacts (``lexd``); data/noarch artifacts (wasm, grammar) land later.
+
+    The lowercased name is validated against the conda package-name vocabulary
+    (lowercase letters/digits/``-``/``_``/``.``, :data:`_CONDA_PACKAGE_NAME_RE`)
+    and a mismatch is a loud :class:`ReleaseError`: ``expected_main_binary`` can
+    return a scoped wasm-pack identity (``@scope/name``) or a spaced
+    ``product-name``, neither of which can name a conda package — a config fix
+    the maintainer must make, not an opaque ``rattler-build`` failure downstream.
+    """
+    name = integrity_mod.expected_main_binary(artifact).lower()
+    if not _CONDA_PACKAGE_NAME_RE.fullmatch(name):
+        raise ReleaseError(
+            f"[artifacts.{artifact.name}] conda: derived package name `{name}` "
+            f"is not a valid conda package name (lowercase letters, digits, "
+            f"`.`, `_`, `-` only) — set `main-binary` to a conda-safe name or "
+            f"drop the conda endpoint. A scoped wasm-pack identity (`@scope/x`) "
+            f"or a spaced `product-name` cannot name a conda package."
+        )
+    return name
+
+
+def _conda_binary_layout(subdir: str, binary: str) -> tuple[str, str, str]:
+    """``(source_filename, install_dir, install_filename)`` for the binary in a
+    ``subdir`` package. Pure.
+
+    The release archive holds the binary as ``<binary>`` on unix and
+    ``<binary>.exe`` on windows (:data:`PLATFORM_MATRIX` ext_bin). conda puts
+    executables on PATH from ``bin`` on unix and ``Scripts`` on windows, so the
+    build script copies the extracted binary to the platform's PATH dir under
+    ``$PREFIX``. The single-runner repackage runs the copy in the host shell
+    regardless of the target subdir (no compilation — ADR-0064), so the layout
+    is data, not a per-OS build script.
+    """
+    if subdir == "win-64":
+        return f"{binary}.exe", "Scripts", f"{binary}.exe"
+    return binary, "bin", binary
+
+
+def render_conda_recipe(
+    *,
+    package: str,
+    version: str,
+    archive_path: str,
+    source_binary: str,
+    install_dir: str,
+    install_binary: str,
+) -> str:
+    """The ``rattler-build`` recipe.yaml that repackages ONE prebuilt binary
+    into a ``.conda``. Pure text (the render-vs-effect split brew uses).
+
+    rattler-build extracts the local ``archive_path`` source, then the build
+    script (run in the host shell — the single-runner repackage needs no
+    cross-compilation, ADR-0064) copies the extracted ``source_binary`` into
+    ``$PREFIX/<install_dir>/<install_binary>``. ``source_binary`` is the
+    binary's path WITHIN the extracted tree — the release archive stages it
+    under a top-level ``<artifact>-<triple>/`` dir (bundle._compose_archive's
+    contract), so the copy source is that dir + the binary name, never the
+    archive root. ``archive_path`` is a POSIX path (``Path.as_posix``) emitted
+    through ``json.dumps`` — a JSON string IS a valid YAML 1.2 double-quoted
+    scalar, so spaces, ``#``, and any embedded ``"`` / ``\\`` are escaped
+    rather than breaking the recipe or silently re-pointing the source.
+    ``build.number`` is 0 (the tag version is the sole ordering axis,
+    ADR-0041 — a re-cut of the same version is a re-upload, not a new build
+    number). Validated live on a ``file://`` channel: build → pixi resolve →
+    run → version bump → transparent re-resolve (the ADR-0064 spike loop).
+    """
+    return (
+        f"package:\n"
+        f"  name: {package}\n"
+        f'  version: "{version}"\n'
+        f"\n"
+        f"source:\n"
+        f"  - path: {json.dumps(archive_path)}\n"
+        f"\n"
+        f"build:\n"
+        f"  number: 0\n"
+        f"  script:\n"
+        f'    - mkdir -p "${{PREFIX}}/{install_dir}"\n'
+        f'    - cp "{source_binary}" "${{PREFIX}}/{install_dir}/{install_binary}"\n'
+    )
+
+
+def _publish_conda(req: PublishRequest) -> Published:
+    """Repackage the final release archives into ``.conda`` packages and
+    push+reindex them to the producing repo's per-repo Artifact channel. See
+    the module docstring's conda entry.
+
+    Derived-stage contract (mirrors brew): runs only after gh-release staged
+    the assets, so every ``.conda`` is built from the exact bytes the release
+    shipped. One ``rattler-build build`` per served subdir renders into a local
+    channel tree (rattler-build indexes each subdir on build), then one
+    ``rattler-build publish`` uploads AND reindexes the remote S3 channel in a
+    single step. Idempotent-resumable: ``--force`` re-uploads and re-indexes,
+    so a repair run converges (ADR-0009 phase 2). The S3 endpoint/region are
+    the fixed GCS-interop constants; the write HMAC pair rides the env seam
+    (never argv), looked up from the endpoint's secret pair.
+    """
+    if req.repo is None:
+        # Belt for direct (test/library) callers — the verb resolves the source
+        # slug for any live needs_repo dispatch (conda among them), so a real
+        # release never reaches here without it. A loud ReleaseError (not a
+        # strippable `assert`) matches the publish stage's error handling: the
+        # per-repo channel root IS `<bucket>/<owner/name>`, so an unresolved
+        # repo would write to the wrong channel.
+        raise ReleaseError(
+            f"[artifacts.{req.artifact.name}] conda: no source repo resolved — "
+            f"the per-repo channel root is `<bucket>/<owner/name>`, so an "
+            f"unresolved repo is a hard error, never a mis-rooted channel write"
+        )
+    key_id = _require_token(req, "conda", CONDA_KEY_ID_SECRET)
+    secret_key = _require_token(req, "conda", CONDA_SECRET_KEY_SECRET)
+    assets = conda_assets(req.artifact.name, release_assets(req.assets_dir))
+    if not assets:
+        served = ", ".join(sorted(CONDA_SUBDIRS.values()))
+        raise ReleaseError(
+            f"[artifacts.{req.artifact.name}] conda: no release archive maps to "
+            f"a served conda subdir ({served}) under {req.assets_dir} — the "
+            f"endpoint repackages the release stage's known "
+            f"`{req.artifact.name}-<triple>.tar.gz`/`.zip` archives; an "
+            f"unserved-only set (osx-64 / musl) publishes nothing"
+        )
+    package = conda_package_name(req.artifact)
+    binary = integrity_mod.expected_main_binary(req.artifact)
+    # Namespace both scratch trees by artifact: `assets_dir` is the stage-wide
+    # bundle tree shared by EVERY artifact in the run, so an un-namespaced
+    # `conda-channel/<subdir>` would let a second conda artifact's post-build
+    # glob pick up the FIRST artifact's `.conda` files (same subdir) and
+    # re-publish them under the wrong package — a per-artifact root keeps each
+    # build's channel tree its own.
+    recipe_root = req.assets_dir / CONDA_RECIPE_SCRATCH / req.artifact.name
+    channel_dir = req.assets_dir / CONDA_CHANNEL_SCRATCH / req.artifact.name
+    built: list[Path] = []
+    actions: list[str] = []
+    for subdir, (triple, asset_name) in sorted(assets.items()):
+        binary_name, install_dir, install_binary = _conda_binary_layout(subdir, binary)
+        # The release archive stages the binary under a top-level
+        # `<artifact>-<triple>/` dir (bundle._compose_archive's contract:
+        # `Composed(..., (archive, f"{stem}/"))`, stem == `<artifact>-<triple>`)
+        # and rattler-build extracts it preserving that dir, so the build
+        # script's copy source is `<artifact>-<triple>/<binary>`, NOT the
+        # archive root — copying just `<binary>` would miss the file.
+        source_binary = f"{req.artifact.name}-{triple}/{binary_name}"
+        recipe_dir = recipe_root / subdir
+        recipe_dir.mkdir(parents=True, exist_ok=True)
+        recipe = recipe_dir / "recipe.yaml"
+        recipe.write_text(
+            render_conda_recipe(
+                package=package,
+                version=req.version,
+                archive_path=(req.assets_dir / asset_name).as_posix(),
+                source_binary=source_binary,
+                install_dir=install_dir,
+                install_binary=install_binary,
+            ),
+            encoding="utf-8",
+            newline="\n",
+        )
+        req.run_cmd(
+            [
+                "rattler-build",
+                "build",
+                "--recipe",
+                str(recipe),
+                "--target-platform",
+                subdir,
+                "--output-dir",
+                str(channel_dir),
+                "--package-format",
+                "conda",
+                "--no-build-id",
+                # `native` runs the recipe's tests only when the build platform
+                # equals the host platform; a cross-subdir repackage (linux/win
+                # built on the release runner) skips them — there is nothing to
+                # run, and the binary cannot execute on the build host anyway.
+                "--test",
+                "native",
+            ],
+            req.root,
+            None,
+        )
+        produced = sorted((channel_dir / subdir).glob("*.conda"))
+        built.extend(produced)
+        actions.append(f"built {len(produced)} {subdir} package(s) from {asset_name}")
+    if not built:  # pragma: no cover — a successful build always writes a .conda
+        raise ReleaseError(
+            f"[artifacts.{req.artifact.name}] conda: rattler-build produced no "
+            f"`.conda` under {channel_dir} — the build recorded success but "
+            f"emitted no package"
+        )
+    # Tier is DERIVED from the producing repo's visibility (ADR-0065), never
+    # declared: a private repo publishes to the private bucket, a public one to
+    # the public bucket. Both writes ride the SAME S3-interop rail and HMAC
+    # write pair (a public-read bucket is still write-protected) — the tier only
+    # picks the bucket, so the consumer read model (authless HTTPS vs S3-interop
+    # creds, WS02/WS04) is the only place the tiers diverge.
+    private = bool(req.ghio.repo_is_private(req.repo))
+    bucket = PRIVATE_ARTIFACT_BUCKET if private else PUBLIC_ARTIFACT_BUCKET
+    channel_url = f"s3://{bucket}/{req.repo}"
+    # The endpoint/region are the fixed GCS-interop constants; the write HMAC
+    # pair rides the env (merged over the process env by the Exec runner),
+    # never argv — the keys are registered with the central redactor by the
+    # verb's token validation, so they are masked in every Exec record.
+    channel_env = {
+        CONDA_S3_ENDPOINT_ENV: CONDA_S3_ENDPOINT,
+        CONDA_S3_REGION_ENV: CONDA_S3_REGION,
+        CONDA_S3_KEY_ID_ENV: key_id,
+        CONDA_S3_SECRET_KEY_ENV: secret_key,
+    }
+    req.run_cmd(
+        [
+            "rattler-build",
+            "publish",
+            "--to",
+            channel_url,
+            "--force",
+            *[str(path) for path in built],
+        ],
+        req.root,
+        channel_env,
+    )
+    actions.append(f"published {len(built)} package(s) to {channel_url} (+ reindex)")
+    return Published(req.artifact.name, "conda", tuple(actions))
+
+
+# --------------------------------------------------------------------------
 # The closed registry
 # --------------------------------------------------------------------------
 
@@ -1289,8 +1679,9 @@ class EndpointAdapter:
     ``stable_skip_reason`` as the stated cause. ``needs_repo`` marks the
     endpoints whose publish reads the source ``owner/name`` slug
     (:attr:`PublishRequest.repo`) — brew's asset URLs, notify-downstreams'
-    dispatch payload — so the verb resolves it (one gh round-trip) ONLY when a
-    live dispatch declares the need, keeping a laptop RC cut offline.
+    dispatch payload, conda's per-repo channel root — so the verb resolves it
+    (one gh round-trip) ONLY when a live dispatch declares the need, keeping a
+    laptop RC cut offline.
     ``secrets`` MIRRORS the
     endpoint's :data:`secretreq.ENDPOINT_SECRETS` entry (the one derivation
     authority gh-setup/preflight traverse, WS02, stories 43–45) rather than
@@ -1349,6 +1740,17 @@ NOTIFY_DOWNSTREAMS = EndpointAdapter(
     stable_skip_reason=SKIP_NOTIFY_PRERELEASE,
     needs_repo=True,
 )
+CONDA = EndpointAdapter(
+    "conda",
+    "derived",
+    _publish_conda,
+    secrets=secretreq.ENDPOINT_SECRETS["conda"],
+    # rc-INCLUSIVE (ADR-0064): NOT stable_only — prereleases publish for manual
+    # pin-testing. It stays external, so the `-release-rc` live-fire rehearsal
+    # (is_live_fire) is still gh-release-only. needs_repo: the per-repo channel
+    # root is `<bucket>/<owner/name>`.
+    needs_repo=True,
+)
 
 #: The CLOSED registry, in a stable order (the config boundary's
 #: :data:`shipit.config.ENDPOINTS` names exactly this set — asserted in the
@@ -1357,8 +1759,10 @@ NOTIFY_DOWNSTREAMS = EndpointAdapter(
 #: adapters (vscode-marketplace, open-vsx) publish the vsix composition's
 #: per-target ``.vsix`` and are external / RC-guarded (TOL02-WS13 #789);
 #: notify-downstreams (TOL02-WS16 #792) is present too — not a marketplace
-#: publisher but the generated-parser release's cross-repo cascade. Other
-#: marketplace-class adapters (Zed) stay ABSENT until their repos migrate.
+#: publisher but the generated-parser release's cross-repo cascade. conda
+#: (ARF01-WS01 #950) is the Artifact channel's producer — a derived endpoint
+#: after notify-downstreams. Other marketplace-class adapters (Zed) stay ABSENT
+#: until their repos migrate.
 ADAPTERS: tuple[EndpointAdapter, ...] = (
     GH_RELEASE,
     CRATES,
@@ -1368,6 +1772,7 @@ ADAPTERS: tuple[EndpointAdapter, ...] = (
     OPEN_VSX,
     BREW,
     NOTIFY_DOWNSTREAMS,
+    CONDA,
 )
 
 
