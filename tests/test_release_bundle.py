@@ -1643,11 +1643,18 @@ def test_vsix_stages_artifact_dep_native_into_the_layout_before_packaging(tmp_pa
     src.write_bytes(b"NATIVE-LSP")  # a recognizable payload the copy must carry
     src.chmod(src.stat().st_mode | 0o755)
     staged = tmp_path / "editors/vscode" / "resources/lexd-lsp"
+    seen: dict = {}
 
     def _vsce_asserts_staged(argv, cwd):
-        # The native must already be in the extension layout when vsce packages —
-        # staging is BEFORE the pack step, so a hollow .vsix can never ship.
-        assert staged.is_file(), "native binary not staged before `vsce package`"
+        # The native must already be in the extension layout WHEN vsce packages —
+        # staging is BEFORE the pack step and cleaned up AFTER, so a hollow .vsix
+        # can never ship. Observe presence/payload/exec-bit here, mid-pack. The
+        # exec-bit is a POSIX concept: on a Windows runner `os.access(X_OK)` keys
+        # off the file extension, so a bare `lexd-lsp` is not "executable" there —
+        # guard the check to POSIX (a unix target's staged name carries no `.exe`).
+        seen["exists"] = staged.is_file()
+        seen["payload"] = staged.read_bytes()
+        seen["runnable"] = os.name == "nt" or os.access(staged, os.X_OK)
         _vsce_writes_out(argv, cwd)
 
     recorder = RunRecorder({"npm": _vsce_asserts_staged})
@@ -1662,9 +1669,10 @@ def test_vsix_stages_artifact_dep_native_into_the_layout_before_packaging(tmp_pa
         )
     )
 
-    assert staged.is_file()
-    assert staged.read_bytes() == b"NATIVE-LSP"
-    assert os.access(staged, os.X_OK)  # the LSP the extension spawns stays runnable
+    assert seen == {"exists": True, "payload": b"NATIVE-LSP", "runnable": True}
+    # Transient: vsce zipped the native in, so the compose removes the staged copy
+    # — the extension source tree is left clean, no per-target binary lingering.
+    assert not staged.exists()
     # Staging is a filesystem copy, not a recorded command — the ONLY recorded
     # invocation is still the single `vsce package` (no fetch, no extra process).
     assert recorder.heads == ["npm"]
@@ -1689,8 +1697,16 @@ def test_vsix_stage_resolves_the_named_feature_env(tmp_path):
     entries = _entries({"editors/vscode": "npm"})
     dep = _dep("lexd-lsp", feature="lint")
     _materialize_dep_bin(tmp_path, dep)  # under .pixi/envs/shipit-artifacts-lint
-    recorder = RunRecorder({"npm": _vsce_writes_out})
+    staged = tmp_path / "editors/vscode" / "resources/lexd-lsp"
+    seen: dict = {}
 
+    def _vsce(argv, cwd):
+        # Resolved from the `shipit-artifacts-lint` env (not `default`) and staged
+        # by pack time; observed mid-pack since the copy is cleaned up after.
+        seen["staged"] = staged.is_file()
+        _vsce_writes_out(argv, cwd)
+
+    recorder = RunRecorder({"npm": _vsce})
     bundle_mod.VSIX.compose(
         _request(
             tmp_path,
@@ -1701,20 +1717,24 @@ def test_vsix_stage_resolves_the_named_feature_env(tmp_path):
             artifact_deps=(dep,),
         )
     )
-    assert (tmp_path / "editors/vscode" / "resources/lexd-lsp").is_file()
+    assert seen == {"staged": True}
+    assert not staged.exists()  # cleaned up after packaging
 
 
-def test_vsix_win32_target_stages_from_the_scripts_exe_layout(tmp_path):
-    # The win32-x64 leg resolves the binary from conda's `Scripts/<pkg>.exe` PATH
-    # dir (release.publish._conda_binary_layout), NOT the unix `bin/<pkg>` that
-    # never exists on a Windows runner — the staging is target-aware.
+def test_vsix_win32_target_stages_scripts_exe_to_an_exe_dest(tmp_path):
+    # win32-x64 is target-aware on BOTH sides: the SOURCE resolves from conda's
+    # `Scripts/<pkg>.exe` PATH dir (release.publish._conda_binary_layout), not the
+    # unix `bin/<pkg>` that never exists on a Windows runner; and the DEST gets a
+    # `.exe` suffix so the extension spawns a runnable binary. The consumer
+    # declares ONE `dest` for all platforms (`resources/lexd-lsp`) — `.exe` is
+    # appended per-target, never a bare non-executable name on windows.
     (artifact,) = _artifacts(
         {
             "ext": {
                 "build": ["npm"],
                 "bundle": {
                     "composition": "vsix",
-                    "stage": {"lexd-lsp": "resources/lexd-lsp.exe"},
+                    "stage": {"lexd-lsp": "resources/lexd-lsp"},
                 },
             }
         }
@@ -1723,8 +1743,18 @@ def test_vsix_win32_target_stages_from_the_scripts_exe_layout(tmp_path):
     dep = _dep("lexd-lsp")
     src = _materialize_dep_bin(tmp_path, dep, target=WIN)
     assert src == tmp_path / ".pixi/envs/default/Scripts/lexd-lsp.exe"
-    recorder = RunRecorder({"npm": _vsce_writes_out})
+    staged_exe = tmp_path / "editors/vscode" / "resources/lexd-lsp.exe"
+    seen: dict = {}
 
+    def _vsce(argv, cwd):
+        seen["exe"] = staged_exe.is_file()  # `.exe`-suffixed dest
+        # never a bare, non-executable `lexd-lsp` alongside it on windows
+        seen["no_bare"] = not (
+            tmp_path / "editors/vscode" / "resources/lexd-lsp"
+        ).exists()
+        _vsce_writes_out(argv, cwd)
+
+    recorder = RunRecorder({"npm": _vsce})
     composed = bundle_mod.VSIX.compose(
         _request(
             tmp_path,
@@ -1735,7 +1765,8 @@ def test_vsix_win32_target_stages_from_the_scripts_exe_layout(tmp_path):
             artifact_deps=(dep,),
         )
     )
-    assert (tmp_path / "editors/vscode" / "resources/lexd-lsp.exe").is_file()
+    assert seen == {"exe": True, "no_bare": True}
+    assert not staged_exe.exists()  # cleaned up after packaging
     assert composed.outputs == ("ext-win32-x64.vsix",)
 
 

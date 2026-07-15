@@ -821,9 +821,10 @@ def _parse_vsix_stage(where: str, value: object) -> tuple[tuple[str, str], ...]:
     a non-empty repo-relative destination path UNDER the npm leg dir — the file
     the binary is copied to before ``vsce package`` (e.g.
     ``"resources/lexd-lsp"``); it is refused if it escapes the checkout
-    (:func:`_reject_path_escape`), the same guard ``bundle.source`` takes. A
-    duplicate package key is a loud refusal (two destinations for one binary is
-    never an intent). Construction is validation (ADR-0030)."""
+    (:func:`_reject_path_escape`), the same guard ``bundle.source`` takes.
+    Duplicate package keys cannot reach here — ``tomllib`` rejects a repeated
+    table/inline key before the parse runs — so this validates only shape.
+    Construction is validation (ADR-0030)."""
     if not isinstance(value, dict) or not value:
         raise ConfigError(
             f"{where}.stage: must be a non-empty table mapping an [artifact-deps] "
@@ -831,7 +832,6 @@ def _parse_vsix_stage(where: str, value: object) -> tuple[tuple[str, str], ...]:
             f'"resources/lexd-lsp" }}; got {value!r}'
         )
     pairs: list[tuple[str, str]] = []
-    seen: set[str] = set()
     for pkg, dest in value.items():
         if not _CONDA_PKG_KEY_RE.match(str(pkg)):
             raise ConfigError(
@@ -839,9 +839,6 @@ def _parse_vsix_stage(where: str, value: object) -> tuple[tuple[str, str], ...]:
                 f"name (lowercase letters, digits, '.', '-', '_'; leading "
                 f"alphanumeric)"
             )
-        if pkg in seen:
-            raise ConfigError(f"{where}.stage: duplicate package `{pkg}`")
-        seen.add(str(pkg))
         if not isinstance(dest, str) or not dest:
             raise ConfigError(
                 f"{where}.stage.{pkg}: destination must be a non-empty "
