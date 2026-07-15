@@ -819,7 +819,7 @@ def apply(
         # ``retired_removals``, which needs nothing on disk.
         dest = root / d.retired.path
         if d.action == DELETE and dest.is_file():
-            dest.unlink()
+            dest.unlink(missing_ok=True)
     for d in plan.retire_hook_deletes:
         # Retired hook entries (#619): rewrite the hooks file without the
         # matched consumer-local entries. Runs AFTER the unit writes above, so

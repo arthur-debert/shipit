@@ -3561,6 +3561,41 @@ def test_pr_mode_leaves_a_retired_path_that_became_a_directory(tmp_path, rec):
     assert RETIRED_WORKFLOW_PATH in rec.rm_cached_paths
 
 
+def test_pr_mode_survives_a_retired_delete_vanishing_between_is_file_and_unlink(
+    tmp_path, rec, monkeypatch
+):
+    # #986 agy review (minor, robustness): the working-tree unlink for a retired
+    # DELETE is guarded by `dest.is_file()`, but the file can still vanish in the
+    # tiny TOC/TOU window between that check and `dest.unlink()`. Without
+    # `missing_ok=True` the unlink raises FileNotFoundError and crashes the
+    # install; the guard must be idempotent. Model the race precisely by wrapping
+    # `Path.unlink` so the victim disappears the instant apply tries to remove it.
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    victim = tmp_path / RETIRED_WORKFLOW_PATH
+    victim.parent.mkdir(parents=True)
+    victim.write_bytes(PRISTINE_WORKFLOW.read_bytes())
+
+    plan = _plan(tmp_path)
+    assert [d.retired.path for d in plan.retire_deletes] == [RETIRED_WORKFLOW_PATH]
+
+    # The file is present through gather AND the `is_file()` check, then vanishes
+    # in the window: the first unlink of the victim finds it already gone.
+    real_unlink = Path.unlink
+
+    def _racy_unlink(self, missing_ok=False):
+        if self == victim and victim.exists():
+            real_unlink(victim)  # a concurrent process removed it in the window
+        return real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", _racy_unlink)
+
+    # apply must NOT crash on the missing-file unlink…
+    _apply_plan(plan, tmp_path, iapply.MODE_PR)
+
+    # …and still stages the base-side deletion from the index.
+    assert RETIRED_WORKFLOW_PATH in rec.rm_cached_paths
+
+
 def test_pr_mode_universe_excludes_a_noop_retired_hook_file(tmp_path, rec, monkeypatch):
     # #984 round-6 review (major): retired HOOKS carry DELETE-only, never NOOP.
     # A retired-hook NOOP does NOT mean the hook FILE is absent (unlike a retired
