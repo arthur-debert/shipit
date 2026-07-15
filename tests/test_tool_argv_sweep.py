@@ -97,6 +97,11 @@ _ADAPTER_HOMES: dict[str, tuple[str, ...]] = {
     "pixi": ("pixienv/read.py", "pixienv/run.py"),
     "ps": ("session/liveness.py",),
     "curl": ("provision/lexd.py",),
+    # gcloud — the Artifact channel store provisioner (ARF01-WS03): the one
+    # place that provisions the two access-tier GCS buckets + reader-SA IAM,
+    # assembled ONLY in :mod:`shipit.channel.store_provision`. Operator-side
+    # infra provisioning (the operator's own gcloud), never a release runner.
+    "gcloud": ("channel/store_provision.py",),
     "cargo": (
         "tools/registry.py",
         "release/bump.py",
