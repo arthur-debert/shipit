@@ -197,23 +197,45 @@ def env_name(feature: str | None) -> str:
     return DEFAULT_ENV if feature is None else f"{DEFAULT_FEATURE}-{feature}"
 
 
-def materialized_bin_path(root: Path, dep: ArtifactDep) -> Path:
-    """On-disk path of a TOOL artifact-dep's binary in the projected pixi env.
+def _is_windows_target(target: str) -> bool:
+    """Whether a target triple is windows — the conda ``win-64`` subdir, whose
+    tool binaries install to ``Scripts/<pkg>.exe`` not ``bin/<pkg>``.
 
-    A tool artifact-dep (``lexd-lsp``, ``lexd``) materializes its binary at
-    ``<env-prefix>/bin/<package>`` — ADR-0064: "a tool artifact puts a binary on
-    PATH, while a data artifact installs its files into the env". The prefix is
-    the pixi env the projection wired the pin into (:func:`env_name` off
-    ``dep.feature``), under ``<root>/.pixi/envs/<env>/``. The vsix bundle staging
-    (:func:`shipit.release.bundle._stage_vsix_natives`, release#974) reads this
-    to copy the per-platform binary into the extension layout before ``vsce
-    package``: pixi has ALREADY resolved and materialized the RIGHT platform's
-    conda package at this path (the build runner's own subdir — ADR-0064's
-    osx-arm64/linux-64/linux-aarch64/win-64 closure), so staging is a copy, never
-    a per-target fetch. Pure path arithmetic — no filesystem probe; the caller
-    checks existence and reports the "run ``shipit install``" remediation.
+    Mirrors :func:`shipit.release.bundle._is_windows` (the ``"windows" in triple``
+    rule the bundle module keys off) — kept a local predicate to avoid a
+    release→install import cycle."""
+    return "windows" in target
+
+
+def materialized_bin_path(root: Path, dep: ArtifactDep, *, target: str) -> Path:
+    """On-disk path of a TOOL artifact-dep's binary in the projected pixi env,
+    for the ``target`` platform being composed for.
+
+    A tool artifact-dep (``lexd-lsp``, ``lexd``) materializes its binary on the
+    env PATH — ADR-0064: "a tool artifact puts a binary on PATH, while a data
+    artifact installs its files into the env". conda's PATH dir is OS-specific:
+    ``bin/<package>`` on unix, ``Scripts/<package>.exe`` on windows — the exact
+    layout the producer's conda endpoint writes
+    (:func:`shipit.release.publish._conda_binary_layout`, the ``win-64`` subdir's
+    ``Scripts``/``.exe`` install), which is why the path is TARGET-aware: a
+    ``win32-x64`` vsix leg resolves ``Scripts/<package>.exe``, not the unix
+    ``bin/<package>`` that would never exist on that runner. The prefix is the
+    pixi env the projection wired the pin into (:func:`env_name` off
+    ``dep.feature``), under ``<root>/.pixi/envs/<env>/``.
+
+    The vsix bundle staging (:func:`shipit.release.bundle._stage_vsix_natives`,
+    release#974) reads this to copy the per-platform binary into the extension
+    layout before ``vsce package``: pixi has ALREADY resolved and materialized
+    the RIGHT platform's conda package at this path (the build runner's own
+    subdir — ADR-0064's osx-arm64/linux-64/linux-aarch64/win-64 closure), so
+    staging is a copy, never a per-target fetch. Pure path arithmetic — no
+    filesystem probe; the caller checks existence and reports the "run ``shipit
+    install``" remediation.
     """
-    return root.joinpath(*_PIXI_ENVS_DIR, env_name(dep.feature), "bin", dep.package)
+    prefix = root.joinpath(*_PIXI_ENVS_DIR, env_name(dep.feature))
+    if _is_windows_target(target):
+        return prefix / "Scripts" / f"{dep.package}.exe"
+    return prefix / "bin" / dep.package
 
 
 def _toml_str_list(values: Sequence[str]) -> str:

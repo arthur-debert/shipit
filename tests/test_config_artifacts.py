@@ -671,10 +671,23 @@ def test_vsix_stage_destination_must_be_a_non_empty_string():
         )
 
 
-@pytest.mark.parametrize("dest", ["/abs/lexd", "../escape/lexd"])
+@pytest.mark.parametrize(
+    "dest",
+    [
+        "/abs/lexd",  # POSIX-absolute
+        "../escape/lexd",  # POSIX `..` climb
+        "C:\\\\temp\\\\lexd-lsp",  # Windows drive-rooted (escapes on a win runner)
+        "\\\\temp\\\\lexd-lsp",  # Windows leading-separator root
+        "..\\\\escape\\\\x",  # backslash `..` climb — PurePosixPath misses the `\`
+        "C:lexd-lsp",  # bare Windows drive-relative
+    ],
+)
 def test_vsix_stage_destination_may_not_escape_the_checkout(dest):
-    # The dest is joined to the leg dir and WRITTEN — an absolute path or a `..`
-    # segment would stage outside the extension, refused like `bundle.source`.
+    # The dest is joined to the leg dir with the RUNNER's native pathlib and
+    # WRITTEN — an absolute/`..` path (POSIX or Windows), a backslash, or a drive
+    # letter would stage outside the extension. `vsce package` runs on the
+    # win32-x64 leg too (#974), so the guard must catch the Windows vectors a
+    # POSIX-only check misses, not just the unix ones.
     with pytest.raises(config.ConfigError, match="must be a repo-relative path"):
         _load(
             "[artifacts.ext]\n"

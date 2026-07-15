@@ -998,13 +998,16 @@ def _stage_vsix_natives(req: ComposeRequest, leg_dir: Path) -> None:
     the repo's parsed ``[artifact-deps]`` (``req.artifact_deps``): a key naming no
     declared pin is a loud refusal (staging a binary the channel was never told
     to publish is a config mistake, not a silent skip). The pin's materialized
-    binary — ``<root>/.pixi/envs/<env>/bin/<package>``, put there by ``shipit
-    install`` projecting the pin so pixi resolves/fetches the RIGHT per-platform
-    conda package (ADR-0064/0066) — is copied to ``<leg_dir>/<dest>`` (executable
-    bit preserved), inside the extension package so ``vsce package`` includes it.
+    binary — ``<root>/.pixi/envs/<env>/bin/<package>`` on unix,
+    ``…/Scripts/<package>.exe`` on a ``win32-x64`` leg (the target-aware conda
+    PATH layout, :func:`shipit.install.artifactdeps.materialized_bin_path`), put
+    there by ``shipit install`` projecting the pin so pixi resolves/fetches the
+    RIGHT per-platform conda package (ADR-0064/0066) — is copied to
+    ``<leg_dir>/<dest>`` (executable bit preserved), inside the extension package
+    so ``vsce package`` includes it.
 
     This is a COPY off the already-materialized env, never a fetch: if the binary
-    is absent, the composition hard-fails pointing at ``shipit install`` /the
+    is absent, the composition hard-fails pointing at ``shipit install`` and the
     Artifact channel rather than reaching across repos itself (issue #911's
     bespoke fetcher is deliberately NOT reintroduced — the channel already put
     the binary in the build env). Per-target correctness needs no branching here:
@@ -1026,7 +1029,7 @@ def _stage_vsix_natives(req: ComposeRequest, leg_dir: Path) -> None:
                 f"(ADR-0064); declare the pin so `shipit install` materializes "
                 f"it, never a bespoke fetch (declared artifact-deps: {declared})"
             )
-        src = artifactdeps.materialized_bin_path(req.root, dep)
+        src = artifactdeps.materialized_bin_path(req.root, dep, target=req.target)
         if not src.is_file():
             raise ReleaseError(
                 f"[artifacts.{req.artifact.name}] vsix stage: the `{package}` "

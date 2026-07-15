@@ -1616,13 +1616,13 @@ def _dep(package, *, repo="lex-fmt/lex", version="0.19.3", feature=None):
     )
 
 
-def _materialize_dep_bin(tmp_path, dep):
+def _materialize_dep_bin(tmp_path, dep, *, target=LINUX):
     """Seed the on-disk binary an `[artifact-deps]` pin would materialize in the
-    pixi env — `<root>/.pixi/envs/<env>/bin/<package>` — as an executable stub,
-    mirroring what `shipit install` + pixi resolve/fetch leaves in the build env.
+    pixi env — target-aware (`bin/<package>` on unix, `Scripts/<package>.exe` on
+    windows) — as an executable stub, mirroring what `shipit install` + pixi
+    resolve/fetch leaves in the build env.
     """
-    env = artifactdeps.env_name(dep.feature)
-    return _executable(tmp_path / ".pixi" / "envs" / env / "bin" / dep.package)
+    return _executable(artifactdeps.materialized_bin_path(tmp_path, dep, target=target))
 
 
 def test_vsix_stages_artifact_dep_native_into_the_layout_before_packaging(tmp_path):
@@ -1702,6 +1702,41 @@ def test_vsix_stage_resolves_the_named_feature_env(tmp_path):
         )
     )
     assert (tmp_path / "editors/vscode" / "resources/lexd-lsp").is_file()
+
+
+def test_vsix_win32_target_stages_from_the_scripts_exe_layout(tmp_path):
+    # The win32-x64 leg resolves the binary from conda's `Scripts/<pkg>.exe` PATH
+    # dir (release.publish._conda_binary_layout), NOT the unix `bin/<pkg>` that
+    # never exists on a Windows runner — the staging is target-aware.
+    (artifact,) = _artifacts(
+        {
+            "ext": {
+                "build": ["npm"],
+                "bundle": {
+                    "composition": "vsix",
+                    "stage": {"lexd-lsp": "resources/lexd-lsp.exe"},
+                },
+            }
+        }
+    )
+    entries = _entries({"editors/vscode": "npm"})
+    dep = _dep("lexd-lsp")
+    src = _materialize_dep_bin(tmp_path, dep, target=WIN)
+    assert src == tmp_path / ".pixi/envs/default/Scripts/lexd-lsp.exe"
+    recorder = RunRecorder({"npm": _vsce_writes_out})
+
+    composed = bundle_mod.VSIX.compose(
+        _request(
+            tmp_path,
+            artifact,
+            entries,
+            target=WIN,
+            run_cmd=recorder,
+            artifact_deps=(dep,),
+        )
+    )
+    assert (tmp_path / "editors/vscode" / "resources/lexd-lsp.exe").is_file()
+    assert composed.outputs == ("ext-win32-x64.vsix",)
 
 
 def test_vsix_stage_naming_an_undeclared_pin_refuses(tmp_path):

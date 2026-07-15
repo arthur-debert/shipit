@@ -24,7 +24,7 @@ import re
 import tomllib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import MappingProxyType
 
 from .identity import Sha, repo_from_slug
@@ -331,19 +331,36 @@ def _parse_argv(where: str, value: object) -> tuple[str, ...]:
 
 def _reject_path_escape(where: str, value: str) -> None:
     """Refuse a config path that leaves the checkout — absolute, or carrying a
-    ``..`` segment. Pure.
+    ``..`` segment. Pure, and OS-INDEPENDENT of the runner.
 
     Such a path is later joined to the repo root and READ or REWRITTEN (an
-    adapter's leg cwd, a bundle-config bump); an absolute path discards the root
-    and ``..`` climbs above it, so a repo's own ``.shipit.toml`` could steer a
-    release rewrite at a file outside the tree. Rejected at the parse boundary,
-    the one place every value flows through.
+    adapter's leg cwd, a bundle-config bump, a vsix stage destination); an
+    absolute path discards the root and ``..`` climbs above it, so a repo's own
+    ``.shipit.toml`` could steer a release rewrite at a file outside the tree.
+    The join happens with the RUNNER's native ``pathlib`` (``leg_dir / dest``),
+    so a value that is harmless under POSIX but ABSOLUTE under Windows —
+    ``C:\\x``, ``\\\\server\\share``, a leading ``\\``, or a bare drive ``C:x`` —
+    would escape on a Windows runner (``vsce package`` runs on the win32-x64 leg,
+    #974). Both path flavours are therefore checked here, at the parse boundary,
+    the one place every value flows through, so the guard never depends on which
+    OS the config is loaded on. Backslashes are refused outright: a repo-relative
+    config path is always POSIX-separated, so a ``\\`` is either a Windows anchor
+    or a filename that would mis-split on the wrong OS — never a legitimate value.
     """
-    pure = PurePosixPath(value)
-    if pure.is_absolute() or ".." in pure.parts:
+    posix = PurePosixPath(value)
+    windows = PureWindowsPath(value)
+    if (
+        posix.is_absolute()
+        or ".." in posix.parts
+        or "\\" in value
+        or windows.is_absolute()
+        or windows.drive
+        or windows.root
+        or ".." in windows.parts
+    ):
         raise ConfigError(
             f"{where}: must be a repo-relative path inside the checkout — no "
-            f"leading '/', no '..' segment; got {value!r}"
+            f"leading '/' or '\\', no drive letter, no '..' segment; got {value!r}"
         )
 
 
