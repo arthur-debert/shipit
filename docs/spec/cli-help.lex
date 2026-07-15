@@ -462,7 +462,41 @@ Shipit CLI Human Help Draft
 
                 It is a no-op when the pinned binary is already present.
 
-        1.16. session
+        1.16. repo
+
+            `shipit repo` groups the commands that create shipit-managed
+            repositories.
+
+            It is the creation side of adoption: where `shipit install`
+            reconciles the managed set into an existing repository, `shipit
+            repo` brings a new one into being with that baseline already in
+            place and certified.
+
+            1.16.1. new
+
+                `shipit repo new --stack rust <name> [parent]` creates a new
+                local Repo with a complete, verified, shipit-managed baseline.
+
+                The destination is always `<parent>/<name>`; the command never
+                guesses whether the positional path is a parent or an exact
+                destination. `parent` defaults to the current directory and
+                must already exist as a writable directory; the destination
+                must be absent or an empty directory. `--stack` selects a
+                Creation profile and is repeatable so the request can later
+                describe a multi-toolchain Repo; at least one selection is
+                mandatory, and v1 supports a single profile, `rust`.
+
+                Creation scaffolds the consumer-owned project (a two-crate
+                Cargo workspace for Rust), applies the managed baseline,
+                resolves the pixi lockfile, and runs the lint, test, and build
+                Checks. It stages the whole Repo in a sibling directory and
+                publishes it with one atomic rename only after every Check
+                passes, yielding a single initial commit on `main`; any failure
+                removes the staging directory and leaves the destination
+                untouched. Creation is local only — it creates no GitHub
+                repository, remote, publishing endpoint, or release policy.
+
+        1.17. session
 
             `shipit session` launches isolated, Tree-rooted coordinator
             sessions.
@@ -470,7 +504,7 @@ Shipit CLI Human Help Draft
             It exists for hosts that need shipit to provision the top-level
             session Tree explicitly before launching the agent UI.
 
-            1.16.1. codex
+            1.17.1. codex
 
                 `shipit session codex` launches an interactive Codex
                 coordinator session in a fresh ephemeral Tree.
@@ -480,7 +514,7 @@ Shipit CLI Human Help Draft
                 process with `codex --cd <tree>`. Extra arguments are forwarded
                 to Codex. On success, this command does not return.
 
-        1.17. spawn
+        1.18. spawn
 
             `shipit spawn` launches backend-agent runs that shipit owns end to
             end.
@@ -490,7 +524,7 @@ Shipit CLI Human Help Draft
             Coordinators use this surface rather than hand-provisioning Trees
             or starting agents in shared checkouts.
 
-            1.17.1. subagent
+            1.18.1. subagent
 
                 `shipit spawn subagent` creates a Tree and launches a
                 role-scoped backend-agent run.
@@ -502,7 +536,7 @@ Shipit CLI Human Help Draft
                 expected branch and base; spawn fails loudly if that contract is
                 not met.
 
-            1.17.2. brief
+            1.18.2. brief
 
                 `shipit spawn brief ROLE` prints the task-specific brief
                 template for a role.
@@ -511,7 +545,7 @@ Shipit CLI Human Help Draft
                 placeholder slot is meant to be filled with concrete issue,
                 verification, governing-doc, and decision-boundary context.
 
-        1.18. test
+        1.19. test
 
             `shipit test` runs the repository's declared test legs.
 
@@ -522,7 +556,7 @@ Shipit CLI Human Help Draft
 
             Missing test tools fail the check; they are not skipped.
 
-        1.19. tree
+        1.20. tree
 
             `shipit tree` manages isolated Trees, the independent clones where
             write sessions work.
@@ -530,7 +564,7 @@ Shipit CLI Human Help Draft
             A Tree is disposable and isolated from the source checkout. It is
             how concurrent agents avoid colliding in one working tree.
 
-            1.19.1. create
+            1.20.1. create
 
                 `shipit tree create` provisions an isolated Tree and prints its
                 READY summary.
@@ -541,7 +575,7 @@ Shipit CLI Human Help Draft
                 creates that branch from `origin/main`. `--slug` affects only
                 the directory name, not the branch.
 
-            1.19.2. list
+            1.20.2. list
 
                 `shipit tree list` scans the central root and lists every Tree.
 
@@ -549,7 +583,7 @@ Shipit CLI Human Help Draft
                 from what the clones on disk say now. There is no separate
                 manifest to trust.
 
-            1.19.3. remove
+            1.20.3. remove
 
                 `shipit tree remove TARGET` deletes one Tree by path or
                 directory name.
@@ -558,7 +592,7 @@ Shipit CLI Human Help Draft
                 still contains uncommitted changes or unpushed commits, removal
                 is gated behind confirmation; `--yes` skips the prompt.
 
-            1.19.4. gc
+            1.20.4. gc
 
                 `shipit tree gc` conservatively cleans the central Tree root.
 
@@ -567,7 +601,7 @@ Shipit CLI Human Help Draft
                 removed. `--dry-run` shows the same partition without deleting
                 anything.
 
-        1.20. verify-apps
+        1.21. verify-apps
 
             `shipit verify-apps` checks whether local-agent reviewer GitHub
             Apps are live on a repo.
@@ -577,14 +611,14 @@ Shipit CLI Human Help Draft
             Apps. Use it to confirm that reviewer integrations are ready before
             relying on them in PR flow.
 
-        1.21. wf
+        1.22. wf
 
             `shipit wf` validates GitHub Actions workflow edits locally.
 
             It is a local pre-push confidence tool around `act`, not a complete
             replacement for a real GitHub Actions run.
 
-            1.21.1. test
+            1.22.1. test
 
                 `shipit wf test WORKFLOW` runs a workflow under `act` in
                 shipit's stock Ubuntu container image.
