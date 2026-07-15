@@ -229,6 +229,9 @@ pristine = [
   "sha256:271ffbaaa98315c752ddf9c2d01e504b041140bdc9c5a21fc7ac152891931b16",
   # Content also changed by #929 (ticket = the "how" step) in this same train.
   "sha256:d922c867458135ebf665233149268b25ba8ea3147a59e5b7ffcc9c3748fda3d5",
+  # Content also changed by #855 (spec-path placeholder <feature-slug> -> <slug>
+  # to match the to-spec producer) in this same train.
+  "sha256:11419ddc56ed6a6b07cc780b1c38aa5cf20bcdfb89479bda2f4e032a4ea80b57",
 ]
 
 # Retired HOOK ENTRIES (#619) — consumer-local entries in a hooks-event array
