@@ -550,7 +550,10 @@ def test_run_fanout_replay_provisioning_failure_is_a_clean_review_error(
 
     monkeypatch.setattr(replay, "provision_agent_defs", boom)
     view = replay.resolve_range("HEAD~1..HEAD", workdir=str(checkout))
-    with pytest.raises(ReviewError, match="agent-defs"):
+    # A CODEX primary + judge: only the judge needs the defs, so the message
+    # keeps the remediation hint that dropping `--calibrator-*` bypasses the
+    # read-only checkout (the escape hatch is real here).
+    with pytest.raises(ReviewError, match=r"drop the `--calibrator-\*` options"):
         replay.run_fanout_replay(
             agent_backend.CODEX,
             view,
@@ -691,13 +694,16 @@ def test_run_replay_agy_provisioning_failure_is_a_clean_review_error(
 
     monkeypatch.setattr(replay, "provision_agent_defs", boom)
     view = replay.resolve_range("HEAD~1..HEAD", workdir=str(checkout))
-    with pytest.raises(ReviewError, match="agent-defs"):
+    with pytest.raises(ReviewError, match="agent-defs") as excinfo:
         replay.run_replay(
             agent_backend.ANTIGRAVITY,
             view,
             launcher=launcher["launch"],
             base_dir=tmp_path / "state",
         )
+    # The ANTIGRAVITY primary reads the defs itself, so dropping `--calibrator-*`
+    # would NOT bypass the read-only checkout — the misleading hint is omitted.
+    assert "--calibrator-*" not in str(excinfo.value)
 
 
 def test_provision_agent_defs_nested_symlink_aborts_the_tree_fail_closed(

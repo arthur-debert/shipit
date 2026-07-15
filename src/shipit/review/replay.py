@@ -201,11 +201,21 @@ def _provision_replay_defs(
     try:
         provision_agent_defs(view.workdir)
     except OSError as exc:
+        # Only the calibrator's judge is dodgeable: when it alone needs the
+        # defs (calibrator on, primary NOT the ANTIGRAVITY reviewer), dropping
+        # the `--calibrator-*` options bypasses the read-only checkout. An
+        # ANTIGRAVITY primary reads them regardless, so the hint would mislead.
+        hint = (
+            " (or drop the `--calibrator-*` options to run the fan-out without "
+            "the judge)"
+            if calibrator_on and backend is not ANTIGRAVITY
+            else ""
+        )
         raise ReviewError(
             f"cannot provision the reviewer role agent-defs into "
             f"{view.workdir!r} ({exc}) — a replay launch (the ANTIGRAVITY "
             "reviewer, or the calibrator's judge) reads them from the checkout. "
-            "Fix the checkout's writability, then re-run."
+            f"Fix the checkout's writability{hint}, then re-run."
         ) from exc
 
 
