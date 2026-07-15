@@ -26,7 +26,7 @@ from pathlib import Path
 
 import pytest
 
-from shipit import git
+from shipit import execrun, git, pixienv
 from shipit.repocreate import (
     CreationError,
     build_plan,
@@ -1042,6 +1042,168 @@ def test_command_refuses_symlink_destination(tmp_path, capsys):
 
 
 # --------------------------------------------------------------------------
+# isolated user-shell certification (GEN01-WS06)
+#
+# The certification seam certifies the staged Repo through the SAME public pixi
+# task interface a contributor uses, from a child rooted in the staged Repo,
+# with inherited pixi project-selection state scrubbed so it cannot redirect
+# resolution back to the invoking checkout (ADR-0062, spec §Proposed Shape).
+# These drive `default_provisioner`/`default_verifier` through a captured Exec
+# runner: the seam builds the real argv/env, so the assertions prove manifest,
+# environment, tasks, and lockfile selection WITHOUT a pixi/Rust toolchain.
+# --------------------------------------------------------------------------
+
+
+#: A parent dev session's leaked pixi/Conda activation state. A naive child would
+#: resolve THIS (the invoking checkout's manifest + env), redirecting the
+#: certification away from the staged Repo — exactly what the scrub must prevent.
+_LEAKED_PARENT_STATE = {
+    "PIXI_PROJECT_MANIFEST": "/parent/pixi.toml",
+    "PIXI_PROJECT_ROOT": "/parent",
+    "PIXI_ENVIRONMENT_NAME": "default",
+    "CONDA_PREFIX": "/parent/.pixi/envs/default",
+    "CONDA_DEFAULT_ENV": "parent-env",
+    "CONDA_SHLVL": "2",
+}
+
+
+def _capture_exec(monkeypatch):
+    """Patch the shared Exec seam with a recorder that reports every call OK.
+
+    ``pixienv.run_task``/``install`` resolve ``execrun.run`` at call time, so
+    patching the module attribute intercepts the child the certification would
+    spawn. Returns the list every ``(argv, kwargs)`` lands in.
+    """
+    calls: list[tuple[list[str], dict]] = []
+
+    def fake_run(argv, **kwargs):
+        calls.append((list(argv), kwargs))
+        return execrun.ExecResult(
+            argv=tuple(argv), rc=0, stdout="", stderr="", duration_ms=1
+        )
+
+    monkeypatch.setattr(execrun, "run", fake_run)
+    return calls
+
+
+def _seed_leaked_parent_state(monkeypatch):
+    """Seed the leaked parent activation vars plus a PATH that MUST survive."""
+    monkeypatch.setenv("PATH", "/usr/bin")
+    for var, val in _LEAKED_PARENT_STATE.items():
+        monkeypatch.setenv(var, val)
+
+
+def test_default_verifier_scrubs_parent_state_and_selects_staged_tasks(
+    tmp_path, monkeypatch
+):
+    # Conflicting parent pixi/Conda activation is seeded; certification must run
+    # the three public tasks against the STAGED manifest under a scrubbed env.
+    _seed_leaked_parent_state(monkeypatch)
+    calls = _capture_exec(monkeypatch)
+
+    create_mod.default_verifier(tmp_path)
+
+    manifest = str(tmp_path / "pixi.toml")
+    # Exactly the three canonical public TASKS, in order, each addressed at the
+    # staged manifest (`pixi run --manifest-path <staged>/pixi.toml <task>`) — the
+    # user's public interface, not a Tool implementation call.
+    assert [argv[-1] for argv, _ in calls] == ["lint", "test", "build"]
+    for argv, kwargs in calls:
+        assert argv[:4] == ["pixi", "run", "--manifest-path", manifest]
+        # The child is rooted in the staged Repo (AC: working directory is the
+        # staged Repo), reads the rc as a verdict (check=False), and carries the
+        # long-runner bound so a first-activation re-solve is not killed.
+        assert kwargs["cwd"] == str(tmp_path)
+        assert kwargs["check"] is False
+        assert kwargs["timeout"] == create_mod._LONG_TIMEOUT
+        # The child env is the COMPLETE scrubbed snapshot (replace_env), so no
+        # leaked parent project pointer can creep back via a merge over os.environ.
+        assert kwargs["replace_env"] is True
+        env = kwargs["env"]
+        for leaked in _LEAKED_PARENT_STATE:
+            assert leaked not in env, f"{leaked} leaked into the certification child"
+        assert env["PATH"] == "/usr/bin"  # user-level vars survive the scrub
+
+
+def test_default_provisioner_scrubs_parent_state_and_locks_staged_env(
+    tmp_path, monkeypatch
+):
+    # Provisioning resolves + locks the STAGED Repo's environment; the same
+    # leaked parent state must not bind the solve to the invoking checkout, and
+    # `pixi install` runs IN the staged Repo so it writes that Repo's own lockfile.
+    _seed_leaked_parent_state(monkeypatch)
+    calls = _capture_exec(monkeypatch)
+
+    create_mod.default_provisioner(tmp_path)
+
+    assert len(calls) == 1
+    argv, kwargs = calls[0]
+    assert argv == ["pixi", "install"]
+    assert kwargs["cwd"] == str(tmp_path)  # writes <staged>/pixi.lock, not parent's
+    assert kwargs["replace_env"] is True
+    assert kwargs["timeout"] == pixienv.INSTALL_TIMEOUT
+    for leaked in _LEAKED_PARENT_STATE:
+        assert leaked not in kwargs["env"]
+    assert kwargs["env"]["PATH"] == "/usr/bin"
+
+
+def test_default_verifier_retains_failing_check_output_and_stops(tmp_path, monkeypatch):
+    # A mocked verifier could conceal a missing generated dependency; the real
+    # staged Check surfaces the failing command's OWN diagnostics (AC7). Here the
+    # `test` task fails as a missing `cargo-nextest` would, and lint has already
+    # passed — proving the failure carries creation-stage context + the tool's
+    # output and aborts BEFORE build, the initial commit, and publication.
+    diagnostic = "error: no such command: `nextest`"
+    seen: list[str] = []
+
+    def fake_run(argv, **kwargs):
+        task = argv[-1]
+        seen.append(task)
+        if task == "test":
+            return execrun.ExecResult(
+                argv=tuple(argv),
+                rc=101,
+                stdout="Compiling libhello v0.1.0\n",
+                stderr=diagnostic + "\n",
+                duration_ms=1,
+            )
+        return execrun.ExecResult(
+            argv=tuple(argv), rc=0, stdout="", stderr="", duration_ms=1
+        )
+
+    monkeypatch.setattr(execrun, "run", fake_run)
+
+    with pytest.raises(CreationError) as excinfo:
+        create_mod.default_verifier(tmp_path)
+
+    message = str(excinfo.value)
+    # Creation-stage context + the failing command + its rc.
+    assert "staged Check `pixi run test` failed (rc=101)" in message
+    assert "the Repo was not published" in message
+    # The failing command's OWN output is retained (both streams' tails).
+    assert diagnostic in message
+    assert "Compiling libhello" in message
+    # Stopped at the first failure: build never ran.
+    assert seen == ["lint", "test"]
+
+
+def test_create_failed_check_leaves_no_repo_and_reports_output(tmp_path, git_identity):
+    # End to end through the orchestrator: a failing verifier (carrying the
+    # certification's real message) rolls back and publishes nothing, so a hidden
+    # missing dependency can never reach a committed, published Repo.
+    def failing_verifier(root: Path) -> None:
+        raise CreationError(
+            "staged Check `pixi run test` failed (rc=101); the Repo was not "
+            "published\nstderr:\nerror: no such command: `nextest`"
+        )
+
+    with pytest.raises(CreationError, match="was not published"):
+        _fake_create(tmp_path, [], verifier=failing_verifier)
+    assert not (tmp_path / "hello").exists()
+    assert list(tmp_path.iterdir()) == []
+
+
+# --------------------------------------------------------------------------
 # real-toolchain certification — gated (heavy: pixi solve + Rust build)
 # --------------------------------------------------------------------------
 
@@ -1058,11 +1220,18 @@ def test_create_real_toolchain_end_to_end(tmp_path, git_identity):
     result = create_repo("my-tool", tmp_path, ("rust",))
     dest = result.destination
     assert (dest / "Cargo.toml").is_file()
+    # The committed lockfile provisions Rust AND cargo-nextest (AC: no ambient
+    # Cargo/rustup/`cargo install` is required) — the generated test task fails
+    # with "no such command: nextest" if the dependency is not locked in.
     assert (dest / "pixi.lock").is_file()
+    assert "cargo-nextest" in (dest / "pixi.lock").read_text(encoding="utf-8")
     assert git.current_branch(cwd=str(dest)) == "main"
-    # Re-run every public Check against the published Repo — the full
-    # certification contract the module documents (lint, test, build), not just
-    # build — proving the generated Repo stands on its own.
+    # Re-run every public Check against the published Repo through the SAME
+    # public interface a contributor uses — the full certification contract the
+    # module documents (lint, test, build). `test` executes the generated
+    # black-box CLI test (CLI-to-library wiring) and `build` compiles the primary
+    # product (AC6), on a FRESH environment materialized from the committed
+    # lockfile — so mocked command execution cannot conceal a missing dependency.
     for task in ("lint", "test", "build"):
         run = subprocess.run(
             ["pixi", "run", "--manifest-path", str(dest / "pixi.toml"), task],
@@ -1070,3 +1239,8 @@ def test_create_real_toolchain_end_to_end(tmp_path, git_identity):
             text=True,
         )
         assert run.returncode == 0, f"pixi run {task} failed:\n{run.stderr}"
+    # Fresh-environment acceptance leaves the Git tree clean (AC5): running the
+    # three public Checks writes build/environment output (target/, .pixi/) that
+    # the generated .gitignore must keep out of the index, so certification does
+    # not dirty the committed Repo.
+    assert git.status_porcelain(cwd=str(dest)) == []
