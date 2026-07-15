@@ -478,7 +478,12 @@ def load_toolchains(cfg: dict) -> tuple[ToolchainEntry, ...]:
 #: asset into a versioned ``.conda`` and pushes+reindexes it to the producing
 #: repo's per-repo channel in a public object-storage bucket — the same
 #: derived shape as ``brew``, consuming final release assets by their known
-#: names.
+#: names. ``zed`` is the Zed-extension registry endpoint (TOL03-WS02 #973,
+#: ADR-0068): a derived, stable-only endpoint that RENDERS the
+#: ``zed-industries/extensions`` registry coordinates (the ``extensions.toml``
+#: bump + submodule rev pointing at the released tag) for a MANUALLY-gated
+#: registry PR — the tag is the release; shipit never pushes into the foreign
+#: review-gated registry, so it declares no secret.
 ENDPOINTS: tuple[str, ...] = (
     "gh-release",
     "crates",
@@ -489,6 +494,7 @@ ENDPOINTS: tuple[str, ...] = (
     "brew",
     "notify-downstreams",
     "conda",
+    "zed",
 )
 
 #: The CLOSED OS×arch platform registry a ``platforms`` list may use — the

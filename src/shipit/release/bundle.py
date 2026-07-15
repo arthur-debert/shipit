@@ -143,6 +143,18 @@ functions the entries carry:
   tree plus the grammar/queries/bindings that are present. Platform-
   independent (generated C source, no per-OS variant — no ``-<target>``
   suffix), so every matrix leg composes the identical bytes.
+- **zed** — the Zed-extension ``<name>.tar.gz`` (TOL03-WS02 #973, ADR-0068):
+  the extension's committed source under the rust leg (the extension is a Rust
+  crate compiled to WASM) — ``extension.toml`` (the REQUIRED manifest core, its
+  absence meaning this is not a Zed extension) plus the committed ``shared/``
+  grammar assets and the ``languages``/``grammars``/``src``/``Cargo.toml``/
+  ``LICENSE``/``README.md`` that are present. The ``shared/`` grammar is a
+  COMMITTED LOCAL COPY — the composition never fetches a grammar cross-repo, so
+  every leg archives exactly the checked-in bytes. Platform-independent (no
+  per-OS variant — no ``-<target>`` suffix), the tarball shape. The tag this
+  archive rides IS the release; the ``zed`` publish endpoint
+  (``release/publish.py``) renders the ``zed-industries/extensions`` registry
+  coordinates for a manually-gated PR (ADR-0068), never a cross-repo push.
 
 Every external command runs through the injected runner — the one Exec seam
 (ADR-0028); the ``cargo`` / ``uv`` / ``wasm-pack`` / ``npm`` / ``tar`` /
@@ -486,6 +498,74 @@ def _compose_tarball(req: ComposeRequest) -> Composed:
         req.root,
     )
     return Composed(req.artifact.name, "tarball", (archive,))
+
+
+#: The Zed-extension payload the ``zed`` composition ships — the extension's
+#: conventional layout under the rust leg's path (a Zed extension is a Rust
+#: crate compiled to WASM). ``extension.toml`` (the manifest naming the
+#: extension id/version and its grammar/language wiring) is the REQUIRED core —
+#: its absence means this is not a Zed extension. The rest ride WHEN PRESENT
+#: (the :data:`DOC_FILES` "when present" shape): ``shared`` is the COMMITTED
+#: local grammar-asset copy (the whole point — no cross-repo grammar fetch);
+#: ``languages``/``grammars`` are the extension's language & grammar configs;
+#: ``src``/``Cargo.toml`` are the Rust extension source when the extension
+#: compiles WASM; ``LICENSE``/``README.md`` are the docs. Assembled shipit-side
+#: from the checked-in tree, never fetched.
+ZED_PAYLOAD: tuple[str, ...] = (
+    "extension.toml",
+    "shared",
+    "languages",
+    "grammars",
+    "src",
+    "Cargo.toml",
+    "LICENSE",
+    "LICENSE.md",
+    "README.md",
+)
+
+
+def _compose_zed(req: ComposeRequest) -> Composed:
+    """The Zed-extension tarball: ``<name>.tar.gz`` of the rust leg's
+    :data:`ZED_PAYLOAD` (``extension.toml`` plus the committed ``shared/``
+    grammar assets and the language/grammar/source files, when present). See
+    the module docstring's zed entry.
+
+    A Zed extension is platform-independent committed source — no per-OS
+    variant — so the archive carries NO ``-<target>`` suffix: every matrix leg
+    that runs it composes the identical bytes (the tarball composition's shape).
+    ``extension.toml`` is REQUIRED — its absence is a bundle-stage failure (the
+    tree does not hold a Zed extension), never a quiet empty archive. The
+    ``shared/`` grammar is bundled as the COMMITTED LOCAL COPY it already is; the
+    composition performs no cross-repo grammar fetch, so the artifact is exactly
+    the checked-in bytes.
+
+    The extension source is located under the ``rust`` leg (the extension is a
+    Rust crate — the same leg its checks run against, TOL03), so a repo whose
+    ``[toolchains]`` rust path is a subdir bundles from there, and a root repo
+    (``"." = "rust"``) from the root.
+    """
+    leg = _leg_for(req.artifact, req.entries, "rust", "zed")
+    leg_dir = req.root if leg.path in (".", "") else req.root / leg.path
+    if not (leg_dir / "extension.toml").is_file():
+        raise ReleaseError(
+            f"[artifacts.{req.artifact.name}] zed composition: no "
+            f"{leg_dir / 'extension.toml'} — the zed tarball ships a Zed "
+            f"extension's committed source (extension.toml + the local shared/ "
+            f"grammar assets); this tree holds no extension manifest"
+        )
+    present = [name for name in ZED_PAYLOAD if (leg_dir / name).exists()]
+    archive = f"{req.artifact.name}.tar.gz"
+    archive_path = req.out_dir / archive
+    req.out_dir.mkdir(parents=True, exist_ok=True)
+    if archive_path.exists():
+        # tar -czf truncates, but an unlink keeps the rerun's artifact exactly
+        # the fresh tree (the archive/tarball recreate-from-clean contract).
+        archive_path.unlink()
+    req.run_cmd(
+        ["tar", "-czf", str(archive_path), "-C", str(leg_dir), *present],
+        req.root,
+    )
+    return Composed(req.artifact.name, "zed", (archive,))
 
 
 #: wasm-pack's default output target when a wasm/npm artifact declares none —
@@ -1166,6 +1246,14 @@ ELECTRON = Composition(
 TARBALL = Composition(
     "tarball", _compose_tarball, asserts_binary=False, platform_independent=True
 )
+#: the Zed-extension tarball (TOL03-WS02 #973, ADR-0068) — platform-independent
+#: (the same committed extension source on every leg, emitted as one unqualified
+#: ``<name>.tar.gz``), NOT signable (a source tarball has no binary the mac
+#: signer reopens), and NOT binary-asserting (a source ``.tar.gz`` has no main
+#: binary — the scar-#2 guard is skipped, like the tree-sitter tarball and the
+#: wheel's sdist). ``platform_independent`` makes the config boundary refuse it
+#: with >1 ``platforms`` (the unqualified name would collide across legs).
+ZED = Composition("zed", _compose_zed, asserts_binary=False, platform_independent=True)
 
 #: The CLOSED registry, in a stable order. Adding a composition is adding an
 #: entry here (the toolchain registry's mirror) — never a kind switch.
@@ -1179,6 +1267,7 @@ COMPOSITIONS: tuple[Composition, ...] = (
     TAURI,
     ELECTRON,
     TARBALL,
+    ZED,
 )
 
 

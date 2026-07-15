@@ -74,6 +74,25 @@ switch), one adapter per name of :data:`shipit.config.ENDPOINTS`:
   but it IS external, so a ``-release-rc`` live-fire rehearsal stays
   gh-release-only. Idempotent-resumable via ``--force`` (a re-run re-uploads
   and re-indexes; already-published converges, ADR-0009 phase 2).
+- **zed** (a *derived*, stable-only endpoint, TOL03-WS02 #973, ADR-0068) — the
+  Zed-extension registry endpoint. A Zed extension "publishes" only when a PR
+  into the foreign, review-gated ``zed-industries/extensions`` monorepo (bump
+  the extension's ``extensions.toml`` row + advance a git submodule to the
+  newly-tagged source) is merged by Zed's maintainers — an API push we do NOT
+  own. So the posture (ADR-0068) is **the tag is the release**: the ``zed``
+  bundle composition tarballs the committed extension source (the local
+  ``shared/`` grammar assets — no cross-repo fetch) and gh-release ships it,
+  and this endpoint RENDERS the registry coordinates (the extension id read
+  from ``extension.toml``, the new version, and the submodule rev = the release
+  tag) into a scratch subdir + REPORTS them for a MANUALLY-gated registry PR —
+  the render-vs-effect split brew uses, minus the push. It performs NO
+  cross-repo write, so it declares NO secret (``ENDPOINT_SECRETS["zed"] ==
+  ()``). External / RC-guarded (a ``-release-rc`` cut renders nothing —
+  gh-release only) and stable-only (the registry serves stable versions, so a
+  prerelease renders no entry). needs_repo: the submodule rev names the source
+  ``owner/name`` @ tag. Unlike brew/notify/conda it does NOT require an
+  unskipped gh-release in the plan — it references the ``release prepare`` tag
+  (ADR-0041), not gh-release assets, so a zed-only map is valid.
 
 The stage-wide invariants live HERE as pure cores, so they hold identically
 for the WS06 ``wf-publish`` block and a laptop invocation (ADR-0040):
@@ -496,6 +515,10 @@ SKIP_RC_GUARD = "rc-guard: -release-rc publishes to the GH release only"
 SKIP_STABLE_ONLY = "stable-channel only: a prerelease never moves the tap formula"
 SKIP_NOTIFY_PRERELEASE = (
     "notify-downstreams fires on real releases only: a prerelease notifies no one"
+)
+SKIP_ZED_PRERELEASE = (
+    "the zed extensions registry serves stable versions: a prerelease renders "
+    "no registry entry"
 )
 
 
@@ -1662,6 +1685,128 @@ def _publish_conda(req: PublishRequest) -> Published:
 
 
 # --------------------------------------------------------------------------
+# zed (derived) — the Zed-extension registry coordinates (ADR-0068)
+# --------------------------------------------------------------------------
+
+#: The foreign, review-gated Zed extensions registry a zed extension publishes
+#: THROUGH — by a maintainer-merged PR that bumps the extension's row and
+#: advances a git submodule (ADR-0068). shipit never pushes here; the endpoint
+#: only RENDERS the row + submodule coordinates for that manual PR.
+ZED_REGISTRY = "zed-industries/extensions"
+
+#: The Zed extension manifest the endpoint reads the extension id from — the
+#: same file the ``zed`` bundle composition ships as the tarball's required core
+#: (:data:`shipit.release.bundle.ZED_PAYLOAD`).
+ZED_MANIFEST = "extension.toml"
+
+#: The scratch subdir under the staged assets tree the zed adapter renders the
+#: registry entry into — a SUBDIR, never a top-level file, so a gh-release
+#: re-run can never ship it as an asset (the brew/conda scratch prior art).
+ZED_SCRATCH = "zed"
+
+
+def zed_extension_id(text: str) -> str:
+    """The Zed extension ``id`` parsed from an ``extension.toml`` ``text``. Pure.
+
+    A Zed ``extension.toml`` names the extension's registry id at top-level
+    ``id = "…"`` — the key both the registry's ``extensions.toml`` row and the
+    submodule dir (``extensions/<id>``) are keyed by. A manifest with no ``id``
+    (or an unparseable one) is a loud :class:`ReleaseError`: the registry entry
+    is keyed by the id, so the endpoint never renders a null-keyed row.
+    """
+    try:
+        data = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise ReleaseError(
+            f"zed: cannot parse {ZED_MANIFEST} to read the extension id: {exc}"
+        ) from exc
+    ext_id = data.get("id") if isinstance(data, dict) else None
+    if not ext_id or not isinstance(ext_id, str):
+        raise ReleaseError(
+            f"zed: {ZED_MANIFEST} has no top-level `id` — the "
+            f"{ZED_REGISTRY} registry row and its submodule dir "
+            f"(extensions/<id>) are keyed by the extension id"
+        )
+    return ext_id
+
+
+def render_zed_registry_entry(*, ext_id: str, version: str, repo: str, tag: str) -> str:
+    """The ``zed-industries/extensions`` registry coordinates a maintainer
+    applies in the manual publish PR (ADR-0068). Pure text (the render-vs-effect
+    split brew uses).
+
+    Emits the extension's ``extensions.toml`` row (submodule path + the bumped
+    version) plus a header naming the submodule rev the PR advances
+    ``extensions/<id>`` to — ``github.com/<owner/name>`` at the release ``tag``
+    (the authoritative release, ADR-0041). No push: this text is what the human
+    step applies, drift-free.
+    """
+    return (
+        f"# {ZED_REGISTRY} registry entry — apply in a PR (ADR-0068):\n"
+        f"# advance submodule extensions/{ext_id} to "
+        f"github.com/{repo} @ {tag}, then set:\n"
+        f"[{ext_id}]\n"
+        f'submodule = "extensions/{ext_id}"\n'
+        f'version = "{version}"\n'
+    )
+
+
+def _publish_zed(req: PublishRequest) -> Published:
+    """Render the ``zed-industries/extensions`` registry coordinates for the
+    manually-gated publish PR (ADR-0068). See the module docstring's zed entry.
+
+    The tag is the release: the ``zed`` composition tarballed the extension and
+    gh-release shipped it, so this endpoint does the ONE remaining thing shipit
+    can own without touching the foreign registry — render the exact
+    ``extensions.toml`` row + submodule rev (the extension id read from
+    ``extension.toml`` under the rust leg, the bumped version, the release tag)
+    into a scratch subdir and report the coordinates. It performs NO cross-repo
+    write and needs NO token; opening the PR into ``zed-industries/extensions``
+    is a maintainer-gated human step.
+    """
+    if req.repo is None:
+        # Belt for direct (test/library) callers — the verb resolves the source
+        # slug for any live needs_repo dispatch (zed among them), so a real
+        # release never reaches here without it. A loud ReleaseError (not a
+        # strippable `assert`) matches the publish stage's error handling: the
+        # submodule rev names github.com/<owner/name>@<tag>, so an unresolved
+        # repo would render a null-source row.
+        raise ReleaseError(
+            f"[artifacts.{req.artifact.name}] zed: no source repo resolved — the "
+            f"registry submodule points at github.com/<owner/name> @ <tag>, so "
+            f"an unresolved repo is a hard error, never a null-source row"
+        )
+    leg = _leg_for(req.artifact, req.entries, "rust", "zed")
+    manifest = _leg_dir(req.root, leg) / ZED_MANIFEST
+    try:
+        text = manifest.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ReleaseError(
+            f"[artifacts.{req.artifact.name}] zed: cannot read {manifest} to "
+            f"render the registry entry — the zed composition ships this manifest "
+            f"as the extension's required core; run `shipit release bundle` first"
+        ) from exc
+    ext_id = zed_extension_id(text)
+    entry = render_zed_registry_entry(
+        ext_id=ext_id, version=req.version, repo=req.repo, tag=req.tag
+    )
+    scratch = req.assets_dir / ZED_SCRATCH
+    scratch.mkdir(parents=True, exist_ok=True)
+    rendered = scratch / f"{ext_id}.extensions-toml"
+    rendered.write_text(entry, encoding="utf-8", newline="\n")
+    return Published(
+        req.artifact.name,
+        "zed",
+        (
+            f"rendered {ZED_REGISTRY} registry entry for {ext_id} {req.version} "
+            f"(submodule extensions/{ext_id} -> github.com/{req.repo}@{req.tag})",
+            f"manual step: open a PR against {ZED_REGISTRY} applying this entry — "
+            f"the tag is the release, shipit does not push into the registry",
+        ),
+    )
+
+
+# --------------------------------------------------------------------------
 # The closed registry
 # --------------------------------------------------------------------------
 
@@ -1751,6 +1896,22 @@ CONDA = EndpointAdapter(
     # root is `<bucket>/<owner/name>`.
     needs_repo=True,
 )
+ZED = EndpointAdapter(
+    "zed",
+    "derived",
+    _publish_zed,
+    secrets=secretreq.ENDPOINT_SECRETS["zed"],
+    # stable_only: the zed extensions registry serves stable versions, so a
+    # prerelease renders no registry entry (brew's stable-channel shape).
+    # external: a `-release-rc` live-fire cut is gh-release-only. needs_repo:
+    # the submodule rev names github.com/<owner/name>@<tag>. Renders the manual
+    # PR coordinates only — no cross-repo push, no secret (ADR-0068). It does
+    # NOT require an unskipped gh-release in the plan (unlike brew/notify/conda):
+    # it references the `release prepare` tag, not gh-release assets.
+    stable_only=True,
+    stable_skip_reason=SKIP_ZED_PRERELEASE,
+    needs_repo=True,
+)
 
 #: The CLOSED registry, in a stable order (the config boundary's
 #: :data:`shipit.config.ENDPOINTS` names exactly this set — asserted in the
@@ -1761,8 +1922,9 @@ CONDA = EndpointAdapter(
 #: notify-downstreams (TOL02-WS16 #792) is present too — not a marketplace
 #: publisher but the generated-parser release's cross-repo cascade. conda
 #: (ARF01-WS01 #950) is the Artifact channel's producer — a derived endpoint
-#: after notify-downstreams. Other marketplace-class adapters (Zed) stay ABSENT
-#: until their repos migrate.
+#: after notify-downstreams. zed (TOL03-WS02 #973, ADR-0068) is the last derived
+#: entry — the Zed-extension registry endpoint that renders the manual registry
+#: PR's coordinates (the tag is the release; no cross-repo push).
 ADAPTERS: tuple[EndpointAdapter, ...] = (
     GH_RELEASE,
     CRATES,
@@ -1773,6 +1935,7 @@ ADAPTERS: tuple[EndpointAdapter, ...] = (
     BREW,
     NOTIFY_DOWNSTREAMS,
     CONDA,
+    ZED,
 )
 
 

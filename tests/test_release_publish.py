@@ -330,21 +330,25 @@ def test_registry_mirrors_the_config_endpoint_set_and_stages():
         "brew",
         "notify-downstreams",
         "conda",
+        "zed",
     ]
     assert [a.name for a in publish_mod.ADAPTERS if not a.external] == ["gh-release"]
     # conda is external (a -release-rc live-fire stays gh-release-only) but NOT
-    # stable_only — a plain prerelease still publishes it (rc-inclusive).
+    # stable_only — a plain prerelease still publishes it (rc-inclusive). zed is
+    # stable_only (the registry serves stable versions, ADR-0068), like brew.
     assert [a.name for a in publish_mod.ADAPTERS if a.stable_only] == [
         "brew",
         "notify-downstreams",
+        "zed",
     ]
     # The repo-reading endpoints: brew (asset URLs) + notify-downstreams
-    # (dispatch payload) + conda (per-repo channel root) — the verb resolves the
-    # source slug only for these.
+    # (dispatch payload) + conda (per-repo channel root) + zed (submodule rev) —
+    # the verb resolves the source slug only for these.
     assert [a.name for a in publish_mod.ADAPTERS if a.needs_repo] == [
         "brew",
         "notify-downstreams",
         "conda",
+        "zed",
     ]
     # The marketplace endpoints are external (RC-guarded) release-stage entries.
     assert {"vscode-marketplace", "open-vsx"} <= {a.name for a in publish_mod.ADAPTERS}
@@ -2376,3 +2380,143 @@ endpoints = ["gh-release", "conda"]
     assert "[artifacts.lex] conda:" in err
     assert "pixi.toml#shipit-rust-release-deps" in err
     assert "`shipit install --pr`" in err
+
+
+# --------------------------------------------------------------------------
+# zed (derived) — the Zed-extension registry coordinates (TOL03-WS02 #973)
+# --------------------------------------------------------------------------
+
+
+def _zed_artifacts():
+    return _artifacts(
+        {"zed-lex": {"build": ["rust"], "endpoints": ["gh-release", "zed"]}}
+    )
+
+
+def _write_zed_manifest(tmp_path, *, ext_id="lex"):
+    (tmp_path / "extension.toml").write_text(
+        f'id = "{ext_id}"\nname = "Lex"\nversion = "0.0.0"\n', encoding="utf-8"
+    )
+
+
+def test_zed_extension_id_reads_the_manifest_top_level_id():
+    assert publish_mod.zed_extension_id('id = "lex"\nname = "Lex"\n') == "lex"
+
+
+@pytest.mark.parametrize("text", ['name = "Lex"\n', "", "id = 3\n"])
+def test_zed_extension_id_refuses_a_manifest_without_a_string_id(text):
+    with pytest.raises(ReleaseError, match="no top-level `id`"):
+        publish_mod.zed_extension_id(text)
+
+
+def test_zed_extension_id_refuses_unparseable_toml():
+    with pytest.raises(ReleaseError, match="cannot parse"):
+        publish_mod.zed_extension_id("id = = broken")
+
+
+def test_render_zed_registry_entry_emits_the_row_and_submodule_rev():
+    text = publish_mod.render_zed_registry_entry(
+        ext_id="lex", version="1.2.3", repo="lex-fmt/zed-lex", tag="v1.2.3"
+    )
+    # The extensions.toml row keyed by the extension id, with the bumped version…
+    assert "[lex]\n" in text
+    assert 'submodule = "extensions/lex"\n' in text
+    assert 'version = "1.2.3"\n' in text
+    # …plus the submodule rev the manual PR advances the id's submodule to.
+    assert "github.com/lex-fmt/zed-lex @ v1.2.3" in text
+
+
+def test_zed_renders_the_registry_entry_and_reports_the_manual_step(tmp_path):
+    """The happy path: read the extension id from extension.toml, render the
+    registry row + submodule rev into a scratch subdir, and report the manual
+    PR step. No cross-repo push, no tool invocation (ADR-0068)."""
+    artifact = _zed_artifacts()[0]
+    _write_zed_manifest(tmp_path, ext_id="lex")
+    seam = SeamRecorder()
+    req = _request(
+        tmp_path,
+        artifact,
+        entries=_entries({".": "rust"}),
+        version="1.2.3",
+        run_cmd=seam,
+        repo="lex-fmt/zed-lex",
+    )
+    published = publish_mod._publish_zed(req)
+    # No effectful command ran — the endpoint only renders + reports.
+    assert seam.calls == []
+    rendered = tmp_path / "dist" / publish_mod.ZED_SCRATCH / "lex.extensions-toml"
+    assert rendered.is_file()
+    assert 'submodule = "extensions/lex"' in rendered.read_text()
+    assert published.endpoint == "zed"
+    assert published.actions[0] == (
+        "rendered zed-industries/extensions registry entry for lex 1.2.3 "
+        "(submodule extensions/lex -> github.com/lex-fmt/zed-lex@v1.2.3)"
+    )
+    assert "manual step" in published.actions[1]
+
+
+def test_zed_refuses_an_unresolved_source_repo(tmp_path):
+    """The submodule rev names github.com/<owner/name>@<tag>; a direct caller
+    that omits the repo gets a loud refusal, never a null-source row."""
+    artifact = _zed_artifacts()[0]
+    _write_zed_manifest(tmp_path)
+    req = _request(
+        tmp_path,
+        artifact,
+        entries=_entries({".": "rust"}),
+        version="1.2.3",
+        repo=None,
+    )
+    with pytest.raises(ReleaseError, match="no source repo resolved"):
+        publish_mod._publish_zed(req)
+
+
+def test_zed_refuses_a_missing_extension_manifest(tmp_path):
+    """The zed composition ships extension.toml as the required core; its
+    absence at publish is a loud refusal (run bundle first), never a skip."""
+    artifact = _zed_artifacts()[0]  # no extension.toml written
+    req = _request(
+        tmp_path,
+        artifact,
+        entries=_entries({".": "rust"}),
+        version="1.2.3",
+        repo="lex-fmt/zed-lex",
+    )
+    with pytest.raises(ReleaseError, match="cannot read"):
+        publish_mod._publish_zed(req)
+
+
+def test_zed_declares_no_secret_and_is_a_derived_stable_only_endpoint():
+    """The endpoint renders the manual-PR coordinates and never pushes into the
+    foreign registry, so it declares NO secret — its `secretreq.ENDPOINT_SECRETS`
+    entry is empty, like gh-release (ADR-0068)."""
+    assert secretreq_mod.ENDPOINT_SECRETS["zed"] == ()
+    adapter = publish_mod.adapter_for("zed")
+    assert adapter is not None
+    assert adapter.secrets == ()
+    # derived, stable_only (registry serves stable), external (rc = gh only),
+    # needs_repo (the submodule rev names the source slug @ tag).
+    assert adapter.stage == "derived"
+    assert adapter.stable_only and adapter.external and adapter.needs_repo
+
+
+def test_plan_prerelease_skips_zed_and_a_live_fire_skips_it_too():
+    """stable_only: a plain prerelease renders no registry entry (the registry
+    serves stable versions); external: a -release-rc live-fire is gh-only."""
+    artifacts = _artifacts({"zed-lex": {"endpoints": ["gh-release", "zed"]}})
+    pre = publish_mod.plan(artifacts, prerelease=True, live_fire=False)
+    assert {d.adapter.name: d.skip for d in pre}[
+        "zed"
+    ] == publish_mod.SKIP_ZED_PRERELEASE
+    live = publish_mod.plan(artifacts, prerelease=True, live_fire=True)
+    assert {d.adapter.name: d.skip for d in live}["zed"] == publish_mod.SKIP_RC_GUARD
+
+
+def test_plan_zed_alone_needs_no_gh_release():
+    """Unlike brew/notify/conda, zed references the `release prepare` tag (not
+    gh-release assets, ADR-0068), so a zed-only map is a valid plan — the
+    gh-release-must-exist invariant does not extend to it."""
+    artifacts = _artifacts({"zed-lex": {"endpoints": ["zed"]}})
+    dispatched = publish_mod.plan(artifacts, prerelease=False, live_fire=False)
+    assert [d.adapter.name for d in dispatched] == ["zed"]
+    assert dispatched[0].skip is None

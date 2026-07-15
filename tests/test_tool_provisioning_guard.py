@@ -350,6 +350,7 @@ _NON_ARGV_LITERALS = frozenset(
         "deb",  # tauri linux bundle-format subdir (_TAURI_LINUX_FORMATS)
         "description",
         "dispatch",
+        "extension.toml",  # zed extension manifest — ZED_PAYLOAD core (ADR-0068)
         "gh-release",
         "homepage/repository",
         "license",

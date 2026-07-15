@@ -1170,6 +1170,123 @@ def test_tarball_rerun_unlinks_the_stale_archive(tmp_path):
 
 
 # --------------------------------------------------------------------------
+# zed — the Zed-extension tarball (TOL03-WS02 #973, ADR-0068)
+# --------------------------------------------------------------------------
+
+
+def _zed_artifact():
+    (artifact,) = _artifacts(
+        {"zed-lex": {"build": ["rust"], "bundle": {"composition": "zed"}}}
+    )
+    return artifact
+
+
+def test_zed_tars_the_committed_extension_payload_present(tmp_path):
+    # The zed tarball ships extension.toml + the committed shared/ grammar
+    # assets + the language/source files that are present — a COMMITTED local
+    # copy, never a cross-repo grammar fetch (ADR-0068).
+    artifact = _zed_artifact()
+    entries = _entries({".": "rust"})
+    (tmp_path / "extension.toml").write_text('id = "lex"\nname = "Lex"\n')
+    (tmp_path / "shared").mkdir()
+    (tmp_path / "shared/highlights.scm").write_text(";; committed grammar asset")
+    (tmp_path / "languages").mkdir()
+    (tmp_path / "languages/config.toml").write_text('name = "Lex"')
+    (tmp_path / "Cargo.toml").write_text("[package]\nname = 'zed-lex'")
+    # grammars/ src/ LICENSE README absent — ship only what is present.
+    recorder = RunRecorder()
+
+    composed = bundle_mod.ZED.compose(
+        _request(tmp_path, artifact, entries, run_cmd=recorder)
+    )
+
+    archive = tmp_path / "dist" / "zed-lex.tar.gz"
+    assert recorder.calls == [
+        (
+            (
+                "tar",
+                "-czf",
+                str(archive),
+                "-C",
+                str(tmp_path),
+                "extension.toml",
+                "shared",
+                "languages",
+                "Cargo.toml",
+            ),
+            tmp_path,
+        )
+    ]
+    # Platform-independent: no `-<target>` suffix — every leg composes one name.
+    assert composed == bundle_mod.Composed("zed-lex", "zed", ("zed-lex.tar.gz",))
+
+
+def test_zed_reads_the_rust_leg_subdir(tmp_path):
+    # The extension source is located under the rust leg's path, not forced to
+    # the root — a repo whose extension sits in a subdir bundles from there.
+    artifact = _zed_artifact()
+    entries = _entries({"extension": "rust"})
+    (tmp_path / "extension").mkdir()
+    (tmp_path / "extension/extension.toml").write_text('id = "lex"\n')
+    (tmp_path / "extension/shared").mkdir()
+    (tmp_path / "extension/shared/g.scm").write_text(";; asset")
+    recorder = RunRecorder()
+
+    bundle_mod.ZED.compose(_request(tmp_path, artifact, entries, run_cmd=recorder))
+
+    ((argv, _cwd),) = recorder.calls
+    assert argv == (
+        "tar",
+        "-czf",
+        str(tmp_path / "dist" / "zed-lex.tar.gz"),
+        "-C",
+        str(tmp_path / "extension"),
+        "extension.toml",
+        "shared",
+    )
+
+
+def test_zed_without_extension_manifest_refuses(tmp_path):
+    # extension.toml is the required core — a tree without it holds no Zed
+    # extension, a hard fail (never a quiet empty archive).
+    artifact = _zed_artifact()
+    entries = _entries({".": "rust"})
+    (tmp_path / "shared").mkdir()  # assets but no manifest
+    recorder = RunRecorder()
+    with pytest.raises(ReleaseError, match="no .*extension.toml"):
+        bundle_mod.ZED.compose(_request(tmp_path, artifact, entries, run_cmd=recorder))
+    assert recorder.calls == []  # nothing ran, nothing written
+
+
+def test_zed_without_a_rust_leg_refuses(tmp_path):
+    # The extension is a Rust crate; the composition needs the rust leg to
+    # locate it (never a quiet skip).
+    artifact = _zed_artifact()
+    entries = _entries({".": "tree-sitter"})  # no rust leg mapped
+    with pytest.raises(ReleaseError, match="needs a .* rust leg"):
+        bundle_mod.ZED.compose(
+            _request(tmp_path, artifact, entries, run_cmd=RunRecorder())
+        )
+
+
+def test_zed_rerun_unlinks_the_stale_archive(tmp_path):
+    artifact = _zed_artifact()
+    entries = _entries({".": "rust"})
+    (tmp_path / "extension.toml").write_text('id = "lex"\n')
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    stale = dist / "zed-lex.tar.gz"
+    stale.write_bytes(b"STALE")
+
+    def _tar_writes(argv, cwd):
+        Path(argv[2]).write_bytes(b"FRESH")
+
+    recorder = RunRecorder({"tar": _tar_writes})
+    bundle_mod.ZED.compose(_request(tmp_path, artifact, entries, run_cmd=recorder))
+    assert stale.read_bytes() == b"FRESH"  # the stale archive was replaced
+
+
+# --------------------------------------------------------------------------
 # wasm-pack — build the pkg tree, npm pack the tarball (TOL02-WS12 #788)
 # --------------------------------------------------------------------------
 
@@ -1601,6 +1718,7 @@ def test_registry_is_closed_and_platform_scoped():
         "tauri",
         "electron",
         "tarball",
+        "zed",
     )
     assert bundle_mod.composition("deb") is bundle_mod.DEB
     assert bundle_mod.composition("wasm-pack") is bundle_mod.WASM_PACK
@@ -1646,18 +1764,22 @@ def test_source_compositions_do_not_assert_a_binary():
     assert not bundle_mod.TARBALL.asserts_binary
     assert not bundle_mod.WASM_PACK.asserts_binary
     assert not bundle_mod.VSIX.asserts_binary
+    # the zed extension tarball is committed source, no main binary (ADR-0068).
+    assert not bundle_mod.ZED.asserts_binary
 
 
 def test_registry_marks_the_platform_independent_compositions():
     # tarball emits one unqualified `<name>.tar.gz` (identical generated C on
-    # every leg) and wasm-pack an npm `<name>-<version>.tgz` (version-qualified
-    # but not target-qualified, #828), so the config boundary refuses either with
-    # >1 platform — a name without the `-<target>` qualifier built on multiple
-    # legs would collide in the merged dist/. Registry order: wasm-pack precedes
-    # tarball in COMPOSITIONS.
-    assert bundle_mod.platform_independent_names() == ("wasm-pack", "tarball")
+    # every leg), wasm-pack an npm `<name>-<version>.tgz` (version-qualified but
+    # not target-qualified, #828), and zed an unqualified `<name>.tar.gz` of the
+    # committed extension source (ADR-0068), so the config boundary refuses any
+    # of them with >1 platform — a name without the `-<target>` qualifier built
+    # on multiple legs would collide in the merged dist/. Registry order:
+    # wasm-pack, tarball, then zed in COMPOSITIONS.
+    assert bundle_mod.platform_independent_names() == ("wasm-pack", "tarball", "zed")
     assert bundle_mod.TARBALL.platform_independent
     assert bundle_mod.WASM_PACK.platform_independent
+    assert bundle_mod.ZED.platform_independent
     assert not bundle_mod.ARCHIVE.platform_independent
 
 
