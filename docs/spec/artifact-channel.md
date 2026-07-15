@@ -89,7 +89,9 @@ object-storage buckets, consumed by downstreams in artifact-pinned mode.
   ([ADR-0065](../adr/0065-artifact-channel-access-tiers-two-buckets.md))
 - **Consumer declaration** — `[artifact-deps.<pkg>]` in `.shipit.toml`
   (`repo` + `version` + optional `feature`), projected by `shipit install` into
-  a managed pixi block. The key = conda package = binary on PATH.
+  a managed pixi block. The key names the artifact and its conda package; tool
+  artifacts (`lexd`, `lexd-lsp`) install a binary on PATH, data artifacts (wasm,
+  grammar) install their files into the env.
   ([ADR-0064](../adr/0064-artifact-channel-conda-for-cross-repo-consumption.md))
 - **`provision lexd` retires** — `lexd` becomes a public-channel package; the
   gate pin moves to a managed, non-consumer-editable lint block.

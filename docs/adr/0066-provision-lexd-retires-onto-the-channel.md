@@ -11,7 +11,7 @@ package, which removes the *sole* reason `provision` existed.
 
 - **Publish `lexd` to the (public) Artifact channel and retire
   `shipit provision lexd` entirely** — delete the `provision` module and its
-  hand-pinned `SHAS`. `lexd` becomes an ordinary conda dependency resolved
+  hand-pinned `SHAs`. `lexd` becomes an ordinary conda dependency resolved
   through `pixi.lock`, integrity-checked by pixi's sha256 (stronger than the
   bespoke trust-on-first-use pins).
 - **Preserve fleet-uniformity of the gate** by moving the `lexd` pin into a

@@ -31,13 +31,16 @@ of inventing a fetcher.
 - **Per-repo channels:** the channel root is the producing repo, so each repo
   is the sole writer of its own `repodata.json` and cross-repo index races are
   structurally impossible.
-- **A dedicated bucket, separate from sccache:** the store is object storage
+- **Dedicated buckets, separate from sccache:** the store is object storage
   (GCS) on its own lifecycle — a cache purge must never wipe published
-  artifacts.
+  artifacts. Two tiers, two buckets (ADR-0065).
 - **Consumer declaration in `.shipit.toml`:** `[artifact-deps.<pkg>]` names a
   `repo`, a `version`, and an optional `feature`, which `shipit install`
-  **projects** into a managed pixi block (channel, pin, auth). The key doubles as the
-  conda package name and the binary on PATH. Ordinary conda-forge deps stay
+  **projects** into a managed pixi block (channel, pin, auth). The key doubles
+  as the conda package name; a tool artifact (`lexd`, `lexd-lsp`) puts a binary
+  on PATH, while a data artifact (wasm, grammar) installs its files into the
+  env — the key names the package, not an executable contract. Ordinary
+  conda-forge deps stay
   consumer-authored in pixi; only cross-repo artifact-pins live in
   `.shipit.toml`, because shipit must be able to reason about and bump them.
 - **Versions, not commit hashes:** a conda channel resolves on *orderable*

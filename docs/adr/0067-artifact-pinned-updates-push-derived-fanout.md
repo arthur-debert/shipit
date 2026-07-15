@@ -8,11 +8,11 @@ one coherent update model.
 
 ## Decision
 
-- **Push with a derived fan-out.** On an upstream's stable release, the Cascade
-  propagates *immediately* (no poll latency). The target set is **derived** —
-  computed from which repos declare an `[artifact-deps]` on the upstream — not a
-  producer-maintained downstreams list, so the consumer's declaration stays the
-  single source of truth and cannot drift.
+- **Push with a derived fan-out (artifact-pinned).** On an upstream's stable
+  release, propagation to *artifact-pinned* consumers is *immediate* (no poll
+  latency). Their target set is **derived** — computed from which repos declare
+  an `[artifact-deps]` on the upstream — not a producer-maintained list, so the
+  consumer's declaration stays the single source of truth and cannot drift.
 - **Transport:** reuse the `notify-downstreams` dispatch rail; fire
   `repository_dispatch` at each derived target carrying `{upstream repo, new
   version}`. Each consumer's managed **receive-workflow** opens its *own* draft
@@ -21,10 +21,13 @@ one coherent update model.
   `pixi.lock` re-resolves → new bits from the channel.
 - **Stable-only auto-bump:** rc versions are published to the channel
   (ADR-0064) for manual opt-in pin-testing but are **never** auto-bumped.
-- **Two Dependency modes, one push:** an artifact-pinned downstream gets a
-  version-bump PR; a source-pinned downstream gets a rebuild
-  (`notify-downstreams`' existing effect). Same rail; the effect is chosen by
-  the downstream's Dependency mode.
+- **Two Dependency modes, two fan-out sources, one push:** an artifact-pinned
+  downstream gets a version-bump PR, its target set derived from `[artifact-deps]`
+  (above); a source-pinned downstream gets a rebuild via `notify-downstreams`'
+  existing **producer-declared `Artifact.downstreams`** list, unchanged by this
+  ADR — there is no consumer-side source-pinned declaration to derive from. Same
+  dispatch rail; both the effect and the fan-out source follow the downstream's
+  Dependency mode.
 
 ### Alternatives rejected
 
@@ -32,10 +35,13 @@ one coherent update model.
   check diffing the pin against the channel's `repodata.json`. More decoupled
   and needs no cross-repo read at release time, but propagation is not instant.
   Rejected for the instant-propagation requirement.
-- **A producer-declared downstreams list as the fan-out** — a second
-  declaration of the same edge (the consumer already declares the dependency),
-  which drifts when a consumer is added but the producer's list is not updated.
-  Deriving the set eliminates the drift.
+- **A producer-declared downstreams list for the *artifact-pinned* fan-out** —
+  a second declaration of the same edge (the artifact-pinned consumer already
+  declares the dependency in `[artifact-deps]`), which drifts when a consumer is
+  added but the producer's list is not updated. Deriving the artifact-pinned set
+  eliminates the drift. Source-pinned rebuilds keep the producer-declared
+  `Artifact.downstreams` list, since there is no consumer-side source-pinned
+  declaration to derive from.
 
 ## Consequences
 
