@@ -35,7 +35,8 @@ from pathlib import Path
 
 import click
 
-from .. import config, events, git
+from .. import config, events, gh, git
+from ..install import artifactdeps
 from ..install.apply import (
     MODE_LOCAL,
     MODE_PR,
@@ -119,6 +120,49 @@ def _declared_signals(root: Path) -> set[str]:
         if tc is not None and tc.provisions_signal is not None:
             signals.add(tc.provisions_signal)
     return signals
+
+
+def _artifact_dep_units(root: Path, *, is_private=gh.repo_is_private) -> list[Unit]:
+    """The managed pixi blocks projected from the consumer's ``[artifact-deps]``
+    declarations (ARF01-WS02 #952), or ``[]`` when none are declared.
+
+    The consumer half of the Artifact channel: each ``[artifact-deps.<pkg>]``
+    entry is parsed to a typed :class:`~shipit.config.ArtifactDep`
+    (construction-is-validation — a MALFORMED entry fails loudly HERE, exactly
+    like the toolchain/artifact maps, so ``shipit install`` aborts rather than
+    projecting a broken block), and the pure network-free projection core
+    (:func:`shipit.install.artifactdeps.project`) turns the resolved pins into
+    managed blocks the reconcile then treats like any other.
+
+    The ONLY network read is the producing repo's VISIBILITY (``gh.repo_is_private``,
+    injectable for tests) — the access tier is DERIVED from it (ADR-0065), never
+    declared; it is resolved once per distinct producing repo, and ONLY when a
+    dep is actually declared, so a repo with no ``[artifact-deps]`` (shipit's own
+    included) stays fully offline. A generally-unreadable manifest DEGRADES to no
+    artifact units (gather warns about it downstream, matching the rest of
+    install); only a well-formed manifest carrying a malformed ``[artifact-deps]``
+    entry fails loud.
+    """
+    try:
+        cfg = load_config(root)
+    except config.ConfigError:
+        # A generally-unreadable manifest degrades like gather's read boundary —
+        # no artifact units; the warning surfaces there. A malformed
+        # [artifact-deps] entry, by contrast, is a parse error load_config never
+        # raises (it validates only table shape), so it still fails loud below.
+        return []
+    deps = config.load_artifact_deps(cfg)
+    if not deps:
+        return []
+    visibility: dict[str, bool] = {}
+    resolved = []
+    for dep in deps:
+        if dep.repo not in visibility:
+            visibility[dep.repo] = is_private(dep.repo)
+        resolved.append(
+            (dep, artifactdeps.channel_url(dep.repo, private=visibility[dep.repo]))
+        )
+    return artifactdeps.project(resolved)
 
 
 @click.command(name="install")
@@ -261,6 +305,11 @@ def run(
         # manifest can signal at all (#890).
         toolchains = detect_toolchains(root_path) | _declared_signals(root_path)
         units = load_units(toolchains=toolchains)
+        # The consumer half of the Artifact channel (ARF01-WS02 #952): project
+        # the repo's `[artifact-deps]` declarations into managed pixi blocks the
+        # reconcile then treats like any other. Malformed entries fail loud here;
+        # a repo declaring none (shipit's own) stays offline.
+        units += _artifact_dep_units(root_path)
         retired = load_retired()
         retired_hooks = load_retired_hooks()
         state = gather(root_path, units, retired, retired_hooks)

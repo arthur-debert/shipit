@@ -53,6 +53,7 @@ _KNOWN_TABLES = {
     "lint",
     "toolchains",
     "artifacts",
+    "artifact-deps",
     "lanes",
 }
 _ESCAPE_HATCH_TABLES = {"project", "custom"}
@@ -1059,6 +1060,135 @@ def load_artifacts(cfg: dict) -> tuple[Artifact, ...]:
     if not isinstance(section, dict):
         raise ConfigError("[artifacts] must be a table of artifact declarations")
     return tuple(_parse_artifact(str(name), spec) for name, spec in section.items())
+
+
+# --------------------------------------------------------------------------
+# The [artifact-deps] map — cross-repo Artifact-channel consumption (ARF01-WS02)
+# --------------------------------------------------------------------------
+#
+# The CONSUMER side of the Artifact channel (ADR-0064/0065, #952). A downstream
+# repo declares a cross-repo artifact-pinned dependency as
+# `[artifact-deps.<pkg>]`, and `shipit install` PROJECTS it into a managed pixi
+# block (:mod:`shipit.install.artifactdeps`) so pixi resolves/locks/fetches it
+# like any other dependency and a `version` bump re-resolves transparently:
+#
+#     [artifact-deps.lexd-lsp]
+#     repo    = "lex-fmt/lex"    # the PRODUCING repo (owner/name)
+#     version = "0.19.3"         # a conda/pixi version match-spec
+#     # feature = "lint"         # optional: the pixi feature/env to target
+#
+# The section KEY doubles as the conda package name — it names the package (a
+# tool artifact installs a binary, a data artifact installs files), NOT an
+# executable contract. Only cross-repo artifact pins live here; ordinary
+# conda-forge deps stay consumer-authored in pixi. The access TIER (public /
+# private) is DERIVED from the producing repo's visibility at projection time
+# (ADR-0065), never declared here — one less thing to drift. WS02 serves the
+# PUBLIC tier only; the private tier's `[s3-options]` + credentials are WS04.
+
+#: The per-entry keys `[artifact-deps.<pkg>]` accepts; anything else is a typo
+#: that dies at parse (the same closed-registry philosophy as `_KNOWN_TABLES`).
+_ARTIFACT_DEP_KEYS = ("repo", "version", "feature")
+
+#: A pixi feature name shape (pixi's own rule): a lowercase-ish identifier of
+#: alphanumerics, `-` and `_`. Rejected at parse so a malformed `feature`
+#: cannot splice an unparseable `[feature.<name>]` table into pixi.toml.
+_FEATURE_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
+
+
+@dataclass(frozen=True)
+class ArtifactDep:
+    """One ``[artifact-deps.<pkg>]`` entry, fully typed (ADR-0030).
+
+    Construction is validation: :func:`_parse_artifact_dep` refuses a malformed
+    entry loudly, naming the offending key, before this value exists — so every
+    consumer of the parse (the pixi-block projection) gets a well-formed pin.
+
+    - ``package`` is the section key AND the conda package name — the artifact's
+      pixi/conda dependency name (a tool artifact puts a binary on PATH, a data
+      artifact installs files; the key names the package, not a contract).
+    - ``repo`` is the canonical ``owner/name`` slug of the PRODUCING repo, whose
+      per-repo channel the projection derives (:mod:`shipit.install.artifactdeps`).
+    - ``version`` is a conda/pixi version match-spec string (``"0.19.3"``,
+      ``"0.19.*"``) — the pin pixi resolves and a bump re-resolves against.
+    - ``feature`` is the OPTIONAL pixi feature/env the projection targets;
+      ``None`` targets the default environment.
+    """
+
+    package: str
+    repo: str
+    version: str
+    feature: str | None = None
+
+
+def _parse_artifact_dep(package: str, spec: object) -> ArtifactDep:
+    """One ``[artifact-deps.<pkg>]`` table into a typed :class:`ArtifactDep`.
+
+    Loud at the boundary (ADR-0030): every failure names the offending key and
+    what was expected, so a malformed declaration dies at parse rather than
+    projecting a broken pixi block. ``repo`` is validated through the canonical
+    slug parser (:func:`shipit.identity.repo_from_slug`) so a non-``owner/name``
+    value is refused here, not discovered when the channel URL is derived.
+    """
+    where = f"[artifact-deps].{package}"
+    if not _FEATURE_NAME_RE.match(package):
+        raise ConfigError(
+            f"{where}: the section key is the conda package name and must be a "
+            f"plain package identifier (alphanumerics, '.', '-', '_'); "
+            f"got {package!r}"
+        )
+    if not isinstance(spec, dict):
+        raise ConfigError(
+            f"{where} must be a table, e.g. "
+            f'{{ repo = "owner/name", version = "0.19.3" }}; got {spec!r}'
+        )
+    _reject_unknown_keys(where, spec, _ARTIFACT_DEP_KEYS)
+
+    repo = spec.get("repo")
+    if not isinstance(repo, str) or not repo:
+        raise ConfigError(
+            f"{where}.repo must be the producing repo's `owner/name` slug, "
+            f'e.g. "lex-fmt/lex"; got {repo!r}'
+        )
+    try:
+        canonical = repo_from_slug(repo).slug
+    except ValueError as exc:
+        raise ConfigError(f"{where}.repo: {exc}") from exc
+
+    version = spec.get("version")
+    if not isinstance(version, str) or not version:
+        raise ConfigError(
+            f"{where}.version must be a non-empty version match-spec string, "
+            f'e.g. "0.19.3" or "0.19.*"; got {version!r}'
+        )
+
+    feature = spec.get("feature")
+    if feature is not None:
+        if not isinstance(feature, str) or not _FEATURE_NAME_RE.match(feature):
+            raise ConfigError(
+                f"{where}.feature must be a pixi feature name (alphanumerics, "
+                f"'.', '-', '_'); got {feature!r}"
+            )
+
+    return ArtifactDep(
+        package=package, repo=canonical, version=version, feature=feature
+    )
+
+
+def load_artifact_deps(cfg: dict) -> tuple[ArtifactDep, ...]:
+    """Parse the ``[artifact-deps]`` map (already loaded) into typed
+    :class:`ArtifactDep` values, in DECLARATION order (ARF01-WS02, #952).
+
+    ``()`` when the table is absent — a repo declaring no cross-repo artifact
+    pin projects no managed pixi block. Malformed shapes raise
+    :class:`ConfigError` naming the offending entry (construction is validation,
+    ADR-0030). The section key doubles as the conda package name.
+    """
+    section = cfg.get("artifact-deps", {})
+    if not isinstance(section, dict):
+        raise ConfigError(
+            "[artifact-deps] must be a table of `<pkg>` artifact declarations"
+        )
+    return tuple(_parse_artifact_dep(str(name), spec) for name, spec in section.items())
 
 
 # --------------------------------------------------------------------------
