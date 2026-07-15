@@ -105,10 +105,17 @@ def cli_errors[**P](run: Callable[P, int]) -> Callable[P, int]:
     so direct (non-click) callers and tests drive it exactly like the bare
     ``run()``, and mypy sees the original parameters.
 
+    Any exception notes (``exc.__notes__``, e.g. the cleanup-failure report
+    ``repo new`` attaches alongside a primary creation failure — ADR-0059) are
+    folded into the rendered line: ``str(exc)`` omits notes (they surface only
+    in traceback formatting, which the shell suppresses), so a note-carrying
+    failure would otherwise report the primary error and silently drop the
+    note. Appending them here keeps that report on the public path.
+
     The message is collapsed to a single line before printing: some known
     errors (notably :class:`~shipit.execrun.ExecError`, which tails captured
-    stdout/stderr) carry embedded newlines, and the ``error: …`` contract is
-    ONE stderr line.
+    stdout/stderr) carry embedded newlines, notes are joined in, and the
+    ``error: …`` contract is ONE stderr line.
     """
 
     @functools.wraps(run)
@@ -116,7 +123,8 @@ def cli_errors[**P](run: Callable[P, int]) -> Callable[P, int]:
         try:
             return run(*args, **kwargs)
         except KNOWN_ERRORS as exc:
-            message = " ".join(str(exc).split())
+            parts = [str(exc), *getattr(exc, "__notes__", [])]
+            message = " ".join(" ".join(parts).split())
             print(f"error: {message}", file=sys.stderr)
             return 1
 
