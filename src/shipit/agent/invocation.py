@@ -105,6 +105,7 @@ class Model:
 #: future work (ADR-0025 §Consequences).
 _KNOWN_PROVIDERS: dict[str, Provider] = {
     "gpt-5.5": Provider.OPENAI,
+    "gpt-5.6-sol": Provider.OPENAI,
     "gpt-5.4-mini": Provider.OPENAI,
     "gemini 3.1 pro (high)": Provider.GOOGLE,
     "gemini 3.5 flash (high)": Provider.GOOGLE,

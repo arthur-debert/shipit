@@ -40,7 +40,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import execrun, git, identity
-from ..agent.backend import Backend
+from ..agent.backend import ANTIGRAVITY, Backend
 from ..identity import Sha
 from ..spawn import launch
 from . import artifacts as artifacts_mod
@@ -171,6 +171,54 @@ def _resolve_endpoint(rev: str, workdir: str) -> Sha:
     return sha
 
 
+def _provision_replay_defs(
+    view: RangeView, backend: Backend, *, calibrator_on: bool
+) -> None:
+    """Provision the bundled role agent-defs into the replay checkout when a
+    launch in THIS replay reads a ``--agent reviewer`` def from it, mapping a
+    filesystem failure to the replay path's one clean :class:`ReviewError`.
+
+    Two launches in a replay resolve ``--agent reviewer`` against the checkout
+    (ABSENT in a bare experiment clone), so both require provisioning first:
+
+    - the calibrator's dormant judge, ``claude --agent reviewer``
+      (``.claude/agents``), whenever ``calibrator_on``; and
+    - an ANTIGRAVITY primary reviewer backend, ``agy --agent reviewer``
+      (``.agents/agents/reviewer/agent.md``, #989), on EVERY replay shape —
+      single-pass :func:`run_replay` and uncalibrated fan-out alike, not only
+      the calibrator case.
+
+    A no-op when neither condition holds (a codex/claude primary with no judge
+    needs nothing written). :func:`provision_agent_defs` writes only missing
+    files, so provisioning both trees whenever either launch needs one is safe
+    and idempotent. An :class:`OSError` (read-only checkout, permissions, a
+    non-directory ``.claude``/``.agents`` component) is re-raised as a
+    :class:`~shipit.review.diff.ReviewError` — the replay path's clean one-line
+    refusal — BEFORE any model bills, never a raw traceback.
+    """
+    if not (calibrator_on or backend is ANTIGRAVITY):
+        return
+    try:
+        provision_agent_defs(view.workdir)
+    except OSError as exc:
+        # Only the calibrator's judge is dodgeable: when it alone needs the
+        # defs (calibrator on, primary NOT the ANTIGRAVITY reviewer), dropping
+        # the `--calibrator-*` options bypasses the read-only checkout. An
+        # ANTIGRAVITY primary reads them regardless, so the hint would mislead.
+        hint = (
+            " (or drop the `--calibrator-*` options to run the fan-out without "
+            "the judge)"
+            if calibrator_on and backend is not ANTIGRAVITY
+            else ""
+        )
+        raise ReviewError(
+            f"cannot provision the reviewer role agent-defs into "
+            f"{view.workdir!r} ({exc}) — a replay launch (the ANTIGRAVITY "
+            "reviewer, or the calibrator's judge) reads them from the checkout. "
+            f"Fix the checkout's writability{hint}, then re-run."
+        ) from exc
+
+
 def run_replay(
     backend: Backend,
     view: RangeView,
@@ -207,6 +255,10 @@ def run_replay(
     finding↔pass trail as the fan-out's, so replay evidence is as inspectable
     as a live round's.
     """
+    # An ANTIGRAVITY primary reviewer launches `agy --agent reviewer`, which
+    # reads `.agents/agents/reviewer/agent.md` from the checkout — absent in a
+    # bare experiment clone. Provision it before the launch (no calibrator here).
+    _provision_replay_defs(view, backend, calibrator_on=False)
     agent = backend.funnel_agent or backend.name
     round_id = uuid.uuid4().hex
     run_id = uuid.uuid4().hex
@@ -328,12 +380,14 @@ def run_fanout_replay(
     union dedup into the deterministic same-round near-duplicate collapse —
     the ``dedup = "semantic"`` Lab treatment, threaded verbatim to the
     orchestrator (which rejects it alongside a ``calibrator``: the judge does
-    its own dedup). When ``calibrator``
-    is set, the role agent-defs are provisioned into the replay checkout first
-    (:func:`provision_agent_defs`) so the judge's ``claude --agent reviewer``
-    launch works in a clone that never committed them; a filesystem failure
-    provisioning them is re-raised as a :class:`~shipit.review.diff.ReviewError`
-    (the replay path's clean one-line refusal) rather than a raw ``OSError``.
+    its own dedup). The role agent-defs are provisioned into the replay checkout
+    first (:func:`_provision_replay_defs`) whenever a launch reads them — the
+    judge's ``claude --agent reviewer`` when ``calibrator`` is set AND an
+    ANTIGRAVITY primary reviewer's ``agy --agent reviewer`` on every fan-out
+    (#989) — so the launch works in a clone that never committed them; a
+    filesystem failure provisioning them is re-raised as a
+    :class:`~shipit.review.diff.ReviewError` (the replay path's clean one-line
+    refusal) rather than a raw ``OSError``.
 
     Returns ``{"review": …, "record_path": …}`` and PROPAGATES a record-write
     failure, both exactly as the single-pass arm does (the record is the
@@ -352,21 +406,11 @@ def run_fanout_replay(
     # single monolithic pass (ADR-0052). Resolve it here so the orchestrator
     # below runs the fan-out and the record folds the real pass set.
     dimensions = tuple(dimensions) if dimensions else DEFAULT_DIMENSION_NAMES
-    if calibrator is not None:
-        # A filesystem failure here (read-only checkout, permissions, a
-        # non-directory `.claude`/`agents` component) must die as the replay
-        # path's ONE clean domain refusal, not a raw OSError traceback — the
-        # provisioning runs before any model bills.
-        try:
-            provision_agent_defs(view.workdir)
-        except OSError as exc:
-            raise ReviewError(
-                f"cannot provision the calibrator's role agent-defs into "
-                f"{view.workdir!r} ({exc}) — the fan-out replay's judge reads "
-                "them from the checkout. Fix the checkout's writability, or drop "
-                "the `--calibrator-*` options to run the fan-out without the "
-                "judge, then re-run."
-            ) from exc
+    # Provision the reviewer role agent-defs into the checkout before any model
+    # bills when a launch in this fan-out reads them: the calibrator's judge
+    # (`claude --agent reviewer`) when the judge is on, AND an ANTIGRAVITY primary
+    # reviewer (`agy --agent reviewer`, #989) on EVERY fan-out — calibrated or not.
+    _provision_replay_defs(view, backend, calibrator_on=calibrator is not None)
     agent = backend.funnel_agent or backend.name
     start = time.monotonic()
     outcome = fanout.run_fanout_review(
@@ -421,34 +465,29 @@ def run_fanout_replay(
     return {"review": outcome.review, "record_path": record_path}
 
 
-def provision_agent_defs(workdir: str) -> list[Path]:
-    """Provision the bundled role agent-defs into ``workdir``'s ``.claude/agents``.
+def _provision_bundled_tree(root: Path, rel_dir: str, source) -> list[Path]:
+    """Exclusive-create every bundled file under ``source`` into ``root/rel_dir``.
 
-    The RVW02-WS08 op gap (#680): the Calibrator's default backend launches
-    ``claude --agent reviewer``, which reads ``.claude/agents/reviewer.md`` from
-    the checkout it runs in — present in shipit-self and installed consumers,
-    ABSENT in a bare experiment clone, where the launch fails. So a fan-out
-    replay with the judge on writes the bundled agent-defs
-    (:func:`shipit.install.units.agents_root` — the same source ``shipit
-    install`` vendors) into the replay checkout first. Only MISSING files are
-    written: an existing def (committed, installed, or deliberately edited as an
-    experiment arm) is the checkout's own and is never clobbered. Returns the
-    paths written (empty when everything was already present).
+    The shared core of :func:`provision_agent_defs` (RVW02-WS08, extended for the
+    AGY def in #989): walk the bundled ``source`` tree and write each file into
+    the matching path under ``root/rel_dir``, MISSING-ONLY. Handles a NESTED
+    source (the AGY def is ``reviewer/agent.md``, not a flat file) by mirroring the
+    source's relative paths.
 
-    Untrusted-checkout guard (RVW03-WS01): replay runs over a checkout the
-    operator may not control, so the writes stay strictly inside the checkout.
-    A ``.claude``/``agents`` path component that is a SYMLINK (git carries
-    symlinks) could redirect the bundled defs outside the checkout, so a
-    symlinked component aborts provisioning with nothing written. Each file is
-    created with exclusive ``open(..., "xb")``, so an existing name (a regular
-    file OR a pre-planted symlink) is left untouched — never followed or
-    truncated — which also makes concurrent replays on one checkout race-safe.
+    Untrusted-checkout guard (RVW03-WS01): a SYMLINK anywhere in the destination
+    directory chain — the ``rel_dir`` components OR an intermediate dir created for
+    a nested file — could redirect the writes outside the checkout, so a symlinked
+    component aborts this tree with nothing further written. Each file is created
+    with exclusive ``open(..., "xb")``, so an existing name (a regular file OR a
+    pre-planted symlink) is left untouched — never followed or truncated — which
+    also makes concurrent replays on one checkout race-safe. Returns the paths
+    written under this tree.
     """
-    from ..install.units import AGENTS_DEF_DIR, agents_root
+    from ..install.units import walk_files
 
-    root = Path(workdir).resolve()
+    # Guard every component of the base dir chain before writing anything.
     probe = root
-    for part in Path(AGENTS_DEF_DIR).parts:
+    for part in Path(rel_dir).parts:
         probe = probe / part
         if probe.is_symlink():
             logger.warning(
@@ -457,24 +496,79 @@ def provision_agent_defs(workdir: str) -> list[Path]:
                 probe,
             )
             return []
-    dest_dir = root / AGENTS_DEF_DIR
+    dest_dir = root / rel_dir
     written: list[Path] = []
-    for entry in agents_root().iterdir():
-        if not entry.is_file():
-            continue
-        dest = dest_dir / entry.name
-        dest_dir.mkdir(parents=True, exist_ok=True)
+    for rel, content in walk_files(source):
+        dest = dest_dir / rel
+        # Guard each intermediate dir a nested file needs (e.g. `reviewer/`).
+        # A symlinked component ABORTS this tree fail-closed (nothing further
+        # written) — the same fail-closed posture as the base-chain guard above:
+        # once any destination component is attacker-controlled the whole tree is
+        # suspect, so we stop rather than skip-and-keep-going.
+        probe = dest_dir
+        symlinked = False
+        for part in Path(rel).parent.parts:
+            probe = probe / part
+            if probe.is_symlink():
+                logger.warning(
+                    "replay: refusing to provision %s — %s is a symlink; "
+                    "leaving the untrusted checkout untouched",
+                    rel,
+                    probe,
+                )
+                symlinked = True
+                break
+        if symlinked:
+            return written
+        dest.parent.mkdir(parents=True, exist_ok=True)
         try:
             with open(dest, "xb") as fh:
-                fh.write(entry.read_bytes())
+                fh.write(content)
         except FileExistsError:
             continue
         written.append(dest)
+    return written
+
+
+def provision_agent_defs(workdir: str) -> list[Path]:
+    """Provision the bundled role agent-defs into ``workdir`` — both the Claude
+    defs (``.claude/agents``) and the AGY reviewer def (``.agents/agents``, #989).
+
+    The RVW02-WS08 op gap (#680): a reviewer/calibrator backend launches ``claude
+    --agent reviewer`` (reads ``.claude/agents/reviewer.md``) or, on the agy arm,
+    ``agy --agent reviewer`` (reads ``.agents/agents/reviewer/agent.md``) from the
+    checkout it runs in — present in shipit-self and installed consumers, ABSENT
+    in a bare experiment clone, where the launch fails. So a replay writes the
+    bundled defs (:func:`shipit.install.units.agents_root` /
+    :func:`~shipit.install.units.agy_agents_root` — the same sources ``shipit
+    install`` vendors) into the replay checkout first. Only MISSING files are
+    written: an existing def (committed, installed, or deliberately edited as an
+    experiment arm) is the checkout's own and is never clobbered. Returns every
+    path written across both trees (empty when everything was already present).
+
+    Untrusted-checkout guard (RVW03-WS01): replay runs over a checkout the
+    operator may not control, so the writes stay strictly inside the checkout —
+    a symlinked destination component aborts that tree, and every file is
+    exclusive-created (see :func:`_provision_bundled_tree`).
+    """
+    from ..install.units import (
+        AGENTS_DEF_DIR,
+        AGY_AGENTS_DEF_DIR,
+        agents_root,
+        agy_agents_root,
+    )
+
+    root = Path(workdir).resolve()
+    written: list[Path] = []
+    written += _provision_bundled_tree(root, AGENTS_DEF_DIR, agents_root())
+    agy_source = agy_agents_root()
+    if agy_source.is_dir():
+        written += _provision_bundled_tree(root, AGY_AGENTS_DEF_DIR, agy_source)
     if written:
         logger.info(
             "replay: provisioned %d role agent-def(s) into %s",
             len(written),
-            dest_dir,
+            root,
             extra={"files": len(written)},
         )
     return written

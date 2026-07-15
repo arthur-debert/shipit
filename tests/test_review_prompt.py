@@ -15,6 +15,8 @@ nothing. The tests here pin that parity and the absence of the retired
 
 from __future__ import annotations
 
+import json
+
 from shipit.review.instructions import default_instructions
 from shipit.review.prompt import (
     build_incremental_reviewer_task,
@@ -98,7 +100,6 @@ def test_agy_task_embeds_the_serialized_real_schema_not_a_hand_written_example()
     so the agy prompt can never disagree with the validator / codex's
     `--output-schema`. The lead-in frames it and the JSON-validity hardening rides
     along."""
-    import json
 
     task = build_reviewer_task(_INSTRUCTIONS, 7, schema_inline=True)
     assert "JSON Schema:" in task  # the human lead-in
@@ -114,10 +115,9 @@ def test_agy_task_embeds_the_serialized_real_schema_not_a_hand_written_example()
     assert "valid JSON that a strict parser accepts on the first try" in task
 
 
-def _agy_self_verify_arms():
-    """Every agy (schema_inline=True) arm — full, incremental, range — that carries
-    the self-verify appendix, so the guard below holds across all of them, not just
-    the full task."""
+def _agy_arms():
+    """Every agy (schema_inline=True) arm — full, incremental, range — so a guard
+    holds across all of them, not just the full task."""
     return {
         "full": build_reviewer_task(_INSTRUCTIONS, 7, schema_inline=True),
         "incremental": build_incremental_reviewer_task(
@@ -129,31 +129,34 @@ def _agy_self_verify_arms():
     }
 
 
-def test_agy_task_carries_the_best_effort_self_verify_instruction():
-    """The agy path nudges the agent to self-verify with the TOP-LEVEL
-    `shipit review validate` (#826) — worded as a best-effort SHOULD, never a hard
-    loop-until-green that could hang when the CLI is unavailable. Every agy arm
-    (full, incremental, range) carries it, and NONE references the retired nested
-    `shipit pr review validate` spelling — an agent handed the old command would
-    hit "no such command" and, per the SHOULD wording, silently skip the check
-    (the round-2 move introduced exactly that stale example in the pipe form)."""
-    for arm, task in _agy_self_verify_arms().items():
-        assert "shipit review validate" in task, arm
-        # Guard the retired spelling's ABSENCE — both the `<file>` and the pipe
-        # form. The positive check above passes even with a stale `pr review`
-        # example present, so this negative check is the one that actually catches
-        # the regression.
+def test_agy_task_no_longer_carries_the_shipit_review_validate_self_check():
+    """The agy prompt's temp-file / `shipit review validate` self-check is REMOVED
+    (#989): it cost the reviewer a tool loop for a check the producer already
+    guarantees deterministically (the parser + one parse retry + the salvage). Every
+    agy arm (full, incremental, range) drops the nudge entirely — no `shipit review
+    validate` reference, no BEST-EFFORT SELF-CHECK block, and (belt and suspenders)
+    no retired nested `shipit pr review validate` spelling either."""
+    for arm, task in _agy_arms().items():
+        assert "shipit review validate" not in task, arm
         assert "shipit pr review validate" not in task, arm
-        assert "BEST-EFFORT SELF-CHECK" in task, arm
-        # It is a SHOULD, explicitly not a blocking loop.
-        assert "SHOULD" in task, arm
-        assert "do NOT loop" in task, arm
+        assert "BEST-EFFORT SELF-CHECK" not in task, arm
+
+
+def test_agy_task_still_carries_the_inline_schema_and_json_validity_hardening():
+    """Removing the self-check keeps the rest of the agy-only block intact (#989):
+    the inline serialized schema and the #76 single-object JSON-validity hardening
+    still ride every agy arm — only the CLI round-trip nudge is gone."""
+    for arm, task in _agy_arms().items():
+        assert json.dumps(REVIEW_SCHEMA, indent=2) in task, arm
+        assert (
+            "ENTIRE response must be a single, complete, valid JSON object" in task
+        ), arm
 
 
 def test_codex_task_omits_schema_validity_and_self_verify():
     """The codex path (`schema_inline=False`) enforces the shape out of band, so it
-    embeds NONE of the agy-only block: no schema, no JSON-validity hardening, and no
-    `shipit review validate` self-check nudge."""
+    embeds NONE of the agy-only block: no schema and no JSON-validity hardening. (The
+    `shipit review validate` self-check no longer exists on any path, #989.)"""
     task = build_reviewer_task(_INSTRUCTIONS, 7, schema_inline=False)
     assert "JSON Schema:" not in task
     assert "ENTIRE response must be a single, complete, valid JSON object" not in task

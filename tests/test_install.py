@@ -1221,6 +1221,20 @@ def test_load_units_includes_the_three_agent_defs():
         assert f"name: {role}".encode() in unit.content
 
 
+def test_load_units_includes_the_agy_native_reviewer_def():
+    # #989: the AGY native custom-agent reviewer def is a managed whole-file unit
+    # keyed/dest'd at `.agents/agents/reviewer/agent.md`, so `shipit install` lays it
+    # into a consumer's checkout for `agy --agent reviewer`.
+    units = {u.key: u for u in iunits.load_units()}
+    key = f"{iunits.AGY_AGENTS_DEF_DIR}/reviewer/agent.md"
+    assert key in units, f"{key} not registered"
+    unit = units[key]
+    assert unit.kind == "file"
+    assert unit.dest == key
+    # The bundled content is the generated AGY def (frontmatter names the reviewer).
+    assert b"name: reviewer" in unit.content
+
+
 def test_load_units_includes_the_settings_hook_block():
     units = {u.key: u for u in iunits.load_units()}
     assert iunits.SETTINGS_KEY in units

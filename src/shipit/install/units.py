@@ -394,6 +394,11 @@ def pixi_manifest_seed(name: str) -> str:
 # `tests.conftest.managed_pretooluse_hook_command` (the single source of this
 # exact string) vs `managed_cc_hook_command` (the other four).
 AGENTS_DEF_DIR = ".claude/agents"
+#: The AGY native custom-agent def dir (issue #989): the generated
+#: ``.agents/agents/<name>/agent.md`` defs `agy --agent <name>` reads. Managed as
+#: whole-file units the same way as the Claude agent-defs, sourced from
+#: :func:`agy_agents_root` (the force-included wheel data, or the dev checkout).
+AGY_AGENTS_DEF_DIR = ".agents/agents"
 SETTINGS_FILE = ".claude/settings.json"
 SETTINGS_KEY = ".claude/settings.json#shipit-pretooluse-hook"
 # The substring that identifies shipit's managed PreToolUse entry in a consumer's
@@ -601,6 +606,22 @@ def agents_root():
     if bundled.is_dir():
         return bundled
     return Path(__file__).resolve().parents[3] / ".claude" / "agents"
+
+
+def agy_agents_root():
+    """The bundled AGY native custom-agent defs — wheel package data, or the repo
+    root in dev (issue #989).
+
+    The AGY sibling of :func:`agents_root`: the generated
+    ``.agents/agents/<name>/agent.md`` defs live at the repo root (where ``agy
+    --agent <name>`` reads them for shipit-self) and are force-included into the
+    wheel at ``shipit/data/agy-agents`` (pyproject). Returns a Traversable
+    (installed wheel) or a :class:`Path` (editable checkout).
+    """
+    bundled = resources.files("shipit.data").joinpath("agy-agents")
+    if bundled.is_dir():
+        return bundled
+    return Path(__file__).resolve().parents[3] / ".agents" / "agents"
 
 
 def canonical_hook_entry(entry: dict) -> str:
@@ -837,6 +858,24 @@ def load_units(*, toolchains: frozenset[str] = frozenset()) -> list[Unit]:
                 content=content,
             )
         )
+
+    # The AGY native custom-agent defs (#989): `.agents/agents/<name>/agent.md`,
+    # delivered as whole-file units exactly like the Claude agent-defs above so
+    # `agy --agent reviewer` reads shipit's managed reviewer posture from a
+    # consumer's checkout. Guarded on the source dir existing (a checkout that
+    # predates the generated def, or a wheel built without it, simply carries no
+    # AGY unit) so `load_units` never raises on a missing source tree.
+    agy_root = agy_agents_root()
+    if agy_root.is_dir():
+        for rel, content in walk_files(agy_root):
+            units.append(
+                Unit(
+                    key=f"{AGY_AGENTS_DEF_DIR}/{rel}",
+                    dest=f"{AGY_AGENTS_DEF_DIR}/{rel}",
+                    kind="file",
+                    content=content,
+                )
+            )
 
     # Store each desired entry already canonicalized, so its hash matches a consumer
     # entry extracted + canonicalized through the same function (formatting-immune).

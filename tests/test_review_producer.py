@@ -46,6 +46,8 @@ def _faked(monkeypatch):
     """Fake the Tree clone, the remote-url read, and the PATH preflight so a launch
     exercises ONLY the producer wiring. Returns a dict the test fills with the captured
     launch argv/cwd/env."""
+    from shipit.spawn.backends import antigravity as agy_backend
+
     monkeypatch.setattr(
         producer,
         "create_readonly",
@@ -57,6 +59,12 @@ def _faked(monkeypatch):
     )
     monkeypatch.setattr(producer.git, "remote_url", lambda *, cwd: "https://x/y.git")
     monkeypatch.setattr(producer.shutil, "which", lambda binary: f"/usr/bin/{binary}")
+    # #989: the AGY reviewer preflight probes `agy --help` for `--agent`. These
+    # wiring tests must not depend on a real agy binary (absent in CI), so stub
+    # the capability probe present — the probe itself is covered by dedicated
+    # tests (test_agy_reviewer_preflight_*). Tests exercising the UNSUPPORTED
+    # path override this back to False.
+    monkeypatch.setattr(agy_backend, "supports_agent_flag", lambda **k: True)
     captured: dict = {}
 
     def launcher(cmd, *, cwd, env, timeout=None):
@@ -398,9 +406,55 @@ def test_missing_cli_fails_loud(monkeypatch):
         )
 
 
+def test_agy_reviewer_preflight_requires_the_agent_flag(monkeypatch):
+    # #989: a real agy reviewer launch preflights `--agent` support and surfaces a
+    # clean UPGRADE BackendUnavailable when the installed agy predates it — never a
+    # confusing "unknown option" from the CLI mid-launch.
+    from shipit.spawn.backends import antigravity as agy_backend
+
+    monkeypatch.setattr(producer.shutil, "which", lambda binary: f"/usr/bin/{binary}")
+    monkeypatch.setattr(agy_backend, "supports_agent_flag", lambda **k: False)
+    with pytest.raises(BackendUnavailable, match="--agent"):
+        producer.run_tree_review(
+            agent_backend.ANTIGRAVITY, _ctx(), launcher=lambda *a, **k: None
+        )
+
+
+def test_agy_reviewer_preflight_passes_when_agent_flag_is_supported(monkeypatch):
+    # With a modern agy the `--agent` preflight is satisfied, so preflight does not
+    # raise (the launch proceeds past it). We stub the launch to return promptly.
+    from shipit.spawn.backends import antigravity as agy_backend
+
+    monkeypatch.setattr(producer.shutil, "which", lambda binary: f"/usr/bin/{binary}")
+    monkeypatch.setattr(agy_backend, "supports_agent_flag", lambda **k: True)
+    # No BackendUnavailable from the capability check: _preflight returns cleanly.
+    producer._preflight(agent_backend.ANTIGRAVITY, dry_run=False)
+
+
 def test_preflight_round_passes_when_every_binary_is_on_path(monkeypatch):
     monkeypatch.setattr(producer.shutil, "which", lambda binary: f"/usr/bin/{binary}")
     producer.preflight_round([agent_backend.CODEX, agent_backend.CLAUDE])  # no raise
+
+
+def test_preflight_round_raises_one_upgrade_error_for_outdated_agy(monkeypatch):
+    # #989: the round preflight validates AGY's `--agent` support ONCE, before any
+    # Tree is provisioned, so an outdated agy surfaces a single clean UPGRADE
+    # BackendUnavailable — never N wrapped "all passes failed" from per-launch
+    # _preflight. The binary is present (on PATH); the flag is what's missing.
+    from shipit.spawn.backends import antigravity as agy_backend
+
+    monkeypatch.setattr(producer.shutil, "which", lambda binary: f"/usr/bin/{binary}")
+    monkeypatch.setattr(agy_backend, "supports_agent_flag", lambda **k: False)
+    with pytest.raises(BackendUnavailable, match="--agent"):
+        producer.preflight_round([agent_backend.ANTIGRAVITY, agent_backend.ANTIGRAVITY])
+
+
+def test_preflight_round_passes_for_agy_when_agent_flag_is_supported(monkeypatch):
+    from shipit.spawn.backends import antigravity as agy_backend
+
+    monkeypatch.setattr(producer.shutil, "which", lambda binary: f"/usr/bin/{binary}")
+    monkeypatch.setattr(agy_backend, "supports_agent_flag", lambda **k: True)
+    producer.preflight_round([agent_backend.ANTIGRAVITY])  # no raise
 
 
 def test_preflight_round_names_each_missing_binary_in_one_error(monkeypatch):
