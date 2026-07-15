@@ -2399,8 +2399,9 @@ def _write_zed_manifest(tmp_path, *, ext_id="lex"):
     )
 
 
-def test_zed_extension_id_reads_the_manifest_top_level_id():
-    assert publish_mod.zed_extension_id('id = "lex"\nname = "Lex"\n') == "lex"
+@pytest.mark.parametrize("ext_id", ["lex", "zed-lex", "lex_2", "html", "toml0"])
+def test_zed_extension_id_reads_a_valid_manifest_id(ext_id):
+    assert publish_mod.zed_extension_id(f'id = "{ext_id}"\nname = "Lex"\n') == ext_id
 
 
 @pytest.mark.parametrize("text", ['name = "Lex"\n', "", "id = 3\n"])
@@ -2409,9 +2410,54 @@ def test_zed_extension_id_refuses_a_manifest_without_a_string_id(text):
         publish_mod.zed_extension_id(text)
 
 
+@pytest.mark.parametrize(
+    "ext_id",
+    [
+        "../zed-registry",  # path traversal out of the scratch dir
+        "..",
+        "/tmp/x",  # absolute path
+        "foo/bar",  # a slash — a second path segment / submodule-dir escape
+        "foo.bar",  # a dot — blurs the `<id>.extensions-toml` filename
+        'x]\nversion = "0"',  # closes the TOML table key + injects a line
+        "Lex",  # uppercase is outside the lowercase registry vocabulary
+        "with space",
+        "-leading",  # must start with an alphanumeric
+    ],
+)
+def test_zed_extension_id_refuses_an_id_outside_the_grammar(ext_id):
+    # The id is untrusted repo content used as BOTH a TOML key and a filename,
+    # so a non-conforming id is a loud refusal — never a mis-scoped write or a
+    # malformed registry row (codex/copilot round-1 finding).
+    manifest = f"id = {json.dumps(ext_id)}\n"
+    with pytest.raises(ReleaseError, match="is not a valid Zed extension id"):
+        publish_mod.zed_extension_id(manifest)
+
+
+def test_zed_extension_id_refuses_an_empty_id():
+    with pytest.raises(ReleaseError, match="no top-level `id`"):
+        publish_mod.zed_extension_id('id = ""\n')
+
+
 def test_zed_extension_id_refuses_unparseable_toml():
     with pytest.raises(ReleaseError, match="cannot parse"):
         publish_mod.zed_extension_id("id = = broken")
+
+
+def test_zed_publish_refuses_a_traversal_id_before_writing(tmp_path):
+    # End to end through the adapter: a malicious extension.toml id never
+    # reaches render/write — the scratch dir stays empty on refusal.
+    artifact = _zed_artifacts()[0]
+    (tmp_path / "extension.toml").write_text('id = "../escape"\n', encoding="utf-8")
+    req = _request(
+        tmp_path,
+        artifact,
+        entries=_entries({".": "rust"}),
+        version="1.2.3",
+        repo="lex-fmt/zed-lex",
+    )
+    with pytest.raises(ReleaseError, match="is not a valid Zed extension id"):
+        publish_mod._publish_zed(req)
+    assert not (tmp_path / "dist" / publish_mod.ZED_SCRATCH).exists()
 
 
 def test_render_zed_registry_entry_emits_the_row_and_submodule_rev():

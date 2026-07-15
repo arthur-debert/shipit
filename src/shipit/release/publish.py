@@ -1704,6 +1704,20 @@ ZED_MANIFEST = "extension.toml"
 #: re-run can never ship it as an asset (the brew/conda scratch prior art).
 ZED_SCRATCH = "zed"
 
+#: The Zed extension-id grammar (the ``zed-industries/extensions`` registry id
+#: vocabulary): a SINGLE lowercase path segment of letters/digits/``-``/``_``,
+#: starting with an alphanumeric. The id comes from UNTRUSTED repo content
+#: (``extension.toml``) and is used BOTH as a TOML table key (``[<id>]``) and as
+#: a scratch FILENAME (``<id>.extensions-toml``), so a full-match against this
+#: conservative grammar is a security boundary, not cosmetics: it rejects any id
+#: that could traverse out of the ``dist/zed/`` scratch (``../x``, ``/tmp/x``,
+#: ``foo/bar``), break the rendered TOML key (``x]\nversion = …``, newlines,
+#: spaces), or blur the filename (``foo.bar``). Deliberately NO ``.`` (unlike the
+#: conda name grammar): a dot in a registry id is neither valid Zed vocabulary
+#: nor safe as a filename stem here. An id outside it is a loud
+#: :class:`ReleaseError`, never a mis-scoped write or a malformed row.
+_ZED_EXTENSION_ID_RE = re.compile(r"[a-z0-9][a-z0-9_-]*")
+
 
 def zed_extension_id(text: str) -> str:
     """The Zed extension ``id`` parsed from an ``extension.toml`` ``text``. Pure.
@@ -1713,6 +1727,15 @@ def zed_extension_id(text: str) -> str:
     submodule dir (``extensions/<id>``) are keyed by. A manifest with no ``id``
     (or an unparseable one) is a loud :class:`ReleaseError`: the registry entry
     is keyed by the id, so the endpoint never renders a null-keyed row.
+
+    The id is UNTRUSTED repo content that becomes BOTH a rendered TOML table key
+    and a scratch filename, so it is full-matched against the conservative Zed
+    id grammar (:data:`_ZED_EXTENSION_ID_RE` — a single lowercase
+    letters/digits/``-``/``_`` segment) BEFORE the caller renders or writes with
+    it. An id that could traverse the scratch dir (``../x``, ``/tmp/x``,
+    ``foo/bar``), break the TOML key (``x]\\nversion = …``, spaces, newlines), or
+    blur the filename (``foo.bar``) is a loud :class:`ReleaseError`, never a
+    mis-scoped write or a silently-malformed registry row.
     """
     try:
         data = tomllib.loads(text)
@@ -1726,6 +1749,14 @@ def zed_extension_id(text: str) -> str:
             f"zed: {ZED_MANIFEST} has no top-level `id` — the "
             f"{ZED_REGISTRY} registry row and its submodule dir "
             f"(extensions/<id>) are keyed by the extension id"
+        )
+    if not _ZED_EXTENSION_ID_RE.fullmatch(ext_id):
+        raise ReleaseError(
+            f"zed: {ZED_MANIFEST} id `{ext_id}` is not a valid Zed extension id "
+            f"(one lowercase segment of letters, digits, `-`, `_`; no slashes, "
+            f"dots, spaces, or newlines) — the id becomes both the "
+            f"`extensions.toml` table key and a scratch filename, so it must not "
+            f"escape the scratch dir or break the rendered row"
         )
     return ext_id
 
