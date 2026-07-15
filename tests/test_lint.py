@@ -2590,7 +2590,7 @@ _HERM_SPECS: tuple[_ToolSpec, ...] = (
         home_via_lexd=True,
     ),
     # stylua — the lua FORMATTER (TOL03-WS01 #972), NO config injection (a
-    # canonical stylua.toml is a follow-up, ADR-0068). stylua reads config ONLY
+    # canonical stylua.toml is a follow-up, ADR-0069). stylua reads config ONLY
     # from a `stylua.toml` in the CWD (the repo root the gate runs from): it does
     # NOT walk ANCESTOR directories without `--search-parent-directories`, reads
     # no $HOME config, and honors no config env var (verified empirically). So
