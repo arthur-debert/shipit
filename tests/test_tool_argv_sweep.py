@@ -52,9 +52,10 @@ def _parsed(path: pathlib.Path) -> ast.Module:
 #:   ``os_probe``): the OS process table has exactly one reader.
 #: - ``curl`` — the lexd release fetch (:mod:`shipit.provision.lexd`): the one
 #:   external download shipit performs (ADP00-WS03).
-#: - ``cargo`` / ``go`` / ``pytest`` / ``npm`` / ``uv`` / ``tree-sitter`` —
-#:   the Tool verbs' default producing commands (TOL01-WS01/WS02,
-#:   ``tree-sitter`` TOL02-WS16): assembled ONLY in the
+#: - ``cargo`` / ``go`` / ``pytest`` / ``npm`` / ``uv`` / ``tree-sitter`` /
+#:   ``busted`` — the Tool verbs' default producing commands (TOL01-WS01/WS02,
+#:   ``tree-sitter`` TOL02-WS16, ``busted`` the lua test slot TOL03-WS01):
+#:   assembled ONLY in the
 #:   closed toolchain registry (:mod:`shipit.tools.registry`); a per-path
 #:   ``.shipit.toml`` override is consumer DATA, never a second assembly
 #:   point. ``npm`` has a second sanctioned home: the Tree provisioner's
@@ -114,6 +115,10 @@ _ADAPTER_HOMES: dict[str, tuple[str, ...]] = {
     ),
     "go": ("tools/registry.py",),
     "pytest": ("tools/registry.py",),
+    # busted (TOL03-WS01 #972): the lua toolchain's test-slot runner, assembled
+    # ONLY in the closed registry. Like pytest it is a test-lane tool, not a
+    # release-stage tool.
+    "busted": ("tools/registry.py",),
     # tree-sitter (TOL02-WS16 #792): the generated-parser toolchain's
     # generate/corpus commands, assembled ONLY in the closed registry. The
     # tarball composition's payload is bytes, not a tree-sitter argv — the

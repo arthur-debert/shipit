@@ -166,10 +166,14 @@ PIXI_LAUNCHER_DEPS_ANCHOR = "[dependencies]"
 # delivers the release-side publish tool (twine, the pypi endpoint's uploader
 # — open hole 2, #801). The tree-sitter signal delivers the grammar
 # toolchain's own CLI (`tree-sitter-cli` — `tree-sitter generate` at build,
-# the corpus `tree-sitter test` lane; #890 closes open hole 7). Unlike the
-# manifest-detected signals it fires off the DECLARATION — a `.shipit.toml`
-# [toolchains] tree-sitter leg, no manifest signals a grammar — via the same
-# union mechanics as the wasm-pack→node-deps delivery
+# the corpus `tree-sitter test` lane; #890 closes open hole 7). The lua signal
+# delivers the lua LINT toolchain (`stylua` + `selene`, under the lint feature
+# like rust/go — TOL03-WS01 #972), and like tree-sitter it fires off the
+# DECLARATION (a nvim plugin has no manifest to detect), so both anchor the
+# provisions_signal mechanism on their respective (release / lint) axes. Unlike
+# the manifest-detected signals these fire off the DECLARATION — a `.shipit.toml`
+# [toolchains] tree-sitter or lua leg, no manifest signals a grammar or a nvim
+# plugin — via the same union mechanics as the wasm-pack→node-deps delivery
 # (:attr:`shipit.tools.registry.Toolchain.provisions_signal`, read by
 # :func:`shipit.verbs.install._declared_signals`). All the release-side
 # blocks anchor under
@@ -196,12 +200,20 @@ TOOLCHAIN_GO = "go"
 TOOLCHAIN_NODE = "node"
 TOOLCHAIN_PYTHON = "python"
 TOOLCHAIN_TREE_SITTER = "tree-sitter"
+TOOLCHAIN_LUA = "lua"
 PIXI_RUST_DEPS_KEY = "pixi.toml#shipit-rust-lint-toolchain"
 PIXI_RUST_DEPS_OPEN = "# >>> shipit-managed rust lint toolchain (do not edit; regenerate via `shipit install`) >>>"
 PIXI_RUST_DEPS_CLOSE = "# <<< shipit-managed rust lint toolchain <<<"
 PIXI_GO_DEPS_KEY = "pixi.toml#shipit-go-lint-toolchain"
 PIXI_GO_DEPS_OPEN = "# >>> shipit-managed go lint toolchain (do not edit; regenerate via `shipit install`) >>>"
 PIXI_GO_DEPS_CLOSE = "# <<< shipit-managed go lint toolchain <<<"
+# The lua lint toolchain (TOL03-WS01 #972): stylua + selene, siblings of the
+# rust/go lint blocks under the lint feature. Unlike them it fires off the
+# DECLARED `[toolchains]` lua leg (no manifest signals a nvim plugin), via the
+# registry entry's provisions_signal — the tree-sitter mechanics on the lint axis.
+PIXI_LUA_DEPS_KEY = "pixi.toml#shipit-lua-lint-toolchain"
+PIXI_LUA_DEPS_OPEN = "# >>> shipit-managed lua lint toolchain (do not edit; regenerate via `shipit install`) >>>"
+PIXI_LUA_DEPS_CLOSE = "# <<< shipit-managed lua lint toolchain <<<"
 PIXI_NODE_DEPS_KEY = "pixi.toml#shipit-node-deps"
 PIXI_NODE_DEPS_OPEN = (
     "# >>> shipit-managed node deps (do not edit; regenerate via `shipit install`) >>>"
@@ -263,6 +275,14 @@ TOOLCHAIN_UNITS = (
         PIXI_GO_DEPS_CLOSE,
         PIXI_LINT_DEPS_ANCHOR,
         "pixi-go-lint-deps-block.toml",
+    ),
+    (
+        PIXI_LUA_DEPS_KEY,
+        TOOLCHAIN_LUA,
+        PIXI_LUA_DEPS_OPEN,
+        PIXI_LUA_DEPS_CLOSE,
+        PIXI_LINT_DEPS_ANCHOR,
+        "pixi-lua-lint-deps-block.toml",
     ),
     (
         PIXI_NODE_DEPS_KEY,

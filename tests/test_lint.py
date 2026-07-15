@@ -364,6 +364,27 @@ def test_rust_tools_argv_forms():
     assert clippy.per_manifest and fmt.per_manifest
 
 
+def test_lua_lang_routes_and_uses_stylua_and_selene():
+    # TOL03-WS01 #972: `.lua` routes to the lua Lang, whose tools are stylua
+    # (formatter) + selene (linter) — the pair conda-forge carries, so a managed
+    # env solves them cleanly (luacheck is a luarocks package off conda-forge).
+    lua = lint.lang_for("lua/plugin/init.lua")
+    assert lua is not None and lua.name == "lua"
+    assert [tool.binary for tool in lua.tools] == ["stylua", "selene"]
+
+
+def test_lua_tools_argv_forms():
+    stylua, selene = lint.LUA.tools
+    # stylua is the one lua --fix leg: `--check` verifies (check mode), the bare
+    # form formats in place (fix mode — an empty fix tuple, not None, so the
+    # tool HAS a fix and does not fall back to --check).
+    assert stylua.argv(fix=False) == ("--check",)
+    assert stylua.argv(fix=True) == ()
+    # selene has no autofix, so --fix still runs its check form (never skipped).
+    assert selene.argv(fix=False) == ()
+    assert selene.argv(fix=True) == ()
+
+
 def test_every_lang_has_at_least_one_tool():
     for lang in lint.LANGS:
         assert lang.tools, f"{lang.name} has no tools"
@@ -2567,6 +2588,55 @@ _HERM_SPECS: tuple[_ToolSpec, ...] = (
         ),
         expected_ok=False,  # bogus lex.* directive trips two deny rules (dirty)
         home_via_lexd=True,
+    ),
+    # stylua — the lua FORMATTER (TOL03-WS01 #972), NO config injection (a
+    # canonical stylua.toml is a follow-up, ADR-0069). stylua reads config ONLY
+    # from a `stylua.toml` in the CWD (the repo root the gate runs from): it does
+    # NOT walk ANCESTOR directories without `--search-parent-directories`, reads
+    # no $HOME config, and honors no config env var (verified empirically). So
+    # the ambient sources the hermeticity pin exists to close — a config ABOVE
+    # the checkout, a $HOME file, an env var — CANNOT move its verdict; the cwd
+    # `stylua.toml` is the repo's OWN committed config (consumer-owned, like a
+    # tracked `.editorconfig`). Clean TAB-indented fixture (clean under stylua's
+    # Tabs default); a hostile ANCESTOR `stylua.toml` (2-space) would reflow it
+    # IF honored, and stylua's cwd-only discovery is exactly what keeps it from
+    # being — hermetic against the ancestor vector.
+    _ToolSpec(
+        lang="lua",
+        tag="stylua",
+        target_check=("--check",),
+        binaries=("stylua",),
+        fixture=(
+            (
+                "m.lua",
+                "local M = {}\n\nlocal function f()\n\treturn 1\nend\n\nreturn M\n",
+            ),
+        ),
+        hostile_name="stylua.toml",
+        hostile_body='indent_type = "Spaces"\nindent_width = 2\n',
+        vectors=(_Vector("ancestor"),),
+        expected_ok=True,  # tab-indented fixture is clean under stylua's Tabs default
+    ),
+    # selene — the lua LINTER (TOL03-WS01 #972), NO config injection. Like stylua
+    # it reads config ONLY from a `selene.toml` in the CWD — an ANCESTOR
+    # selene.toml is NOT consulted (verified), and there is no $HOME/env source —
+    # so an ambient config above the checkout cannot move its verdict (hermetic
+    # against the ancestor vector). The cwd `selene.toml` is the consumer's OWN
+    # config, and MUST be (it carries the plugin's `std`, e.g. the neovim standard
+    # library), so it is consumer-owned by design, never a gate-owned canonical.
+    # Fixture is DIRTY under selene's default (an unused local trips
+    # `unused_variable`); a hostile ANCESTOR selene.toml downgrading that rule
+    # would flip it green IF honored — selene's cwd-only discovery stops it.
+    _ToolSpec(
+        lang="lua",
+        tag="selene",
+        target_check=(),
+        binaries=("selene",),
+        fixture=(("m.lua", "local unused = 5\nprint(1)\n"),),
+        hostile_name="selene.toml",
+        hostile_body='std = "lua51"\n[rules]\nunused_variable = "allow"\n',
+        vectors=(_Vector("ancestor"),),
+        expected_ok=False,  # an unused local is dirty under selene's default rules
     ),
 )
 

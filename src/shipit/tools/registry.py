@@ -1,8 +1,11 @@
 """The closed toolchain registry — the Tool verbs' dispatch axis (ADR-0007/0039).
 
 A **Toolchain** names the build/test ecosystem of one path in a repo (rust,
-go, python, npm, tree-sitter) and carries the DEFAULT producing command per **tool slot**
-(``test`` from WS01, ``build`` from WS02). The registry is CLOSED, the
+go, python, npm, tree-sitter, lua) and carries the DEFAULT producing command per **tool slot**
+(``test`` from WS01, ``build`` from WS02). A slot may be EMPTY — lua declares
+no ``build`` (a Neovim plugin has no compile step), the buildless analogue of
+the go/tree-sitter zero-file bump adapters — and :func:`shipit.tools.build.plan_build`
+skips a leg whose build command is empty. The registry is CLOSED, the
 lint ``Lang`` set's mirror: adding a toolchain is adding an entry here,
 nothing downstream changes — and a toolchain is never a project-Kind switch
 ("a tauri Kind" is a composition of map entries, not a dispatch label).
@@ -60,7 +63,11 @@ class Toolchain:
     """One registry entry: a toolchain and its default producing command per tool.
 
     ``test`` / ``build`` are the default producing argvs per tool slot, run
-    with cwd at the leg's map path. A per-path ``.shipit.toml`` override
+    with cwd at the leg's map path. A slot may be an EMPTY tuple — a toolchain
+    that produces nothing for that verb: lua's ``build`` is ``()`` (a Neovim
+    plugin has no compile step), and :func:`shipit.tools.build.plan_build`
+    skips a leg whose build command is empty rather than exec an empty argv. A
+    per-path ``.shipit.toml`` override
     replaces one for that leg only (:func:`shipit.config.load_toolchains`);
     the registry never changes per repo. The ``build`` argv is the BASE
     command: per-invocation shaping — the artifact's build target args, go's
@@ -153,10 +160,32 @@ TREE_SITTER = Toolchain(
     build=("tree-sitter", "generate"),
     provisions_signal="tree-sitter",
 )
+#: lua: the Neovim-plugin toolchain (TOL03-WS01 #972). The test slot is
+#: ``busted`` — the LuaRocks-standard spec runner a nvim plugin's ``spec/``
+#: assertions run under; the whole point of this entry is to give a lua repo
+#: the same first-class ``shipit test`` a rust/npm repo gets, so lex-fmt/nvim
+#: can drop its inline luacheck bolt-on (#104). The BUILD slot is EMPTY: a lua
+#: plugin is interpreted source with no compile/bundle step — nothing to
+#: produce — so ``shipit build`` skips a lua leg
+#: (:func:`shipit.tools.build.plan_build`), the first buildless toolchain (the
+#: build analogue of the go/tree-sitter zero-file bump adapters). busted is NOT
+#: on conda-forge (a luarocks package): like ``pytest`` it rides the test lane
+#: in the consumer's own env, never a release stage, so it needs no managed
+#: pixi block (the tool-provisioning inventory records busted CONSUMER_ENV). The
+#: lua LINT tools (stylua + selene, both on conda-forge) live in the lint
+#: ``LANGS`` registry, not here — but their MANAGED provisioning rides THIS
+#: entry's ``provisions_signal``: a nvim plugin has no manifest the toolchain
+#: walk can find (:func:`shipit.install.reconcile.detect_toolchains`), so a
+#: declared ``[toolchains]`` lua leg is the only signal, and ``shipit install``
+#: unions the ``lua`` signal off it (:func:`shipit.verbs.install._declared_signals`)
+#: to deliver the ``pixi-lua-lint-deps-block`` (stylua/selene) — the exact
+#: tree-sitter mechanics (#890), on the lint axis. So the lua lint legs stop
+#: hard-failing (127) on a host without stylua/selene.
+LUA = Toolchain("lua", test=("busted",), build=(), provisions_signal="lua")
 
 #: The closed registry, in a stable order. Adding a toolchain is adding an
 #: entry here (mirror of the lint ``LANGS`` tuple).
-TOOLCHAINS: tuple[Toolchain, ...] = (RUST, GO, PYTHON, NPM, TREE_SITTER)
+TOOLCHAINS: tuple[Toolchain, ...] = (RUST, GO, PYTHON, NPM, TREE_SITTER, LUA)
 
 
 def names() -> tuple[str, ...]:

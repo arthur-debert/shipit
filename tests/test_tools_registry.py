@@ -11,8 +11,27 @@ from shipit.tools import registry
 
 def test_registry_is_the_closed_prd_set_in_stable_order():
     # PRD story 3 + ADR-0039: rust / go / python / npm, an entry each; plus
-    # tree-sitter, the bespoke generated-parser toolchain (TOL02-WS16 #792).
-    assert registry.names() == ("rust", "go", "python", "npm", "tree-sitter")
+    # tree-sitter, the bespoke generated-parser toolchain (TOL02-WS16 #792);
+    # plus lua, the Neovim-plugin toolchain (TOL03-WS01 #972).
+    assert registry.names() == (
+        "rust",
+        "go",
+        "python",
+        "npm",
+        "tree-sitter",
+        "lua",
+    )
+
+
+def test_lua_is_a_buildless_test_only_toolchain():
+    # TOL03-WS01 #972: the lua toolchain's test slot is `busted` (the
+    # luarocks-standard nvim-plugin spec runner); its build slot is EMPTY — a
+    # Neovim plugin has no compile step (the first buildless toolchain, the
+    # build analogue of the go/tree-sitter zero-file bump adapters).
+    lua = registry.toolchain("lua")
+    assert lua is not None
+    assert lua.test == ("busted",)
+    assert lua.build == ()
 
 
 def test_tree_sitter_slots_are_generate_and_corpus_test():

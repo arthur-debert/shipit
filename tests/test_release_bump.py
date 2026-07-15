@@ -76,6 +76,16 @@ def test_tree_sitter_is_a_zero_file_adapter():
     assert not adapter.projects_files
 
 
+def test_lua_is_a_pure_edit_of_the_plugin_entry_file():
+    """TOL03-WS01 #972: lua projects the version by rewriting `M.version` in the
+    plugin's leg-relative `init.lua` — a pure edit like python, zero commands."""
+    adapter = bump.adapter_for("lua")
+    assert adapter.commands("1.2.3") == ()
+    assert adapter.edit_path == "init.lua"
+    assert adapter.stage == ("init.lua",)
+    assert adapter.projects_files
+
+
 def test_adapter_for_unknown_toolchain_is_loud():
     with pytest.raises(ReleaseError, match="no bump adapter"):
         bump.adapter_for("tauri")
@@ -133,6 +143,115 @@ def test_bump_pyproject_ignores_version_of_other_tables_only():
         bump.bump_pyproject(
             '[project]\nname = "x"\n\n[tool.y]\nversion = "1.0"\n', "2.0.0"
         )
+
+
+# --------------------------------------------------------------------------
+# bump_lua_version — the toolchain-free Neovim-plugin projection (TOL03-WS01)
+# --------------------------------------------------------------------------
+
+_INIT_LUA = """\
+local M = {}
+
+M.version = "0.1.0"
+
+function M.setup(opts)
+  return opts
+end
+
+return M
+"""
+
+
+def test_bump_lua_version_rewrites_the_module_version_verbatim():
+    out = bump.bump_lua_version(_INIT_LUA, "0.2.0")
+    assert 'M.version = "0.2.0"' in out
+    # Only the M.version line changes; the rest is byte-for-byte identical.
+    assert out == _INIT_LUA.replace('M.version = "0.1.0"', 'M.version = "0.2.0"')
+
+
+def test_bump_lua_version_writes_a_prerelease_semver_verbatim():
+    """A Lua string is arbitrary text — no PEP 440 constraint, so the semver
+    the tag names is written as-is (the npm shape, not python's)."""
+    out = bump.bump_lua_version('M.version = "0.0.0"\n', "1.0.0-rc.1")
+    assert out == 'M.version = "1.0.0-rc.1"\n'
+
+
+def test_bump_lua_version_preserves_single_quote_style():
+    assert (
+        bump.bump_lua_version("M.version = '1.0.0'\n", "2.0.0")
+        == "M.version = '2.0.0'\n"
+    )
+
+
+def test_bump_lua_version_bumps_only_the_first_occurrence():
+    text = 'M.version = "0.1.0"\nM.version = "9.9.9"\n'
+    assert bump.bump_lua_version(text, "0.2.0") == (
+        'M.version = "0.2.0"\nM.version = "9.9.9"\n'
+    )
+
+
+def test_bump_lua_version_skips_a_leading_comment_line():
+    """A commented-out `-- M.version = ...` before the real assignment must NOT
+    be bumped — the regex anchors to a real assignment line, not the first
+    textual occurrence (round 1, codex)."""
+    text = (
+        '-- M.version = "0.0.1" (old, kept as a note)\n'
+        "local M = {}\n"
+        'M.version = "0.1.0"\n'
+        "return M\n"
+    )
+    out = bump.bump_lua_version(text, "0.2.0")
+    assert '-- M.version = "0.0.1" (old, kept as a note)' in out  # comment untouched
+    assert 'M.version = "0.2.0"' in out
+    assert out == text.replace('M.version = "0.1.0"', 'M.version = "0.2.0"')
+
+
+def test_bump_lua_version_skips_a_version_inside_a_string():
+    """A `M.version = ...` embedded in a string literal before the real line is
+    not an assignment and must not be bumped."""
+    text = 'local doc = "M.version = 9.9.9"\nM.version = "0.1.0"\n'
+    out = bump.bump_lua_version(text, "0.2.0")
+    assert 'local doc = "M.version = 9.9.9"' in out  # the string is untouched
+    assert out == 'local doc = "M.version = 9.9.9"\nM.version = "0.2.0"\n'
+
+
+def test_bump_lua_version_inserts_the_value_literally_not_as_a_backreference():
+    """The replacement is a callable, so a version carrying regex-replacement
+    metachars (a backslash, `\\g<...>`) is inserted VERBATIM rather than
+    re-parsed as a backreference (round 1, agy). Real semver never contains
+    these, but the rewrite must not depend on that."""
+    assert bump.bump_lua_version('M.version = "0.0.0"\n', r"1.0.0-\g<head>") == (
+        'M.version = "1.0.0-\\g<head>"\n'
+    )
+
+
+def test_bump_lua_version_bumps_an_indented_assignment():
+    """The line anchor allows leading indentation and preserves it."""
+    assert bump.bump_lua_version('\tM.version = "0.1.0"\n', "0.2.0") == (
+        '\tM.version = "0.2.0"\n'
+    )
+
+
+def test_bump_lua_version_ignores_a_longer_identifier():
+    """The `\\b` guard keeps the rewrite off `someM.version` — only the module
+    table `M`'s version is the plugin's declared version."""
+    text = 'someM.version = "0.1.0"\n'
+    with pytest.raises(ReleaseError, match=r"M\.version"):
+        bump.bump_lua_version(text, "0.2.0")
+
+
+def test_bump_lua_version_without_a_version_line_is_loud():
+    with pytest.raises(ReleaseError, match=r"M\.version"):
+        bump.bump_lua_version("local M = {}\nreturn M\n", "1.0.0")
+
+
+def test_edit_for_dispatches_lua_to_the_lua_rewrite():
+    """The edit dispatch keys on toolchain: a lua adapter routes to
+    bump_lua_version, not bump_pyproject."""
+    adapter = bump.adapter_for("lua")
+    assert bump.edit_for(adapter, 'M.version = "0.1.0"\n', "0.2.0") == (
+        'M.version = "0.2.0"\n'
+    )
 
 
 # --------------------------------------------------------------------------

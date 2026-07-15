@@ -169,6 +169,16 @@ PROVISIONING: dict[str, tuple[Provisioned, ...]] = {
     "pytest": (
         Provisioned("pytest", CONSUMER_ENV, note="test lane, never a release stage"),
     ),
+    "busted": (
+        Provisioned(
+            "busted",
+            CONSUMER_ENV,
+            note="the lua toolchain's test-slot runner (TOL03-WS01 #972); a "
+            "luarocks package NOT on conda-forge, so like pytest it rides the "
+            "test lane in the consumer's own env, never a release stage — no "
+            "managed pixi block, no provisions_signal",
+        ),
+    ),
     "tree-sitter": (
         Provisioned(
             "tree-sitter-cli",
@@ -353,6 +363,7 @@ _NON_ARGV_LITERALS = frozenset(
         "extension.toml",  # zed extension manifest — ZED_PAYLOAD core (ADR-0068)
         "gh-release",
         "homepage/repository",
+        "init.lua",  # lua bump adapter's leg-relative edit_path (a filename, not a tool)
         "license",
         "linux",
         "major",

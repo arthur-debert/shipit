@@ -576,8 +576,51 @@ LEX = Lang(
     # --fix; it runs as check-only via `lexd check` (CI-friendly exit codes).
     tools=(Tool("lexd", ("check",)),),
 )
+LUA = Lang(
+    name="lua",
+    extensions=(".lua",),
+    # The Neovim-plugin lint leg (TOL03-WS01 #972): the pair a nvim plugin
+    # actually uses, and — decisively for the pixi provisioning model — the
+    # pair conda-forge carries, so a consumer's managed env solves them cleanly
+    # (luacheck, the classic alternative, is a luarocks package NOT on
+    # conda-forge, so it would never provision through the managed surface; that
+    # is why selene wins here, not a quality judgement — both are documented in
+    # the ADR):
+    #   * stylua — the opinionated Lua FORMATTER. `--check` verifies (non-zero
+    #     when a file is unformatted) and is the check-mode leg; the bare form
+    #     (empty `fix` tuple) formats in place, the one lua --fix leg. stylua
+    #     reads config ONLY from a `stylua.toml`/`.stylua.toml` in the CWD (the
+    #     repo root the gate runs from) — it does NOT walk ANCESTOR directories
+    #     without `--search-parent-directories`, and consults no `$HOME`/XDG or
+    #     env config (verified in the hermeticity gate). So a config ABOVE the
+    #     checkout cannot move the verdict; the cwd `stylua.toml` is the repo's
+    #     OWN committed config (consumer-owned). A canonical shipped stylua config
+    #     (the ADR-0037 `--config-path` injection, to own the cwd config too) is a
+    #     follow-up (there is no lua source in shipit's own tree to validate one
+    #     against yet) — see ADR-0069.
+    #   * selene — the modern (Rust) Lua LINTER; check-only (it has no
+    #     autofix), so it runs its check form in both modes and never skips. Like
+    #     stylua it reads config ONLY from a `selene.toml` in the CWD (no ancestor
+    #     walk, no `$HOME`/env source). Its rule set + standard-library (`std`,
+    #     e.g. the neovim std) come from the consumer's own `selene.toml`, exactly
+    #     as a nvim plugin already ships — consumer-owned by design.
+    tools=(
+        Tool("stylua", ("--check",), fix=()),
+        Tool("selene", ()),
+    ),
+)
 
-LANGS: tuple[Lang, ...] = (PYTHON, RUST, SHELL, YAML, ACTIONS, WEB, MARKDOWN, LEX)
+LANGS: tuple[Lang, ...] = (
+    PYTHON,
+    RUST,
+    SHELL,
+    YAML,
+    ACTIONS,
+    WEB,
+    MARKDOWN,
+    LEX,
+    LUA,
+)
 
 
 # --------------------------------------------------------------------------

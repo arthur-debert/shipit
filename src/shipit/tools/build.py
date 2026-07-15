@@ -8,6 +8,12 @@ executes: the join between the path→toolchain map (the leg axis) and the
 
 - a leg with NO artifact build targets runs its base build command once —
   the whole-leg build (a repo needs no artifact map to ``shipit build``);
+- a leg whose toolchain declares an EMPTY build slot (lua — a Neovim plugin
+  has no compile step) is SKIPPED when nothing targets it: there is nothing to
+  produce, so the fan-out omits it rather than exec an empty argv. But an
+  ``[artifacts]`` build target that NAMES a buildless toolchain is a loud
+  :class:`~shipit.config.ConfigError`, never a silent drop — skipping a
+  targeted buildless leg would lose the artifact's build with no diagnostic;
 - a CROSS ``--target <triple>`` (TOL02-WS11) narrows a rust leg's build to
   one platform: the base command gains ``--target <triple>`` and cargo writes
   the binary to ``target/<triple>/release/`` (not the native
@@ -315,6 +321,26 @@ def plan_build(
             for build_target in artifact.build
             if build_target.toolchain == leg.toolchain
         ]
+        if not leg.argv:
+            # A buildless toolchain (lua: a Neovim plugin has no compile step,
+            # so registry.LUA declares an empty `build` slot) yields an empty
+            # build argv. When NOTHING targets it, skip the whole leg — there is
+            # nothing to run, and exec'ing an empty command would crash the
+            # fan-out over a repo that mixes a lua leg with real build legs.
+            # But an `[artifacts]` build target naming a buildless toolchain is a
+            # config error, NOT a silent no-op: skipping it would drop the
+            # artifact's build with no diagnostic, so refuse LOUDLY (mirrors
+            # check_targets_mapped's "target names a toolchain with no leg").
+            if matched:
+                orphaned = ", ".join(sorted(name for name, _ in matched))
+                raise config.ConfigError(
+                    f"[artifacts] build target(s) name the buildless toolchain "
+                    f"{leg.toolchain!r}, which declares no build command (a "
+                    f"{leg.toolchain} leg has no compile step — e.g. a Neovim "
+                    f"plugin is interpreted source): {orphaned}. Remove the "
+                    f"build target, or point it at a toolchain that builds."
+                )
+            continue
         if not matched:
             steps.append(
                 BuildStep(

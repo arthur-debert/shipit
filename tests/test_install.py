@@ -1923,7 +1923,7 @@ def test_load_units_toolchain_blocks_are_conditional():
     assert not (base & toolchain_keys)
 
     # Per-signal: each signal adds exactly ITS blocks — one for
-    # go/node/python/tree-sitter, THREE for rust (the lint toolchain + the
+    # go/node/python/tree-sitter/lua, THREE for rust (the lint toolchain + the
     # release-side cargo-edit block #793 + the release toolchain block #801).
     for signal in (
         iunits.TOOLCHAIN_RUST,
@@ -1931,6 +1931,7 @@ def test_load_units_toolchain_blocks_are_conditional():
         iunits.TOOLCHAIN_NODE,
         iunits.TOOLCHAIN_PYTHON,
         iunits.TOOLCHAIN_TREE_SITTER,
+        iunits.TOOLCHAIN_LUA,
     ):
         expected = {key for key, sig, *_ in iunits.TOOLCHAIN_UNITS if sig == signal}
         keys = {u.key for u in iunits.load_units(toolchains=frozenset({signal}))}
@@ -1956,6 +1957,7 @@ def test_load_units_toolchain_blocks_are_conditional():
                     iunits.TOOLCHAIN_NODE,
                     iunits.TOOLCHAIN_PYTHON,
                     iunits.TOOLCHAIN_TREE_SITTER,
+                    iunits.TOOLCHAIN_LUA,
                 }
             )
         )
@@ -1974,6 +1976,7 @@ def test_toolchain_block_units_have_the_right_shape():
                     iunits.TOOLCHAIN_NODE,
                     iunits.TOOLCHAIN_PYTHON,
                     iunits.TOOLCHAIN_TREE_SITTER,
+                    iunits.TOOLCHAIN_LUA,
                 }
             )
         )
@@ -1981,7 +1984,7 @@ def test_toolchain_block_units_have_the_right_shape():
 
     rust = units[iunits.PIXI_RUST_DEPS_KEY]
     assert rust.dest == "pixi.toml"
-    # rust/go provision LINT toolchains, so they anchor in the lint feature —
+    # rust/go/lua provision LINT toolchains, so they anchor in the lint feature —
     # sibling blocks of the managed lint-deps block under ONE table header.
     assert rust.anchor == iunits.PIXI_LINT_DEPS_ANCHOR
     assert tomllib.loads(rust.desired_inner()) == {"rust": "1.96.*"}
@@ -1989,6 +1992,13 @@ def test_toolchain_block_units_have_the_right_shape():
     go = units[iunits.PIXI_GO_DEPS_KEY]
     assert go.anchor == iunits.PIXI_LINT_DEPS_ANCHOR
     assert tomllib.loads(go.desired_inner()) == {"go": "1.26.*", "golangci-lint": "2.*"}
+
+    # lua provisions its LINTERS (stylua + selene), so it anchors in the lint
+    # feature too (TOL03-WS01 #972) — but fires off the DECLARED [toolchains]
+    # lua leg, not a manifest (see the declared-signal test below).
+    lua = units[iunits.PIXI_LUA_DEPS_KEY]
+    assert lua.anchor == iunits.PIXI_LINT_DEPS_ANCHOR
+    assert tomllib.loads(lua.desired_inner()) == {"stylua": "2.*", "selene": "0.31.*"}
 
     # node provisions the repo's OWN runtime, not a linter → the default env.
     node = units[iunits.PIXI_NODE_DEPS_KEY]
@@ -2400,6 +2410,34 @@ def test_tree_sitter_toolchain_delivers_the_cli_block(tmp_path):
     assert signals == {iunits.TOOLCHAIN_TREE_SITTER}
     keys = {u.key for u in iunits.load_units(toolchains=signals)}
     assert iunits.PIXI_TREE_SITTER_DEPS_KEY in keys
+
+
+def test_declared_signals_unions_lua_for_a_declared_toolchain_leg(tmp_path):
+    # A nvim plugin has NO manifest for the toolchain walk to find — the
+    # `[toolchains]` declaration is the only signal, so install unions the lua
+    # signal off the registry entry's provisions_signal (TOL03-WS01 #972, the
+    # tree-sitter mechanics on the lint axis).
+    (tmp_path / ".shipit.toml").write_text('[toolchains]\n"." = "lua"\n')
+    assert verb._declared_signals(tmp_path) == {iunits.TOOLCHAIN_LUA}
+
+
+def test_lua_toolchain_delivers_the_lint_block(tmp_path):
+    # End to end at the install seam (TOL03-WS01 #972): a declared lua plugin
+    # repo gets the lua-lint-deps block (stylua + selene) under the lint feature,
+    # so the lua legs of `shipit lint` stop hard-failing (127) on a host without
+    # them — the provisioning half of the first-class managed lua check lane.
+    root = _git_repo(tmp_path)
+    (root / "lua" / "plugin").mkdir(parents=True)
+    (root / "lua" / "plugin" / "init.lua").write_text(
+        'local M = {}\nM.version = "0.1.0"\nreturn M\n'
+    )
+    (root / ".shipit.toml").write_text('[toolchains]\n"." = "lua"\n')
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+
+    signals = irec.detect_toolchains(root) | verb._declared_signals(root)
+    assert signals == {iunits.TOOLCHAIN_LUA}
+    keys = {u.key for u in iunits.load_units(toolchains=signals)}
+    assert iunits.PIXI_LUA_DEPS_KEY in keys
 
 
 def _plan_with_toolchains(root, toolchains: frozenset) -> irec.Plan:

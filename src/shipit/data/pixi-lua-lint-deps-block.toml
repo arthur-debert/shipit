@@ -1,0 +1,13 @@
+# The fleet-pinned lua lint toolchain (#547 Layer 1, TOL03-WS01 #972) —
+# delivered because this repo DECLARES a lua `[toolchains]` leg, which is what
+# makes the lua leg of `shipit lint` run (stylua + selene over `.lua` files).
+# A nvim plugin has no manifest the toolchain walk can find, so the signal rides
+# the `[toolchains]` declaration off the registry entry's provisions_signal
+# ("lua") — the tree-sitter mechanics on the lint axis. Both tools are on
+# conda-forge, so the managed lint env solves them cleanly and the lua legs stop
+# hard-failing (127) on a host without stylua/selene. If this repo no longer
+# declares a lua toolchain, delete this block and its
+# `pixi.toml#shipit-lua-lint-toolchain` entry in .shipit.toml's [managed] table
+# — a reconcile only ADDS toolchain blocks, it never retires one.
+stylua = "2.*"
+selene = "0.31.*"
