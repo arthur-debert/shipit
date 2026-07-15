@@ -331,6 +331,113 @@ def test_plan_pixi_manifest_declares_build_task_and_nextest():
     assert 'lint = "./bin/shipit lint"' not in text
 
 
+# --------------------------------------------------------------------------
+# CLI Artifact + generic CI policy (GEN01-WS04) — the consumer-owned
+# `.shipit.toml` [lanes]/[artifacts] tables and the thin stack-neutral CI
+# caller (spec §CI, §Proposed Shape; ADR-0039/0040/0060/0061).
+# --------------------------------------------------------------------------
+
+
+def _shipit_toml(**kw):
+    """The parsed generated ``.shipit.toml`` for the default plan."""
+    text = {f.path: f.text for f in _plan(**kw).files}[".shipit.toml"]
+    return tomllib.loads(text)
+
+
+def test_plan_shipit_manifest_declares_one_cli_artifact_with_rust_build_target():
+    # AC1: one Artifact named after the project, one Rust build target whose
+    # package is the CLI package.
+    artifacts = _shipit_toml()["artifacts"]
+    assert list(artifacts) == ["hello"]
+    assert artifacts["hello"]["build"] == [{"toolchain": "rust", "package": "hello"}]
+
+
+def test_plan_artifact_carries_no_endpoint_bundle_signing_or_release_policy():
+    # AC2: the Artifact declaration is a bare build-target claim — no endpoint,
+    # Bundle, signing, publishing, or release policy anywhere in `.shipit.toml`.
+    cfg = _shipit_toml()
+    artifact = cfg["artifacts"]["hello"]
+    assert set(artifact) == {"build"}  # only the build target, nothing else
+    target = artifact["build"][0]
+    assert set(target) == {"toolchain", "package"}
+    forbidden = (
+        "endpoint",
+        "bundle",
+        "sign",
+        "signing",
+        "publish",
+        "publishing",
+        "release",
+    )
+
+    def _keys(node):
+        # Every mapping key anywhere in the parsed manifest — policy lives in
+        # keys/tables, so traverse the structure instead of stringifying it
+        # (a value like a `release-tool` project name must not trip the check).
+        if isinstance(node, dict):
+            for key, value in node.items():
+                yield key.lower()
+                yield from _keys(value)
+        elif isinstance(node, list):
+            for item in node:
+                yield from _keys(item)
+
+    manifest_keys = list(_keys(cfg))
+    for word in forbidden:
+        offenders = [key for key in manifest_keys if word in key]
+        assert not offenders, (
+            f"unexpected {word!r} policy key in .shipit.toml: {offenders}"
+        )
+
+
+def test_plan_shipit_manifest_declares_required_lint_and_test_lanes_only():
+    # AC5: required lint and test lanes, no default PR (or any) build lane.
+    lanes = _shipit_toml()["lanes"]
+    assert list(lanes) == ["lint", "test"]  # exactly these, in order
+    assert "build" not in lanes
+    for name in ("lint", "test"):
+        assert lanes[name]["run"] == name
+        assert lanes[name]["required"] is True
+        assert lanes[name]["local"] is True
+
+
+def test_generated_lanes_parse_and_derive_lint_test_commit_push_checks():
+    # AC5 proven through the real config loader + lane planner, not string
+    # matching: the generated policy is a valid Lane/Tool declaration whose
+    # required∩local commit/push checks and merge-blocking PR matrix are exactly
+    # lint + test.
+    from shipit import config
+    from shipit.tools import lanes as lane_planner
+
+    parsed = config.load_lanes(_shipit_toml())
+    assert [lane.name for lane in parsed] == ["lint", "test"]
+    assert all(lane.required for lane in parsed)
+    assert [lane.name for lane in lane_planner.commit_push_checks(parsed)] == [
+        "lint",
+        "test",
+    ]
+    jobs = lane_planner.plan(parsed, event="pr")
+    assert [(job.name, job.required) for job in jobs] == [
+        ("lint", True),
+        ("test", True),
+    ]
+
+
+def test_plan_ci_caller_is_valid_yaml_delegating_to_reusable_checks():
+    # AC4 + AC6: the generated caller is structurally valid YAML that delegates
+    # to shipit's reusable checks workflow by floating major ref, with no Cargo
+    # command or other Rust-specific execution logic.
+    import yaml
+
+    text = {f.path: f.text for f in _plan().files}[".github/workflows/ci.yml"]
+    doc = yaml.safe_load(text)  # raises on malformed YAML
+    checks = doc["jobs"]["checks"]
+    assert checks["uses"] == "arthur-debert/shipit/.github/workflows/wf-checks.yml@v1"
+    lowered = text.lower()
+    for token in ("cargo", "rustc", "rustup", "cross build"):
+        assert token not in lowered, f"CI caller must not name {token!r}"
+
+
 def test_plan_detects_conflicting_owned_file():
     class _Clash:
         key = "clash"
