@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 
 from shipit import config, execrun
+from shipit.install import artifactdeps
 from shipit.release import ReleaseError
 from shipit.release import bundle as bundle_mod
 from shipit.verbs import release as release_verb
@@ -72,7 +73,16 @@ def _entries(mapping: dict) -> tuple[config.ToolchainEntry, ...]:
     return config.load_toolchains({"toolchains": mapping})
 
 
-def _request(tmp_path, artifact, entries, *, target=LINUX, build_target=None, run_cmd):
+def _request(
+    tmp_path,
+    artifact,
+    entries,
+    *,
+    target=LINUX,
+    build_target=None,
+    run_cmd,
+    artifact_deps=(),
+):
     return bundle_mod.ComposeRequest(
         artifact=artifact,
         entries=entries,
@@ -81,6 +91,7 @@ def _request(tmp_path, artifact, entries, *, target=LINUX, build_target=None, ru
         target=target,
         run_cmd=run_cmd,
         build_target=build_target,
+        artifact_deps=artifact_deps,
     )
 
 
@@ -1705,6 +1716,484 @@ def test_vsix_without_an_npm_leg_refuses(tmp_path):
         bundle_mod.VSIX.compose(
             _request(tmp_path, artifact, entries, target=MAC, run_cmd=RunRecorder())
         )
+
+
+# --------------------------------------------------------------------------
+# vsix native staging via the Artifact channel (TOL03-WS03 #974, closes #911):
+# the vsix compose copies a per-platform native binary — materialized in the
+# managed pixi env by an `[artifact-deps]` conda pin — into the extension layout
+# BEFORE `vsce package`. No bespoke fetcher / deps.json: the channel already put
+# the binary in the env, so staging is a copy.
+# --------------------------------------------------------------------------
+
+
+def _dep(package, *, repo="lex-fmt/lex", version="0.19.3", feature=None):
+    return config.ArtifactDep(
+        package=package, repo=repo, version=version, feature=feature
+    )
+
+
+def _materialize_dep_bin(tmp_path, dep, *, target=LINUX):
+    """Seed the on-disk binary an `[artifact-deps]` pin would materialize in the
+    pixi env — target-aware (`bin/<package>` on unix, `Scripts/<package>.exe` on
+    windows) — as an executable stub, mirroring what `shipit install` + pixi
+    resolve/fetch leaves in the build env.
+    """
+    return _executable(artifactdeps.materialized_bin_path(tmp_path, dep, target=target))
+
+
+def test_vsix_stages_artifact_dep_native_into_the_layout_before_packaging(tmp_path):
+    (artifact,) = _artifacts(
+        {
+            "ext": {
+                "build": ["npm"],
+                "bundle": {
+                    "composition": "vsix",
+                    "stage": {"lexd-lsp": "resources/lexd-lsp"},
+                },
+            }
+        }
+    )
+    entries = _entries({"editors/vscode": "npm"})
+    dep = _dep("lexd-lsp")
+    src = _materialize_dep_bin(tmp_path, dep)
+    src.write_bytes(b"NATIVE-LSP")  # a recognizable payload the copy must carry
+    src.chmod(src.stat().st_mode | 0o755)
+    staged = tmp_path / "editors/vscode" / "resources/lexd-lsp"
+    seen: dict = {}
+
+    def _vsce_asserts_staged(argv, cwd):
+        # The native must already be in the extension layout WHEN vsce packages —
+        # staging is BEFORE the pack step and cleaned up AFTER, so a hollow .vsix
+        # can never ship. Observe presence/payload/exec-bit here, mid-pack. The
+        # exec-bit is a POSIX concept: on a Windows runner `os.access(X_OK)` keys
+        # off the file extension, so a bare `lexd-lsp` is not "executable" there —
+        # guard the check to POSIX (a unix target's staged name carries no `.exe`).
+        seen["exists"] = staged.is_file()
+        seen["payload"] = staged.read_bytes()
+        seen["runnable"] = os.name == "nt" or os.access(staged, os.X_OK)
+        _vsce_writes_out(argv, cwd)
+
+    recorder = RunRecorder({"npm": _vsce_asserts_staged})
+    composed = bundle_mod.VSIX.compose(
+        _request(
+            tmp_path,
+            artifact,
+            entries,
+            target=MAC,
+            run_cmd=recorder,
+            artifact_deps=(dep,),
+        )
+    )
+
+    assert seen == {"exists": True, "payload": b"NATIVE-LSP", "runnable": True}
+    # Transient: vsce zipped the native in, so the compose removes the staged copy
+    # — the extension source tree is left clean, no per-target binary lingering.
+    assert not staged.exists()
+    # Staging is a filesystem copy, not a recorded command — the ONLY recorded
+    # invocation is still the single `vsce package` (no fetch, no extra process).
+    assert recorder.heads == ["npm"]
+    assert composed == bundle_mod.Composed("ext", "vsix", ("ext-darwin-arm64.vsix",))
+
+
+def test_vsix_stage_resolves_the_named_feature_env(tmp_path):
+    # A pin declaring `feature = "lint"` materializes in the isolated
+    # `shipit-artifacts-lint` env, not `default`; staging must read the SAME env
+    # the projection wired the pin into.
+    (artifact,) = _artifacts(
+        {
+            "ext": {
+                "build": ["npm"],
+                "bundle": {
+                    "composition": "vsix",
+                    "stage": {"lexd-lsp": "resources/lexd-lsp"},
+                },
+            }
+        }
+    )
+    entries = _entries({"editors/vscode": "npm"})
+    dep = _dep("lexd-lsp", feature="lint")
+    _materialize_dep_bin(tmp_path, dep)  # under .pixi/envs/shipit-artifacts-lint
+    staged = tmp_path / "editors/vscode" / "resources/lexd-lsp"
+    seen: dict = {}
+
+    def _vsce(argv, cwd):
+        # Resolved from the `shipit-artifacts-lint` env (not `default`) and staged
+        # by pack time; observed mid-pack since the copy is cleaned up after.
+        seen["staged"] = staged.is_file()
+        _vsce_writes_out(argv, cwd)
+
+    recorder = RunRecorder({"npm": _vsce})
+    bundle_mod.VSIX.compose(
+        _request(
+            tmp_path,
+            artifact,
+            entries,
+            target=MAC,
+            run_cmd=recorder,
+            artifact_deps=(dep,),
+        )
+    )
+    assert seen == {"staged": True}
+    assert not staged.exists()  # cleaned up after packaging
+
+
+def test_vsix_win32_target_stages_scripts_exe_to_an_exe_dest(tmp_path):
+    # win32-x64 is target-aware on BOTH sides: the SOURCE resolves from conda's
+    # `Scripts/<pkg>.exe` PATH dir (release.publish._conda_binary_layout), not the
+    # unix `bin/<pkg>` that never exists on a Windows runner; and the DEST gets a
+    # `.exe` suffix so the extension spawns a runnable binary. The consumer
+    # declares ONE `dest` for all platforms (`resources/lexd-lsp`) — `.exe` is
+    # appended per-target, never a bare non-executable name on windows.
+    (artifact,) = _artifacts(
+        {
+            "ext": {
+                "build": ["npm"],
+                "bundle": {
+                    "composition": "vsix",
+                    "stage": {"lexd-lsp": "resources/lexd-lsp"},
+                },
+            }
+        }
+    )
+    entries = _entries({"editors/vscode": "npm"})
+    dep = _dep("lexd-lsp")
+    src = _materialize_dep_bin(tmp_path, dep, target=WIN)
+    assert src == tmp_path / ".pixi/envs/default/Scripts/lexd-lsp.exe"
+    staged_exe = tmp_path / "editors/vscode" / "resources/lexd-lsp.exe"
+    seen: dict = {}
+
+    def _vsce(argv, cwd):
+        seen["exe"] = staged_exe.is_file()  # `.exe`-suffixed dest
+        # never a bare, non-executable `lexd-lsp` alongside it on windows
+        seen["no_bare"] = not (
+            tmp_path / "editors/vscode" / "resources/lexd-lsp"
+        ).exists()
+        _vsce_writes_out(argv, cwd)
+
+    recorder = RunRecorder({"npm": _vsce})
+    composed = bundle_mod.VSIX.compose(
+        _request(
+            tmp_path,
+            artifact,
+            entries,
+            target=WIN,
+            run_cmd=recorder,
+            artifact_deps=(dep,),
+        )
+    )
+    assert seen == {"exe": True, "no_bare": True}
+    assert not staged_exe.exists()  # cleaned up after packaging
+    assert composed.outputs == ("ext-win32-x64.vsix",)
+
+
+def test_vsix_stage_naming_an_undeclared_pin_refuses(tmp_path):
+    # `stage` names a package with no `[artifact-deps]` pin — a config mistake,
+    # never a silent skip: the channel was never told to publish it.
+    (artifact,) = _artifacts(
+        {
+            "ext": {
+                "build": ["npm"],
+                "bundle": {
+                    "composition": "vsix",
+                    "stage": {"lexd-lsp": "resources/lexd-lsp"},
+                },
+            }
+        }
+    )
+    entries = _entries({"editors/vscode": "npm"})
+    recorder = RunRecorder({"npm": _vsce_writes_out})
+    with pytest.raises(ReleaseError, match="no \\[artifact-deps.lexd-lsp\\] pin"):
+        bundle_mod.VSIX.compose(
+            _request(
+                tmp_path,
+                artifact,
+                entries,
+                target=MAC,
+                run_cmd=recorder,
+                artifact_deps=(),  # nothing declared
+            )
+        )
+    assert recorder.calls == []  # refused before packaging
+
+
+def test_vsix_stage_missing_materialized_binary_points_at_install(tmp_path):
+    # The pin is declared but the binary is not in the pixi env — the compose
+    # STAGES (copies), it never fetches: hard-fail pointing at `shipit install`
+    # rather than reaching across repos (issue #911's fetcher is NOT reborn).
+    (artifact,) = _artifacts(
+        {
+            "ext": {
+                "build": ["npm"],
+                "bundle": {
+                    "composition": "vsix",
+                    "stage": {"lexd-lsp": "resources/lexd-lsp"},
+                },
+            }
+        }
+    )
+    entries = _entries({"editors/vscode": "npm"})
+    dep = _dep("lexd-lsp")  # declared, but nothing materialized on disk
+    recorder = RunRecorder({"npm": _vsce_writes_out})
+    with pytest.raises(ReleaseError, match="not materialized.*shipit install"):
+        bundle_mod.VSIX.compose(
+            _request(
+                tmp_path,
+                artifact,
+                entries,
+                target=MAC,
+                run_cmd=recorder,
+                artifact_deps=(dep,),
+            )
+        )
+    assert recorder.calls == []
+
+
+@pytest.mark.parametrize("kind", ["file", "dir"])
+def test_vsix_stage_refuses_a_pre_existing_destination(tmp_path, kind):
+    # Staging must target a FRESH path: overwriting a tracked/checked-in resource
+    # and then cleaning it up would DELETE committed content. A collision (a
+    # pre-existing file, or a directory the copy would land a child under) is a
+    # loud refusal, and the pre-existing content is left untouched — so cleanup
+    # only ever removes files staging itself created.
+    (artifact,) = _artifacts(
+        {
+            "ext": {
+                "build": ["npm"],
+                "bundle": {
+                    "composition": "vsix",
+                    "stage": {"lexd-lsp": "resources/lexd-lsp"},
+                },
+            }
+        }
+    )
+    entries = _entries({"editors/vscode": "npm"})
+    dep = _dep("lexd-lsp")
+    _materialize_dep_bin(tmp_path, dep)
+    tracked = tmp_path / "editors/vscode" / "resources/lexd-lsp"
+    tracked.parent.mkdir(parents=True, exist_ok=True)
+    if kind == "file":
+        tracked.write_bytes(b"TRACKED-COMMITTED")
+    else:
+        tracked.mkdir()
+    recorder = RunRecorder({"npm": _vsce_writes_out})
+    with pytest.raises(ReleaseError, match="already exists"):
+        bundle_mod.VSIX.compose(
+            _request(
+                tmp_path,
+                artifact,
+                entries,
+                target=MAC,
+                run_cmd=recorder,
+                artifact_deps=(dep,),
+            )
+        )
+    assert recorder.calls == []  # refused before packaging
+    # The pre-existing content survives — never clobbered, never cleaned up.
+    if kind == "file":
+        assert tracked.read_bytes() == b"TRACKED-COMMITTED"
+    else:
+        assert tracked.is_dir()
+
+
+def _vsix_stage_artifact():
+    (artifact,) = _artifacts(
+        {
+            "ext": {
+                "build": ["npm"],
+                "bundle": {
+                    "composition": "vsix",
+                    "stage": {"lexd-lsp": "resources/lexd-lsp"},
+                },
+            }
+        }
+    )
+    return artifact
+
+
+def test_vsix_stage_refuses_a_dangling_symlink_dest(tmp_path):
+    # A broken symlink at the dest reads False under `Path.exists` but staging
+    # must still refuse it (`os.path.lexists`), or a copy would write THROUGH the
+    # link and mutate its (possibly tracked) target. The dangling link is left
+    # untouched — never followed, never removed.
+    artifact = _vsix_stage_artifact()
+    entries = _entries({"editors/vscode": "npm"})
+    dep = _dep("lexd-lsp")
+    _materialize_dep_bin(tmp_path, dep)
+    dst = tmp_path / "editors/vscode" / "resources/lexd-lsp"
+    dst.parent.mkdir(parents=True)
+    dst.symlink_to(tmp_path / "does-not-exist")  # dangling — Path.exists() is False
+    assert not dst.exists() and dst.is_symlink()
+    recorder = RunRecorder({"npm": _vsce_writes_out})
+    with pytest.raises(ReleaseError, match="already exists"):
+        bundle_mod.VSIX.compose(
+            _request(
+                tmp_path,
+                artifact,
+                entries,
+                target=MAC,
+                run_cmd=recorder,
+                artifact_deps=(dep,),
+            )
+        )
+    assert recorder.calls == []
+    assert dst.is_symlink()  # the dangling link is left exactly as found
+
+
+def test_vsix_stage_refuses_a_symlinked_parent_escape(tmp_path):
+    # A committed parent symlink (`resources` -> outside the tree) must not steer
+    # the copy through it: the resolved dest is verified inside the leg dir, so
+    # staging refuses and writes NOTHING outside the extension.
+    artifact = _vsix_stage_artifact()
+    entries = _entries({"editors/vscode": "npm"})
+    dep = _dep("lexd-lsp")
+    _materialize_dep_bin(tmp_path, dep)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    leg_dir = tmp_path / "editors/vscode"
+    leg_dir.mkdir(parents=True)
+    (leg_dir / "resources").symlink_to(outside)  # resources -> /outside
+    recorder = RunRecorder({"npm": _vsce_writes_out})
+    with pytest.raises(ReleaseError, match="resolves outside"):
+        bundle_mod.VSIX.compose(
+            _request(
+                tmp_path,
+                artifact,
+                entries,
+                target=MAC,
+                run_cmd=recorder,
+                artifact_deps=(dep,),
+            )
+        )
+    assert recorder.calls == []
+    assert not (outside / "lexd-lsp").exists()  # nothing written beyond the tree
+    assert (leg_dir / "resources").is_symlink()  # the parent link is untouched
+
+
+def test_vsix_stage_cleans_up_a_partial_copy_that_dies_mid_write(tmp_path, monkeypatch):
+    # If `copy2` fails mid-write (full disk / I/O), the partial file — and the
+    # fresh dir it landed in — must still be cleaned up: the dest is recorded
+    # BEFORE the copy, so the caller's `finally` removes it.
+    artifact = _vsix_stage_artifact()
+    entries = _entries({"editors/vscode": "npm"})
+    dep = _dep("lexd-lsp")
+    _materialize_dep_bin(tmp_path, dep)
+    leg_dir = tmp_path / "editors/vscode"
+    leg_dir.mkdir(parents=True)
+    staged = leg_dir / "resources/lexd-lsp"
+
+    def _copy2_dies(src, dst):
+        Path(dst).write_bytes(b"PARTIAL")  # a half-written file left on disk
+        raise OSError("disk full")
+
+    monkeypatch.setattr(bundle_mod.shutil, "copy2", _copy2_dies)
+    recorder = RunRecorder({"npm": _vsce_writes_out})
+    with pytest.raises(OSError, match="disk full"):
+        bundle_mod.VSIX.compose(
+            _request(
+                tmp_path,
+                artifact,
+                entries,
+                target=MAC,
+                run_cmd=recorder,
+                artifact_deps=(dep,),
+            )
+        )
+    assert recorder.calls == []  # never reached packaging
+    assert not staged.exists()  # partial file cleaned up
+    assert not (leg_dir / "resources").exists()  # fresh dir cleaned up too
+
+
+def test_vsix_stage_leaves_no_empty_dir_behind(tmp_path):
+    # Cleanup removes not just the staged binary but any dir staging created
+    # (deepest-first), so a fresh `resources/nested/` does not dirty the tree
+    # across repeated composes — the leg dir is left exactly as found.
+    (artifact,) = _artifacts(
+        {
+            "ext": {
+                "build": ["npm"],
+                "bundle": {
+                    "composition": "vsix",
+                    "stage": {"lexd-lsp": "resources/nested/lexd-lsp"},
+                },
+            }
+        }
+    )
+    entries = _entries({"editors/vscode": "npm"})
+    dep = _dep("lexd-lsp")
+    _materialize_dep_bin(tmp_path, dep)
+    leg_dir = tmp_path / "editors/vscode"
+    leg_dir.mkdir(parents=True)
+    (leg_dir / "package.json").write_text("{}")  # pre-existing tracked content
+    recorder = RunRecorder({"npm": _vsce_writes_out})
+
+    composed = bundle_mod.VSIX.compose(
+        _request(
+            tmp_path,
+            artifact,
+            entries,
+            target=MAC,
+            run_cmd=recorder,
+            artifact_deps=(dep,),
+        )
+    )
+    assert composed.outputs == ("ext-darwin-arm64.vsix",)
+    # The whole fresh subtree staging created is gone; tracked content untouched.
+    assert not (leg_dir / "resources").exists()
+    assert [p.name for p in leg_dir.iterdir()] == ["package.json"]
+
+
+def test_vsix_stage_intermediate_component_is_a_file_raises_release_error(tmp_path):
+    # Staging to `resources/nested/…` when `resources` is a checked-in FILE: the
+    # mkdir would bubble a bare FileExistsError/NotADirectoryError — surface it as
+    # a `ReleaseError` with the same vsix-stage context every other failure has.
+    (artifact,) = _artifacts(
+        {
+            "ext": {
+                "build": ["npm"],
+                "bundle": {
+                    "composition": "vsix",
+                    "stage": {"lexd-lsp": "resources/nested/lexd-lsp"},
+                },
+            }
+        }
+    )
+    entries = _entries({"editors/vscode": "npm"})
+    dep = _dep("lexd-lsp")
+    _materialize_dep_bin(tmp_path, dep)
+    leg_dir = tmp_path / "editors/vscode"
+    leg_dir.mkdir(parents=True)
+    (leg_dir / "resources").write_text("i am a file, not a dir")  # blocks the mkdir
+    recorder = RunRecorder({"npm": _vsce_writes_out})
+    with pytest.raises(ReleaseError, match="intermediate path component is a file"):
+        bundle_mod.VSIX.compose(
+            _request(
+                tmp_path,
+                artifact,
+                entries,
+                target=MAC,
+                run_cmd=recorder,
+                artifact_deps=(dep,),
+            )
+        )
+    assert recorder.calls == []  # refused before packaging
+    assert (leg_dir / "resources").read_text() == "i am a file, not a dir"  # untouched
+
+
+def test_vsix_without_a_stage_map_stages_nothing(tmp_path):
+    # The base per-platform vsix (no `stage`) is unchanged: no copy, just the
+    # single `vsce package` — the pre-#974 contract still holds.
+    (artifact,) = _artifacts(
+        {"ext": {"build": ["npm"], "bundle": {"composition": "vsix"}}}
+    )
+    entries = _entries({"editors/vscode": "npm"})
+    recorder = RunRecorder({"npm": _vsce_writes_out})
+    composed = bundle_mod.VSIX.compose(
+        _request(tmp_path, artifact, entries, target=MAC, run_cmd=recorder)
+    )
+    assert recorder.heads == ["npm"]
+    assert not (tmp_path / "editors/vscode" / "resources").exists()
+    assert composed.outputs == ("ext-darwin-arm64.vsix",)
 
 
 def test_registry_is_closed_and_platform_scoped():

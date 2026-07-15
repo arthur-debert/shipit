@@ -72,11 +72,23 @@ functions the entries carry:
   fleet-provisioned PATH binary, so the local package context resolves it. A
   ``.vsix`` is a zip package with no reopenable main binary, so — like wheel,
   wasm-pack, and tarball — it is NOT binary-asserting (``asserts_binary=False``,
-  the scar-#2 guard is skipped). The per-target binary it bundles is produced
-  by the build stage — for ``win32-x64`` that binary comes from the
-  cross-target build (TOL02-WS11 #787, the windows leg's stated dependency, not
-  hidden), which writes ``target/<triple>/release/`` for the extension's
-  prepackage step to stage.
+  the scar-#2 guard is skipped). The per-target native binary the extension
+  bundles (the ``lexd-lsp`` LSP, tree-sitter wasm) rides the **Artifact channel**
+  (ARF01, ADR-0064/0066): it is published by its producing repo as a
+  per-platform **conda package** and consumed here through an ``[artifact-deps]``
+  pin, which ``shipit install`` projects into the managed pixi env so pixi
+  resolves/fetches THIS leg's platform build into
+  ``<root>/.pixi/envs/<env>/bin/<pkg>``. The vsix artifact names which pins to
+  stage and where in the extension layout via the optional ``bundle.stage`` map
+  (``{ "lexd-lsp" = "resources/lexd-lsp" }``); :func:`_stage_vsix_natives`
+  COPIES each materialized binary into the leg dir before ``vsce package`` (never
+  a fetch — issue #911's bespoke fetcher is superseded by the channel; a binary
+  absent from the env hard-fails pointing at ``shipit install``), ``.exe``-suffixed
+  on a windows target so the extension spawns a runnable binary, then REMOVES the
+  staged copies after packaging (transient inputs vsce already zipped in — the
+  leg dir is left clean, no per-target binary accumulating). Because pixi already
+  resolved the per-platform subdir, the SOURCE binary at the path IS the right
+  one for the target — no cross-target branching on the source.
 - **mac-app** — the coupled UNSIGNED ``.app``/``.dmg`` pair (the declared
   bundler builds the .app inside the .dmg run; they are not cleanly
   separable) PLUS the inner ``.app`` re-emitted as the reseal payload
@@ -174,12 +186,14 @@ apply to the current target) is ``shipit release bundle``
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 from .. import config, execrun
+from ..install import artifactdeps
 from ..tools import e2e as e2e_mod
 from . import ReleaseError
 
@@ -241,6 +255,13 @@ class ComposeRequest:
     default (a native local bundle) — so build and bundle agree on the dir by
     being handed the SAME triple, never a native/cross guess (the triple-dir
     contract's single owner, issue #785 deferral resolved by #787).
+
+    ``artifact_deps`` is the repo's parsed ``[artifact-deps]`` set
+    (:func:`shipit.config.load_artifact_deps`) — the cross-repo Artifact-channel
+    pins the vsix composition stages a native binary from (TOL03-WS03 #974): the
+    compose resolves a ``bundle.stage`` package key against it to find the pin's
+    pixi env and copy the materialized binary into the extension layout. ``()``
+    for a repo declaring none (every composition but vsix ignores it).
     """
 
     artifact: config.Artifact
@@ -250,6 +271,7 @@ class ComposeRequest:
     target: str
     run_cmd: RunCmd
     build_target: str | None = None
+    artifact_deps: tuple[config.ArtifactDep, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1050,9 +1072,181 @@ def vsce_target(target: str) -> str:
     return vt
 
 
+def _staged_dest(leg_dir: Path, dest: str, *, windows: bool) -> Path:
+    """The on-disk path a ``bundle.stage`` entry copies its binary to, under the
+    extension leg dir — target-aware in the SAME way the source path is.
+
+    On a windows target the executable carries a ``.exe`` suffix (conda's
+    ``Scripts/<pkg>.exe`` PATH layout, mirrored on the destination so the
+    extension spawns a runnable ``.exe`` — a bare ``lexd-lsp`` on windows is not
+    executable). The consumer declares ONE ``dest`` for all platforms
+    (``resources/lexd-lsp``); ``.exe`` is appended per-target here, never
+    doubly (a ``dest`` already ending ``.exe`` is left as-is). Pure."""
+    if windows and not dest.lower().endswith(".exe"):
+        dest = f"{dest}.exe"
+    return leg_dir / dest
+
+
+def _dirs_staging_will_create(leg_dir: Path, parent: Path) -> list[Path]:
+    """The ancestor dirs of ``parent`` — under ``leg_dir`` (exclusive) — that do
+    NOT yet exist, deepest-first: exactly the dirs ``mkdir(parents=True)`` will
+    create for a stage copy, so cleanup can remove only those it created (never a
+    pre-existing/tracked dir). Pure (an ``exists`` probe only). ``leg_dir`` itself
+    is never included — it is the extension package root ``vsce`` reads, assumed
+    present (a repo with no extension dir fails the pack regardless)."""
+    to_create: list[Path] = []
+    current = parent
+    while current != leg_dir and leg_dir in current.parents and not current.exists():
+        to_create.append(current)
+        current = current.parent
+    return to_create
+
+
+def _unstage_vsix_natives(staged: list[Path], created_dirs: list[Path]) -> None:
+    """Undo staging: remove every staged binary, then every dir staging created
+    (deepest-first, only if now empty). Leaves the extension source tree EXACTLY
+    as staging found it — no per-target binary and no empty ``resources/``
+    lingering across repeated composes.
+
+    Only paths STAGING recorded are touched (files it copied, dirs that did not
+    exist before it ran), so a pre-existing/tracked file or dir is never removed.
+    ``rmdir`` removes an empty dir and refuses a non-empty one (``OSError`` — a
+    dir still holding other content, or already gone), which is swallowed: cleanup
+    is best-effort and must never mask the original failure in a ``finally``."""
+    for path in staged:
+        path.unlink(missing_ok=True)
+    # Deepest-first GLOBALLY (across all entries) so a nested `a/b` is emptied
+    # before its parent `a` is tried — a per-entry order alone would strand `a`.
+    for directory in sorted(
+        set(created_dirs), key=lambda p: len(p.parts), reverse=True
+    ):
+        try:
+            directory.rmdir()
+        except OSError:
+            pass  # non-empty (holds other content) or already gone — leave it
+
+
+def _stage_vsix_natives(
+    req: ComposeRequest,
+    leg_dir: Path,
+    staged: list[Path],
+    created_dirs: list[Path],
+) -> None:
+    """Copy each declared ``bundle.stage`` native binary into the extension
+    layout BEFORE ``vsce package`` (TOL03-WS03 #974) — the Artifact-channel
+    staging that turns a hollow ``.vsix`` into a real extension. APPENDS each
+    destination to ``staged`` and each freshly-created parent dir to
+    ``created_dirs`` (caller-owned accumulators) AS it goes, so the caller's
+    ``finally`` (:func:`_unstage_vsix_natives`) cleans up even a PARTIAL stage —
+    a later entry raising, or ``copy2`` dying mid-write — the copies + dirs are
+    transient build inputs, never left in the source tree.
+
+    For each ``(package, dest)`` the vsix artifact declares
+    (:attr:`shipit.config.BundleSpec.stage`), the ``package`` is resolved against
+    the repo's parsed ``[artifact-deps]`` (``req.artifact_deps``): a key naming no
+    declared pin is a loud refusal (staging a binary the channel was never told
+    to publish is a config mistake, not a silent skip). The pin's materialized
+    binary — ``<root>/.pixi/envs/<env>/bin/<package>`` on unix,
+    ``…/Scripts/<package>.exe`` on a ``win32-x64`` leg (the target-aware conda
+    PATH layout, :func:`shipit.install.artifactdeps.materialized_bin_path`), put
+    there by ``shipit install`` projecting the pin so pixi resolves/fetches the
+    RIGHT per-platform conda package (ADR-0064/0066) — is copied to
+    ``<leg_dir>/<dest>`` (``.exe``-suffixed on windows, executable bit preserved),
+    inside the extension package so ``vsce package`` includes it.
+
+    The destination MUST NOT already exist AND must resolve inside ``leg_dir``:
+    staging targets a FRESH path so the copy never clobbers tracked/checked-in
+    content, and — decisively — so cleanup only ever removes files STAGING created.
+    ``os.path.lexists`` (not ``Path.exists``) is the collision probe so a DANGLING
+    symlink at the dest is caught too (``exists`` follows it and reads False),
+    and the resolved dest is verified under ``leg_dir`` so a SYMLINKED PARENT
+    (a committed ``resources`` → ``/outside``) cannot steer the copy through it to
+    mutate content beyond the tree. Either is a loud config error, not a silent
+    overwrite/escape.
+
+    This is a COPY off the already-materialized env, never a fetch: if the binary
+    is absent, the composition hard-fails pointing at ``shipit install`` and the
+    Artifact channel rather than reaching across repos itself (issue #911's
+    bespoke fetcher is deliberately NOT reintroduced — the channel already put
+    the binary in the build env). Per-target correctness needs no branching on the
+    SOURCE: pixi resolved this leg's own platform subdir, so the binary at the
+    path IS the right one for ``req.target``.
+    """
+    stage = req.artifact.bundle.stage if req.artifact.bundle is not None else ()
+    if not stage:
+        return
+    windows = _is_windows(req.target)
+    leg_root = leg_dir.resolve()
+    deps = {dep.package: dep for dep in req.artifact_deps}
+    for package, dest in stage:
+        dep = deps.get(package)
+        if dep is None:
+            declared = ", ".join(sorted(deps)) or "none declared"
+            raise ReleaseError(
+                f"[artifacts.{req.artifact.name}] vsix stage names `{package}`, "
+                f"but no [artifact-deps.{package}] pin is declared — the native "
+                f"binary rides the Artifact channel as a conda package "
+                f"(ADR-0064); declare the pin so `shipit install` materializes "
+                f"it, never a bespoke fetch (declared artifact-deps: {declared})"
+            )
+        src = artifactdeps.materialized_bin_path(req.root, dep, target=req.target)
+        if not src.is_file():
+            raise ReleaseError(
+                f"[artifacts.{req.artifact.name}] vsix stage: the `{package}` "
+                f"binary is not materialized at {src} — run `shipit install` so "
+                f"the Artifact channel projects the `{dep.repo}` pin into the "
+                f"pixi env (ADR-0064/0066); the vsix bundle STAGES the binary, it "
+                f"never fetches it"
+            )
+        dst = _staged_dest(leg_dir, dest, windows=windows)
+        # lexists (not exists) so a DANGLING symlink is also a collision.
+        if os.path.lexists(dst):
+            raise ReleaseError(
+                f"[artifacts.{req.artifact.name}] vsix stage: destination {dst} "
+                f"already exists — `bundle.stage` must target a FRESH path the "
+                f"extension does not commit (staging overwrites nothing tracked, "
+                f"and cleanup then removes only what staging created). Point "
+                f"`{package}` at a build-only path, not a checked-in file/dir/link"
+            )
+        # A symlinked PARENT (e.g. committed `resources` → outside) would let the
+        # copy write beyond the leg dir; the resolved dest must stay under it.
+        if not dst.resolve().is_relative_to(leg_root):
+            raise ReleaseError(
+                f"[artifacts.{req.artifact.name}] vsix stage: destination {dst} "
+                f"resolves outside the extension leg dir ({leg_root}) — a "
+                f"symlinked parent must not steer staging beyond the tree; point "
+                f"`{package}` at a real path inside the extension"
+            )
+        # Record the dirs we are about to create + the dest BEFORE the copy, so a
+        # copy2 that dies mid-write (full disk / I/O) still leaves the partial
+        # file and its fresh dirs recorded for the caller's cleanup.
+        created_dirs.extend(_dirs_staging_will_create(leg_dir, dst.parent))
+        try:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            # An intermediate component is a FILE, not a dir (a checked-in
+            # `resources` when the dest is `resources/nested/…`): mkdir bubbles a
+            # bare FileExistsError/NotADirectoryError. Re-raise with the same
+            # vsix-stage context every other staging failure carries.
+            raise ReleaseError(
+                f"[artifacts.{req.artifact.name}] vsix stage: cannot create the "
+                f"destination directory for `{package}` at {dst.parent} — an "
+                f"intermediate path component is a file, not a directory; point "
+                f"`{package}` at a path whose parents are dirs the extension owns"
+            ) from exc
+        staged.append(dst)
+        shutil.copy2(src, dst)
+        # Keep the exec bit: the LSP the extension spawns must stay runnable
+        # (copy2 preserves mode, but a channel binary staged read-only would ship
+        # a non-executable LSP — make the intent explicit); a no-op on windows,
+        # where the `.exe` suffix (not a mode bit) is what runs.
+        dst.chmod(dst.stat().st_mode | 0o755)
+
+
 def _compose_vsix(req: ComposeRequest) -> Composed:
     """Package the per-target ``.vsix`` via ``npm exec -- vsce package
-    --target``. See the module docstring's vsix entry.
+    --target``, after staging any declared native binaries. See the module
+    docstring's vsix entry.
 
     Runs ``vsce`` through ``npm exec`` in the ``npm`` leg (the extension
     package): vsce is the consumer's ``@vscode/vsce`` devDependency under
@@ -1060,39 +1254,59 @@ def _compose_vsix(req: ComposeRequest) -> Composed:
     context — a bare ``vsce`` would not be on ``PATH`` under ``pixi run
     ./bin/shipit``. Writes the single ``<name>-<vsce-target>.vsix`` straight
     into the bundle output tree; the ``vsce`` output path is stated so a rerun
-    overwrites in place (vsce replaces, never appends). The native binary vsce
-    bundles for this target is the build stage's output — for ``win32-x64`` the
-    cross-target build's (TOL02-WS11 #787). A run that leaves no ``.vsix`` is a
-    hard failure, never a quiet pass (the legacy ``vscode-ext.yml@v3``
-    per-target contract).
+    overwrites in place (vsce replaces, never appends). The per-target native
+    binary the extension bundles (the ``lexd-lsp`` LSP, tree-sitter wasm) is
+    staged FIRST (:func:`_stage_vsix_natives`) by copying it out of the pixi env
+    the Artifact channel materialized it into (``[artifact-deps]`` conda packages,
+    TOL03-WS03 #974) — so the ``.vsix`` ships a real extension, not a hollow one.
+    The staged binaries are TRANSIENT build inputs: ``vsce`` copies them into the
+    ``.vsix`` zip, then this function removes them — AND any dirs staging created
+    (e.g. a fresh ``resources/``) — from the extension source tree
+    (:func:`_unstage_vsix_natives`, a ``finally`` so a failing pack cleans up too),
+    leaving only its declared ``.vsix`` under ``out_dir`` and the leg dir exactly
+    as found (no per-target binary or empty dir accumulating across composes).
+    Staging AND the ``out_dir`` prep run INSIDE the guarded block, so anything
+    that can raise after the first copy (a mid-stage failure, a ``copy2`` dying
+    mid-write, an ``out_dir`` mkdir/unlink error) still triggers cleanup — which
+    removes exactly the paths+dirs staging recorded, never a pre-existing entry
+    (staging refuses a collision or a symlinked-parent escape).
+    A run that leaves no ``.vsix`` is a hard failure, never a quiet pass (the
+    legacy ``vscode-ext.yml@v3`` per-target contract).
     """
     leg = _leg_for(req.artifact, req.entries, "npm", "vsix")
     vt = vsce_target(req.target)
+    leg_dir = req.root / leg.path
     out_name = f"{req.artifact.name}-{vt}.vsix"
-    req.out_dir.mkdir(parents=True, exist_ok=True)
     out_path = req.out_dir / out_name
-    if out_path.exists():
-        out_path.unlink()
-    req.run_cmd(
-        [
-            "npm",
-            "exec",
-            "--",
-            "vsce",
-            "package",
-            "--target",
-            vt,
-            "--out",
-            str(out_path),
-        ],
-        req.root / leg.path,
-    )
-    if not out_path.is_file():
-        raise ReleaseError(
-            f"[artifacts.{req.artifact.name}] vsix composition: vsce package "
-            f"completed but produced no {out_name} under {req.out_dir} — hard "
-            f"fail, never a quiet pass (legacy vscode-ext per-target contract)"
+    staged: list[Path] = []
+    created_dirs: list[Path] = []
+    try:
+        _stage_vsix_natives(req, leg_dir, staged, created_dirs)
+        req.out_dir.mkdir(parents=True, exist_ok=True)
+        if out_path.exists():
+            out_path.unlink()
+        req.run_cmd(
+            [
+                "npm",
+                "exec",
+                "--",
+                "vsce",
+                "package",
+                "--target",
+                vt,
+                "--out",
+                str(out_path),
+            ],
+            leg_dir,
         )
+        if not out_path.is_file():
+            raise ReleaseError(
+                f"[artifacts.{req.artifact.name}] vsix composition: vsce package "
+                f"completed but produced no {out_name} under {req.out_dir} — hard "
+                f"fail, never a quiet pass (legacy vscode-ext per-target contract)"
+            )
+    finally:
+        _unstage_vsix_natives(staged, created_dirs)
     return Composed(req.artifact.name, "vsix", (out_name,))
 
 
@@ -1135,9 +1349,10 @@ class Composition:
     ``option_keys`` are the
     EXTRA optional declaration keys a registry-assembled composition accepts
     (wasm-pack's ``scope`` / ``wasm-target`` — the ``@scope`` and wasm-pack
-    ``--target``, the only consumer-specific parts); the config boundary
-    accepts them ONLY for the composition that names them and rejects them
-    everywhere else (:func:`shipit.config._parse_bundle`). ``provisions_signal``
+    ``--target``; vsix's ``stage`` — the Artifact-channel native-binary staging
+    map, #974 — each composition's only consumer-specific parts); the config
+    boundary accepts them ONLY for the composition that names them and rejects
+    them everywhere else (:func:`shipit.config._parse_bundle`). ``provisions_signal``
     names a toolchain SIGNAL a declared composition needs beyond its own leg —
     wasm-pack's ``npm pack`` needs the node runtime (``npm`` rides ``nodejs``),
     but wasm-pack rides the RUST signal and a rust-only wasm crate's npm
@@ -1197,12 +1412,19 @@ WASM_PACK = Composition(
 #: reopenable main binary, so like wheel/wasm-pack/tarball the scar-#2 guard is
 #: skipped (``asserts_binary=False``): preflight never routes the vsix leg
 #: through assert-bundle, which would hard-fail "no main binary" on a tree
-#: carrying only the per-target ``<name>-<vsce-target>.vsix``.
+#: carrying only the per-target ``<name>-<vsce-target>.vsix``. Its optional
+#: ``stage`` option key (#974) carries the Artifact-channel native-binary staging
+#: map — the one vsix-specific declaration, gated to this composition.
 VSIX = Composition(
     "vsix",
     _compose_vsix,
     platforms=("apple-darwin", "linux", "windows"),
     asserts_binary=False,
+    # `stage`: the optional Artifact-channel native-binary staging map (#974) —
+    # `{ "<artifact-dep pkg>" = "<dest-in-extension>" }`, the only vsix-specific
+    # declaration. Accepted ONLY here (the config boundary rejects it on every
+    # other composition via this option_keys gate), like wasm-pack's scope.
+    option_keys=("stage",),
 )
 MAC_APP = Composition(
     "mac-app",

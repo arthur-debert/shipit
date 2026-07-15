@@ -24,7 +24,7 @@ import re
 import tomllib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import MappingProxyType
 
 from .identity import Sha, repo_from_slug
@@ -331,19 +331,37 @@ def _parse_argv(where: str, value: object) -> tuple[str, ...]:
 
 def _reject_path_escape(where: str, value: str) -> None:
     """Refuse a config path that leaves the checkout — absolute, or carrying a
-    ``..`` segment. Pure.
+    ``..`` segment. Pure, and OS-INDEPENDENT of the runner.
 
     Such a path is later joined to the repo root and READ or REWRITTEN (an
-    adapter's leg cwd, a bundle-config bump); an absolute path discards the root
-    and ``..`` climbs above it, so a repo's own ``.shipit.toml`` could steer a
-    release rewrite at a file outside the tree. Rejected at the parse boundary,
-    the one place every value flows through.
+    adapter's leg cwd, a bundle-config bump, a vsix stage destination); an
+    absolute path discards the root and ``..`` climbs above it, so a repo's own
+    ``.shipit.toml`` could steer a release rewrite at a file outside the tree.
+    The join happens with the RUNNER's native ``pathlib`` (``leg_dir / dest``),
+    so a value that is harmless under POSIX but ABSOLUTE under Windows —
+    ``C:\\x``, ``\\\\server\\share``, a leading ``\\``, or a bare drive ``C:x`` —
+    would escape on a Windows runner (``vsce package`` runs on the win32-x64 leg,
+    #974). Both path flavours are therefore checked here, at the parse boundary,
+    the one place every value flows through, so the guard never depends on which
+    OS the config is loaded on. Backslashes are refused outright: a repo-relative
+    config path is always POSIX-separated, so a ``\\`` is either a Windows anchor
+    or a filename that would mis-split on the wrong OS — never a legitimate value.
     """
-    pure = PurePosixPath(value)
-    if pure.is_absolute() or ".." in pure.parts:
+    posix = PurePosixPath(value)
+    windows = PureWindowsPath(value)
+    if (
+        posix.is_absolute()
+        or ".." in posix.parts
+        or "\\" in value
+        or windows.is_absolute()
+        or windows.drive
+        or windows.root
+        or ".." in windows.parts
+    ):
         raise ConfigError(
-            f"{where}: must be a repo-relative path inside the checkout — no "
-            f"leading '/', no '..' segment; got {value!r}"
+            f"{where}: must be a repo-relative POSIX path inside the checkout — "
+            f"no leading '/', no '\\' anywhere, no drive letter, no '..' segment; "
+            f"got {value!r}"
         )
 
 
@@ -579,6 +597,21 @@ class BundleSpec:
     the registry default, ``bundler``). Both are accepted ONLY for
     ``wasm-pack`` (:attr:`shipit.release.bundle.Composition.option_keys`) and
     rejected for every other composition.
+
+    ``stage`` is the ``vsix`` composition's optional native-binary staging map
+    (TOL03-WS03 #974): ``(artifact-dep package, destination-path)`` pairs, in
+    declaration order, telling the vsix compose which cross-repo **native
+    binaries** — published as conda packages and consumed via ``[artifact-deps]``
+    off the Artifact channel (ADR-0064) — to copy into the extension layout
+    (relative to the npm leg dir) BEFORE ``vsce package``, so the ``.vsix`` ships
+    the real ``lexd-lsp`` LSP instead of a hollow package. It is an EXPLICIT
+    declaration, not a blanket "stage every artifact-dep", because not every
+    ``[artifact-deps]`` pin is extension payload (``lexd`` is the lint-gate tool,
+    ``lexd-lsp`` is the extension's LSP). Accepted ONLY for ``vsix``
+    (:attr:`shipit.release.bundle.Composition.option_keys`); each key is
+    resolved against the parsed ``[artifact-deps]`` at compose time (a key naming
+    an undeclared pin is a loud refusal there). ``()`` = a vsix that stages no
+    native (the base per-platform ``vsce package`` alone).
     """
 
     composition: str
@@ -586,6 +619,7 @@ class BundleSpec:
     source: str | None = None
     scope: str | None = None
     wasm_target: str | None = None
+    stage: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -798,6 +832,47 @@ def _parse_platforms(where: str, value: object) -> tuple[str, ...]:
     return tuple(value)
 
 
+def _parse_vsix_stage(where: str, value: object) -> tuple[tuple[str, str], ...]:
+    """The vsix ``stage`` map (TOL03-WS03 #974): an ``[artifact-deps]`` package
+    name → a destination path in the extension layout, as ordered pairs.
+
+    Each KEY must be a valid conda package identifier (:data:`_CONDA_PKG_KEY_RE`,
+    the same shape ``[artifact-deps.<pkg>]`` keys take) — the cross-repo native
+    binary the vsix compose stages off the Artifact channel; the compose
+    cross-checks it against the parsed ``[artifact-deps]`` (a key naming no
+    declared pin is refused there, where the pin set is in scope). Each VALUE is
+    a non-empty repo-relative destination path UNDER the npm leg dir — the file
+    the binary is copied to before ``vsce package`` (e.g.
+    ``"resources/lexd-lsp"``); it is refused if it escapes the checkout
+    (:func:`_reject_path_escape`), the same guard ``bundle.source`` takes.
+    Duplicate package keys cannot reach here — ``tomllib`` rejects a repeated
+    table/inline key before the parse runs — so this validates only shape.
+    Construction is validation (ADR-0030)."""
+    if not isinstance(value, dict) or not value:
+        raise ConfigError(
+            f"{where}.stage: must be a non-empty table mapping an [artifact-deps] "
+            f'package to a destination path, e.g. {{ "lexd-lsp" = '
+            f'"resources/lexd-lsp" }}; got {value!r}'
+        )
+    pairs: list[tuple[str, str]] = []
+    for pkg, dest in value.items():
+        if not _CONDA_PKG_KEY_RE.match(str(pkg)):
+            raise ConfigError(
+                f"{where}.stage: `{pkg}` is not a valid [artifact-deps] package "
+                f"name (lowercase letters, digits, '.', '-', '_'; leading "
+                f"alphanumeric)"
+            )
+        if not isinstance(dest, str) or not dest:
+            raise ConfigError(
+                f"{where}.stage.{pkg}: destination must be a non-empty "
+                f"repo-relative path under the extension layout, e.g. "
+                f'"resources/lexd-lsp"; got {dest!r}'
+            )
+        _reject_path_escape(f"{where}.stage.{pkg}", dest)
+        pairs.append((str(pkg), str(PurePosixPath(dest))))
+    return tuple(pairs)
+
+
 def _parse_bundle(where: str, spec: object) -> BundleSpec:
     from .release import bundle as bundle_registry  # lazy — config stays import-light
 
@@ -828,6 +903,12 @@ def _parse_bundle(where: str, spec: object) -> BundleSpec:
         f"{where}.bundle",
         spec,
         ("composition", "command", "source", *entry.option_keys),
+    )
+    # `stage` (vsix's native-binary staging map) is gated to the composition
+    # that names it via option_keys — the unknown-key check above already
+    # rejects it on any other composition, so parsing it here is safe.
+    stage = (
+        _parse_vsix_stage(f"{where}.bundle", spec["stage"]) if "stage" in spec else ()
     )
     command = spec.get("command")
     source = spec.get("source")
@@ -891,6 +972,7 @@ def _parse_bundle(where: str, spec: object) -> BundleSpec:
         composition=composition,
         scope=scope,
         wasm_target=wasm_target,
+        stage=stage,
     )
 
 

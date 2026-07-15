@@ -653,3 +653,40 @@ def test_verb_degrades_on_a_generally_unreadable_manifest(tmp_path):
     # An unreadable manifest degrades to no artifact units (gather warns), it
     # does not crash install here.
     assert verb._artifact_dep_units(tmp_path, is_private=lambda slug: False) == []
+
+
+# --------------------------------------------------------------------------
+# env-name mapping + materialized-binary path (TOL03-WS03 #974): the bridge the
+# vsix bundle staging reads to locate a tool artifact-dep's on-disk binary.
+# --------------------------------------------------------------------------
+
+
+def test_env_name_maps_default_and_named_features():
+    # The default target lands in the `default` env; a named feature in its
+    # isolated `shipit-artifacts-<F>` env — the SAME mapping the projection uses.
+    assert ad.env_name(None) == "default"
+    assert ad.env_name("lint") == "shipit-artifacts-lint"
+
+
+def test_materialized_bin_path_is_the_env_prefix_bin_package(tmp_path):
+    # A unix tool artifact-dep's binary lands at
+    # <root>/.pixi/envs/<env>/bin/<package> (ADR-0064: a tool artifact puts a
+    # binary on PATH) — pure path arithmetic, no filesystem probe.
+    default_dep = _dep(package="lexd-lsp", feature=None)
+    assert ad.materialized_bin_path(
+        tmp_path, default_dep, target="x86_64-unknown-linux-gnu"
+    ) == (tmp_path / ".pixi/envs/default/bin/lexd-lsp")
+    lint_dep = _dep(package="lexd", feature="lint")
+    assert ad.materialized_bin_path(
+        tmp_path, lint_dep, target="aarch64-apple-darwin"
+    ) == (tmp_path / ".pixi/envs/shipit-artifacts-lint/bin/lexd")
+
+
+def test_materialized_bin_path_is_target_aware_for_windows(tmp_path):
+    # conda installs a win-64 tool binary to `Scripts/<pkg>.exe`, not `bin/<pkg>`
+    # (release.publish._conda_binary_layout) — a win32-x64 vsix leg must resolve
+    # THERE, or staging aborts on a path that never exists on that runner.
+    dep = _dep(package="lexd-lsp", feature=None)
+    assert ad.materialized_bin_path(tmp_path, dep, target="x86_64-pc-windows-msvc") == (
+        tmp_path / ".pixi/envs/default/Scripts/lexd-lsp.exe"
+    )
