@@ -4,6 +4,8 @@
 
 ## Unreleased
 
+## 1.2.0 - 2026-07-15
+
 - `shipit repo new --stack rust <name> [parent]` creates a new local Repo
   with a complete, verified, shipit-managed baseline (GEN01, #944): it
   scaffolds a two-crate Cargo workspace (a `<name>` CLI over a `lib<name>`
