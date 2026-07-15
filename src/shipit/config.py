@@ -573,6 +573,21 @@ class BundleSpec:
     the registry default, ``bundler``). Both are accepted ONLY for
     ``wasm-pack`` (:attr:`shipit.release.bundle.Composition.option_keys`) and
     rejected for every other composition.
+
+    ``stage`` is the ``vsix`` composition's optional native-binary staging map
+    (TOL03-WS03 #974): ``(artifact-dep package, destination-path)`` pairs, in
+    declaration order, telling the vsix compose which cross-repo **native
+    binaries** — published as conda packages and consumed via ``[artifact-deps]``
+    off the Artifact channel (ADR-0064) — to copy into the extension layout
+    (relative to the npm leg dir) BEFORE ``vsce package``, so the ``.vsix`` ships
+    the real ``lexd-lsp`` LSP instead of a hollow package. It is an EXPLICIT
+    declaration, not a blanket "stage every artifact-dep", because not every
+    ``[artifact-deps]`` pin is extension payload (``lexd`` is the lint-gate tool,
+    ``lexd-lsp`` is the extension's LSP). Accepted ONLY for ``vsix``
+    (:attr:`shipit.release.bundle.Composition.option_keys`); each key is
+    resolved against the parsed ``[artifact-deps]`` at compose time (a key naming
+    an undeclared pin is a loud refusal there). ``()`` = a vsix that stages no
+    native (the base per-platform ``vsce package`` alone).
     """
 
     composition: str
@@ -580,6 +595,7 @@ class BundleSpec:
     source: str | None = None
     scope: str | None = None
     wasm_target: str | None = None
+    stage: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -776,6 +792,50 @@ def _parse_platforms(where: str, value: object) -> tuple[str, ...]:
     return tuple(value)
 
 
+def _parse_vsix_stage(where: str, value: object) -> tuple[tuple[str, str], ...]:
+    """The vsix ``stage`` map (TOL03-WS03 #974): an ``[artifact-deps]`` package
+    name → a destination path in the extension layout, as ordered pairs.
+
+    Each KEY must be a valid conda package identifier (:data:`_CONDA_PKG_KEY_RE`,
+    the same shape ``[artifact-deps.<pkg>]`` keys take) — the cross-repo native
+    binary the vsix compose stages off the Artifact channel; the compose
+    cross-checks it against the parsed ``[artifact-deps]`` (a key naming no
+    declared pin is refused there, where the pin set is in scope). Each VALUE is
+    a non-empty repo-relative destination path UNDER the npm leg dir — the file
+    the binary is copied to before ``vsce package`` (e.g.
+    ``"resources/lexd-lsp"``); it is refused if it escapes the checkout
+    (:func:`_reject_path_escape`), the same guard ``bundle.source`` takes. A
+    duplicate package key is a loud refusal (two destinations for one binary is
+    never an intent). Construction is validation (ADR-0030)."""
+    if not isinstance(value, dict) or not value:
+        raise ConfigError(
+            f"{where}.stage: must be a non-empty table mapping an [artifact-deps] "
+            f'package to a destination path, e.g. {{ "lexd-lsp" = '
+            f'"resources/lexd-lsp" }}; got {value!r}'
+        )
+    pairs: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for pkg, dest in value.items():
+        if not _CONDA_PKG_KEY_RE.match(str(pkg)):
+            raise ConfigError(
+                f"{where}.stage: `{pkg}` is not a valid [artifact-deps] package "
+                f"name (lowercase letters, digits, '.', '-', '_'; leading "
+                f"alphanumeric)"
+            )
+        if pkg in seen:
+            raise ConfigError(f"{where}.stage: duplicate package `{pkg}`")
+        seen.add(str(pkg))
+        if not isinstance(dest, str) or not dest:
+            raise ConfigError(
+                f"{where}.stage.{pkg}: destination must be a non-empty "
+                f"repo-relative path under the extension layout, e.g. "
+                f'"resources/lexd-lsp"; got {dest!r}'
+            )
+        _reject_path_escape(f"{where}.stage.{pkg}", dest)
+        pairs.append((str(pkg), str(PurePosixPath(dest))))
+    return tuple(pairs)
+
+
 def _parse_bundle(where: str, spec: object) -> BundleSpec:
     from .release import bundle as bundle_registry  # lazy — config stays import-light
 
@@ -806,6 +866,12 @@ def _parse_bundle(where: str, spec: object) -> BundleSpec:
         f"{where}.bundle",
         spec,
         ("composition", "command", "source", *entry.option_keys),
+    )
+    # `stage` (vsix's native-binary staging map) is gated to the composition
+    # that names it via option_keys — the unknown-key check above already
+    # rejects it on any other composition, so parsing it here is safe.
+    stage = (
+        _parse_vsix_stage(f"{where}.bundle", spec["stage"]) if "stage" in spec else ()
     )
     command = spec.get("command")
     source = spec.get("source")
@@ -869,6 +935,7 @@ def _parse_bundle(where: str, spec: object) -> BundleSpec:
         composition=composition,
         scope=scope,
         wasm_target=wasm_target,
+        stage=stage,
     )
 
 

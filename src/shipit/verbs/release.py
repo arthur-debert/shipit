@@ -903,6 +903,10 @@ def run_bundle(
     cfg = load_config(root)
     entries = config.load_toolchains(cfg)
     artifacts = config.load_artifacts(cfg)
+    # The Artifact-channel pins the vsix composition stages a native binary from
+    # (TOL03-WS03 #974): threaded into every ComposeRequest so the vsix compose
+    # can resolve a `bundle.stage` package to its materialized pixi-env binary.
+    artifact_deps = config.load_artifact_deps(cfg)
     if artifact is not None:
         selected = tuple(a for a in artifacts if a.name == artifact)
         if not selected:
@@ -956,6 +960,7 @@ def run_bundle(
                     target=resolved,
                     run_cmd=run_cmd,
                     build_target=build_target,
+                    artifact_deps=artifact_deps,
                 )
             )
         )

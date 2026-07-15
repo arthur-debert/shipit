@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 
 from shipit import config, execrun
+from shipit.install import artifactdeps
 from shipit.release import ReleaseError
 from shipit.release import bundle as bundle_mod
 from shipit.verbs import release as release_verb
@@ -72,7 +73,16 @@ def _entries(mapping: dict) -> tuple[config.ToolchainEntry, ...]:
     return config.load_toolchains({"toolchains": mapping})
 
 
-def _request(tmp_path, artifact, entries, *, target=LINUX, build_target=None, run_cmd):
+def _request(
+    tmp_path,
+    artifact,
+    entries,
+    *,
+    target=LINUX,
+    build_target=None,
+    run_cmd,
+    artifact_deps=(),
+):
     return bundle_mod.ComposeRequest(
         artifact=artifact,
         entries=entries,
@@ -81,6 +91,7 @@ def _request(tmp_path, artifact, entries, *, target=LINUX, build_target=None, ru
         target=target,
         run_cmd=run_cmd,
         build_target=build_target,
+        artifact_deps=artifact_deps,
     )
 
 
@@ -1588,6 +1599,187 @@ def test_vsix_without_an_npm_leg_refuses(tmp_path):
         bundle_mod.VSIX.compose(
             _request(tmp_path, artifact, entries, target=MAC, run_cmd=RunRecorder())
         )
+
+
+# --------------------------------------------------------------------------
+# vsix native staging via the Artifact channel (TOL03-WS03 #974, closes #911):
+# the vsix compose copies a per-platform native binary — materialized in the
+# managed pixi env by an `[artifact-deps]` conda pin — into the extension layout
+# BEFORE `vsce package`. No bespoke fetcher / deps.json: the channel already put
+# the binary in the env, so staging is a copy.
+# --------------------------------------------------------------------------
+
+
+def _dep(package, *, repo="lex-fmt/lex", version="0.19.3", feature=None):
+    return config.ArtifactDep(
+        package=package, repo=repo, version=version, feature=feature
+    )
+
+
+def _materialize_dep_bin(tmp_path, dep):
+    """Seed the on-disk binary an `[artifact-deps]` pin would materialize in the
+    pixi env — `<root>/.pixi/envs/<env>/bin/<package>` — as an executable stub,
+    mirroring what `shipit install` + pixi resolve/fetch leaves in the build env.
+    """
+    env = artifactdeps.env_name(dep.feature)
+    return _executable(tmp_path / ".pixi" / "envs" / env / "bin" / dep.package)
+
+
+def test_vsix_stages_artifact_dep_native_into_the_layout_before_packaging(tmp_path):
+    (artifact,) = _artifacts(
+        {
+            "ext": {
+                "build": ["npm"],
+                "bundle": {
+                    "composition": "vsix",
+                    "stage": {"lexd-lsp": "resources/lexd-lsp"},
+                },
+            }
+        }
+    )
+    entries = _entries({"editors/vscode": "npm"})
+    dep = _dep("lexd-lsp")
+    src = _materialize_dep_bin(tmp_path, dep)
+    src.write_bytes(b"NATIVE-LSP")  # a recognizable payload the copy must carry
+    src.chmod(src.stat().st_mode | 0o755)
+    staged = tmp_path / "editors/vscode" / "resources/lexd-lsp"
+
+    def _vsce_asserts_staged(argv, cwd):
+        # The native must already be in the extension layout when vsce packages —
+        # staging is BEFORE the pack step, so a hollow .vsix can never ship.
+        assert staged.is_file(), "native binary not staged before `vsce package`"
+        _vsce_writes_out(argv, cwd)
+
+    recorder = RunRecorder({"npm": _vsce_asserts_staged})
+    composed = bundle_mod.VSIX.compose(
+        _request(
+            tmp_path,
+            artifact,
+            entries,
+            target=MAC,
+            run_cmd=recorder,
+            artifact_deps=(dep,),
+        )
+    )
+
+    assert staged.is_file()
+    assert staged.read_bytes() == b"NATIVE-LSP"
+    assert os.access(staged, os.X_OK)  # the LSP the extension spawns stays runnable
+    # Staging is a filesystem copy, not a recorded command — the ONLY recorded
+    # invocation is still the single `vsce package` (no fetch, no extra process).
+    assert recorder.heads == ["npm"]
+    assert composed == bundle_mod.Composed("ext", "vsix", ("ext-darwin-arm64.vsix",))
+
+
+def test_vsix_stage_resolves_the_named_feature_env(tmp_path):
+    # A pin declaring `feature = "lint"` materializes in the isolated
+    # `shipit-artifacts-lint` env, not `default`; staging must read the SAME env
+    # the projection wired the pin into.
+    (artifact,) = _artifacts(
+        {
+            "ext": {
+                "build": ["npm"],
+                "bundle": {
+                    "composition": "vsix",
+                    "stage": {"lexd-lsp": "resources/lexd-lsp"},
+                },
+            }
+        }
+    )
+    entries = _entries({"editors/vscode": "npm"})
+    dep = _dep("lexd-lsp", feature="lint")
+    _materialize_dep_bin(tmp_path, dep)  # under .pixi/envs/shipit-artifacts-lint
+    recorder = RunRecorder({"npm": _vsce_writes_out})
+
+    bundle_mod.VSIX.compose(
+        _request(
+            tmp_path,
+            artifact,
+            entries,
+            target=MAC,
+            run_cmd=recorder,
+            artifact_deps=(dep,),
+        )
+    )
+    assert (tmp_path / "editors/vscode" / "resources/lexd-lsp").is_file()
+
+
+def test_vsix_stage_naming_an_undeclared_pin_refuses(tmp_path):
+    # `stage` names a package with no `[artifact-deps]` pin — a config mistake,
+    # never a silent skip: the channel was never told to publish it.
+    (artifact,) = _artifacts(
+        {
+            "ext": {
+                "build": ["npm"],
+                "bundle": {
+                    "composition": "vsix",
+                    "stage": {"lexd-lsp": "resources/lexd-lsp"},
+                },
+            }
+        }
+    )
+    entries = _entries({"editors/vscode": "npm"})
+    recorder = RunRecorder({"npm": _vsce_writes_out})
+    with pytest.raises(ReleaseError, match="no \\[artifact-deps.lexd-lsp\\] pin"):
+        bundle_mod.VSIX.compose(
+            _request(
+                tmp_path,
+                artifact,
+                entries,
+                target=MAC,
+                run_cmd=recorder,
+                artifact_deps=(),  # nothing declared
+            )
+        )
+    assert recorder.calls == []  # refused before packaging
+
+
+def test_vsix_stage_missing_materialized_binary_points_at_install(tmp_path):
+    # The pin is declared but the binary is not in the pixi env — the compose
+    # STAGES (copies), it never fetches: hard-fail pointing at `shipit install`
+    # rather than reaching across repos (issue #911's fetcher is NOT reborn).
+    (artifact,) = _artifacts(
+        {
+            "ext": {
+                "build": ["npm"],
+                "bundle": {
+                    "composition": "vsix",
+                    "stage": {"lexd-lsp": "resources/lexd-lsp"},
+                },
+            }
+        }
+    )
+    entries = _entries({"editors/vscode": "npm"})
+    dep = _dep("lexd-lsp")  # declared, but nothing materialized on disk
+    recorder = RunRecorder({"npm": _vsce_writes_out})
+    with pytest.raises(ReleaseError, match="not materialized.*shipit install"):
+        bundle_mod.VSIX.compose(
+            _request(
+                tmp_path,
+                artifact,
+                entries,
+                target=MAC,
+                run_cmd=recorder,
+                artifact_deps=(dep,),
+            )
+        )
+    assert recorder.calls == []
+
+
+def test_vsix_without_a_stage_map_stages_nothing(tmp_path):
+    # The base per-platform vsix (no `stage`) is unchanged: no copy, just the
+    # single `vsce package` — the pre-#974 contract still holds.
+    (artifact,) = _artifacts(
+        {"ext": {"build": ["npm"], "bundle": {"composition": "vsix"}}}
+    )
+    entries = _entries({"editors/vscode": "npm"})
+    recorder = RunRecorder({"npm": _vsce_writes_out})
+    composed = bundle_mod.VSIX.compose(
+        _request(tmp_path, artifact, entries, target=MAC, run_cmd=recorder)
+    )
+    assert recorder.heads == ["npm"]
+    assert not (tmp_path / "editors/vscode" / "resources").exists()
+    assert composed.outputs == ("ext-darwin-arm64.vsix",)
 
 
 def test_registry_is_closed_and_platform_scoped():

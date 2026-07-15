@@ -57,10 +57,18 @@ from __future__ import annotations
 
 import re
 from collections.abc import Sequence
+from pathlib import Path
 
 from ..channel import buckets
 from ..config import ArtifactDep
 from .units import PIXI_FILE, Unit
+
+#: The pixi env root under a checkout — ``<root>/.pixi/envs/<env>`` is the
+#: prefix pixi materializes a projected artifact-dep into (mirrors
+#: :data:`shipit.pixienv.run.DEFAULT_ENV_DIR`, the default-env sentinel). The
+#: vsix bundle staging (:func:`shipit.release.bundle._stage_vsix_natives`,
+#: release#974) joins this to locate a TOOL artifact-dep's on-disk binary.
+_PIXI_ENVS_DIR = (".pixi", "envs")
 
 #: The public-tier Artifact channel host + bucket (ADR-0065 — the public-read,
 #: authless tier; the private tier's bucket is :data:`PRIVATE_ARTIFACT_BUCKET`
@@ -177,10 +185,35 @@ def _feature_name(feature: str | None) -> str:
     return DEFAULT_FEATURE if feature is None else f"{DEFAULT_FEATURE}-{feature}"
 
 
-def _env_name(feature: str | None) -> str:
+def env_name(feature: str | None) -> str:
     """The environment a target's feature is wired into — the default env for
-    the default target, an isolated ``shipit-artifacts-<F>`` env for a named one."""
+    the default target, an isolated ``shipit-artifacts-<F>`` env for a named one.
+
+    Public because the vsix bundle staging (release#974) needs the SAME
+    feature→env mapping the projection uses to locate a materialized artifact-dep
+    on disk (:func:`materialized_bin_path`) — one source of truth, so a named
+    feature never resolves to a different env in the projection than in staging.
+    """
     return DEFAULT_ENV if feature is None else f"{DEFAULT_FEATURE}-{feature}"
+
+
+def materialized_bin_path(root: Path, dep: ArtifactDep) -> Path:
+    """On-disk path of a TOOL artifact-dep's binary in the projected pixi env.
+
+    A tool artifact-dep (``lexd-lsp``, ``lexd``) materializes its binary at
+    ``<env-prefix>/bin/<package>`` — ADR-0064: "a tool artifact puts a binary on
+    PATH, while a data artifact installs its files into the env". The prefix is
+    the pixi env the projection wired the pin into (:func:`env_name` off
+    ``dep.feature``), under ``<root>/.pixi/envs/<env>/``. The vsix bundle staging
+    (:func:`shipit.release.bundle._stage_vsix_natives`, release#974) reads this
+    to copy the per-platform binary into the extension layout before ``vsce
+    package``: pixi has ALREADY resolved and materialized the RIGHT platform's
+    conda package at this path (the build runner's own subdir — ADR-0064's
+    osx-arm64/linux-64/linux-aarch64/win-64 closure), so staging is a copy, never
+    a per-target fetch. Pure path arithmetic — no filesystem probe; the caller
+    checks existence and reports the "run ``shipit install``" remediation.
+    """
+    return root.joinpath(*_PIXI_ENVS_DIR, env_name(dep.feature), "bin", dep.package)
 
 
 def _toml_str_list(values: Sequence[str]) -> str:
@@ -265,7 +298,7 @@ def _environments_unit(features: Sequence[str | None]) -> Unit:
     """The one consolidated environments block wiring every target's feature
     into its environment, anchored under ``[environments]``."""
     lines = [
-        f"{_toml_key(_env_name(f))} = {_toml_str_list([_feature_name(f)])}"
+        f"{_toml_key(env_name(f))} = {_toml_str_list([_feature_name(f)])}"
         for f in features
     ]
     return Unit(

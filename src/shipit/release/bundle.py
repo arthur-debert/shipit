@@ -72,11 +72,20 @@ functions the entries carry:
   fleet-provisioned PATH binary, so the local package context resolves it. A
   ``.vsix`` is a zip package with no reopenable main binary, so — like wheel,
   wasm-pack, and tarball — it is NOT binary-asserting (``asserts_binary=False``,
-  the scar-#2 guard is skipped). The per-target binary it bundles is produced
-  by the build stage — for ``win32-x64`` that binary comes from the
-  cross-target build (TOL02-WS11 #787, the windows leg's stated dependency, not
-  hidden), which writes ``target/<triple>/release/`` for the extension's
-  prepackage step to stage.
+  the scar-#2 guard is skipped). The per-target native binary the extension
+  bundles (the ``lexd-lsp`` LSP, tree-sitter wasm) rides the **Artifact channel**
+  (ARF01, ADR-0064/0066): it is published by its producing repo as a
+  per-platform **conda package** and consumed here through an ``[artifact-deps]``
+  pin, which ``shipit install`` projects into the managed pixi env so pixi
+  resolves/fetches THIS leg's platform build into
+  ``<root>/.pixi/envs/<env>/bin/<pkg>``. The vsix artifact names which pins to
+  stage and where in the extension layout via the optional ``bundle.stage`` map
+  (``{ "lexd-lsp" = "resources/lexd-lsp" }``); :func:`_stage_vsix_natives`
+  COPIES each materialized binary into the leg dir before ``vsce package`` (never
+  a fetch — issue #911's bespoke fetcher is superseded by the channel; a binary
+  absent from the env hard-fails pointing at ``shipit install``). Because pixi
+  already resolved the per-platform subdir, the binary at the path IS the right
+  one for the target — no cross-target branching in the composition.
 - **mac-app** — the coupled UNSIGNED ``.app``/``.dmg`` pair (the declared
   bundler builds the .app inside the .dmg run; they are not cleanly
   separable) PLUS the inner ``.app`` re-emitted as the reseal payload
@@ -168,6 +177,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .. import config, execrun
+from ..install import artifactdeps
 from ..tools import e2e as e2e_mod
 from . import ReleaseError
 
@@ -229,6 +239,13 @@ class ComposeRequest:
     default (a native local bundle) — so build and bundle agree on the dir by
     being handed the SAME triple, never a native/cross guess (the triple-dir
     contract's single owner, issue #785 deferral resolved by #787).
+
+    ``artifact_deps`` is the repo's parsed ``[artifact-deps]`` set
+    (:func:`shipit.config.load_artifact_deps`) — the cross-repo Artifact-channel
+    pins the vsix composition stages a native binary from (TOL03-WS03 #974): the
+    compose resolves a ``bundle.stage`` package key against it to find the pin's
+    pixi env and copy the materialized binary into the extension layout. ``()``
+    for a repo declaring none (every composition but vsix ignores it).
     """
 
     artifact: config.Artifact
@@ -238,6 +255,7 @@ class ComposeRequest:
     target: str
     run_cmd: RunCmd
     build_target: str | None = None
+    artifact_deps: tuple[config.ArtifactDep, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -970,9 +988,66 @@ def vsce_target(target: str) -> str:
     return vt
 
 
+def _stage_vsix_natives(req: ComposeRequest, leg_dir: Path) -> None:
+    """Copy each declared ``bundle.stage`` native binary into the extension
+    layout BEFORE ``vsce package`` (TOL03-WS03 #974) — the Artifact-channel
+    staging that turns a hollow ``.vsix`` into a real extension.
+
+    For each ``(package, dest)`` the vsix artifact declares
+    (:attr:`shipit.config.BundleSpec.stage`), the ``package`` is resolved against
+    the repo's parsed ``[artifact-deps]`` (``req.artifact_deps``): a key naming no
+    declared pin is a loud refusal (staging a binary the channel was never told
+    to publish is a config mistake, not a silent skip). The pin's materialized
+    binary — ``<root>/.pixi/envs/<env>/bin/<package>``, put there by ``shipit
+    install`` projecting the pin so pixi resolves/fetches the RIGHT per-platform
+    conda package (ADR-0064/0066) — is copied to ``<leg_dir>/<dest>`` (executable
+    bit preserved), inside the extension package so ``vsce package`` includes it.
+
+    This is a COPY off the already-materialized env, never a fetch: if the binary
+    is absent, the composition hard-fails pointing at ``shipit install`` /the
+    Artifact channel rather than reaching across repos itself (issue #911's
+    bespoke fetcher is deliberately NOT reintroduced — the channel already put
+    the binary in the build env). Per-target correctness needs no branching here:
+    pixi resolved this leg's own platform subdir, so the binary at the path IS the
+    right one for ``req.target``.
+    """
+    stage = req.artifact.bundle.stage if req.artifact.bundle is not None else ()
+    if not stage:
+        return
+    deps = {dep.package: dep for dep in req.artifact_deps}
+    for package, dest in stage:
+        dep = deps.get(package)
+        if dep is None:
+            declared = ", ".join(sorted(deps)) or "none declared"
+            raise ReleaseError(
+                f"[artifacts.{req.artifact.name}] vsix stage names `{package}`, "
+                f"but no [artifact-deps.{package}] pin is declared — the native "
+                f"binary rides the Artifact channel as a conda package "
+                f"(ADR-0064); declare the pin so `shipit install` materializes "
+                f"it, never a bespoke fetch (declared artifact-deps: {declared})"
+            )
+        src = artifactdeps.materialized_bin_path(req.root, dep)
+        if not src.is_file():
+            raise ReleaseError(
+                f"[artifacts.{req.artifact.name}] vsix stage: the `{package}` "
+                f"binary is not materialized at {src} — run `shipit install` so "
+                f"the Artifact channel projects the `{dep.repo}` pin into the "
+                f"pixi env (ADR-0064/0066); the vsix bundle STAGES the binary, it "
+                f"never fetches it"
+            )
+        dst = leg_dir / dest
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+        # Keep the exec bit: the LSP the extension spawns must stay runnable
+        # (copy2 preserves mode, but a channel binary staged read-only would
+        # ship a non-executable LSP — make the intent explicit).
+        dst.chmod(dst.stat().st_mode | 0o755)
+
+
 def _compose_vsix(req: ComposeRequest) -> Composed:
     """Package the per-target ``.vsix`` via ``npm exec -- vsce package
-    --target``. See the module docstring's vsix entry.
+    --target``, after staging any declared native binaries. See the module
+    docstring's vsix entry.
 
     Runs ``vsce`` through ``npm exec`` in the ``npm`` leg (the extension
     package): vsce is the consumer's ``@vscode/vsce`` devDependency under
@@ -980,14 +1055,17 @@ def _compose_vsix(req: ComposeRequest) -> Composed:
     context — a bare ``vsce`` would not be on ``PATH`` under ``pixi run
     ./bin/shipit``. Writes the single ``<name>-<vsce-target>.vsix`` straight
     into the bundle output tree; the ``vsce`` output path is stated so a rerun
-    overwrites in place (vsce replaces, never appends). The native binary vsce
-    bundles for this target is the build stage's output — for ``win32-x64`` the
-    cross-target build's (TOL02-WS11 #787). A run that leaves no ``.vsix`` is a
-    hard failure, never a quiet pass (the legacy ``vscode-ext.yml@v3``
-    per-target contract).
+    overwrites in place (vsce replaces, never appends). The per-target native
+    binary the extension bundles (the ``lexd-lsp`` LSP, tree-sitter wasm) is
+    staged FIRST (:func:`_stage_vsix_natives`) by copying it out of the pixi env
+    the Artifact channel materialized it into (``[artifact-deps]`` conda packages,
+    TOL03-WS03 #974) — so the ``.vsix`` ships a real extension, not a hollow one.
+    A run that leaves no ``.vsix`` is a hard failure, never a quiet pass (the
+    legacy ``vscode-ext.yml@v3`` per-target contract).
     """
     leg = _leg_for(req.artifact, req.entries, "npm", "vsix")
     vt = vsce_target(req.target)
+    _stage_vsix_natives(req, req.root / leg.path)
     out_name = f"{req.artifact.name}-{vt}.vsix"
     req.out_dir.mkdir(parents=True, exist_ok=True)
     out_path = req.out_dir / out_name
@@ -1055,9 +1133,10 @@ class Composition:
     ``option_keys`` are the
     EXTRA optional declaration keys a registry-assembled composition accepts
     (wasm-pack's ``scope`` / ``wasm-target`` — the ``@scope`` and wasm-pack
-    ``--target``, the only consumer-specific parts); the config boundary
-    accepts them ONLY for the composition that names them and rejects them
-    everywhere else (:func:`shipit.config._parse_bundle`). ``provisions_signal``
+    ``--target``; vsix's ``stage`` — the Artifact-channel native-binary staging
+    map, #974 — each composition's only consumer-specific parts); the config
+    boundary accepts them ONLY for the composition that names them and rejects
+    them everywhere else (:func:`shipit.config._parse_bundle`). ``provisions_signal``
     names a toolchain SIGNAL a declared composition needs beyond its own leg —
     wasm-pack's ``npm pack`` needs the node runtime (``npm`` rides ``nodejs``),
     but wasm-pack rides the RUST signal and a rust-only wasm crate's npm
@@ -1117,12 +1196,19 @@ WASM_PACK = Composition(
 #: reopenable main binary, so like wheel/wasm-pack/tarball the scar-#2 guard is
 #: skipped (``asserts_binary=False``): preflight never routes the vsix leg
 #: through assert-bundle, which would hard-fail "no main binary" on a tree
-#: carrying only the per-target ``<name>-<vsce-target>.vsix``.
+#: carrying only the per-target ``<name>-<vsce-target>.vsix``. Its optional
+#: ``stage`` option key (#974) carries the Artifact-channel native-binary staging
+#: map — the one vsix-specific declaration, gated to this composition.
 VSIX = Composition(
     "vsix",
     _compose_vsix,
     platforms=("apple-darwin", "linux", "windows"),
     asserts_binary=False,
+    # `stage`: the optional Artifact-channel native-binary staging map (#974) —
+    # `{ "<artifact-dep pkg>" = "<dest-in-extension>" }`, the only vsix-specific
+    # declaration. Accepted ONLY here (the config boundary rejects it on every
+    # other composition via this option_keys gate), like wasm-pack's scope.
+    option_keys=("stage",),
 )
 MAC_APP = Composition(
     "mac-app",

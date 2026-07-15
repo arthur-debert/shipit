@@ -366,6 +366,7 @@ _NON_ARGV_LITERALS = frozenset(
         "rust",
         "scope",
         "src",
+        "stage",  # vsix's native-staging option key (bundle.py VSIX option_keys)
         "success",
         "v",
         "windows",

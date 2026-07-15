@@ -593,6 +593,97 @@ def test_wasm_pack_options_are_rejected_on_other_compositions(key):
         )
 
 
+# --------------------------------------------------------------------------
+# vsix `stage` — the Artifact-channel native-binary staging map (#974)
+# --------------------------------------------------------------------------
+
+
+def test_vsix_parses_the_stage_map():
+    # The vsix composition's optional `stage`: an `[artifact-deps]` package name
+    # → its destination path in the extension layout, kept as ordered pairs so
+    # the compose copies each materialized native before `vsce package`.
+    (artifact,) = _load(
+        "[artifacts.ext]\n"
+        'build = ["npm"]\n'
+        "[artifacts.ext.bundle]\n"
+        'composition = "vsix"\n'
+        "[artifacts.ext.bundle.stage]\n"
+        '"lexd-lsp" = "resources/lexd-lsp"\n'
+        '"tree-sitter-lex" = "resources/tree-sitter-lex.wasm"\n'
+    )
+    assert artifact.bundle == config.BundleSpec(
+        composition="vsix",
+        stage=(
+            ("lexd-lsp", "resources/lexd-lsp"),
+            ("tree-sitter-lex", "resources/tree-sitter-lex.wasm"),
+        ),
+    )
+
+
+def test_vsix_stage_defaults_to_empty():
+    # No `stage` is a legal vsix: the base per-platform `vsce package` alone.
+    (artifact,) = _load(
+        '[artifacts.ext]\nbuild = ["npm"]\nbundle = { composition = "vsix" }\n'
+    )
+    assert artifact.bundle == config.BundleSpec(composition="vsix", stage=())
+
+
+def test_vsix_stage_is_rejected_on_other_compositions():
+    # `stage` is vsix's ONLY (option_keys) — an unknown key elsewhere.
+    with pytest.raises(config.ConfigError, match="unknown key `stage`"):
+        _load(
+            "[artifacts.x]\n"
+            'build = ["rust"]\n'
+            'bundle = { composition = "archive", stage = { "lexd-lsp" = "r" } }\n'
+        )
+
+
+def test_vsix_stage_must_be_a_non_empty_table():
+    with pytest.raises(config.ConfigError, match="stage: must be a non-empty table"):
+        _load(
+            "[artifacts.ext]\n"
+            'build = ["npm"]\n'
+            'bundle = { composition = "vsix", stage = {} }\n'
+        )
+
+
+def test_vsix_stage_key_must_be_a_conda_package_name():
+    # The key doubles as the `[artifact-deps]` package name — conda's lowercase
+    # vocabulary; an uppercase key dies at parse (it could never resolve a pin).
+    with pytest.raises(
+        config.ConfigError, match="not a valid \\[artifact-deps\\] package name"
+    ):
+        _load(
+            "[artifacts.ext]\n"
+            'build = ["npm"]\n'
+            '[artifacts.ext.bundle]\ncomposition = "vsix"\n'
+            '[artifacts.ext.bundle.stage]\n"Lexd-LSP" = "resources/lexd-lsp"\n'
+        )
+
+
+def test_vsix_stage_destination_must_be_a_non_empty_string():
+    with pytest.raises(config.ConfigError, match="destination must be a non-empty"):
+        _load(
+            "[artifacts.ext]\n"
+            'build = ["npm"]\n'
+            '[artifacts.ext.bundle]\ncomposition = "vsix"\n'
+            '[artifacts.ext.bundle.stage]\n"lexd-lsp" = ""\n'
+        )
+
+
+@pytest.mark.parametrize("dest", ["/abs/lexd", "../escape/lexd"])
+def test_vsix_stage_destination_may_not_escape_the_checkout(dest):
+    # The dest is joined to the leg dir and WRITTEN — an absolute path or a `..`
+    # segment would stage outside the extension, refused like `bundle.source`.
+    with pytest.raises(config.ConfigError, match="must be a repo-relative path"):
+        _load(
+            "[artifacts.ext]\n"
+            'build = ["npm"]\n'
+            '[artifacts.ext.bundle]\ncomposition = "vsix"\n'
+            f'[artifacts.ext.bundle.stage]\n"lexd-lsp" = "{dest}"\n'
+        )
+
+
 @pytest.mark.parametrize("key", ["main-binary", "product-name"])
 @pytest.mark.parametrize("value", ['""', "true", "[1]"])
 def test_main_binary_names_must_be_non_empty_strings(key, value):
