@@ -1082,8 +1082,10 @@ def load_artifacts(cfg: dict) -> tuple[Artifact, ...]:
 # executable contract. Only cross-repo artifact pins live here; ordinary
 # conda-forge deps stay consumer-authored in pixi. The access TIER (public /
 # private) is DERIVED from the producing repo's visibility at projection time
-# (ADR-0065), never declared here — one less thing to drift. WS02 serves the
-# PUBLIC tier only; the private tier's `[s3-options]` + credentials are WS04.
+# (ADR-0065), never declared here — one less thing to drift. A public producing
+# repo projects an authless HTTPS channel; a private one projects an `s3://`
+# S3-interop channel plus the `[s3-options]` block (credentials arrive as env
+# vars, out of band — ARF01-WS04).
 
 #: The per-entry keys `[artifact-deps.<pkg>]` accepts; anything else is a typo
 #: that dies at parse (the same closed-registry philosophy as `_KNOWN_TABLES`).
