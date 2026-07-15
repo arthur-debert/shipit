@@ -199,6 +199,32 @@ def current_branch(*, cwd: str) -> str | None:
     return None if (not name or name == "HEAD") else name
 
 
+def default_branch(*, cwd: str, remote: str = "origin") -> str:
+    """The remote's default branch name (e.g. ``main``), from ``<remote>/HEAD``.
+
+    Reads the local ``refs/remotes/<remote>/HEAD`` symbolic ref a clone points at
+    the remote's default branch and strips the ``<remote>/`` prefix. This is the
+    base the MODE_PR install flow resets its ``shipit/install`` staging branch
+    onto (#852): the staging branch must be based on the CURRENT default branch,
+    never on whatever HEAD a Tree was cut from, or a Tree cut from a stale
+    leftover remote ``shipit/install`` head would stack a conflicting commit.
+
+    A PROBE, not a mutation: a missing symref (some reference-borrow clones never
+    set ``<remote>/HEAD``) is a normal answer, so it falls back to ``main`` — the
+    portfolio default — rather than raising. A launch-level failure (missing git,
+    timeout) still propagates :class:`ExecError`.
+    """
+    result = _probe(["symbolic-ref", "--short", f"refs/remotes/{remote}/HEAD"], cwd=cwd)
+    if result.ok:
+        name = result.stdout.strip()
+        prefix = f"{remote}/"
+        if name.startswith(prefix):
+            name = name[len(prefix) :]
+        if name:
+            return name
+    return "main"
+
+
 def remote_url(*, cwd: str, remote: str = "origin") -> str:
     """The configured URL of ``remote`` for the checkout at ``cwd``."""
     return _git(["remote", "get-url", remote], cwd=cwd).strip()
@@ -1143,6 +1169,21 @@ def reset_hard(ref: str, *, cwd: str) -> None:
     line stays clean.
     """
     _git(["reset", "--hard", ref], cwd=cwd)
+
+
+def reset_soft(ref: str, *, cwd: str) -> None:
+    """``git reset --soft <ref>`` — move HEAD to ``ref``, keep index and working tree.
+
+    The MODE_PR staging-branch rebase (#852, :mod:`shipit.install.apply`):
+    install (re)creates the ``shipit/install`` branch and resets it onto
+    ``origin/<default>`` so the managed commit lands as ONE clean refresh on top
+    of the current default branch, no matter what HEAD the Tree was cut from.
+    ``--soft`` moves only the branch pointer — the rendered managed files stay in
+    the working tree — so the following pathspec commit (which takes the listed
+    paths from the working tree and everything else from HEAD) produces
+    ``origin/<default>`` + the managed delta, never a stack on stale commits.
+    """
+    _git(["reset", "--soft", ref], cwd=cwd)
 
 
 def submodule_update_init(*, cwd: str) -> None:

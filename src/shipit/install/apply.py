@@ -56,8 +56,10 @@ logger = logging.getLogger("shipit.install")
 #:   side effect (no ``shipit/install`` branch, no draft PR). See #170.
 #: - ``MODE_PUSH`` — break-glass: commit on the current branch and push straight
 #:   to it (admin bypass), no PR.
-#: - ``MODE_PR`` — switch to the ``shipit/install`` branch, commit, force-push,
-#:   and open a DRAFT PR (the standalone consumer-onboarding/reconcile flow).
+#: - ``MODE_PR`` — (re)create the ``shipit/install`` branch based on the CURRENT
+#:   origin default (never the Tree's cut point, #852), commit, force-push, and
+#:   open a DRAFT PR against that default (the standalone
+#:   consumer-onboarding/reconcile flow).
 MODE_TREE = "tree"
 MODE_LOCAL = "local"
 MODE_PUSH = "push"
@@ -668,7 +670,10 @@ def apply(
     this very run just armed it (pre-push lints the whole tree, not the staged
     managed set), and pre-existing consumer debt is reported in the PR body,
     never a blocker. ``MODE_PR`` stages onto the ``shipit/install`` scratch
-    branch and, in a ``finally``, always restores the caller's original checkout
+    branch, which it (re)creates and resets onto the CURRENT origin default
+    branch (#852) — never the HEAD the Tree was cut from — so a Tree cut from a
+    stale leftover remote ``shipit/install`` head can never stack a conflicting
+    commit; and, in a ``finally``, always restores the caller's original checkout
     (#777 mode 1 — never strand the operator off their own branch).
 
     Raises :class:`InstallError` on a domain refusal (``local``/``push`` in
@@ -955,13 +960,28 @@ def apply(
         # scratch ref, and leaving the operator sitting on it — off their own
         # branch, with no notice — is the surprise the issue reports.
         original_ref = git.current_branch(cwd=cwd)
+        # Base the staging branch on the CURRENT origin default, never on the
+        # HEAD the Tree was cut from (#852): a Tree cut from a STALE leftover
+        # remote `shipit/install` head (the reconcile merge does not delete the
+        # staging branch) would otherwise stack the fresh managed commit onto
+        # stale commits, minting a PR that conflicts with main. Fetch the base,
+        # (re)create the branch, then reset it onto origin/<default> so the
+        # managed commit lands as ONE clean refresh regardless of the cut point —
+        # which also RECYCLES a stale leftover branch on the next run. The reset
+        # is `--soft`: it moves only the branch pointer, so the rendered managed
+        # files stay in the working tree for the pathspec commit below (which
+        # takes the listed paths from the working tree and everything else from
+        # HEAD, now origin/<default>).
+        base_branch = git.default_branch(cwd=cwd)
+        git.fetch(cwd=cwd)
         git.switch_create(INSTALL_BRANCH, cwd=cwd)
+        git.reset_soft(f"origin/{base_branch}", cwd=cwd)
         try:
             git.add(changed_paths, cwd=cwd)
             git.commit(COMMIT_MESSAGE, changed_paths, cwd=cwd, no_verify=True)
-            # The install branch is regenerated from HEAD each run; force so a
-            # re-run with an open install PR updates it rather than failing
-            # non-fast-forward.
+            # The install branch is regenerated on top of origin/<default> each
+            # run; force so a re-run with an open install PR (or a stale leftover
+            # branch) updates it rather than failing non-fast-forward.
             git.push(INSTALL_BRANCH, cwd=cwd, force=True, no_verify=True)
             existing = gh.pr_url_for_head(INSTALL_BRANCH, cwd=cwd)
             if existing:
@@ -980,6 +1000,7 @@ def apply(
                 )
             url = gh.pr_create(
                 head=INSTALL_BRANCH,
+                base=base_branch,
                 title="shipit: install/update the managed set",
                 body=pr_body(
                     override_before,

@@ -161,6 +161,51 @@ def test_switch_moves_to_an_existing_branch_without_force(monkeypatch):
     assert seen["args"] == ["switch", "main"]
 
 
+def test_default_branch_strips_the_remote_prefix_from_the_symref(monkeypatch):
+    # #852: the MODE_PR staging-branch base is read from `<remote>/HEAD` and the
+    # `<remote>/` prefix is stripped, so `origin/HEAD -> origin/main` resolves to
+    # the bare branch name `main`.
+    seen = {}
+
+    def fake(args, *, cwd, timeout=None):
+        seen["args"] = args
+        return _ok("origin/main\n")
+
+    monkeypatch.setattr(git, "_probe", fake)
+    assert git.default_branch(cwd="/x") == "main"
+    assert seen["args"] == ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]
+
+
+def test_default_branch_honors_a_non_main_default(monkeypatch):
+    # A consumer whose default branch is `trunk` resolves to `trunk`, never a
+    # hardcoded `main` — the reset base and the PR base both follow the symref.
+    monkeypatch.setattr(git, "_probe", lambda args, *, cwd: _ok("origin/trunk\n"))
+    assert git.default_branch(cwd="/x") == "trunk"
+
+
+def test_default_branch_falls_back_to_main_when_the_symref_is_absent(monkeypatch):
+    # Some reference-borrow clones never set `origin/HEAD`: an absent symref is a
+    # NORMAL probe answer (nonzero rc), so the resolver falls back to the
+    # portfolio default `main` rather than raising.
+    monkeypatch.setattr(git, "_probe", lambda args, *, cwd: _fail("not a symref"))
+    assert git.default_branch(cwd="/x") == "main"
+
+
+def test_reset_soft_moves_only_the_branch_pointer(monkeypatch):
+    # #852: the staging-branch rebase resets shipit/install onto origin/<default>
+    # with `--soft` so the rendered managed files stay in the working tree for
+    # the following pathspec commit.
+    seen = {}
+
+    def fake(args, *, cwd, timeout=None):
+        seen["args"] = args
+        return ""
+
+    monkeypatch.setattr(git, "_git", fake)
+    git.reset_soft("origin/main", cwd="/x")
+    assert seen["args"] == ["reset", "--soft", "origin/main"]
+
+
 def test_submodule_update_init_syncs_then_recursively_inits_on_the_network_bound(
     monkeypatch,
 ):

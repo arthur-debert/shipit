@@ -63,8 +63,20 @@ class _GhRecorder:
             argv=("lefthook", "install"), rc=0, stdout="", stderr="", duration_ms=1
         )
 
+    def default_branch(self, *, cwd, remote="origin"):
+        # The remote default the MODE_PR staging branch is reset onto (#852);
+        # a pure query, not recorded in `calls`.
+        return "main"
+
+    def fetch(self, *, cwd, remote="origin"):
+        self.calls.append(("fetch", remote))
+
     def switch_create(self, branch, *, cwd):
         self.calls.append(("switch", branch))
+
+    def reset_soft(self, ref, *, cwd):
+        # #852: reset shipit/install onto origin/<default> before the commit.
+        self.calls.append(("reset", ref))
 
     def add(self, paths, *, cwd):
         self.calls.append(("add", tuple(paths)))
@@ -96,7 +108,16 @@ class _GhRecorder:
 @pytest.fixture
 def rec(monkeypatch):
     r = _GhRecorder()
-    for name in ("switch_create", "add", "commit", "push", "current_branch"):
+    for name in (
+        "switch_create",
+        "add",
+        "commit",
+        "push",
+        "current_branch",
+        "default_branch",
+        "fetch",
+        "reset_soft",
+    ):
         monkeypatch.setattr(git, name, getattr(r, name))
     for name in ("pr_url_for_head", "pr_create"):
         monkeypatch.setattr(gh, name, getattr(r, name))
@@ -720,7 +741,15 @@ def test_healthy_install_certifies_then_opens_the_pr(tmp_path, rec):
     # proceeded to the normal PR side effects.
     assert seen["pin"] == "testhash"
     assert result.pr_url is not None
-    assert rec.names() == ["switch", "add", "commit", "push", "pr_create"]
+    assert rec.names() == [
+        "fetch",
+        "switch",
+        "reset",
+        "add",
+        "commit",
+        "push",
+        "pr_create",
+    ]
     # The reconcile commit bypasses the repo's hooks (ADR-0033): the
     # whole-tree gate is the repo's bar, not install's.
     assert rec.commit_no_verify is True

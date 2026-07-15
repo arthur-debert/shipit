@@ -3122,8 +3122,24 @@ class _GhRecorder:
         self.hook_activations.append(root)
         return _exec_result(0)
 
+    def default_branch(self, *, cwd, remote="origin"):
+        # The remote default the MODE_PR staging branch is reset onto (#852).
+        # A pure query (like current_branch), so it is not recorded in `calls`.
+        return getattr(self, "_default_branch", "main")
+
+    def fetch(self, *, cwd, remote="origin"):
+        # Refresh origin/<default> before the staging branch is reset onto it.
+        # A 2-tuple like every other recorded call so name/payload unpacking
+        # (`for name, _ in rec.calls`) stays uniform.
+        self.calls.append(("fetch", remote))
+
     def switch_create(self, branch, *, cwd):
         self.calls.append(("switch", branch))
+
+    def reset_soft(self, ref, *, cwd):
+        # The #852 staging-branch rebase: reset shipit/install onto
+        # origin/<default> so the managed commit lands as one clean refresh.
+        self.calls.append(("reset", ref))
 
     def switch(self, branch, *, cwd):
         # The MODE_PR caller-branch restore (#777 mode 1) — recorded under its
@@ -3149,9 +3165,10 @@ class _GhRecorder:
     def pr_url_for_head(self, branch, *, cwd=None):
         return None  # no existing PR by default
 
-    def pr_create(self, *, head, title, body, draft, cwd, **kw):
+    def pr_create(self, *, head, title, body, draft, cwd, base=None, **kw):
         self.calls.append(("pr_create", draft))
         self.pr_body = body
+        self.pr_base = base  # the base the draft PR targets (#852)
         return "https://github.com/acme/repo/pull/1"
 
     def names(self):
@@ -3168,6 +3185,9 @@ def rec(monkeypatch):
         "commit",
         "push",
         "current_branch",
+        "default_branch",
+        "fetch",
+        "reset_soft",
     ):
         monkeypatch.setattr(git, name, getattr(r, name))
     for name in ("pr_url_for_head", "pr_create"):
@@ -3223,17 +3243,59 @@ def test_fresh_install_writes_set_and_opens_draft_pr(tmp_path, rec):
     # A DRAFT PR was opened; the rendered body lists the additions.
     assert ("pr_create", True) in rec.calls
     assert "### Added" in rec.pr_body
-    # Order: branch -> add -> commit -> push -> pr -> restore the caller's branch
-    # (#777 mode 1: the flow returns the checkout to where it started).
+    # Order: fetch -> branch -> reset onto origin/<default> -> add -> commit ->
+    # push -> pr -> restore the caller's branch. The fetch+reset front (#852)
+    # bases the staging branch on current origin/main so a Tree cut from a stale
+    # remote shipit/install head can never stack a conflicting commit; the
+    # switch_back (#777 mode 1) returns the checkout to where it started.
     assert rec.names() == [
+        "fetch",
         "switch",
+        "reset",
         "add",
         "commit",
         "push",
         "pr_create",
         "switch_back",
     ]
+    assert ("reset", "origin/main") in rec.calls
     assert ("switch_back", "main") in rec.calls
+
+
+def test_pr_mode_bases_staging_branch_on_current_origin_default(tmp_path, rec):
+    # #852: install --pr must base its `shipit/install` staging branch on the
+    # CURRENT origin default, never on whatever HEAD the Tree was cut from. A
+    # Tree cut from a STALE leftover remote `shipit/install` head (the merge does
+    # not delete the staging branch) would otherwise stack the fresh managed
+    # commit onto stale commits, minting a PR that conflicts with main. The fix:
+    # fetch the base, (re)create the branch, and reset it onto origin/<default>
+    # so the managed commit lands as one clean refresh regardless of the cut
+    # point — which also RECYCLES a stale leftover branch on the next run.
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    result = _apply(tmp_path, iapply.MODE_PR)
+
+    # Origin is refreshed BEFORE the reset, so origin/<default> is current…
+    assert "fetch" in rec.names()
+    assert rec.names().index("fetch") < rec.names().index("reset")
+    # …the staging branch is recreated and reset onto origin/<default> BEFORE the
+    # managed commit is staged, so the commit's parent is main, never the stale
+    # head the Tree started on.
+    assert rec.names().index("switch") < rec.names().index("reset")
+    assert rec.names().index("reset") < rec.names().index("commit")
+    assert ("reset", "origin/main") in rec.calls
+    assert result.pr_url == "https://github.com/acme/repo/pull/1"
+
+
+def test_pr_mode_honors_a_non_main_default_branch(tmp_path, rec):
+    # #852: the base is the RESOLVED origin default, not a hardcoded "main" — a
+    # consumer whose default branch is `trunk` gets its staging branch reset onto
+    # origin/trunk and its draft PR targeted at trunk, so the two never diverge.
+    rec._default_branch = "trunk"
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    _apply(tmp_path, iapply.MODE_PR)
+
+    assert ("reset", "origin/trunk") in rec.calls
+    assert rec.pr_base == "trunk"
 
 
 def test_fresh_install_provisions_agent_defs_and_settings_hook(tmp_path, rec):
@@ -3773,7 +3835,9 @@ def test_pr_mode_on_virgin_repo_with_lint_debt_reaches_the_pr_leg(tmp_path, rec)
     assert rec.hook_activations == [tmp_path]
     # …and the push/PR leg still ran, both git write ops bypassing the hooks.
     assert rec.names() == [
+        "fetch",
         "switch",
+        "reset",
         "add",
         "commit",
         "push",
