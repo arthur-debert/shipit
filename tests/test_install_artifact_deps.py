@@ -399,17 +399,46 @@ def test_an_unrelated_consumer_feature_table_is_no_conflict(tmp_path):
     assert feat.action == irec.ADD
 
 
-def test_toml_table_headers_honor_quoted_dotted_segments():
-    # A dotted segment is quoted at emission (_toml_key), so the header parser
-    # must read a quoted dot as a literal name char, not a path separator —
-    # else `[s3-options."my.bucket"]` would walk the wrong path and miss a clash.
+def test_toml_table_headers_return_verbatim_text_and_split_segments():
+    # A dotted segment is quoted at emission (_toml_key). The parser returns the
+    # VERBATIM header (for a faithful conflict report) plus the split segments
+    # (which read a quoted dot as a literal, not a path separator, so the walk
+    # hits the right table) — else `[s3-options."my.bucket"]` would both walk the
+    # wrong path AND be reported as the different, nested `s3-options.my.bucket`.
     inner = '[s3-options."my.bucket"]\nregion = "auto"\n\n[feature.plain]\n'
     assert irec._toml_table_headers(inner) == (
-        ("s3-options", "my.bucket"),
-        ("feature", "plain"),
+        ('s3-options."my.bucket"', ("s3-options", "my.bucket")),
+        ("feature.plain", ("feature", "plain")),
     )
     # Array-of-tables and non-header lines are ignored.
     assert irec._toml_table_headers("[[x]]\nk = 1\n") == ()
+
+
+def test_table_conflict_reports_the_quoted_header_for_a_dotted_name(tmp_path):
+    # Display fidelity (copilot round 2): a dotted name is quoted at emission, so
+    # the reported clash must PRESERVE the quoting — a bare
+    # `feature.shipit-artifacts-tools.v2` is a different, nested table in TOML and
+    # would send the user to delete the wrong one. A dotted `feature` projects
+    # the reserved `shipit-artifacts-tools.v2` feature (dotted → quoted); a
+    # consumer that already declares that table exercises the report end-to-end.
+    (tmp_path / "pixi.toml").write_text(
+        iunits.pixi_manifest_seed("downstream")
+        + '\n[feature."shipit-artifacts-tools.v2"]\nchannels = []\n'
+    )
+    units = ad.project(
+        [(_dep(feature="tools.v2"), ad.channel_url("lex-fmt/lex", private=False))]
+    )
+    state = irec.gather(tmp_path, units, irec.load_retired())
+    plan = irec.reconcile(units, irec.load_retired(), state)
+
+    conflict = next(
+        c
+        for c in plan.pixi_table_conflicts
+        if c.unit_key == "pixi.toml#shipit-artifacts-tools.v2"
+    )
+    assert conflict.tables == ('feature."shipit-artifacts-tools.v2"',)
+    # The user-facing warning names the real, quoted table path.
+    assert '[feature."shipit-artifacts-tools.v2"]' in verb.format_plan_warnings(plan)
 
 
 def test_table_declared_matches_only_the_full_leaf_path():

@@ -842,7 +842,10 @@ class PixiTableConflict:
     unit_key: (
         str  # the [managed] table key, e.g. "pixi.toml#shipit-artifact-deps-s3-options"
     )
-    tables: tuple[str, ...]  # the table headers the consumer already declares
+    # The clashing table headers the consumer already declares, VERBATIM (the
+    # TOML-quoted form, e.g. `s3-options."my.bucket"`) so the warning names the
+    # real path — a bare `s3-options.my.bucket` is a different nested table.
+    tables: tuple[str, ...]
 
 
 def format_pixi_table_conflict(conflict: PixiTableConflict) -> str:
@@ -889,16 +892,22 @@ def _split_toml_key(key: str) -> tuple[str, ...]:
     return tuple(segments)
 
 
-def _toml_table_headers(inner: str) -> tuple[tuple[str, ...], ...]:
-    """The key-path of every plain ``[table]`` header declared in a TOML text.
+def _toml_table_headers(inner: str) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    """Every plain ``[table]`` header in a TOML text, as ``(raw, segments)``.
+
+    ``raw`` is the header's inner text VERBATIM (``s3-options."my.bucket"`` —
+    the TOML-quoted form the block emitted), so a conflict report names the real
+    table path a user would delete; ``segments`` is that path split with quoting
+    honored (:func:`_split_toml_key`), so the walk against the parsed consumer
+    manifest compares whole names. Reporting ``raw`` rather than
+    ``".".join(segments)`` keeps the quoting: a bare ``s3-options.my.bucket`` is
+    a DIFFERENT (nested) table in TOML and would misdirect the fix.
 
     Only plain-table headers matter to the redeclaration guard: array-of-tables
     (``[[...]]``) declarations stack rather than clash, and the projection emits
-    none anyway. Each header's dotted path is split with quoting honored
-    (:func:`_split_toml_key`), so the walk against the parsed consumer manifest
-    compares whole names.
+    none anyway.
     """
-    headers: list[tuple[str, ...]] = []
+    headers: list[tuple[str, tuple[str, ...]]] = []
     for line in inner.splitlines():
         stripped = line.strip()
         if (
@@ -907,7 +916,8 @@ def _toml_table_headers(inner: str) -> tuple[tuple[str, ...], ...]:
             or not stripped.endswith("]")
         ):
             continue
-        headers.append(_split_toml_key(stripped[1:-1]))
+        raw = stripped[1:-1].strip()
+        headers.append((raw, _split_toml_key(raw)))
     return tuple(headers)
 
 
@@ -959,9 +969,9 @@ def _pixi_table_conflicts(
         if consumer_hashes.get(unit.key) is not None:
             continue  # markers present: the block's tables are already its own
         clashes = tuple(
-            ".".join(header)
-            for header in _toml_table_headers(unit.desired_inner())
-            if _table_declared(manifest, header)
+            raw
+            for raw, segments in _toml_table_headers(unit.desired_inner())
+            if _table_declared(manifest, segments)
         )
         if clashes:
             conflicts.append(PixiTableConflict(unit_key=unit.key, tables=clashes))
