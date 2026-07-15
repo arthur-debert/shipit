@@ -356,6 +356,66 @@ def test_rm_cached_on_empty_paths_never_shells(monkeypatch):
     assert called is False
 
 
+def test_commit_all_publishes_index_deletions_a_pathspec_commit_would_drop(tmp_path):
+    # #991 (regression, end-to-end over REAL git — a fake seam cannot prove tree
+    # content): the MODE_PR reconcile stages its retired-path deletions into the
+    # INDEX (`git rm --cached`), so the publishing commit MUST read the index. A
+    # `git commit -- <pathspec>` runs git's PARTIAL-commit mode, which builds the
+    # tree from the WORKING TREE of the named paths and DISREGARDS the index —
+    # so whenever the retired file's working-tree copy is still present it
+    # RESURRECTS it, silently negating the staged deletion (the skills-store move
+    # #921 dropped all 11 `skills/*` deletions this way). The fix commits the
+    # whole INDEX (`commit_all`), which honors the staged deletion regardless of
+    # the working tree while still excluding an unrelated dirty consumer file
+    # (never staged). Drive the exact reconcile staging sequence and assert the
+    # committed TREE.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t.co"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=repo, check=True)
+    # The base carries the retired managed file AND an unrelated consumer file.
+    (repo / "skills").mkdir()
+    (repo / "skills" / "foo.md").write_text("old shipit skill\n")
+    (repo / "notes.txt").write_text("consumer\n")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "base"], cwd=repo, check=True)
+
+    # The reconcile staging: add the new managed file, stage the retired path's
+    # removal from the INDEX (its working-tree copy deliberately LEFT in place —
+    # the case that broke the pathspec commit), and leave an unrelated dirty edit
+    # in the working tree that is NEVER staged.
+    (repo / ".shipit-skills").mkdir()
+    (repo / ".shipit-skills" / "foo.md").write_text("new shipit skill\n")
+    (repo / "notes.txt").write_text("consumer — locally edited\n")  # dirty, unstaged
+    git.add([".shipit-skills/foo.md"], cwd=str(repo))
+    git.rm_cached(["skills/foo.md"], cwd=str(repo))
+    git.commit_all("reconcile", cwd=str(repo), no_verify=True)
+
+    tree = subprocess.run(
+        ["git", "ls-tree", "-r", "--name-only", "HEAD"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.split()
+    # The staged deletion is PUBLISHED — the retired path is gone from the tree…
+    assert "skills/foo.md" not in tree
+    # …the new managed file was added…
+    assert ".shipit-skills/foo.md" in tree
+    # …and the unrelated consumer file is KEPT, at its BASE content: the unstaged
+    # working-tree edit was excluded (the scoping the pathspec commit used to give).
+    assert "notes.txt" in tree
+    committed = subprocess.run(
+        ["git", "show", "HEAD:notes.txt"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert committed == "consumer\n"
+
+
 def test_submodule_update_init_syncs_then_recursively_inits_on_the_network_bound(
     monkeypatch,
 ):

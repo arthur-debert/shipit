@@ -782,11 +782,23 @@ def add_all(*, cwd: str) -> None:
 def commit_all(message: str, *, cwd: str, no_verify: bool = False) -> None:
     """``git commit -m <message>`` — commit everything already staged.
 
-    The whole-tree counterpart of :func:`commit` (which scopes to pathspecs):
-    ``shipit repo new`` stages the whole Repo with :func:`add_all` and commits
-    it as one root ``Initial commit``. ``no_verify`` is left at its default
-    ``False`` by creation so the installed hooks run on that commit exactly as
-    they would for any consumer (ADR-0062).
+    The whole-INDEX counterpart of :func:`commit` (which scopes to pathspecs).
+    Two callers:
+
+    - ``shipit repo new`` stages the whole Repo with :func:`add_all` and commits
+      it as one root ``Initial commit``. ``no_verify`` is left at its default
+      ``False`` by creation so the installed hooks run on that commit exactly as
+      they would for any consumer (ADR-0062).
+    - install's MODE_PR reconcile (#991) stages ONLY the managed paths — the
+      writes via :func:`add`, the retired-path deletions via :func:`rm_cached`
+      (an INDEX-only ``git rm --cached``) — onto a ``reset --soft origin/<base>``
+      index, then publishes that index as-is with ``no_verify=True`` (ADR-0033,
+      like :func:`commit`). It MUST be this whole-index commit, never a pathspec
+      :func:`commit`: a pathspec commit runs git's PARTIAL-commit mode, which
+      rebuilds the tree from the WORKING TREE of the named paths and DISREGARDS
+      the index — silently negating the ``rm --cached`` deletions and
+      resurrecting every retired file whose working-tree copy survives. An
+      unrelated dirty consumer file is excluded because it is never staged.
     """
     args = ["commit"]
     if no_verify:
@@ -889,10 +901,18 @@ def commit(
 ) -> None:
     """``git commit -m <message> -- <paths>`` — commit only the given pathspecs.
 
+    This is git's PARTIAL-commit mode: it builds the tree from the WORKING TREE
+    of the named paths and DISREGARDS the index, so it can only publish WRITES,
+    never an index-staged deletion (:func:`rm_cached`) — install's MODE_PR
+    reconcile therefore publishes via the whole-index :func:`commit_all` instead
+    (#991). This pathspec form serves install's MODE_LOCAL/MODE_PUSH commits,
+    which stage and commit the write set (``changed_paths``) with no index-only
+    deletions to honor.
+
     ``no_verify`` bypasses the repo's commit hooks (``--no-verify``): install's
-    reconcile commit uses it deliberately (ADR-0033) — the whole-tree gate is
-    the REPO'S bar, not install's, and a consumer's pre-existing lint debt must
-    never deadlock the very install that delivers the env to clear it.
+    commit uses it deliberately (ADR-0033) — the whole-tree gate is the REPO'S
+    bar, not install's, and a consumer's pre-existing lint debt must never
+    deadlock the very install that delivers the env to clear it.
     """
     args = ["commit"]
     if no_verify:
@@ -906,19 +926,19 @@ def staged_paths(paths: list[str], *, cwd: str) -> list[str]:
     ``git diff --cached --name-only -- <paths>`` — the pathspec-scoped index
     diff, parsed to the changed names (the adapter owns output parsing, like
     :func:`diff_name_only`). The MODE_PR staging flow reads this AFTER
-    ``reset --soft`` + ``git add`` + :func:`rm_cached` (#984/#986 review) to
-    build the pathspec :func:`commit` carries: the writes :func:`add` just staged
-    PLUS the retired-path deletions :func:`rm_cached` staged from the index for
-    paths the base still carries. A pathspec that
-    matches nothing in the working tree, the index AND HEAD is simply never
-    listed (``git diff`` skips it, exit 0), so the commit never receives a
-    pathspec it would abort on — unlike ``git add``/``git commit``, which fail
-    on a pathspec that matches nothing.
+    ``reset --soft`` + ``git add`` + :func:`rm_cached` (#984/#986 review) as the
+    "nothing to publish" NO-OP GUARD (#991) — NOT as a commit pathspec: the
+    reconcile itself is published by the whole-index :func:`commit_all`, so this
+    read exists only to answer whether ANY managed path (the writes :func:`add`
+    just staged PLUS the retired-path deletions :func:`rm_cached` staged from the
+    index) carries a staged diff against the base. A path that matches nothing in
+    the working tree, the index AND HEAD is simply never listed (``git diff``
+    skips it, exit 0).
 
     An empty return means the named set already matches HEAD — the MODE_PR
     "nothing to publish" case (the staging branch is a stale Tree duplicating an
-    already-merged reconcile), where a pathspec :func:`commit` over an empty
-    diff would otherwise crash with "nothing to commit". A genuine git failure
+    already-merged reconcile), where a whole-index :func:`commit_all` over an
+    empty diff would otherwise crash with "nothing to commit". A genuine git failure
     (bad pathspec magic, unreadable index) still surfaces as the transport
     :class:`ExecError`: ``--name-only`` signals a real error through a nonzero
     exit, not through the diff-present rc=1 that ``--quiet`` overloads, so

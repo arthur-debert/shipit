@@ -1104,20 +1104,30 @@ def apply(
             # carries it — robust where `git add` is not, since the path may be
             # absent, untracked, or a consumer file that reappeared at it, and
             # `--ignore-unmatch` makes any of those a no-op rather than a crash
-            # (#986 review). `git.staged_paths` then scopes the commit to the
-            # members of the FULL `touched` set that actually carry a staged diff
-            # — the primitive that keeps a consumer-local path (a KEPT retired
-            # file, a NOOP hook file) OUT of the commit, and that silently skips a
-            # path absent from the tree, the index AND HEAD, so the commit never
-            # receives a pathspec `git commit` would abort on (the
-            # changelog-deletion and empty-diff cases both ride this).
+            # (#986 review). `git.staged_paths` then scopes the FULL `touched`
+            # set to the members that actually carry a staged diff against
+            # origin/<base> — used here ONLY as the no-op guard (empty → nothing
+            # to publish, below), NOT as a commit pathspec: the commit itself is
+            # a whole-INDEX commit (`commit_all`, #991). A pathspec `git commit`
+            # runs git's PARTIAL-commit mode, which builds the tree from the
+            # WORKING TREE of the named paths and DISREGARDS the index — silently
+            # negating the `git rm --cached` deletions (they live only in the
+            # index) and resurrecting every retired file whose working-tree copy
+            # survived (the skills-store move dropped all 11 `skills/*` deletions,
+            # #991). After `reset --soft origin/<base>` the index equals the base,
+            # and only managed paths are staged (via `add`/`rm --cached`) — a
+            # KEPT retired file or an unrelated dirty consumer file is NEVER
+            # `git add`ed, so it stays in the working tree alone and the index
+            # commit excludes it exactly as the pathspec scoping used to. So the
+            # staged index IS precisely the reconcile: it keeps the adds, HONORS
+            # the deletions, and still leaves consumer-local paths out.
             git.add(sorted(staged_writes), cwd=cwd)
             git.rm_cached(sorted(retired_removals), cwd=cwd)
             pr_paths = git.staged_paths(sorted(touched), cwd=cwd)
             if not pr_paths:
                 # After the reset the managed set already matches origin/<base> —
                 # a stale Tree duplicating an already-merged reconcile. Nothing
-                # in the shipit-owned touched-set is staged, so a pathspec
+                # in the shipit-owned touched-set is staged, so a whole-index
                 # `git commit` over an empty diff would fail with "nothing to
                 # commit" (exit 1); report the clean no-op and skip the
                 # commit/PR rather than crashing the install (#852 review). The
@@ -1134,7 +1144,7 @@ def apply(
                     },
                 )
                 return result
-            git.commit(COMMIT_MESSAGE, pr_paths, cwd=cwd, no_verify=True)
+            git.commit_all(COMMIT_MESSAGE, cwd=cwd, no_verify=True)
             # The install branch is regenerated on top of origin/<default> each
             # run; force so a re-run with an open install PR (or a stale leftover
             # branch) updates it rather than failing non-fast-forward.

@@ -3133,6 +3133,7 @@ class _GhRecorder:
         self.pr_body = None
         self.hook_activations = []
         self.commit_paths = ()
+        self.commit_all_message = None
         self.rm_cached_paths = ()
         self.commit_no_verify = None
         self.push_no_verify = None
@@ -3204,8 +3205,20 @@ class _GhRecorder:
         self.calls.append(("reset_index", None))
 
     def commit(self, message, paths, *, cwd, no_verify=False):
+        # The MODE_LOCAL/MODE_PUSH pathspec commit — scoped to `changed_paths`.
         self.calls.append(("commit", message))
         self.commit_paths = tuple(paths)
+        self.commit_no_verify = no_verify
+
+    def commit_all(self, message, *, cwd, no_verify=False):
+        # The MODE_PR whole-INDEX reconcile commit (#991): `git commit -m …` with
+        # NO pathspec, so the staged index (the `add` writes PLUS the `rm --cached`
+        # deletions) is committed as-is — honoring the retired-path deletions a
+        # partial-commit pathspec would silently negate. Recorded under the same
+        # "commit" name so ordering assertions stay uniform; `commit_paths` is
+        # left unset (a whole-index commit carries no pathspec).
+        self.calls.append(("commit", message))
+        self.commit_all_message = message
         self.commit_no_verify = no_verify
 
     def push(self, branch, *, cwd, remote="origin", force=False, no_verify=False):
@@ -3239,6 +3252,7 @@ def rec(monkeypatch):
         "staged_paths",
         "reset_index",
         "commit",
+        "commit_all",
         "push",
         "current_branch",
         "default_branch",
@@ -3389,9 +3403,41 @@ def test_pr_mode_commits_the_full_managed_universe_including_noop_units(tmp_path
     )
 
     _apply(tmp_path, iapply.MODE_PR)
-    # ...yet the MODE_PR commit still carries it (the full managed universe), so
-    # the reset onto origin/<default> can never drop it from the PR.
-    assert noop.dest in rec.commit_paths
+    # ...yet the MODE_PR reconcile still carries it (the full managed universe),
+    # so the reset onto origin/<default> can never drop it from the PR. The
+    # whole-index commit (#991) publishes exactly what is STAGED, and every
+    # managed dest — NOOP included — is staged via `git add` (`staged_writes`),
+    # so the NOOP dest rides the commit.
+    add_paths = next(paths for name, paths in rec.calls if name == "add")
+    assert noop.dest in add_paths
+
+
+def test_pr_mode_commits_the_whole_index_not_a_worktree_pathspec(tmp_path, rec):
+    # #991: the MODE_PR reconcile publishes via a whole-INDEX commit
+    # (`git.commit_all`), NEVER a `git.commit(msg, pathspec)`. A pathspec commit
+    # runs git's PARTIAL-commit mode, which rebuilds the tree from the WORKING
+    # TREE of the named paths and DISREGARDS the index — silently negating the
+    # `git rm --cached` retired-path deletions and resurrecting every retired
+    # file whose working-tree copy survived (#921's skills-store move dropped all
+    # 11 `skills/*` deletions this way). The staged index (add writes PLUS
+    # rm --cached deletions) IS the reconcile, so it is committed as-is. The
+    # tree-level proof that this HONORS the deletion lives in the real-git
+    # `test_commit_all_publishes_index_deletions_a_pathspec_commit_would_drop`;
+    # here, assert apply's WIRING — `commit_all` ran, the pathspec `commit` did
+    # not.
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    victim = tmp_path / RETIRED_WORKFLOW_PATH
+    victim.parent.mkdir(parents=True)
+    victim.write_bytes(PRISTINE_WORKFLOW.read_bytes())
+
+    _apply(tmp_path, iapply.MODE_PR)
+
+    # The retired deletion was staged from the index…
+    assert RETIRED_WORKFLOW_PATH in rec.rm_cached_paths
+    # …and the publishing commit is the whole-index `commit_all`, no pathspec.
+    assert rec.commit_all_message == iapply.COMMIT_MESSAGE
+    assert rec.commit_paths == ()  # the pathspec `git.commit` was never called
+    assert rec.commit_no_verify is True
 
 
 def test_pr_mode_commit_universe_carries_retired_deletes_noops_and_the_changelog(
@@ -3634,10 +3680,10 @@ def test_pr_mode_reports_no_changes_when_the_managed_set_already_matches_base(
 ):
     # #852 review (major): after the `reset --soft origin/<default>` the staged
     # managed set can already match the base (a stale Tree duplicating an
-    # already-merged reconcile). A pathspec `git commit` over an empty diff fails
-    # with "nothing to commit" (exit 1) — so apply skips the commit/PR when
-    # `staged_paths` returns no shipit-owned diff, rather than crashing the
-    # install.
+    # already-merged reconcile). A whole-index `git commit` over an empty diff
+    # fails with "nothing to commit" (exit 1) — so apply skips the commit/PR when
+    # `staged_paths` (the no-op guard, #991) returns no shipit-owned diff, rather
+    # than crashing the install.
     rec._no_staged = True
     (tmp_path / "AGENTS.md").write_text("# Acme\n")
     result = _apply(tmp_path, iapply.MODE_PR)
@@ -6284,15 +6330,12 @@ def test_rerender_skipped_in_the_window_omits_the_pr_body_section(tmp_path, rec)
 
     assert "Changelog re-rendered" not in rec.pr_body
     # The phantom changelog was dropped from `changed_paths` before apply, so it
-    # never reaches `git add`. The MODE_PR commit pathspec names CHANGELOG_FILE
-    # UNCONDITIONALLY in its universe (#984 review — so a changelog DELETED since
-    # a prior run is still published as a deletion), then scopes to the members
-    # with a real staged diff via `git.staged_paths` (`git diff --cached
-    # --name-only`), which silently skips a path absent from the tree, the index
-    # AND HEAD — so an absent/untracked CHANGELOG.md is never committed. The stub
-    # `staged_paths` echoes the whole queried universe, so `rec.commit_paths`
-    # cannot show that scoping (it is covered by `test_staged_paths_*` in
-    # test_git_adapter.py); assert the stub-independent guarantee instead — the
-    # phantom path never reaches `git add`.
+    # never reaches `git add` and so is never staged into the whole-index MODE_PR
+    # commit (#991). CHANGELOG_FILE still rides the `touched` no-op-guard universe
+    # UNCONDITIONALLY (#984 review — so a changelog DELETED since a prior run is
+    # published as a staged deletion via `rm --cached`), but an absent/untracked
+    # changelog that was never (re)written is simply never staged, so the commit
+    # cannot resurrect it. Assert the stub-independent guarantee — the phantom
+    # path never reaches `git add`.
     add_paths = next(paths for name, paths in rec.calls if name == "add")
     assert chlog.CHANGELOG_FILE not in add_paths

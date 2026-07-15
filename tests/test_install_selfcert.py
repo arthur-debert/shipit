@@ -96,8 +96,17 @@ class _GhRecorder:
         self.calls.append(("reset_index", None))
 
     def commit(self, message, paths, *, cwd, no_verify=False):
+        # The MODE_LOCAL/MODE_PUSH pathspec commit — scoped to `changed_paths`.
         self.calls.append(("commit", message))
         self.commit_paths = tuple(paths)
+        self.commit_no_verify = no_verify
+
+    def commit_all(self, message, *, cwd, no_verify=False):
+        # The MODE_PR whole-INDEX reconcile commit (#991): no pathspec, so the
+        # staged index (adds PLUS `rm --cached` deletions) is committed as-is.
+        # Recorded under the same "commit" name so ordering assertions stay
+        # uniform; a whole-index commit carries no pathspec.
+        self.calls.append(("commit", message))
         self.commit_no_verify = no_verify
 
     def push(self, branch, *, cwd, remote="origin", force=False, no_verify=False):
@@ -129,6 +138,7 @@ def rec(monkeypatch):
         "staged_paths",
         "reset_index",
         "commit",
+        "commit_all",
         "push",
         "current_branch",
         "default_branch",

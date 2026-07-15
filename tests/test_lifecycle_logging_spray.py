@@ -75,6 +75,10 @@ class _GhRecorder:
     def commit(self, message, paths, *, cwd, no_verify=False):
         pass
 
+    def commit_all(self, message, *, cwd, no_verify=False):
+        # The MODE_PR whole-INDEX reconcile commit (#991); a no-op stub here.
+        pass
+
     def push(self, branch, *, cwd, remote="origin", force=False, no_verify=False):
         pass
 
@@ -98,6 +102,7 @@ def rec(monkeypatch):
         "staged_paths",
         "reset_index",
         "commit",
+        "commit_all",
         "push",
         "current_branch",
         "default_branch",
