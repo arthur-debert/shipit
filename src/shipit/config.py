@@ -447,7 +447,7 @@ def load_toolchains(cfg: dict) -> tuple[ToolchainEntry, ...]:
 #     main-binary   = "lex"                                      # optional
 #     product-name  = "Lex"                                      # optional
 #     endpoints     = ["gh-release", "crates"]                   # closed set
-#     e2e           = { harness = ["bats", "tests/e2e.bats"] }   # optional
+#     e2e           = { harness = "electron" }                   # optional: a registered harness name, or a raw argv list
 #     sign          = true                                       # default false
 #
 # A build entry may be the bare toolchain name ("python") when the leg's
@@ -585,12 +585,28 @@ class BundleSpec:
 @dataclass(frozen=True)
 class E2eSpec:
     """An artifact's declared e2e harness (consumed by ``shipit e2e``,
-    TOL01-WS03). ``harness`` is the declared harness argv; ``None`` (a bare
-    ``e2e = {}``) means the registry default (bats-run check-e2e, PRD).
-    DECLARING the table at all is what opts an artifact into e2e — a repo
-    with no ``e2e`` key has no e2e lane (PRD story 11)."""
+    TOL01-WS03). The ``harness`` key is polymorphic:
+
+    - a STRING names a registered harness in the closed registry
+      (:data:`shipit.tools.e2e.HARNESSES` — ``"electron"`` / ``"tauri"`` /
+      ``"bats"``), captured as :attr:`harness_name` and resolved by the planner
+      to that entry's argv AND its canonical ``E2E_*`` environment (the GUI
+      harnesses' ``window.__e2e`` launch contract, TOL03-WS04);
+    - a LIST is a raw harness argv override (``["bats", "tests/e2e.bats"]``),
+      captured as :attr:`harness` and run with NO injected ``E2E_*`` env — only
+      the ``<NAME>_BIN`` injection every harness gets;
+    - ABSENT (a bare ``e2e = {}``) means the registry default (bats-run
+      ``bin/check-e2e``, PRD).
+
+    At most one of :attr:`harness` / :attr:`harness_name` is set (the parse
+    guarantees it). DECLARING the table at all is what opts an artifact into
+    e2e — a repo with no ``e2e`` key has no e2e lane (PRD story 11). A named
+    harness is captured but NOT validated here: the registry lives in
+    :mod:`shipit.tools.e2e` (which imports config, never the reverse), so an
+    unknown name is refused by the planner, not at this boundary."""
 
     harness: tuple[str, ...] | None = None
+    harness_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -876,12 +892,26 @@ def _parse_e2e(where: str, spec: object) -> E2eSpec:
     if not isinstance(spec, dict):
         raise ConfigError(
             f"{where}.e2e: must be a table (empty for the default harness), "
-            f'e.g. {{}} or {{ harness = ["bats", "tests/e2e.bats"] }}; got {spec!r}'
+            f'e.g. {{}}, {{ harness = "electron" }}, or '
+            f'{{ harness = ["bats", "tests/e2e.bats"] }}; got {spec!r}'
         )
     _reject_unknown_keys(f"{where}.e2e", spec, ("harness",))
     if "harness" not in spec:
-        return E2eSpec(harness=None)
-    return E2eSpec(harness=_parse_argv(f"{where}.e2e.harness", spec["harness"]))
+        return E2eSpec()
+    harness = spec["harness"]
+    if isinstance(harness, str):
+        # A STRING names a registered harness (electron / tauri / bats); a LIST
+        # is a raw argv override. The name is resolved against the registry by
+        # the planner (config does not import :mod:`shipit.tools.e2e`), so only
+        # the empty-string shape is caught here.
+        if not harness:
+            raise ConfigError(
+                f"{where}.e2e.harness: a named harness must be a non-empty "
+                f'string (e.g. "electron", "tauri"), or declare a raw argv '
+                f'list (e.g. ["bats", "tests/e2e.bats"])'
+            )
+        return E2eSpec(harness_name=harness)
+    return E2eSpec(harness=_parse_argv(f"{where}.e2e.harness", harness))
 
 
 def _parse_artifact(name: str, spec: object) -> Artifact:

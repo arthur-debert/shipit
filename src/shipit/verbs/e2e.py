@@ -8,7 +8,9 @@ artifact-source seam (:mod:`shipit.tools.artifact_source` — the WF02
 boundary; the one source today is the local build, PRD story 12), injects
 its absolute path into the declared harness's environment as ``<NAME>_BIN``
 (uppercased artifact name, ``-`` → ``_`` — the legacy fleet's contract,
-kept deliberately), and runs the harness from the repo root. A repo with no
+kept deliberately) ALONGSIDE the harness's own canonical ``E2E_*`` launch env
+(the GUI harnesses' ``window.__e2e`` contract; empty for bats), and runs the
+harness from the repo root. A repo with no
 e2e declaration has NO e2e lane: the verb reports it and exits 0 — opting
 out is the absence of config, never a flag.
 
@@ -126,8 +128,8 @@ def _run_harness(
     argv: Sequence[str], cwd: Path, env: Mapping[str, str]
 ) -> execrun.ExecResult:
     """Run one job's harness in ``cwd`` (the repo root) through the one Exec
-    runner, ``env`` — the ``<NAME>_BIN`` injection — merged over the
-    parent's.
+    runner, ``env`` — the harness's ``E2E_*`` launch env plus the
+    ``<NAME>_BIN`` injection — merged over the parent's.
 
     ``check=False``: a nonzero rc is the suite's *verdict* (ADR-0028's
     check=False shape — the harness verdict is the tool's verdict, not a
@@ -262,9 +264,16 @@ def run(
                 extra={"job": job.label, "root": str(root)},
             )
             continue
-        print(f"e2e: {job.label}: {command} [{job.env_var}={binary}]")
+        # The harness environment: the harness's own canonical env (the GUI
+        # harnesses' shared E2E_* launch contract; empty for bats and a
+        # raw-argv override) with the per-artifact <NAME>_BIN injection layered
+        # last, so the resolved binary path always wins. The display shows the
+        # exact injected env, in that order.
+        injected = {**dict(job.env), job.env_var: str(binary)}
+        shown = " ".join(f"{key}={value}" for key, value in injected.items())
+        print(f"e2e: {job.label}: {command} [{shown}]")
         try:
-            result = run_harness(job.harness, root, {job.env_var: str(binary)})
+            result = run_harness(job.harness, root, injected)
         except execrun.ExecError as exc:
             # A harness binary missing from PATH (or any launch failure) is
             # the HARD-fail signal: 127 + a clear note, never a silent skip.
