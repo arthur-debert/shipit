@@ -700,6 +700,30 @@ def commit_all(message: str, *, cwd: str, no_verify: bool = False) -> None:
     _git([*args, "-m", message], cwd=cwd)
 
 
+def clean_non_committed(*, cwd: str) -> None:
+    """``git clean -ffdx`` — remove everything the tree does not track.
+
+    Leaves exactly the committed content: every untracked AND ignored path
+    (``-x``) is removed, recursing into untracked directories (``-d``) and
+    forcing through nested working trees (``-ff``), so no build cache, resolved
+    environment, or other regenerable artifact survives.
+
+    ``shipit repo new`` uses this to make publication RELOCATABLE (ADR-0059).
+    Staged certification (ADR-0062) builds the Rust workspace and materializes
+    the pixi environment in the temporary sibling; those ignored artifacts embed
+    the staging path as an ABSOLUTE location — Cargo bakes
+    ``CARGO_BIN_EXE_<bin>`` into the compiled black-box test, and the conda-based
+    ``.pixi`` environment hard-codes its own prefix — so an atomic rename that
+    carried them would leave the published Repo running canonical commands
+    against the vanished staging sibling. Stripping them after the ``Initial
+    commit`` (they are gitignored, so the commit already excludes them) and
+    before the rename publishes only the committed, location-independent tree;
+    the destination regenerates its build and environment state fresh on first
+    use from the committed lockfiles.
+    """
+    _git(["clean", "-ffdx"], cwd=cwd)
+
+
 def init_main(*, cwd: str) -> None:
     """``git init -b main`` — initialize a repository on the ``main`` branch.
 

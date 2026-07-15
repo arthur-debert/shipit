@@ -301,9 +301,12 @@ def create_repo(
     complete Repo in a temporary sibling: writes the plan, initializes Git on
     ``main``, stages the scaffold, installs the managed baseline, provisions and
     locks pixi, runs the three public Checks, and creates the ``Initial commit``.
-    Only after every step succeeds does one atomic rename publish it at the
-    destination. Any handled failure removes the temporary sibling and leaves
-    the destination in its preflight state.
+    It then strips every non-committed artifact (the build cache and resolved
+    environment that certification produced, both of which embed the staging
+    path) so the published tree is relocatable, and only after every step
+    succeeds does one atomic rename publish it at the destination. Any handled
+    failure removes the temporary sibling and leaves the destination in its
+    preflight state.
 
     ``year`` defaults to the local creation year; the effect seams default to
     the real implementations and are injected in tests.
@@ -356,6 +359,18 @@ def create_repo(
         head = git.head_commit(cwd=str(staging))
         if head is None:
             raise CreationError("Initial commit did not produce a resolvable HEAD")
+        # Strip every non-committed artifact BEFORE the atomic rename so
+        # publication is relocatable (ADR-0059). Staged certification (ADR-0062)
+        # builds the Rust workspace and materializes the pixi environment in this
+        # temporary sibling; both embed the staging path as an absolute location
+        # (Cargo bakes `CARGO_BIN_EXE_<bin>` into the compiled black-box test;
+        # the conda-based `.pixi` env hard-codes its prefix), so a rename that
+        # carried them would leave the published Repo resolving canonical commands
+        # against the vanished staging path. The `Initial commit` already excludes
+        # these (they are gitignored), so removing them leaves the destination
+        # exactly the committed tree, which regenerates its build/environment
+        # state fresh from the committed lockfiles on first use.
+        git.clean_non_committed(cwd=str(staging))
         _publish(staging, dest)
     except BaseException as primary:
         # Roll back on ANY handled failure, then let the primary failure keep
