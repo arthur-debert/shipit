@@ -2106,7 +2106,7 @@ class _CondaBuildRecorder(SeamRecorder):
         return super().__call__(argv, cwd, env)
 
 
-def _conda_request(tmp_path, *, env=None, assets=None):
+def _conda_request(tmp_path, *, env=None, assets=None, ghio=None):
     _staged_assets(
         tmp_path,
         assets
@@ -2130,6 +2130,7 @@ def _conda_request(tmp_path, *, env=None, assets=None):
             "ARTIFACT_CHANNEL_SECRET_KEY": "chan-secret-key",
         },
         run_cmd=run_cmd,
+        ghio=ghio,
     )
     return req, run_cmd
 
@@ -2175,6 +2176,35 @@ def test_conda_builds_each_served_subdir_and_publishes_the_channel(tmp_path):
     # The HMAC secret NEVER rides argv (it is env-only, redactor-registered).
     assert not any("chan-secret-key" in a for a in pub_argv)
     assert any("published 3 package(s)" in a for a in published.actions)
+
+
+def _conda_publish_target(req):
+    """The `--to` channel URL of the single `rattler-build publish` in a run."""
+    (pub_argv,) = [
+        argv
+        for argv, _, _ in req.run_cmd.calls
+        if argv[:2] == ("rattler-build", "publish")
+    ]
+    return pub_argv[pub_argv.index("--to") + 1]
+
+
+def test_conda_publishes_a_public_repo_to_the_public_bucket(tmp_path):
+    # Tier is DERIVED from repo visibility (ADR-0065): a public repo → public
+    # bucket, authless-readable downstream.
+    req, _ = _conda_request(tmp_path, ghio=FakeGh(private=False))
+    publish_mod._publish_conda(req)
+    assert _conda_publish_target(req) == "s3://shipit-artifacts-public/acme/widget"
+    assert ("private?", "acme/widget") in req.ghio.calls
+
+
+def test_conda_publishes_a_private_repo_to_the_private_bucket(tmp_path):
+    # A private producing repo (phos-shaped) → the private bucket, over the SAME
+    # S3-interop rail + write HMAC pair (only the bucket changes, ADR-0065).
+    req, _ = _conda_request(tmp_path, ghio=FakeGh(private=True))
+    published = publish_mod._publish_conda(req)
+    assert _conda_publish_target(req) == "s3://shipit-artifacts-private/acme/widget"
+    assert ("private?", "acme/widget") in req.ghio.calls
+    assert any("shipit-artifacts-private" in a for a in published.actions)
 
 
 def test_conda_recipe_source_path_matches_the_archive_staging_dir(tmp_path):

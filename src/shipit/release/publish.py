@@ -208,13 +208,19 @@ CONDA_SUBDIRS: dict[str, str] = {
     "x86_64-pc-windows-msvc": "win-64",
 }
 
-#: The public-tier Artifact channel bucket (ADR-0065 — the public-read,
-#: authless bucket; the private tier is WS04). The per-repo channel root is
-#: ``<bucket>/<owner/name>``, so each repo is the sole writer of its own
+#: The two-tier Artifact channel buckets (ADR-0065 — two dedicated buckets, one
+#: public-read/authless and one private/credentialed). The per-repo channel root
+#: is ``<bucket>/<owner/name>``, so each repo is the sole writer of its own
 #: repodata (cross-repo index races structurally impossible, ADR-0064). WS03
-#: automates the bucket's provisioning; this walking skeleton (WS01) targets a
-#: pre-created public bucket.
+#: automates the buckets' provisioning. The tier a publish writes to is DERIVED
+#: from the producing repo's visibility (ADR-0065), never declared:
+#: :func:`_publish_conda` routes a private repo to
+#: :data:`PRIVATE_ARTIFACT_BUCKET` and a public one to
+#: :data:`PUBLIC_ARTIFACT_BUCKET`. WRITING always needs the HMAC pair (a
+#: public-read bucket is still write-protected); the tier only changes which
+#: bucket, so the write path is identical for both.
 PUBLIC_ARTIFACT_BUCKET = "shipit-artifacts-public"
+PRIVATE_ARTIFACT_BUCKET = "shipit-artifacts-private"
 
 #: The GCS S3-interop endpoint + region (ADR-0065 — ``region = "auto"`` and the
 #: global ``storage.googleapis.com`` endpoint are load-bearing for GCS
@@ -1613,7 +1619,15 @@ def _publish_conda(req: PublishRequest) -> Published:
             f"`.conda` under {channel_dir} — the build recorded success but "
             f"emitted no package"
         )
-    channel_url = f"s3://{PUBLIC_ARTIFACT_BUCKET}/{req.repo}"
+    # Tier is DERIVED from the producing repo's visibility (ADR-0065), never
+    # declared: a private repo publishes to the private bucket, a public one to
+    # the public bucket. Both writes ride the SAME S3-interop rail and HMAC
+    # write pair (a public-read bucket is still write-protected) — the tier only
+    # picks the bucket, so the consumer read model (authless HTTPS vs S3-interop
+    # creds, WS02/WS04) is the only place the tiers diverge.
+    private = bool(req.ghio.repo_is_private(req.repo))
+    bucket = PRIVATE_ARTIFACT_BUCKET if private else PUBLIC_ARTIFACT_BUCKET
+    channel_url = f"s3://{bucket}/{req.repo}"
     # The endpoint/region are the fixed GCS-interop constants; the write HMAC
     # pair rides the env (merged over the process env by the Exec runner),
     # never argv — the keys are registered with the central redactor by the

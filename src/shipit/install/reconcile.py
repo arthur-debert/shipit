@@ -70,7 +70,14 @@ sibling (TOL01-WS01) guards ``[tasks]`` blocks the same way against TASK-NAME
 ambiguity: a managed default-env task (``test``) also defined by a consumer
 ``[feature.*.tasks]`` table would make ``pixi run <task>`` refuse the name,
 so the block is skipped and the consumer's own task stays authoritative
-(:class:`PixiTaskConflict`).
+(:class:`PixiTaskConflict`). A third sibling (ARF01-WS04) guards ANCHOR-LESS
+blocks against TABLE REDECLARATION: an EOF-appended top-level table whose name
+is NOT in shipit's reserved namespace — the private-tier
+``[s3-options.<bucket>]``, which the documented manual runbook may have the
+consumer declare by hand — would, on a first splice over a pre-existing table,
+declare that table twice and make ``pixi.toml`` unparseable, so the block is
+skipped and the consumer's own table stays authoritative
+(:class:`PixiTableConflict`).
 
 Install also decides a CHANGELOG RE-RENDER (TOL01-WS08 #578): where the
 consumer has adopted the fragment convention (``CHANGELOG/``), a renderer
@@ -812,6 +819,165 @@ def _pixi_task_conflicts(
     return tuple(conflicts)
 
 
+@dataclass(frozen=True)
+class PixiTableConflict:
+    """One anchor-less pixi block unit whose FIRST splice would REDECLARE a
+    consumer-owned TOML table — the key-conflict guard's EOF-appended-table
+    sibling (ARF01-WS04).
+
+    An anchor-less block appends its own top-level table(s) at EOF. The
+    projection's reserved ``shipit-artifacts*`` feature tables can never clash
+    with a consumer table by design, but the private-tier
+    ``[s3-options.<bucket>]`` table (:data:`shipit.install.artifactdeps.S3_OPTIONS_KEY`)
+    reuses a NON-reserved name a consumer may already declare by hand (the
+    documented manual private-tier runbook). Splicing a second identical table
+    header makes ``pixi.toml`` unparseable (TOML forbids a table defined twice),
+    blocking installs and every hooked commit — so the block is SKIPPED, the
+    consumer's own table stays authoritative, and every surface warns. Detected
+    only when the block's markers are absent (an ADD), like
+    :class:`PixiKeyConflict`: once spliced, the block's own tables legitimately
+    live in the manifest and a re-reconcile reads them as its own.
+    """
+
+    unit_key: (
+        str  # the [managed] table key, e.g. "pixi.toml#shipit-artifact-deps-s3-options"
+    )
+    # The clashing table headers the consumer already declares, VERBATIM (the
+    # TOML-quoted form, e.g. `s3-options."my.bucket"`) so the warning names the
+    # real path — a bare `s3-options.my.bucket` is a different nested table.
+    tables: tuple[str, ...]
+
+
+def format_pixi_table_conflict(conflict: PixiTableConflict) -> str:
+    """The one actionable message for a table-redeclaration conflict — used
+    verbatim by the stderr warning and the durable log line, so the two surfaces
+    never drift."""
+    tables = " and ".join(f"[{t}]" for t in conflict.tables)
+    return (
+        f"this repo's pixi.toml already declares the {tables} table(s), which "
+        f"the managed block '{conflict.unit_key}' also declares — splicing it "
+        f"would redeclare the table(s) and make pixi.toml unparseable, so the "
+        f"block was NOT delivered and this repo's own table stays "
+        f"authoritative. To adopt the managed block instead, delete this repo's "
+        f"own table(s) and re-run `shipit install`."
+    )
+
+
+def _split_toml_key(key: str) -> tuple[str, ...]:
+    """Split a TOML dotted key-path into its segments, honoring quoted parts.
+
+    A dot inside a quoted segment is a literal name char, not a path separator,
+    so ``s3-options."my.bucket"`` splits into ``("s3-options", "my.bucket")`` —
+    the same quoting :func:`shipit.install.artifactdeps._toml_key` emits when a
+    projected name carries a dot. Surrounding whitespace on a bare segment is
+    trimmed; a quoted segment's inner text is taken verbatim.
+    """
+    segments: list[str] = []
+    buf: list[str] = []
+    quote: str | None = None
+    for ch in key:
+        if quote is not None:
+            if ch == quote:
+                quote = None
+            else:
+                buf.append(ch)
+        elif ch in "\"'":
+            quote = ch
+        elif ch == ".":
+            segments.append("".join(buf).strip())
+            buf = []
+        else:
+            buf.append(ch)
+    segments.append("".join(buf).strip())
+    return tuple(segments)
+
+
+def _toml_table_headers(inner: str) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    """Every plain ``[table]`` header in a TOML text, as ``(raw, segments)``.
+
+    ``raw`` is the header's inner text VERBATIM (``s3-options."my.bucket"`` —
+    the TOML-quoted form the block emitted), so a conflict report names the real
+    table path a user would delete; ``segments`` is that path split with quoting
+    honored (:func:`_split_toml_key`), so the walk against the parsed consumer
+    manifest compares whole names. Reporting ``raw`` rather than
+    ``".".join(segments)`` keeps the quoting: a bare ``s3-options.my.bucket`` is
+    a DIFFERENT (nested) table in TOML and would misdirect the fix.
+
+    Only plain-table headers matter to the redeclaration guard: array-of-tables
+    (``[[...]]``) declarations stack rather than clash, and the projection emits
+    none anyway.
+    """
+    headers: list[tuple[str, tuple[str, ...]]] = []
+    for line in inner.splitlines():
+        stripped = line.strip()
+        if (
+            not stripped.startswith("[")
+            or stripped.startswith("[[")
+            or not stripped.endswith("]")
+        ):
+            continue
+        raw = stripped[1:-1].strip()
+        headers.append((raw, _split_toml_key(raw)))
+    return tuple(headers)
+
+
+def _table_declared(manifest: Mapping[str, object], path: tuple[str, ...]) -> bool:
+    """Whether the parsed consumer manifest already declares the table at ``path``.
+
+    Walks the manifest along the segments; the table is present when the FULL
+    path resolves to a sub-table (dict) — exactly the redeclaration a duplicate
+    ``[path]`` header would cause. An empty path (a malformed header) is never a
+    table. Only the LEAF path each block header names is checked, so a shared
+    super-table (a consumer ``[feature.foo]`` next to the reserved
+    ``[feature.shipit-artifacts]``) is not mistaken for a clash.
+    """
+    if not path:
+        return False
+    table: object = manifest
+    for part in path:
+        if not isinstance(table, dict) or part not in table:
+            return False
+        table = table[part]
+    return isinstance(table, dict)
+
+
+def _pixi_table_conflicts(
+    root: Path, units: Sequence[Unit], consumer_hashes: Mapping[str, str | None]
+) -> tuple[PixiTableConflict, ...]:
+    """Gather's table-redeclaration read: first-splice duplicate top-level tables.
+
+    Best-effort and fail-open like :func:`_pixi_key_conflicts` (whose
+    ADD-bound-only rule it shares): no manifest or an unparseable one detects
+    nothing. Only ANCHOR-LESS pixi block units are checked — an anchored block's
+    duplicate-KEY risk is the key-conflict guard's, and its own header (an
+    ``[environments]`` say) is the consumer's own table it merges into. An
+    anchor-less block whose EOF-appended header names a table the consumer
+    already declares would make pixi.toml unparseable on the ADD splice, so the
+    reconcile skips it (:class:`PixiTableConflict`).
+    """
+    path = root / PIXI_FILE
+    if not path.is_file():
+        return ()
+    try:
+        manifest = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (tomllib.TOMLDecodeError, OSError, UnicodeDecodeError):
+        return ()
+    conflicts: list[PixiTableConflict] = []
+    for unit in units:
+        if unit.kind != "block" or unit.dest != PIXI_FILE or unit.anchor is not None:
+            continue
+        if consumer_hashes.get(unit.key) is not None:
+            continue  # markers present: the block's tables are already its own
+        clashes = tuple(
+            raw
+            for raw, segments in _toml_table_headers(unit.desired_inner())
+            if _table_declared(manifest, segments)
+        )
+        if clashes:
+            conflicts.append(PixiTableConflict(unit_key=unit.key, tables=clashes))
+    return tuple(conflicts)
+
+
 def _changelog_stale(root: Path) -> bool:
     """Whether the consumer's committed ``CHANGELOG.md`` no longer matches the
     CURRENT renderer's output over ``CHANGELOG/`` — gather's changelog read
@@ -932,6 +1098,11 @@ class ConsumerState:
     # block task also defined by a consumer [feature.*.tasks] table — read
     # here for the same purity reason.
     pixi_task_conflicts: tuple[PixiTaskConflict, ...] = ()
+    # First-splice table-REDECLARATION clashes (ARF01-WS04): an anchor-less
+    # managed block whose EOF-appended top-level table (the private-tier
+    # [s3-options.<bucket>]) the consumer already declares by hand — read here
+    # for the same purity reason.
+    pixi_table_conflicts: tuple[PixiTableConflict, ...] = ()
     # The committed CHANGELOG.md no longer matches the CURRENT renderer's
     # output over CHANGELOG/ (#578) — read here (the ONE read boundary) so the
     # reconcile's re-render decision stays pure over this state. Always False
@@ -963,8 +1134,9 @@ def gather(
     (:func:`retired_hook_count`, #619), the consumer's committed
     lefthook-local config (#544, the
     merge-conflict tripwire's input), the pixi manifest's first-splice
-    key clashes (:func:`_pixi_key_conflicts`) and task-ambiguity clashes
-    (:func:`_pixi_task_conflicts`), whether the committed ``CHANGELOG.md``
+    key clashes (:func:`_pixi_key_conflicts`), task-ambiguity clashes
+    (:func:`_pixi_task_conflicts`) and table-redeclaration clashes
+    (:func:`_pixi_table_conflicts`), whether the committed ``CHANGELOG.md``
     is stale against the current renderer (:func:`_changelog_stale`, #578),
     and the declined managed-unit keys (``[managed.decline].keep``, #600 —
     consumer-owned policy, read alongside the pristine map).
@@ -1022,6 +1194,7 @@ def gather(
         lefthook_local=lefthook_local,
         pixi_key_conflicts=_pixi_key_conflicts(root, units, consumer_hashes),
         pixi_task_conflicts=_pixi_task_conflicts(root, units, consumer_hashes),
+        pixi_table_conflicts=_pixi_table_conflicts(root, units, consumer_hashes),
         changelog_stale=_changelog_stale(root),
         declines=declines,
     )
@@ -1128,6 +1301,12 @@ class Plan:
     # `pixi run <task>` refuse the name — excluded the same way, every surface
     # warns off this record.
     pixi_task_conflicts: tuple[PixiTaskConflict, ...] = ()
+    # Pixi blocks SKIPPED over a table REDECLARATION (ARF01-WS04): an anchor-less
+    # block's EOF-appended top-level table (the private-tier
+    # [s3-options.<bucket>]) is one the consumer already declares by hand, so the
+    # splice would make pixi.toml unparseable — excluded the same way, every
+    # surface warns off this record.
+    pixi_table_conflicts: tuple[PixiTableConflict, ...] = ()
     # This plan regenerates CHANGELOG.md from CHANGELOG/ with the CURRENT
     # renderer (#578): the committed projection went stale against a renderer
     # change, and the reconcile PR is the sanctioned channel that refreshes it
@@ -1254,12 +1433,15 @@ def reconcile(
     # A conflicted block never reaches the write set: a key conflict's ADD
     # would splice a duplicate TOML key into the consumer's pixi.toml
     # (PixiKeyConflict); a task conflict's would make a pixi task ambiguous
-    # (PixiTaskConflict). Neither does a DECLINED unit (#600): the consumer's
-    # `[managed.decline].keep` keeps it as the repo's own, so it is excluded
-    # before the four-case decide ever runs.
-    conflicted = {c.unit_key for c in state.pixi_key_conflicts} | {
-        c.unit_key for c in state.pixi_task_conflicts
-    }
+    # (PixiTaskConflict); a table conflict's would redeclare a consumer-owned
+    # top-level table (PixiTableConflict, ARF01-WS04). Neither does a DECLINED
+    # unit (#600): the consumer's `[managed.decline].keep` keeps it as the repo's
+    # own, so it is excluded before the four-case decide ever runs.
+    conflicted = (
+        {c.unit_key for c in state.pixi_key_conflicts}
+        | {c.unit_key for c in state.pixi_task_conflicts}
+        | {c.unit_key for c in state.pixi_table_conflicts}
+    )
     decline_set = set(state.declines)
     unit_keys = {u.key for u in units}
     # Both surfaces keep the consumer's DECLARATION order (config.load_declines'
@@ -1296,6 +1478,7 @@ def reconcile(
         lefthook_conflicts=_plan_lefthook_conflicts(units, state),
         pixi_key_conflicts=state.pixi_key_conflicts,
         pixi_task_conflicts=state.pixi_task_conflicts,
+        pixi_table_conflicts=state.pixi_table_conflicts,
         rerender_changelog=state.changelog_stale,
         declined=declined,
         decline_unmatched=decline_unmatched,
@@ -1351,6 +1534,12 @@ def reconcile(
             "pixi task conflict: %s",
             format_pixi_task_conflict(tc),
             extra={"root": state.root, "unit": tc.unit_key, "task": tc.task},
+        )
+    for bc in result.pixi_table_conflicts:
+        logger.warning(
+            "pixi table conflict: %s",
+            format_pixi_table_conflict(bc),
+            extra={"root": state.root, "unit": bc.unit_key, "tables": bc.tables},
         )
     if result.nothing_to_do:
         logger.debug(

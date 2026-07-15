@@ -79,9 +79,34 @@ gcloud storage hmac keys create artifact-channel-reader@<project>.iam.gserviceac
 
 The returned `accessId` / `secret` become the consumer's `AWS_ACCESS_KEY_ID` /
 `AWS_SECRET_ACCESS_KEY` (Doppler locally, the sccache credential path in CI —
-never `pixi auth login`, which is unwired in pixi 0.71.0, ADR-0065). Wiring
-those into a consumer's pixi config is a **later** work stream (private pixi
-projection); this runbook only mints the credential the store honours.
+never `pixi auth login`, which is unwired for S3 in pixi 0.71.0, ADR-0065). This
+runbook mints the credential the store honours; the consumer's **pixi config**
+is projected by `shipit install` (ARF01-WS04).
+
+### Consumer read-cred path (private tier)
+
+A downstream repo that declares an `[artifact-deps.<pkg>]` pin on a **private**
+producing repo gets, from `shipit install`
+([`shipit.install.artifactdeps`](../../src/shipit/install/artifactdeps.py)), a
+managed pixi block projecting the `s3://<bucket>/<repo>` channel plus the
+validated `[s3-options.<bucket>]` config (`endpoint-url`, `region = "auto"`,
+`force-path-style = true`) — templated **directly** into the manifest, never via
+`pixi config set s3-options.*` (a silent no-op in 0.71.0). The tier is derived
+from the producing repo's visibility, so no consumer flag selects it.
+
+The **credentials are never committed** — the projected manifest carries only
+the endpoint config. pixi's S3 backend reads them from the environment at
+resolve time:
+
+- **`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`** — the reader SA's HMAC key
+  pair minted above; **or**
+- **`RATTLER_AUTH_FILE`** — a rattler auth JSON pointing at the same HMAC pair.
+
+Delivery mirrors the sccache credential rail: **Doppler** sourced onto the shell
+locally, and the **same credential path as sccache** in CI. `pixi auth login` is
+**not** used (unwired for S3 in 0.71.0). Because the credentials live only in the
+environment, a consumer with none genuinely **cannot** resolve the private
+channel — the access control is real, not cosmetic.
 
 ## Verify (the live acceptance checks)
 

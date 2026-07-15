@@ -59,6 +59,7 @@ from ..install.reconcile import (
     detect_toolchains,
     format_lefthook_conflict,
     format_pixi_key_conflict,
+    format_pixi_table_conflict,
     format_pixi_task_conflict,
     gather,
     load_retired,
@@ -497,6 +498,8 @@ def format_plan_warnings(plan: Plan) -> str:
         lines.append(f"install: pixi block skipped: {format_pixi_key_conflict(kc)}")
     for tc in plan.pixi_task_conflicts:
         lines.append(f"install: pixi block skipped: {format_pixi_task_conflict(tc)}")
+    for bc in plan.pixi_table_conflicts:
+        lines.append(f"install: pixi block skipped: {format_pixi_table_conflict(bc)}")
     for key in plan.decline_unmatched:
         lines.append(
             f"install: declined key {key!r} names no managed unit in this "
