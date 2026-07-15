@@ -3363,38 +3363,66 @@ def test_pr_mode_commits_the_full_managed_universe_including_noop_units(tmp_path
     assert noop.dest in rec.commit_paths
 
 
-def test_pr_mode_commit_universe_carries_retired_paths_and_the_changelog(tmp_path, rec):
-    # #984 agy review (major): the SAME drop-out class the full-managed-universe
-    # fix closes for NOOP managed units also hits retired files, retired-hook
-    # files, and a previously-rendered CHANGELOG.md. A retired path absent at the
-    # cut point is a NOOP that never joins the write-scoped `changed_paths`, yet
-    # after the reset onto origin/<default> the index stages its deletion against
-    # a base that still carries it — so it MUST ride the commit pathspec, or the
-    # pathspec `git commit` (unlisted paths come from HEAD) silently REVERTS it
-    # to the base state in the refreshed PR. The commit is scoped to the members
-    # of the shipit-owned universe that carry a staged diff, so assert that
-    # universe — what `staged_paths` is asked about — carries the retired paths
-    # and the on-disk changelog, not just the managed writes.
+def test_pr_mode_commit_universe_carries_retired_deletes_and_the_changelog(
+    tmp_path, rec
+):
+    # #984 review (major): the SAME drop-out class the full-managed-universe fix
+    # closes for NOOP managed units also hits the retired-file DELETES and a
+    # previously-rendered CHANGELOG.md. A retired DELETE absent from
+    # `changed_paths` (or a changelog no longer on disk) whose deletion the reset
+    # stages against a base that still carries it MUST ride the commit pathspec,
+    # or the pathspec `git commit` (unlisted paths come from HEAD) silently
+    # REVERTS it to the base state in the refreshed PR. The commit is scoped to
+    # the members of the shipit-owned universe that carry a staged diff, so
+    # assert that universe — what `staged_paths` is asked about — carries the
+    # retired DELETE and the changelog even when the changelog is NOT on disk.
     (tmp_path / "AGENTS.md").write_text("# Acme\n")
-    # A previously-rendered changelog on disk that this run does NOT re-render:
-    # absent from `changed_paths`, but present on the base, so it must be carried.
-    (tmp_path / iapply.CHANGELOG_FILE).write_text("# Changelog\n")
+    # A pristine retired workflow on disk → a DELETE decision apply carries.
+    victim = tmp_path / RETIRED_WORKFLOW_PATH
+    victim.parent.mkdir(parents=True)
+    victim.write_bytes(PRISTINE_WORKFLOW.read_bytes())
+    # NB: the changelog is deliberately NOT written to disk — Fix 4's drop-out
+    # case: a changelog deleted since a prior run must still be published as a
+    # deletion, so it must be in the universe even absent from the working tree.
+    assert not (tmp_path / iapply.CHANGELOG_FILE).exists()
 
     plan = _plan(tmp_path)
-    retired_paths = {d.retired.path for d in plan.retired}
-    assert retired_paths, "the manifest must declare retired files to exercise this"
-    # Every retired entry is absent here → NOOP, so none join `changed_paths`…
-    assert retired_paths.isdisjoint(plan.changed_paths)
+    delete_paths = {d.retired.path for d in plan.retire_deletes}
+    assert RETIRED_WORKFLOW_PATH in delete_paths
     assert iapply.CHANGELOG_FILE not in plan.changed_paths
 
     _apply(tmp_path, iapply.MODE_PR)
-    # …yet the commit universe carries every retired path, every retired-hook
-    # file, and the on-disk changelog, so the reset onto origin/<default> can
-    # never silently revert them in the refreshed PR.
+    # The commit universe carries the retired DELETE and the changelog — the
+    # latter UNCONDITIONALLY, so a changelog absent from the tree is still
+    # published as a deletion rather than silently reverted to the base state.
     universe = set(rec.staged_query)
-    assert retired_paths <= universe
+    assert RETIRED_WORKFLOW_PATH in universe
     assert iapply.CHANGELOG_FILE in universe
-    assert {d.retired.file for d in plan.retired_hooks} <= universe
+
+
+def test_pr_mode_commit_universe_excludes_a_kept_retired_file(tmp_path, rec):
+    # #984 codex review (major): the commit universe is only what apply ACTUALLY
+    # CHANGED, never the full retired manifest. A KEEP retired decision is a
+    # locally-modified consumer file apply PRESERVES — not shipit content to
+    # publish. Carried on the stale install branch it differs from the base in
+    # the post-reset index, so listing it in the universe would leak that
+    # consumer-local file into the PR. It must NOT be queried (retired invariant).
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    # A locally-modified retired workflow → a KEEP decision apply preserves.
+    victim = tmp_path / RETIRED_WORKFLOW_PATH
+    victim.parent.mkdir(parents=True)
+    victim.write_text(PRISTINE_WORKFLOW.read_text() + "# local tweak\n")
+
+    plan = _plan(tmp_path)
+    assert [d.retired.path for d in plan.retire_keeps] == [RETIRED_WORKFLOW_PATH]
+    assert not plan.retire_deletes
+
+    _apply(tmp_path, iapply.MODE_PR)
+    # The KEEP path is never in the queried universe, so it can never be
+    # committed into the refreshed PR — and apply left it on disk untouched.
+    assert RETIRED_WORKFLOW_PATH not in set(rec.staged_query)
+    assert victim.is_file()
+    assert "# local tweak" in victim.read_text()
 
 
 def test_pr_mode_reports_no_changes_when_the_managed_set_already_matches_base(
@@ -6007,4 +6035,16 @@ def test_rerender_skipped_in_the_window_omits_the_pr_body_section(tmp_path, rec)
     )
 
     assert "Changelog re-rendered" not in rec.pr_body
-    assert chlog.CHANGELOG_FILE not in rec.commit_paths
+    # The phantom changelog was dropped from `changed_paths` before apply, so it
+    # never reaches `git add`. The MODE_PR commit pathspec names CHANGELOG_FILE
+    # UNCONDITIONALLY in its universe (#984 review — so a changelog DELETED since
+    # a prior run is still published as a deletion), then scopes to the members
+    # with a real staged diff via `git.staged_paths` (`git diff --cached
+    # --name-only`), which silently skips a path absent from the tree, the index
+    # AND HEAD — so an absent/untracked CHANGELOG.md is never committed. The stub
+    # `staged_paths` echoes the whole queried universe, so `rec.commit_paths`
+    # cannot show that scoping (it is covered by `test_staged_paths_*` in
+    # test_git_adapter.py); assert the stub-independent guarantee instead — the
+    # phantom path never reaches `git add`.
+    add_paths = next(paths for name, paths in rec.calls if name == "add")
+    assert chlog.CHANGELOG_FILE not in add_paths

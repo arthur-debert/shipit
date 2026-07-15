@@ -185,7 +185,7 @@ def test_default_branch_honors_a_non_main_default(monkeypatch):
 
 def test_default_branch_falls_back_to_main_when_the_symref_is_absent(monkeypatch):
     # Some reference-borrow clones never set `origin/HEAD`: an absent symref is a
-    # NORMAL probe answer (nonzero rc). With no `main`/`master`/`trunk`
+    # NORMAL probe answer (nonzero rc). With no `main`/`master`/`develop`/`trunk`
     # remote-tracking ref to confirm either, the resolver falls back to the
     # portfolio default `main` rather than raising.
     monkeypatch.setattr(git, "_probe", lambda args, *, cwd: _fail("not a symref"))
@@ -206,6 +206,23 @@ def test_default_branch_probes_common_names_when_the_symref_is_absent(monkeypatc
 
     monkeypatch.setattr(git, "_probe", fake)
     assert git.default_branch(cwd="/x") == "master"
+
+
+def test_default_branch_probes_develop_when_the_symref_is_absent(monkeypatch):
+    # #984 copilot review: `develop` is a common default-branch name and must be
+    # in the fallback probe list — a repo whose default is `develop` (with
+    # `refs/remotes/origin/develop`) but no `<remote>/HEAD` symref must resolve
+    # to `develop`, not fall through to `main` and crash the MODE_PR reset onto a
+    # non-existent `origin/main`.
+    def fake(args, *, cwd):
+        if args[0] == "symbolic-ref":
+            return _fail("no symref")
+        # rev-parse --verify --quiet refs/remotes/origin/<candidate>: only the
+        # `develop` remote-tracking ref exists (no main/master).
+        return _ok("deadbeef\n") if args[-1].endswith("/develop") else _fail()
+
+    monkeypatch.setattr(git, "_probe", fake)
+    assert git.default_branch(cwd="/x") == "develop"
 
 
 def test_staged_paths_scopes_the_cached_diff_and_parses_the_names(monkeypatch):

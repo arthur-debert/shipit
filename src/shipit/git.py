@@ -211,19 +211,19 @@ def default_branch(*, cwd: str, remote: str = "origin") -> str:
 
     A PROBE, not a mutation: a missing symref (some reference-borrow clones never
     set ``<remote>/HEAD``) is a normal answer. Rather than blindly returning
-    ``main`` — which would mis-resolve a ``master``/``trunk`` remote and then
-    crash the MODE_PR reset onto a non-existent ``origin/main`` — the fallback
-    PROBES the common default-branch names against the remote-tracking refs a
-    fetch populated, ``main`` first (the portfolio default), and only when none
-    exist returns ``main`` as the last resort. A launch-level failure (missing
-    git, timeout) still propagates :class:`ExecError`.
+    ``main`` — which would mis-resolve a ``master``/``develop``/``trunk`` remote
+    and then crash the MODE_PR reset onto a non-existent ``origin/main`` — the
+    fallback PROBES the common default-branch names against the remote-tracking
+    refs a fetch populated, ``main`` first (the portfolio default), and only when
+    none exist returns ``main`` as the last resort. A launch-level failure
+    (missing git, timeout) still propagates :class:`ExecError`.
     """
     result = _probe(["symbolic-ref", "--short", f"refs/remotes/{remote}/HEAD"], cwd=cwd)
     if result.ok:
         name = result.stdout.strip().removeprefix(f"{remote}/")
         if name:
             return name
-    for candidate in ("main", "master", "trunk"):
+    for candidate in ("main", "master", "develop", "trunk"):
         probe = _probe(
             ["rev-parse", "--verify", "--quiet", f"refs/remotes/{remote}/{candidate}"],
             cwd=cwd,

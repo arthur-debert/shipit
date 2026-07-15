@@ -1024,25 +1024,41 @@ def apply(
             )
             git.add(add_paths, cwd=cwd)
             # The commit pathspec must carry MORE than the writes. The SAME
-            # drop-out class hits retired files, retired-hook files, and a
-            # previously-rendered CHANGELOG.md (#984 agy review): a retired path
-            # already absent at the cut point is a NOOP that never joins
-            # `changed_paths`, yet after the reset onto origin/<base> the index
-            # still stages its difference against the base (e.g. the deletion of
-            # a retired file the base still carries). Omit it from the commit
-            # pathspec and the pathspec `git commit` — which takes UNLISTED paths
-            # from HEAD — silently REVERTS it to the base state in the refreshed
-            # PR. So widen the universe to the full shipit-owned path set, then
-            # scope the commit to the members that ACTUALLY carry a staged diff:
-            # a retired path absent from the tree, the index AND the base has
-            # nothing to carry, and `git commit` aborts on a pathspec that
-            # matches nothing (the same crash the #578 changelog phantom-drop
-            # above guards against — `git.staged_paths` never lists it).
+            # drop-out class hits the retired-file DELETES, retired-hook DELETES,
+            # and a previously-rendered CHANGELOG.md (#984 agy review): a retired
+            # path already absent at the cut point never joins `changed_paths`,
+            # yet after the reset onto origin/<base> the index still stages its
+            # difference against the base (e.g. the deletion of a retired file
+            # the base still carries). Omit it from the commit pathspec and the
+            # pathspec `git commit` — which takes UNLISTED paths from HEAD —
+            # silently REVERTS it to the base state in the refreshed PR.
+            #
+            # But the universe is only what APPLY ACTUALLY CHANGED, never the
+            # full retired manifest (#984 codex review): a KEEP retired decision
+            # is a locally-modified consumer file apply PRESERVES, not shipit
+            # content to publish — and a NOOP is a path apply never touched. A
+            # KEEP path carried on the stale install branch differs from the base
+            # in the post-reset index, so listing it in the universe would leak
+            # that consumer-local file into the PR. So filter to the action
+            # DELETES only (`retire_deletes`/`retire_hook_deletes`); KEEP/NOOP
+            # stay unlisted and thus at the base state, honouring the retired
+            # invariant. The changelog is included UNCONDITIONALLY: gating on
+            # `is_file()` would drop the case where it was DELETED (absent from
+            # the tree) and must be published as a deletion — and an absent
+            # changelog costs nothing, since `git diff --cached --name-only`
+            # silently skips a path missing from the tree, the index AND HEAD.
+            #
+            # The universe is then scoped to the members that ACTUALLY carry a
+            # staged diff: a retired path absent from the tree, the index AND the
+            # base has nothing to carry, and `git commit` aborts on a pathspec
+            # that matches nothing (the same crash the #578 changelog
+            # phantom-drop above guards against — `git.staged_paths` never lists
+            # it).
             universe = sorted(
                 set(add_paths)
-                | {d.retired.path for d in plan.retired}
-                | {d.retired.file for d in plan.retired_hooks}
-                | ({CHANGELOG_FILE} if (root / CHANGELOG_FILE).is_file() else set())
+                | {d.retired.path for d in plan.retire_deletes}
+                | {d.retired.file for d in plan.retire_hook_deletes}
+                | {CHANGELOG_FILE}
             )
             pr_paths = git.staged_paths(universe, cwd=cwd)
             if not pr_paths:
