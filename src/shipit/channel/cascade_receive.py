@@ -7,8 +7,9 @@ The RECEIVE end of the artifact-channel Cascade (ADR-0067, docs/spec/artifact-ch
 declares a dependency on it. This module is what the consumer runs when that
 dispatch lands: it bumps **every** ``[artifact-deps]`` entry whose ``repo``
 matches ``upstream`` to ``version``, re-renders the managed pixi block (WS02's
-projection, via ``shipit install``), and opens a **draft** bump PR that then
-rides the normal review loop and re-resolves ``pixi.lock``.
+projection, via ``shipit install``) — whose solve re-resolves ``pixi.lock`` —
+and opens a **draft** bump PR (carrying the bumped pins, re-rendered block, and
+re-resolved lock) that then rides the normal review loop.
 
 Two halves, kept apart so the decision core stays PURE and network-free:
 
@@ -147,7 +148,13 @@ def parse_payload(upstream: object, version: object) -> CascadePayload:
 _HEADER_RE = re.compile(r"^\s*\[(?!\[)(?P<inner>[^\]]*)\]\s*(#.*)?$")
 
 #: A dotted-key segment: a quoted string or a bare key. Used to split a header's
-#: inner dotted path (``artifact-deps."ruamel.yaml"``) into its segments.
+#: inner dotted path (``artifact-deps."ruamel.yaml"``) into its segments. The
+#: quoted alternatives are deliberately ``[^"]``/``[^']`` (no escape handling):
+#: a package name with an ESCAPED quote (``"pkg\"name"``) is not modelled and
+#: makes :func:`_header_segments` return ``None`` → the header is skipped → the
+#: entry is reported unlocatable and :func:`bump_artifact_deps` raises rather
+#: than corrupting ``.shipit.toml``. That safe-fail is the intended behaviour:
+#: conda/pixi package names never carry quotes, so the un-modelled case is inert.
 _SEGMENT_RE = re.compile(r'\s*(?:"([^"]*)"|\'([^\']*)\'|([^.\s]+))\s*')
 
 #: A ``version = "…"`` assignment line (double- OR single-quoted value),
@@ -163,9 +170,15 @@ _INLINE_KEY_RE = re.compile(
     r'^\s*(?:"(?P<qk>[^"]*)"|\'(?P<sk>[^\']*)\'|(?P<bk>[^\s=]+))\s*='
 )
 
-#: A ``version = "…"`` pair INSIDE an inline table (anywhere on the line).
+#: A ``version = "…"`` pair INSIDE an inline table (anywhere on the line). The
+#: negative lookbehind anchors on the WHOLE key ``version``: without it the bare
+#: ``version\s*=`` would ``.search``-match the tail of another key —
+#: ``previous_version = "…"`` or ``other-version = "…"`` — and rewrite the wrong
+#: field, leaving the real ``version`` untouched. (The header-table form's
+#: :data:`_VERSION_LINE_RE` is already ``^\s*version``-anchored, so only this
+#: line-interior search needs the guard.)
 _INLINE_VERSION_RE = re.compile(
-    r'(?P<pre>version\s*=\s*)(?P<q>["\'])(?P<val>[^"\']*)(?P=q)'
+    r'(?P<pre>(?<![A-Za-z0-9_-])version\s*=\s*)(?P<q>["\'])(?P<val>[^"\']*)(?P=q)'
 )
 
 
@@ -375,8 +388,8 @@ def _default_reinstall(root: Path) -> None:
     if rc != 0:
         raise CascadeError(
             f"cascade bump: re-rendering the managed pixi block via `shipit "
-            f"install` failed (exit {rc}) — the .shipit.toml bump is written but "
-            f"the pixi block is stale; not opening a PR"
+            f"install` failed (exit {rc}); not opening a PR (the .shipit.toml "
+            f"bump is rolled back by :func:`receive`, leaving the tree clean)"
         )
 
 
@@ -403,8 +416,9 @@ def _pr_body(payload: CascadePayload, bumped: tuple[Bumped, ...]) -> str:
     lines += [f"- `{b.package}`: `{b.old_version}` → `{b.new_version}`" for b in bumped]
     lines += [
         "",
-        "This draft PR rides the normal review loop; `pixi.lock` re-resolves "
-        "against the new pin as part of that loop.",
+        "The bump commit carries a re-resolved `pixi.lock` (the re-render's "
+        "solve), so CI's `--locked` install is green; this draft PR then rides "
+        "the normal review loop.",
         "",
         "for #956",
         "",
@@ -425,9 +439,12 @@ def receive(
     the pixi block → branch/commit/push → draft PR). An unknown upstream or an
     already-current version bumps nothing and returns a clean no-op (no write, no
     branch, no PR) — so a redundant or misdirected dispatch is inert, never a
-    corrupt ``.shipit.toml`` or an empty PR. Every world-touching step goes
-    through the ``git`` / ``gh`` adapters and the injectable ``reinstall`` seam,
-    so the whole flow is recorded in tests with no network.
+    corrupt ``.shipit.toml`` or an empty PR. The bump is ATOMIC: a re-render
+    (``reinstall``) that fails rolls the ``.shipit.toml`` write back before
+    propagating, so a failed run never strands a half-edited tree. Every
+    world-touching step goes through the ``git`` / ``gh`` adapters and the
+    injectable ``reinstall`` seam, so the whole flow is recorded in tests with no
+    network.
     """
     payload = parse_payload(upstream, version)
     toml_path = root / config.CONFIG_NAME
@@ -439,7 +456,16 @@ def receive(
         return ReceiveResult(bumped=(), branch=None, url=None)
 
     toml_path.write_text(result.text, encoding="utf-8")
-    reinstall(root)
+    try:
+        reinstall(root)
+    except Exception:
+        # Atomicity (the `run_receive` contract: `.shipit.toml` is never left
+        # half-edited): the pins are already written, but the re-render failed,
+        # so restore the original text before propagating. Otherwise a failed
+        # reinstall would strand the checkout with bumped pins but a stale pixi
+        # block — a partially-updated tree the operator never asked for.
+        toml_path.write_text(text, encoding="utf-8")
+        raise
 
     cwd = str(root)
     branch = _branch_name(payload)
@@ -448,12 +474,24 @@ def receive(
     paths = [config.CONFIG_NAME]
     if (root / "pixi.toml").is_file():
         paths.append("pixi.toml")
+    # The re-render's lint-env solve re-resolves the WHOLE `pixi.lock` (one file,
+    # every environment) against the new pin; stage it so the bump PR carries a
+    # lock matching the bumped block and CI's `--locked` install stays green —
+    # the same laptop/CI-parity move `shipit install` makes (apply.py, #439).
+    if (root / "pixi.lock").is_file():
+        paths.append("pixi.lock")
 
     git.switch_create(branch, cwd=cwd)
     try:
         git.add(paths, cwd=cwd)
         git.commit(_pr_title(payload), paths, cwd=cwd, no_verify=True)
-        git.push(branch, cwd=cwd, no_verify=True)
+        # Force: the bump branch is deterministic (one per upstream/version) and
+        # `switch_create` (`git switch -C`) re-creates it from HEAD each run, so
+        # a re-dispatch would diverge from an existing remote branch and a plain
+        # push would fail non-fast-forward — the same shipit-owned-branch push
+        # `shipit install`'s MODE_PR does (apply.py). Reusing the open PR then
+        # works: the force-push refreshes its head before `pr_url_for_head`.
+        git.push(branch, cwd=cwd, force=True, no_verify=True)
         url = gh.pr_url_for_head(branch, cwd=cwd) or gh.pr_create(
             head=branch,
             title=_pr_title(payload),

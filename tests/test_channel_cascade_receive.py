@@ -148,6 +148,26 @@ def test_single_quoted_version_value_keeps_its_quote_style():
     assert "version = '0.20.0'" in result.text
 
 
+def test_inline_bump_anchors_on_the_whole_version_key_not_a_lookalike():
+    # The inline `version = "…"` edit `.search`es the whole line, so it must
+    # anchor on the WHOLE key: a look-alike sharing the tail (`previous_version`,
+    # `other-version`) must be left alone and only the real `version` rewritten —
+    # otherwise the surgical edit moves the wrong field and corrupts the config.
+    # (Tested at `_bump_one` directly: the config layer rejects such extra keys
+    # before `bump_artifact_deps`, so this locks the regex, its last line of
+    # defense, against a hand-authored or future-schema line.)
+    lines = [
+        "[artifact-deps]",
+        'lexd = { repo = "lex-fmt/lex", previous_version = "0.1.0", '
+        'version = "0.19.0" }',
+    ]
+    old = cr._bump_one(lines, "lexd", "0.20.0")
+    assert old == "0.19.0"
+    assert 'previous_version = "0.1.0"' in lines[1]  # untouched
+    assert 'version = "0.20.0"' in lines[1]
+    assert "0.19.0" not in lines[1]
+
+
 def test_inline_table_form_is_bumped_in_place():
     text = (
         "[artifact-deps]\n"
@@ -249,7 +269,7 @@ class _Recorder:
         self.calls.append(("commit", message, no_verify))
 
     def push(self, branch, *, cwd, remote="origin", force=False, no_verify=False):
-        self.calls.append(("push", branch, no_verify))
+        self.calls.append(("push", branch, force, no_verify))
 
     # gh
     def pr_url_for_head(self, branch, *, cwd=None):
@@ -314,6 +334,10 @@ def test_receive_bumps_reinstalls_and_opens_a_draft_pr(tmp_path, rec):
     assert ("add", (config.CONFIG_NAME, "pixi.toml")) in rec.calls
     # The commit bypasses hooks, like install's own managed commits.
     assert ("commit", rec.pr_title, True) in rec.calls
+    # The push FORCES: the deterministic bump branch is re-created from HEAD each
+    # run, so a re-dispatch must update the existing remote branch, not fail
+    # non-fast-forward. (force=True, no_verify=True.)
+    assert ("push", result.branch, True, True) in rec.calls
     assert result.url == "https://github.com/acme/repo/pull/7"
     assert result.branch == "shipit/artifact-bump/lex-fmt-lex-0.20.1"
     assert "lexd" in rec.pr_body and "0.20.1" in rec.pr_body
@@ -353,3 +377,44 @@ def test_receive_commits_only_shipit_toml_when_there_is_no_pixi_manifest(tmp_pat
     cr.receive(root, "lex-fmt/lex", "0.20.1", reinstall=lambda r: None)
 
     assert ("add", (config.CONFIG_NAME,)) in rec.calls
+
+
+def test_receive_stages_the_re_resolved_pixi_lock(tmp_path, rec):
+    # The re-render's solve re-resolves pixi.lock; it rides the bump commit so
+    # CI's `--locked` install stays green against the new pin.
+    root = _consumer(tmp_path)
+    (root / "pixi.lock").write_text("version: 6\n")
+
+    cr.receive(root, "lex-fmt/lex", "0.20.1", reinstall=lambda r: None)
+
+    assert ("add", (config.CONFIG_NAME, "pixi.toml", "pixi.lock")) in rec.calls
+
+
+def test_receive_force_pushes_the_deterministic_bump_branch(tmp_path, rec):
+    # A re-dispatch reuses the branch/PR: switch_create re-cuts the branch from
+    # HEAD, so the push must force to update the existing remote branch rather
+    # than fail non-fast-forward.
+    root = _consumer(tmp_path)
+    rec.existing_pr = "https://github.com/acme/repo/pull/3"
+
+    result = cr.receive(root, "lex-fmt/lex", "0.20.1", reinstall=lambda r: None)
+
+    assert ("push", result.branch, True, True) in rec.calls
+    assert "pr_create" not in rec.names()  # the forced push refreshed the open PR
+
+
+def test_receive_rolls_shipit_toml_back_when_the_re_render_fails(tmp_path, rec):
+    # Atomicity: a re-render failure after the pins are written must restore the
+    # original .shipit.toml, never strand a half-edited tree (bumped pins, stale
+    # pixi block).
+    root = _consumer(tmp_path)
+    before = (root / ".shipit.toml").read_text()
+
+    def _boom(_root):
+        raise CascadeError("re-render failed")
+
+    with pytest.raises(CascadeError, match="re-render failed"):
+        cr.receive(root, "lex-fmt/lex", "0.20.1", reinstall=_boom)
+
+    assert (root / ".shipit.toml").read_text() == before  # rolled back
+    assert rec.calls == []  # no branch, no commit, no PR

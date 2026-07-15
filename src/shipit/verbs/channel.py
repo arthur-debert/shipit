@@ -81,9 +81,13 @@ def run_receive(*, upstream: str, version: str, path: str | None = None) -> int:
 def format_receive(result: cascade_receive.ReceiveResult) -> str:
     """The pure text renderer — the no-op line, or the bump summary + PR URL."""
     if not result.bumped:
+        # Empty `bumped` covers BOTH no-op shapes — an unknown upstream (no entry
+        # matched) and an already-current version (entries matched but were left
+        # alone) — so the wording stays true for both rather than claiming
+        # "nothing matched" over an entry that did.
         return (
-            "channel receive: no `[artifact-deps]` entry matched — nothing to "
-            "bump (.shipit.toml untouched)."
+            "channel receive: no bump needed — no stale `[artifact-deps]` entry "
+            "matched this upstream/version (.shipit.toml untouched)."
         )
     lines = ["channel receive: bumped"]
     lines += [
