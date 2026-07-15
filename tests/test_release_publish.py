@@ -19,6 +19,7 @@ import json
 from pathlib import Path
 
 import pytest
+import yaml
 
 from shipit import config, execrun
 from shipit.release import ReleaseError
@@ -2053,6 +2054,25 @@ def test_render_conda_recipe_repackages_the_prebuilt_binary():
         install_binary=install_bin,
     )
     assert 'cp "lexd.exe" "${PREFIX}/Scripts/lexd.exe"' in win
+
+
+def test_render_conda_recipe_escapes_the_archive_path_scalar():
+    """The path scalar is JSON-escaped (a JSON string IS a valid YAML 1.2
+    double-quoted scalar), so a staging path bearing a `"` or `\\` renders as
+    valid YAML that parses back to the EXACT path — bare-quote concatenation
+    would break the recipe or silently re-point the source."""
+    weird = '/weird/pa"th\\dir/lexd.tar.gz'
+    recipe = publish_mod.render_conda_recipe(
+        package="lexd",
+        version="1.2.3",
+        archive_path=weird,
+        source_binary="lexd",
+        install_dir="bin",
+        install_binary="lexd",
+    )
+    # Round-trips through a real YAML parser to the exact input path.
+    doc = yaml.safe_load(recipe)
+    assert doc["source"][0]["path"] == weird
 
 
 class _CondaBuildRecorder(SeamRecorder):

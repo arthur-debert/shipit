@@ -1460,8 +1460,10 @@ def render_conda_recipe(
     binary's path WITHIN the extracted tree — the release archive stages it
     under a top-level ``<artifact>-<triple>/`` dir (bundle._compose_archive's
     contract), so the copy source is that dir + the binary name, never the
-    archive root. ``archive_path`` is a POSIX path (``Path.as_posix``) and is
-    quoted so a path with spaces or ``#`` still parses as one YAML scalar.
+    archive root. ``archive_path`` is a POSIX path (``Path.as_posix``) emitted
+    through ``json.dumps`` — a JSON string IS a valid YAML 1.2 double-quoted
+    scalar, so spaces, ``#``, and any embedded ``"`` / ``\\`` are escaped
+    rather than breaking the recipe or silently re-pointing the source.
     ``build.number`` is 0 (the tag version is the sole ordering axis,
     ADR-0041 — a re-cut of the same version is a re-upload, not a new build
     number). Validated live on a ``file://`` channel: build → pixi resolve →
@@ -1473,7 +1475,7 @@ def render_conda_recipe(
         f'  version: "{version}"\n'
         f"\n"
         f"source:\n"
-        f'  - path: "{archive_path}"\n'
+        f"  - path: {json.dumps(archive_path)}\n"
         f"\n"
         f"build:\n"
         f"  number: 0\n"
