@@ -36,6 +36,7 @@ from pathlib import Path
 import click
 
 from .. import config, events, gh, git
+from ..channel import cascade_receive
 from ..install import artifactdeps
 from ..install.apply import (
     MODE_LOCAL,
@@ -162,7 +163,12 @@ def _artifact_dep_units(root: Path, *, is_private=gh.repo_is_private) -> list[Un
         resolved.append(
             (dep, artifactdeps.channel_url(dep.repo, private=visibility[dep.repo]))
         )
-    return artifactdeps.project(resolved)
+    # The consumer half also carries the receive-workflow (ARF01-WS07 #956): a
+    # repo that declares a cross-repo pin gets the managed workflow that, on the
+    # producer's release cascade, bumps the pin and opens a draft PR. Delivered
+    # ONLY when `[artifact-deps]` exist, so a repo with no pin never carries a
+    # dead cascade workflow; reconciled like every other whole-file unit.
+    return [cascade_receive.receive_workflow_unit(), *artifactdeps.project(resolved)]
 
 
 @click.command(name="install")
