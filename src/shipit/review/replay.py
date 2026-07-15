@@ -421,34 +421,29 @@ def run_fanout_replay(
     return {"review": outcome.review, "record_path": record_path}
 
 
-def provision_agent_defs(workdir: str) -> list[Path]:
-    """Provision the bundled role agent-defs into ``workdir``'s ``.claude/agents``.
+def _provision_bundled_tree(root: Path, rel_dir: str, source) -> list[Path]:
+    """Exclusive-create every bundled file under ``source`` into ``root/rel_dir``.
 
-    The RVW02-WS08 op gap (#680): the Calibrator's default backend launches
-    ``claude --agent reviewer``, which reads ``.claude/agents/reviewer.md`` from
-    the checkout it runs in — present in shipit-self and installed consumers,
-    ABSENT in a bare experiment clone, where the launch fails. So a fan-out
-    replay with the judge on writes the bundled agent-defs
-    (:func:`shipit.install.units.agents_root` — the same source ``shipit
-    install`` vendors) into the replay checkout first. Only MISSING files are
-    written: an existing def (committed, installed, or deliberately edited as an
-    experiment arm) is the checkout's own and is never clobbered. Returns the
-    paths written (empty when everything was already present).
+    The shared core of :func:`provision_agent_defs` (RVW02-WS08, extended for the
+    AGY def in #989): walk the bundled ``source`` tree and write each file into
+    the matching path under ``root/rel_dir``, MISSING-ONLY. Handles a NESTED
+    source (the AGY def is ``reviewer/agent.md``, not a flat file) by mirroring the
+    source's relative paths.
 
-    Untrusted-checkout guard (RVW03-WS01): replay runs over a checkout the
-    operator may not control, so the writes stay strictly inside the checkout.
-    A ``.claude``/``agents`` path component that is a SYMLINK (git carries
-    symlinks) could redirect the bundled defs outside the checkout, so a
-    symlinked component aborts provisioning with nothing written. Each file is
-    created with exclusive ``open(..., "xb")``, so an existing name (a regular
-    file OR a pre-planted symlink) is left untouched — never followed or
-    truncated — which also makes concurrent replays on one checkout race-safe.
+    Untrusted-checkout guard (RVW03-WS01): a SYMLINK anywhere in the destination
+    directory chain — the ``rel_dir`` components OR an intermediate dir created for
+    a nested file — could redirect the writes outside the checkout, so a symlinked
+    component aborts this tree with nothing further written. Each file is created
+    with exclusive ``open(..., "xb")``, so an existing name (a regular file OR a
+    pre-planted symlink) is left untouched — never followed or truncated — which
+    also makes concurrent replays on one checkout race-safe. Returns the paths
+    written under this tree.
     """
-    from ..install.units import AGENTS_DEF_DIR, agents_root
+    from ..install.units import walk_files
 
-    root = Path(workdir).resolve()
+    # Guard every component of the base dir chain before writing anything.
     probe = root
-    for part in Path(AGENTS_DEF_DIR).parts:
+    for part in Path(rel_dir).parts:
         probe = probe / part
         if probe.is_symlink():
             logger.warning(
@@ -457,24 +452,75 @@ def provision_agent_defs(workdir: str) -> list[Path]:
                 probe,
             )
             return []
-    dest_dir = root / AGENTS_DEF_DIR
+    dest_dir = root / rel_dir
     written: list[Path] = []
-    for entry in agents_root().iterdir():
-        if not entry.is_file():
+    for rel, content in walk_files(source):
+        dest = dest_dir / rel
+        # Guard each intermediate dir a nested file needs (e.g. `reviewer/`).
+        probe = dest_dir
+        symlinked = False
+        for part in Path(rel).parent.parts:
+            probe = probe / part
+            if probe.is_symlink():
+                logger.warning(
+                    "replay: refusing to provision %s — %s is a symlink; "
+                    "leaving the untrusted checkout untouched",
+                    rel,
+                    probe,
+                )
+                symlinked = True
+                break
+        if symlinked:
             continue
-        dest = dest_dir / entry.name
-        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest.parent.mkdir(parents=True, exist_ok=True)
         try:
             with open(dest, "xb") as fh:
-                fh.write(entry.read_bytes())
+                fh.write(content)
         except FileExistsError:
             continue
         written.append(dest)
+    return written
+
+
+def provision_agent_defs(workdir: str) -> list[Path]:
+    """Provision the bundled role agent-defs into ``workdir`` — both the Claude
+    defs (``.claude/agents``) and the AGY reviewer def (``.agents/agents``, #989).
+
+    The RVW02-WS08 op gap (#680): a reviewer/calibrator backend launches ``claude
+    --agent reviewer`` (reads ``.claude/agents/reviewer.md``) or, on the agy arm,
+    ``agy --agent reviewer`` (reads ``.agents/agents/reviewer/agent.md``) from the
+    checkout it runs in — present in shipit-self and installed consumers, ABSENT
+    in a bare experiment clone, where the launch fails. So a replay writes the
+    bundled defs (:func:`shipit.install.units.agents_root` /
+    :func:`~shipit.install.units.agy_agents_root` — the same sources ``shipit
+    install`` vendors) into the replay checkout first. Only MISSING files are
+    written: an existing def (committed, installed, or deliberately edited as an
+    experiment arm) is the checkout's own and is never clobbered. Returns every
+    path written across both trees (empty when everything was already present).
+
+    Untrusted-checkout guard (RVW03-WS01): replay runs over a checkout the
+    operator may not control, so the writes stay strictly inside the checkout —
+    a symlinked destination component aborts that tree, and every file is
+    exclusive-created (see :func:`_provision_bundled_tree`).
+    """
+    from ..install.units import (
+        AGENTS_DEF_DIR,
+        AGY_AGENTS_DEF_DIR,
+        agents_root,
+        agy_agents_root,
+    )
+
+    root = Path(workdir).resolve()
+    written: list[Path] = []
+    written += _provision_bundled_tree(root, AGENTS_DEF_DIR, agents_root())
+    agy_source = agy_agents_root()
+    if agy_source.is_dir():
+        written += _provision_bundled_tree(root, AGY_AGENTS_DEF_DIR, agy_source)
     if written:
         logger.info(
             "replay: provisioned %d role agent-def(s) into %s",
             len(written),
-            dest_dir,
+            root,
             extra={"files": len(written)},
         )
     return written

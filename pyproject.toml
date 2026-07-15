@@ -68,9 +68,16 @@ path = "hatch_build.py"
 # into the wheel so `shipit install` can lay them into a consumer's `.claude/agents/`.
 # One source (the regen-roles generator), two readers (shipit-self at the repo
 # root, the wheel for install) — never committed twice.
+#
+# The AGY native reviewer def (#989) is vendored the same way: it lives at
+# `.agents/agents/` (where `agy --agent reviewer` reads it for shipit-self) and is
+# force-included so `shipit install` can lay it into a consumer's `.agents/agents/`.
+# Only the `agents/` subtree is vendored, NOT the whole `.agents/` dir (which also
+# holds `.agents/skills/`, a separate concern).
 [tool.hatch.build.targets.wheel.force-include]
 ".shipit-skills" = "shipit/data/skills"
 ".claude/agents" = "shipit/data/agents"
+".agents/agents" = "shipit/data/agy-agents"
 
 # shipit's ruff config was CARVED OUT of this file into a standalone `ruff.toml`
 # (LNT01-WS03 #516, ADR-0037 "the gate owns the config"): the ONE canonical body

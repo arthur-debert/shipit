@@ -406,6 +406,36 @@ def test_regenerate_records_a_summary_with_the_count(tmp_path, caplog):
     assert rec.files == len(written)
 
 
+def test_regenerate_writes_the_agy_native_reviewer_def(tmp_path):
+    """#989: regenerate emits the AGY native custom-agent reviewer def at
+    `.agents/agents/reviewer/agent.md` — documented `name`/`description` frontmatter
+    ONLY (no `tools:` line), the generated banner, and the reviewer OVERLAY body
+    (the focused reviewer marching orders, not the base+overlay composition)."""
+    import yaml
+
+    from shipit.harness.prompts import AGY_REVIEWER_DEF_REL
+    from shipit.harness.role import Role
+
+    written = regenerate(tmp_path)
+    agy_def = tmp_path.joinpath(*AGY_REVIEWER_DEF_REL)
+    assert agy_def in written
+    text = agy_def.read_text(encoding="utf-8")
+
+    front = next(yaml.safe_load_all(text))
+    assert front["name"] == "reviewer"
+    assert front["description"]  # the authored "when to use" line
+    # AGY frontmatter is name/description ONLY — no Claude-style tools allow-list.
+    assert "tools" not in front
+    assert "Generated from src/shipit/data/roles/" in text  # the banner
+
+    # The body is the reviewer OVERLAY (focused), not the shared dev-cycle base.
+    defs = load_role_defs()
+    assert defs.overlays[Role.REVIEWER].strip() in text
+    # A base-only marker (the coordinator's dev-cycle heading) is absent — this is
+    # the slim reviewer posture, not the full role prompt.
+    assert "## Dev cycle" not in text
+
+
 def test_main_prints_one_line_per_regenerated_file(tmp_path, capsys, monkeypatch):
     """The print stays the user-facing surface: one stdout line per written file
     (the records are ADDITIVE — the CLI output did not change shape)."""

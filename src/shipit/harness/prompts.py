@@ -314,6 +314,49 @@ def _agent_def(role: Role, prompt: str) -> str:
     return f"{_frontmatter(role)}\n\n{GENERATED_COMMENT}\n\n{prompt}\n"
 
 
+#: The relative path (under the repo root / a checkout) of the AGY native
+#: custom-agent reviewer def (issue #989): ``.agents/agents/reviewer/agent.md``,
+#: the location AGY 1.1.2 reads a ``--agent reviewer`` def from.
+AGY_REVIEWER_DEF_REL = (".agents", "agents", Role.REVIEWER.value, "agent.md")
+
+
+def _agy_frontmatter(role: Role) -> str:
+    """The AGY custom-agent frontmatter block — ONLY the documented ``name`` /
+    ``description`` fields (issue #989).
+
+    Unlike :func:`_frontmatter` (the Claude agent-def), this emits NO ``tools``
+    allow-list: AGY has no per-agent tool grant in its documented frontmatter, and
+    the reviewer's read-only guarantee rides the chmod'd Tree (ADR-0018), not an
+    agent-def field. The ``description`` reuses the same authored
+    :data:`_AGENT_DESCRIPTIONS` entry the Claude def uses, so the two surfaces
+    never disagree on what the reviewer is for.
+    """
+    return "\n".join(
+        [
+            "---",
+            f"name: {role.value}",
+            f"description: {json.dumps(_AGENT_DESCRIPTIONS[role])}",
+            "---",
+        ]
+    )
+
+
+def _agy_agent_def(role: Role, overlay: str) -> str:
+    """An AGY native custom-agent def body: AGY frontmatter + banner + the role's
+    FOCUSED overlay (issue #989).
+
+    The body is the role's own overlay slice (``defs.overlays[role]``) — the
+    focused reviewer marching orders — NOT the ``base + overlay`` composition the
+    Claude agent-def carries. AGY's reviewer runs a slim, read-only posture (it
+    fetches a diff and emits a structured review; the whole shared dev-cycle base
+    is irrelevant to it), and the slimmer def is the measured speed win the issue
+    lands. The schema/output contract is NOT baked in here: the funnel producer
+    still hands the concrete review task (with the inline schema) as the ``--print``
+    payload, so the def stays a stable posture and the task carries the specifics.
+    """
+    return f"{_agy_frontmatter(role)}\n\n{GENERATED_COMMENT}\n\n{overlay.strip()}\n"
+
+
 def _generated_doc(prompt: str) -> str:
     """A bundled generated markdown doc: banner + the composed prompt."""
     return f"{GENERATED_COMMENT}\n\n{prompt}\n"
@@ -327,8 +370,10 @@ def _repo_root() -> Path:
 def regenerate(repo_root: Path | None = None) -> list[Path]:
     """Regenerate every derived surface from the fragments. BOUNDARY.
 
-    Writes, and returns the paths of: the three subagent agent-defs
-    (``.claude/agents/<role>.md``), the bundled coordinator slice
+    Writes, and returns the paths of: the four subagent agent-defs
+    (``.claude/agents/<role>.md``), the AGY native reviewer def
+    (``.agents/agents/reviewer/agent.md``, issue #989 — read by ``agy --agent
+    reviewer``), the bundled coordinator slice
     (``src/shipit/data/roles/generated/coordinator-prompt.md``, read at import by
     ``policy``), and the union reference
     (``src/shipit/data/roles/generated/agents-union.md``). The fragment ``.md``
@@ -336,7 +381,8 @@ def regenerate(repo_root: Path | None = None) -> list[Path]:
     mirror step); ``tools/regen-roles.sh`` chains both.
     """
     root = repo_root if repo_root is not None else _repo_root()
-    rendered = render(load_role_defs())
+    defs = load_role_defs()
+    rendered = render(defs)
     written: list[Path] = []
 
     def _write_surface(dest: Path, text: str) -> None:
@@ -351,6 +397,17 @@ def regenerate(repo_root: Path | None = None) -> list[Path]:
     for role in SUBAGENT_ROLES:
         dest = agents_dir / f"{role.value}.md"
         _write_surface(dest, _agent_def(role, rendered.role_prompts[role]))
+
+    # The AGY native custom-agent reviewer def (#989): `agy --agent reviewer` reads
+    # `.agents/agents/reviewer/agent.md` from the checkout it runs in. Generated from
+    # the SAME reviewer overlay the Claude reviewer def uses, so the two reviewer
+    # surfaces can never disagree.
+    agy_reviewer_dest = root.joinpath(*AGY_REVIEWER_DEF_REL)
+    agy_reviewer_dest.parent.mkdir(parents=True, exist_ok=True)
+    _write_surface(
+        agy_reviewer_dest,
+        _agy_agent_def(Role.REVIEWER, defs.overlays[Role.REVIEWER]),
+    )
 
     generated_dir = root / "src" / "shipit" / "data" / "roles" / "generated"
     generated_dir.mkdir(parents=True, exist_ok=True)

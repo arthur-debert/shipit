@@ -398,6 +398,31 @@ def test_missing_cli_fails_loud(monkeypatch):
         )
 
 
+def test_agy_reviewer_preflight_requires_the_agent_flag(monkeypatch):
+    # #989: a real agy reviewer launch preflights `--agent` support and surfaces a
+    # clean UPGRADE BackendUnavailable when the installed agy predates it — never a
+    # confusing "unknown option" from the CLI mid-launch.
+    from shipit.spawn.backends import antigravity as agy_backend
+
+    monkeypatch.setattr(producer.shutil, "which", lambda binary: f"/usr/bin/{binary}")
+    monkeypatch.setattr(agy_backend, "supports_agent_flag", lambda **k: False)
+    with pytest.raises(BackendUnavailable, match="--agent"):
+        producer.run_tree_review(
+            agent_backend.ANTIGRAVITY, _ctx(), launcher=lambda *a, **k: None
+        )
+
+
+def test_agy_reviewer_preflight_passes_when_agent_flag_is_supported(monkeypatch):
+    # With a modern agy the `--agent` preflight is satisfied, so preflight does not
+    # raise (the launch proceeds past it). We stub the launch to return promptly.
+    from shipit.spawn.backends import antigravity as agy_backend
+
+    monkeypatch.setattr(producer.shutil, "which", lambda binary: f"/usr/bin/{binary}")
+    monkeypatch.setattr(agy_backend, "supports_agent_flag", lambda **k: True)
+    # No BackendUnavailable from the capability check: _preflight returns cleanly.
+    producer._preflight(agent_backend.ANTIGRAVITY, dry_run=False)
+
+
 def test_preflight_round_passes_when_every_binary_is_on_path(monkeypatch):
     monkeypatch.setattr(producer.shutil, "which", lambda binary: f"/usr/bin/{binary}")
     producer.preflight_round([agent_backend.CODEX, agent_backend.CLAUDE])  # no raise

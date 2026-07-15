@@ -581,17 +581,49 @@ def test_provision_agent_defs_writes_missing_and_never_clobbers(checkout):
 
 def test_provision_agent_defs_refuses_symlinked_component(checkout, tmp_path):
     # Untrusted-checkout guard: a crafted checkout can make `.claude` (or
-    # `.claude/agents`) a symlink out of the tree; provisioning must refuse
-    # rather than follow it and write bundled defs outside the checkout.
+    # `.claude/agents`) a symlink out of the tree; provisioning must refuse to
+    # follow it. Since #989 the AGY def rides an INDEPENDENT tree (`.agents`), so a
+    # `.claude` symlink aborts only the `.claude` tree — nothing bundled leaks
+    # through the symlink, and the (unsymlinked) AGY tree still provisions.
     outside = tmp_path / "outside"
     outside.mkdir()
     (checkout / ".claude").symlink_to(outside, target_is_directory=True)
 
     written = replay.provision_agent_defs(str(checkout))
 
-    assert written == []
-    # Nothing leaked through the symlink to the external directory.
+    # Nothing leaked through the `.claude` symlink to the external directory.
     assert list(outside.iterdir()) == []
+    # No `.claude/agents` def was written (that tree was refused).
+    assert not any(".claude" in path.parts for path in written)
+
+
+def test_provision_agent_defs_refuses_symlinked_agy_component(checkout, tmp_path):
+    # The AGY tree (`.agents/agents`, #989) carries the SAME untrusted-checkout
+    # guard: a symlinked `.agents` component aborts the AGY tree and writes nothing
+    # bundled through it, while the independent `.claude` tree still provisions.
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (checkout / ".agents").symlink_to(outside, target_is_directory=True)
+
+    written = replay.provision_agent_defs(str(checkout))
+
+    assert list(outside.iterdir()) == []
+    assert not any(".agents" in path.parts for path in written)
+    # The `.claude` tree is unaffected and still lands its defs.
+    assert any(".claude" in path.parts for path in written)
+
+
+def test_provision_agent_defs_provisions_the_agy_reviewer_def(checkout):
+    # #989: the AGY native reviewer def is provisioned into `.agents/agents/reviewer/
+    # agent.md` (nested) so `agy --agent reviewer` finds it in a bare replay checkout.
+    written = replay.provision_agent_defs(str(checkout))
+
+    agy_def = checkout / ".agents" / "agents" / "reviewer" / "agent.md"
+    assert agy_def in written
+    assert agy_def.is_file()
+    assert "name: reviewer" in agy_def.read_text(encoding="utf-8")
+    # Never clobbered on a second call.
+    assert replay.provision_agent_defs(str(checkout)) == []
 
 
 # --- the fan-out CLI surface ------------------------------------------------------

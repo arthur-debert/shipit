@@ -937,12 +937,20 @@ def _dry_run(
 
 def _preflight(backend: Backend, *, dry_run: bool) -> None:
     """Verify the backend's CLI binary (the registry's ``binary`` alias) is on
-    PATH; raise :class:`BackendUnavailable` otherwise.
+    PATH — and, for agy, that it supports the reviewer's ``--agent`` flag; raise
+    :class:`BackendUnavailable` otherwise.
 
     Skipped in ``dry_run`` (a dry-run only prints the would-run argv; it must work
     without the CLI installed, mirroring the spawn dry-run posture). A missing CLI on a
     REAL run fails loud — these are LOCAL backends and a missing binary must never
     silently degrade.
+
+    For the ANTIGRAVITY backend the reviewer posture depends on AGY 1.1.2's native
+    ``--agent`` flag (issue #989), so a real launch additionally preflights that
+    capability (:func:`shipit.spawn.backends.antigravity.require_agent_support`)
+    and surfaces a clean UPGRADE message when the installed ``agy`` predates it —
+    the same :class:`BackendUnavailable` surface as a missing binary, so the
+    round-level preflight and the service map it uniformly.
     """
     if dry_run:
         return
@@ -952,6 +960,13 @@ def _preflight(backend: Backend, *, dry_run: bool) -> None:
             f"the '{backend.binary}' CLI on your PATH, but it was not found. "
             f"Install it (and log it in), then re-run."
         )
+    if backend is ANTIGRAVITY:
+        from ..spawn.backends.antigravity import require_agent_support
+
+        try:
+            require_agent_support(binary=backend.binary)
+        except RuntimeError as exc:
+            raise BackendUnavailable(str(exc)) from exc
 
 
 def preflight_round(backends: Sequence[Backend]) -> None:

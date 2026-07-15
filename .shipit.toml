@@ -67,8 +67,17 @@ copilot = { rerun = true }
 # fully wired and selectable — re-add `dimensions = [...]` on a reviewer to opt
 # it back in (the RVW02-WS05 baseline-study set was correctness,
 # cross-file-invariants, security-robustness, test-quality; report on #638).
-codex = { window = 2700 }
-agy = { window = 2700 }
+#
+# Local review models are pinned EXPLICITLY (issue #989) rather than left on the
+# backend defaults (which launch gpt-5.5 for codex and Gemini 3.1 Pro (High) for
+# agy). The dogfood roster wants the faster review tier: codex on `gpt-5.6-sol`
+# (a verbatim id — passes through the alias table unchanged) and agy on `flash`
+# (the existing honest alias → Gemini 3.5 Flash (High)). The spike measured the
+# agy reviewer ~20% faster on 3.5 Flash with a native reviewer agent and no loss
+# of the seeded defects (see ADR-0020 §agy). This pins the per-reviewer `model`
+# only; it does NOT remap agy's `pro` alias or touch any write-agent default.
+codex = { window = 2700, model = "gpt-5.6-sol" }
+agy = { window = 2700, model = "flash" }
 
 # Table-level review-run policy, set FROM the WS05 baseline study (#638):
 #
@@ -247,6 +256,7 @@ claude-start = "sha256:8a658d5d88269a0444e9843d5cddbf133e4ac9fb2e6862701980991bb
 ".claude/agents/implementer.md" = "sha256:18b16a9383e160ffdcdb62e798292605738f6366691bc8e59e77645ed605bb19"
 ".claude/agents/reviewer.md" = "sha256:9b5d9e3739583dcd55c2218984f6f37f47f8ae5ec0663d0e1bafd635ccb9b859"
 ".claude/agents/shepherd.md" = "sha256:78cf79e86e974a7e663f6ed6318995d964759ed824b8edc6170f74bfb735a211"
+".agents/agents/reviewer/agent.md" = "sha256:38d3d1265d8cf912652570932d0e59f867c71ad80b7c7e0a9fbbb55316c6cca5"
 ".claude/settings.json#shipit-pretooluse-hook" = "sha256:5ecfbfac5a759a18e4b35a8e17a193c82610030972aeaf6c3cfc54b657872c4f"
 ".claude/settings.json#shipit-stop-hook" = "sha256:f01a445a58731cca9cfa67032780749aed3ece69afa0cec813c1a522cf25ce8f"
 ".claude/settings.json#shipit-subagentstop-hook" = "sha256:48cf4d9e66102fe17d1f5cdd93b0fccef89547e32eb737ad519d809f5cf2b644"
