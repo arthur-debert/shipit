@@ -10,6 +10,7 @@ argv-assembly logic can't silently rot (the funnel_verify pattern).
 from __future__ import annotations
 
 import json
+import urllib.error
 
 import pytest
 
@@ -61,9 +62,12 @@ def test_create_bucket_argv_sets_ubla_and_tier_public_access_prevention():
         "--uniform-bucket-level-access" in pub
         and "--uniform-bucket-level-access" in priv
     )
-    # Public permits the allUsers grant; private forbids any public binding.
-    assert "--public-access-prevention=inherited" in pub
-    assert "--public-access-prevention=enforced" in priv
+    # PAP is a BOOLEAN flag, never a =value: public permits the allUsers grant
+    # (--no-public-access-prevention), private forbids any public binding
+    # (--public-access-prevention).
+    assert "--no-public-access-prevention" in pub
+    assert "--public-access-prevention" in priv
+    assert not any(a.startswith("--public-access-prevention=") for a in pub + priv)
     assert "--location=US" in pub and "--project=p" in pub
 
 
@@ -125,6 +129,18 @@ def test_has_public_binding_detects_allusers_and_allauthenticated():
     assert not sp.has_public_binding(json.dumps({}))
 
 
+def test_has_public_binding_fails_closed_on_malformed_shapes():
+    # A binding whose members is null / a scalar, or a non-list bindings, must
+    # NOT raise TypeError — the acceptance verdict degrades to "not observed
+    # public" instead of crashing the report.
+    assert not sp.has_public_binding(json.dumps({"bindings": [{"members": None}]}))
+    assert not sp.has_public_binding(
+        json.dumps({"bindings": [{"members": "allUsers"}]})
+    )
+    assert not sp.has_public_binding(json.dumps({"bindings": ["nonsense"]}))
+    assert not sp.has_public_binding(json.dumps({"bindings": "nope"}))
+
+
 def test_verdict_readers_refuse_unreadable_json():
     with pytest.raises(sp.ProvisionError):
         sp.ubla_enabled("not json")
@@ -140,7 +156,8 @@ class FakeRunner:
 
     ``existing`` is the set of resource tokens (SA email / bucket name) that
     already exist: their describe probes return rc 0, everything absent returns
-    rc 1 (gcloud's not-found). Non-describe commands return rc 0.
+    rc 1 with gcloud's ``not found: 404`` stderr (the ONLY nonzero shape
+    ``_exists`` reads as absent). Non-describe commands return rc 0.
     """
 
     def __init__(self, existing: set[str] | None = None, stdout_for=None):
@@ -151,18 +168,21 @@ class FakeRunner:
     def __call__(self, argv, *, check=True, **kw):
         self.calls.append(list(argv))
         rc = 0
+        stderr = ""
         if "describe" in argv:
             token = next(
                 (a[len("gs://") :] for a in argv if a.startswith("gs://")), None
             )
             if token is None:  # SA describe — the email is a bare positional
                 token = next((a for a in argv if "@" in a), None)
-            rc = 0 if token in self.existing else 1
+            if token not in self.existing:
+                rc = 1
+                stderr = f"ERROR: gs://{token} not found: 404."
         return execrun.ExecResult(
             argv=tuple(argv),
             rc=rc,
             stdout=self.stdout_for(argv),
-            stderr="",
+            stderr=stderr,
             duration_ms=1,
         )
 
@@ -221,13 +241,42 @@ def test_provision_refuses_empty_project():
         sp.provision("", runner=FakeRunner())
 
 
+def test_provision_stops_on_a_non_not_found_probe_and_creates_nothing():
+    """A describe that fails for ANY reason other than not-found (permission
+    denied, disabled API, wrong project) must STOP the run, not drive create."""
+
+    def runner(argv, *, check=True, **kw):
+        rc = 0
+        stderr = ""
+        if "describe" in argv:
+            rc = 1
+            stderr = "ERROR: (gcloud) PERMISSION_DENIED: caller lacks permission"
+        return execrun.ExecResult(
+            argv=tuple(argv), rc=rc, stdout="", stderr=stderr, duration_ms=1
+        )
+
+    calls: list[list[str]] = []
+
+    def recording(argv, *, check=True, **kw):
+        calls.append(list(argv))
+        return runner(argv, check=check, **kw)
+
+    with pytest.raises(sp.ProvisionError, match="PERMISSION_DENIED"):
+        sp.provision("p", runner=recording)
+    # No create / update / binding call was made after the failed probe.
+    assert not any(
+        v in c for c in calls for v in ("create", "update", "add-iam-policy-binding")
+    )
+
+
 def test_private_bucket_create_enforces_public_access_prevention():
     runner = FakeRunner(existing=set())
     sp.provision("p", runner=runner)
     priv_create = next(
         c for c in runner.heads("create") if "gs://p-artifact-channel-private" in c
     )
-    assert "--public-access-prevention=enforced" in priv_create
+    assert "--public-access-prevention" in priv_create
+    assert "--no-public-access-prevention" not in priv_create
 
 
 # --------------------------------------------------------------------------
@@ -310,6 +359,36 @@ def test_verify_notes_a_missing_private_object_instead_of_silently_passing():
     assert any("private scoped read failed" in n for n in report.notes)
 
 
+def test_verify_refuses_empty_project_or_repo():
+    with pytest.raises(sp.ProvisionError):
+        sp.verify("", "r", runner=_verify_runner(), http_get=lambda url: 200)
+    with pytest.raises(sp.ProvisionError):
+        sp.verify("p", "", runner=_verify_runner(), http_get=lambda url: 200)
+
+
+def test_verify_turns_a_network_failure_into_a_clean_refusal(monkeypatch):
+    # A DNS/TLS/connectivity failure (URLError) or timeout during the authless
+    # GET is NOT a status verdict — the DEFAULT HTTP seam (_http_status) raises
+    # ProvisionError so verify/main render `error: …` instead of a traceback.
+    def raise_urlerror(url, timeout=None):
+        raise urllib.error.URLError("name resolution failed")
+
+    monkeypatch.setattr(sp.urllib.request, "urlopen", raise_urlerror)
+    with pytest.raises(sp.ProvisionError, match="HTTPS GET"):
+        sp.verify("p", "r", runner=_verify_runner())  # default http_get seam
+
+
+def test_http_status_default_seam_raises_provision_error_on_network_failure(
+    monkeypatch,
+):
+    def raise_urlerror(url, timeout=None):
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr(sp.urllib.request, "urlopen", raise_urlerror)
+    with pytest.raises(sp.ProvisionError, match="HTTPS GET"):
+        sp._http_status("https://storage.googleapis.com/b/r/repodata.json")
+
+
 # --------------------------------------------------------------------------
 # The entrypoint refuses without a project (opt-in operator harness)
 # --------------------------------------------------------------------------
@@ -320,3 +399,29 @@ def test_main_requires_project_and_subcommand():
         sp.main([])
     with pytest.raises(SystemExit):
         sp.main(["--project", "p"])  # no subcommand
+
+
+def test_main_renders_a_checked_gcloud_failure_as_error_not_traceback(
+    monkeypatch, capsys
+):
+    # A checked gcloud call failing (org policy blocking allUsers, insufficient
+    # IAM, missing binary) raises execrun.ExecError; main() must catch it, print
+    # `error: …`, and return 1 — never let a traceback escape.
+    def raise_execerror(project, location=..., **kw):
+        raise execrun.ExecError(
+            [
+                "gcloud",
+                "storage",
+                "buckets",
+                "create",
+                "gs://p-artifact-channel-public",
+            ],
+            rc=1,
+            stderr="ERROR: org policy blocks allUsers",
+        )
+
+    monkeypatch.setattr(sp, "provision", raise_execerror)
+    rc = sp.main(["--project", "p", "provision"])
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert captured.err.startswith("error:")

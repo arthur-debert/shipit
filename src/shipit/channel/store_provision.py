@@ -159,6 +159,18 @@ def _bucket_uri(bucket: str) -> str:
     return f"gs://{bucket}"
 
 
+def _pap_flag(*, public: bool) -> str:
+    """The public-access-prevention BOOLEAN flag for the tier.
+
+    ``gcloud storage buckets create/update`` spells PAP as a boolean:
+    ``--public-access-prevention`` sets it to "enforced" (private tier),
+    ``--no-public-access-prevention`` sets it to "inherited" (public tier, so
+    the ``allUsers`` grant is permitted). It is NOT a ``=inherited``/``=enforced``
+    value flag — that form is rejected as an "ignored explicit argument".
+    """
+    return "--no-public-access-prevention" if public else "--public-access-prevention"
+
+
 def describe_bucket_argv(bucket: str) -> list[str]:
     """``gcloud`` argv reading a bucket's metadata as JSON (the existence probe
     and the UBLA / public-access-prevention verdict source)."""
@@ -178,12 +190,16 @@ def create_bucket_argv(
     """``gcloud`` argv creating ``bucket`` with UBLA on and the tier's
     public-access-prevention.
 
-    Public tier: ``--public-access-prevention=inherited`` so the ``allUsers``
-    binding is permitted. Private tier: ``--public-access-prevention=enforced``
-    so a public binding cannot be added at all — the "no public access
-    (verified)" criterion made structural, not just unbound.
+    Public tier: ``--no-public-access-prevention`` (PAP "inherited") so the
+    ``allUsers`` binding is permitted. Private tier: ``--public-access-prevention``
+    (PAP "enforced") so a public binding cannot be added at all — the "no public
+    access (verified)" criterion made structural, not just unbound.
+
+    ``gcloud storage buckets`` takes public-access-prevention as a BOOLEAN flag
+    (``--public-access-prevention`` = enforced, ``--no-public-access-prevention``
+    = inherited), NOT a ``=value``; a ``--public-access-prevention=inherited``
+    would be rejected as an "ignored explicit argument".
     """
-    pap = "inherited" if public else "enforced"
     return [
         "gcloud",
         "storage",
@@ -193,14 +209,16 @@ def create_bucket_argv(
         f"--project={project}",
         f"--location={location}",
         "--uniform-bucket-level-access",
-        f"--public-access-prevention={pap}",
+        _pap_flag(public=public),
     ]
 
 
 def configure_bucket_argv(bucket: str, *, public: bool) -> list[str]:
     """``gcloud`` argv re-asserting UBLA + public-access-prevention on an
-    existing bucket — idempotent (a no-op when already so)."""
-    pap = "inherited" if public else "enforced"
+    existing bucket — idempotent (a no-op when already so).
+
+    Public-access-prevention is a BOOLEAN flag here too (see
+    :func:`create_bucket_argv`)."""
     return [
         "gcloud",
         "storage",
@@ -208,7 +226,7 @@ def configure_bucket_argv(bucket: str, *, public: bool) -> list[str]:
         "update",
         _bucket_uri(bucket),
         "--uniform-bucket-level-access",
-        f"--public-access-prevention={pap}",
+        _pap_flag(public=public),
     ]
 
 
@@ -320,14 +338,23 @@ def has_public_binding(iam_policy_json: str) -> bool:
     The private-tier "no public access" check: a policy with an ``allUsers``
     (or ``allAuthenticatedUsers``) member in ANY binding is public. gcloud
     ``get-iam-policy --format=json`` renders ``{"bindings": [{"members": […]}]}``.
+
+    Fails CLOSED on an unexpected JSON shape: a binding whose ``members`` is not
+    a list (``null``, a scalar) is skipped rather than crashing with a
+    ``TypeError`` — this verdict powers the private bucket's "no public binding"
+    acceptance check, so a malformed shape must degrade to "not observed public",
+    never blow up the report.
     """
     data = _load_json(iam_policy_json, "iam policy")
     bindings = data.get("bindings", []) if isinstance(data, dict) else []
+    if not isinstance(bindings, list):
+        return False
     public_members = {ALL_USERS, "allAuthenticatedUsers"}
     for binding in bindings:
-        if isinstance(binding, dict) and public_members & set(
-            binding.get("members", [])
-        ):
+        if not isinstance(binding, dict):
+            continue
+        members = binding.get("members", [])
+        if isinstance(members, list) and public_members & set(members):
             return True
     return False
 
@@ -420,14 +447,39 @@ class VerifyReport:
 # --------------------------------------------------------------------------
 
 
-def _exists(argv: list[str], runner: Callable[..., execrun.ExecResult]) -> bool:
-    """Run a describe probe; True on rc 0, False on a nonzero exit.
+#: The stderr shapes gcloud uses to say a resource is genuinely absent — the
+#: ONLY nonzero describe outcome :func:`_exists` may read as "not there". Every
+#: other nonzero probe (permission denied, disabled API, wrong account/project,
+#: quota, transient error) is a refusal, not an absence, and must stop the run
+#: rather than silently drive the create path. ``gcloud storage buckets describe``
+#: on a missing bucket says "not found: 404"; ``iam service-accounts describe``
+#: says the SA "does not exist" / "NOT_FOUND".
+_NOT_FOUND_MARKERS = ("not found", "notfound", "not_found", "does not exist", "404")
 
-    ``check=False`` — a missing resource is gcloud's NORMAL "not found" (nonzero)
-    answer, not a transport failure — and a launch failure (gcloud absent) is a
-    real refusal, so it is left to raise as :class:`~shipit.execrun.ExecError`.
+
+def _exists(argv: list[str], runner: Callable[..., execrun.ExecResult]) -> bool:
+    """Run a describe probe; True on rc 0, False ONLY on gcloud's not-found shape.
+
+    ``check=False`` so we can inspect the outcome: rc 0 → exists; a nonzero exit
+    whose stderr carries a :data:`_NOT_FOUND_MARKERS` token → genuinely absent
+    (create it). Any OTHER nonzero probe — permission denied, disabled API, wrong
+    account/project, quota, a transient gcloud error — is a refusal, not an
+    absence: raise :class:`ProvisionError` so the run STOPS with a clear message
+    instead of blindly creating/configuring over a broken probe. A launch failure
+    (gcloud absent) raises :class:`~shipit.execrun.ExecError` and surfaces the same
+    way through the entrypoint handler.
     """
-    return runner(argv, check=False).rc == 0
+    result = runner(argv, check=False)
+    if result.rc == 0:
+        return True
+    haystack = f"{result.stderr}\n{result.stdout}".lower()
+    if any(marker in haystack for marker in _NOT_FOUND_MARKERS):
+        return False
+    detail = (result.stderr or result.stdout).strip() or f"rc {result.rc}"
+    raise ProvisionError(
+        f"store provision: describe probe {' '.join(argv[:5])} failed "
+        f"(not a not-found result): {detail}"
+    )
 
 
 def provision(
@@ -502,12 +554,20 @@ def provision(
 
 def _http_status(url: str) -> int:
     """Authless HTTPS GET → status code. 200 on success; the HTTP error code on
-    a 4xx/5xx (403 is the expected private-tier no-creds answer, not a failure)."""
+    a 4xx/5xx (403 is the expected private-tier no-creds answer, not a failure).
+
+    An ``HTTPError`` IS a status verdict (its ``.code``). A network-layer failure
+    — DNS/TLS/connectivity (``URLError``) or a timeout (``TimeoutError``) — is NOT
+    a verdict: it is raised as a :class:`ProvisionError` so the run stops with a
+    clean ``error: …`` message instead of a traceback escaping the report path.
+    """
     try:
         with urllib.request.urlopen(url, timeout=30) as resp:  # noqa: S310 — https literal
             return resp.status
     except urllib.error.HTTPError as exc:
         return exc.code
+    except (urllib.error.URLError, TimeoutError) as exc:
+        raise ProvisionError(f"store verify: HTTPS GET of {url} failed: {exc}") from exc
 
 
 def verify(
@@ -532,7 +592,16 @@ def verify(
     so the verdict logic is unit-tested without live cloud. Live, this needs a
     published ``<repo>/<obj>`` object in each bucket; when the private object is
     absent the scoped-read positive cannot be asserted and lands in ``notes``.
+
+    Fails fast on an empty ``project`` or ``repo`` (as :func:`provision` does on
+    an empty project): both key the bucket names / channel-subdir URLs, and an
+    empty one derives nonsense like ``-artifact-channel-public`` that would only
+    produce confusing verdicts.
     """
+    if not project:
+        raise ProvisionError("store verify: a --project is required")
+    if not repo:
+        raise ProvisionError("store verify: a --repo is required")
     public = bucket_name(project, TIER_PUBLIC)
     private = bucket_name(project, TIER_PRIVATE)
     sa_email = reader_sa_email(project)
@@ -571,6 +640,9 @@ def main(argv: list[str] | None = None) -> int:
 
     Subcommands: ``provision`` (idempotent create/configure) and ``verify`` (the
     live acceptance checks). ``verify`` exits nonzero when any criterion fails.
+    Any refusal — a :class:`ProvisionError` or a checked gcloud
+    :class:`~shipit.execrun.ExecError` (org policy, insufficient IAM, missing
+    binary, timeout) — renders as ``error: …`` + exit 1, never a traceback.
     """
     parser = argparse.ArgumentParser(
         prog="python -m shipit.channel.store_provision",
@@ -615,7 +687,11 @@ def main(argv: list[str] | None = None) -> int:
             human=f"store verify: {'PASS' if vreport.ok else 'FAIL'} {vreport.to_dict()}",
         )
         return 0 if vreport.ok else 1
-    except ProvisionError as exc:
+    except (ProvisionError, execrun.ExecError) as exc:
+        # ProvisionError is our own refusal; ExecError is a checked gcloud call
+        # failing (org policy blocking allUsers, insufficient IAM, a missing
+        # gcloud binary, a timeout). Both render as a one-line `error: …` + exit
+        # 1, never an escaping traceback.
         print(f"error: {exc}", file=sys.stderr)
         return 1
 

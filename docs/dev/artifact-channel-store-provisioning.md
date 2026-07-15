@@ -52,10 +52,14 @@ The exact `gcloud` operations (all assembled in the provisioner, ADR-0028):
 1. `gcloud iam service-accounts create artifact-channel-reader …` (skipped if it
    already exists).
 2. `gcloud storage buckets create gs://<project>-artifact-channel-public …
-   --uniform-bucket-level-access --public-access-prevention=inherited` (skipped
-   if it exists), then `gcloud storage buckets update …` to re-assert.
-3. same for `…-artifact-channel-private` with
-   `--public-access-prevention=enforced`.
+   --uniform-bucket-level-access --no-public-access-prevention` (PAP inherited;
+   skipped if it exists), then `gcloud storage buckets update …` to re-assert.
+3. same for `…-artifact-channel-private` with `--public-access-prevention`
+   (PAP enforced).
+
+   `gcloud storage buckets` spells public-access-prevention as a **boolean**
+   flag — `--public-access-prevention` (enforced) / `--no-public-access-prevention`
+   (inherited), not a `=value`.
 4. `gcloud storage buckets add-iam-policy-binding gs://…-public
    --member=allUsers --role=roles/storage.objectViewer`.
 5. `gcloud storage buckets add-iam-policy-binding gs://…-private
