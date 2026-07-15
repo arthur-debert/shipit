@@ -108,11 +108,12 @@ from typing import Any
 
 import click
 
-from .. import checks, config, events, execrun, gh, git, redact
+from .. import checks, config, events, execrun, fleetsweep, gh, git, redact
 from ..changelog import is_prerelease
 from ..release import ReleaseError
 from ..release import bump as bump_mod
 from ..release import bundle as bundle_mod
+from ..release import cascade as cascade_mod
 from ..release import integrity as integrity_mod
 from ..release import preflight as preflight_mod
 from ..release import provisioning as provisioning_mod
@@ -121,7 +122,7 @@ from ..release import sign as sign_mod
 from ..release import version as version_mod
 from . import changelog as changelog_verb
 from ._errors import cli_errors
-from ._params import BARE_SEMVER, VERSION_SPEC, json_option
+from ._params import BARE_SEMVER, REPO_SLUG, VERSION_SPEC, json_option
 from ._render import emit
 from ._tool import load_config
 
@@ -1895,6 +1896,139 @@ def publish_cmd(
             assets=assets,
             notes=notes,
             testpypi=testpypi,
+            as_json=as_json,
+        )
+    )
+
+
+@cli_errors
+def run_release_cascade(
+    upstream: str,
+    version: str,
+    *,
+    source_root: Path | None = None,
+    dry_run: bool = False,
+    as_json: bool = False,
+    gitio: Any = git,
+    ghio: Any = gh,
+    env: Any = None,
+) -> int:
+    """Fire the release-side artifact-pinned Cascade from the portfolio home.
+
+    Runs from the shipit checkout (the ``[project.portfolio]``'s home, like
+    ``fleet sweep``): reads the portfolio off the CURRENT checkout's
+    ``.shipit.toml``, scans each declared repo's local ``[artifact-deps]`` under
+    ``--source-root`` for a pin on ``upstream``, and fires one
+    ``repository_dispatch`` per derived target carrying the shared
+    ``{upstream, version}`` payload (:mod:`shipit.release.cascade`).
+
+    Stable-only: an rc/prerelease ``version`` short-circuits with a stated skip
+    and dispatches nothing (ADR-0067). A live (non ``--dry-run``) fan-out needs
+    the cross-repo PAT :data:`~shipit.release.cascade.DISPATCH_TOKEN_ENV`, read
+    from ``env`` and registered with the central redactor before any dispatch so
+    no Exec record can leak it. Returns 0 (the derivation/dispatch is advisory —
+    a domain refusal maps through the shared ``cli_errors`` shell to exit 1).
+    ``gitio``/``ghio``/``env`` are the injected seams the tests drive.
+    """
+    env_map = os.environ if env is None else env
+    root_s = gitio.repo_root(cwd=".")
+    if root_s is None:
+        raise ReleaseError(
+            "not inside a git checkout — `release cascade` reads the "
+            "[project.portfolio] off the portfolio home's .shipit.toml"
+        )
+    cfg = load_config(Path(root_s))
+    prerelease = is_prerelease(version)
+    root = source_root or fleetsweep.DEFAULT_SOURCE_ROOT
+    token = env_map.get(cascade_mod.DISPATCH_TOKEN_ENV)
+    # Register the dispatch PAT with the central redactor the moment it is read,
+    # BEFORE any dispatch, so no Exec/log record can leak it (mirrors publish's
+    # token discipline). A dry run / prerelease may carry no token — nothing to
+    # register, and run_cascade never dispatches on those paths.
+    if token:
+        redact.register_secret(token)
+    report = cascade_mod.run_cascade(
+        upstream,
+        version,
+        cfg=cfg,
+        source_root=root,
+        prerelease=prerelease,
+        token=token,
+        ghio=ghio,
+        dry_run=dry_run,
+    )
+    emit(report, format_cascade, as_json=as_json)
+    return 0
+
+
+def format_cascade(report: cascade_mod.CascadeReport) -> str:
+    """The pure text renderer: the derived targets and the dispatch verdict."""
+    head = f"cascade {report.upstream} {report.version}"
+    if report.skipped is not None and not report.targets:
+        return f"{head}: {report.skipped}"
+    lines = [f"{head}: {len(report.targets)} derived target(s)"]
+    dispatched = set(report.dispatched)
+    for target in report.targets:
+        mark = "dispatched" if target.repo in dispatched else "derived"
+        pkgs = ", ".join(target.packages)
+        lines.append(f"  {mark} {target.repo} ({pkgs})")
+    if report.skipped is not None:
+        lines.append(report.skipped)
+    else:
+        lines.append(f"fired {CASCADE_EVENT_TYPE_LABEL} at {len(dispatched)} repo(s)")
+    return "\n".join(lines)
+
+
+#: The event-type label the renderer prints — the module's shared contract name.
+CASCADE_EVENT_TYPE_LABEL = cascade_mod.CASCADE_EVENT_TYPE
+
+
+@release.command(name="cascade")
+@click.argument("upstream", type=REPO_SLUG)
+@click.argument("version", type=BARE_SEMVER)
+@click.option(
+    "--source-root",
+    type=click.Path(path_type=Path),
+    default=None,
+    help=(
+        "Root of the local portfolio checkouts the [project.portfolio] `path` "
+        f"entries index into. Default {fleetsweep.DEFAULT_SOURCE_ROOT}."
+    ),
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help=(
+        "Derive and print the target set but dispatch nothing (no token "
+        "needed) — the offline rehearsal of the fan-out."
+    ),
+)
+@json_option
+def cascade_cmd(
+    upstream: Any,
+    version: str,
+    source_root: Path | None,
+    dry_run: bool,
+    as_json: bool,
+) -> None:
+    """Fire the artifact-pinned Cascade for an upstream's stable release.
+
+    UPSTREAM is the releasing repo's `owner/name` slug; VERSION is the concrete
+    released semver. Derives the target set from the portfolio's `[artifact-deps]`
+    declarations pointing at UPSTREAM and fires one `repository_dispatch`
+    (`{upstream, version}`) at each — the consumer's declaration is the single
+    source of truth, so the set is DERIVED, never producer-maintained. rc /
+    prerelease versions dispatch NOTHING (stable-only, ADR-0067). Runs from the
+    portfolio home (the shipit checkout) and reads each portfolio repo's local
+    `.shipit.toml` under --source-root; the cross-repo dispatch PAT
+    (DOWNSTREAM_DISPATCH_TOKEN) is required for a live (non --dry-run) fan-out.
+    """
+    raise SystemExit(
+        run_release_cascade(
+            upstream.slug,
+            version,
+            source_root=source_root,
+            dry_run=dry_run,
             as_json=as_json,
         )
     )
