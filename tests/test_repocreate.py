@@ -65,6 +65,103 @@ def test_validate_name_refuses_non_kebab(bad):
         validate_name(bad)
 
 
+# --- names: request-grammar edges (WS02) --------------------------------------
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "a",  # one-letter name
+        "a1",  # a digit right after the first letter
+        "x9y",  # a digit mid-segment
+        "a-b-c",  # a multi-segment kebab name
+        "web-app-2",  # a digit-tailed segment
+        # Names that merely CONTAIN a reservation as a substring are fine — the
+        # reservation check matches whole derived identifiers, not fragments.
+        "testing",  # not the reserved `test`
+        "builder",  # not the reserved `build`
+        "fnord",  # not the keyword `fn`
+        "console",  # not the Windows device `con`
+        "async-worker",  # a segment resembling a keyword, but the whole name isn't
+    ],
+)
+def test_validate_name_accepts_grammar_edges(name):
+    assert validate_name(name).value == name
+
+
+@pytest.mark.parametrize(
+    "reserved",
+    [
+        # Rust keywords (whichever survive the kebab grammar as a bare name).
+        "fn",
+        "async",
+        "await",
+        "match",
+        "type",
+        "self",
+        "super",
+        "crate",
+        "move",
+        "mut",
+        "use",
+        "enum",
+        "trait",
+        "loop",
+        "dyn",
+        # Rust's built-in `test` crate.
+        "test",
+        # Cargo build-directory artifact-name collisions (hard errors --bin).
+        "build",
+        "deps",
+        "examples",
+        "incremental",
+        # Windows reserved device names — unusable as a directory on Windows.
+        "con",
+        "prn",
+        "aux",
+        "nul",
+        "com1",
+        "com9",
+        "lpt1",
+        "lpt9",
+    ],
+)
+def test_validate_name_refuses_cargo_reserved(reserved):
+    # A name that passes the kebab grammar can still be one the managed Cargo
+    # toolchain (or a Windows checkout) refuses; those are rejected here with an
+    # actionable error rather than silently rewritten (spec §Risks).
+    with pytest.raises(CreationError, match="invalid project name"):
+        validate_name(reserved)
+
+
+def test_validate_name_reserved_message_names_the_offender():
+    # The rejection is actionable: it names the exact offending identifier so an
+    # operator can fix the request without reading the spec.
+    with pytest.raises(CreationError, match=r"'fn'"):
+        validate_name("fn")
+
+
+@pytest.mark.parametrize(
+    "identifier",
+    ["fn", "test", "build", "deps", "examples", "incremental", "con", "lpt3"],
+)
+def test_reject_if_reserved_covers_every_reservation_class(identifier):
+    # The one reservation gate is exercised directly across all four classes —
+    # keyword, the `test` crate, artifact-dir collision, and Windows device —
+    # so the derived-identifier callers (library package, crate identifiers) are
+    # covered even though no valid `lib<name>` derivation lands on a reservation.
+    from shipit.repocreate.names import _reject_if_reserved
+
+    with pytest.raises(CreationError):
+        _reject_if_reserved(identifier, "the project name")
+
+
+def test_reject_if_reserved_passes_a_safe_identifier():
+    from shipit.repocreate.names import _reject_if_reserved
+
+    _reject_if_reserved("libhello", "the derived library package")  # does not raise
+
+
 # --------------------------------------------------------------------------
 # tomlio — the one format-aware structured renderer (ADR-0058)
 # --------------------------------------------------------------------------
@@ -734,6 +831,107 @@ def test_run_new_maps_creation_error_to_exit_one(capsys, tmp_path):
     rc = repo_verb.run_new(stacks=("go",), name="hello", parent=tmp_path)
     assert rc == 1
     assert capsys.readouterr().err.startswith("error:")
+
+
+# --- verb: the rejected request matrix through the public command (WS02) ------
+#
+# Every usage-shaped rejection — an unresolvable stack selection, an invalid or
+# reserved name, or an unusable parent/destination — is raised in the module's
+# preflight BEFORE any effect seam runs (resolve_profiles → validate_name →
+# _preflight, all ahead of the staging mkdtemp). So the REAL `create_repo` can
+# drive these tests with no pixi/Rust toolchain: the observable outcome is exit
+# 1, an `error:` line, and a parent directory left exactly as it was found.
+
+
+def _reject_via_command(tmp_path, capsys, *, stacks, name, seed=None):
+    """Run the real ``repo new`` command for a request expected to be refused.
+
+    ``seed`` optionally prepares destination content (``{relpath: kind}`` where
+    kind is ``"dir"``, ``"file"``, or a symlink target ``Path``). Returns the
+    exit code and captured stderr and asserts the parent's top-level entries are
+    unchanged by the refused run — no new destination, no leaked staging
+    sibling.
+    """
+    from shipit.verbs import repo as repo_verb
+
+    if seed:
+        for rel, kind in seed.items():
+            target = tmp_path / rel
+            if kind == "dir":
+                target.mkdir()
+            elif kind == "file":
+                target.write_text("keep", encoding="utf-8")
+            else:
+                target.symlink_to(kind)
+    before = sorted(p.name for p in tmp_path.iterdir())
+
+    rc = repo_verb.run_new(stacks=stacks, name=name, parent=tmp_path)
+    err = capsys.readouterr().err
+
+    assert rc == 1
+    assert err.startswith("error:")
+    # The refusal touched nothing: same entries, no `.shipit-repo-new-*` sibling.
+    assert sorted(p.name for p in tmp_path.iterdir()) == before
+    return rc, err
+
+
+def test_command_refuses_missing_stack(tmp_path, capsys):
+    _reject_via_command(tmp_path, capsys, stacks=(), name="hello")
+
+
+def test_command_refuses_unknown_stack(tmp_path, capsys):
+    _reject_via_command(tmp_path, capsys, stacks=("go",), name="hello")
+
+
+def test_command_refuses_duplicate_stack(tmp_path, capsys):
+    _reject_via_command(tmp_path, capsys, stacks=("rust", "rust"), name="hello")
+
+
+@pytest.mark.parametrize("bad", ["Hello", "my_tool", "1abc", "a--b", "a b"])
+def test_command_refuses_invalid_name(tmp_path, capsys, bad):
+    _reject_via_command(tmp_path, capsys, stacks=("rust",), name=bad)
+
+
+@pytest.mark.parametrize("reserved", ["test", "fn", "build", "con"])
+def test_command_refuses_cargo_reserved_name(tmp_path, capsys, reserved):
+    _reject_via_command(tmp_path, capsys, stacks=("rust",), name=reserved)
+
+
+def test_command_refuses_missing_parent(tmp_path, capsys):
+    from shipit.verbs import repo as repo_verb
+
+    missing = tmp_path / "nope"
+    rc = repo_verb.run_new(stacks=("rust",), name="hello", parent=missing)
+    assert rc == 1
+    assert capsys.readouterr().err.startswith("error:")
+    # A missing parent is never created to hold the refused Repo.
+    assert not missing.exists()
+
+
+def test_command_refuses_non_empty_destination(tmp_path, capsys):
+    # A destination directory holding even one entry is refused and its content
+    # is preserved intact.
+    (tmp_path / "hello").mkdir()
+    _reject_via_command(
+        tmp_path, capsys, stacks=("rust",), name="hello", seed={"hello/keep": "file"}
+    )
+    assert (tmp_path / "hello" / "keep").read_text(encoding="utf-8") == "keep"
+
+
+def test_command_refuses_file_destination(tmp_path, capsys):
+    _reject_via_command(
+        tmp_path, capsys, stacks=("rust",), name="hello", seed={"hello": "file"}
+    )
+    assert (tmp_path / "hello").is_file()
+
+
+def test_command_refuses_symlink_destination(tmp_path, capsys):
+    target = tmp_path / "elsewhere"
+    target.mkdir()
+    _reject_via_command(
+        tmp_path, capsys, stacks=("rust",), name="hello", seed={"hello": target}
+    )
+    assert (tmp_path / "hello").is_symlink()
 
 
 # --------------------------------------------------------------------------
