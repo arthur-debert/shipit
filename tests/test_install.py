@@ -2593,6 +2593,48 @@ def test_test_task_block_is_skipped_when_a_feature_defines_the_task(tmp_path):
     assert "ambiguous" in warnings
 
 
+def test_task_conflict_message_quotes_a_dotted_feature_name():
+    # ARF01-WS08: a feature name with a dot (e.g. a package-named feature like
+    # `ruamel.yaml`) must render as a QUOTED TOML path — an unquoted
+    # `[feature.ruamel.yaml.tasks]` would read as the nested `ruamel` → `yaml`
+    # tables, misnaming the one feature in the actionable message. Bare names
+    # stay unquoted.
+    dotted = irec.format_pixi_task_conflict(
+        irec.PixiTaskConflict(
+            unit_key=iunits.PIXI_TEST_TASK_KEY,
+            task="test",
+            features=("ruamel.yaml", "plain"),
+        )
+    )
+    assert '[feature."ruamel.yaml".tasks]' in dotted
+    assert "[feature.plain.tasks]" in dotted
+    # No unquoted dotted header leaks through.
+    assert "[feature.ruamel.yaml.tasks]" not in dotted
+
+
+def test_task_conflict_message_escapes_quotes_and_backslashes():
+    # ARF01-WS08 (copilot #966): feature names are read from the CONSUMER's own
+    # pixi.toml, so they are unbounded. A quoted TOML key is a basic string, so a
+    # name carrying a `"` or `\` must be escaped — otherwise the rendered header
+    # is INVALID TOML and the actionable message mis-quotes the path it names.
+    weird = irec.format_pixi_task_conflict(
+        irec.PixiTaskConflict(
+            unit_key=iunits.PIXI_TEST_TASK_KEY,
+            task="test",
+            features=('a"b', "c\\d"),
+        )
+    )
+    assert '[feature."a\\"b".tasks]' in weird
+    assert '[feature."c\\\\d".tasks]' in weird
+    # The rendered headers are valid, parseable TOML.
+    for header, expected in (
+        ('[feature."a\\"b".tasks]', 'a"b'),
+        ('[feature."c\\\\d".tasks]', "c\\d"),
+    ):
+        parsed = tomllib.loads(f"{header}\nx = 1\n")
+        assert parsed["feature"][expected]["tasks"] == {"x": 1}
+
+
 def test_test_task_block_delivers_when_no_feature_defines_it(tmp_path):
     (tmp_path / "pixi.toml").write_text(
         _CONSUMER_PIXI_WITH_FEATURE_TEST_TASK.replace("test =", "e2e =", 1)

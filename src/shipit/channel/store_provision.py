@@ -67,6 +67,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from .. import execrun
+from . import buckets
 
 logger = logging.getLogger("shipit.channel")
 
@@ -79,13 +80,6 @@ logger = logging.getLogger("shipit.channel")
 TIER_PUBLIC = "public"
 TIER_PRIVATE = "private"
 TIERS = (TIER_PUBLIC, TIER_PRIVATE)
-
-#: The infix that makes a bucket name unmistakably the Artifact channel store —
-#: and unmistakably NOT the sccache bucket (the "clearly named, distinct from
-#: the sccache bucket" acceptance criterion). GCS bucket names are globally
-#: unique, 3-63 chars, lowercase; deriving from the project keeps them unique
-#: without a second config knob.
-_BUCKET_INFIX = "artifact-channel"
 
 #: The private tier's reader service account short name (the local part of its
 #: email). Its ONLY grant is bucket-scoped ``objectViewer`` on the private
@@ -103,8 +97,10 @@ OBJECT_VIEWER_ROLE = "roles/storage.objectViewer"
 #: authless HTTPS GET resolves (ADR-0065).
 ALL_USERS = "allUsers"
 
-#: The GCS global HTTPS host authless public reads use (ADR-0065).
-_GCS_HOST = "https://storage.googleapis.com"
+#: The GCS global HTTPS host authless public reads use (ADR-0065) — the SAME
+#: shared constant the consumer reads the public tier over and the S3-interop
+#: endpoint both tiers use (:data:`shipit.channel.buckets.CHANNEL_HOST`).
+_GCS_HOST = buckets.CHANNEL_HOST
 
 #: :attr:`Action` values.
 ACTION_CREATED = "created"  # the resource was absent and was created
@@ -117,17 +113,25 @@ class ProvisionError(RuntimeError):
     Rendered as ``error: …`` + exit 1 by the entrypoint."""
 
 
-def bucket_name(project: str, tier: str) -> str:
-    """The derived, globally-unique bucket name for ``project`` + ``tier``.
+def bucket_name(tier: str) -> str:
+    """The fixed, portfolio-wide bucket name for ``tier`` (ARF01-WS08).
 
-    e.g. ``supage-prod`` → ``supage-prod-artifact-channel-public`` /
-    ``…-artifact-channel-private``. The ``artifact-channel`` infix is what makes
-    the name self-describing and distinct from the sccache bucket. Refuses an
-    unknown tier (a mistyped tier must never resolve to a real bucket).
+    The name is a single repo-internal constant — :data:`shipit.channel.buckets.PUBLIC_ARTIFACT_BUCKET`
+    / :data:`~shipit.channel.buckets.PRIVATE_ARTIFACT_BUCKET` — the SAME source
+    of truth the producer (``conda`` endpoint) writes to and the consumer
+    projection reads from, so the provisioner can never create a bucket the
+    other two sides do not use. There is exactly ONE shipit-portfolio Artifact
+    channel (every repo is the sole writer of its own ``<bucket>/<owner/name>``
+    subdir, ADR-0064), so the name is a fixed global constant, NOT derived from
+    the ``--project`` (the project only selects which GCP project the buckets
+    live in, and keys the reader SA / IAM). Refuses an unknown tier (a mistyped
+    tier must never resolve to a real bucket).
     """
-    if tier not in TIERS:
-        raise ProvisionError(f"store: unknown tier {tier!r}")
-    return f"{project}-{_BUCKET_INFIX}-{tier}"
+    if tier == TIER_PUBLIC:
+        return buckets.PUBLIC_ARTIFACT_BUCKET
+    if tier == TIER_PRIVATE:
+        return buckets.PRIVATE_ARTIFACT_BUCKET
+    raise ProvisionError(f"store: unknown tier {tier!r}")
 
 
 def reader_sa_email(project: str) -> str:
@@ -559,8 +563,8 @@ def provision(
     """
     if not project:
         raise ProvisionError("store provision: a --project is required")
-    public = bucket_name(project, TIER_PUBLIC)
-    private = bucket_name(project, TIER_PRIVATE)
+    public = bucket_name(TIER_PUBLIC)
+    private = bucket_name(TIER_PRIVATE)
     sa_email = reader_sa_email(project)
     actions: list[Action] = []
 
@@ -654,16 +658,17 @@ def verify(
     actual error text, so the note never misdirects the diagnosis.
 
     Fails fast on an empty ``project`` or ``repo`` (as :func:`provision` does on
-    an empty project): both key the bucket names / channel-subdir URLs, and an
-    empty one derives nonsense like ``-artifact-channel-public`` that would only
-    produce confusing verdicts.
+    an empty project): ``project`` keys the reader SA email + gcloud project and
+    ``repo`` keys the channel-subdir URLs, so an empty one would produce
+    confusing verdicts (the bucket names themselves are now fixed constants,
+    :func:`bucket_name`, independent of ``project``).
     """
     if not project:
         raise ProvisionError("store verify: a --project is required")
     if not repo:
         raise ProvisionError("store verify: a --repo is required")
-    public = bucket_name(project, TIER_PUBLIC)
-    private = bucket_name(project, TIER_PRIVATE)
+    public = bucket_name(TIER_PUBLIC)
+    private = bucket_name(TIER_PRIVATE)
     sa_email = reader_sa_email(project)
     report = VerifyReport()
 

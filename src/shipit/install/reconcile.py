@@ -102,6 +102,7 @@ any file is written. All writes live in :mod:`shipit.install.apply`.
 from __future__ import annotations
 
 import logging
+import re
 import tomllib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -724,10 +725,28 @@ class PixiTaskConflict:
     features: tuple[str, ...]  # the features whose tasks tables define it
 
 
+def _feature_tasks_header(feature: str) -> str:
+    """The ``[feature.<name>.tasks]`` header for ``feature``, QUOTING the name
+    when it carries a dot (or is otherwise not a bare TOML key) so the rendered
+    header is a valid, unambiguous path — an unquoted ``ruamel.yaml`` would read
+    as the nested ``ruamel`` → ``yaml`` tables, not the one feature named
+    ``ruamel.yaml``. Bare keys (the common case) render unquoted.
+
+    The name is read from the CONSUMER's own ``pixi.toml`` (:func:`_enabled_features`),
+    so it is unbounded: a quoted TOML key is a basic string, so any ``\\`` or ``"``
+    it carries is escaped before interpolation — otherwise the header would be
+    invalid TOML and the conflict message would mis-render the very path it names.
+    """
+    if re.fullmatch(r"[A-Za-z0-9_-]+", feature):
+        return f"[feature.{feature}.tasks]"
+    escaped = feature.replace("\\", "\\\\").replace('"', '\\"')
+    return f'[feature."{escaped}".tasks]'
+
+
 def format_pixi_task_conflict(conflict: PixiTaskConflict) -> str:
     """The one actionable message for a task-ambiguity conflict — used verbatim
     by the stderr warning and the durable log line, so the two never drift."""
-    tables = " and ".join(f"[feature.{f}.tasks]" for f in conflict.features)
+    tables = " and ".join(_feature_tasks_header(f) for f in conflict.features)
     return (
         f"this repo's pixi.toml already defines a '{conflict.task}' task in "
         f"{tables}, which the managed block '{conflict.unit_key}' also defines "

@@ -138,6 +138,7 @@ from typing import Any
 
 from .. import config, execrun
 from ..changelog import SEMVER_RE
+from ..channel import buckets
 from . import ReleaseError, secretreq
 from . import brew as brew_mod
 from . import integrity as integrity_mod
@@ -218,14 +219,20 @@ CONDA_SUBDIRS: dict[str, str] = {
 #: :data:`PRIVATE_ARTIFACT_BUCKET` and a public one to
 #: :data:`PUBLIC_ARTIFACT_BUCKET`. WRITING always needs the HMAC pair (a
 #: public-read bucket is still write-protected); the tier only changes which
-#: bucket, so the write path is identical for both.
-PUBLIC_ARTIFACT_BUCKET = "shipit-artifacts-public"
-PRIVATE_ARTIFACT_BUCKET = "shipit-artifacts-private"
+#: bucket, so the write path is identical for both. These re-export the ONE
+#: source of truth (:mod:`shipit.channel.buckets`) the consumer projection reads
+#: from and the WS03 store provisioner CREATES — a drift test pins all three so
+#: a publish can never write to a bucket the consumer never reads (or the
+#: provisioner never made).
+PUBLIC_ARTIFACT_BUCKET = buckets.PUBLIC_ARTIFACT_BUCKET
+PRIVATE_ARTIFACT_BUCKET = buckets.PRIVATE_ARTIFACT_BUCKET
 
 #: The GCS S3-interop endpoint + region (ADR-0065 — ``region = "auto"`` and the
 #: global ``storage.googleapis.com`` endpoint are load-bearing for GCS
-#: interop). Passed to rattler-build's S3 backend via the env seam below.
-CONDA_S3_ENDPOINT = "https://storage.googleapis.com"
+#: interop). Passed to rattler-build's S3 backend via the env seam below. The
+#: endpoint is the same shared host constant the consumer/provisioner use
+#: (:data:`shipit.channel.buckets.CHANNEL_HOST`).
+CONDA_S3_ENDPOINT = buckets.CHANNEL_HOST
 CONDA_S3_REGION = "auto"
 
 #: The child-process env vars rattler-build's S3 backend READS the channel

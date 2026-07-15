@@ -311,7 +311,13 @@ def _parse(text: str) -> dict:
 #: token defaults to the ambient Actions token (`github.token`, the fleet
 #: convention); a repo that needs the bump PR to TRIGGER its own CI supplies a
 #: PAT as SHIPIT_CASCADE_TOKEN (a `github.token`-opened PR does not start
-#: further workflow runs — a GitHub constraint).
+#: further workflow runs — a GitHub constraint). Because `upstream-release` is
+#: the SAME event the pre-existing notify-downstreams rail fires (ADR-0067
+#: reuses that rail) but with a different payload (`{repo, tag, version,
+#: artifact}`, no `upstream`), the run step first GUARDS on a non-empty
+#: `$UPSTREAM`: a foreign notify-downstreams payload landing here (a repo that is
+#: both a notify-downstreams downstream and an `[artifact-deps]` consumer)
+#: no-ops cleanly (exit 0) instead of failing the run or corrupting a bump.
 _WORKFLOW_BODY = """\
 # Managed by shipit; do not edit. Regenerate via `shipit install`.
 #
@@ -349,6 +355,19 @@ jobs:
           UPSTREAM: ${{ github.event.client_payload.upstream }}
           VERSION: ${{ github.event.client_payload.version }}
         run: |
+          # The `upstream-release` event is SHARED with the pre-existing
+          # notify-downstreams rail (ADR-0067 reuses its dispatch rail), whose
+          # payload is `{repo, tag, version, artifact}` — no `upstream` key. A
+          # repo that is BOTH a notify-downstreams downstream AND declares
+          # `[artifact-deps]` receives both payloads on this one event; a foreign
+          # (notify-downstreams) payload leaves UPSTREAM empty. Skip it as a
+          # clean no-op rather than calling `shipit channel receive ""` (which
+          # rightly errors on an empty --upstream) — so the foreign dispatch is
+          # inert, never a red workflow run or a corrupt bump.
+          if [ -z "$UPSTREAM" ]; then
+            echo "no client_payload.upstream — foreign upstream-release dispatch (e.g. the notify-downstreams rail); nothing to bump."
+            exit 0
+          fi
           git config user.name "shipit-cascade[bot]"
           git config user.email "shipit-cascade@users.noreply.github.com"
           pixi run --locked ./bin/shipit channel receive \\

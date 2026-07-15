@@ -224,6 +224,22 @@ def test_receive_workflow_unit_is_a_whole_file_managed_unit():
     assert "UPSTREAM: ${{ github.event.client_payload.upstream }}" in body
 
 
+def test_receive_workflow_guards_against_foreign_upstream_release_payloads():
+    # ARF01-WS08: `upstream-release` is SHARED with the pre-existing
+    # notify-downstreams rail (ADR-0067 reuses that dispatch rail), whose payload
+    # carries no `upstream` key. A repo that is both a notify-downstreams
+    # downstream and an [artifact-deps] consumer receives that foreign payload on
+    # this same event; the workflow must NO-OP (exit 0) on an empty UPSTREAM
+    # rather than call `shipit channel receive ""` (which rightly errors) — so
+    # the foreign dispatch is inert, never a red run or a corrupt bump.
+    body = cr.receive_workflow_unit().content.decode("utf-8")
+    guard = body.index('if [ -z "$UPSTREAM" ]')
+    exit0 = body.index("exit 0", guard)
+    receive = body.index("./bin/shipit channel receive")
+    # The empty-upstream guard and its early exit come BEFORE the receive call.
+    assert guard < exit0 < receive
+
+
 def test_install_delivers_the_workflow_only_when_artifact_deps_declared(tmp_path):
     from shipit.verbs import install as install_verb
 

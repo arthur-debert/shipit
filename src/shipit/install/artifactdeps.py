@@ -58,6 +58,7 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence
 
+from ..channel import buckets
 from ..config import ArtifactDep
 from .units import PIXI_FILE, Unit
 
@@ -65,23 +66,22 @@ from .units import PIXI_FILE, Unit
 #: authless tier; the private tier's bucket is :data:`PRIVATE_ARTIFACT_BUCKET`
 #: below). The per-repo channel root is
 #: ``<bucket>/<owner/name>`` (each repo the sole writer of its own repodata,
-#: ADR-0064), reached over the authless HTTPS object-storage URL. These MIRROR
-#: the producer-side constants the ``conda`` endpoint publishes to
-#: (:data:`shipit.release.publish.PUBLIC_ARTIFACT_BUCKET`,
-#: :data:`~shipit.release.publish.CONDA_S3_ENDPOINT`) — a drift test asserts the
-#: two agree so the consumer can never read from a bucket the producer never
-#: writes to.
-PUBLIC_CHANNEL_HOST = "https://storage.googleapis.com"
-PUBLIC_ARTIFACT_BUCKET = "shipit-artifacts-public"
+#: ADR-0064), reached over the authless HTTPS object-storage URL. These re-export
+#: the ONE source of truth (:mod:`shipit.channel.buckets`) the producer ``conda``
+#: endpoint writes to and the WS03 store provisioner CREATES — a drift test
+#: asserts all three agree so the consumer can never read from a bucket the
+#: producer never writes to (or the provisioner never made).
+PUBLIC_CHANNEL_HOST = buckets.CHANNEL_HOST
+PUBLIC_ARTIFACT_BUCKET = buckets.PUBLIC_ARTIFACT_BUCKET
 
 #: The private-tier Artifact channel bucket (ADR-0065 — the credentialed,
 #: no-public-access bucket). A private producing repo's channel is reached as an
 #: S3-compatible conda channel — ``s3://<bucket>/<repo>`` — over GCS's interop
-#: endpoint, NOT the authless HTTPS URL. MIRRORS the producer-side constant the
-#: ``conda`` endpoint writes to (:data:`shipit.release.publish.PRIVATE_ARTIFACT_BUCKET`);
-#: the same drift test that pins the public pair pins this one, so the consumer
-#: can never read from a private bucket the producer never writes to.
-PRIVATE_ARTIFACT_BUCKET = "shipit-artifacts-private"
+#: endpoint, NOT the authless HTTPS URL. Re-exports the same source of truth
+#: (:data:`shipit.channel.buckets.PRIVATE_ARTIFACT_BUCKET`) the producer writes
+#: to and WS03 provisions; the same drift test that pins the public pair pins
+#: this one.
+PRIVATE_ARTIFACT_BUCKET = buckets.PRIVATE_ARTIFACT_BUCKET
 
 #: The S3-interop scheme a private-tier channel URL carries. The projection keys
 #: tier off this prefix — an ``s3://`` channel is private and needs the
