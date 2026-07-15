@@ -22,11 +22,17 @@ from shipit.channel import store_provision as sp
 # --------------------------------------------------------------------------
 
 
-def test_bucket_names_are_derived_distinct_and_tier_tagged():
-    pub = sp.bucket_name("supage-prod", sp.TIER_PUBLIC)
-    priv = sp.bucket_name("supage-prod", sp.TIER_PRIVATE)
-    assert pub == "supage-prod-artifact-channel-public"
-    assert priv == "supage-prod-artifact-channel-private"
+def test_bucket_names_are_the_fixed_shared_constants_and_project_independent():
+    # ARF01-WS08: the names are the ONE source of truth (shipit.channel.buckets)
+    # the producer writes to and the consumer reads from — fixed, not derived
+    # from --project (the provisioner would otherwise make a bucket the other two
+    # sides never touch).
+    from shipit.channel import buckets
+
+    pub = sp.bucket_name(sp.TIER_PUBLIC)
+    priv = sp.bucket_name(sp.TIER_PRIVATE)
+    assert pub == buckets.PUBLIC_ARTIFACT_BUCKET == "shipit-artifacts-public"
+    assert priv == buckets.PRIVATE_ARTIFACT_BUCKET == "shipit-artifacts-private"
     # Distinct from each other and self-describing (not the sccache bucket).
     assert pub != priv
     assert "sccache" not in pub and "sccache" not in priv
@@ -34,7 +40,7 @@ def test_bucket_names_are_derived_distinct_and_tier_tagged():
 
 def test_bucket_name_refuses_unknown_tier():
     with pytest.raises(sp.ProvisionError):
-        sp.bucket_name("p", "sekret")
+        sp.bucket_name("sekret")
 
 
 def test_reader_sa_email_is_derived_in_project():
@@ -213,8 +219,8 @@ def test_provision_creates_everything_when_nothing_exists_yet():
 
     created = {a.resource for a in report.actions if a.action == sp.ACTION_CREATED}
     assert created == {
-        "supage-prod-artifact-channel-public",
-        "supage-prod-artifact-channel-private",
+        "shipit-artifacts-public",
+        "shipit-artifacts-private",
         "artifact-channel-reader@supage-prod.iam.gserviceaccount.com",
     }
     # SA + both buckets created; both configured; two IAM bindings added.
@@ -224,12 +230,12 @@ def test_provision_creates_everything_when_nothing_exists_yet():
     pub_binding = next(
         c
         for c in runner.heads("add-iam-policy-binding")
-        if "gs://supage-prod-artifact-channel-public" in c
+        if "gs://shipit-artifacts-public" in c
     )
     priv_binding = next(
         c
         for c in runner.heads("add-iam-policy-binding")
-        if "gs://supage-prod-artifact-channel-private" in c
+        if "gs://shipit-artifacts-private" in c
     )
     assert "--member=allUsers" in pub_binding
     assert any(a.startswith("--member=serviceAccount:") for a in priv_binding)
@@ -238,8 +244,8 @@ def test_provision_creates_everything_when_nothing_exists_yet():
 
 def test_provision_is_idempotent_when_everything_exists():
     existing = {
-        "supage-prod-artifact-channel-public",
-        "supage-prod-artifact-channel-private",
+        "shipit-artifacts-public",
+        "shipit-artifacts-private",
         "artifact-channel-reader@supage-prod.iam.gserviceaccount.com",
     }
     runner = FakeRunner(existing=existing)
@@ -322,7 +328,7 @@ def test_private_bucket_create_enforces_public_access_prevention():
     runner = FakeRunner(existing=set())
     sp.provision("p", runner=runner)
     priv_create = next(
-        c for c in runner.heads("create") if "gs://p-artifact-channel-private" in c
+        c for c in runner.heads("create") if "gs://shipit-artifacts-private" in c
     )
     assert "--public-access-prevention" in priv_create
     assert "--no-public-access-prevention" not in priv_create
@@ -371,8 +377,8 @@ def _verify_runner(
 
 def test_verify_all_green():
     http = {
-        sp.public_object_url("supage-prod-artifact-channel-public", "r"): 200,
-        sp.public_object_url("supage-prod-artifact-channel-private", "r"): 403,
+        sp.public_object_url("shipit-artifacts-public", "r"): 200,
+        sp.public_object_url("shipit-artifacts-private", "r"): 403,
     }
     report = sp.verify(
         "supage-prod",
@@ -390,8 +396,8 @@ def test_verify_all_green():
 
 def test_verify_flags_a_public_binding_on_the_private_bucket():
     http = {
-        sp.public_object_url("p-artifact-channel-public", "r"): 200,
-        sp.public_object_url("p-artifact-channel-private", "r"): 200,  # leaked!
+        sp.public_object_url("shipit-artifacts-public", "r"): 200,
+        sp.public_object_url("shipit-artifacts-private", "r"): 200,  # leaked!
     }
     report = sp.verify(
         "p",
@@ -406,8 +412,8 @@ def test_verify_flags_a_public_binding_on_the_private_bucket():
 
 def test_verify_notes_a_missing_private_object_instead_of_silently_passing():
     http = {
-        sp.public_object_url("p-artifact-channel-public", "r"): 200,
-        sp.public_object_url("p-artifact-channel-private", "r"): 403,
+        sp.public_object_url("shipit-artifacts-public", "r"): 200,
+        sp.public_object_url("shipit-artifacts-private", "r"): 403,
     }
     report = sp.verify(
         "p",
@@ -426,8 +432,8 @@ def test_verify_surfaces_the_actual_error_on_a_non_not_found_scoped_read():
     # wrong project) must surface gcloud's real error text, NOT the misleading
     # "publish the object" hint.
     http = {
-        sp.public_object_url("p-artifact-channel-public", "r"): 200,
-        sp.public_object_url("p-artifact-channel-private", "r"): 403,
+        sp.public_object_url("shipit-artifacts-public", "r"): 200,
+        sp.public_object_url("shipit-artifacts-private", "r"): 403,
     }
     report = sp.verify(
         "p",
@@ -450,8 +456,8 @@ def test_verify_scoped_not_found_marker_is_not_faked_from_the_resource_uri():
     # exercises the argv-stripping in _looks_not_found rather than passing
     # trivially. The stderr echoes the FULL object URI (the argv token stripped).
     http = {
-        sp.public_object_url("pnotfound-artifact-channel-public", "r"): 200,
-        sp.public_object_url("pnotfound-artifact-channel-private", "r"): 403,
+        sp.public_object_url("shipit-artifacts-public", "r"): 200,
+        sp.public_object_url("shipit-artifacts-private", "r"): 403,
     }
     report = sp.verify(
         "pnotfound",
@@ -460,7 +466,7 @@ def test_verify_scoped_not_found_marker_is_not_faked_from_the_resource_uri():
             scoped_ok=False,
             scoped_stderr=(
                 "ERROR: PERMISSION_DENIED on "
-                "gs://pnotfound-artifact-channel-private/r/repodata.json"
+                "gs://shipit-artifacts-private/r/repodata.json"
             ),
         ),
         http_get=lambda url: http[url],
@@ -478,8 +484,8 @@ def test_verify_scoped_not_found_marker_is_not_faked_from_a_bare_flag_value():
     # This fails if the --flag=value value-extraction is removed.
     sa_email = sp.reader_sa_email("pnotfound")  # …@pnotfound.iam.gserviceaccount.com
     http = {
-        sp.public_object_url("pnotfound-artifact-channel-public", "r"): 200,
-        sp.public_object_url("pnotfound-artifact-channel-private", "r"): 403,
+        sp.public_object_url("shipit-artifacts-public", "r"): 200,
+        sp.public_object_url("shipit-artifacts-private", "r"): 403,
     }
     report = sp.verify(
         "pnotfound",
@@ -549,7 +555,7 @@ def test_main_renders_a_checked_gcloud_failure_as_error_not_traceback(
                 "storage",
                 "buckets",
                 "create",
-                "gs://p-artifact-channel-public",
+                "gs://shipit-artifacts-public",
             ],
             rc=1,
             stderr="ERROR: org policy blocks allUsers",

@@ -537,6 +537,38 @@ def test_consumer_bucket_matches_the_producer_endpoint():
     assert ad.S3_OPTIONS_REGION == publish.CONDA_S3_REGION
 
 
+def test_producer_consumer_and_provisioner_share_one_bucket_source_of_truth():
+    # ARF01-WS08 convergence: producer (publish), consumer (artifactdeps), AND
+    # the WS03 store provisioner must name the SAME buckets — else the
+    # provisioner CREATES a bucket the producer never writes to and the consumer
+    # never reads from (the incoherence WS08 reconciled). All three now re-export
+    # `shipit.channel.buckets`, and this pins them together so none can drift.
+    from shipit.channel import buckets
+    from shipit.channel import store_provision as sp
+    from shipit.release import publish
+
+    assert (
+        buckets.PUBLIC_ARTIFACT_BUCKET
+        == ad.PUBLIC_ARTIFACT_BUCKET
+        == publish.PUBLIC_ARTIFACT_BUCKET
+        == sp.bucket_name(sp.TIER_PUBLIC)
+    )
+    assert (
+        buckets.PRIVATE_ARTIFACT_BUCKET
+        == ad.PRIVATE_ARTIFACT_BUCKET
+        == publish.PRIVATE_ARTIFACT_BUCKET
+        == sp.bucket_name(sp.TIER_PRIVATE)
+    )
+    # The GCS host: consumer public-read + producer S3 endpoint + the URL the
+    # provisioner's authless acceptance probe builds all use the one constant.
+    assert (
+        buckets.CHANNEL_HOST
+        == ad.PUBLIC_CHANNEL_HOST
+        == publish.CONDA_S3_ENDPOINT
+        == sp._GCS_HOST
+    )
+
+
 # --------------------------------------------------------------------------
 # The verb glue — `_artifact_dep_units` (visibility injected; no network)
 # --------------------------------------------------------------------------

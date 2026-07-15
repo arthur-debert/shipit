@@ -5,16 +5,28 @@ sccache GCP project, on a lifecycle **separate from the sccache bucket**
 ([ADR-0065](../adr/0065-artifact-channel-access-tiers-two-buckets.md),
 [Spec](../spec/artifact-channel.md)):
 
-| Tier | Bucket (derived) | Access model |
+| Tier | Bucket (fixed) | Access model |
 | --- | --- | --- |
-| **public** | `<project>-artifact-channel-public` | `allUsers` → `roles/storage.objectViewer`; authless HTTPS reads. Public-access-prevention **inherited** (the `allUsers` grant is permitted). |
-| **private** | `<project>-artifact-channel-private` | a dedicated reader service account (`artifact-channel-reader@<project>.iam.gserviceaccount.com`) granted **bucket-scoped** `roles/storage.objectViewer`; **no** public binding; public-access-prevention **enforced**. |
+| **public** | `shipit-artifacts-public` | `allUsers` → `roles/storage.objectViewer`; authless HTTPS reads. Public-access-prevention **inherited** (the `allUsers` grant is permitted). |
+| **private** | `shipit-artifacts-private` | a dedicated reader service account (`artifact-channel-reader@<project>.iam.gserviceaccount.com`) granted **bucket-scoped** `roles/storage.objectViewer`; **no** public binding; public-access-prevention **enforced**. |
+
+The bucket **names are fixed portfolio-wide constants** — the single source of
+truth in [`shipit.channel.buckets`](../../src/shipit/channel/buckets.py), the
+SAME names the `conda` producer endpoint writes to and the consumer projection
+reads from (ARF01-WS08 reconciled these: the provisioner had derived
+`<project>-artifact-channel-<tier>`, which named a bucket the other two sides
+never touched). There is exactly ONE shipit-portfolio Artifact channel (each
+repo the sole writer of its own `<bucket>/<owner/name>` subdir), so the names do
+**not** vary by `--project`; the `--project` now only selects the GCP project
+the buckets live in and keys the reader SA / IAM. A drift test
+(`tests/test_install_artifact_deps.py`) pins producer, consumer, and provisioner
+to the one definition.
 
 Both buckets have **uniform bucket-level access (UBLA)** on — IAM-only, no
 per-object ACLs. Neither carries an object-lifecycle / TTL rule (artifacts are
 permanent, and the sccache purge targets the sccache bucket by name), so a cache
-purge can never touch them. The names carry the `artifact-channel` infix so they
-are unmistakably distinct from the sccache bucket.
+purge can never touch them. The `shipit-artifacts-*` names are unmistakably
+distinct from the sccache bucket.
 
 This runbook is executed by the **idempotent provisioner**
 [`shipit.channel.store_provision`](../../src/shipit/channel/store_provision.py):
@@ -51,10 +63,10 @@ The exact `gcloud` operations (all assembled in the provisioner, ADR-0028):
 
 1. `gcloud iam service-accounts create artifact-channel-reader …` (skipped if it
    already exists).
-2. `gcloud storage buckets create gs://<project>-artifact-channel-public …
+2. `gcloud storage buckets create gs://shipit-artifacts-public …
    --uniform-bucket-level-access --no-public-access-prevention` (PAP inherited;
    skipped if it exists), then `gcloud storage buckets update …` to re-assert.
-3. same for `…-artifact-channel-private` with `--public-access-prevention`
+3. same for `shipit-artifacts-private` with `--public-access-prevention`
    (PAP enforced).
 
    `gcloud storage buckets` spells public-access-prevention as a **boolean**
@@ -131,10 +143,10 @@ four checks still verify the access model.
 
 ```bash
 # Delete objects then the buckets (both tiers), and the reader SA:
-gcloud storage rm --recursive gs://<project>-artifact-channel-public
-gcloud storage rm --recursive gs://<project>-artifact-channel-private
-gcloud storage buckets delete gs://<project>-artifact-channel-public
-gcloud storage buckets delete gs://<project>-artifact-channel-private
+gcloud storage rm --recursive gs://shipit-artifacts-public
+gcloud storage rm --recursive gs://shipit-artifacts-private
+gcloud storage buckets delete gs://shipit-artifacts-public
+gcloud storage buckets delete gs://shipit-artifacts-private
 gcloud iam service-accounts delete artifact-channel-reader@<project>.iam.gserviceaccount.com
 ```
 
