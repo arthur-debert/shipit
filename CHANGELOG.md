@@ -4,6 +4,8 @@
 
 ## Unreleased
 
+## 1.2.1 - 2026-07-15
+
 - `install --pr` builds its reconcile commit from an authoritative
   apply-recorded touched-set instead of a hand-enumerated "commit universe"
   (#986, the design fix behind #852/#984). `apply()` now records the exact set
