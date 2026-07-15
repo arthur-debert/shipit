@@ -229,6 +229,19 @@ def test_has_staged_changes_is_false_on_a_clean_index(monkeypatch):
     assert git.has_staged_changes(["a"], cwd="/x") is False
 
 
+def test_has_staged_changes_surfaces_a_git_failure_rather_than_masking_it(monkeypatch):
+    # #984 review: `git diff --quiet` is three-valued — rc 0 (clean), rc 1
+    # (staged diff), rc >1 (git could not run the diff at all: bad pathspec,
+    # unreadable index). An rc >1 is a genuine failure, NOT "changes exist";
+    # collapsing it into True would mask a real git failure as a staged diff and
+    # push MODE_PR into a murkier later failure. It must surface as ExecError.
+    monkeypatch.setattr(
+        git, "_probe", lambda args, *, cwd: _fail("fatal: bad pathspec", rc=128)
+    )
+    with pytest.raises(ExecError):
+        git.has_staged_changes(["a"], cwd="/x")
+
+
 def test_has_staged_changes_on_empty_paths_never_probes(monkeypatch):
     # An empty pathspec is a vacuous "no staged changes" — never a bare unscoped
     # `git diff --cached` that would answer for the whole index.

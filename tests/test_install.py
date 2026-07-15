@@ -3116,6 +3116,7 @@ class _GhRecorder:
         self.commit_paths = ()
         self.commit_no_verify = None
         self.push_no_verify = None
+        self.default_branch_after_fetch = None
 
     def activate_hooks(self, root):
         # Stand in for `lefthook install`: record the call, mutate nothing.
@@ -3125,6 +3126,10 @@ class _GhRecorder:
     def default_branch(self, *, cwd, remote="origin"):
         # The remote default the MODE_PR staging branch is reset onto (#852).
         # A pure query (like current_branch), so it is not recorded in `calls`.
+        # #984 review: capture whether the base fetch already ran when the
+        # default branch is resolved — `default_branch`'s fallback probes the
+        # remote-tracking refs a fetch POPULATES, so MODE_PR must fetch first.
+        self.default_branch_after_fetch = any(c[0] == "fetch" for c in self.calls)
         return getattr(self, "_default_branch", "main")
 
     def fetch(self, *, cwd, remote="origin"):
@@ -3299,6 +3304,19 @@ def test_pr_mode_bases_staging_branch_on_current_origin_default(tmp_path, rec):
     assert rec.names().index("reset") < rec.names().index("commit")
     assert ("reset", "origin/main") in rec.calls
     assert result.pr_url == "https://github.com/acme/repo/pull/1"
+
+
+def test_pr_mode_fetches_before_resolving_the_default_branch(tmp_path, rec):
+    # #984 review (major): MODE_PR must FETCH before it resolves the default
+    # branch. When `<remote>/HEAD` is absent (a reference-borrow clone),
+    # `default_branch`'s fallback probes the remote-tracking refs a fetch
+    # populated — resolving first on a pre-fetch checkout could not see
+    # `origin/master`/`origin/trunk` yet, mis-fall-back to `main`, and then
+    # `reset --soft origin/main` onto a ref that does not exist. Fetch first.
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    _apply(tmp_path, iapply.MODE_PR)
+
+    assert rec.default_branch_after_fetch is True
 
 
 def test_pr_mode_honors_a_non_main_default_branch(tmp_path, rec):

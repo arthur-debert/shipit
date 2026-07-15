@@ -989,8 +989,16 @@ def apply(
         # files stay in the working tree for the pathspec commit below (which
         # takes the listed paths from the working tree and everything else from
         # HEAD, now origin/<default>).
-        base_branch = git.default_branch(cwd=cwd)
+        #
+        # Fetch BEFORE resolving the default branch (#984 review): when
+        # `<remote>/HEAD` is absent (a reference-borrow clone), `default_branch`
+        # falls back to probing the remote-tracking refs a fetch populated. A
+        # pre-fetch checkout may not yet have `origin/master`/`origin/trunk`, so
+        # resolving first would mis-fall-back to `main` and then `reset_soft`
+        # onto a non-existent `origin/main`. Fetch first, then resolve, so the
+        # fallback probes see the current remote-tracking refs.
         git.fetch(cwd=cwd)
+        base_branch = git.default_branch(cwd=cwd)
         # The branch switch and the reset live INSIDE the try/finally: a
         # `reset_soft` (or `switch_create`) that raises AFTER the checkout has
         # moved onto `shipit/install` must still restore the caller's branch

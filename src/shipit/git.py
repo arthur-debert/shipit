@@ -882,18 +882,36 @@ def commit(
 def has_staged_changes(paths: list[str], *, cwd: str) -> bool:
     """Whether the index holds a staged diff for ``paths`` against HEAD.
 
-    ``git diff --cached --quiet -- <paths>`` is a PROBE: exit 0 means the named
-    pathspecs match HEAD (nothing staged), a nonzero exit means at least one
-    differs. The MODE_PR staging flow asks this AFTER ``reset --soft`` +
-    ``git add`` (#852 review): once the staging branch is reset onto
-    ``origin/<default>`` the managed set can already match the base (a Tree
-    duplicating an already-merged reconcile), and a pathspec :func:`commit` over
-    an empty diff fails ``git commit`` with "nothing to commit" — so apply checks
-    here and skips the commit rather than crashing. An empty ``paths`` is a
-    vacuous "no staged changes" (never a bare unscoped diff)."""
+    ``git diff --cached --quiet -- <paths>`` is a THREE-VALUED probe, not a
+    boolean: exit 0 means the named pathspecs match HEAD (nothing staged), exit
+    1 means at least one differs, and exit >1 means git could not run the diff
+    at all (bad pathspec, unreadable index) — a genuine failure, not an answer.
+    Collapsing >1 into "changes exist" (the old ``not …ok``) would MASK a real
+    git failure as a staged diff and push the MODE_PR flow into a murkier later
+    failure (#984 review), so an rc >1 surfaces as the transport
+    :class:`ExecError` instead.
+
+    The MODE_PR staging flow asks this AFTER ``reset --soft`` + ``git add``
+    (#852 review): once the staging branch is reset onto ``origin/<default>``
+    the managed set can already match the base (a Tree duplicating an
+    already-merged reconcile), and a pathspec :func:`commit` over an empty diff
+    fails ``git commit`` with "nothing to commit" — so apply checks here and
+    skips the commit rather than crashing. An empty ``paths`` is a vacuous "no
+    staged changes" (never a bare unscoped diff)."""
     if not paths:
         return False
-    return not _probe(["diff", "--cached", "--quiet", "--", *paths], cwd=cwd).ok
+    result = _probe(["diff", "--cached", "--quiet", "--", *paths], cwd=cwd)
+    if result.rc == 0:
+        return False
+    if result.rc == 1:
+        return True
+    raise ExecError(
+        result.argv,
+        rc=result.rc,
+        stdout=result.stdout,
+        stderr=result.stderr,
+        duration_ms=result.duration_ms,
+    )
 
 
 def reset_index(*, cwd: str) -> None:
