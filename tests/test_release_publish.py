@@ -2037,7 +2037,9 @@ def test_render_conda_recipe_repackages_the_prebuilt_binary():
     )
     assert "name: lexd" in unix
     assert 'version: "1.2.3"' in unix
-    assert "- path: /stage/lexd-aarch64-apple-darwin.tar.gz" in unix
+    # The archive path is quoted (survives spaces / `#`) — see the as_posix +
+    # quote fix so a Windows-native or spaced staging path stays one scalar.
+    assert '- path: "/stage/lexd-aarch64-apple-darwin.tar.gz"' in unix
     assert 'cp "lexd" "${PREFIX}/bin/lexd"' in unix
     # windows layout: the .exe copied into Scripts (on the win conda PATH).
     src, install_dir, install_bin = publish_mod._conda_binary_layout("win-64", "lexd")
@@ -2139,6 +2141,46 @@ def test_conda_builds_each_served_subdir_and_publishes_the_channel(tmp_path):
     # The HMAC secret NEVER rides argv (it is env-only, redactor-registered).
     assert not any("chan-secret-key" in a for a in pub_argv)
     assert any("published 3 package(s)" in a for a in published.actions)
+
+
+def test_conda_recipe_source_path_matches_the_archive_staging_dir(tmp_path):
+    """The rendered build script copies the binary from the archive's
+    top-level `<artifact>-<triple>/` staging dir — the contract
+    `bundle._compose_archive` emits (`Composed(..., (archive, f"{stem}/"))`,
+    stem == `<artifact>-<triple>`). rattler-build extracts preserving that
+    dir, so copying just `<binary>` from the archive root would miss the file.
+    """
+    req, _ = _conda_request(tmp_path)
+
+    publish_mod._publish_conda(req)
+
+    recipe_root = req.assets_dir / publish_mod.CONDA_RECIPE_SCRATCH / req.artifact.name
+    # osx-arm64 (unix): binary staged at `lex-<triple>/lex`, copied into bin.
+    # The dir prefix IS the archive stem `lex-<triple>` (the `.tar.gz` staging
+    # subdir), never the archive root.
+    unix_recipe = (recipe_root / "osx-arm64" / "recipe.yaml").read_text()
+    assert f'cp "lex-{MAC_ARM}/lex" "${{PREFIX}}/bin/lex"' in unix_recipe
+    # win-64: the `.exe` staged at `lex-<triple>/lex.exe`, copied into Scripts.
+    win_recipe = (recipe_root / "win-64" / "recipe.yaml").read_text()
+    assert f'cp "lex-{WIN}/lex.exe" "${{PREFIX}}/Scripts/lex.exe"' in win_recipe
+
+
+def test_conda_scratch_is_namespaced_per_artifact(tmp_path):
+    """`assets_dir` is stage-wide, so the recipe/channel scratch trees are
+    rooted under the artifact name — a second conda artifact's post-build glob
+    must never capture this one's `.conda` files (cross-artifact leak)."""
+    req, _ = _conda_request(tmp_path)
+
+    publish_mod._publish_conda(req)
+
+    recipe_root = req.assets_dir / publish_mod.CONDA_RECIPE_SCRATCH
+    channel_root = req.assets_dir / publish_mod.CONDA_CHANNEL_SCRATCH
+    # The subdir trees live UNDER `<scratch>/<artifact>/`, not directly under
+    # the shared `<scratch>/` — so a sibling artifact gets its own root.
+    assert (recipe_root / req.artifact.name / "osx-arm64" / "recipe.yaml").is_file()
+    assert (channel_root / req.artifact.name / "osx-arm64").is_dir()
+    assert not (recipe_root / "osx-arm64").exists()
+    assert not (channel_root / "osx-arm64").exists()
 
 
 def test_conda_without_served_archives_refuses(tmp_path):

@@ -237,7 +237,9 @@ CONDA_S3_SECRET_KEY_ENV = "S3_SECRET_ACCESS_KEY"
 #: The scratch subdir names under the staged assets tree the conda adapter
 #: renders recipes / stages the built channel into — never top-level files (so
 #: a gh-release re-run can never ship them as assets, the brew scratch prior
-#: art).
+#: art). Each is namespaced by artifact (``<scratch>/<artifact>/<subdir>``)
+#: because ``assets_dir`` is stage-wide: an un-namespaced channel tree would
+#: let one conda artifact's post-build glob capture another's ``.conda``.
 CONDA_RECIPE_SCRATCH = "conda-recipe"
 CONDA_CHANNEL_SCRATCH = "conda-channel"
 
@@ -1454,11 +1456,16 @@ def render_conda_recipe(
     rattler-build extracts the local ``archive_path`` source, then the build
     script (run in the host shell — the single-runner repackage needs no
     cross-compilation, ADR-0064) copies the extracted ``source_binary`` into
-    ``$PREFIX/<install_dir>/<install_binary>``. ``build.number`` is 0 (the tag
-    version is the sole ordering axis, ADR-0041 — a re-cut of the same version
-    is a re-upload, not a new build number). Validated live on a ``file://``
-    channel: build → pixi resolve → run → version bump → transparent
-    re-resolve (the ADR-0064 spike loop).
+    ``$PREFIX/<install_dir>/<install_binary>``. ``source_binary`` is the
+    binary's path WITHIN the extracted tree — the release archive stages it
+    under a top-level ``<artifact>-<triple>/`` dir (bundle._compose_archive's
+    contract), so the copy source is that dir + the binary name, never the
+    archive root. ``archive_path`` is a POSIX path (``Path.as_posix``) and is
+    quoted so a path with spaces or ``#`` still parses as one YAML scalar.
+    ``build.number`` is 0 (the tag version is the sole ordering axis,
+    ADR-0041 — a re-cut of the same version is a re-upload, not a new build
+    number). Validated live on a ``file://`` channel: build → pixi resolve →
+    run → version bump → transparent re-resolve (the ADR-0064 spike loop).
     """
     return (
         f"package:\n"
@@ -1466,7 +1473,7 @@ def render_conda_recipe(
         f'  version: "{version}"\n'
         f"\n"
         f"source:\n"
-        f"  - path: {archive_path}\n"
+        f'  - path: "{archive_path}"\n'
         f"\n"
         f"build:\n"
         f"  number: 0\n"
@@ -1517,14 +1524,25 @@ def _publish_conda(req: PublishRequest) -> Published:
         )
     package = conda_package_name(req.artifact)
     binary = integrity_mod.expected_main_binary(req.artifact)
-    recipe_root = req.assets_dir / CONDA_RECIPE_SCRATCH
-    channel_dir = req.assets_dir / CONDA_CHANNEL_SCRATCH
+    # Namespace both scratch trees by artifact: `assets_dir` is the stage-wide
+    # bundle tree shared by EVERY artifact in the run, so an un-namespaced
+    # `conda-channel/<subdir>` would let a second conda artifact's post-build
+    # glob pick up the FIRST artifact's `.conda` files (same subdir) and
+    # re-publish them under the wrong package — a per-artifact root keeps each
+    # build's channel tree its own.
+    recipe_root = req.assets_dir / CONDA_RECIPE_SCRATCH / req.artifact.name
+    channel_dir = req.assets_dir / CONDA_CHANNEL_SCRATCH / req.artifact.name
     built: list[Path] = []
     actions: list[str] = []
-    for subdir, (_triple, asset_name) in sorted(assets.items()):
-        source_binary, install_dir, install_binary = _conda_binary_layout(
-            subdir, binary
-        )
+    for subdir, (triple, asset_name) in sorted(assets.items()):
+        binary_name, install_dir, install_binary = _conda_binary_layout(subdir, binary)
+        # The release archive stages the binary under a top-level
+        # `<artifact>-<triple>/` dir (bundle._compose_archive's contract:
+        # `Composed(..., (archive, f"{stem}/"))`, stem == `<artifact>-<triple>`)
+        # and rattler-build extracts it preserving that dir, so the build
+        # script's copy source is `<artifact>-<triple>/<binary>`, NOT the
+        # archive root — copying just `<binary>` would miss the file.
+        source_binary = f"{req.artifact.name}-{triple}/{binary_name}"
         recipe_dir = recipe_root / subdir
         recipe_dir.mkdir(parents=True, exist_ok=True)
         recipe = recipe_dir / "recipe.yaml"
@@ -1532,7 +1550,7 @@ def _publish_conda(req: PublishRequest) -> Published:
             render_conda_recipe(
                 package=package,
                 version=req.version,
-                archive_path=str(req.assets_dir / asset_name),
+                archive_path=(req.assets_dir / asset_name).as_posix(),
                 source_binary=source_binary,
                 install_dir=install_dir,
                 install_binary=install_binary,
