@@ -185,10 +185,73 @@ def test_default_branch_honors_a_non_main_default(monkeypatch):
 
 def test_default_branch_falls_back_to_main_when_the_symref_is_absent(monkeypatch):
     # Some reference-borrow clones never set `origin/HEAD`: an absent symref is a
-    # NORMAL probe answer (nonzero rc), so the resolver falls back to the
+    # NORMAL probe answer (nonzero rc). With no `main`/`master`/`trunk`
+    # remote-tracking ref to confirm either, the resolver falls back to the
     # portfolio default `main` rather than raising.
     monkeypatch.setattr(git, "_probe", lambda args, *, cwd: _fail("not a symref"))
     assert git.default_branch(cwd="/x") == "main"
+
+
+def test_default_branch_probes_common_names_when_the_symref_is_absent(monkeypatch):
+    # #852 review: an absent `<remote>/HEAD` symref must NOT blindly resolve to
+    # `main` — that would crash the MODE_PR reset onto a non-existent
+    # `origin/main` on a `master`/`trunk` remote. The fallback probes the common
+    # default-branch names against the remote-tracking refs a fetch populated and
+    # returns the one that exists.
+    def fake(args, *, cwd):
+        if args[0] == "symbolic-ref":
+            return _fail("no symref")
+        # rev-parse --verify --quiet refs/remotes/origin/<candidate>
+        return _ok("deadbeef\n") if args[-1].endswith("/master") else _fail()
+
+    monkeypatch.setattr(git, "_probe", fake)
+    assert git.default_branch(cwd="/x") == "master"
+
+
+def test_has_staged_changes_is_true_when_the_cached_diff_is_nonempty(monkeypatch):
+    # #852 review: the MODE_PR "nothing to publish" guard reads a scoped
+    # `git diff --cached --quiet`. A nonzero exit means at least one pathspec
+    # differs from HEAD — there ARE staged changes.
+    seen = {}
+
+    def fake(args, *, cwd):
+        seen["args"] = args
+        return _fail("", rc=1)
+
+    monkeypatch.setattr(git, "_probe", fake)
+    assert git.has_staged_changes(["a", "b"], cwd="/x") is True
+    assert seen["args"] == ["diff", "--cached", "--quiet", "--", "a", "b"]
+
+
+def test_has_staged_changes_is_false_on_a_clean_index(monkeypatch):
+    # Exit 0 (the pathspecs match HEAD) means nothing is staged.
+    monkeypatch.setattr(git, "_probe", lambda args, *, cwd: _ok())
+    assert git.has_staged_changes(["a"], cwd="/x") is False
+
+
+def test_has_staged_changes_on_empty_paths_never_probes(monkeypatch):
+    # An empty pathspec is a vacuous "no staged changes" — never a bare unscoped
+    # `git diff --cached` that would answer for the whole index.
+    def boom(*a, **k):
+        raise AssertionError("must not probe on an empty pathspec")
+
+    monkeypatch.setattr(git, "_probe", boom)
+    assert git.has_staged_changes([], cwd="/x") is False
+
+
+def test_reset_index_unstages_everything_to_head(monkeypatch):
+    # #852 review: the MODE_PR caller-restore unstages the soft-reset index when
+    # the operator started on the scratch branch — a bare `git reset` (mixed to
+    # HEAD), leaving HEAD and the working tree untouched.
+    seen = {}
+
+    def fake(args, *, cwd, timeout=None):
+        seen["args"] = args
+        return ""
+
+    monkeypatch.setattr(git, "_git", fake)
+    git.reset_index(cwd="/x")
+    assert seen["args"] == ["reset"]
 
 
 def test_reset_soft_moves_only_the_branch_pointer(monkeypatch):

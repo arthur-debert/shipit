@@ -574,12 +574,29 @@ def _restore_caller_branch(cwd: str, original_ref: str | None) -> None:
     MODE_PR switches onto the ``shipit/install`` scratch branch to stage its
     commit; without this the operator is silently left off their own branch.
     Best-effort and no-op when there is nothing to restore to — a detached HEAD
-    (``original_ref`` is ``None``) or a checkout already sitting on the scratch
-    branch (a prior run that itself failed to restore). A restore that cannot
-    run is logged, never raised: it must not mask the real apply outcome (or a
-    git/gh error already unwinding through the ``finally`` that calls this).
+    (``original_ref`` is ``None``). A caller who STARTED on the scratch branch
+    has no other branch to return to, but the flow's
+    ``reset --soft origin/<default>`` left the index staged with the
+    pre-reset..base diff, so this unstages it (:func:`git.reset_index`) rather
+    than leaving the operator a heavily-polluted index (#852 review). A restore
+    that cannot run is logged, never raised: it must not mask the real apply
+    outcome (or a git/gh error already unwinding through the ``finally`` that
+    calls this).
     """
-    if original_ref is None or original_ref == INSTALL_BRANCH:
+    if original_ref is None:
+        return
+    if original_ref == INSTALL_BRANCH:
+        try:
+            git.reset_index(cwd=cwd)
+        except execrun.ExecError:
+            logger.warning(
+                "could not unstage the soft-reset index after the install PR "
+                "flow — the caller was already on %s, so its index may retain "
+                "staged changes",
+                INSTALL_BRANCH,
+                exc_info=True,
+                extra={"root": cwd},
+            )
         return
     try:
         git.switch(original_ref, cwd=cwd)
@@ -974,11 +991,49 @@ def apply(
         # HEAD, now origin/<default>).
         base_branch = git.default_branch(cwd=cwd)
         git.fetch(cwd=cwd)
-        git.switch_create(INSTALL_BRANCH, cwd=cwd)
-        git.reset_soft(f"origin/{base_branch}", cwd=cwd)
+        # The branch switch and the reset live INSIDE the try/finally: a
+        # `reset_soft` (or `switch_create`) that raises AFTER the checkout has
+        # moved onto `shipit/install` must still restore the caller's branch
+        # (#852 review) — leaving the operator stranded on the scratch branch is
+        # exactly the #777 mode 1 surprise the restore exists to prevent.
         try:
-            git.add(changed_paths, cwd=cwd)
-            git.commit(COMMIT_MESSAGE, changed_paths, cwd=cwd, no_verify=True)
+            git.switch_create(INSTALL_BRANCH, cwd=cwd)
+            git.reset_soft(f"origin/{base_branch}", cwd=cwd)
+            # Commit the FULL managed universe, not just the pre-reset writes:
+            # `changed_paths` is computed against the Tree's cut point, where a
+            # managed file already at desired content is a NOOP and drops out of
+            # the write set. After the reset onto origin/<base> that same file may
+            # be ABSENT from the base (a Tree cut from a stale `shipit/install`
+            # head), so a changed_paths-only commit would silently DROP it from
+            # the refreshed PR (#852 review). Staging every managed destination
+            # makes the commit deterministically origin/<base> + the whole managed
+            # set, whatever HEAD the Tree was cut from — the pathspec commit still
+            # takes everything else from HEAD, so a NOOP already matching the base
+            # contributes no diff.
+            pr_paths = sorted(
+                set(changed_paths) | {d.unit.dest for d in plan.decisions}
+            )
+            git.add(pr_paths, cwd=cwd)
+            if not git.has_staged_changes(pr_paths, cwd=cwd):
+                # After the reset the managed set already matches origin/<base> —
+                # a stale Tree duplicating an already-merged reconcile. A pathspec
+                # `git commit` over an empty diff fails with "nothing to commit"
+                # (exit 1); report the clean no-op and skip the commit/PR rather
+                # than crashing the install (#852 review). The `finally` still
+                # restores the caller's branch.
+                logger.info(
+                    "install PR: the managed set is already current on "
+                    "origin/%s — nothing to publish",
+                    base_branch,
+                    extra={
+                        "root": str(root),
+                        "branch": INSTALL_BRANCH,
+                        "base": base_branch,
+                        "duration_ms": _elapsed(),
+                    },
+                )
+                return result
+            git.commit(COMMIT_MESSAGE, pr_paths, cwd=cwd, no_verify=True)
             # The install branch is regenerated on top of origin/<default> each
             # run; force so a re-run with an open install PR (or a stale leftover
             # branch) updates it rather than failing non-fast-forward.

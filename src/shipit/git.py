@@ -210,18 +210,26 @@ def default_branch(*, cwd: str, remote: str = "origin") -> str:
     leftover remote ``shipit/install`` head would stack a conflicting commit.
 
     A PROBE, not a mutation: a missing symref (some reference-borrow clones never
-    set ``<remote>/HEAD``) is a normal answer, so it falls back to ``main`` — the
-    portfolio default — rather than raising. A launch-level failure (missing git,
-    timeout) still propagates :class:`ExecError`.
+    set ``<remote>/HEAD``) is a normal answer. Rather than blindly returning
+    ``main`` — which would mis-resolve a ``master``/``trunk`` remote and then
+    crash the MODE_PR reset onto a non-existent ``origin/main`` — the fallback
+    PROBES the common default-branch names against the remote-tracking refs a
+    fetch populated, ``main`` first (the portfolio default), and only when none
+    exist returns ``main`` as the last resort. A launch-level failure (missing
+    git, timeout) still propagates :class:`ExecError`.
     """
     result = _probe(["symbolic-ref", "--short", f"refs/remotes/{remote}/HEAD"], cwd=cwd)
     if result.ok:
-        name = result.stdout.strip()
-        prefix = f"{remote}/"
-        if name.startswith(prefix):
-            name = name[len(prefix) :]
+        name = result.stdout.strip().removeprefix(f"{remote}/")
         if name:
             return name
+    for candidate in ("main", "master", "trunk"):
+        probe = _probe(
+            ["rev-parse", "--verify", "--quiet", f"refs/remotes/{remote}/{candidate}"],
+            cwd=cwd,
+        )
+        if probe.ok:
+            return candidate
     return "main"
 
 
@@ -869,6 +877,35 @@ def commit(
     if no_verify:
         args.append("--no-verify")
     _git([*args, "-m", message, "--", *paths], cwd=cwd)
+
+
+def has_staged_changes(paths: list[str], *, cwd: str) -> bool:
+    """Whether the index holds a staged diff for ``paths`` against HEAD.
+
+    ``git diff --cached --quiet -- <paths>`` is a PROBE: exit 0 means the named
+    pathspecs match HEAD (nothing staged), a nonzero exit means at least one
+    differs. The MODE_PR staging flow asks this AFTER ``reset --soft`` +
+    ``git add`` (#852 review): once the staging branch is reset onto
+    ``origin/<default>`` the managed set can already match the base (a Tree
+    duplicating an already-merged reconcile), and a pathspec :func:`commit` over
+    an empty diff fails ``git commit`` with "nothing to commit" — so apply checks
+    here and skips the commit rather than crashing. An empty ``paths`` is a
+    vacuous "no staged changes" (never a bare unscoped diff)."""
+    if not paths:
+        return False
+    return not _probe(["diff", "--cached", "--quiet", "--", *paths], cwd=cwd).ok
+
+
+def reset_index(*, cwd: str) -> None:
+    """``git reset`` — unstage everything, rewinding the index to HEAD.
+
+    HEAD and the working tree are untouched; only the index moves back. The
+    MODE_PR caller-restore uses it when the operator STARTED on the
+    ``shipit/install`` scratch branch (#852 review): the flow's
+    ``reset --soft origin/<default>`` staged the pre-reset..base diff into the
+    index, and with no other branch to switch back to, unstaging is how the
+    operator is returned to a clean index rather than a heavily-polluted one."""
+    _git(["reset"], cwd=cwd)
 
 
 def push(

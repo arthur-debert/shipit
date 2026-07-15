@@ -3150,6 +3150,19 @@ class _GhRecorder:
     def add(self, paths, *, cwd):
         self.calls.append(("add", tuple(paths)))
 
+    def has_staged_changes(self, paths, *, cwd):
+        # The MODE_PR "nothing to publish" guard (#852 review): after the reset
+        # onto origin/<default> the staged managed set can already match the
+        # base. A pure query (like current_branch/default_branch), so it is not
+        # recorded in `calls`. Defaults to True (the commit proceeds); a test
+        # sets `_no_staged` to exercise the clean no-op.
+        return not getattr(self, "_no_staged", False)
+
+    def reset_index(self, *, cwd):
+        # The MODE_PR caller-restore unstages the soft-reset index when the
+        # operator STARTED on `shipit/install` (#852 review).
+        self.calls.append(("reset_index", None))
+
     def commit(self, message, paths, *, cwd, no_verify=False):
         self.calls.append(("commit", message))
         self.commit_paths = tuple(paths)
@@ -3182,6 +3195,8 @@ def rec(monkeypatch):
         "switch_create",
         "switch",
         "add",
+        "has_staged_changes",
+        "reset_index",
         "commit",
         "push",
         "current_branch",
@@ -3296,6 +3311,55 @@ def test_pr_mode_honors_a_non_main_default_branch(tmp_path, rec):
 
     assert ("reset", "origin/trunk") in rec.calls
     assert rec.pr_base == "trunk"
+
+
+def test_pr_mode_commits_the_full_managed_universe_including_noop_units(tmp_path, rec):
+    # #852 review (major): the MODE_PR commit is scoped to the FULL managed set,
+    # not just the pre-reset writes. `changed_paths` is computed against the
+    # Tree's cut point, where a file already at desired content is a NOOP and
+    # drops out of the write set; after the staging branch is reset onto
+    # origin/<default> that file may be ABSENT from the base, so a writes-only
+    # commit would silently DROP it from the refreshed PR. Staging every managed
+    # destination keeps it — the whole managed set lands on the reset base.
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    # Pre-seed one whole-file unit at its desired content so it reconciles NOOP.
+    noop = next(u for u in iunits.load_units() if u.dest == iunits.MARKDOWNLINT_FILE)
+    (tmp_path / noop.dest).write_bytes(noop.content)
+
+    plan = _plan(tmp_path)
+    # It is a NOOP — absent from the write-scoped changed_paths...
+    assert noop.dest not in plan.changed_paths
+    assert any(
+        d.unit.dest == noop.dest and d.action == irec.NOOP for d in plan.decisions
+    )
+
+    _apply(tmp_path, iapply.MODE_PR)
+    # ...yet the MODE_PR commit still carries it (the full managed universe), so
+    # the reset onto origin/<default> can never drop it from the PR.
+    assert noop.dest in rec.commit_paths
+
+
+def test_pr_mode_reports_no_changes_when_the_managed_set_already_matches_base(
+    tmp_path, rec
+):
+    # #852 review (major): after the `reset --soft origin/<default>` the staged
+    # managed set can already match the base (a stale Tree duplicating an
+    # already-merged reconcile). A pathspec `git commit` over an empty diff fails
+    # with "nothing to commit" (exit 1) — so apply checks `has_staged_changes`
+    # and cleanly skips the commit/PR rather than crashing the install.
+    rec._no_staged = True
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    result = _apply(tmp_path, iapply.MODE_PR)
+
+    # No commit, no push, no PR — the flow stopped at the empty-diff guard...
+    assert "commit" not in rec.names()
+    assert "push" not in rec.names()
+    assert "pr_create" not in rec.names()
+    # ...the result names no PR (a clean no-op, not a raised ExecError)...
+    assert result.pr_url is None
+    assert result.branch is None
+    # ...and the caller's branch was still restored on the way out.
+    assert ("switch_back", "main") in rec.calls
 
 
 def test_fresh_install_provisions_agent_defs_and_settings_hook(tmp_path, rec):
@@ -4468,12 +4532,19 @@ def test_pr_flow_from_detached_head_does_not_restore(tmp_path, rec, monkeypatch)
     assert not any(name == "switch_back" for name, _ in rec.calls)
 
 
-def test_restore_caller_branch_skips_none_and_the_scratch_branch(tmp_path, rec):
-    # The guard: no branch to restore to (None) and a checkout already on the
-    # scratch branch both no-op — there is nowhere sensible to switch.
+def test_restore_caller_branch_skips_none_and_unstages_on_the_scratch_branch(
+    tmp_path, rec
+):
+    # The guard: no branch to restore to (None) is a pure no-op — nothing to
+    # switch, nothing staged to clean.
     iapply._restore_caller_branch(str(tmp_path), None)
+    assert rec.calls == []
+    # A caller already ON the scratch branch has nowhere to switch back to, but
+    # the flow's `reset --soft` left the index staged, so the restore unstages it
+    # (#852 review) rather than switching.
     iapply._restore_caller_branch(str(tmp_path), iapply.INSTALL_BRANCH)
     assert not any(name == "switch_back" for name, _ in rec.calls)
+    assert ("reset_index", None) in rec.calls
 
 
 def test_restore_committing_writes_is_a_transaction(tmp_path):
@@ -5435,6 +5506,11 @@ def test_format_result_renders_the_mode_outcomes():
         pr_updated=True,
     )
     assert "updated draft PR: https://x/1" in verb.format_result(updated)
+    # MODE_PR with no PR url: the reset onto origin/<default> found the managed
+    # set already current, so nothing was published (#852 review — no crash).
+    noop_pr = iapply.InstallResult(plan=plan, mode=iapply.MODE_PR)
+    assert "already current on the default branch" in verb.format_result(noop_pr)
+    assert "nothing to publish" in verb.format_result(noop_pr)
     # The activation line leads the outcome when the checks went live.
     live = iapply.InstallResult(plan=plan, mode=iapply.MODE_TREE, hooks_activated=True)
     assert verb.format_result(live).splitlines()[0] == (
