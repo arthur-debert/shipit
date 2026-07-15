@@ -237,13 +237,16 @@ def _check_failure_message(task: str, result: execrun.ExecResult) -> str:
     environment (:func:`pixienv.scrub_env` drops pixi/Conda selection, not the
     user's secrets), so a failing tool that echoes a token or PEM would
     otherwise leak it straight onto the unredacted ``CreationError`` /
-    ``error:`` CLI surface. The tail is sliced before masking so redaction runs
-    on the bounded window, not the whole build log.
+    ``error:`` CLI surface. Redaction runs on the WHOLE stream before the tail
+    is sliced — the SAME order an :class:`ExecError` uses on its own streams —
+    so a secret that straddles the :data:`execrun.TAIL_CHARS` boundary is masked
+    intact; slicing first would tail a half-secret the exact-value and pattern
+    matchers can no longer recognize, leaking the retained fragment.
     """
     tails = [
         f"{label}:\n{tail}"
         for label, stream in (("stdout", result.stdout), ("stderr", result.stderr))
-        if (tail := redact.redact_text(stream[-execrun.TAIL_CHARS :].strip()))
+        if (tail := redact.redact_text(stream)[-execrun.TAIL_CHARS :].strip())
     ]
     output = ("\n" + "\n".join(tails)) if tails else ""
     return (

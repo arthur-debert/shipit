@@ -1485,6 +1485,52 @@ def test_default_verifier_redacts_secrets_in_failing_check_output(
     assert "leaked PEM:" in message
 
 
+def test_failing_check_redacts_secret_straddling_tail_boundary(tmp_path, monkeypatch):
+    # Redaction runs on the WHOLE stream before the tail is sliced, so a secret
+    # that crosses the TAIL_CHARS boundary is masked intact. If the tail were
+    # sliced FIRST, only a suffix fragment of the secret would remain in the
+    # bounded window — the exact-value matcher could no longer recognize it, and
+    # that fragment would leak onto the CreationError / `error:` CLI surface.
+    secret = "tok_boundary_str4ddl3_s3cr3t_v4lue"
+    # Place the secret so the TAIL_CHARS window opens in its MIDDLE: a lead pushes
+    # the secret's prefix out of the window, and trailing padding sized so the
+    # last TAIL_CHARS begin exactly at secret[split] keeps only its suffix.
+    split = len(secret) // 2
+    trailing = "y" * (execrun.TAIL_CHARS - (len(secret) - split))
+    stdout = f"dumping env: {secret}{trailing}"
+    # Sanity: slicing the raw stream to the tail keeps only a suffix fragment of
+    # the secret, proving this input genuinely straddles the boundary.
+    tail_fragment = stdout[-execrun.TAIL_CHARS :]
+    assert secret not in tail_fragment
+    assert secret[split:] in tail_fragment
+
+    def fake_run(argv, **kwargs):
+        task = argv[-1]
+        if task == "test":
+            return execrun.ExecResult(
+                argv=tuple(argv), rc=101, stdout=stdout, stderr="", duration_ms=1
+            )
+        return execrun.ExecResult(
+            argv=tuple(argv), rc=0, stdout="", stderr="", duration_ms=1
+        )
+
+    monkeypatch.setattr(execrun, "run", fake_run)
+
+    redact.register_secret(secret)
+    try:
+        with pytest.raises(CreationError) as excinfo:
+            create_mod.default_verifier(tmp_path)
+    finally:
+        redact.clear_registered_secrets()
+
+    message = str(excinfo.value)
+    # No fragment of the secret survives — not the whole value, not the suffix
+    # that fell inside the tail window.
+    assert secret not in message
+    assert secret[split:] not in message
+    assert redact.MASK in message
+
+
 def test_create_failed_check_leaves_no_repo_and_reports_output(tmp_path, git_identity):
     # End to end through the orchestrator: a failing verifier (carrying the
     # certification's real message) rolls back and publishes nothing, so a hidden
@@ -1530,12 +1576,19 @@ def test_create_real_toolchain_end_to_end(tmp_path, git_identity):
     # black-box CLI test (CLI-to-library wiring) and `build` compiles the primary
     # product (AC6), on a FRESH environment materialized from the committed
     # lockfile — so mocked command execution cannot conceal a missing dependency.
+    # Scrub the inherited `PIXI_PROJECT_*` pointers before re-running: this test
+    # itself runs under `pixi run test`, which injects manifest/env-root vars that
+    # bind `pixi run` to the PARENT manifest and would override `cwd`, resolving
+    # the parent Repo's tasks instead of the generated one (the exact leak class
+    # `pixienv.scrub_env` guards — matching how `default_verifier` certifies).
+    scrubbed = pixienv.scrub_env(dict(os.environ))
     for task in ("lint", "test", "build"):
         run = subprocess.run(
             ["pixi", "run", task],
             cwd=str(dest),
             capture_output=True,
             text=True,
+            env=scrubbed,
         )
         assert run.returncode == 0, f"pixi run {task} failed:\n{run.stderr}"
     # Fresh-environment acceptance leaves the Git tree clean (AC5): running the
