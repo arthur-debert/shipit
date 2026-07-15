@@ -576,8 +576,46 @@ LEX = Lang(
     # --fix; it runs as check-only via `lexd check` (CI-friendly exit codes).
     tools=(Tool("lexd", ("check",)),),
 )
+LUA = Lang(
+    name="lua",
+    extensions=(".lua",),
+    # The Neovim-plugin lint leg (TOL03-WS01 #972): the pair a nvim plugin
+    # actually uses, and — decisively for the pixi provisioning model — the
+    # pair conda-forge carries, so a consumer's managed env solves them cleanly
+    # (luacheck, the classic alternative, is a luarocks package NOT on
+    # conda-forge, so it would never provision through the managed surface; that
+    # is why selene wins here, not a quality judgement — both are documented in
+    # the ADR):
+    #   * stylua — the opinionated Lua FORMATTER. `--check` verifies (non-zero
+    #     when a file is unformatted) and is the check-mode leg; the bare form
+    #     (empty `fix` tuple) formats in place, the one lua --fix leg. Like
+    #     shfmt/prettier, stylua honors an ancestor `stylua.toml`/`.editorconfig`
+    #     — a canonical shipped stylua config (the ADR-0037 injection) is a
+    #     follow-up body decision (there is no lua source in shipit's own tree to
+    #     validate one against yet); until then the `_run_tool` env scrub still
+    #     blocks `$HOME`/XDG config, matching how lexd's ancestor `.lex.toml`
+    #     walk stays an open pin (#526).
+    #   * selene — the modern (Rust) Lua LINTER; check-only (it has no
+    #     autofix), so it runs its check form in both modes and never skips. Its
+    #     rule set + standard-library (`std`, e.g. the neovim std) come from the
+    #     consumer's own `selene.toml`, exactly as a nvim plugin already ships.
+    tools=(
+        Tool("stylua", ("--check",), fix=()),
+        Tool("selene", ()),
+    ),
+)
 
-LANGS: tuple[Lang, ...] = (PYTHON, RUST, SHELL, YAML, ACTIONS, WEB, MARKDOWN, LEX)
+LANGS: tuple[Lang, ...] = (
+    PYTHON,
+    RUST,
+    SHELL,
+    YAML,
+    ACTIONS,
+    WEB,
+    MARKDOWN,
+    LEX,
+    LUA,
+)
 
 
 # --------------------------------------------------------------------------

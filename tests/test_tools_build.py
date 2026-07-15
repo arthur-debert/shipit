@@ -45,6 +45,20 @@ def test_leg_without_artifacts_runs_its_base_command_once():
     assert step.label == "python (.)"
 
 
+def test_buildless_lua_leg_is_skipped():
+    # TOL03-WS01 #972: lua declares an EMPTY build slot (a Neovim plugin has no
+    # compile step), so its build argv is (). plan_build skips the whole leg
+    # rather than exec an empty command.
+    assert build_mod.plan_build([_leg("lua")], []) == ()
+
+
+def test_buildless_lua_leg_is_skipped_but_sibling_legs_still_build():
+    # The skip is per-leg: a repo mixing a buildless lua leg with a real build
+    # leg still builds the real one — the fan-out never crashes on the empty argv.
+    steps = build_mod.plan_build([_leg("lua"), _leg("python")], [])
+    assert [step.argv for step in steps] == [("uv", "build")]
+
+
 def test_go_leg_without_artifacts_builds_every_package():
     # #608 (supage's red build cell): a bare `go build` compiles only the root
     # package — "no Go files in ." on a repo whose packages live under cmd/…

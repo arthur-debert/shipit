@@ -8,6 +8,9 @@ executes: the join between the path→toolchain map (the leg axis) and the
 
 - a leg with NO artifact build targets runs its base build command once —
   the whole-leg build (a repo needs no artifact map to ``shipit build``);
+- a leg whose toolchain declares an EMPTY build slot (lua — a Neovim plugin
+  has no compile step) is SKIPPED: there is nothing to produce, so the
+  fan-out omits it rather than exec an empty argv;
 - a CROSS ``--target <triple>`` (TOL02-WS11) narrows a rust leg's build to
   one platform: the base command gains ``--target <triple>`` and cargo writes
   the binary to ``target/<triple>/release/`` (not the native
@@ -309,6 +312,15 @@ def plan_build(
     """
     steps: list[BuildStep] = []
     for leg in legs:
+        if not leg.argv:
+            # A buildless toolchain (lua: a Neovim plugin has no compile step,
+            # so registry.LUA declares an empty `build` slot) yields an empty
+            # build argv. Skip the whole leg — there is nothing to run, and
+            # exec'ing an empty command would crash the fan-out over a repo
+            # that mixes a lua leg with real build legs. A lua leg is never an
+            # artifact build target (nothing to produce), so no narrowed step
+            # is lost here either.
+            continue
         matched = [
             (artifact.name, build_target)
             for artifact in artifacts

@@ -35,6 +35,16 @@ of those projections, plus the artifact-declared bundle-config hook:
   manifest whose version a downstream resolves — the tag alone names the
   release (the go shape, for the same ADR-0041 reason: no projection to
   bump).
+- **lua** — a PURE rewrite of the Neovim-plugin entry file's ``M.version``
+  string (:func:`bump_lua_version`), toolchain-free like python's (no
+  luarocks/build tool is invoked — a nvim plugin freezes its version in Lua
+  source, and #104 froze lex-fmt/nvim's exactly because shipit had no
+  projection to bump it; TOL03-WS01 #972). The ``edit_path`` is the
+  leg-relative ``init.lua``: the lua ``[toolchains]`` leg maps to the plugin's
+  Lua package directory (``lua/<plugin>``), so the entry file resolves against
+  the leg cwd the same way python's ``pyproject.toml`` does (see the ADR). The
+  written value is the semver the tag names, VERBATIM — a Lua string is
+  arbitrary text (no PEP 440 constraint), so no normalization, the npm shape.
 
 "tauri" is NEVER a registry key (PRD story 25, ADR-0007): a Tauri app is a
 composition of the npm and rust legs, and its bundle-level version file
@@ -189,12 +199,18 @@ GO = BumpAdapter("go")
 #: the tag (ADR-0041), npm publish off (legacy tree-sitter.yml), so no manifest
 #: projection to bump (TOL02-WS16 #792).
 TREE_SITTER = BumpAdapter("tree-sitter")
+#: lua: a pure edit like python (TOL03-WS01 #972) — the Neovim-plugin entry
+#: file's ``M.version`` string. ``edit_path`` is leg-relative (``init.lua``),
+#: resolved against the lua leg's map path (the plugin's ``lua/<plugin>``
+#: package dir), and it is the only file the bump touches, so it is also the
+#: whole ``stage`` set.
+LUA = BumpAdapter("lua", edit_path="init.lua", stage=("init.lua",))
 
 #: The CLOSED registry, keyed by toolchain name — exactly the
 #: :mod:`shipit.tools.registry` set, pinned by test. No "tauri" key, ever
 #: (story 25): bundle-level files ride :func:`bump_bundle_config`.
 ADAPTERS: dict[str, BumpAdapter] = {
-    a.toolchain: a for a in (RUST, GO, PYTHON, NPM, TREE_SITTER)
+    a.toolchain: a for a in (RUST, GO, PYTHON, NPM, TREE_SITTER, LUA)
 }
 
 
@@ -237,15 +253,31 @@ _JSON_VERSION_RE = re.compile(
     r"(?P<head>\"version\"\s*:\s*\")(?P<value>[^\"]*)(?P<tail>\")"
 )
 
+#: A Neovim plugin's ``M.version = "…"`` assignment in its entry ``init.lua``
+#: (TOL03-WS01 #972). ``M`` is the conventional module table a plugin returns
+#: (``local M = {}`` … ``return M``); the ``\b`` before ``M`` keeps the match
+#: from firing inside a longer identifier (``someM.version``). The quote char
+#: is captured (``q``) and back-referenced for the close, so a Lua single- or
+#: double-quoted string bumps and keeps its own style; the value spans no quote
+#: char, so a semver (no embedded quote) is matched whole. Matched textually,
+#: first occurrence — the rewrite preserves the file's formatting byte-for-byte.
+_LUA_VERSION_RE = re.compile(
+    r"(?P<head>\bM\.version[ \t]*=[ \t]*(?P<q>[\"']))(?P<value>[^\"']*)(?P<tail>(?P=q))"
+)
+
 
 def edit_for(adapter: BumpAdapter, text: str, version: str) -> str:
     """Apply ``adapter``'s pure manifest rewrite to ``text``. Pure.
 
-    Today the only edit-shaped adapter is python's
-    (:func:`bump_pyproject`); a future edit-shaped entry adds its function
-    here. Calling this for an adapter with no ``edit_path`` is a caller bug.
+    The two edit-shaped adapters dispatch by toolchain: python's
+    ``pyproject.toml`` rewrite (:func:`bump_pyproject`) and lua's ``M.version``
+    rewrite (:func:`bump_lua_version`, TOL03-WS01 #972); a future edit-shaped
+    entry adds its function here. Calling this for an adapter with no
+    ``edit_path`` is a caller bug.
     """
     assert adapter.edit_path is not None
+    if adapter.toolchain == "lua":
+        return bump_lua_version(text, version)
     return bump_pyproject(text, version)
 
 
@@ -333,6 +365,32 @@ def bump_pyproject(text: str, version: str) -> str:
             "pyproject.toml has no [project] version line to bump — a static "
             '`version = "…"` under [project] is required (dynamic versions '
             "have no manifest projection)"
+        )
+    return replaced[0]
+
+
+def bump_lua_version(text: str, version: str) -> str:
+    """A Neovim plugin's entry ``init.lua`` with ``M.version`` set to
+    ``version``. Pure.
+
+    Toolchain-free, the python bump's spirit (TOL03-WS01 #972): a targeted
+    rewrite of the FIRST ``M.version = "…"`` assignment that preserves the rest
+    of the file byte-for-byte (no Lua parse/emit — that would reflow the
+    source). The value is written VERBATIM: a Lua version string is arbitrary
+    text, so unlike the python manifest there is no PEP 440 constraint to
+    normalize toward — the semver the tag names is written as-is (the npm
+    shape). Raises :class:`ReleaseError` when the file carries no ``M.version``
+    assignment — a plugin that never declared a bumpable version, which this
+    projection cannot express (fail loud, never a silent no-op that would then
+    trip prepare's no-op-bump guard with a confusing message).
+    """
+    replaced = _LUA_VERSION_RE.subn(rf"\g<head>{version}\g<tail>", text, count=1)
+    if replaced[1] == 0:
+        raise ReleaseError(
+            'lua entry file has no `M.version = "…"` line to bump — a Neovim '
+            "plugin declares its version as a string on its module table "
+            '(`M.version = "x.y.z"` in the plugin\'s init.lua) for shipit to '
+            "project the tag onto (ADR-0041)"
         )
     return replaced[0]
 
