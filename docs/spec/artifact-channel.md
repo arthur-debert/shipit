@@ -151,6 +151,28 @@ prefix-scoped IAM (leak-prone under UBLA), a capability URL (leaks via
   fleet crawl per release.
 - **Bootstrap/self-hosting** for `lexd`: seed the channel once before the
   `provision` cutover; `lex-fmt/lex` lints against its prior release's `lexd`.
+  The cutover (ADR-0066 — delete `provision`, move the pin into the managed
+  lint block) is **gated on that seed** and MUST NOT land before it. Once
+  `provision` is gone and `lexd` is an ordinary managed conda dependency, every
+  managed repo's `pixi install` / lint solve resolves `lexd` from the channel
+  with **no fallback** (the clean cutover retains none — ADR-0066), so a solve
+  against an unseeded channel fails closed. This binds shipit's own gate too:
+  shipit dogfoods the managed lint block byte-for-byte
+  (`tests/test_install.py::test_packaged_lint_env_agrees_with_shipits_own_manifest`),
+  so the cutover commit cannot even pass shipit's own pre-commit lint hook
+  (`pixi run -e lint lint` re-solves the lint env) until the channel serves
+  `lexd`. Readiness gate — all three required before the cutover PR can go
+  green:
+  1. the public bucket exists (WS03 — `shipit-artifacts-public`);
+  2. `lex-fmt/lex` has published a stable `lexd` release through the `conda`
+     endpoint, so its per-repo channel holds `lexd` for the served subdirs
+     (`osx-arm64`, `linux-64`, `linux-aarch64`); and
+  3. the channel serves `repodata.json` authless — verify with
+     `curl -fsS <host>/shipit-artifacts-public/lex-fmt/lex/osx-arm64/repodata.json`
+     (`<host>` = `https://storage.googleapis.com`).
+
+  Until all three hold, the cutover stays blocked and shipit keeps provisioning
+  `lexd` via the pinned fetcher so its own gate self-hosts.
 - **Lock discipline:** a bump re-resolves only through `pixi install`/`update`,
   which rewrites `pixi.lock`; the downstream must commit the updated lock.
 
