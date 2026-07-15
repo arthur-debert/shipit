@@ -315,6 +315,29 @@ def test_notary_names_are_never_individually_missing():
     assert notary.isdisjoint({m.name for m in missing})
 
 
+def test_empty_valid_secret_is_never_reported_missing_on_a_signing_map():
+    # #892 on the PROVISIONING side: APPLE_CERTIFICATE_PASSWORD is empty-valid,
+    # so a passwordless-.p12 signing repo that declares NO source for it is not
+    # a missing-source error — accepted-but-not-demanded, matching the signer.
+    # Its counterpart cert stays a hard requirement (signing needs it).
+    missing = {m.name for m in secretreq.missing_sources(_artifacts(RUST_CLI), [])}
+    assert "APPLE_CERTIFICATE_PASSWORD" not in missing
+    assert "APPLE_CERTIFICATE" in missing
+
+
+def test_empty_valid_secret_still_rides_the_forwarded_accepted_set():
+    # Relaxed DEMAND, not dropped: the name stays in the required/accepted set
+    # so the caller block forwards it and the plan lists it (#892). Only its
+    # SOURCE demand is relaxed, never its forwarding.
+    assert "APPLE_CERTIFICATE_PASSWORD" in secretreq.required_names(
+        _artifacts(RUST_CLI)
+    )
+    assert "APPLE_CERTIFICATE_PASSWORD" in secretreq.accepted_names(
+        _artifacts(RUST_CLI)
+    )
+    assert "APPLE_CERTIFICATE_PASSWORD" in secretreq.secrets_block(_artifacts(RUST_CLI))
+
+
 # --------------------------------------------------------------------------
 # Reviewer credential derivation (#740, option C — the third input)
 # --------------------------------------------------------------------------

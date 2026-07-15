@@ -11,6 +11,7 @@ fail-closed contract (no git, no PR) on the recorded boundary.
 from __future__ import annotations
 
 import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -295,7 +296,8 @@ def test_delivered_lint_fails_closed_when_a_planned_file_is_missing(staged):
 
 
 # --------------------------------------------------------------------------
-# Postcondition 2, managed skills (#777) — the delivered skill/*.md content is
+# Postcondition 2, managed skills (#777) — the delivered `.shipit-skills/*.md`
+# content is
 # no longer exempt from the delivered markdownlint gate, so self-cert's
 # delivered-lint CATCHES a skill-content defect that would otherwise ride the
 # managed set into a consumer's markdownlint gate (modes 4+6). These route the
@@ -306,8 +308,9 @@ def test_delivered_lint_fails_closed_when_a_planned_file_is_missing(staged):
 
 def _skill_only_plan(root) -> irec.Plan:
     """A plan whose write set is JUST the managed skill files, so a scoped
-    delivered-lint routes only markdownlint over the shipped skill/*.md."""
-    skills = [u for u in iunits.load_units() if u.key.startswith("skills/")]
+    delivered-lint routes only markdownlint over the shipped
+    `.shipit-skills/*.md`."""
+    skills = [u for u in iunits.load_units() if u.key.startswith(".shipit-skills/")]
     decisions = tuple(
         irec.Decision(
             unit=u,
@@ -343,15 +346,15 @@ def _unwrapping_real_runner():
 
 
 def test_managed_skill_files_are_in_the_delivered_lint_set(staged):
-    # The root-cause guard (no binary): every managed skill/*.md is a whole-file
+    # The root-cause guard (no binary): every managed `.shipit-skills/*.md` is a whole-file
     # unit, so it is in scope for the delivered-lint check — the blindness was
     # only the shipped `.markdownlintignore` exempting `skills/`, now removed.
     paths = selfcert.delivered_lint_paths(_skill_only_plan(staged))
-    assert "skills/grill-me-with-docs/SKILL.md" in paths
-    assert "skills/to-spec/SKILL.md" in paths
+    assert ".shipit-skills/grill-me-with-docs/SKILL.md" in paths
+    assert ".shipit-skills/to-spec/SKILL.md" in paths
     # The delivered ignore no longer blanket-exempts the managed skills tree.
     ignore = (staged / ".markdownlintignore").read_text().splitlines()
-    assert "skills/" not in {line.strip() for line in ignore}
+    assert ".shipit-skills/" not in {line.strip() for line in ignore}
 
 
 @pytest.mark.skipif(shutil.which("markdownlint") is None, reason="no markdownlint")
@@ -369,14 +372,14 @@ def test_delivered_skill_files_pass_the_delivered_config_real(staged):
 def test_delivered_lint_catches_a_planted_skill_defect_real(staged):
     # Plant an MD040 bare-fence defect (mode 4's exact class) into a delivered
     # skill file: self-cert must now CATCH it — the defect can no longer ship.
-    skill = staged / "skills" / "grill-me-with-docs" / "SKILL.md"
+    skill = staged / ".shipit-skills" / "grill-me-with-docs" / "SKILL.md"
     skill.write_text(skill.read_text() + "\n```\nplanted bare fence\n```\n")
     check = selfcert._check_delivered_lint(
         staged, _skill_only_plan(staged), _unwrapping_real_runner()
     )
     assert not check.ok
     assert "MD040" in check.detail
-    assert "skills/grill-me-with-docs/SKILL.md" in check.detail
+    assert ".shipit-skills/grill-me-with-docs/SKILL.md" in check.detail
 
 
 # --------------------------------------------------------------------------
@@ -395,15 +398,54 @@ def test_hooks_check_requires_a_successful_activation(staged):
 
 
 def test_hooks_check_requires_the_hook_files_on_disk(staged):
+    # A REAL checkout so the postcondition resolves `.git/hooks` through the git
+    # adapter (#914) rather than a fabricated bare dir the resolver reads as
+    # not-a-repo. `git init` seeds only `*.sample` hooks, so the managed
+    # pre-commit/pre-push are genuinely absent until written below.
+    subprocess.run(["git", "init", "-q"], cwd=staged, check=True)
     plan = _plan_with_writes(staged)
     check = selfcert._check_hooks(staged, plan, hooks_activated=True)
     assert not check.ok  # activation claimed success but .git/hooks is empty
 
     hooks = staged / ".git" / "hooks"
-    hooks.mkdir(parents=True)
     (hooks / "pre-commit").write_text("#!/bin/sh\n# lefthook\n")
     (hooks / "pre-push").write_text("#!/bin/sh\n# lefthook\n")
     assert selfcert._check_hooks(staged, plan, hooks_activated=True).ok
+
+
+def test_hooks_check_fails_when_the_hooks_dir_cannot_be_resolved(staged, monkeypatch):
+    # #914: the postcondition resolves `.git/hooks` through the git adapter; when
+    # that returns None (not a resolvable checkout) an activation that reported
+    # success has nothing to verify against, so the check fails CLOSED rather than
+    # passing a live-hooks claim it never checked.
+    monkeypatch.setattr(git, "hooks_dir", lambda *, cwd: None)
+    plan = _plan_with_writes(staged)
+    check = selfcert._check_hooks(staged, plan, hooks_activated=True)
+    assert not check.ok
+    assert "could not be resolved" in check.detail
+
+
+def test_hooks_check_reads_the_shared_hooks_dir_from_a_linked_worktree(tmp_path):
+    # #914 end-to-end: run against a LINKED worktree (its `.git` is a file), the
+    # check must read the managed hooks in the main checkout's SHARED common dir —
+    # the hardcoded `<worktree>/.git/hooks` does not exist, so the old code would
+    # have failed a worktree install that genuinely HAS live hooks.
+    main = tmp_path / "main"
+    main.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=main, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t.co"], cwd=main, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=main, check=True)
+    subprocess.run(
+        ["git", "commit", "--allow-empty", "-qm", "init"], cwd=main, check=True
+    )
+    wt = tmp_path / "wt"
+    subprocess.run(["git", "worktree", "add", "-q", str(wt)], cwd=main, check=True)
+    shared = main / ".git" / "hooks"
+    (shared / "pre-commit").write_text("#!/bin/sh\n# lefthook\n")
+    (shared / "pre-push").write_text("#!/bin/sh\n# lefthook\n")
+
+    plan = _plan_with_writes(wt)
+    assert selfcert._check_hooks(wt, plan, hooks_activated=True).ok
 
 
 def test_hooks_check_is_vacuous_when_the_plan_activates_nothing(tmp_path, rec):
@@ -517,8 +559,11 @@ def _dispatching_runner(pin: str):
 
 
 def _live_hooks(root: Path) -> None:
+    # A REAL checkout so the `hooks` postcondition resolves `.git/hooks` through
+    # the git adapter (#914); `git init` seeds the dir, into which the managed
+    # pre-commit/pre-push shims are written to stand in for a live activation.
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
     hooks = root / ".git" / "hooks"
-    hooks.mkdir(parents=True, exist_ok=True)
     (hooks / "pre-commit").write_text("#!/bin/sh\n")
     (hooks / "pre-push").write_text("#!/bin/sh\n")
 

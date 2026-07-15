@@ -14,7 +14,7 @@ The issue tracker and triage label vocabulary should have been provided to you �
 
 ### 1. Gather context
 
-Work from whatever is already in the conversation context. The authoritative source is the **Spec file in `docs/spec/`** (the feature spec — the *what & why*), produced by `/to-spec`. Read it in full, along with the ADRs it references. If the user passes a reference (Spec path, issue number, or URL) as an argument, fetch it and read it fully.
+Work from whatever is already in the conversation context. The authoritative source is the **Spec + the ADRs it references, read together as a pair**: the **Spec file in `docs/spec/`** (the feature spec — the *why & general-what*, produced by `/to-spec`) states what we're building; the **ADRs** (produced by the grill that followed the Spec, and linked back into the Spec's Further Notes by that grill) carry the specific durable decisions. Read the Spec in full AND every ADR it references — the slicing must honor both. If the Spec references no ADRs but you have reason to believe the grill produced some (e.g. the docs PR or session log mentions them), track them down rather than slicing blind. If the user passes a reference (Spec path, issue number, or URL) as an argument, fetch it and read it fully.
 
 This skill **creates the epic umbrella issue(s)** — do not assume one already exists. The epic issue is an **execution tracker** (Spec summary + pointers to the Spec/ADRs + the WS topology), not the spec; the Spec file stays authoritative. (`/to-spec` writes the Spec only; epic-issue creation lives here.)
 

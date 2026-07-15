@@ -55,10 +55,13 @@ packages = ["src/shipit"]
 [tool.hatch.build.targets.wheel.hooks.custom]
 path = "hatch_build.py"
 
-# Vendor the managed skills into the wheel as package data. skills/ lives at the
-# repo root (it is also shipit's own Claude skill set), so it is force-included
-# rather than re-homed under src/. It is OUTSIDE src/shipit, so this does not
-# collide with the packages= bundling above (no double-add).
+# Vendor the managed skills into the wheel as package data. The store lives at the
+# repo root as `.shipit-skills/` (dot-prefixed and dedicated so shipit's OWN skill
+# set never collides with the public `skills/` convention a repo uses to publish
+# its own skills, #921), so it is force-included rather than re-homed under src/.
+# It is OUTSIDE src/shipit, so this does not collide with the packages= bundling
+# above (no double-add). The wheel dest stays `shipit/data/skills` so
+# `skills_root()`'s bundled lookup is unchanged.
 #
 # The generated subagent agent-defs are force-included the same way: they live at
 # `.claude/agents/` (where Claude Code reads them for shipit-self) and are vendored
@@ -66,7 +69,7 @@ path = "hatch_build.py"
 # One source (the regen-roles generator), two readers (shipit-self at the repo
 # root, the wheel for install) — never committed twice.
 [tool.hatch.build.targets.wheel.force-include]
-"skills" = "shipit/data/skills"
+".shipit-skills" = "shipit/data/skills"
 ".claude/agents" = "shipit/data/agents"
 
 # shipit's ruff config was CARVED OUT of this file into a standalone `ruff.toml`

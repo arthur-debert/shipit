@@ -756,8 +756,8 @@ def test_managed_markdownlintignore_covers_managed_paths_and_testdata():
     conventions (#500) — never other consumer-authored prose (a consumer's
     README.md is theirs; shipit's own README is skipped only because it is a lex
     projection, which `shipit lint` routes to the lexd leg with no ignore entry —
-    tested in test_lint.py). The managed skills/ tree is deliberately NOT exempt
-    (#777): it is shipped content that must pass the delivered markdownlint gate,
+    tested in test_lint.py). The managed .shipit-skills/ tree is deliberately NOT
+    exempt (#777): it is shipped content that must pass the delivered markdownlint gate,
     so self-cert and this repo lint it at source. The test-data globs match
     lint.PROTECTED_TESTDATA_GLOBS: the fixer refuses to auto-rewrite them AND
     check mode skips these deliberately-malformed fixtures too."""
@@ -769,7 +769,7 @@ def test_managed_markdownlintignore_covers_managed_paths_and_testdata():
         if line and not line.startswith("#")
     ]
     # #777 — shipped skills are gated, not exempt (the exhaustive equality below
-    # locks it in: `skills/` is absent from the managed ignore entries).
+    # locks it in: `.shipit-skills/` is absent from the managed ignore entries).
     assert entries == ["AGENTS.md", *lint.PROTECTED_TESTDATA_GLOBS]
 
 
@@ -896,7 +896,7 @@ def test_load_units_has_skills_agents_and_bootstrap():
     keys = {u.key for u in units}
     assert "AGENTS.md#shipit-block" in keys
     assert "bin/shipit" in keys
-    assert any(k.startswith("skills/") for k in keys)
+    assert any(k.startswith(".shipit-skills/") for k in keys)
     agents = next(u for u in units if u.key == "AGENTS.md#shipit-block")
     assert agents.kind == "block"
     boot = next(u for u in units if u.key == "bin/shipit")
@@ -3106,7 +3106,7 @@ def test_dry_run_has_no_side_effects(tmp_path, rec):
     rc = verb.run(str(tmp_path), dry_run=True)
     assert rc == 0
     assert not (tmp_path / ".shipit.toml").exists()
-    assert not (tmp_path / "skills").exists()
+    assert not (tmp_path / ".shipit-skills").exists()
     assert rec.calls == []  # no git, no PR
     assert rec.hook_activations == []  # no side effect on dry-run
 
@@ -3122,7 +3122,7 @@ def test_fresh_install_writes_set_and_opens_draft_pr(tmp_path, rec):
     assert result.pr_updated is False
 
     # Managed files landed.
-    assert (tmp_path / "skills" / "to-spec" / "SKILL.md").is_file()
+    assert (tmp_path / ".shipit-skills" / "to-spec" / "SKILL.md").is_file()
     assert (tmp_path / "bin" / "shipit").is_file()
     # The AGENTS block was spliced in without losing the consumer's text.
     agents = (tmp_path / "AGENTS.md").read_text()
@@ -3277,13 +3277,13 @@ def test_consumer_edit_surfaces_as_override(tmp_path, rec):
     rec.calls.clear()
 
     # The consumer edits a managed skill file.
-    skill = tmp_path / "skills" / "to-spec" / "SKILL.md"
+    skill = tmp_path / ".shipit-skills" / "to-spec" / "SKILL.md"
     skill.write_text("CONSUMER EDIT\n")
 
     _apply(tmp_path, iapply.MODE_PR)
     assert ("pr_create", True) in rec.calls
     assert "### Overrides" in rec.pr_body
-    assert "skills/to-spec/SKILL.md" in rec.pr_body
+    assert ".shipit-skills/to-spec/SKILL.md" in rec.pr_body
     # The diff is captured BEFORE the overwrite, so it shows the consumer's edit
     # (a non-empty diff), not an empty diff against what shipit just wrote.
     assert "CONSUMER EDIT" in rec.pr_body
@@ -3333,7 +3333,7 @@ def test_declined_unit_is_never_written_and_drops_from_the_manifest(tmp_path, re
     (tmp_path / "bin" / "shipit").write_text("#!/bin/sh\n# MY OWN LAUNCHER\n")
     _decline(tmp_path, "bin/shipit")
     # Another unit changes, so the plan still has work — an applying install runs.
-    (tmp_path / "skills" / "to-spec" / "SKILL.md").unlink()
+    (tmp_path / ".shipit-skills" / "to-spec" / "SKILL.md").unlink()
 
     result = _apply(tmp_path, iapply.MODE_PR)
     assert result.pr_url is not None
@@ -3344,7 +3344,7 @@ def test_declined_unit_is_never_written_and_drops_from_the_manifest(tmp_path, re
     cfg = config.load(cfg_path)
     managed = config.load_managed(cfg)
     assert iunits.SHIPIT_LAUNCHER_FILE not in managed
-    assert "skills/to-spec/SKILL.md" in managed
+    assert ".shipit-skills/to-spec/SKILL.md" in managed
     # The decline itself survives the manifest re-stamp (the durable half)...
     assert config.load_declines(cfg, cfg_path.read_text()) == (
         iunits.SHIPIT_LAUNCHER_FILE,
@@ -3641,7 +3641,7 @@ def test_default_install_mid_drift_never_branches_or_opens_pr(tmp_path, rec):
     _apply(tmp_path)
     rec.calls.clear()
 
-    skill = tmp_path / "skills" / "to-spec" / "SKILL.md"
+    skill = tmp_path / ".shipit-skills" / "to-spec" / "SKILL.md"
     skill.write_text("CONSUMER EDIT\n")
     result = _apply(tmp_path)
     # The drifted unit was refreshed to shipit's content, in the working tree.
@@ -3652,7 +3652,7 @@ def test_default_install_mid_drift_never_branches_or_opens_pr(tmp_path, rec):
     # the renderer's stderr warning derives from the typed result.
     warning = verb.format_result_warnings(result)
     assert "consumer-edited" in warning
-    assert "skills/to-spec/SKILL.md" in warning
+    assert ".shipit-skills/to-spec/SKILL.md" in warning
 
 
 def test_push_flag_pushes_to_branch_without_pr(tmp_path, rec):
@@ -4122,12 +4122,26 @@ _LEFTHOOK_SHIM = (
 )
 
 
+def _hooks_repo(root: Path) -> Path:
+    """A REAL git checkout so `git.hooks_dir` resolves worktree-correctly (#914)
+    — returns the (already git-init'd) `.git/hooks` dir the precleans read.
+
+    The precleans now route through `git rev-parse --git-path hooks`, so a
+    fabricated bare `.git/hooks` dir (no valid gitdir) reads as "not a repo" and
+    the resolver returns None; a genuine `git init` is what these unit tests must
+    stand on to exercise the real hook-path resolution.
+    """
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    hooks = root / ".git" / "hooks"
+    hooks.mkdir(parents=True, exist_ok=True)  # `git init` already created it
+    return hooks
+
+
 def test_preclean_removes_a_stale_lefthook_shim_backup(tmp_path):
     # Mode 2: a stale `<hook>.old` left by a prior (release-era) `lefthook
     # install` is what collides with the next activation's rename. A backup
     # positively identified as a lefthook shim (both markers) is removed.
-    hooks = tmp_path / ".git" / "hooks"
-    hooks.mkdir(parents=True)
+    hooks = _hooks_repo(tmp_path)
     (hooks / "pre-commit.old").write_text(_LEFTHOOK_SHIM)
     (hooks / "pre-push.old").write_text(_LEFTHOOK_SHIM)
     iapply._preclean_stale_hook_backups(tmp_path)
@@ -4139,8 +4153,7 @@ def test_preclean_preserves_a_non_lefthook_backup(tmp_path):
     # Conservative by construction: a `.old` that is NOT a lefthook shim (a
     # hand-written consumer hook backup) is left untouched — install only removes
     # backups it can positively identify as tool-authored.
-    hooks = tmp_path / ".git" / "hooks"
-    hooks.mkdir(parents=True)
+    hooks = _hooks_repo(tmp_path)
     consumer = "#!/bin/sh\necho my own pre-commit\nexit 0\n"
     (hooks / "pre-commit.old").write_text(consumer)
     # A file that carries only ONE marker is still not a shim — require both.
@@ -4153,16 +4166,16 @@ def test_preclean_preserves_a_non_lefthook_backup(tmp_path):
 def test_preclean_leaves_the_live_hooks_untouched(tmp_path):
     # The pre-clean targets ONLY `.old` backups — a live `pre-commit` shim (no
     # `.old` suffix) is never removed, even though it is a lefthook shim.
-    hooks = tmp_path / ".git" / "hooks"
-    hooks.mkdir(parents=True)
+    hooks = _hooks_repo(tmp_path)
     (hooks / "pre-commit").write_text(_LEFTHOOK_SHIM)
     iapply._preclean_stale_hook_backups(tmp_path)
     assert (hooks / "pre-commit").read_text() == _LEFTHOOK_SHIM
 
 
 def test_preclean_no_hooks_dir_is_a_noop(tmp_path):
-    # A consumer whose `.git/hooks` does not exist must not raise.
-    iapply._preclean_stale_hook_backups(tmp_path)  # no .git/hooks yet
+    # A path that is not even a git checkout: the resolver reads None and the
+    # preclean no-ops without raising (the same disposition as an absent dir).
+    iapply._preclean_stale_hook_backups(tmp_path)  # not a repo → no hooks dir
 
 
 def test_preclean_removes_a_dangling_hook_symlink(tmp_path):
@@ -4170,8 +4183,7 @@ def test_preclean_removes_a_dangling_hook_symlink(tmp_path):
     # resolves (a legacy `pre-commit -> ../../scripts/ci.sh` whose target is
     # gone) defeats `lefthook install` with ENOENT. The dead link is unlinked so
     # lefthook writes a fresh shim into the now-empty slot.
-    hooks = tmp_path / ".git" / "hooks"
-    hooks.mkdir(parents=True)
+    hooks = _hooks_repo(tmp_path)
     (hooks / "pre-commit").symlink_to("../../scripts/does-not-exist")
     assert (hooks / "pre-commit").is_symlink()
     iapply._preclean_dangling_hook_symlinks(tmp_path)
@@ -4182,8 +4194,7 @@ def test_preclean_removes_a_dangling_hook_symlink(tmp_path):
 def test_preclean_preserves_a_live_hook_symlink(tmp_path):
     # Conservative by construction: a symlink whose target RESOLVES is a working
     # consumer hook — left untouched, so install never destroys a live hook.
-    hooks = tmp_path / ".git" / "hooks"
-    hooks.mkdir(parents=True)
+    hooks = _hooks_repo(tmp_path)
     target = tmp_path / "real-hook.sh"
     target.write_text("#!/bin/sh\necho live\n")
     (hooks / "pre-commit").symlink_to(target)
@@ -4200,8 +4211,7 @@ def test_preclean_preserves_a_symlink_whose_stat_fails_non_enoent(tmp_path):
     # target) must be LEFT UNTOUCHED, or the preclean would destroy a live hook
     # it cannot see. The classification is also OSError-guarded, so this never
     # crashes the install — the call returns cleanly with the link intact.
-    hooks = tmp_path / ".git" / "hooks"
-    hooks.mkdir(parents=True)
+    hooks = _hooks_repo(tmp_path)
     loop = hooks / "pre-commit"
     loop.symlink_to("pre-commit")  # self-referential → stat() raises ELOOP
     assert loop.is_symlink()
@@ -4212,36 +4222,63 @@ def test_preclean_preserves_a_symlink_whose_stat_fails_non_enoent(tmp_path):
 def test_preclean_leaves_a_real_hook_file_untouched(tmp_path):
     # A real (non-symlink) file at a managed hook path — a live shim or a
     # hand-written consumer hook — is never a dangling link, so it is untouched.
-    hooks = tmp_path / ".git" / "hooks"
-    hooks.mkdir(parents=True)
+    hooks = _hooks_repo(tmp_path)
     (hooks / "pre-commit").write_text(_LEFTHOOK_SHIM)
     iapply._preclean_dangling_hook_symlinks(tmp_path)
     assert (hooks / "pre-commit").read_text() == _LEFTHOOK_SHIM
 
 
 def test_preclean_dangling_symlink_no_hooks_dir_is_a_noop(tmp_path):
-    # A consumer whose `.git/hooks` does not exist must not raise.
-    iapply._preclean_dangling_hook_symlinks(tmp_path)  # no .git/hooks yet
+    # A path that is not even a git checkout: the resolver reads None and the
+    # preclean no-ops without raising (the same disposition as an absent dir).
+    iapply._preclean_dangling_hook_symlinks(tmp_path)  # not a repo → no hooks dir
 
 
 def test_pr_install_precleans_a_dangling_hook_symlink_before_activation(tmp_path, rec):
     # #912 end-to-end: a writing `install --pr` clears the dead link as part of
     # its activation step, so `lefthook install` never ENOENTs on the missing
     # symlink target (and every managed hook activates cleanly).
-    hooks = tmp_path / ".git" / "hooks"
-    hooks.mkdir(parents=True)
+    hooks = _hooks_repo(tmp_path)
     (hooks / "pre-commit").symlink_to("../../scripts/does-not-exist")
     (tmp_path / "AGENTS.md").write_text("# Acme\n")
     _apply(tmp_path, iapply.MODE_PR)
     assert not (hooks / "pre-commit").is_symlink()
 
 
+def test_preclean_reaches_the_shared_hooks_dir_from_a_linked_worktree(tmp_path):
+    # #914: in a LINKED worktree `.git` is a FILE and the managed hooks live in
+    # the main checkout's SHARED common dir. Run against the worktree, the
+    # preclean must still find and clear a dangling link there — the hardcoded
+    # `<worktree>/.git/hooks` (a nonexistent dir) made this a silent no-op before,
+    # so a worktree consumer's dead hook link never got cleaned.
+    main = tmp_path / "main"
+    main.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=main, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t.co"], cwd=main, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=main, check=True)
+    subprocess.run(
+        ["git", "commit", "--allow-empty", "-qm", "init"], cwd=main, check=True
+    )
+    wt = tmp_path / "wt"
+    subprocess.run(["git", "worktree", "add", "-q", str(wt)], cwd=main, check=True)
+    assert (wt / ".git").is_file()  # a linked worktree — hooks live in the common dir
+
+    shared = main / ".git" / "hooks"
+    (shared / "pre-commit").symlink_to("../../scripts/does-not-exist")
+    # The old hardcoded path a worktree does NOT have — proving the resolver, not
+    # this literal, is what finds the real hooks dir.
+    assert not (wt / ".git" / "hooks").exists()
+
+    iapply._preclean_dangling_hook_symlinks(wt)
+    assert not (shared / "pre-commit").is_symlink()
+    assert not (shared / "pre-commit").exists()
+
+
 def test_pr_install_precleans_a_stale_lefthook_backup_before_activation(tmp_path, rec):
     # Mode 2 end-to-end: a writing `install --pr` clears the colliding backup as
     # part of its activation step, so `lefthook install` never fails the rename
     # (and self-cert never fails closed on it).
-    hooks = tmp_path / ".git" / "hooks"
-    hooks.mkdir(parents=True)
+    hooks = _hooks_repo(tmp_path)
     (hooks / "pre-commit.old").write_text(_LEFTHOOK_SHIM)
     (tmp_path / "AGENTS.md").write_text("# Acme\n")
     _apply(tmp_path, iapply.MODE_PR)
@@ -4368,7 +4405,7 @@ def test_pr_selfcert_failure_rolls_the_staged_writes_back(tmp_path, rec):
     # restores file STATE; an emptied managed directory is inert — git does not
     # track it and reconcile reads files, not dirs.)
     assert not (tmp_path / ".shipit.toml").exists()
-    assert not (tmp_path / "skills" / "to-spec" / "SKILL.md").exists()
+    assert not (tmp_path / ".shipit-skills" / "to-spec" / "SKILL.md").exists()
     assert not (tmp_path / "bin" / "shipit").exists()
     assert (tmp_path / "AGENTS.md").read_text() == original_agents
 
@@ -4621,6 +4658,66 @@ def test_retired_manifest_carries_the_renamed_skill_history():
         assert retired[path].pristine_hashes == expected_hashes
 
 
+# The ELEVEN skills the #921 store move relocated from `skills/<rel>` to
+# `.shipit-skills/<rel>`. Pinned as an EXPLICIT set — not derived from the
+# current `.shipit-skills/` units — because "every store unit has a retired
+# `skills/<rel>`" is a one-time MIGRATION invariant, not a standing one: a new
+# skill added to the store later was never under `skills/`, so deriving from the
+# live units would force a bogus `skills/<rel>` retirement (which could shed a
+# consumer-authored `skills/<rel>` file whose content matched).
+RELOCATED_SKILL_STORE_PATHS = (
+    "coordinating/SKILL.md",
+    "grill-me-with-docs/ADR-FORMAT.md",
+    "grill-me-with-docs/CONTEXT-FORMAT.md",
+    "grill-me-with-docs/SKILL.md",
+    "implementing/SKILL.md",
+    "lex-primer/SKILL.md",
+    "planning/SKILL.md",
+    "shepherding-prs/SKILL.md",
+    "shipit-session-status/SKILL.md",
+    "to-spec/SKILL.md",
+    "to-tickets/SKILL.md",
+)
+
+
+def test_retired_manifest_carries_the_relocated_skill_store():
+    # The store moved out of `skills/` to `.shipit-skills/` (#921): each of the
+    # ELEVEN relocated skills must still be delivered under `.shipit-skills/<rel>`
+    # AND have its OLD `skills/<rel>` path retired, carrying the current content
+    # hash so a consumer sheds the polluting old copy on install (leaving
+    # consumer-authored `skills/` files alone — they are not in this manifest).
+    retired = {r.path: r for r in irec.load_retired()}
+    units = {u.key: u for u in iunits.load_units()}
+    for rel in RELOCATED_SKILL_STORE_PATHS:
+        new_key = f".shipit-skills/{rel}"
+        old_path = f"skills/{rel}"
+        assert new_key in units, f"{new_key} no longer delivered"
+        assert old_path in retired, f"{old_path} not retired"
+        assert units[new_key].desired_hash() in retired[old_path].pristine_hashes
+
+
+def test_install_deletes_a_pristine_relocated_skill_and_installs_new_store(
+    tmp_path, rec
+):
+    # End-to-end for the store move: a consumer with a pristine copy of the OLD
+    # `skills/coordinating/SKILL.md` sheds it on install, while the same content
+    # is (re)installed at the new `.shipit-skills/coordinating/SKILL.md` store.
+    old_path = "skills/coordinating/SKILL.md"
+    source = REPO_ROOT / ".shipit-skills/coordinating/SKILL.md"
+    assert config.content_hash(source.read_bytes()) in {
+        h for r in irec.load_retired() if r.path == old_path for h in r.pristine_hashes
+    }
+    victim = tmp_path / old_path
+    victim.parent.mkdir(parents=True)
+    victim.write_bytes(source.read_bytes())
+
+    plan = _plan(tmp_path)
+    assert old_path in [d.retired.path for d in plan.retire_deletes]
+    _apply(tmp_path)
+    assert not victim.exists()
+    assert (tmp_path / ".shipit-skills/coordinating/SKILL.md").is_file()
+
+
 # The agent-specific launcher shims (#815): repo-root whole-file units shipit
 # used to distribute, retired now that all launch logic lives in `agent-start`.
 # The fixtures snapshot the last-shipped pristine bytes so the upgrade path —
@@ -4688,7 +4785,7 @@ def test_install_deletes_a_pristine_retired_skill_file(tmp_path, rec):
     # A consumer upgrading across the skill rename sheds the old path when its
     # content is a known pristine copy, while the new skill path is installed.
     retired_path = "skills/shipit-grill-with-docs/ADR-FORMAT.md"
-    source = REPO_ROOT / "skills/grill-me-with-docs/ADR-FORMAT.md"
+    source = REPO_ROOT / ".shipit-skills/grill-me-with-docs/ADR-FORMAT.md"
     assert (
         config.content_hash(source.read_bytes()) in RETIRED_SKILL_HASHES[retired_path]
     )
@@ -4700,7 +4797,7 @@ def test_install_deletes_a_pristine_retired_skill_file(tmp_path, rec):
     assert retired_path in [d.retired.path for d in plan.retire_deletes]
     _apply(tmp_path)
     assert not victim.exists()
-    assert (tmp_path / "skills/grill-me-with-docs/ADR-FORMAT.md").is_file()
+    assert (tmp_path / ".shipit-skills/grill-me-with-docs/ADR-FORMAT.md").is_file()
 
 
 def test_install_deletes_a_pristine_retired_to_prd_skill_and_installs_to_spec(
@@ -4720,7 +4817,7 @@ def test_install_deletes_a_pristine_retired_to_prd_skill_and_installs_to_spec(
     assert retired_path in [d.retired.path for d in plan.retire_deletes]
     _apply(tmp_path)
     assert not victim.exists()
-    assert (tmp_path / "skills/to-spec/SKILL.md").is_file()
+    assert (tmp_path / ".shipit-skills/to-spec/SKILL.md").is_file()
 
 
 def test_install_keeps_a_modified_retired_file_with_warning(tmp_path, rec):

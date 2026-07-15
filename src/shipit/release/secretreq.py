@@ -88,6 +88,29 @@ SIGN_MAC_CERT_SECRETS: tuple[str, ...] = (
     "APPLE_CERTIFICATE_PASSWORD",
 )
 
+#: Required names whose EMPTY value is VALID presence — the ONE authority for
+#: what "present" means per name, so no consumer can drift from the signer
+#: (#892). ``APPLE_CERTIFICATE_PASSWORD`` names a ``.p12`` password, and a
+#: passwordless ``.p12`` is legal PKCS#12: the signer
+#: (:data:`shipit.release.sign.CERT_PASSWORD_SECRET`,
+#: :func:`shipit.release.sign.resolve_signing`) accepts an empty — or entirely
+#: absent, defaulting to empty — value and NEVER hard-fails on it. BOTH
+#: consumers that could contradict the signer honour this set: preflight
+#: presence validation must not DEMAND it non-empty
+#: (:func:`shipit.release.preflight.missing_secrets`), and the gh-setup
+#: provisioning path treats it as accepted-but-not-demanded — never a missing
+#: source (:func:`missing_sources`) and never force-required
+#: (:func:`shipit.ghsetup.sync_secrets`) — so a genuinely passwordless repo
+#: provisions and preflights clean instead of being refused or forced to invent
+#: a dummy password. The NAME still rides :data:`SIGN_MAC_CERT_SECRETS` (synced
+#: by gh-setup, forwarded by the caller block, listed in the plan's
+#: ``secrets``); only its value/source DEMAND is relaxed —
+#: presence-if-set-even-empty, per the sign contract. Its counterpart
+#: ``APPLE_CERTIFICATE`` is NOT here: a missing cert is a hard fail
+#: (:data:`shipit.release.sign.CERT_SECRET` — signing is impossible without it).
+#: The pairing to the signer's name is drift-guarded by test.
+EMPTY_VALID_SECRETS: frozenset[str] = frozenset({"APPLE_CERTIFICATE_PASSWORD"})
+
 #: Notary alternative 1 — the App Store Connect API-key trio. Takes
 #: precedence at the signer when both trios are complete
 #: (:func:`shipit.release.sign.resolve_notary`; the drift-guard test in
@@ -403,12 +426,20 @@ def missing_sources(
     With ``reviewers`` passed (gh-setup's provisioning scope, #740), a
     declared funnel reviewer whose credential pair has no ``[secrets]`` source
     is an error HERE — the sync fails loud where the repo opts the reviewer
-    in, instead of the App breaking later at review-posting time."""
+    in, instead of the App breaking later at review-posting time.
+
+    A name in :data:`EMPTY_VALID_SECRETS` is NEVER reported missing (#892): its
+    empty value is valid presence per the same authority preflight consumes, so
+    a genuinely passwordless repo that declares no source for it provisions
+    cleanly rather than failing sync. The name still rides the required set for
+    forwarding/listing (:func:`accepted_names`, :func:`secrets_block`); only its
+    SOURCE demand is relaxed — accepted-but-not-demanded — matching the signer's
+    empty-valid contract on the provisioning side, not just at preflight."""
     declared = {source.name for source in sources}
     return tuple(
         req
         for req in requirements(artifacts, reviewers=reviewers)
-        if req.name not in declared
+        if req.name not in declared and req.name not in EMPTY_VALID_SECRETS
     )
 
 

@@ -485,9 +485,13 @@ def sync_secrets(
       :func:`push_secrets` (dry-run resolves nothing); a source whose name is in
       the derived required set is forced non-optional first, so its `optional`
       flag can never turn a missing REQUIRED value into a silent skip (story 44 —
-      the sync never under-provisions);
+      the sync never under-provisions) — EXCEPT an
+      :data:`~shipit.release.secretreq.EMPTY_VALID_SECRETS` name (#892), left
+      optional so a passwordless-`.p12` repo's absent/empty
+      ``APPLE_CERTIFICATE_PASSWORD`` skips cleanly instead of failing;
     - one ``failed`` outcome per derived requirement with NO declared source,
-      naming the requiring entry (the sync-time error of story 45);
+      naming the requiring entry (the sync-time error of story 45) — an
+      empty-valid name is never in this set, so no source for it is not an error;
     - one ``failed`` outcome per ALTERNATIVE-SET requirement (#746 — the
       notary trios) with no complete alternative sourced: ONE diagnostic
       naming what is missing from every alternative. A repo sources either
@@ -507,9 +511,20 @@ def sync_secrets(
     # any other derived name (#740) — a hand-edited `optional = true` on a pair
     # the repo's reviewers need can no longer sync "clean" and break the App
     # later at review-posting time.
+    #
+    # EXCEPTION: an EMPTY_VALID_SECRETS name (APPLE_CERTIFICATE_PASSWORD, #892)
+    # is accepted-but-not-demanded on the provisioning side, matching the
+    # signer's empty-valid contract. Its optional flag is LEFT intact so an
+    # optional-absent (or empty) source resolves to `skipped`, not `failed` —
+    # a genuinely passwordless `.p12` repo syncs clean instead of being forced
+    # to invent a non-empty dummy password. `missing_sources` likewise never
+    # reports it, so a repo with no source for it provisions cleanly too.
+    empty_valid = secretreq.EMPTY_VALID_SECRETS
     to_push = [
         replace(source, optional=False)
-        if source.optional and source.name in required_names
+        if source.optional
+        and source.name in required_names
+        and source.name not in empty_valid
         else source
         for source in sources
         if source.name not in orphan_names
