@@ -2023,6 +2023,20 @@ def test_conda_package_name_is_the_lowercased_main_binary():
     assert publish_mod.conda_package_name(artifact) == "lexd"
 
 
+def test_conda_package_name_rejects_a_conda_invalid_derived_name():
+    """A derived name outside the conda vocabulary — a scoped wasm-pack identity
+    (`@scope/name`) or a spaced `product-name` — is a loud ReleaseError pointing
+    at the config fix, never handed to rattler-build as a doomed build."""
+    scoped = _artifacts({"lex": {"endpoints": ["conda"], "main-binary": "@scope/lex"}})[
+        0
+    ]
+    with pytest.raises(ReleaseError, match="not a valid conda package name"):
+        publish_mod.conda_package_name(scoped)
+    spaced = _artifacts({"lex": {"endpoints": ["conda"], "product-name": "My Tool"}})[0]
+    with pytest.raises(ReleaseError, match="not a valid conda package name"):
+        publish_mod.conda_package_name(spaced)
+
+
 def test_render_conda_recipe_repackages_the_prebuilt_binary():
     """The recipe extracts the local release archive and copies the prebuilt
     binary onto PATH under $PREFIX — unix into bin, windows into Scripts (the

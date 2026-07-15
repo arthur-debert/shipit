@@ -177,10 +177,11 @@ on:
       # an unskipped notify-downstreams dispatch (a real, non-rc release).
       DOWNSTREAM_DISPATCH_TOKEN:
         required: false
-      # The conda Artifact-channel endpoint's write-credential pair (ARF01-WS01
-      # #950, ADR-0065): the GCS HMAC interop key that authorizes the per-repo
-      # channel write+reindex. Optional like every endpoint token — the verb
-      # validates it only when the plan keeps an unskipped conda dispatch.
+      # The conda Artifact-channel endpoint's write-credential pair
+      # (ARF01-WS01 #950, ADR-0065): the GCS HMAC interop key that authorizes
+      # the per-repo channel write+reindex. Optional like every endpoint token
+      # — the verb validates it only when the plan keeps an unskipped conda
+      # dispatch.
       ARTIFACT_CHANNEL_KEY_ID:
         required: false
       ARTIFACT_CHANNEL_SECRET_KEY:

@@ -1367,6 +1367,13 @@ def _publish_notify_downstreams(req: PublishRequest) -> Published:
 #: values). :func:`conda_assets` strips exactly these to recover the triple.
 CONDA_ASSET_EXTS: tuple[str, ...] = (".tar.gz", ".zip")
 
+#: The conda package-name vocabulary (ADR-0064): lowercase letters, digits,
+#: ``.``, ``_``, ``-``. :func:`conda_package_name` rejects anything else loudly
+#: — a scoped wasm-pack identity (``@scope/name``) or a spaced ``product-name``
+#: would otherwise reach ``rattler-build`` as a doomed build with an opaque
+#: error instead of an actionable config fix.
+_CONDA_PACKAGE_NAME_RE = re.compile(r"[a-z0-9._-]+")
+
 
 def conda_subdir(triple: str) -> str | None:
     """The conda subdir for a release target ``triple``, or ``None`` when the
@@ -1416,12 +1423,26 @@ def conda_package_name(artifact: config.Artifact) -> str:
 
     The name IS the artifact's main-binary name
     (:func:`shipit.release.integrity.expected_main_binary`, the same identity
-    brew renders its formula for), lowercased to the conda package-name
-    vocabulary (lowercase letters/digits/``-``/``_``/``.``). WS01 packages
-    single-binary tool artifacts (``lexd``); data/noarch artifacts (wasm,
-    grammar) land later.
+    brew renders its formula for), lowercased. WS01 packages single-binary tool
+    artifacts (``lexd``); data/noarch artifacts (wasm, grammar) land later.
+
+    The lowercased name is validated against the conda package-name vocabulary
+    (lowercase letters/digits/``-``/``_``/``.``, :data:`_CONDA_PACKAGE_NAME_RE`)
+    and a mismatch is a loud :class:`ReleaseError`: ``expected_main_binary`` can
+    return a scoped wasm-pack identity (``@scope/name``) or a spaced
+    ``product-name``, neither of which can name a conda package — a config fix
+    the maintainer must make, not an opaque ``rattler-build`` failure downstream.
     """
-    return integrity_mod.expected_main_binary(artifact).lower()
+    name = integrity_mod.expected_main_binary(artifact).lower()
+    if not _CONDA_PACKAGE_NAME_RE.fullmatch(name):
+        raise ReleaseError(
+            f"[artifacts.{artifact.name}] conda: derived package name `{name}` "
+            f"is not a valid conda package name (lowercase letters, digits, "
+            f"`.`, `_`, `-` only) — set `main-binary` to a conda-safe name or "
+            f"drop the conda endpoint. A scoped wasm-pack identity (`@scope/x`) "
+            f"or a spaced `product-name` cannot name a conda package."
+        )
+    return name
 
 
 def _conda_binary_layout(subdir: str, binary: str) -> tuple[str, str, str]:
