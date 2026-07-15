@@ -366,6 +366,10 @@ _Avoid_: "channel".
 **Endpoint adapter**:
 The boundary that knows how to publish to one Distribution endpoint. Adding an endpoint means adding an adapter, not changing release orchestration.
 
+**Artifact channel**:
+The portfolio's durable, versioned store of published Artifacts that downstream repos consume in artifact-pinned mode. It is realized as per-repo conda channels hosted in dedicated object-storage buckets, with a public-authless tier for open artifacts and a private-authenticated tier for closed ones, so a downstream declares an Artifact as an ordinary versioned dependency and a pin bump re-resolves against it. Permanent and release-scoped, unlike an ephemeral CI job artifact that only chains one workflow run's jobs.
+_Avoid_: "forge" (conda-forge is the upstream community channel, not this); "cache" or "sccache bucket" (a different store with a different lifecycle); "CI artifact" (those are ephemeral).
+
 **Content-key**:
 The identity shipit uses for build-once reuse of an Artifact, derived from the inputs that determine that Artifact. It is more than a cache bucket.
 _Avoid_: "cache key".
@@ -382,8 +386,8 @@ A repo-level versioned event that publishes the repo's Artifact set to its Distr
 _Avoid_: "deploy".
 
 **Cascade**:
-The cross-repo release flow where an upstream release opens version-bump PRs for declared downstream repos.
-_Avoid_: "trigger chain", "webhook chain".
+The cross-repo update flow fired by an upstream's release that keeps its downstreams current, its effect set by each downstream's Dependency mode. An artifact-pinned downstream is found by deriving the target set from which repos declare an artifact-pin on the upstream, and gets a version-bump PR pinning the newer released version from the Artifact channel; a source-pinned downstream is a producer-declared target and gets a rebuild. One push, two effects.
+_Avoid_: "trigger chain", "webhook chain"; treating the artifact-pinned target set as producer-declared rather than derived.
 
 **Dependency mode**:
 How a downstream consumes an upstream: source-pinned rebuilds from a ref or version, while artifact-pinned fetches a released Artifact by version.
