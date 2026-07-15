@@ -1112,8 +1112,21 @@ def configure_identity(name: str, email: str, *, cwd: str) -> None:
 
 
 def checkout_new_branch(branch: str, base: str, *, cwd: str) -> None:
-    """``git checkout -b <branch> <base>`` — cut ``branch`` from ``base`` and switch."""
-    _git(["checkout", "-b", branch, base], cwd=cwd)
+    """``git checkout -B <branch> <base>`` — cut ``branch`` from ``base`` and switch.
+
+    ``-B`` (create-or-reset), not ``-b`` (create-only), so a freeform Tree whose
+    NAME is the repo's DEFAULT branch works (#845): a fresh clone already has the
+    default branch checked out, so ``checkout -b main origin/main`` dies with
+    ``fatal: a branch named 'main' already exists``. ``-B`` resets that
+    already-local branch to ``<base>`` instead of failing — the exact case a
+    freeform Tree on the default branch (e.g. ``shipit install --pr`` from a clean
+    main checkout) needs. This only changes behaviour when the branch already
+    exists locally; a fresh clone carries exactly one local branch (the remote's
+    default HEAD), so ``-B`` is identical to ``-b`` for every non-default NAME and
+    the reset never discards work — the just-fetched default sits at ``origin/NAME``
+    already.
+    """
+    _git(["checkout", "-B", branch, base], cwd=cwd)
 
 
 def checkout(branch: str, *, cwd: str) -> None:
