@@ -56,8 +56,10 @@ logger = logging.getLogger("shipit.install")
 #:   side effect (no ``shipit/install`` branch, no draft PR). See #170.
 #: - ``MODE_PUSH`` — break-glass: commit on the current branch and push straight
 #:   to it (admin bypass), no PR.
-#: - ``MODE_PR`` — switch to the ``shipit/install`` branch, commit, force-push,
-#:   and open a DRAFT PR (the standalone consumer-onboarding/reconcile flow).
+#: - ``MODE_PR`` — (re)create the ``shipit/install`` branch based on the CURRENT
+#:   origin default (never the Tree's cut point, #852), commit, force-push, and
+#:   open a DRAFT PR against that default (the standalone
+#:   consumer-onboarding/reconcile flow).
 MODE_TREE = "tree"
 MODE_LOCAL = "local"
 MODE_PUSH = "push"
@@ -572,12 +574,29 @@ def _restore_caller_branch(cwd: str, original_ref: str | None) -> None:
     MODE_PR switches onto the ``shipit/install`` scratch branch to stage its
     commit; without this the operator is silently left off their own branch.
     Best-effort and no-op when there is nothing to restore to — a detached HEAD
-    (``original_ref`` is ``None``) or a checkout already sitting on the scratch
-    branch (a prior run that itself failed to restore). A restore that cannot
-    run is logged, never raised: it must not mask the real apply outcome (or a
-    git/gh error already unwinding through the ``finally`` that calls this).
+    (``original_ref`` is ``None``). A caller who STARTED on the scratch branch
+    has no other branch to return to, but the flow's
+    ``reset --soft origin/<default>`` left the index staged with the
+    pre-reset..base diff, so this unstages it (:func:`git.reset_index`) rather
+    than leaving the operator a heavily-polluted index (#852 review). A restore
+    that cannot run is logged, never raised: it must not mask the real apply
+    outcome (or a git/gh error already unwinding through the ``finally`` that
+    calls this).
     """
-    if original_ref is None or original_ref == INSTALL_BRANCH:
+    if original_ref is None:
+        return
+    if original_ref == INSTALL_BRANCH:
+        try:
+            git.reset_index(cwd=cwd)
+        except execrun.ExecError:
+            logger.warning(
+                "could not unstage the soft-reset index after the install PR "
+                "flow — the caller was already on %s, so its index may retain "
+                "staged changes",
+                INSTALL_BRANCH,
+                exc_info=True,
+                extra={"root": cwd},
+            )
         return
     try:
         git.switch(original_ref, cwd=cwd)
@@ -668,7 +687,10 @@ def apply(
     this very run just armed it (pre-push lints the whole tree, not the staged
     managed set), and pre-existing consumer debt is reported in the PR body,
     never a blocker. ``MODE_PR`` stages onto the ``shipit/install`` scratch
-    branch and, in a ``finally``, always restores the caller's original checkout
+    branch, which it (re)creates and resets onto the CURRENT origin default
+    branch (#852) — never the HEAD the Tree was cut from — so a Tree cut from a
+    stale leftover remote ``shipit/install`` head can never stack a conflicting
+    commit; and, in a ``finally``, always restores the caller's original checkout
     (#777 mode 1 — never strand the operator off their own branch).
 
     Raises :class:`InstallError` on a domain refusal (``local``/``push`` in
@@ -955,13 +977,125 @@ def apply(
         # scratch ref, and leaving the operator sitting on it — off their own
         # branch, with no notice — is the surprise the issue reports.
         original_ref = git.current_branch(cwd=cwd)
-        git.switch_create(INSTALL_BRANCH, cwd=cwd)
+        # Base the staging branch on the CURRENT origin default, never on the
+        # HEAD the Tree was cut from (#852): a Tree cut from a STALE leftover
+        # remote `shipit/install` head (the reconcile merge does not delete the
+        # staging branch) would otherwise stack the fresh managed commit onto
+        # stale commits, minting a PR that conflicts with main. Fetch the base,
+        # (re)create the branch, then reset it onto origin/<default> so the
+        # managed commit lands as ONE clean refresh regardless of the cut point —
+        # which also RECYCLES a stale leftover branch on the next run. The reset
+        # is `--soft`: it moves only the branch pointer, so the rendered managed
+        # files stay in the working tree for the pathspec commit below (which
+        # takes the listed paths from the working tree and everything else from
+        # HEAD, now origin/<default>).
+        #
+        # Fetch BEFORE resolving the default branch (#984 review): when
+        # `<remote>/HEAD` is absent (a reference-borrow clone), `default_branch`
+        # falls back to probing the remote-tracking refs a fetch populated. A
+        # pre-fetch checkout may not yet have `origin/master`/`origin/trunk`, so
+        # resolving first would mis-fall-back to `main` and then `reset_soft`
+        # onto a non-existent `origin/main`. Fetch first, then resolve, so the
+        # fallback probes see the current remote-tracking refs.
+        git.fetch(cwd=cwd)
+        base_branch = git.default_branch(cwd=cwd)
+        # The branch switch and the reset live INSIDE the try/finally: a
+        # `reset_soft` (or `switch_create`) that raises AFTER the checkout has
+        # moved onto `shipit/install` must still restore the caller's branch
+        # (#852 review) — leaving the operator stranded on the scratch branch is
+        # exactly the #777 mode 1 surprise the restore exists to prevent.
         try:
-            git.add(changed_paths, cwd=cwd)
-            git.commit(COMMIT_MESSAGE, changed_paths, cwd=cwd, no_verify=True)
-            # The install branch is regenerated from HEAD each run; force so a
-            # re-run with an open install PR updates it rather than failing
-            # non-fast-forward.
+            git.switch_create(INSTALL_BRANCH, cwd=cwd)
+            git.reset_soft(f"origin/{base_branch}", cwd=cwd)
+            # Stage the FULL managed universe, not just the pre-reset writes:
+            # `changed_paths` is computed against the Tree's cut point, where a
+            # managed file already at desired content is a NOOP and drops out of
+            # the write set. After the reset onto origin/<base> that same file may
+            # be ABSENT from the base (a Tree cut from a stale `shipit/install`
+            # head), so a changed_paths-only commit would silently DROP it from
+            # the refreshed PR (#852 review). Staging every managed destination
+            # makes the commit deterministically origin/<base> + the whole managed
+            # set, whatever HEAD the Tree was cut from. These paths are all
+            # present in the working tree (a managed write) or tracked in the
+            # index (a retired file apply deleted from the tree, carried by
+            # `changed_paths`), so `git add` resolves every one.
+            add_paths = sorted(
+                set(changed_paths) | {d.unit.dest for d in plan.decisions}
+            )
+            git.add(add_paths, cwd=cwd)
+            # The commit pathspec must carry MORE than the writes. The SAME
+            # drop-out class hits the retired paths and a previously-rendered
+            # CHANGELOG.md (#984 agy review): a retired path absent at the cut
+            # point never joins `changed_paths`, yet after the reset onto
+            # origin/<base> the index still stages its difference against the
+            # base (e.g. the deletion of a retired file the base still carries).
+            # Omit it from the commit pathspec and the pathspec `git commit` —
+            # which takes UNLISTED paths from HEAD — silently REVERTS it to the
+            # base state, RESURRECTING the retired file in the refreshed PR.
+            #
+            # For retired FILES the universe is the paths apply left ABSENT
+            # locally — every retired decision EXCEPT KEEP (`retire_carries`):
+            # DELETE unlinked the pristine copy, NOOP found it already gone, and
+            # both absences must be published so the reset onto a base that still
+            # carries the path DELETES it, not resurrects it (#984 agy review,
+            # the round-4 regression: filtering to DELETE alone dropped the
+            # NOOP-vs-base deletions). KEEP stays OUT: a locally-modified consumer
+            # file apply PRESERVES, whose post-reset index differs from the base,
+            # so listing it would leak that consumer-local file into the PR (#984
+            # codex review, the retired invariant).
+            #
+            # Retired HOOKS carry ONLY the files apply REWROTE (`retire_hook_deletes`,
+            # the DELETE decisions), NOT the file/NOOP mirror of the retired-file
+            # rule (#984 round-6 review): a retired-hook NOOP does not mean the
+            # hook FILE is absent — only that the legacy entry was not found. The
+            # file (`.claude/settings.json`, `.lefthook-local.yml`) can still be
+            # present with UNRELATED consumer edits, so carrying a NOOP hook file
+            # would sweep those edits across the reset into the PR. Only a rewrite
+            # (a DELETE) is a change apply owns and may publish.
+            #
+            # The changelog is included UNCONDITIONALLY: gating on `is_file()`
+            # would drop the case where it was DELETED (absent from the tree) and
+            # must be published as a deletion — and an absent changelog costs
+            # nothing, since `git diff --cached --name-only` silently skips a path
+            # missing from the tree, the index AND HEAD.
+            #
+            # The universe is then scoped to the members that ACTUALLY carry a
+            # staged diff: a retired path absent from the tree, the index AND the
+            # base has nothing to carry, and `git commit` aborts on a pathspec
+            # that matches nothing (the same crash the #578 changelog
+            # phantom-drop above guards against — `git.staged_paths` never lists
+            # it).
+            universe = sorted(
+                set(add_paths)
+                | {d.retired.path for d in plan.retire_carries}
+                | {d.retired.file for d in plan.retire_hook_deletes}
+                | {CHANGELOG_FILE}
+            )
+            pr_paths = git.staged_paths(universe, cwd=cwd)
+            if not pr_paths:
+                # After the reset the managed set already matches origin/<base> —
+                # a stale Tree duplicating an already-merged reconcile. Nothing
+                # in the shipit-owned universe is staged, so a pathspec
+                # `git commit` over an empty diff would fail with "nothing to
+                # commit" (exit 1); report the clean no-op and skip the
+                # commit/PR rather than crashing the install (#852 review). The
+                # `finally` still restores the caller's branch.
+                logger.info(
+                    "install PR: the managed set is already current on "
+                    "origin/%s — nothing to publish",
+                    base_branch,
+                    extra={
+                        "root": str(root),
+                        "branch": INSTALL_BRANCH,
+                        "base": base_branch,
+                        "duration_ms": _elapsed(),
+                    },
+                )
+                return result
+            git.commit(COMMIT_MESSAGE, pr_paths, cwd=cwd, no_verify=True)
+            # The install branch is regenerated on top of origin/<default> each
+            # run; force so a re-run with an open install PR (or a stale leftover
+            # branch) updates it rather than failing non-fast-forward.
             git.push(INSTALL_BRANCH, cwd=cwd, force=True, no_verify=True)
             existing = gh.pr_url_for_head(INSTALL_BRANCH, cwd=cwd)
             if existing:
@@ -980,6 +1114,7 @@ def apply(
                 )
             url = gh.pr_create(
                 head=INSTALL_BRANCH,
+                base=base_branch,
                 title="shipit: install/update the managed set",
                 body=pr_body(
                     override_before,

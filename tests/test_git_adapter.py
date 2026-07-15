@@ -146,6 +146,23 @@ def test_push_default_does_not_bypass_hooks(monkeypatch):
     assert seen["args"] == ["push", "origin", "main"]
 
 
+def test_checkout_create_or_reset_uses_dash_big_b(monkeypatch):
+    # #845: `-B` (create-or-reset), not `-b` (create-only), so a freeform Tree
+    # whose NAME is the repo's default branch works — a fresh clone already has
+    # `main` checked out, and `checkout -b main origin/main` dies on the collision.
+    seen = {}
+
+    def fake(args, *, cwd, timeout=None):
+        seen["args"] = args
+        seen["cwd"] = cwd
+        return ""
+
+    monkeypatch.setattr(git, "_git", fake)
+    git.checkout_create_or_reset("main", "origin/main", cwd="/tree")
+    assert seen["args"] == ["checkout", "-B", "main", "origin/main"]
+    assert seen["cwd"] == "/tree"
+
+
 def test_switch_moves_to_an_existing_branch_without_force(monkeypatch):
     # #777 mode 1: the MODE_PR caller-branch restore switches to a branch that
     # already exists (the caller's own) — a plain `git switch`, never `-C`, so it
@@ -159,6 +176,145 @@ def test_switch_moves_to_an_existing_branch_without_force(monkeypatch):
     monkeypatch.setattr(git, "_git", fake)
     git.switch("main", cwd="/x")
     assert seen["args"] == ["switch", "main"]
+
+
+def test_default_branch_strips_the_remote_prefix_from_the_symref(monkeypatch):
+    # #852: the MODE_PR staging-branch base is read from `<remote>/HEAD` and the
+    # `<remote>/` prefix is stripped, so `origin/HEAD -> origin/main` resolves to
+    # the bare branch name `main`.
+    seen = {}
+
+    def fake(args, *, cwd, timeout=None):
+        seen["args"] = args
+        return _ok("origin/main\n")
+
+    monkeypatch.setattr(git, "_probe", fake)
+    assert git.default_branch(cwd="/x") == "main"
+    assert seen["args"] == ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]
+
+
+def test_default_branch_honors_a_non_main_default(monkeypatch):
+    # A consumer whose default branch is `trunk` resolves to `trunk`, never a
+    # hardcoded `main` — the reset base and the PR base both follow the symref.
+    monkeypatch.setattr(git, "_probe", lambda args, *, cwd: _ok("origin/trunk\n"))
+    assert git.default_branch(cwd="/x") == "trunk"
+
+
+def test_default_branch_falls_back_to_main_when_the_symref_is_absent(monkeypatch):
+    # Some reference-borrow clones never set `origin/HEAD`: an absent symref is a
+    # NORMAL probe answer (nonzero rc). With no `main`/`master`/`develop`/`trunk`
+    # remote-tracking ref to confirm either, the resolver falls back to the
+    # portfolio default `main` rather than raising.
+    monkeypatch.setattr(git, "_probe", lambda args, *, cwd: _fail("not a symref"))
+    assert git.default_branch(cwd="/x") == "main"
+
+
+def test_default_branch_probes_common_names_when_the_symref_is_absent(monkeypatch):
+    # #852 review: an absent `<remote>/HEAD` symref must NOT blindly resolve to
+    # `main` — that would crash the MODE_PR reset onto a non-existent
+    # `origin/main` on a `master`/`trunk` remote. The fallback probes the common
+    # default-branch names against the remote-tracking refs a fetch populated and
+    # returns the one that exists.
+    def fake(args, *, cwd):
+        if args[0] == "symbolic-ref":
+            return _fail("no symref")
+        # rev-parse --verify --quiet refs/remotes/origin/<candidate>
+        return _ok("deadbeef\n") if args[-1].endswith("/master") else _fail()
+
+    monkeypatch.setattr(git, "_probe", fake)
+    assert git.default_branch(cwd="/x") == "master"
+
+
+def test_default_branch_probes_develop_when_the_symref_is_absent(monkeypatch):
+    # #984 copilot review: `develop` is a common default-branch name and must be
+    # in the fallback probe list — a repo whose default is `develop` (with
+    # `refs/remotes/origin/develop`) but no `<remote>/HEAD` symref must resolve
+    # to `develop`, not fall through to `main` and crash the MODE_PR reset onto a
+    # non-existent `origin/main`.
+    def fake(args, *, cwd):
+        if args[0] == "symbolic-ref":
+            return _fail("no symref")
+        # rev-parse --verify --quiet refs/remotes/origin/<candidate>: only the
+        # `develop` remote-tracking ref exists (no main/master).
+        return _ok("deadbeef\n") if args[-1].endswith("/develop") else _fail()
+
+    monkeypatch.setattr(git, "_probe", fake)
+    assert git.default_branch(cwd="/x") == "develop"
+
+
+def test_staged_paths_scopes_the_cached_diff_and_parses_the_names(monkeypatch):
+    # #984 review: the MODE_PR commit pathspec reads a scoped
+    # `git diff --cached --name-only`, parsed to the staged names. A path the
+    # diff omits (matched nothing, or matches HEAD) simply never appears.
+    seen = {}
+
+    def fake(args, *, cwd):
+        seen["args"] = args
+        return "a\n\nb/c\n"
+
+    monkeypatch.setattr(git, "_git", fake)
+    assert git.staged_paths(["a", "b/c", "gone"], cwd="/x") == ["a", "b/c"]
+    assert seen["args"] == ["diff", "--cached", "--name-only", "--", "a", "b/c", "gone"]
+
+
+def test_staged_paths_is_empty_on_a_clean_index(monkeypatch):
+    # No staged diff for the named pathspecs — the MODE_PR "nothing to publish"
+    # case, which skips the commit rather than crashing an empty pathspec commit.
+    monkeypatch.setattr(git, "_git", lambda args, *, cwd: "")
+    assert git.staged_paths(["a"], cwd="/x") == []
+
+
+def test_staged_paths_surfaces_a_git_failure_rather_than_masking_it(monkeypatch):
+    # #984 review: unlike `--quiet` (rc 1 = diff present, rc >1 = failure),
+    # `--name-only` exits 0 on any successful diff and nonzero ONLY on a genuine
+    # failure (bad pathspec magic, unreadable index) — which `_git` raises. A
+    # real git failure can never be masked as a staged path.
+    def boom(args, *, cwd):
+        raise ExecError(args, rc=128, stdout="", stderr="fatal", duration_ms=1)
+
+    monkeypatch.setattr(git, "_git", boom)
+    with pytest.raises(ExecError):
+        git.staged_paths(["a"], cwd="/x")
+
+
+def test_staged_paths_on_empty_paths_never_probes(monkeypatch):
+    # An empty pathspec is a vacuous "nothing staged" — never a bare unscoped
+    # `git diff --cached --name-only` answering for the whole index.
+    def boom(*a, **k):
+        raise AssertionError("must not probe on an empty pathspec")
+
+    monkeypatch.setattr(git, "_git", boom)
+    assert git.staged_paths([], cwd="/x") == []
+
+
+def test_reset_index_unstages_everything_to_head(monkeypatch):
+    # #852 review: the MODE_PR caller-restore unstages the soft-reset index when
+    # the operator started on the scratch branch — a bare `git reset` (mixed to
+    # HEAD), leaving HEAD and the working tree untouched.
+    seen = {}
+
+    def fake(args, *, cwd, timeout=None):
+        seen["args"] = args
+        return ""
+
+    monkeypatch.setattr(git, "_git", fake)
+    git.reset_index(cwd="/x")
+    assert seen["args"] == ["reset"]
+
+
+def test_reset_soft_moves_only_the_branch_pointer(monkeypatch):
+    # #852: the staging-branch rebase resets shipit/install onto origin/<default>
+    # with `--soft` so the rendered managed files stay in the working tree for
+    # the following pathspec commit.
+    seen = {}
+
+    def fake(args, *, cwd, timeout=None):
+        seen["args"] = args
+        return ""
+
+    monkeypatch.setattr(git, "_git", fake)
+    git.reset_soft("origin/main", cwd="/x")
+    assert seen["args"] == ["reset", "--soft", "origin/main"]
 
 
 def test_submodule_update_init_syncs_then_recursively_inits_on_the_network_bound(

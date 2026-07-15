@@ -162,6 +162,35 @@ def test_create_produces_an_independent_dissociated_clone(
     assert (dest / "README.md").read_text() == "hello tree\n"
 
 
+def test_create_freeform_tree_on_the_default_branch(
+    tmp_path: Path, remote: Path, reference: Path, monkeypatch
+):
+    # #845: a freeform Tree whose NAME is the repo's DEFAULT branch (`main`) is a
+    # legitimate ask (e.g. `shipit install --pr` from a clean main checkout). The
+    # fresh clone already has `main` checked out, so the old `checkout -b main
+    # origin/main` died with "a branch named 'main' already exists". `-B` resets
+    # the already-local branch instead — this end-to-end create must now succeed
+    # and land on `main` at the fetched head.
+    _stub_provision(monkeypatch)
+    spec = TreeSpec(
+        repo=repo_from_slug("acme/widget"),
+        agent_hash="abcd1234",
+        branch="main",
+        root=tmp_path / "trees",
+    )
+    base_sha = _git(["rev-parse", "main"], cwd=remote)
+
+    tree = create(spec, source_repo=str(reference), github_url=str(remote))
+
+    dest = Path(tree.path)
+    assert tree.branch == "main"
+    assert tree.base == "origin/main"
+    # Landed on `main`, at the fetched upstream head — no stale/half-made checkout.
+    assert _git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=dest) == "main"
+    assert _git(["rev-parse", "HEAD"], cwd=dest) == base_sha
+    assert (dest / "README.md").read_text() == "hello tree\n"
+
+
 def test_create_from_source_resolves_origin_url(
     tmp_path: Path, remote: Path, reference: Path, monkeypatch
 ):
@@ -452,7 +481,7 @@ def test_create_rolls_back_partial_tree_on_failure(
     def boom(*args, **kwargs):
         raise ExecError(["gh"], rc=1, stderr="checkout blew up")
 
-    monkeypatch.setattr(git, "checkout_new_branch", boom)
+    monkeypatch.setattr(git, "checkout_create_or_reset", boom)
 
     with pytest.raises(ExecError):
         create(spec, source_repo=str(reference), github_url=str(remote))
@@ -566,7 +595,7 @@ def _mock_git_boundary(monkeypatch, *, manifests: list[str]):
     monkeypatch.setattr(git, "clone_dissociated", fake_clone)
     monkeypatch.setattr(git, "configure_safe_reference_donor", lambda **k: None)
     monkeypatch.setattr(git, "fetch", lambda **k: None)
-    monkeypatch.setattr(git, "checkout_new_branch", lambda *a, **k: None)
+    monkeypatch.setattr(git, "checkout_create_or_reset", lambda *a, **k: None)
     monkeypatch.setattr(git, "submodule_update_init", lambda **k: None)
 
 
@@ -661,7 +690,7 @@ def test_create_initializes_submodules_after_checkout_before_provision(
     monkeypatch.setattr(git, "configure_safe_reference_donor", lambda **k: None)
     monkeypatch.setattr(git, "fetch", lambda **k: None)
     monkeypatch.setattr(
-        git, "checkout_new_branch", lambda *a, **k: order.append("checkout")
+        git, "checkout_create_or_reset", lambda *a, **k: order.append("checkout")
     )
     monkeypatch.setattr(
         git, "submodule_update_init", lambda **k: order.append("submodule")

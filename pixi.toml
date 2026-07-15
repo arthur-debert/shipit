@@ -213,8 +213,8 @@ test = { cmd = "./bin/shipit provision lexd && ./bin/shipit test" }
 # provisioning script anymore.
 [feature.lint.dependencies]
 # >>> shipit-managed lint deps (do not edit; regenerate via `shipit install`) >>>
-# The fleet-pinned lint toolchain (docs/legacy-prd/adoption.md in the
-# arthur-debert/shipit repo: the managed set owns the consumer environment).
+# The fleet-pinned lint toolchain (https://github.com/arthur-debert/shipit/blob/main/docs/legacy-prd/adoption.md:
+# the managed set owns the consumer environment).
 # Canonical versions live HERE — a bump is one data edit, rolled fleet-wide on
 # each consumer's next `shipit install` reconcile.
 ruff = "0.15.*"

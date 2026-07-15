@@ -43,11 +43,29 @@ class _GhRecorder:
     def __init__(self):
         self.fail_switch = False
 
+    def default_branch(self, *, cwd, remote="origin"):
+        # The MODE_PR staging-branch base (#852); a pure query, no side effect.
+        return "main"
+
+    def fetch(self, *, cwd, remote="origin"):
+        pass
+
     def switch_create(self, branch, *, cwd):
         if self.fail_switch:
             raise execrun.ExecError(["git", "switch"], rc=1, stderr="boom")
 
+    def reset_soft(self, ref, *, cwd):
+        pass
+
     def add(self, paths, *, cwd):
+        pass
+
+    def staged_paths(self, paths, *, cwd):
+        # The MODE_PR commit pathspec (#984 review); the whole queried set so
+        # the commit proceeds.
+        return sorted(paths)
+
+    def reset_index(self, *, cwd):
         pass
 
     def commit(self, message, paths, *, cwd, no_verify=False):
@@ -72,9 +90,14 @@ def rec(monkeypatch):
     for name in (
         "switch_create",
         "add",
+        "staged_paths",
+        "reset_index",
         "commit",
         "push",
         "current_branch",
+        "default_branch",
+        "fetch",
+        "reset_soft",
     ):
         monkeypatch.setattr(git, name, getattr(r, name))
     for name in ("pr_url_for_head", "pr_create"):
