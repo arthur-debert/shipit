@@ -1111,7 +1111,7 @@ def configure_identity(name: str, email: str, *, cwd: str) -> None:
     _git(["config", "--local", "user.email", email], cwd=cwd)
 
 
-def checkout_new_branch(branch: str, base: str, *, cwd: str) -> None:
+def checkout_create_or_reset(branch: str, base: str, *, cwd: str) -> None:
     """``git checkout -B <branch> <base>`` — cut ``branch`` from ``base`` and switch.
 
     ``-B`` (create-or-reset), not ``-b`` (create-only), so a freeform Tree whose
@@ -1132,7 +1132,7 @@ def checkout_new_branch(branch: str, base: str, *, cwd: str) -> None:
 def checkout(branch: str, *, cwd: str) -> None:
     """``git checkout <branch>`` — switch to an EXISTING branch (no ``-b``).
 
-    The read-only-Tree counterpart of :func:`checkout_new_branch`: a reviewer
+    The read-only-Tree counterpart of :func:`checkout_create_or_reset`: a reviewer
     Tree checks out a branch that already exists on ``origin`` (the PR head) rather
     than cutting a new one. After a ``git fetch`` the plain checkout DWIMs a local
     tracking branch from ``origin/<branch>``, so the read-only clone lands on the

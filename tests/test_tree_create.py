@@ -481,7 +481,7 @@ def test_create_rolls_back_partial_tree_on_failure(
     def boom(*args, **kwargs):
         raise ExecError(["gh"], rc=1, stderr="checkout blew up")
 
-    monkeypatch.setattr(git, "checkout_new_branch", boom)
+    monkeypatch.setattr(git, "checkout_create_or_reset", boom)
 
     with pytest.raises(ExecError):
         create(spec, source_repo=str(reference), github_url=str(remote))
@@ -595,7 +595,7 @@ def _mock_git_boundary(monkeypatch, *, manifests: list[str]):
     monkeypatch.setattr(git, "clone_dissociated", fake_clone)
     monkeypatch.setattr(git, "configure_safe_reference_donor", lambda **k: None)
     monkeypatch.setattr(git, "fetch", lambda **k: None)
-    monkeypatch.setattr(git, "checkout_new_branch", lambda *a, **k: None)
+    monkeypatch.setattr(git, "checkout_create_or_reset", lambda *a, **k: None)
     monkeypatch.setattr(git, "submodule_update_init", lambda **k: None)
 
 
@@ -690,7 +690,7 @@ def test_create_initializes_submodules_after_checkout_before_provision(
     monkeypatch.setattr(git, "configure_safe_reference_donor", lambda **k: None)
     monkeypatch.setattr(git, "fetch", lambda **k: None)
     monkeypatch.setattr(
-        git, "checkout_new_branch", lambda *a, **k: order.append("checkout")
+        git, "checkout_create_or_reset", lambda *a, **k: order.append("checkout")
     )
     monkeypatch.setattr(
         git, "submodule_update_init", lambda **k: order.append("submodule")

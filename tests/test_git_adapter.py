@@ -146,7 +146,7 @@ def test_push_default_does_not_bypass_hooks(monkeypatch):
     assert seen["args"] == ["push", "origin", "main"]
 
 
-def test_checkout_new_branch_uses_create_or_reset(monkeypatch):
+def test_checkout_create_or_reset_uses_dash_big_b(monkeypatch):
     # #845: `-B` (create-or-reset), not `-b` (create-only), so a freeform Tree
     # whose NAME is the repo's default branch works — a fresh clone already has
     # `main` checked out, and `checkout -b main origin/main` dies on the collision.
@@ -158,7 +158,7 @@ def test_checkout_new_branch_uses_create_or_reset(monkeypatch):
         return ""
 
     monkeypatch.setattr(git, "_git", fake)
-    git.checkout_new_branch("main", "origin/main", cwd="/tree")
+    git.checkout_create_or_reset("main", "origin/main", cwd="/tree")
     assert seen["args"] == ["checkout", "-B", "main", "origin/main"]
     assert seen["cwd"] == "/tree"
 

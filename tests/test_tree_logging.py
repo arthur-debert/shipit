@@ -106,7 +106,7 @@ def _mock_write_boundary(monkeypatch):
 
     monkeypatch.setattr(git, "clone_dissociated", fake_clone)
     monkeypatch.setattr(git, "fetch", lambda **k: None)
-    monkeypatch.setattr(git, "checkout_new_branch", lambda *a, **k: None)
+    monkeypatch.setattr(git, "checkout_create_or_reset", lambda *a, **k: None)
     monkeypatch.setattr(git, "submodule_update_init", lambda **k: None)
     monkeypatch.setattr(
         execrun,
@@ -169,7 +169,7 @@ def test_create_failure_is_an_error_record_with_the_exception_attached(
     _mock_write_boundary(monkeypatch)
     monkeypatch.setattr(
         git,
-        "checkout_new_branch",
+        "checkout_create_or_reset",
         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")),
     )
 
