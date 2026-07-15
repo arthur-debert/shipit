@@ -9,11 +9,13 @@ optional ``parent`` (defaulting to the current directory), calls
 staging, install, verification, or commit itself — those live in the module.
 
 ``repo`` is a new top-level command group and ``new`` its creation verb
-(ADR-0056). Every handled failure — a bad request, a conflicting profile
-contribution, a failed staged Check, a Git failure — is a
-:class:`~shipit.repocreate.CreationError` mapped to ``error: …`` + exit 1 by the
-one shared :func:`~._errors.cli_errors` shell; nothing here re-implements that
-mapping.
+(ADR-0056). Creation failures reach one uniform ``error: …`` + exit 1 through the
+shared :func:`~._errors.cli_errors` shell (nothing here re-implements that
+mapping): a domain-level refusal — a bad request, a conflicting profile
+contribution, a failed staged Check — raises
+:class:`~shipit.repocreate.CreationError`, while an underlying Git failure (e.g.
+a commit that cannot sign) propagates as an :class:`~shipit.execrun.ExecError`;
+the shell's known-error set carries both.
 """
 
 from __future__ import annotations

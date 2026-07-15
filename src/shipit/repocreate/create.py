@@ -61,8 +61,10 @@ class CreationResult:
 
     ``destination`` is the published Repo path; ``initial_commit`` the root
     commit's sha; ``stacks`` the selected profile keys. A value returned only
-    on full success — a handled failure raises :class:`CreationError` and
-    publishes nothing.
+    on full success — a handled failure publishes nothing (a domain-level
+    refusal raises :class:`CreationError`; an underlying tool failure such as an
+    :class:`~shipit.execrun.ExecError` from Git propagates unchanged), and
+    rollback leaves the destination in its preflight state.
     """
 
     destination: Path
@@ -303,10 +305,12 @@ def create_repo(
     locks pixi, runs the three public Checks, and creates the ``Initial commit``.
     It then strips every non-committed artifact (the build cache and resolved
     environment that certification produced, both of which embed the staging
-    path) so the published tree is relocatable, and only after every step
-    succeeds does one atomic rename publish it at the destination. Any handled
-    failure removes the temporary sibling and leaves the destination in its
-    preflight state.
+    path) so the published tree is relocatable, and rewrites the staging path
+    baked into the managed git-hook shims to the destination — the one staging
+    reference the strip cannot reach, since ``git clean`` never touches
+    ``.git`` — and only after every step succeeds does one atomic rename publish
+    it at the destination. Any handled failure removes the temporary sibling and
+    leaves the destination in its preflight state.
 
     ``year`` defaults to the local creation year; the effect seams default to
     the real implementations and are injected in tests.
@@ -371,6 +375,10 @@ def create_repo(
         # exactly the committed tree, which regenerates its build/environment
         # state fresh from the committed lockfiles on first use.
         git.clean_non_committed(cwd=str(staging))
+        # `git clean` never touches `.git`, so the one staging-path reference the
+        # strip cannot remove is the absolute lefthook fallback baked into the
+        # activated hook shims; rewrite it to the destination before publishing.
+        _relocate_hook_shims(staging, dest)
         _publish(staging, dest)
     except BaseException as primary:
         # Roll back on ANY handled failure, then let the primary failure keep
@@ -387,6 +395,49 @@ def create_repo(
         initial_commit=head.value,
         stacks=tuple(p.key for p in profiles),
     )
+
+
+def _relocate_hook_shims(staging: Path, dest: Path) -> None:
+    """Rewrite the baked staging path in the git hook shims to the destination.
+
+    The managed install activates hooks by running ``lefthook install``
+    (:func:`shipit.install.apply._activate_hooks`), which bakes the ABSOLUTE path
+    of the lefthook executable that ran install into every generated
+    ``.git/hooks/*`` shim as its ``call_lefthook`` non-activated fallback (#478).
+    Routed through the staged Repo's own lint env, that executable lives at
+    ``<staging>/.pixi/envs/lint/bin/lefthook`` — so the fallback embeds the
+    staging path. :func:`shipit.git.clean_non_committed` then deletes ``.pixi``
+    and :func:`_publish` renames the tree, but ``git clean`` never touches
+    ``.git``, so this is the ONE staging-path reference the relocatability strip
+    cannot remove: left as-is, a ``git commit`` from a NON-activated shell in the
+    published Repo would fall through to the vanished staging ``.pixi`` path
+    instead of running the hooks.
+
+    Rewriting the staging prefix to the final destination makes each published
+    shim's fallback resolve ``<dest>/.pixi/envs/lint/bin/lefthook`` — exactly the
+    path a plain ``shipit install`` at the destination would bake — so the
+    published Repo's hooks behave identically to any other managed consumer's
+    once its environment is provisioned. Runs at staging BEFORE the atomic rename
+    so publication still carries one fully finalized, relocatable tree. Every
+    file in ``.git/hooks`` is swept (lefthook writes a shim per managed slot);
+    files without the staging prefix (git's ``*.sample`` defaults) are untouched.
+    """
+    hooks = staging / ".git" / "hooks"
+    if not hooks.is_dir():
+        return
+    needle = str(staging)
+    replacement = str(dest)
+    for shim in hooks.iterdir():
+        if not shim.is_file():
+            continue
+        body = shim.read_text(encoding="utf-8", errors="surrogateescape")
+        if needle not in body:
+            continue
+        shim.write_text(
+            body.replace(needle, replacement),
+            encoding="utf-8",
+            errors="surrogateescape",
+        )
 
 
 def _publish(staging: Path, dest: Path) -> None:

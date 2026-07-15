@@ -3,7 +3,11 @@
 A deep module the CLI is thin over (``docs/spec/repo-new.md``; ADR-0055–0063).
 The public surface is small and value-typed (ADR-0030): :func:`create_repo`
 takes a name, a parent, and the selected stacks and returns a
-:class:`CreationResult`, raising :class:`CreationError` on any handled failure.
+:class:`CreationResult`. A domain-level refusal raises :class:`CreationError`;
+an underlying tool failure the orchestrator does not re-wrap — notably an
+:class:`~shipit.execrun.ExecError` from Git (e.g. a commit that cannot sign) —
+propagates unchanged. Both roll back with nothing partial ever published, and
+both are handled callers must expect.
 
 The internal layers:
 

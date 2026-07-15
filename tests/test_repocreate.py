@@ -610,6 +610,53 @@ def test_create_publishes_only_the_committed_relocatable_tree(tmp_path, git_iden
     assert git.status_porcelain(cwd=str(dest)) == []
 
 
+def test_create_relocates_baked_hook_paths_out_of_staging(tmp_path, git_identity):
+    # Relocatability regression (#948): the managed install activates hooks via
+    # `lefthook install`, which bakes the ABSOLUTE path of the lefthook that ran
+    # install into each `.git/hooks/*` shim as its non-activated fallback (#478).
+    # In creation that path points into the staged Repo's own lint env under the
+    # temporary sibling; `clean_non_committed` then deletes `.pixi` and the atomic
+    # rename moves the tree — but `git clean` never touches `.git`, so an
+    # unrewritten shim would resolve a VANISHED `<staging>/.pixi/...` path from a
+    # non-activated shell. The published shims must reference the destination.
+    order: list[str] = []
+    captured: dict[str, Path] = {}
+
+    def install_baking_staging_hook(root: Path) -> None:
+        order.append("install")
+        captured["staging"] = root
+        # Mimic lefthook's shim: a managed slot AND git's own `*.sample` default
+        # (which carries no staging path and must be left untouched).
+        hooks = root / ".git" / "hooks"
+        hooks.mkdir(parents=True, exist_ok=True)
+        (hooks / "pre-commit").write_text(
+            f'call_lefthook() {{ "{root}/.pixi/envs/lint/bin/lefthook" "$@"; }}\n',
+            encoding="utf-8",
+        )
+        (hooks / "pre-push").write_text(
+            f'call_lefthook() {{ "{root}/.pixi/envs/lint/bin/lefthook" "$@"; }}\n',
+            encoding="utf-8",
+        )
+        (hooks / "pre-rebase.sample").write_text(
+            "#!/bin/sh\nexit 0\n", encoding="utf-8"
+        )
+
+    result = _fake_create(tmp_path, order, installer=install_baking_staging_hook)
+    dest = result.destination
+    staging = captured["staging"]
+
+    # Every managed shim now resolves the destination's lint env, not the deleted
+    # staging path — the exact fallback a plain `shipit install` at `dest` bakes.
+    for slot in ("pre-commit", "pre-push"):
+        body = (dest / ".git" / "hooks" / slot).read_text(encoding="utf-8")
+        assert str(staging) not in body
+        assert f"{dest}/.pixi/envs/lint/bin/lefthook" in body
+    # The unrelated sample hook (no staging reference) is left verbatim.
+    assert (dest / ".git" / "hooks" / "pre-rebase.sample").read_text(
+        encoding="utf-8"
+    ) == "#!/bin/sh\nexit 0\n"
+
+
 def test_create_accepts_empty_destination_directory(tmp_path, git_identity):
     (tmp_path / "hello").mkdir()
     result = _fake_create(tmp_path, [])
@@ -1679,3 +1726,12 @@ def test_create_real_toolchain_end_to_end(tmp_path, git_identity):
     # the generated .gitignore must keep out of the index, so certification does
     # not dirty the committed Repo.
     assert git.status_porcelain(cwd=str(dest)) == []
+    # The published hooks carry NO reference to the vanished staging sibling
+    # (#948): `lefthook install` bakes an absolute fallback into each
+    # `.git/hooks/*` shim, and creation rewrites that staging path to the
+    # destination so a non-activated-shell `git commit` resolves the real
+    # published env rather than the deleted staging `.pixi`.
+    for shim in (dest / ".git" / "hooks").iterdir():
+        if shim.is_file():
+            body = shim.read_text(encoding="utf-8", errors="ignore")
+            assert ".shipit-repo-new-" not in body, f"{shim} references staging"
