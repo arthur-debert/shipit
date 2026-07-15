@@ -153,6 +153,23 @@ jobs:
 #: catalog; ``lint``/``test`` still arrive through their managed blocks.
 _BUILD_TASK = "./bin/shipit build"
 
+#: The lint lane's CI-provisioned twin of the managed ``lint`` task, declared in
+#: the generated ``[feature.lint.tasks]`` — the exact fleet pattern shipit's own
+#: repo uses (``lint-full``, "the provisioned twin of the managed `lint` task").
+#: WHY a twin and not the managed bare ``lint``: the ``wf-checks`` lane planner
+#: (``shipit ci plan``) keys a lane's provisioned pixi env off the FEATURE that
+#: declares its ``run`` task. The managed ``lint`` task anchors in the default
+#: ``[tasks]`` table (its tooling — shfmt/prettier/markdownlint/actionlint/…
+#: lives in ``[feature.lint]``, run locally via the hook's ``pixi run -e lint
+#: lint``), so a lane pointed at it provisions the DEFAULT env and the runner
+#: never installs the lint tooling — the lane dies 127 on a stock runner (found
+#: in GEN01-WS07 QA, #930). Declaring the twin in ``[feature.lint.tasks]``
+#: resolves the lane onto the ``lint`` env, where every lint binary (and the
+#: managed rust lint toolchain) is provisioned. It is consumer-owned scaffold
+#: data, NOT a managed-catalog entry; ``lint``/``test`` still arrive through
+#: their managed blocks and the hook keeps using the bare managed ``lint`` task.
+_LINT_LANE_TASK = "./bin/shipit lint"
+
 #: The generated Repo's CI policy: the standard, universal, required lint and
 #: test lanes, rendered into the consumer-owned ``.shipit.toml [lanes]`` (spec
 #: §CI: "the new Repo follows the existing pattern with required lint and test
@@ -167,7 +184,15 @@ _BUILD_TASK = "./bin/shipit build"
 #: the caller is consumer-owned policy over the existing Lane/Tool model, not a
 #: new one). These are stack-neutral universal-seed policy, not a profile
 #: contribution: lint and test are generic Tool verbs, not Rust behavior.
-_REQUIRED_LANES: tuple[tuple[str, str], ...] = (("lint", "lint"), ("test", "test"))
+#:
+#: The lint lane runs ``lint-full`` (NOT the managed bare ``lint`` task) so the
+#: planner provisions the ``lint`` env its tooling needs — see
+#: :data:`_LINT_LANE_TASK`. The test lane's tooling (cargo-nextest, rust) is in
+#: the default env, so it rides the managed ``test`` task directly.
+_REQUIRED_LANES: tuple[tuple[str, str], ...] = (
+    ("lint", "lint-full"),
+    ("test", "test"),
+)
 
 
 @dataclass(frozen=True)
@@ -210,6 +235,11 @@ def _pixi_manifest(name: ProjectName, deps: dict[str, str]) -> str:
     (name/channels/platforms) so a re-install is a no-op; ``[dependencies]``
     carries the merged profile deps; ``[tasks]`` carries only the universal
     ``build`` task (managed blocks splice in ``lint``/``test``/… beneath).
+    ``[feature.lint.tasks]`` carries the ``lint-full`` twin (:data:`_LINT_LANE_TASK`)
+    the lint CI lane runs so it provisions the ``lint`` env; the managed lint
+    dependency/environment blocks splice in beneath (``_insert_under_anchor``
+    creates ``[feature.lint.dependencies]``/``[environments]`` at EOF, leaving
+    this ``[feature.lint.tasks]`` table intact).
     """
     header = (
         "# pixi workspace — the consumer-owned provisioning manifest for this\n"
@@ -224,6 +254,7 @@ def _pixi_manifest(name: ProjectName, deps: dict[str, str]) -> str:
             },
             "dependencies": dict(deps),
             "tasks": {"build": _BUILD_TASK},
+            "feature": {"lint": {"tasks": {"lint-full": _LINT_LANE_TASK}}},
         }
     )
     return header + body

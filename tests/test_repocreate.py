@@ -329,6 +329,10 @@ def test_plan_pixi_manifest_declares_build_task_and_nextest():
     # The managed lint/test blocks are NOT duplicated by the scaffold.
     assert 'test = "./bin/shipit test"' not in text
     assert 'lint = "./bin/shipit lint"' not in text
+    # The lint lane's provisioned twin IS seeded, in the lint feature (so the
+    # CI lane resolves onto the lint env — see the lane-env regression below).
+    assert 'lint-full = "./bin/shipit lint"' in text
+    assert "[feature.lint.tasks]" in text
 
 
 # --------------------------------------------------------------------------
@@ -395,8 +399,11 @@ def test_plan_shipit_manifest_declares_required_lint_and_test_lanes_only():
     lanes = _shipit_toml()["lanes"]
     assert list(lanes) == ["lint", "test"]  # exactly these, in order
     assert "build" not in lanes
+    # The lint lane runs the `lint-full` twin (provisions the lint env); the
+    # test lane rides the managed `test` task directly (its tooling is default).
+    assert lanes["lint"]["run"] == "lint-full"
+    assert lanes["test"]["run"] == "test"
     for name in ("lint", "test"):
-        assert lanes[name]["run"] == name
         assert lanes[name]["required"] is True
         assert lanes[name]["local"] is True
 
@@ -421,6 +428,31 @@ def test_generated_lanes_parse_and_derive_lint_test_commit_push_checks():
         ("lint", True),
         ("test", True),
     ]
+
+
+def test_generated_lint_lane_provisions_the_lint_env_not_default():
+    # Regression (GEN01-WS07 QA, #930): the generated hosted-CI lint lane MUST
+    # run in the `lint` pixi env — where shfmt/prettier/markdownlint/actionlint/
+    # shellcheck/yamllint and the managed rust lint toolchain are provisioned —
+    # not the default env (rust only). `shipit ci plan` keys a lane's env off the
+    # feature that declares its `run` task; the earlier lane pointed at the
+    # managed bare `lint` task (default `[tasks]`) so the runner installed only
+    # the default env and every non-rust lint binary was missing (`FileNotFound`,
+    # rc 127) — green locally only because dev machines carry those tools on PATH
+    # and the hook forces `-e lint`. The lane now runs the `lint-full` twin
+    # declared in `[feature.lint.tasks]`, which resolves onto the `lint` env.
+    from shipit import config
+    from shipit.tools import lanes as lane_planner
+
+    pixi = tomllib.loads({f.path: f.text for f in _plan().files}["pixi.toml"])
+    task_envs = lane_planner.task_env_sets(pixi)
+    assert task_envs["lint-full"] == ("lint",)  # the twin lives in the lint env
+
+    parsed = config.load_lanes(_shipit_toml())
+    jobs = lane_planner.plan(parsed, event="pr", task_envs=task_envs)
+    by_name = {job.name: job for job in jobs}
+    assert by_name["lint"].envs == ("lint",)  # not ("default",) — the defect
+    assert by_name["test"].envs == ("default",)  # test tooling is default-env
 
 
 def test_plan_ci_caller_is_valid_yaml_delegating_to_reusable_checks():
