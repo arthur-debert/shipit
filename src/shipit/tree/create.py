@@ -10,7 +10,8 @@ summary (``{path, branch, base}``). The whole pipeline hides behind this one cal
    :func:`shipit.git.clone_dissociated`.
 2. harden the fresh clone as a future ``--reference`` donor
    (:func:`shipit.git.configure_safe_reference_donor`, #353), then
-   ``git fetch origin`` and ``git checkout -b <branch> <base>``, then
+   ``git fetch origin`` and ``git checkout -B <branch> <base>`` (``-B`` so a
+   freeform Tree on the repo's default branch works — #845), then
    ``git submodule sync --recursive`` then ``update --init --recursive``
    (:func:`shipit.git.submodule_update_init`, #485/#486) — a dissociated clone leaves
    submodules as empty gitlinks, so a Tree of a submodule-using consumer must populate
@@ -191,7 +192,9 @@ def create(spec: TreeSpec, *, source_repo: str, github_url: str) -> Tree:
             # is exactly a fetch-time writer.
             git.configure_safe_reference_donor(cwd=str(dest))
             git.fetch(cwd=str(dest))
-            git.checkout_new_branch(tree_plan.branch, tree_plan.base, cwd=str(dest))
+            git.checkout_create_or_reset(
+                tree_plan.branch, tree_plan.base, cwd=str(dest)
+            )
             # A dissociated clone leaves submodules as EMPTY gitlink dirs (#485): a
             # consumer whose suite reads submodule-backed fixtures (lex's `comms/specs`)
             # would fail in the Tree though it is green in a normal checkout. Populate

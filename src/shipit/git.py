@@ -1111,15 +1111,28 @@ def configure_identity(name: str, email: str, *, cwd: str) -> None:
     _git(["config", "--local", "user.email", email], cwd=cwd)
 
 
-def checkout_new_branch(branch: str, base: str, *, cwd: str) -> None:
-    """``git checkout -b <branch> <base>`` — cut ``branch`` from ``base`` and switch."""
-    _git(["checkout", "-b", branch, base], cwd=cwd)
+def checkout_create_or_reset(branch: str, base: str, *, cwd: str) -> None:
+    """``git checkout -B <branch> <base>`` — cut ``branch`` from ``base`` and switch.
+
+    ``-B`` (create-or-reset), not ``-b`` (create-only), so a freeform Tree whose
+    NAME is the repo's DEFAULT branch works (#845): a fresh clone already has the
+    default branch checked out, so ``checkout -b main origin/main`` dies with
+    ``fatal: a branch named 'main' already exists``. ``-B`` resets that
+    already-local branch to ``<base>`` instead of failing — the exact case a
+    freeform Tree on the default branch (e.g. ``shipit install --pr`` from a clean
+    main checkout) needs. This only changes behaviour when the branch already
+    exists locally; a fresh clone carries exactly one local branch (the remote's
+    default HEAD), so ``-B`` is identical to ``-b`` for every non-default NAME and
+    the reset never discards work — the just-fetched default sits at ``origin/NAME``
+    already.
+    """
+    _git(["checkout", "-B", branch, base], cwd=cwd)
 
 
 def checkout(branch: str, *, cwd: str) -> None:
     """``git checkout <branch>`` — switch to an EXISTING branch (no ``-b``).
 
-    The read-only-Tree counterpart of :func:`checkout_new_branch`: a reviewer
+    The read-only-Tree counterpart of :func:`checkout_create_or_reset`: a reviewer
     Tree checks out a branch that already exists on ``origin`` (the PR head) rather
     than cutting a new one. After a ``git fetch`` the plain checkout DWIMs a local
     tracking branch from ``origin/<branch>``, so the read-only clone lands on the
