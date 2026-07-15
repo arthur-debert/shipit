@@ -3116,14 +3116,36 @@ class _GhRecorder:
         self.commit_paths = ()
         self.commit_no_verify = None
         self.push_no_verify = None
+        self.default_branch_after_fetch = None
+        self.staged_query = ()
 
     def activate_hooks(self, root):
         # Stand in for `lefthook install`: record the call, mutate nothing.
         self.hook_activations.append(root)
         return _exec_result(0)
 
+    def default_branch(self, *, cwd, remote="origin"):
+        # The remote default the MODE_PR staging branch is reset onto (#852).
+        # A pure query (like current_branch), so it is not recorded in `calls`.
+        # #984 review: capture whether the base fetch already ran when the
+        # default branch is resolved — `default_branch`'s fallback probes the
+        # remote-tracking refs a fetch POPULATES, so MODE_PR must fetch first.
+        self.default_branch_after_fetch = any(c[0] == "fetch" for c in self.calls)
+        return getattr(self, "_default_branch", "main")
+
+    def fetch(self, *, cwd, remote="origin"):
+        # Refresh origin/<default> before the staging branch is reset onto it.
+        # A 2-tuple like every other recorded call so name/payload unpacking
+        # (`for name, _ in rec.calls`) stays uniform.
+        self.calls.append(("fetch", remote))
+
     def switch_create(self, branch, *, cwd):
         self.calls.append(("switch", branch))
+
+    def reset_soft(self, ref, *, cwd):
+        # The #852 staging-branch rebase: reset shipit/install onto
+        # origin/<default> so the managed commit lands as one clean refresh.
+        self.calls.append(("reset", ref))
 
     def switch(self, branch, *, cwd):
         # The MODE_PR caller-branch restore (#777 mode 1) — recorded under its
@@ -3133,6 +3155,24 @@ class _GhRecorder:
 
     def add(self, paths, *, cwd):
         self.calls.append(("add", tuple(paths)))
+
+    def staged_paths(self, paths, *, cwd):
+        # The MODE_PR commit pathspec (#984 review): the shipit-owned universe
+        # members that carry a staged diff against origin/<default>. A pure query
+        # (like current_branch/default_branch), so it is not recorded in `calls`;
+        # the queried universe is captured so a test can assert what the commit
+        # must carry. The real adapter reads the index — the recorder returns the
+        # whole queried set (everything staged) unless a test sets `_no_staged`
+        # to exercise the clean "nothing to publish" no-op.
+        self.staged_query = tuple(paths)
+        if getattr(self, "_no_staged", False):
+            return []
+        return sorted(paths)
+
+    def reset_index(self, *, cwd):
+        # The MODE_PR caller-restore unstages the soft-reset index when the
+        # operator STARTED on `shipit/install` (#852 review).
+        self.calls.append(("reset_index", None))
 
     def commit(self, message, paths, *, cwd, no_verify=False):
         self.calls.append(("commit", message))
@@ -3149,9 +3189,10 @@ class _GhRecorder:
     def pr_url_for_head(self, branch, *, cwd=None):
         return None  # no existing PR by default
 
-    def pr_create(self, *, head, title, body, draft, cwd, **kw):
+    def pr_create(self, *, head, title, body, draft, cwd, base=None, **kw):
         self.calls.append(("pr_create", draft))
         self.pr_body = body
+        self.pr_base = base  # the base the draft PR targets (#852)
         return "https://github.com/acme/repo/pull/1"
 
     def names(self):
@@ -3165,9 +3206,14 @@ def rec(monkeypatch):
         "switch_create",
         "switch",
         "add",
+        "staged_paths",
+        "reset_index",
         "commit",
         "push",
         "current_branch",
+        "default_branch",
+        "fetch",
+        "reset_soft",
     ):
         monkeypatch.setattr(git, name, getattr(r, name))
     for name in ("pr_url_for_head", "pr_create"):
@@ -3223,16 +3269,228 @@ def test_fresh_install_writes_set_and_opens_draft_pr(tmp_path, rec):
     # A DRAFT PR was opened; the rendered body lists the additions.
     assert ("pr_create", True) in rec.calls
     assert "### Added" in rec.pr_body
-    # Order: branch -> add -> commit -> push -> pr -> restore the caller's branch
-    # (#777 mode 1: the flow returns the checkout to where it started).
+    # Order: fetch -> branch -> reset onto origin/<default> -> add -> commit ->
+    # push -> pr -> restore the caller's branch. The fetch+reset front (#852)
+    # bases the staging branch on current origin/main so a Tree cut from a stale
+    # remote shipit/install head can never stack a conflicting commit; the
+    # switch_back (#777 mode 1) returns the checkout to where it started.
     assert rec.names() == [
+        "fetch",
         "switch",
+        "reset",
         "add",
         "commit",
         "push",
         "pr_create",
         "switch_back",
     ]
+    assert ("reset", "origin/main") in rec.calls
+    assert ("switch_back", "main") in rec.calls
+
+
+def test_pr_mode_bases_staging_branch_on_current_origin_default(tmp_path, rec):
+    # #852: install --pr must base its `shipit/install` staging branch on the
+    # CURRENT origin default, never on whatever HEAD the Tree was cut from. A
+    # Tree cut from a STALE leftover remote `shipit/install` head (the merge does
+    # not delete the staging branch) would otherwise stack the fresh managed
+    # commit onto stale commits, minting a PR that conflicts with main. The fix:
+    # fetch the base, (re)create the branch, and reset it onto origin/<default>
+    # so the managed commit lands as one clean refresh regardless of the cut
+    # point — which also RECYCLES a stale leftover branch on the next run.
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    result = _apply(tmp_path, iapply.MODE_PR)
+
+    # Origin is refreshed BEFORE the reset, so origin/<default> is current…
+    assert "fetch" in rec.names()
+    assert rec.names().index("fetch") < rec.names().index("reset")
+    # …the staging branch is recreated and reset onto origin/<default> BEFORE the
+    # managed commit is staged, so the commit's parent is main, never the stale
+    # head the Tree started on.
+    assert rec.names().index("switch") < rec.names().index("reset")
+    assert rec.names().index("reset") < rec.names().index("commit")
+    assert ("reset", "origin/main") in rec.calls
+    assert result.pr_url == "https://github.com/acme/repo/pull/1"
+
+
+def test_pr_mode_fetches_before_resolving_the_default_branch(tmp_path, rec):
+    # #984 review (major): MODE_PR must FETCH before it resolves the default
+    # branch. When `<remote>/HEAD` is absent (a reference-borrow clone),
+    # `default_branch`'s fallback probes the remote-tracking refs a fetch
+    # populated — resolving first on a pre-fetch checkout could not see
+    # `origin/master`/`origin/trunk` yet, mis-fall-back to `main`, and then
+    # `reset --soft origin/main` onto a ref that does not exist. Fetch first.
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    _apply(tmp_path, iapply.MODE_PR)
+
+    assert rec.default_branch_after_fetch is True
+
+
+def test_pr_mode_honors_a_non_main_default_branch(tmp_path, rec):
+    # #852: the base is the RESOLVED origin default, not a hardcoded "main" — a
+    # consumer whose default branch is `trunk` gets its staging branch reset onto
+    # origin/trunk and its draft PR targeted at trunk, so the two never diverge.
+    rec._default_branch = "trunk"
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    _apply(tmp_path, iapply.MODE_PR)
+
+    assert ("reset", "origin/trunk") in rec.calls
+    assert rec.pr_base == "trunk"
+
+
+def test_pr_mode_commits_the_full_managed_universe_including_noop_units(tmp_path, rec):
+    # #852 review (major): the MODE_PR commit is scoped to the FULL managed set,
+    # not just the pre-reset writes. `changed_paths` is computed against the
+    # Tree's cut point, where a file already at desired content is a NOOP and
+    # drops out of the write set; after the staging branch is reset onto
+    # origin/<default> that file may be ABSENT from the base, so a writes-only
+    # commit would silently DROP it from the refreshed PR. Staging every managed
+    # destination keeps it — the whole managed set lands on the reset base.
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    # Pre-seed one whole-file unit at its desired content so it reconciles NOOP.
+    noop = next(u for u in iunits.load_units() if u.dest == iunits.MARKDOWNLINT_FILE)
+    (tmp_path / noop.dest).write_bytes(noop.content)
+
+    plan = _plan(tmp_path)
+    # It is a NOOP — absent from the write-scoped changed_paths...
+    assert noop.dest not in plan.changed_paths
+    assert any(
+        d.unit.dest == noop.dest and d.action == irec.NOOP for d in plan.decisions
+    )
+
+    _apply(tmp_path, iapply.MODE_PR)
+    # ...yet the MODE_PR commit still carries it (the full managed universe), so
+    # the reset onto origin/<default> can never drop it from the PR.
+    assert noop.dest in rec.commit_paths
+
+
+def test_pr_mode_commit_universe_carries_retired_deletes_noops_and_the_changelog(
+    tmp_path, rec
+):
+    # #984 review (major): the SAME drop-out class the full-managed-universe fix
+    # closes for NOOP managed units also hits the retired paths and a
+    # previously-rendered CHANGELOG.md. A retired path absent from `changed_paths`
+    # (or a changelog no longer on disk) whose deletion the reset stages against a
+    # base that still carries it MUST ride the commit pathspec, or the pathspec
+    # `git commit` (unlisted paths come from HEAD) silently REVERTS it to the base
+    # state — RESURRECTING the retired file in the refreshed PR. This holds for
+    # BOTH retired DELETES (pristine copy apply unlinks) AND retired NOOPS (a
+    # retired path already absent locally): both are absent after apply, and a
+    # base that still carries either needs the deletion published. The round-4
+    # filter to DELETE alone dropped the NOOP-vs-base deletions (#984 agy review),
+    # so assert the queried universe carries a DELETE, a NOOP, and the changelog
+    # even when the changelog is NOT on disk.
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    # A pristine retired workflow on disk → a DELETE decision apply carries.
+    victim = tmp_path / RETIRED_WORKFLOW_PATH
+    victim.parent.mkdir(parents=True)
+    victim.write_bytes(PRISTINE_WORKFLOW.read_bytes())
+    # NB: the changelog is deliberately NOT written to disk — the drop-out case:
+    # a changelog deleted since a prior run must still be published as a deletion,
+    # so it must be in the universe even absent from the working tree.
+    assert not (tmp_path / iapply.CHANGELOG_FILE).exists()
+
+    plan = _plan(tmp_path)
+    delete_paths = {d.retired.path for d in plan.retire_deletes}
+    # Every OTHER retired path is absent here → NOOP, none joining `changed_paths`.
+    noop_paths = {d.retired.path for d in plan.retired if d.action == irec.NOOP}
+    assert RETIRED_WORKFLOW_PATH in delete_paths
+    assert noop_paths, "the manifest must declare more retired files to exercise NOOP"
+    assert noop_paths.isdisjoint(plan.changed_paths)
+    assert iapply.CHANGELOG_FILE not in plan.changed_paths
+
+    _apply(tmp_path, iapply.MODE_PR)
+    # The commit universe carries the retired DELETE, EVERY retired NOOP (so a
+    # base-side deletion is published, never resurrected), and the changelog —
+    # the last UNCONDITIONALLY, so a changelog absent from the tree is still
+    # published as a deletion rather than silently reverted to the base state.
+    universe = set(rec.staged_query)
+    assert RETIRED_WORKFLOW_PATH in universe
+    assert noop_paths <= universe
+    assert iapply.CHANGELOG_FILE in universe
+
+
+def test_pr_mode_commit_universe_excludes_a_kept_retired_file(tmp_path, rec):
+    # #984 codex review (major): the commit universe EXCLUDES KEEP retired
+    # decisions. A KEEP is a locally-modified consumer file apply PRESERVES — not
+    # shipit content to publish. Carried on the stale install branch it differs
+    # from the base in the post-reset index, so listing it in the universe would
+    # leak that consumer-local file into the PR. It must NOT be queried (the
+    # retired-file invariant) — unlike a DELETE or NOOP, whose absence IS carried.
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    # A locally-modified retired workflow → a KEEP decision apply preserves.
+    victim = tmp_path / RETIRED_WORKFLOW_PATH
+    victim.parent.mkdir(parents=True)
+    victim.write_text(PRISTINE_WORKFLOW.read_text() + "# local tweak\n")
+
+    plan = _plan(tmp_path)
+    assert [d.retired.path for d in plan.retire_keeps] == [RETIRED_WORKFLOW_PATH]
+    assert not plan.retire_deletes
+    # The KEEP is excluded from the carried set even though other retired paths
+    # (NOOPs) are in it.
+    assert RETIRED_WORKFLOW_PATH not in {d.retired.path for d in plan.retire_carries}
+
+    _apply(tmp_path, iapply.MODE_PR)
+    # The KEEP path is never in the queried universe, so it can never be
+    # committed into the refreshed PR — and apply left it on disk untouched.
+    assert RETIRED_WORKFLOW_PATH not in set(rec.staged_query)
+    assert victim.is_file()
+    assert "# local tweak" in victim.read_text()
+
+
+def test_pr_mode_universe_excludes_a_noop_retired_hook_file(tmp_path, rec, monkeypatch):
+    # #984 round-6 review (major): retired HOOKS carry DELETE-only, never NOOP.
+    # A retired-hook NOOP does NOT mean the hook FILE is absent (unlike a retired
+    # FILE NOOP) — it only means the legacy entry was not found. The file can
+    # still be present with unrelated consumer-local edits; carrying a NOOP hook
+    # file into the universe would let those edits ride the pathspec commit after
+    # `reset --soft origin/<base>` and leak into the refreshed PR. Use a hook over
+    # a NON-managed file (settings.json is a managed unit dest, always carried, so
+    # it cannot isolate the hook-carry path) whose file is present but carries no
+    # matching legacy entry → a NOOP decision → its file must stay OUT.
+    hook = irec.RetiredHook(
+        file=".shipit-legacy-hooks.json", event="pre-commit", marker="legacy-cmd"
+    )
+    monkeypatch.setattr(irec, "load_retired_hooks", lambda: [hook])
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    # The hook file is present with ONLY unrelated consumer content (no matching
+    # `legacy-cmd` entry) → retired_hook_count == 0 → a NOOP decision.
+    (tmp_path / ".shipit-legacy-hooks.json").write_text(
+        '{"hooks": {"pre-commit": [{"command": "my-own-tool"}]}}\n'
+    )
+
+    plan = _plan(tmp_path)
+    assert [d.action for d in plan.retired_hooks] == [irec.NOOP]
+    assert not plan.retire_hook_deletes  # nothing rewritten → nothing to carry
+
+    _apply(tmp_path, iapply.MODE_PR)
+    # The NOOP hook file — not a managed dest, not rewritten by apply — never
+    # enters the queried universe, so its consumer-local edits cannot leak.
+    assert ".shipit-legacy-hooks.json" not in set(rec.staged_query)
+    # And apply left the consumer's file untouched on disk.
+    assert "my-own-tool" in (tmp_path / ".shipit-legacy-hooks.json").read_text()
+
+
+def test_pr_mode_reports_no_changes_when_the_managed_set_already_matches_base(
+    tmp_path, rec
+):
+    # #852 review (major): after the `reset --soft origin/<default>` the staged
+    # managed set can already match the base (a stale Tree duplicating an
+    # already-merged reconcile). A pathspec `git commit` over an empty diff fails
+    # with "nothing to commit" (exit 1) — so apply skips the commit/PR when
+    # `staged_paths` returns no shipit-owned diff, rather than crashing the
+    # install.
+    rec._no_staged = True
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    result = _apply(tmp_path, iapply.MODE_PR)
+
+    # No commit, no push, no PR — the flow stopped at the empty-diff guard...
+    assert "commit" not in rec.names()
+    assert "push" not in rec.names()
+    assert "pr_create" not in rec.names()
+    # ...the result names no PR (a clean no-op, not a raised ExecError)...
+    assert result.pr_url is None
+    assert result.branch is None
+    # ...and the caller's branch was still restored on the way out.
     assert ("switch_back", "main") in rec.calls
 
 
@@ -3773,7 +4031,9 @@ def test_pr_mode_on_virgin_repo_with_lint_debt_reaches_the_pr_leg(tmp_path, rec)
     assert rec.hook_activations == [tmp_path]
     # …and the push/PR leg still ran, both git write ops bypassing the hooks.
     assert rec.names() == [
+        "fetch",
         "switch",
+        "reset",
         "add",
         "commit",
         "push",
@@ -4404,12 +4664,19 @@ def test_pr_flow_from_detached_head_does_not_restore(tmp_path, rec, monkeypatch)
     assert not any(name == "switch_back" for name, _ in rec.calls)
 
 
-def test_restore_caller_branch_skips_none_and_the_scratch_branch(tmp_path, rec):
-    # The guard: no branch to restore to (None) and a checkout already on the
-    # scratch branch both no-op — there is nowhere sensible to switch.
+def test_restore_caller_branch_skips_none_and_unstages_on_the_scratch_branch(
+    tmp_path, rec
+):
+    # The guard: no branch to restore to (None) is a pure no-op — nothing to
+    # switch, nothing staged to clean.
     iapply._restore_caller_branch(str(tmp_path), None)
+    assert rec.calls == []
+    # A caller already ON the scratch branch has nowhere to switch back to, but
+    # the flow's `reset --soft` left the index staged, so the restore unstages it
+    # (#852 review) rather than switching.
     iapply._restore_caller_branch(str(tmp_path), iapply.INSTALL_BRANCH)
     assert not any(name == "switch_back" for name, _ in rec.calls)
+    assert ("reset_index", None) in rec.calls
 
 
 def test_restore_committing_writes_is_a_transaction(tmp_path):
@@ -4699,6 +4966,55 @@ def test_plan_retired_decides_every_manifest_entry():
         irec.KEEP,
         irec.NOOP,
     ]
+
+
+def test_retire_carries_files_keep_noop_asymmetry_from_hooks():
+    # #984 review: retired FILES and retired HOOKS carry DIFFERENTLY.
+    # Files: the universe carries the paths apply left ABSENT locally — DELETE
+    # (pristine copy unlinked) AND NOOP (already gone) — so a base still carrying
+    # either has its deletion published, never resurrected. Only KEEP (a
+    # preserved locally-modified file) is excluded.
+    retired = irec.plan_retired(
+        [
+            irec.RetiredFile(path="del.yml", pristine_hashes=("h1",)),
+            irec.RetiredFile(path="keep.yml", pristine_hashes=("h2",)),
+            irec.RetiredFile(path="noop.yml", pristine_hashes=("h3",)),
+        ],
+        {"del.yml": "h1", "keep.yml": "edited", "noop.yml": None},
+    )
+    hooks = irec.plan_retired_hooks(
+        [
+            irec.RetiredHook(file=".claude/settings.json", event="X", marker="gone"),
+            irec.RetiredHook(file=".claude/settings.json", event="X", marker="present"),
+        ],
+        {
+            irec.RetiredHook(
+                file=".claude/settings.json", event="X", marker="present"
+            ).key: 1
+        },
+    )
+    plan = irec.Plan(
+        root="/x",
+        decisions=(),
+        retired=tuple(retired),
+        seeds=(),
+        retired_hooks=tuple(hooks),
+    )
+
+    assert {d.retired.path for d in plan.retire_carries} == {"del.yml", "noop.yml"}
+    assert "keep.yml" not in {d.retired.path for d in plan.retire_carries}
+    # Hooks: the universe carries ONLY the files apply REWROTE — the DELETE
+    # decisions (`retire_hook_deletes`), NOT the NOOP. A retired-hook NOOP does
+    # not mean the hook file is absent (only that the legacy entry was not
+    # found); the file may still hold unrelated consumer edits, so carrying a
+    # NOOP hook file would leak them into the PR (#984 round-6 review). Here the
+    # `gone` entry is NOOP and the `present` entry is DELETE, over the same file
+    # → the file is carried by the DELETE, and only once.
+    assert [d.action for d in plan.retired_hooks] == [irec.NOOP, irec.DELETE]
+    assert {d.retired.file for d in plan.retire_hook_deletes} == {
+        ".claude/settings.json"
+    }
+    assert len(plan.retire_hook_deletes) == 1
 
 
 @pytest.mark.parametrize(
@@ -5371,6 +5687,11 @@ def test_format_result_renders_the_mode_outcomes():
         pr_updated=True,
     )
     assert "updated draft PR: https://x/1" in verb.format_result(updated)
+    # MODE_PR with no PR url: the reset onto origin/<default> found the managed
+    # set already current, so nothing was published (#852 review — no crash).
+    noop_pr = iapply.InstallResult(plan=plan, mode=iapply.MODE_PR)
+    assert "already current on the default branch" in verb.format_result(noop_pr)
+    assert "nothing to publish" in verb.format_result(noop_pr)
     # The activation line leads the outcome when the checks went live.
     live = iapply.InstallResult(plan=plan, mode=iapply.MODE_TREE, hooks_activated=True)
     assert verb.format_result(live).splitlines()[0] == (
@@ -5808,4 +6129,16 @@ def test_rerender_skipped_in_the_window_omits_the_pr_body_section(tmp_path, rec)
     )
 
     assert "Changelog re-rendered" not in rec.pr_body
-    assert chlog.CHANGELOG_FILE not in rec.commit_paths
+    # The phantom changelog was dropped from `changed_paths` before apply, so it
+    # never reaches `git add`. The MODE_PR commit pathspec names CHANGELOG_FILE
+    # UNCONDITIONALLY in its universe (#984 review — so a changelog DELETED since
+    # a prior run is still published as a deletion), then scopes to the members
+    # with a real staged diff via `git.staged_paths` (`git diff --cached
+    # --name-only`), which silently skips a path absent from the tree, the index
+    # AND HEAD — so an absent/untracked CHANGELOG.md is never committed. The stub
+    # `staged_paths` echoes the whole queried universe, so `rec.commit_paths`
+    # cannot show that scoping (it is covered by `test_staged_paths_*` in
+    # test_git_adapter.py); assert the stub-independent guarantee instead — the
+    # phantom path never reaches `git add`.
+    add_paths = next(paths for name, paths in rec.calls if name == "add")
+    assert chlog.CHANGELOG_FILE not in add_paths

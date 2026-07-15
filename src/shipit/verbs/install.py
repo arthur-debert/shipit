@@ -532,8 +532,16 @@ def format_result(result: InstallResult) -> str:
         lines.append(f"  pushed to {result.branch} (break-glass --push)")
     elif result.pr_updated:
         lines.append(f"  updated draft PR: {result.pr_url}")
-    else:
+    elif result.pr_url:
         lines.append(f"  opened draft PR: {result.pr_url}")
+    else:
+        # MODE_PR with no PR: after the staging branch was reset onto the current
+        # default the managed set already matched the base, so nothing was
+        # published (#852 review — no crash on an empty commit).
+        lines.append(
+            "  the managed set is already current on the default branch — "
+            "nothing to publish (no draft PR needed)"
+        )
     return "\n".join(lines)
 
 

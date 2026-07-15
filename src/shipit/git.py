@@ -199,6 +199,40 @@ def current_branch(*, cwd: str) -> str | None:
     return None if (not name or name == "HEAD") else name
 
 
+def default_branch(*, cwd: str, remote: str = "origin") -> str:
+    """The remote's default branch name (e.g. ``main``), from ``<remote>/HEAD``.
+
+    Reads the local ``refs/remotes/<remote>/HEAD`` symbolic ref a clone points at
+    the remote's default branch and strips the ``<remote>/`` prefix. This is the
+    base the MODE_PR install flow resets its ``shipit/install`` staging branch
+    onto (#852): the staging branch must be based on the CURRENT default branch,
+    never on whatever HEAD a Tree was cut from, or a Tree cut from a stale
+    leftover remote ``shipit/install`` head would stack a conflicting commit.
+
+    A PROBE, not a mutation: a missing symref (some reference-borrow clones never
+    set ``<remote>/HEAD``) is a normal answer. Rather than blindly returning
+    ``main`` — which would mis-resolve a ``master``/``develop``/``trunk`` remote
+    and then crash the MODE_PR reset onto a non-existent ``origin/main`` — the
+    fallback PROBES the common default-branch names against the remote-tracking
+    refs a fetch populated, ``main`` first (the portfolio default), and only when
+    none exist returns ``main`` as the last resort. A launch-level failure
+    (missing git, timeout) still propagates :class:`ExecError`.
+    """
+    result = _probe(["symbolic-ref", "--short", f"refs/remotes/{remote}/HEAD"], cwd=cwd)
+    if result.ok:
+        name = result.stdout.strip().removeprefix(f"{remote}/")
+        if name:
+            return name
+    for candidate in ("main", "master", "develop", "trunk"):
+        probe = _probe(
+            ["rev-parse", "--verify", "--quiet", f"refs/remotes/{remote}/{candidate}"],
+            cwd=cwd,
+        )
+        if probe.ok:
+            return candidate
+    return "main"
+
+
 def remote_url(*, cwd: str, remote: str = "origin") -> str:
     """The configured URL of ``remote`` for the checkout at ``cwd``."""
     return _git(["remote", "get-url", remote], cwd=cwd).strip()
@@ -845,6 +879,48 @@ def commit(
     _git([*args, "-m", message, "--", *paths], cwd=cwd)
 
 
+def staged_paths(paths: list[str], *, cwd: str) -> list[str]:
+    """The subset of ``paths`` that carry a staged diff against HEAD.
+
+    ``git diff --cached --name-only -- <paths>`` — the pathspec-scoped index
+    diff, parsed to the changed names (the adapter owns output parsing, like
+    :func:`diff_name_only`). The MODE_PR staging flow reads this AFTER
+    ``reset --soft`` + ``git add`` (#984 review) to build the pathspec
+    :func:`commit` carries: the writes it just staged PLUS the deletions the
+    reset staged for retired paths the base still carries. A pathspec that
+    matches nothing in the working tree, the index AND HEAD is simply never
+    listed (``git diff`` skips it, exit 0), so the commit never receives a
+    pathspec it would abort on — unlike ``git add``/``git commit``, which fail
+    on a pathspec that matches nothing.
+
+    An empty return means the named set already matches HEAD — the MODE_PR
+    "nothing to publish" case (the staging branch is a stale Tree duplicating an
+    already-merged reconcile), where a pathspec :func:`commit` over an empty
+    diff would otherwise crash with "nothing to commit". A genuine git failure
+    (bad pathspec magic, unreadable index) still surfaces as the transport
+    :class:`ExecError`: ``--name-only`` signals a real error through a nonzero
+    exit, not through the diff-present rc=1 that ``--quiet`` overloads, so
+    :func:`_git`'s raise-on-nonzero cannot mask one as "changes exist" (#984
+    review). An empty ``paths`` never probes (a scoped read, never a bare
+    unscoped ``git diff --cached`` answering for the whole index)."""
+    if not paths:
+        return []
+    out = _git(["diff", "--cached", "--name-only", "--", *paths], cwd=cwd)
+    return [line for line in out.splitlines() if line.strip()]
+
+
+def reset_index(*, cwd: str) -> None:
+    """``git reset`` — unstage everything, rewinding the index to HEAD.
+
+    HEAD and the working tree are untouched; only the index moves back. The
+    MODE_PR caller-restore uses it when the operator STARTED on the
+    ``shipit/install`` scratch branch (#852 review): the flow's
+    ``reset --soft origin/<default>`` staged the pre-reset..base diff into the
+    index, and with no other branch to switch back to, unstaging is how the
+    operator is returned to a clean index rather than a heavily-polluted one."""
+    _git(["reset"], cwd=cwd)
+
+
 def push(
     branch: str,
     *,
@@ -1156,6 +1232,21 @@ def reset_hard(ref: str, *, cwd: str) -> None:
     line stays clean.
     """
     _git(["reset", "--hard", ref], cwd=cwd)
+
+
+def reset_soft(ref: str, *, cwd: str) -> None:
+    """``git reset --soft <ref>`` — move HEAD to ``ref``, keep index and working tree.
+
+    The MODE_PR staging-branch rebase (#852, :mod:`shipit.install.apply`):
+    install (re)creates the ``shipit/install`` branch and resets it onto
+    ``origin/<default>`` so the managed commit lands as ONE clean refresh on top
+    of the current default branch, no matter what HEAD the Tree was cut from.
+    ``--soft`` moves only the branch pointer — the rendered managed files stay in
+    the working tree — so the following pathspec commit (which takes the listed
+    paths from the working tree and everything else from HEAD) produces
+    ``origin/<default>`` + the managed delta, never a stack on stale commits.
+    """
+    _git(["reset", "--soft", ref], cwd=cwd)
 
 
 def submodule_update_init(*, cwd: str) -> None:
