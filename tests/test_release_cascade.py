@@ -118,6 +118,18 @@ def test_derive_targets_refuses_a_malformed_upstream_slug():
         cascade_mod.derive_targets("not-a-slug", [])
 
 
+def test_derive_targets_names_the_consumer_of_a_malformed_dep_slug():
+    """A malformed `[artifact-deps].repo` names WHICH consumer's WHICH section
+    declared it, so a broken portfolio pin is locatable, not an anonymous bad
+    string."""
+    consumers = [("acme/app", [_dep("lexd", "not-a-slug")])]
+    with pytest.raises(
+        cascade_mod.CascadeError,
+        match=r"invalid repo slug 'not-a-slug' \(\[artifact-deps\.lexd\] in acme/app\)",
+    ):
+        cascade_mod.derive_targets("lex-fmt/lex", consumers)
+
+
 # --------------------------------------------------------------------------
 # The bounded portfolio scan
 # --------------------------------------------------------------------------
@@ -155,12 +167,24 @@ def test_scan_portfolio_reads_each_declared_repos_artifact_deps(tmp_path):
     assert deps[0].repo == "lex-fmt/lex"
 
 
-def test_scan_portfolio_treats_a_missing_toml_as_no_deps(tmp_path):
-    """A portfolio repo whose local checkout is absent contributes an empty dep
-    tuple — it simply never becomes a target, no crash."""
+def test_scan_portfolio_raises_on_a_declared_but_absent_checkout(tmp_path):
+    """A declared portfolio checkout that is absent under source_root RAISES —
+    absence must be proven from a readable checkout, never inferred from a
+    missing directory (else an incomplete --source-root silently misses
+    consumers and the stable release dispatches nothing)."""
     cfg = _portfolio_cfg(("acme/ghost", "acme/ghost"))
+    with pytest.raises(cascade_mod.CascadeError, match="absent"):
+        cascade_mod.scan_portfolio(cfg, source_root=tmp_path)
+
+
+def test_scan_portfolio_treats_a_checked_out_repo_with_no_config_as_no_deps(tmp_path):
+    """A repo that IS checked out but carries no `.shipit.toml` contributes an
+    empty dep tuple — a checked-out repo with no pins is a supported state, never
+    a target, and (unlike an absent checkout) never a crash."""
+    (tmp_path / "acme/plain").mkdir(parents=True)
+    cfg = _portfolio_cfg(("acme/plain", "acme/plain"))
     scanned = cascade_mod.scan_portfolio(cfg, source_root=tmp_path)
-    assert scanned == (("acme/ghost", ()),)
+    assert scanned == (("acme/plain", ()),)
 
 
 def test_scan_portfolio_treats_no_artifact_deps_as_empty(tmp_path):
@@ -414,6 +438,46 @@ def test_verb_dispatches_and_registers_the_token(tmp_path, monkeypatch, capsys):
             "pat-xyz",
         )
     ]
+
+
+def test_verb_missing_token_exits_1_through_the_error_shell(tmp_path, capsys):
+    """A live fan-out with a derived target set but NO cross-repo PAT is a
+    domain refusal: `CascadeError` (a `ReleaseError` subclass) rides the shared
+    `@cli_errors` shell to exit 1 with one `error: …` line — never an uncaught
+    traceback. Guards the KNOWN_ERRORS registration."""
+    (tmp_path / config.CONFIG_NAME).write_text(
+        '[project.portfolio]\nstack = [{ repo = "acme/app", path = "acme/app" }]\n',
+        encoding="utf-8",
+    )
+    _write_shipit_toml(
+        tmp_path,
+        "acme/app",
+        '[artifact-deps.lexd]\nrepo = "lex-fmt/lex"\nversion = "0.19.3"\n',
+    )
+    gh = FakeGh()
+    rc = release_verb.run_release_cascade(
+        "lex-fmt/lex",
+        "0.19.3",
+        source_root=tmp_path,
+        gitio=FakeGit(tmp_path),
+        ghio=gh,
+        env={},
+    )
+    assert rc == 1
+    assert gh.calls == []
+    err = capsys.readouterr().err
+    assert err.startswith("error: ")
+    assert "DOWNSTREAM_DISPATCH_TOKEN" in err
+
+
+def test_cascade_error_is_a_release_error():
+    """`CascadeError` subclasses `ReleaseError`, so it is trapped by the shared
+    `KNOWN_ERRORS`/`cli_errors` shell rather than escaping as a traceback."""
+    from shipit.release import ReleaseError
+    from shipit.verbs import _errors
+
+    assert issubclass(cascade_mod.CascadeError, ReleaseError)
+    assert ReleaseError in _errors.KNOWN_ERRORS
 
 
 def test_verb_prerelease_dispatches_nothing(tmp_path):

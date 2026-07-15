@@ -22,8 +22,10 @@ Three seams, kept apart so the derivation stays a PURE, network-free core:
   ``[project.portfolio]`` and reads each repo's local ``.shipit.toml`` under
   ``source_root`` for its ``[artifact-deps]``. BOUNDED by construction: one
   local file read per declared portfolio entry, never a fleet crawl or a
-  per-release remote index build (ADR-0067's "keep it bounded" risk). A repo
-  with no ``.shipit.toml`` / no ``[artifact-deps]`` contributes nothing.
+  per-release remote index build (ADR-0067's "keep it bounded" risk). A
+  checked-out repo with no ``.shipit.toml`` / no ``[artifact-deps]`` contributes
+  nothing; a declared checkout that is ABSENT under ``source_root`` raises rather
+  than silently reading as "no pins" (absence is proven, never assumed).
 - **dispatch** (:func:`dispatch_targets`) — fires one ``repository_dispatch``
   per derived target through the gh/Exec seam (``ghio.repository_dispatch``),
   carrying the epic's shared payload contract EXACTLY:
@@ -54,6 +56,7 @@ from pathlib import Path
 
 from .. import config, fleetsweep, gh, identity
 from ..config import ArtifactDep
+from . import ReleaseError
 
 #: The ``repository_dispatch`` event type the Cascade fires — the epic's shared
 #: contract with the receiver (ARF01-WS07 #956). It reuses the ``notify-downstreams``
@@ -80,9 +83,16 @@ SKIP_PRERELEASE = (
 )
 
 
-class CascadeError(RuntimeError):
+class CascadeError(ReleaseError):
     """A Cascade fan-out cannot be computed or dispatched (a malformed upstream
-    slug, or a required dispatch token that is absent)."""
+    slug, a portfolio checkout that is declared but absent, or a required
+    dispatch token that is absent).
+
+    A subclass of :class:`shipit.release.ReleaseError` so it rides the shared
+    ``@cli_errors`` shell (:data:`shipit.verbs._errors.KNOWN_ERRORS`): a live
+    refusal — a missing ``DOWNSTREAM_DISPATCH_TOKEN``, a malformed slug — exits 1
+    with one ``error: …`` line, never an uncaught traceback.
+    """
 
 
 @dataclass(frozen=True)
@@ -137,18 +147,21 @@ class CascadeReport:
         }
 
 
-def _canonical(slug: str) -> str:
+def _canonical(slug: str, *, context: str = "") -> str:
     """The canonical (lowercased ``owner/name``) form of a slug, or raise.
 
     The ONE normalization the rest of the CLI uses (:func:`identity.repo_from_slug`),
     so a case-only difference between an ``[artifact-deps].repo`` and the releasing
     upstream still matches, and a malformed slug is refused loudly rather than
-    silently failing to match.
+    silently failing to match. ``context`` names WHERE a bad slug came from (which
+    consumer's which ``[artifact-deps]`` section) so a malformed portfolio pin is
+    locatable, not just an anonymous bad string.
     """
     try:
         return identity.repo_from_slug(slug).slug
     except ValueError as exc:
-        raise CascadeError(f"invalid repo slug {slug!r}: {exc}") from exc
+        where = f" ({context})" if context else ""
+        raise CascadeError(f"invalid repo slug {slug!r}{where}: {exc}") from exc
 
 
 def derive_targets(
@@ -169,10 +182,17 @@ def derive_targets(
     up = _canonical(upstream)
     targets: list[CascadeTarget] = []
     for consumer_slug, deps in consumers:
-        consumer = _canonical(consumer_slug)
+        consumer = _canonical(consumer_slug, context="portfolio entry")
         if consumer == up:
             continue
-        matched = tuple(dep.package for dep in deps if _canonical(dep.repo) == up)
+        matched = tuple(
+            dep.package
+            for dep in deps
+            if _canonical(
+                dep.repo, context=f"[artifact-deps.{dep.package}] in {consumer}"
+            )
+            == up
+        )
         if matched:
             targets.append(CascadeTarget(repo=consumer, packages=matched))
     return tuple(targets)
@@ -188,16 +208,32 @@ def scan_portfolio(
     then reads each entry's local ``.shipit.toml`` at ``<source_root>/<path>``
     and parses its ``[artifact-deps]``. One local file read per declared entry —
     no fleet crawl, no per-release remote index build (ADR-0067's "keep it
-    bounded" risk). A missing ``.shipit.toml`` or an empty/absent
-    ``[artifact-deps]`` contributes an empty dep tuple, so the repo simply never
-    becomes a target; a MALFORMED config still raises (a broken portfolio member
-    is loud, never a silent skip). ``source_root`` is user-expanded (``~/h`` by
-    default, the fleetsweep source layout).
+    bounded" risk).
+
+    Absence is PROVEN, never assumed: a declared portfolio checkout that is not
+    present under ``source_root`` RAISES :class:`CascadeError` naming the missing
+    path — an incomplete ``--source-root`` must never silently masquerade as "no
+    consumer pins this upstream" and make a stable release miss its downstreams
+    (a derived fan-out is only as trustworthy as the declarations it can read).
+    Only an EXISTING checkout with no ``.shipit.toml`` (or one with an empty/absent
+    ``[artifact-deps]``) contributes an empty dep tuple — a repo that is checked
+    out but declares no pins is a supported state, never a target. A MALFORMED
+    config still raises (a broken portfolio member is loud, never a silent skip).
+    ``source_root`` is user-expanded (``~/h`` by default, the fleetsweep source
+    layout).
     """
     root = Path(source_root).expanduser()
     scanned: list[tuple[str, tuple[ArtifactDep, ...]]] = []
     for entry in fleetsweep.load_portfolio(cfg):
-        toml_path = root / entry.path / config.CONFIG_NAME
+        checkout = root / entry.path
+        if not checkout.is_dir():
+            raise CascadeError(
+                f"declared portfolio checkout for {entry.repo!r} is absent at "
+                f"{checkout} — a derived fan-out must PROVE absence from a "
+                f"readable checkout, never infer it from a missing directory; "
+                f"provision the checkout under --source-root or fix the portfolio"
+            )
+        toml_path = checkout / config.CONFIG_NAME
         if not toml_path.is_file():
             scanned.append((entry.repo, ()))
             continue
