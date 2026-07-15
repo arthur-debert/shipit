@@ -174,6 +174,7 @@ apply to the current target) is ``shipit release bundle``
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -1006,13 +1007,59 @@ def _staged_dest(leg_dir: Path, dest: str, *, windows: bool) -> Path:
     return leg_dir / dest
 
 
-def _stage_vsix_natives(req: ComposeRequest, leg_dir: Path, staged: list[Path]) -> None:
+def _dirs_staging_will_create(leg_dir: Path, parent: Path) -> list[Path]:
+    """The ancestor dirs of ``parent`` — under ``leg_dir`` (exclusive) — that do
+    NOT yet exist, deepest-first: exactly the dirs ``mkdir(parents=True)`` will
+    create for a stage copy, so cleanup can remove only those it created (never a
+    pre-existing/tracked dir). Pure (an ``exists`` probe only). ``leg_dir`` itself
+    is never included — it is the extension package root ``vsce`` reads, assumed
+    present (a repo with no extension dir fails the pack regardless)."""
+    to_create: list[Path] = []
+    current = parent
+    while current != leg_dir and leg_dir in current.parents and not current.exists():
+        to_create.append(current)
+        current = current.parent
+    return to_create
+
+
+def _unstage_vsix_natives(staged: list[Path], created_dirs: list[Path]) -> None:
+    """Undo staging: remove every staged binary, then every dir staging created
+    (deepest-first, only if now empty). Leaves the extension source tree EXACTLY
+    as staging found it — no per-target binary and no empty ``resources/``
+    lingering across repeated composes.
+
+    Only paths STAGING recorded are touched (files it copied, dirs that did not
+    exist before it ran), so a pre-existing/tracked file or dir is never removed.
+    ``rmdir`` removes an empty dir and refuses a non-empty one (``OSError`` — a
+    dir still holding other content, or already gone), which is swallowed: cleanup
+    is best-effort and must never mask the original failure in a ``finally``."""
+    for path in staged:
+        path.unlink(missing_ok=True)
+    # Deepest-first GLOBALLY (across all entries) so a nested `a/b` is emptied
+    # before its parent `a` is tried — a per-entry order alone would strand `a`.
+    for directory in sorted(
+        set(created_dirs), key=lambda p: len(p.parts), reverse=True
+    ):
+        try:
+            directory.rmdir()
+        except OSError:
+            pass  # non-empty (holds other content) or already gone — leave it
+
+
+def _stage_vsix_natives(
+    req: ComposeRequest,
+    leg_dir: Path,
+    staged: list[Path],
+    created_dirs: list[Path],
+) -> None:
     """Copy each declared ``bundle.stage`` native binary into the extension
     layout BEFORE ``vsce package`` (TOL03-WS03 #974) — the Artifact-channel
     staging that turns a hollow ``.vsix`` into a real extension. APPENDS each
-    copied destination to ``staged`` (a caller-owned accumulator) as it goes, so
-    the caller's ``finally`` cleans up even a PARTIAL stage if a later entry
-    raises — the copies are transient build inputs, never left in the source tree.
+    destination to ``staged`` and each freshly-created parent dir to
+    ``created_dirs`` (caller-owned accumulators) AS it goes, so the caller's
+    ``finally`` (:func:`_unstage_vsix_natives`) cleans up even a PARTIAL stage —
+    a later entry raising, or ``copy2`` dying mid-write — the copies + dirs are
+    transient build inputs, never left in the source tree.
 
     For each ``(package, dest)`` the vsix artifact declares
     (:attr:`shipit.config.BundleSpec.stage`), the ``package`` is resolved against
@@ -1027,11 +1074,15 @@ def _stage_vsix_natives(req: ComposeRequest, leg_dir: Path, staged: list[Path]) 
     ``<leg_dir>/<dest>`` (``.exe``-suffixed on windows, executable bit preserved),
     inside the extension package so ``vsce package`` includes it.
 
-    The destination MUST NOT already exist: staging targets a FRESH path so the
-    copy never clobbers tracked/checked-in content, and — decisively — so the
-    caller's cleanup only ever removes files STAGING created, never a committed
-    resource (a pre-existing file, or a directory the copy would land a child
-    under). A collision is a loud config error, not a silent overwrite.
+    The destination MUST NOT already exist AND must resolve inside ``leg_dir``:
+    staging targets a FRESH path so the copy never clobbers tracked/checked-in
+    content, and — decisively — so cleanup only ever removes files STAGING created.
+    ``os.path.lexists`` (not ``Path.exists``) is the collision probe so a DANGLING
+    symlink at the dest is caught too (``exists`` follows it and reads False),
+    and the resolved dest is verified under ``leg_dir`` so a SYMLINKED PARENT
+    (a committed ``resources`` → ``/outside``) cannot steer the copy through it to
+    mutate content beyond the tree. Either is a loud config error, not a silent
+    overwrite/escape.
 
     This is a COPY off the already-materialized env, never a fetch: if the binary
     is absent, the composition hard-fails pointing at ``shipit install`` and the
@@ -1045,6 +1096,7 @@ def _stage_vsix_natives(req: ComposeRequest, leg_dir: Path, staged: list[Path]) 
     if not stage:
         return
     windows = _is_windows(req.target)
+    leg_root = leg_dir.resolve()
     deps = {dep.package: dep for dep in req.artifact_deps}
     for package, dest in stage:
         dep = deps.get(package)
@@ -1067,22 +1119,35 @@ def _stage_vsix_natives(req: ComposeRequest, leg_dir: Path, staged: list[Path]) 
                 f"never fetches it"
             )
         dst = _staged_dest(leg_dir, dest, windows=windows)
-        if dst.exists():
+        # lexists (not exists) so a DANGLING symlink is also a collision.
+        if os.path.lexists(dst):
             raise ReleaseError(
                 f"[artifacts.{req.artifact.name}] vsix stage: destination {dst} "
                 f"already exists — `bundle.stage` must target a FRESH path the "
                 f"extension does not commit (staging overwrites nothing tracked, "
                 f"and cleanup then removes only what staging created). Point "
-                f"`{package}` at a build-only path, not a checked-in file/dir"
+                f"`{package}` at a build-only path, not a checked-in file/dir/link"
             )
+        # A symlinked PARENT (e.g. committed `resources` → outside) would let the
+        # copy write beyond the leg dir; the resolved dest must stay under it.
+        if not dst.resolve().is_relative_to(leg_root):
+            raise ReleaseError(
+                f"[artifacts.{req.artifact.name}] vsix stage: destination {dst} "
+                f"resolves outside the extension leg dir ({leg_root}) — a "
+                f"symlinked parent must not steer staging beyond the tree; point "
+                f"`{package}` at a real path inside the extension"
+            )
+        # Record the dirs we are about to create + the dest BEFORE the copy, so a
+        # copy2 that dies mid-write (full disk / I/O) still leaves the partial
+        # file and its fresh dirs recorded for the caller's cleanup.
+        created_dirs.extend(_dirs_staging_will_create(leg_dir, dst.parent))
         dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, dst)
-        # Record the copy IMMEDIATELY so a later entry's failure still cleans this
-        # one up. Then keep the exec bit: the LSP the extension spawns must stay
-        # runnable (copy2 preserves mode, but a channel binary staged read-only
-        # would ship a non-executable LSP — make the intent explicit); a no-op on
-        # windows, where the `.exe` suffix (not a mode bit) is what runs.
         staged.append(dst)
+        shutil.copy2(src, dst)
+        # Keep the exec bit: the LSP the extension spawns must stay runnable
+        # (copy2 preserves mode, but a channel binary staged read-only would ship
+        # a non-executable LSP — make the intent explicit); a no-op on windows,
+        # where the `.exe` suffix (not a mode bit) is what runs.
         dst.chmod(dst.stat().st_mode | 0o755)
 
 
@@ -1103,14 +1168,16 @@ def _compose_vsix(req: ComposeRequest) -> Composed:
     the Artifact channel materialized it into (``[artifact-deps]`` conda packages,
     TOL03-WS03 #974) — so the ``.vsix`` ships a real extension, not a hollow one.
     The staged binaries are TRANSIENT build inputs: ``vsce`` copies them into the
-    ``.vsix`` zip, then this function removes them from the extension source tree
-    (a ``finally``, so a failing pack cleans up too) — the composition leaves only
-    its declared ``.vsix`` under ``out_dir``, never a stray per-target binary
-    (a unix build and a win ``.exe`` accumulating in the shared leg dir). Staging
-    AND the ``out_dir`` prep run INSIDE the guarded block, so anything that can
-    raise after the first copy (a mid-stage failure, an ``out_dir`` mkdir/unlink
-    error) still triggers cleanup — the ``finally`` removes exactly the paths
-    staging recorded, never a pre-existing file (staging refuses a collision).
+    ``.vsix`` zip, then this function removes them — AND any dirs staging created
+    (e.g. a fresh ``resources/``) — from the extension source tree
+    (:func:`_unstage_vsix_natives`, a ``finally`` so a failing pack cleans up too),
+    leaving only its declared ``.vsix`` under ``out_dir`` and the leg dir exactly
+    as found (no per-target binary or empty dir accumulating across composes).
+    Staging AND the ``out_dir`` prep run INSIDE the guarded block, so anything
+    that can raise after the first copy (a mid-stage failure, a ``copy2`` dying
+    mid-write, an ``out_dir`` mkdir/unlink error) still triggers cleanup — which
+    removes exactly the paths+dirs staging recorded, never a pre-existing entry
+    (staging refuses a collision or a symlinked-parent escape).
     A run that leaves no ``.vsix`` is a hard failure, never a quiet pass (the
     legacy ``vscode-ext.yml@v3`` per-target contract).
     """
@@ -1120,8 +1187,9 @@ def _compose_vsix(req: ComposeRequest) -> Composed:
     out_name = f"{req.artifact.name}-{vt}.vsix"
     out_path = req.out_dir / out_name
     staged: list[Path] = []
+    created_dirs: list[Path] = []
     try:
-        _stage_vsix_natives(req, leg_dir, staged)
+        _stage_vsix_natives(req, leg_dir, staged, created_dirs)
         req.out_dir.mkdir(parents=True, exist_ok=True)
         if out_path.exists():
             out_path.unlink()
@@ -1146,12 +1214,7 @@ def _compose_vsix(req: ComposeRequest) -> Composed:
                 f"fail, never a quiet pass (legacy vscode-ext per-target contract)"
             )
     finally:
-        # The staged natives are transient inputs vsce already copied into the
-        # .vsix — remove exactly what staging recorded (only ever files it
-        # created, since staging refuses a pre-existing dest) so the extension
-        # source tree is left as we found it, success or not.
-        for path in staged:
-            path.unlink(missing_ok=True)
+        _unstage_vsix_natives(staged, created_dirs)
     return Composed(req.artifact.name, "vsix", (out_name,))
 
 

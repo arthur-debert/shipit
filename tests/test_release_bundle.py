@@ -1879,6 +1879,153 @@ def test_vsix_stage_refuses_a_pre_existing_destination(tmp_path, kind):
         assert tracked.is_dir()
 
 
+def _vsix_stage_artifact():
+    (artifact,) = _artifacts(
+        {
+            "ext": {
+                "build": ["npm"],
+                "bundle": {
+                    "composition": "vsix",
+                    "stage": {"lexd-lsp": "resources/lexd-lsp"},
+                },
+            }
+        }
+    )
+    return artifact
+
+
+def test_vsix_stage_refuses_a_dangling_symlink_dest(tmp_path):
+    # A broken symlink at the dest reads False under `Path.exists` but staging
+    # must still refuse it (`os.path.lexists`), or a copy would write THROUGH the
+    # link and mutate its (possibly tracked) target. The dangling link is left
+    # untouched — never followed, never removed.
+    artifact = _vsix_stage_artifact()
+    entries = _entries({"editors/vscode": "npm"})
+    dep = _dep("lexd-lsp")
+    _materialize_dep_bin(tmp_path, dep)
+    dst = tmp_path / "editors/vscode" / "resources/lexd-lsp"
+    dst.parent.mkdir(parents=True)
+    dst.symlink_to(tmp_path / "does-not-exist")  # dangling — Path.exists() is False
+    assert not dst.exists() and dst.is_symlink()
+    recorder = RunRecorder({"npm": _vsce_writes_out})
+    with pytest.raises(ReleaseError, match="already exists"):
+        bundle_mod.VSIX.compose(
+            _request(
+                tmp_path,
+                artifact,
+                entries,
+                target=MAC,
+                run_cmd=recorder,
+                artifact_deps=(dep,),
+            )
+        )
+    assert recorder.calls == []
+    assert dst.is_symlink()  # the dangling link is left exactly as found
+
+
+def test_vsix_stage_refuses_a_symlinked_parent_escape(tmp_path):
+    # A committed parent symlink (`resources` -> outside the tree) must not steer
+    # the copy through it: the resolved dest is verified inside the leg dir, so
+    # staging refuses and writes NOTHING outside the extension.
+    artifact = _vsix_stage_artifact()
+    entries = _entries({"editors/vscode": "npm"})
+    dep = _dep("lexd-lsp")
+    _materialize_dep_bin(tmp_path, dep)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    leg_dir = tmp_path / "editors/vscode"
+    leg_dir.mkdir(parents=True)
+    (leg_dir / "resources").symlink_to(outside)  # resources -> /outside
+    recorder = RunRecorder({"npm": _vsce_writes_out})
+    with pytest.raises(ReleaseError, match="resolves outside"):
+        bundle_mod.VSIX.compose(
+            _request(
+                tmp_path,
+                artifact,
+                entries,
+                target=MAC,
+                run_cmd=recorder,
+                artifact_deps=(dep,),
+            )
+        )
+    assert recorder.calls == []
+    assert not (outside / "lexd-lsp").exists()  # nothing written beyond the tree
+    assert (leg_dir / "resources").is_symlink()  # the parent link is untouched
+
+
+def test_vsix_stage_cleans_up_a_partial_copy_that_dies_mid_write(tmp_path, monkeypatch):
+    # If `copy2` fails mid-write (full disk / I/O), the partial file — and the
+    # fresh dir it landed in — must still be cleaned up: the dest is recorded
+    # BEFORE the copy, so the caller's `finally` removes it.
+    artifact = _vsix_stage_artifact()
+    entries = _entries({"editors/vscode": "npm"})
+    dep = _dep("lexd-lsp")
+    _materialize_dep_bin(tmp_path, dep)
+    leg_dir = tmp_path / "editors/vscode"
+    leg_dir.mkdir(parents=True)
+    staged = leg_dir / "resources/lexd-lsp"
+
+    def _copy2_dies(src, dst):
+        Path(dst).write_bytes(b"PARTIAL")  # a half-written file left on disk
+        raise OSError("disk full")
+
+    monkeypatch.setattr(bundle_mod.shutil, "copy2", _copy2_dies)
+    recorder = RunRecorder({"npm": _vsce_writes_out})
+    with pytest.raises(OSError, match="disk full"):
+        bundle_mod.VSIX.compose(
+            _request(
+                tmp_path,
+                artifact,
+                entries,
+                target=MAC,
+                run_cmd=recorder,
+                artifact_deps=(dep,),
+            )
+        )
+    assert recorder.calls == []  # never reached packaging
+    assert not staged.exists()  # partial file cleaned up
+    assert not (leg_dir / "resources").exists()  # fresh dir cleaned up too
+
+
+def test_vsix_stage_leaves_no_empty_dir_behind(tmp_path):
+    # Cleanup removes not just the staged binary but any dir staging created
+    # (deepest-first), so a fresh `resources/nested/` does not dirty the tree
+    # across repeated composes — the leg dir is left exactly as found.
+    (artifact,) = _artifacts(
+        {
+            "ext": {
+                "build": ["npm"],
+                "bundle": {
+                    "composition": "vsix",
+                    "stage": {"lexd-lsp": "resources/nested/lexd-lsp"},
+                },
+            }
+        }
+    )
+    entries = _entries({"editors/vscode": "npm"})
+    dep = _dep("lexd-lsp")
+    _materialize_dep_bin(tmp_path, dep)
+    leg_dir = tmp_path / "editors/vscode"
+    leg_dir.mkdir(parents=True)
+    (leg_dir / "package.json").write_text("{}")  # pre-existing tracked content
+    recorder = RunRecorder({"npm": _vsce_writes_out})
+
+    composed = bundle_mod.VSIX.compose(
+        _request(
+            tmp_path,
+            artifact,
+            entries,
+            target=MAC,
+            run_cmd=recorder,
+            artifact_deps=(dep,),
+        )
+    )
+    assert composed.outputs == ("ext-darwin-arm64.vsix",)
+    # The whole fresh subtree staging created is gone; tracked content untouched.
+    assert not (leg_dir / "resources").exists()
+    assert [p.name for p in leg_dir.iterdir()] == ["package.json"]
+
+
 def test_vsix_without_a_stage_map_stages_nothing(tmp_path):
     # The base per-platform vsix (no `stage`) is unchanged: no copy, just the
     # single `vsce package` — the pre-#974 contract still holds.
