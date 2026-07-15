@@ -78,9 +78,27 @@ def _git(
     *,
     cwd: str | None = None,
     timeout: float | None = _LOCAL_TIMEOUT,
+    env: dict[str, str] | None = None,
 ) -> str:
-    """Run ``git`` through the Exec runner, returning stdout; raises :class:`ExecError`."""
-    return execrun.run(_argv(args, cwd), timeout=timeout).stdout
+    """Run ``git`` through the Exec runner, returning stdout; raises :class:`ExecError`.
+
+    ``env`` (when given) is MERGED over the child's inherited environment by the
+    runner — the isolated-index staging (:func:`read_tree` + the ``index_file=``
+    adapters) uses it to bind ``GIT_INDEX_FILE`` for one git call without
+    touching the caller's real index.
+    """
+    return execrun.run(_argv(args, cwd), timeout=timeout, env=env).stdout
+
+
+def _index_env(index_file: str | None) -> dict[str, str] | None:
+    """``{"GIT_INDEX_FILE": index_file}`` when set, else ``None``.
+
+    The one place the isolated-index binding is assembled: an ``index_file``
+    routes a staging/commit git call at a SCRATCH index file instead of the
+    checkout's ``.git/index``, so install's MODE_PR reconcile can build and
+    publish a base+managed tree without mutating (or leaking) the caller's real
+    index (#992)."""
+    return {"GIT_INDEX_FILE": index_file} if index_file is not None else None
 
 
 def _probe(
@@ -735,19 +753,41 @@ def switch(branch: str, *, cwd: str) -> None:
     _git(["switch", branch], cwd=cwd)
 
 
-def add(paths: list[str], *, cwd: str) -> None:
+def read_tree(ref: str, *, cwd: str, index_file: str) -> None:
+    """``git read-tree <ref>`` into the SCRATCH index at ``index_file``.
+
+    Seeds an ISOLATED index (bound via ``GIT_INDEX_FILE``, :func:`_index_env`)
+    with ``ref``'s tree, leaving the checkout's real ``.git/index`` and the
+    working tree untouched. install's MODE_PR reconcile builds its whole-index
+    reconcile commit on top of this scratch index (#992): after
+    ``reset --soft origin/<base>`` the real index still points at the caller's
+    branch tip (``reset --soft`` moves ONLY HEAD), so publishing the real index
+    with :func:`commit_all` would squash the caller's local commits and staged
+    changes into the PR. Reading ``origin/<base>`` into a scratch index instead,
+    then staging ONLY the managed writes (:func:`add`) and retired-path deletions
+    (:func:`rm_cached`) into it, makes the committed tree exactly ``base`` +
+    the managed delta — the caller's real index is never read and never mutated.
+    """
+    _git(["read-tree", ref], cwd=cwd, env=_index_env(index_file))
+
+
+def add(paths: list[str], *, cwd: str, index_file: str | None = None) -> None:
     """``git add -f -- <paths>`` — stage ONLY these pathspecs, never ``-A``.
 
     ``-f`` because the managed paths are shipit-owned and must be tracked even if
     a consumer ``.gitignore`` happens to cover one (plain ``git add`` errors on an
     ignored path).
+
+    ``index_file`` routes the staging at the isolated scratch index (:func:`read_tree`,
+    MODE_PR #992) instead of the checkout's real index; omitted, it stages into
+    ``.git/index`` as usual.
     """
     if not paths:
         return
-    _git(["add", "-f", "--", *paths], cwd=cwd)
+    _git(["add", "-f", "--", *paths], cwd=cwd, env=_index_env(index_file))
 
 
-def rm_cached(paths: list[str], *, cwd: str) -> None:
+def rm_cached(paths: list[str], *, cwd: str, index_file: str | None = None) -> None:
     """``git rm --cached --ignore-unmatch -- <paths>`` — stage the removal of
     these pathspecs from the INDEX only, never the working tree.
 
@@ -762,10 +802,18 @@ def rm_cached(paths: list[str], *, cwd: str) -> None:
     preserved on disk), and ``--ignore-unmatch`` makes an already-untracked or
     already-absent pathspec a no-op (exit 0) rather than the fatal ``pathspec
     ... did not match any files`` (exit 128) that would abort PR generation.
+
+    ``index_file`` routes the removal at the isolated scratch index (:func:`read_tree`,
+    MODE_PR #992) instead of the checkout's real index; omitted, it stages into
+    ``.git/index`` as usual.
     """
     if not paths:
         return
-    _git(["rm", "--cached", "--ignore-unmatch", "--", *paths], cwd=cwd)
+    _git(
+        ["rm", "--cached", "--ignore-unmatch", "--", *paths],
+        cwd=cwd,
+        env=_index_env(index_file),
+    )
 
 
 def add_all(*, cwd: str) -> None:
@@ -779,19 +827,39 @@ def add_all(*, cwd: str) -> None:
     _git(["add", "-A"], cwd=cwd)
 
 
-def commit_all(message: str, *, cwd: str, no_verify: bool = False) -> None:
+def commit_all(
+    message: str, *, cwd: str, no_verify: bool = False, index_file: str | None = None
+) -> None:
     """``git commit -m <message>`` — commit everything already staged.
 
-    The whole-tree counterpart of :func:`commit` (which scopes to pathspecs):
-    ``shipit repo new`` stages the whole Repo with :func:`add_all` and commits
-    it as one root ``Initial commit``. ``no_verify`` is left at its default
-    ``False`` by creation so the installed hooks run on that commit exactly as
-    they would for any consumer (ADR-0062).
+    The whole-INDEX counterpart of :func:`commit` (which scopes to pathspecs).
+    Two callers:
+
+    - ``shipit repo new`` stages the whole Repo with :func:`add_all` and commits
+      it as one root ``Initial commit``. ``no_verify`` is left at its default
+      ``False`` by creation so the installed hooks run on that commit exactly as
+      they would for any consumer (ADR-0062).
+    - install's MODE_PR reconcile (#991) publishes an ISOLATED scratch index
+      (``index_file``, #992): :func:`read_tree` seeds it from ``origin/<base>``,
+      then ONLY the managed paths are staged into it — the writes via :func:`add`,
+      the retired-path deletions via :func:`rm_cached` (an INDEX-only
+      ``git rm --cached``) — and this commits that scratch index as-is with
+      ``no_verify=True`` (ADR-0033, like :func:`commit`). A scratch index rather
+      than the checkout's real ``.git/index``, because ``reset --soft
+      origin/<base>`` moves ONLY HEAD and leaves the real index pointing at the
+      caller's branch tip — publishing it would squash the caller's local commits
+      and staged changes into the PR (#992). It MUST be this whole-index commit,
+      never a pathspec :func:`commit`: a pathspec commit runs git's PARTIAL-commit
+      mode, which rebuilds the tree from the WORKING TREE of the named paths and
+      DISREGARDS the index — silently negating the ``rm --cached`` deletions and
+      resurrecting every retired file whose working-tree copy survives. An
+      unrelated dirty consumer file is excluded because it is never staged into
+      the scratch index.
     """
     args = ["commit"]
     if no_verify:
         args.append("--no-verify")
-    _git([*args, "-m", message], cwd=cwd)
+    _git([*args, "-m", message], cwd=cwd, env=_index_env(index_file))
 
 
 def clean_non_committed(*, cwd: str) -> None:
@@ -889,10 +957,18 @@ def commit(
 ) -> None:
     """``git commit -m <message> -- <paths>`` — commit only the given pathspecs.
 
+    This is git's PARTIAL-commit mode: it builds the tree from the WORKING TREE
+    of the named paths and DISREGARDS the index, so it can only publish WRITES,
+    never an index-staged deletion (:func:`rm_cached`) — install's MODE_PR
+    reconcile therefore publishes via the whole-index :func:`commit_all` instead
+    (#991). This pathspec form serves install's MODE_LOCAL/MODE_PUSH commits,
+    which stage and commit the write set (``changed_paths``) with no index-only
+    deletions to honor.
+
     ``no_verify`` bypasses the repo's commit hooks (``--no-verify``): install's
-    reconcile commit uses it deliberately (ADR-0033) — the whole-tree gate is
-    the REPO'S bar, not install's, and a consumer's pre-existing lint debt must
-    never deadlock the very install that delivers the env to clear it.
+    commit uses it deliberately (ADR-0033) — the whole-tree gate is the REPO'S
+    bar, not install's, and a consumer's pre-existing lint debt must never
+    deadlock the very install that delivers the env to clear it.
     """
     args = ["commit"]
     if no_verify:
@@ -900,25 +976,28 @@ def commit(
     _git([*args, "-m", message, "--", *paths], cwd=cwd)
 
 
-def staged_paths(paths: list[str], *, cwd: str) -> list[str]:
+def staged_paths(
+    paths: list[str], *, cwd: str, index_file: str | None = None
+) -> list[str]:
     """The subset of ``paths`` that carry a staged diff against HEAD.
 
     ``git diff --cached --name-only -- <paths>`` — the pathspec-scoped index
     diff, parsed to the changed names (the adapter owns output parsing, like
-    :func:`diff_name_only`). The MODE_PR staging flow reads this AFTER
-    ``reset --soft`` + ``git add`` + :func:`rm_cached` (#984/#986 review) to
-    build the pathspec :func:`commit` carries: the writes :func:`add` just staged
-    PLUS the retired-path deletions :func:`rm_cached` staged from the index for
-    paths the base still carries. A pathspec that
-    matches nothing in the working tree, the index AND HEAD is simply never
-    listed (``git diff`` skips it, exit 0), so the commit never receives a
-    pathspec it would abort on — unlike ``git add``/``git commit``, which fail
-    on a pathspec that matches nothing.
+    :func:`diff_name_only`). The MODE_PR staging flow reads this over the ISOLATED
+    scratch index (``index_file``, #992) AFTER :func:`read_tree` +
+    ``git add`` + :func:`rm_cached` (#984/#986 review) as the "nothing to publish"
+    NO-OP GUARD (#991) — NOT as a commit pathspec: the reconcile itself is
+    published by the whole-index :func:`commit_all`, so this read exists only to
+    answer whether ANY managed path (the writes :func:`add` just staged PLUS the
+    retired-path deletions :func:`rm_cached` staged into the scratch index)
+    carries a staged diff against the base. A path that matches nothing in
+    the working tree, the index AND HEAD is simply never listed (``git diff``
+    skips it, exit 0).
 
     An empty return means the named set already matches HEAD — the MODE_PR
     "nothing to publish" case (the staging branch is a stale Tree duplicating an
-    already-merged reconcile), where a pathspec :func:`commit` over an empty
-    diff would otherwise crash with "nothing to commit". A genuine git failure
+    already-merged reconcile), where a whole-index :func:`commit_all` over an
+    empty diff would otherwise crash with "nothing to commit". A genuine git failure
     (bad pathspec magic, unreadable index) still surfaces as the transport
     :class:`ExecError`: ``--name-only`` signals a real error through a nonzero
     exit, not through the diff-present rc=1 that ``--quiet`` overloads, so
@@ -927,7 +1006,11 @@ def staged_paths(paths: list[str], *, cwd: str) -> list[str]:
     unscoped ``git diff --cached`` answering for the whole index)."""
     if not paths:
         return []
-    out = _git(["diff", "--cached", "--name-only", "--", *paths], cwd=cwd)
+    out = _git(
+        ["diff", "--cached", "--name-only", "--", *paths],
+        cwd=cwd,
+        env=_index_env(index_file),
+    )
     return [line for line in out.splitlines() if line.strip()]
 
 
@@ -936,10 +1019,13 @@ def reset_index(*, cwd: str) -> None:
 
     HEAD and the working tree are untouched; only the index moves back. The
     MODE_PR caller-restore uses it when the operator STARTED on the
-    ``shipit/install`` scratch branch (#852 review): the flow's
-    ``reset --soft origin/<default>`` staged the pre-reset..base diff into the
-    index, and with no other branch to switch back to, unstaging is how the
-    operator is returned to a clean index rather than a heavily-polluted one."""
+    ``shipit/install`` scratch branch (#852 review): the reconcile commit is
+    built on an ISOLATED scratch index (#992), so the operator's real index is
+    left at its soft-reset state (their pre-reset branch tip, which now shows as
+    a staged diff against the freshly-published install HEAD). With no other
+    branch to switch back to, rewinding the index to HEAD is how the operator is
+    returned to a clean index on the published branch rather than a heavily-staged
+    one."""
     _git(["reset"], cwd=cwd)
 
 
@@ -1264,9 +1350,12 @@ def reset_soft(ref: str, *, cwd: str) -> None:
     ``origin/<default>`` so the managed commit lands as ONE clean refresh on top
     of the current default branch, no matter what HEAD the Tree was cut from.
     ``--soft`` moves only the branch pointer — the rendered managed files stay in
-    the working tree — so the following pathspec commit (which takes the listed
-    paths from the working tree and everything else from HEAD) produces
-    ``origin/<default>`` + the managed delta, never a stack on stale commits.
+    the working tree — so the reconcile commit's PARENT is ``origin/<default>``
+    and its tree, built from the isolated scratch index (:func:`read_tree` +
+    :func:`commit_all`, #992), is ``origin/<default>`` + the managed delta, never
+    a stack on stale commits. The real index is deliberately LEFT pointing at the
+    caller's branch tip — the scratch index, not this one, is what gets published,
+    so the caller's staged state survives the flow untouched (#992).
     """
     _git(["reset", "--soft", ref], cwd=cwd)
 

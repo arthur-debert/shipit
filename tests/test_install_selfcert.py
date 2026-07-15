@@ -78,26 +78,41 @@ class _GhRecorder:
         # #852: reset shipit/install onto origin/<default> before the commit.
         self.calls.append(("reset", ref))
 
-    def add(self, paths, *, cwd):
+    def read_tree(self, ref, *, cwd, index_file):
+        # The MODE_PR isolated-index seed (#992): origin/<default> into a scratch
+        # index so the reconcile commit never publishes the caller's real index.
+        self.calls.append(("read_tree", ref))
+
+    def add(self, paths, *, cwd, index_file=None):
         self.calls.append(("add", tuple(paths)))
 
-    def rm_cached(self, paths, *, cwd):
+    def rm_cached(self, paths, *, cwd, index_file=None):
         # The MODE_PR retired-removal staging (#986 review): retired paths are
-        # purged from the index, never handed to `git add`.
+        # purged from the scratch index (#992), never handed to `git add`.
         self.calls.append(("rm_cached", tuple(paths)))
 
-    def staged_paths(self, paths, *, cwd):
-        # The MODE_PR commit pathspec (#984 review); a pure query, not recorded.
-        # Returns the whole queried set (everything staged) so the commit
-        # proceeds.
+    def staged_paths(self, paths, *, cwd, index_file=None):
+        # The MODE_PR no-op guard (#991) over the scratch index (#992); a pure
+        # query, not recorded. Returns the whole queried set (everything staged)
+        # so the commit proceeds.
         return sorted(paths)
 
     def reset_index(self, *, cwd):
         self.calls.append(("reset_index", None))
 
     def commit(self, message, paths, *, cwd, no_verify=False):
+        # The MODE_LOCAL/MODE_PUSH pathspec commit — scoped to `changed_paths`.
         self.calls.append(("commit", message))
         self.commit_paths = tuple(paths)
+        self.commit_no_verify = no_verify
+
+    def commit_all(self, message, *, cwd, no_verify=False, index_file=None):
+        # The MODE_PR whole-INDEX reconcile commit (#991): no pathspec, so the
+        # scratch index (#992) — adds PLUS `rm --cached` deletions — is committed
+        # as-is. Recorded under the same "commit" name so ordering assertions stay
+        # uniform; a whole-index commit carries no pathspec.
+        self.calls.append(("commit", message))
+        self.commit_all_message = message
         self.commit_no_verify = no_verify
 
     def push(self, branch, *, cwd, remote="origin", force=False, no_verify=False):
@@ -124,11 +139,13 @@ def rec(monkeypatch):
     r = _GhRecorder()
     for name in (
         "switch_create",
+        "read_tree",
         "add",
         "rm_cached",
         "staged_paths",
         "reset_index",
         "commit",
+        "commit_all",
         "push",
         "current_branch",
         "default_branch",
@@ -762,6 +779,7 @@ def test_healthy_install_certifies_then_opens_the_pr(tmp_path, rec):
         "fetch",
         "switch",
         "reset",
+        "read_tree",
         "add",
         "rm_cached",
         "commit",

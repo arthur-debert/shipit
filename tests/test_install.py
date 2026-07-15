@@ -3147,11 +3147,19 @@ class _GhRecorder:
         self.pr_body = None
         self.hook_activations = []
         self.commit_paths = ()
+        self.commit_all_message = None
         self.rm_cached_paths = ()
         self.commit_no_verify = None
         self.push_no_verify = None
         self.default_branch_after_fetch = None
         self.staged_query = ()
+        # The MODE_PR isolated scratch index (#992): the path read_tree seeds and
+        # every managed staging step binds. None until the PR flow runs.
+        self.pr_index_file = None
+        self.add_index_file = None
+        self.rm_cached_index_file = None
+        self.staged_index_file = None
+        self.commit_all_index_file = None
 
     def activate_hooks(self, root):
         # Stand in for `lefthook install`: record the call, mutate nothing.
@@ -3181,16 +3189,28 @@ class _GhRecorder:
         # origin/<default> so the managed commit lands as one clean refresh.
         self.calls.append(("reset", ref))
 
+    def read_tree(self, ref, *, cwd, index_file):
+        # The MODE_PR isolated-index seed (#992): read origin/<default> into a
+        # SCRATCH index so the whole-index reconcile commit publishes base +
+        # managed only, never the caller's real index. Capture the scratch path
+        # so a test can assert the managed staging routes there, not `.git/index`.
+        self.calls.append(("read_tree", ref))
+        self.pr_index_file = index_file
+
     def switch(self, branch, *, cwd):
         # The MODE_PR caller-branch restore (#777 mode 1) — recorded under its
         # own name so a test can assert the checkout is returned to the branch
         # it started on after the PR flow.
         self.calls.append(("switch_back", branch))
 
-    def add(self, paths, *, cwd):
+    def add(self, paths, *, cwd, index_file=None):
+        # `index_file` routes the write staging at the MODE_PR scratch index
+        # (#992); capture it so a test can assert the managed writes are staged
+        # into the isolated index, not the caller's real one.
         self.calls.append(("add", tuple(paths)))
+        self.add_index_file = index_file
 
-    def rm_cached(self, paths, *, cwd):
+    def rm_cached(self, paths, *, cwd, index_file=None):
         # The MODE_PR retired-removal staging (#986 review): `git rm --cached
         # --ignore-unmatch` purges retired paths from the index so their base-side
         # deletion is published, without ever touching the working tree. Record
@@ -3198,16 +3218,19 @@ class _GhRecorder:
         # retired paths were staged for removal.
         self.calls.append(("rm_cached", tuple(paths)))
         self.rm_cached_paths = tuple(paths)
+        self.rm_cached_index_file = index_file
 
-    def staged_paths(self, paths, *, cwd):
-        # The MODE_PR commit pathspec (#984 review): the shipit-owned universe
-        # members that carry a staged diff against origin/<default>. A pure query
-        # (like current_branch/default_branch), so it is not recorded in `calls`;
-        # the queried universe is captured so a test can assert what the commit
-        # must carry. The real adapter reads the index — the recorder returns the
-        # whole queried set (everything staged) unless a test sets `_no_staged`
-        # to exercise the clean "nothing to publish" no-op.
+    def staged_paths(self, paths, *, cwd, index_file=None):
+        # The MODE_PR no-op guard (#991): the shipit-owned universe members that
+        # carry a staged diff against origin/<default> in the scratch index
+        # (#992). A pure query (like current_branch/default_branch), so it is not
+        # recorded in `calls`; the queried universe and the scratch-index path are
+        # captured so a test can assert what the commit must carry and that the
+        # guard reads the isolated index. The real adapter reads the index — the
+        # recorder returns the whole queried set (everything staged) unless a test
+        # sets `_no_staged` to exercise the clean "nothing to publish" no-op.
         self.staged_query = tuple(paths)
+        self.staged_index_file = index_file
         if getattr(self, "_no_staged", False):
             return []
         return sorted(paths)
@@ -3218,9 +3241,23 @@ class _GhRecorder:
         self.calls.append(("reset_index", None))
 
     def commit(self, message, paths, *, cwd, no_verify=False):
+        # The MODE_LOCAL/MODE_PUSH pathspec commit — scoped to `changed_paths`.
         self.calls.append(("commit", message))
         self.commit_paths = tuple(paths)
         self.commit_no_verify = no_verify
+
+    def commit_all(self, message, *, cwd, no_verify=False, index_file=None):
+        # The MODE_PR whole-INDEX reconcile commit (#991): `git commit -m …` with
+        # NO pathspec, so the staged index (the `add` writes PLUS the `rm --cached`
+        # deletions) is committed as-is — honoring the retired-path deletions a
+        # partial-commit pathspec would silently negate. Committed from the SCRATCH
+        # index (`index_file`, #992), never the caller's real one. Recorded under
+        # the same "commit" name so ordering assertions stay uniform;
+        # `commit_paths` is left unset (a whole-index commit carries no pathspec).
+        self.calls.append(("commit", message))
+        self.commit_all_message = message
+        self.commit_no_verify = no_verify
+        self.commit_all_index_file = index_file
 
     def push(self, branch, *, cwd, remote="origin", force=False, no_verify=False):
         self.calls.append(("push", branch))
@@ -3248,11 +3285,13 @@ def rec(monkeypatch):
     for name in (
         "switch_create",
         "switch",
+        "read_tree",
         "add",
         "rm_cached",
         "staged_paths",
         "reset_index",
         "commit",
+        "commit_all",
         "push",
         "current_branch",
         "default_branch",
@@ -3313,15 +3352,18 @@ def test_fresh_install_writes_set_and_opens_draft_pr(tmp_path, rec):
     # A DRAFT PR was opened; the rendered body lists the additions.
     assert ("pr_create", True) in rec.calls
     assert "### Added" in rec.pr_body
-    # Order: fetch -> branch -> reset onto origin/<default> -> add -> commit ->
-    # push -> pr -> restore the caller's branch. The fetch+reset front (#852)
-    # bases the staging branch on current origin/main so a Tree cut from a stale
-    # remote shipit/install head can never stack a conflicting commit; the
-    # switch_back (#777 mode 1) returns the checkout to where it started.
+    # Order: fetch -> branch -> reset onto origin/<default> -> seed the scratch
+    # index (read_tree, #992) -> add -> commit -> push -> pr -> restore the
+    # caller's branch. The fetch+reset front (#852) bases the staging branch on
+    # current origin/main so a Tree cut from a stale remote shipit/install head
+    # can never stack a conflicting commit; the read_tree seeds an ISOLATED index
+    # so the whole-index commit never publishes the caller's real index (#992);
+    # the switch_back (#777 mode 1) returns the checkout to where it started.
     assert rec.names() == [
         "fetch",
         "switch",
         "reset",
+        "read_tree",
         "add",
         "rm_cached",
         "commit",
@@ -3403,9 +3445,72 @@ def test_pr_mode_commits_the_full_managed_universe_including_noop_units(tmp_path
     )
 
     _apply(tmp_path, iapply.MODE_PR)
-    # ...yet the MODE_PR commit still carries it (the full managed universe), so
-    # the reset onto origin/<default> can never drop it from the PR.
-    assert noop.dest in rec.commit_paths
+    # ...yet the MODE_PR reconcile still carries it (the full managed universe),
+    # so the reset onto origin/<default> can never drop it from the PR. The
+    # whole-index commit (#991) publishes exactly what is STAGED, and every
+    # managed dest — NOOP included — is staged via `git add` (`staged_writes`),
+    # so the NOOP dest rides the commit.
+    add_paths = next(paths for name, paths in rec.calls if name == "add")
+    assert noop.dest in add_paths
+
+
+def test_pr_mode_commits_the_whole_index_not_a_worktree_pathspec(tmp_path, rec):
+    # #991: the MODE_PR reconcile publishes via a whole-INDEX commit
+    # (`git.commit_all`), NEVER a `git.commit(msg, pathspec)`. A pathspec commit
+    # runs git's PARTIAL-commit mode, which rebuilds the tree from the WORKING
+    # TREE of the named paths and DISREGARDS the index — silently negating the
+    # `git rm --cached` retired-path deletions and resurrecting every retired
+    # file whose working-tree copy survived (#921's skills-store move dropped all
+    # 11 `skills/*` deletions this way). The staged index (add writes PLUS
+    # rm --cached deletions) IS the reconcile, so it is committed as-is. The
+    # tree-level proof that this HONORS the deletion lives in the real-git
+    # `test_commit_all_publishes_index_deletions_a_pathspec_commit_would_drop`;
+    # here, assert apply's WIRING — `commit_all` ran, the pathspec `commit` did
+    # not.
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    victim = tmp_path / RETIRED_WORKFLOW_PATH
+    victim.parent.mkdir(parents=True)
+    victim.write_bytes(PRISTINE_WORKFLOW.read_bytes())
+
+    _apply(tmp_path, iapply.MODE_PR)
+
+    # The retired deletion was staged from the index…
+    assert RETIRED_WORKFLOW_PATH in rec.rm_cached_paths
+    # …and the publishing commit is the whole-index `commit_all`, no pathspec.
+    assert rec.commit_all_message == iapply.COMMIT_MESSAGE
+    assert rec.commit_paths == ()  # the pathspec `git.commit` was never called
+    assert rec.commit_no_verify is True
+
+
+def test_pr_mode_stages_and_commits_on_an_isolated_scratch_index(tmp_path, rec):
+    # #992: the whole-index reconcile MUST be built on an ISOLATED scratch index,
+    # never the checkout's real one — `reset --soft origin/<base>` leaves the real
+    # index at the caller's branch tip, so committing it would leak their local
+    # commits and staged changes into the PR (and destroy their staged state on
+    # restore). Assert the WIRING: `read_tree` seeds the scratch index and every
+    # managed staging step (add / rm_cached / staged_paths / commit_all) is bound
+    # to that SAME scratch GIT_INDEX_FILE.
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    victim = tmp_path / RETIRED_WORKFLOW_PATH
+    victim.parent.mkdir(parents=True)
+    victim.write_bytes(PRISTINE_WORKFLOW.read_bytes())
+
+    _apply(tmp_path, iapply.MODE_PR)
+
+    # A scratch index was seeded from origin/<default> BEFORE any managed staging.
+    assert ("read_tree", "origin/main") in rec.calls
+    scratch = rec.pr_index_file
+    assert scratch is not None
+    # …and every managed staging + the publishing commit routed at that same
+    # scratch index — the caller's real `.git/index` is never the target.
+    assert rec.add_index_file == scratch
+    assert rec.rm_cached_index_file == scratch
+    assert rec.staged_index_file == scratch
+    assert rec.commit_all_index_file == scratch
+    # The seed precedes the staging (read-tree, then add/rm/commit).
+    names = [c[0] for c in rec.calls]
+    assert names.index("read_tree") < names.index("add")
+    assert names.index("read_tree") < names.index("commit")
 
 
 def test_pr_mode_commit_universe_carries_retired_deletes_noops_and_the_changelog(
@@ -3648,10 +3753,10 @@ def test_pr_mode_reports_no_changes_when_the_managed_set_already_matches_base(
 ):
     # #852 review (major): after the `reset --soft origin/<default>` the staged
     # managed set can already match the base (a stale Tree duplicating an
-    # already-merged reconcile). A pathspec `git commit` over an empty diff fails
-    # with "nothing to commit" (exit 1) — so apply skips the commit/PR when
-    # `staged_paths` returns no shipit-owned diff, rather than crashing the
-    # install.
+    # already-merged reconcile). A whole-index `git commit` over an empty diff
+    # fails with "nothing to commit" (exit 1) — so apply skips the commit/PR when
+    # `staged_paths` (the no-op guard, #991) returns no shipit-owned diff, rather
+    # than crashing the install.
     rec._no_staged = True
     (tmp_path / "AGENTS.md").write_text("# Acme\n")
     result = _apply(tmp_path, iapply.MODE_PR)
@@ -4207,6 +4312,7 @@ def test_pr_mode_on_virgin_repo_with_lint_debt_reaches_the_pr_leg(tmp_path, rec)
         "fetch",
         "switch",
         "reset",
+        "read_tree",
         "add",
         "rm_cached",
         "commit",
@@ -6298,15 +6404,12 @@ def test_rerender_skipped_in_the_window_omits_the_pr_body_section(tmp_path, rec)
 
     assert "Changelog re-rendered" not in rec.pr_body
     # The phantom changelog was dropped from `changed_paths` before apply, so it
-    # never reaches `git add`. The MODE_PR commit pathspec names CHANGELOG_FILE
-    # UNCONDITIONALLY in its universe (#984 review — so a changelog DELETED since
-    # a prior run is still published as a deletion), then scopes to the members
-    # with a real staged diff via `git.staged_paths` (`git diff --cached
-    # --name-only`), which silently skips a path absent from the tree, the index
-    # AND HEAD — so an absent/untracked CHANGELOG.md is never committed. The stub
-    # `staged_paths` echoes the whole queried universe, so `rec.commit_paths`
-    # cannot show that scoping (it is covered by `test_staged_paths_*` in
-    # test_git_adapter.py); assert the stub-independent guarantee instead — the
-    # phantom path never reaches `git add`.
+    # never reaches `git add` and so is never staged into the whole-index MODE_PR
+    # commit (#991). CHANGELOG_FILE still rides the `touched` no-op-guard universe
+    # UNCONDITIONALLY (#984 review — so a changelog DELETED since a prior run is
+    # published as a staged deletion via `rm --cached`), but an absent/untracked
+    # changelog that was never (re)written is simply never staged, so the commit
+    # cannot resurrect it. Assert the stub-independent guarantee — the phantom
+    # path never reaches `git add`.
     add_paths = next(paths for name, paths in rec.calls if name == "add")
     assert chlog.CHANGELOG_FILE not in add_paths

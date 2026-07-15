@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import stat
+import tempfile
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
@@ -575,13 +576,14 @@ def _restore_caller_branch(cwd: str, original_ref: str | None) -> None:
     commit; without this the operator is silently left off their own branch.
     Best-effort and no-op when there is nothing to restore to — a detached HEAD
     (``original_ref`` is ``None``). A caller who STARTED on the scratch branch
-    has no other branch to return to, but the flow's
-    ``reset --soft origin/<default>`` left the index staged with the
-    pre-reset..base diff, so this unstages it (:func:`git.reset_index`) rather
-    than leaving the operator a heavily-polluted index (#852 review). A restore
-    that cannot run is logged, never raised: it must not mask the real apply
-    outcome (or a git/gh error already unwinding through the ``finally`` that
-    calls this).
+    has no other branch to return to; the reconcile publishes via an ISOLATED
+    scratch index (#992), so the operator's real index is left at its soft-reset
+    state (their pre-reset branch tip, now a staged diff against the published
+    install HEAD), and this rewinds it to HEAD (:func:`git.reset_index`) so they
+    land on a clean install branch rather than a heavily-staged index (#852
+    review). A restore that cannot run is logged, never raised: it must not mask
+    the real apply outcome (or a git/gh error already unwinding through the
+    ``finally`` that calls this).
     """
     if original_ref is None:
         return
@@ -1094,47 +1096,73 @@ def apply(
                 staged_writes.add(PIXI_LOCK)
             # The reconcile commit is the touched-set (#986), recorded as apply
             # mutated — no per-category universe to re-derive, no consumer-edit
-            # surface. Staging has two halves. `git add` stages the paths apply
-            # left ON DISK as writes (`staged_writes`: the managed set incl. NOOP
-            # units, the config, a re-rendered changelog, rewritten hook files,
-            # and pixi.lock). `git rm --cached` then stages the retired-path
-            # REMOVALS from the index (`retired_removals`): an index-only purge
-            # (the working tree is never touched) that publishes each retired
-            # path's absence as a staged deletion against a base that still
-            # carries it — robust where `git add` is not, since the path may be
-            # absent, untracked, or a consumer file that reappeared at it, and
+            # surface. It is a whole-INDEX commit (`commit_all`, #991) built on an
+            # ISOLATED SCRATCH INDEX (#992), never the checkout's real index: the
+            # `reset --soft origin/<base>` above moves ONLY HEAD, so the real
+            # index still points at the caller's branch tip (all their local
+            # commits ahead of base, plus anything they had staged). Publishing
+            # that real index with a whole-index commit would squash the caller's
+            # branch and staged changes into the PR — and the `finally` restore
+            # would then leave the operator's real index destroyed. So seed a
+            # scratch index from `origin/<base>` (`read_tree`) and stage ONLY the
+            # managed paths into IT, leaving the caller's real index untouched.
+            #
+            # Staging into the scratch index has two halves. `git add` stages the
+            # paths apply left ON DISK as writes (`staged_writes`: the managed set
+            # incl. NOOP units, the config, a re-rendered changelog, rewritten
+            # hook files, and pixi.lock). `git rm --cached` then stages the
+            # retired-path REMOVALS (`retired_removals`): an index-only purge (the
+            # working tree is never touched) that publishes each retired path's
+            # absence as a staged deletion against a base that still carries it —
+            # robust where `git add` is not, since the path may be absent,
+            # untracked, or a consumer file that reappeared at it, and
             # `--ignore-unmatch` makes any of those a no-op rather than a crash
-            # (#986 review). `git.staged_paths` then scopes the commit to the
-            # members of the FULL `touched` set that actually carry a staged diff
-            # — the primitive that keeps a consumer-local path (a KEPT retired
-            # file, a NOOP hook file) OUT of the commit, and that silently skips a
-            # path absent from the tree, the index AND HEAD, so the commit never
-            # receives a pathspec `git commit` would abort on (the
-            # changelog-deletion and empty-diff cases both ride this).
-            git.add(sorted(staged_writes), cwd=cwd)
-            git.rm_cached(sorted(retired_removals), cwd=cwd)
-            pr_paths = git.staged_paths(sorted(touched), cwd=cwd)
-            if not pr_paths:
-                # After the reset the managed set already matches origin/<base> —
-                # a stale Tree duplicating an already-merged reconcile. Nothing
-                # in the shipit-owned touched-set is staged, so a pathspec
-                # `git commit` over an empty diff would fail with "nothing to
-                # commit" (exit 1); report the clean no-op and skip the
-                # commit/PR rather than crashing the install (#852 review). The
-                # `finally` still restores the caller's branch.
-                logger.info(
-                    "install PR: the managed set is already current on "
-                    "origin/%s — nothing to publish",
-                    base_branch,
-                    extra={
-                        "root": str(root),
-                        "branch": INSTALL_BRANCH,
-                        "base": base_branch,
-                        "duration_ms": _elapsed(),
-                    },
+            # (#986 review). `git.staged_paths` then scopes the FULL `touched` set
+            # to the members that actually carry a staged diff against
+            # origin/<base> in the scratch index — used here ONLY as the no-op
+            # guard (empty → nothing to publish, below), NOT as a commit pathspec:
+            # the commit itself is the whole-INDEX `commit_all`. It MUST be that,
+            # never a pathspec `git commit`: a pathspec commit runs git's
+            # PARTIAL-commit mode, which builds the tree from the WORKING TREE of
+            # the named paths and DISREGARDS the index — silently negating the
+            # `git rm --cached` deletions (they live only in the index) and
+            # resurrecting every retired file whose working-tree copy survived
+            # (the skills-store move dropped all 11 `skills/*` deletions, #991).
+            # The scratch index seeded from origin/<base> IS precisely the
+            # reconcile: it keeps the adds, HONORS the deletions, and — since a
+            # KEPT retired file or an unrelated dirty consumer file is NEVER
+            # `git add`ed — leaves consumer-local paths at their base content.
+            with tempfile.TemporaryDirectory(prefix="shipit-pr-index-") as index_dir:
+                index_file = str(Path(index_dir) / "index")
+                git.read_tree(f"origin/{base_branch}", cwd=cwd, index_file=index_file)
+                git.add(sorted(staged_writes), cwd=cwd, index_file=index_file)
+                git.rm_cached(sorted(retired_removals), cwd=cwd, index_file=index_file)
+                pr_paths = git.staged_paths(
+                    sorted(touched), cwd=cwd, index_file=index_file
                 )
-                return result
-            git.commit(COMMIT_MESSAGE, pr_paths, cwd=cwd, no_verify=True)
+                if not pr_paths:
+                    # The managed set already matches origin/<base> — a stale Tree
+                    # duplicating an already-merged reconcile. Nothing in the
+                    # shipit-owned touched-set is staged into the scratch index, so
+                    # a whole-index `git commit` over an empty diff would fail with
+                    # "nothing to commit" (exit 1); report the clean no-op and skip
+                    # the commit/PR rather than crashing the install (#852 review).
+                    # The `finally` still restores the caller's branch.
+                    logger.info(
+                        "install PR: the managed set is already current on "
+                        "origin/%s — nothing to publish",
+                        base_branch,
+                        extra={
+                            "root": str(root),
+                            "branch": INSTALL_BRANCH,
+                            "base": base_branch,
+                            "duration_ms": _elapsed(),
+                        },
+                    )
+                    return result
+                git.commit_all(
+                    COMMIT_MESSAGE, cwd=cwd, no_verify=True, index_file=index_file
+                )
             # The install branch is regenerated on top of origin/<default> each
             # run; force so a re-run with an open install PR (or a stale leftover
             # branch) updates it rather than failing non-fast-forward.

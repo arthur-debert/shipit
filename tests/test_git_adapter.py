@@ -248,19 +248,22 @@ def test_staged_paths_scopes_the_cached_diff_and_parses_the_names(monkeypatch):
     # diff omits (matched nothing, or matches HEAD) simply never appears.
     seen = {}
 
-    def fake(args, *, cwd):
+    def fake(args, *, cwd, env=None):
         seen["args"] = args
+        seen["env"] = env
         return "a\n\nb/c\n"
 
     monkeypatch.setattr(git, "_git", fake)
     assert git.staged_paths(["a", "b/c", "gone"], cwd="/x") == ["a", "b/c"]
     assert seen["args"] == ["diff", "--cached", "--name-only", "--", "a", "b/c", "gone"]
+    # No index_file → the read runs against the checkout's real index (no env).
+    assert seen["env"] is None
 
 
 def test_staged_paths_is_empty_on_a_clean_index(monkeypatch):
     # No staged diff for the named pathspecs — the MODE_PR "nothing to publish"
     # case, which skips the commit rather than crashing an empty pathspec commit.
-    monkeypatch.setattr(git, "_git", lambda args, *, cwd: "")
+    monkeypatch.setattr(git, "_git", lambda args, *, cwd, env=None: "")
     assert git.staged_paths(["a"], cwd="/x") == []
 
 
@@ -269,7 +272,7 @@ def test_staged_paths_surfaces_a_git_failure_rather_than_masking_it(monkeypatch)
     # `--name-only` exits 0 on any successful diff and nonzero ONLY on a genuine
     # failure (bad pathspec magic, unreadable index) — which `_git` raises. A
     # real git failure can never be masked as a staged path.
-    def boom(args, *, cwd):
+    def boom(args, *, cwd, env=None):
         raise ExecError(args, rc=128, stdout="", stderr="fatal", duration_ms=1)
 
     monkeypatch.setattr(git, "_git", boom)
@@ -325,8 +328,9 @@ def test_rm_cached_purges_the_index_without_touching_the_working_tree(monkeypatc
     # the exit-128 crash `git add` would raise.
     seen = {}
 
-    def fake(args, *, cwd, timeout=None):
+    def fake(args, *, cwd, timeout=None, env=None):
         seen["args"] = args
+        seen["env"] = env
         return ""
 
     monkeypatch.setattr(git, "_git", fake)
@@ -339,6 +343,43 @@ def test_rm_cached_purges_the_index_without_touching_the_working_tree(monkeypatc
         "a.txt",
         "b/c.txt",
     ]
+    # No index_file → the real index (no GIT_INDEX_FILE env).
+    assert seen["env"] is None
+
+
+def test_read_tree_seeds_the_scratch_index_via_git_index_file(monkeypatch):
+    # #992: the MODE_PR isolated-index seed reads origin/<base> into a SCRATCH
+    # index bound by GIT_INDEX_FILE — never the checkout's real `.git/index`.
+    seen = {}
+
+    def fake(args, *, cwd, timeout=None, env=None):
+        seen["args"] = args
+        seen["env"] = env
+        return ""
+
+    monkeypatch.setattr(git, "_git", fake)
+    git.read_tree("origin/main", cwd="/x", index_file="/tmp/scratch")
+    assert seen["args"] == ["read-tree", "origin/main"]
+    assert seen["env"] == {"GIT_INDEX_FILE": "/tmp/scratch"}
+
+
+def test_index_file_binds_git_index_file_across_the_staging_calls(monkeypatch):
+    # #992: `add` / `rm_cached` / `staged_paths` / `commit_all` route at the
+    # scratch index whenever `index_file` is given, so the whole reconcile is
+    # staged and published without ever mutating the caller's real index.
+    envs = []
+
+    def fake(args, *, cwd, timeout=None, env=None):
+        envs.append(env)
+        return ""
+
+    monkeypatch.setattr(git, "_git", fake)
+    scratch = "/tmp/scratch-index"
+    git.add(["a"], cwd="/x", index_file=scratch)
+    git.rm_cached(["b"], cwd="/x", index_file=scratch)
+    git.staged_paths(["a", "b"], cwd="/x", index_file=scratch)
+    git.commit_all("msg", cwd="/x", no_verify=True, index_file=scratch)
+    assert envs == [{"GIT_INDEX_FILE": scratch}] * 4
 
 
 def test_rm_cached_on_empty_paths_never_shells(monkeypatch):
@@ -354,6 +395,161 @@ def test_rm_cached_on_empty_paths_never_shells(monkeypatch):
     monkeypatch.setattr(git, "_git", fake)
     git.rm_cached([], cwd="/x")
     assert called is False
+
+
+def test_commit_all_publishes_index_deletions_a_pathspec_commit_would_drop(tmp_path):
+    # #991 (regression, end-to-end over REAL git — a fake seam cannot prove tree
+    # content): the MODE_PR reconcile stages its retired-path deletions into the
+    # INDEX (`git rm --cached`), so the publishing commit MUST read the index. A
+    # `git commit -- <pathspec>` runs git's PARTIAL-commit mode, which builds the
+    # tree from the WORKING TREE of the named paths and DISREGARDS the index —
+    # so whenever the retired file's working-tree copy is still present it
+    # RESURRECTS it, silently negating the staged deletion (the skills-store move
+    # #921 dropped all 11 `skills/*` deletions this way). The fix commits the
+    # whole INDEX (`commit_all`), which honors the staged deletion regardless of
+    # the working tree while still excluding an unrelated dirty consumer file
+    # (never staged). Drive the exact reconcile staging sequence and assert the
+    # committed TREE.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t.co"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=repo, check=True)
+    # The base carries the retired managed file AND an unrelated consumer file.
+    (repo / "skills").mkdir()
+    (repo / "skills" / "foo.md").write_text("old shipit skill\n")
+    (repo / "notes.txt").write_text("consumer\n")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "base"], cwd=repo, check=True)
+
+    # The reconcile staging: add the new managed file, stage the retired path's
+    # removal from the INDEX (its working-tree copy deliberately LEFT in place —
+    # the case that broke the pathspec commit), and leave an unrelated dirty edit
+    # in the working tree that is NEVER staged.
+    (repo / ".shipit-skills").mkdir()
+    (repo / ".shipit-skills" / "foo.md").write_text("new shipit skill\n")
+    (repo / "notes.txt").write_text("consumer — locally edited\n")  # dirty, unstaged
+    git.add([".shipit-skills/foo.md"], cwd=str(repo))
+    git.rm_cached(["skills/foo.md"], cwd=str(repo))
+    git.commit_all("reconcile", cwd=str(repo), no_verify=True)
+
+    tree = subprocess.run(
+        ["git", "ls-tree", "-r", "--name-only", "HEAD"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.split()
+    # The staged deletion is PUBLISHED — the retired path is gone from the tree…
+    assert "skills/foo.md" not in tree
+    # …the new managed file was added…
+    assert ".shipit-skills/foo.md" in tree
+    # …and the unrelated consumer file is KEPT, at its BASE content: the unstaged
+    # working-tree edit was excluded (the scoping the pathspec commit used to give).
+    assert "notes.txt" in tree
+    committed = subprocess.run(
+        ["git", "show", "HEAD:notes.txt"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert committed == "consumer\n"
+
+
+def test_mode_pr_scratch_index_commit_excludes_the_callers_branch_and_staged_state(
+    tmp_path,
+):
+    # #992 (regression, end-to-end over REAL git): the MODE_PR reconcile publishes
+    # via a whole-INDEX `commit_all`, but `reset --soft origin/<base>` moves ONLY
+    # HEAD — it leaves the checkout's REAL index pointing at the caller's branch
+    # tip (their local commits ahead of base, plus anything they had staged).
+    # Committing that real index would SQUASH the caller's branch and staged
+    # changes into the PR and destroy their staged state on restore. The fix
+    # builds the reconcile on an ISOLATED scratch index (`read_tree origin/<base>`
+    # + `add`/`rm_cached`/`commit_all` all bound to a scratch GIT_INDEX_FILE), so
+    # the committed tree is EXACTLY base + the managed delta and the caller's real
+    # index is never read or mutated. Drive the exact flow and assert BOTH the
+    # published tree and the survival of the caller's real index.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t.co"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=repo, check=True)
+    # The base carries the retired managed file AND an unrelated consumer file.
+    # Its sha stands in for `origin/<base>` (the reconcile's parent).
+    (repo / "skills").mkdir()
+    (repo / "skills" / "foo.md").write_text("old shipit skill\n")
+    (repo / "notes.txt").write_text("consumer\n")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "base"], cwd=repo, check=True)
+    base_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    # The caller's checkout races AHEAD of base: a local commit (branch content
+    # that must NOT leak into the PR) plus an in-flight STAGED change (that must
+    # NOT leak and must SURVIVE the flow).
+    (repo / "leak.py").write_text("caller's local branch work\n")
+    subprocess.run(["git", "add", "leak.py"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "caller local work"], cwd=repo, check=True)
+    (repo / "staged.txt").write_text("operator staged this\n")
+    subprocess.run(["git", "add", "staged.txt"], cwd=repo, check=True)
+
+    # --- the MODE_PR staging flow ---
+    # switch onto the scratch branch (from the caller's tip) and soft-reset it to
+    # base: HEAD moves to base, but the REAL index still carries leak.py + the
+    # staged staged.txt.
+    git.switch_create("shipit/install", cwd=str(repo))
+    git.reset_soft(base_sha, cwd=str(repo))
+    # apply renders the managed write on disk.
+    (repo / ".shipit-skills").mkdir()
+    (repo / ".shipit-skills" / "foo.md").write_text("new shipit skill\n")
+    # Stage the reconcile into an ISOLATED scratch index, never the real one.
+    index_file = str(tmp_path / "scratch-index")
+    git.read_tree(base_sha, cwd=str(repo), index_file=index_file)
+    git.add([".shipit-skills/foo.md"], cwd=str(repo), index_file=index_file)
+    git.rm_cached(["skills/foo.md"], cwd=str(repo), index_file=index_file)
+    git.commit_all("reconcile", cwd=str(repo), no_verify=True, index_file=index_file)
+
+    tree = subprocess.run(
+        ["git", "ls-tree", "-r", "--name-only", "HEAD"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.split()
+    # The reconcile IS exactly base + managed delta:
+    assert ".shipit-skills/foo.md" in tree  # managed add published
+    assert "skills/foo.md" not in tree  # retired deletion honored
+    assert "notes.txt" in tree  # base consumer file kept
+    # …and NONE of the caller's branch/staged state leaked into the PR:
+    assert "leak.py" not in tree  # local commit ahead of base excluded
+    assert "staged.txt" not in tree  # operator's staged change excluded
+    # The commit's parent is base, not the caller's tip — one clean refresh.
+    parent = subprocess.run(
+        ["git", "rev-parse", "HEAD^"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert parent == base_sha
+
+    # The caller's REAL index is untouched: their in-flight staged.txt is STILL
+    # staged (the scratch-index commit never read or rewound the real index).
+    real_index = subprocess.run(
+        ["git", "diff", "--cached", "--name-only"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.split()
+    assert "staged.txt" in real_index
 
 
 def test_submodule_update_init_syncs_then_recursively_inits_on_the_network_bound(

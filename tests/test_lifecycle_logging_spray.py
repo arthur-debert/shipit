@@ -57,22 +57,30 @@ class _GhRecorder:
     def reset_soft(self, ref, *, cwd):
         pass
 
-    def add(self, paths, *, cwd):
+    def read_tree(self, ref, *, cwd, index_file):
+        # The MODE_PR isolated-index seed (#992); a no-op stub here.
         pass
 
-    def rm_cached(self, paths, *, cwd):
+    def add(self, paths, *, cwd, index_file=None):
+        pass
+
+    def rm_cached(self, paths, *, cwd, index_file=None):
         # The MODE_PR retired-removal staging (#986 review); a no-op stub here.
         pass
 
-    def staged_paths(self, paths, *, cwd):
-        # The MODE_PR commit pathspec (#984 review); the whole queried set so
-        # the commit proceeds.
+    def staged_paths(self, paths, *, cwd, index_file=None):
+        # The MODE_PR no-op guard (#991) over the scratch index (#992); the whole
+        # queried set so the commit proceeds.
         return sorted(paths)
 
     def reset_index(self, *, cwd):
         pass
 
     def commit(self, message, paths, *, cwd, no_verify=False):
+        pass
+
+    def commit_all(self, message, *, cwd, no_verify=False, index_file=None):
+        # The MODE_PR whole-INDEX reconcile commit (#991); a no-op stub here.
         pass
 
     def push(self, branch, *, cwd, remote="origin", force=False, no_verify=False):
@@ -93,11 +101,13 @@ def rec(monkeypatch):
     r = _GhRecorder()
     for name in (
         "switch_create",
+        "read_tree",
         "add",
         "rm_cached",
         "staged_paths",
         "reset_index",
         "commit",
+        "commit_all",
         "push",
         "current_branch",
         "default_branch",
