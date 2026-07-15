@@ -1024,25 +1024,27 @@ def apply(
             )
             git.add(add_paths, cwd=cwd)
             # The commit pathspec must carry MORE than the writes. The SAME
-            # drop-out class hits the retired-file DELETES, retired-hook DELETES,
-            # and a previously-rendered CHANGELOG.md (#984 agy review): a retired
-            # path already absent at the cut point never joins `changed_paths`,
-            # yet after the reset onto origin/<base> the index still stages its
-            # difference against the base (e.g. the deletion of a retired file
-            # the base still carries). Omit it from the commit pathspec and the
-            # pathspec `git commit` — which takes UNLISTED paths from HEAD —
-            # silently REVERTS it to the base state in the refreshed PR.
+            # drop-out class hits the retired paths and a previously-rendered
+            # CHANGELOG.md (#984 agy review): a retired path absent at the cut
+            # point never joins `changed_paths`, yet after the reset onto
+            # origin/<base> the index still stages its difference against the
+            # base (e.g. the deletion of a retired file the base still carries).
+            # Omit it from the commit pathspec and the pathspec `git commit` —
+            # which takes UNLISTED paths from HEAD — silently REVERTS it to the
+            # base state, RESURRECTING the retired file in the refreshed PR.
             #
-            # But the universe is only what APPLY ACTUALLY CHANGED, never the
-            # full retired manifest (#984 codex review): a KEEP retired decision
-            # is a locally-modified consumer file apply PRESERVES, not shipit
-            # content to publish — and a NOOP is a path apply never touched. A
+            # The universe is the retired paths apply left ABSENT locally, which
+            # is every retired decision EXCEPT KEEP (`retire_carries` /
+            # `retire_hook_carries`): DELETE unlinked the pristine copy, NOOP
+            # found it already gone — both absences must be published so the
+            # reset onto a base that still carries the path deletes it, not
+            # resurrects it (#984 agy review, the round-4 regression: filtering
+            # to DELETE alone dropped the NOOP-vs-base deletions). KEEP stays
+            # OUT: it is a locally-modified consumer file apply PRESERVES, and a
             # KEEP path carried on the stale install branch differs from the base
-            # in the post-reset index, so listing it in the universe would leak
-            # that consumer-local file into the PR. So filter to the action
-            # DELETES only (`retire_deletes`/`retire_hook_deletes`); KEEP/NOOP
-            # stay unlisted and thus at the base state, honouring the retired
-            # invariant. The changelog is included UNCONDITIONALLY: gating on
+            # in the post-reset index, so listing it would leak that
+            # consumer-local file into the PR (#984 codex review, the retired
+            # invariant). The changelog is included UNCONDITIONALLY: gating on
             # `is_file()` would drop the case where it was DELETED (absent from
             # the tree) and must be published as a deletion — and an absent
             # changelog costs nothing, since `git diff --cached --name-only`
@@ -1056,8 +1058,8 @@ def apply(
             # it).
             universe = sorted(
                 set(add_paths)
-                | {d.retired.path for d in plan.retire_deletes}
-                | {d.retired.file for d in plan.retire_hook_deletes}
+                | {d.retired.path for d in plan.retire_carries}
+                | {d.retired.file for d in plan.retire_hook_carries}
                 | {CHANGELOG_FILE}
             )
             pr_paths = git.staged_paths(universe, cwd=cwd)

@@ -1369,6 +1369,31 @@ class Plan:
         return tuple(d for d in self.retired_hooks if d.action == DELETE)
 
     @property
+    def retire_carries(self) -> tuple[RetiredDecision, ...]:
+        """Retired file decisions the MODE_PR commit universe must carry —
+        every decision EXCEPT KEEP. A retired path ends ABSENT from the working
+        tree iff its action is not KEEP: DELETE unlinks the pristine copy, NOOP
+        found it already gone, only KEEP leaves a (locally-modified) file in
+        place. The PR resets its staging branch onto ``origin/<base>``, which may
+        still carry a retired path; that base-side deletion must ride the commit
+        pathspec or the refresh silently RESURRECTS the file (#984 review). So
+        DELETE **and** NOOP are carried — dropping NOOP was the resurrection bug.
+        KEEP is excluded: publishing a preserved consumer file would cross the
+        retired-file invariant (#984 codex review)."""
+        return tuple(d for d in self.retired if d.action != KEEP)
+
+    @property
+    def retire_hook_carries(self) -> tuple[RetiredHookDecision, ...]:
+        """Retired-hook decisions the MODE_PR commit universe must carry — every
+        decision EXCEPT KEEP. Retired hooks have NO KEEP case (a hook entry's
+        whole body is the retired command, nothing to preserve — see
+        :func:`decide_retired_hook`), so today this is every decision; filtered
+        and named in parallel with :attr:`retire_carries` so the universe reads
+        symmetrically and a future KEEP-bearing hook would be excluded on its
+        own."""
+        return tuple(d for d in self.retired_hooks if d.action != KEEP)
+
+    @property
     def pin_stale(self) -> bool:
         """The consumer's pin differs from the running build's sha — a pin bump.
 

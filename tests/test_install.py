@@ -3363,50 +3363,59 @@ def test_pr_mode_commits_the_full_managed_universe_including_noop_units(tmp_path
     assert noop.dest in rec.commit_paths
 
 
-def test_pr_mode_commit_universe_carries_retired_deletes_and_the_changelog(
+def test_pr_mode_commit_universe_carries_retired_deletes_noops_and_the_changelog(
     tmp_path, rec
 ):
     # #984 review (major): the SAME drop-out class the full-managed-universe fix
-    # closes for NOOP managed units also hits the retired-file DELETES and a
-    # previously-rendered CHANGELOG.md. A retired DELETE absent from
-    # `changed_paths` (or a changelog no longer on disk) whose deletion the reset
-    # stages against a base that still carries it MUST ride the commit pathspec,
-    # or the pathspec `git commit` (unlisted paths come from HEAD) silently
-    # REVERTS it to the base state in the refreshed PR. The commit is scoped to
-    # the members of the shipit-owned universe that carry a staged diff, so
-    # assert that universe — what `staged_paths` is asked about — carries the
-    # retired DELETE and the changelog even when the changelog is NOT on disk.
+    # closes for NOOP managed units also hits the retired paths and a
+    # previously-rendered CHANGELOG.md. A retired path absent from `changed_paths`
+    # (or a changelog no longer on disk) whose deletion the reset stages against a
+    # base that still carries it MUST ride the commit pathspec, or the pathspec
+    # `git commit` (unlisted paths come from HEAD) silently REVERTS it to the base
+    # state — RESURRECTING the retired file in the refreshed PR. This holds for
+    # BOTH retired DELETES (pristine copy apply unlinks) AND retired NOOPS (a
+    # retired path already absent locally): both are absent after apply, and a
+    # base that still carries either needs the deletion published. The round-4
+    # filter to DELETE alone dropped the NOOP-vs-base deletions (#984 agy review),
+    # so assert the queried universe carries a DELETE, a NOOP, and the changelog
+    # even when the changelog is NOT on disk.
     (tmp_path / "AGENTS.md").write_text("# Acme\n")
     # A pristine retired workflow on disk → a DELETE decision apply carries.
     victim = tmp_path / RETIRED_WORKFLOW_PATH
     victim.parent.mkdir(parents=True)
     victim.write_bytes(PRISTINE_WORKFLOW.read_bytes())
-    # NB: the changelog is deliberately NOT written to disk — Fix 4's drop-out
-    # case: a changelog deleted since a prior run must still be published as a
-    # deletion, so it must be in the universe even absent from the working tree.
+    # NB: the changelog is deliberately NOT written to disk — the drop-out case:
+    # a changelog deleted since a prior run must still be published as a deletion,
+    # so it must be in the universe even absent from the working tree.
     assert not (tmp_path / iapply.CHANGELOG_FILE).exists()
 
     plan = _plan(tmp_path)
     delete_paths = {d.retired.path for d in plan.retire_deletes}
+    # Every OTHER retired path is absent here → NOOP, none joining `changed_paths`.
+    noop_paths = {d.retired.path for d in plan.retired if d.action == irec.NOOP}
     assert RETIRED_WORKFLOW_PATH in delete_paths
+    assert noop_paths, "the manifest must declare more retired files to exercise NOOP"
+    assert noop_paths.isdisjoint(plan.changed_paths)
     assert iapply.CHANGELOG_FILE not in plan.changed_paths
 
     _apply(tmp_path, iapply.MODE_PR)
-    # The commit universe carries the retired DELETE and the changelog — the
-    # latter UNCONDITIONALLY, so a changelog absent from the tree is still
+    # The commit universe carries the retired DELETE, EVERY retired NOOP (so a
+    # base-side deletion is published, never resurrected), and the changelog —
+    # the last UNCONDITIONALLY, so a changelog absent from the tree is still
     # published as a deletion rather than silently reverted to the base state.
     universe = set(rec.staged_query)
     assert RETIRED_WORKFLOW_PATH in universe
+    assert noop_paths <= universe
     assert iapply.CHANGELOG_FILE in universe
 
 
 def test_pr_mode_commit_universe_excludes_a_kept_retired_file(tmp_path, rec):
-    # #984 codex review (major): the commit universe is only what apply ACTUALLY
-    # CHANGED, never the full retired manifest. A KEEP retired decision is a
-    # locally-modified consumer file apply PRESERVES — not shipit content to
-    # publish. Carried on the stale install branch it differs from the base in
-    # the post-reset index, so listing it in the universe would leak that
-    # consumer-local file into the PR. It must NOT be queried (retired invariant).
+    # #984 codex review (major): the commit universe EXCLUDES KEEP retired
+    # decisions. A KEEP is a locally-modified consumer file apply PRESERVES — not
+    # shipit content to publish. Carried on the stale install branch it differs
+    # from the base in the post-reset index, so listing it in the universe would
+    # leak that consumer-local file into the PR. It must NOT be queried (the
+    # retired-file invariant) — unlike a DELETE or NOOP, whose absence IS carried.
     (tmp_path / "AGENTS.md").write_text("# Acme\n")
     # A locally-modified retired workflow → a KEEP decision apply preserves.
     victim = tmp_path / RETIRED_WORKFLOW_PATH
@@ -3416,6 +3425,9 @@ def test_pr_mode_commit_universe_excludes_a_kept_retired_file(tmp_path, rec):
     plan = _plan(tmp_path)
     assert [d.retired.path for d in plan.retire_keeps] == [RETIRED_WORKFLOW_PATH]
     assert not plan.retire_deletes
+    # The KEEP is excluded from the carried set even though other retired paths
+    # (NOOPs) are in it.
+    assert RETIRED_WORKFLOW_PATH not in {d.retired.path for d in plan.retire_carries}
 
     _apply(tmp_path, iapply.MODE_PR)
     # The KEEP path is never in the queried universe, so it can never be
@@ -4921,6 +4933,48 @@ def test_plan_retired_decides_every_manifest_entry():
         irec.KEEP,
         irec.NOOP,
     ]
+
+
+def test_retire_carries_is_every_retired_decision_except_keep():
+    # #984 review: the MODE_PR commit universe carries the retired paths apply
+    # left ABSENT locally — DELETE (pristine copy unlinked) AND NOOP (already
+    # gone) — so a base still carrying either has its deletion published, never
+    # resurrected. Only KEEP (a preserved locally-modified file) is excluded.
+    retired = irec.plan_retired(
+        [
+            irec.RetiredFile(path="del.yml", pristine_hashes=("h1",)),
+            irec.RetiredFile(path="keep.yml", pristine_hashes=("h2",)),
+            irec.RetiredFile(path="noop.yml", pristine_hashes=("h3",)),
+        ],
+        {"del.yml": "h1", "keep.yml": "edited", "noop.yml": None},
+    )
+    hooks = irec.plan_retired_hooks(
+        [
+            irec.RetiredHook(file=".claude/settings.json", event="X", marker="gone"),
+            irec.RetiredHook(file=".claude/settings.json", event="X", marker="present"),
+        ],
+        {
+            irec.RetiredHook(
+                file=".claude/settings.json", event="X", marker="present"
+            ).key: 1
+        },
+    )
+    plan = irec.Plan(
+        root="/x",
+        decisions=(),
+        retired=tuple(retired),
+        seeds=(),
+        retired_hooks=tuple(hooks),
+    )
+
+    assert {d.retired.path for d in plan.retire_carries} == {"del.yml", "noop.yml"}
+    assert "keep.yml" not in {d.retired.path for d in plan.retire_carries}
+    # Retired hooks have no KEEP case, so `retire_hook_carries` is every decision
+    # (both the DELETE and the NOOP entry over the same file).
+    assert {d.retired.file for d in plan.retire_hook_carries} == {
+        ".claude/settings.json"
+    }
+    assert len(plan.retire_hook_carries) == 2
 
 
 @pytest.mark.parametrize(
