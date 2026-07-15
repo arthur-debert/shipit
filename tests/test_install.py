@@ -3437,6 +3437,39 @@ def test_pr_mode_commit_universe_excludes_a_kept_retired_file(tmp_path, rec):
     assert "# local tweak" in victim.read_text()
 
 
+def test_pr_mode_universe_excludes_a_noop_retired_hook_file(tmp_path, rec, monkeypatch):
+    # #984 round-6 review (major): retired HOOKS carry DELETE-only, never NOOP.
+    # A retired-hook NOOP does NOT mean the hook FILE is absent (unlike a retired
+    # FILE NOOP) — it only means the legacy entry was not found. The file can
+    # still be present with unrelated consumer-local edits; carrying a NOOP hook
+    # file into the universe would let those edits ride the pathspec commit after
+    # `reset --soft origin/<base>` and leak into the refreshed PR. Use a hook over
+    # a NON-managed file (settings.json is a managed unit dest, always carried, so
+    # it cannot isolate the hook-carry path) whose file is present but carries no
+    # matching legacy entry → a NOOP decision → its file must stay OUT.
+    hook = irec.RetiredHook(
+        file=".shipit-legacy-hooks.json", event="pre-commit", marker="legacy-cmd"
+    )
+    monkeypatch.setattr(irec, "load_retired_hooks", lambda: [hook])
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    # The hook file is present with ONLY unrelated consumer content (no matching
+    # `legacy-cmd` entry) → retired_hook_count == 0 → a NOOP decision.
+    (tmp_path / ".shipit-legacy-hooks.json").write_text(
+        '{"hooks": {"pre-commit": [{"command": "my-own-tool"}]}}\n'
+    )
+
+    plan = _plan(tmp_path)
+    assert [d.action for d in plan.retired_hooks] == [irec.NOOP]
+    assert not plan.retire_hook_deletes  # nothing rewritten → nothing to carry
+
+    _apply(tmp_path, iapply.MODE_PR)
+    # The NOOP hook file — not a managed dest, not rewritten by apply — never
+    # enters the queried universe, so its consumer-local edits cannot leak.
+    assert ".shipit-legacy-hooks.json" not in set(rec.staged_query)
+    # And apply left the consumer's file untouched on disk.
+    assert "my-own-tool" in (tmp_path / ".shipit-legacy-hooks.json").read_text()
+
+
 def test_pr_mode_reports_no_changes_when_the_managed_set_already_matches_base(
     tmp_path, rec
 ):
@@ -4935,11 +4968,12 @@ def test_plan_retired_decides_every_manifest_entry():
     ]
 
 
-def test_retire_carries_is_every_retired_decision_except_keep():
-    # #984 review: the MODE_PR commit universe carries the retired paths apply
-    # left ABSENT locally — DELETE (pristine copy unlinked) AND NOOP (already
-    # gone) — so a base still carrying either has its deletion published, never
-    # resurrected. Only KEEP (a preserved locally-modified file) is excluded.
+def test_retire_carries_files_keep_noop_asymmetry_from_hooks():
+    # #984 review: retired FILES and retired HOOKS carry DIFFERENTLY.
+    # Files: the universe carries the paths apply left ABSENT locally — DELETE
+    # (pristine copy unlinked) AND NOOP (already gone) — so a base still carrying
+    # either has its deletion published, never resurrected. Only KEEP (a
+    # preserved locally-modified file) is excluded.
     retired = irec.plan_retired(
         [
             irec.RetiredFile(path="del.yml", pristine_hashes=("h1",)),
@@ -4969,12 +5003,18 @@ def test_retire_carries_is_every_retired_decision_except_keep():
 
     assert {d.retired.path for d in plan.retire_carries} == {"del.yml", "noop.yml"}
     assert "keep.yml" not in {d.retired.path for d in plan.retire_carries}
-    # Retired hooks have no KEEP case, so `retire_hook_carries` is every decision
-    # (both the DELETE and the NOOP entry over the same file).
-    assert {d.retired.file for d in plan.retire_hook_carries} == {
+    # Hooks: the universe carries ONLY the files apply REWROTE — the DELETE
+    # decisions (`retire_hook_deletes`), NOT the NOOP. A retired-hook NOOP does
+    # not mean the hook file is absent (only that the legacy entry was not
+    # found); the file may still hold unrelated consumer edits, so carrying a
+    # NOOP hook file would leak them into the PR (#984 round-6 review). Here the
+    # `gone` entry is NOOP and the `present` entry is DELETE, over the same file
+    # → the file is carried by the DELETE, and only once.
+    assert [d.action for d in plan.retired_hooks] == [irec.NOOP, irec.DELETE]
+    assert {d.retired.file for d in plan.retire_hook_deletes} == {
         ".claude/settings.json"
     }
-    assert len(plan.retire_hook_carries) == 2
+    assert len(plan.retire_hook_deletes) == 1
 
 
 @pytest.mark.parametrize(

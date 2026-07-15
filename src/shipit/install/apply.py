@@ -1033,22 +1033,31 @@ def apply(
             # which takes UNLISTED paths from HEAD — silently REVERTS it to the
             # base state, RESURRECTING the retired file in the refreshed PR.
             #
-            # The universe is the retired paths apply left ABSENT locally, which
-            # is every retired decision EXCEPT KEEP (`retire_carries` /
-            # `retire_hook_carries`): DELETE unlinked the pristine copy, NOOP
-            # found it already gone — both absences must be published so the
-            # reset onto a base that still carries the path deletes it, not
-            # resurrects it (#984 agy review, the round-4 regression: filtering
-            # to DELETE alone dropped the NOOP-vs-base deletions). KEEP stays
-            # OUT: it is a locally-modified consumer file apply PRESERVES, and a
-            # KEEP path carried on the stale install branch differs from the base
-            # in the post-reset index, so listing it would leak that
-            # consumer-local file into the PR (#984 codex review, the retired
-            # invariant). The changelog is included UNCONDITIONALLY: gating on
-            # `is_file()` would drop the case where it was DELETED (absent from
-            # the tree) and must be published as a deletion — and an absent
-            # changelog costs nothing, since `git diff --cached --name-only`
-            # silently skips a path missing from the tree, the index AND HEAD.
+            # For retired FILES the universe is the paths apply left ABSENT
+            # locally — every retired decision EXCEPT KEEP (`retire_carries`):
+            # DELETE unlinked the pristine copy, NOOP found it already gone, and
+            # both absences must be published so the reset onto a base that still
+            # carries the path DELETES it, not resurrects it (#984 agy review,
+            # the round-4 regression: filtering to DELETE alone dropped the
+            # NOOP-vs-base deletions). KEEP stays OUT: a locally-modified consumer
+            # file apply PRESERVES, whose post-reset index differs from the base,
+            # so listing it would leak that consumer-local file into the PR (#984
+            # codex review, the retired invariant).
+            #
+            # Retired HOOKS carry ONLY the files apply REWROTE (`retire_hook_deletes`,
+            # the DELETE decisions), NOT the file/NOOP mirror of the retired-file
+            # rule (#984 round-6 review): a retired-hook NOOP does not mean the
+            # hook FILE is absent — only that the legacy entry was not found. The
+            # file (`.claude/settings.json`, `.lefthook-local.yml`) can still be
+            # present with UNRELATED consumer edits, so carrying a NOOP hook file
+            # would sweep those edits across the reset into the PR. Only a rewrite
+            # (a DELETE) is a change apply owns and may publish.
+            #
+            # The changelog is included UNCONDITIONALLY: gating on `is_file()`
+            # would drop the case where it was DELETED (absent from the tree) and
+            # must be published as a deletion — and an absent changelog costs
+            # nothing, since `git diff --cached --name-only` silently skips a path
+            # missing from the tree, the index AND HEAD.
             #
             # The universe is then scoped to the members that ACTUALLY carry a
             # staged diff: a retired path absent from the tree, the index AND the
@@ -1059,7 +1068,7 @@ def apply(
             universe = sorted(
                 set(add_paths)
                 | {d.retired.path for d in plan.retire_carries}
-                | {d.retired.file for d in plan.retire_hook_carries}
+                | {d.retired.file for d in plan.retire_hook_deletes}
                 | {CHANGELOG_FILE}
             )
             pr_paths = git.staged_paths(universe, cwd=cwd)
