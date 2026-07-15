@@ -113,6 +113,15 @@ PROVISIONING: dict[str, tuple[Provisioned, ...]] = {
         ),
     ),
     "ps": (Provisioned("ps", OS_PROVIDED, note="session liveness probe, dev-side"),),
+    "gcloud": (
+        Provisioned(
+            "gcloud",
+            DEV_HOST,
+            note="Artifact channel store provisioner (ARF01-WS03, "
+            "shipit.channel.store_provision) — the operator's own gcloud, an "
+            "opt-in infra harness, never a release runner",
+        ),
+    ),
     "curl": (
         Provisioned(
             "curl",
