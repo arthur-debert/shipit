@@ -60,6 +60,10 @@ class _GhRecorder:
     def add(self, paths, *, cwd):
         pass
 
+    def rm_cached(self, paths, *, cwd):
+        # The MODE_PR retired-removal staging (#986 review); a no-op stub here.
+        pass
+
     def staged_paths(self, paths, *, cwd):
         # The MODE_PR commit pathspec (#984 review); the whole queried set so
         # the commit proceeds.
@@ -90,6 +94,7 @@ def rec(monkeypatch):
     for name in (
         "switch_create",
         "add",
+        "rm_cached",
         "staged_paths",
         "reset_index",
         "commit",

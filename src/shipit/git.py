@@ -747,6 +747,27 @@ def add(paths: list[str], *, cwd: str) -> None:
     _git(["add", "-f", "--", *paths], cwd=cwd)
 
 
+def rm_cached(paths: list[str], *, cwd: str) -> None:
+    """``git rm --cached --ignore-unmatch -- <paths>`` — stage the removal of
+    these pathspecs from the INDEX only, never the working tree.
+
+    The removal counterpart of :func:`add`. MODE_PR uses it to publish
+    retired-path deletions (#986 review): a retired file's ABSENCE must reach the
+    reconcile commit as a staged deletion against ``origin/<base>``, but by the
+    time apply stages, the path may be absent on disk, untracked in the index, or
+    even a consumer-created file that reappeared at the path in the gather→apply
+    window — none of which :func:`add` can stage without crashing on the absent
+    pathspec or destroying consumer content. ``--cached`` touches ONLY the index
+    (the working tree is never modified, so a reappeared consumer file is
+    preserved on disk), and ``--ignore-unmatch`` makes an already-untracked or
+    already-absent pathspec a no-op (exit 0) rather than the fatal ``pathspec
+    ... did not match any files`` (exit 128) that would abort PR generation.
+    """
+    if not paths:
+        return
+    _git(["rm", "--cached", "--ignore-unmatch", "--", *paths], cwd=cwd)
+
+
 def add_all(*, cwd: str) -> None:
     """``git add -A`` — stage every change in the working tree.
 
@@ -885,9 +906,10 @@ def staged_paths(paths: list[str], *, cwd: str) -> list[str]:
     ``git diff --cached --name-only -- <paths>`` — the pathspec-scoped index
     diff, parsed to the changed names (the adapter owns output parsing, like
     :func:`diff_name_only`). The MODE_PR staging flow reads this AFTER
-    ``reset --soft`` + ``git add`` (#984 review) to build the pathspec
-    :func:`commit` carries: the writes it just staged PLUS the deletions the
-    reset staged for retired paths the base still carries. A pathspec that
+    ``reset --soft`` + ``git add`` + :func:`rm_cached` (#984/#986 review) to
+    build the pathspec :func:`commit` carries: the writes :func:`add` just staged
+    PLUS the retired-path deletions :func:`rm_cached` staged from the index for
+    paths the base still carries. A pathspec that
     matches nothing in the working tree, the index AND HEAD is simply never
     listed (``git diff`` skips it, exit 0), so the commit never receives a
     pathspec it would abort on — unlike ``git add``/``git commit``, which fail
