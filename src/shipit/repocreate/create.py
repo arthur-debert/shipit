@@ -185,10 +185,14 @@ def default_installer(root: Path) -> None:
 def default_provisioner(root: Path) -> None:
     """Resolve and lock the staged Repo's pixi environment (writes ``pixi.lock``).
 
-    Runs ``pixi install`` through a SCRUBBED environment (ADR-0062) so an
-    inherited ``PIXI_*`` project pointer from the invoking checkout cannot bind
-    the child to a different manifest; the ``--manifest-path`` the pixi adapter
-    adds pins resolution to the staged Repo regardless.
+    Runs ``pixi install`` from a child rooted in the staged Repo (``cwd=root``)
+    through a SCRUBBED environment (ADR-0062) so an inherited ``PIXI_*`` project
+    pointer from the invoking checkout cannot bind the child to a different
+    manifest. ``pixi install`` carries no ``--manifest-path`` (unlike the ``pixi
+    run`` wrap :func:`shipit.pixienv.run_task`/:func:`shipit.pixienv.run_argv`
+    build): with the leaked pointer scrubbed away, pixi discovers the manifest
+    from the working directory — the staged Repo — which is what pins resolution
+    here.
     """
     scrubbed = pixienv.scrub_env(dict(os.environ))
     pixienv.install(root, env=scrubbed)
@@ -421,22 +425,45 @@ def _relocate_hook_shims(staging: Path, dest: Path) -> None:
     so publication still carries one fully finalized, relocatable tree. Every
     file in ``.git/hooks`` is swept (lefthook writes a shim per managed slot);
     files without the staging prefix (git's ``*.sample`` defaults) are untouched.
+
+    Both the searched staging prefix and its destination replacement are
+    ABSOLUTIZED against the current directory (``Path.cwd() / p`` when ``p`` is
+    relative). ``create_repo`` accepts a relative ``parent`` (``repo new NAME
+    relative-parent`` or a direct ``create_repo(..., Path("relative-parent"),
+    ...)``), which makes both ``staging`` and ``dest`` relative — but the fallback
+    lefthook bakes is an ABSOLUTE ``os.Executable()`` path, and a git hook runs
+    with the repo as its working directory, so a relative fallback would resolve
+    against the repo root and miss. Absolutizing keeps the needle aligned with the
+    absolute baked path and guarantees the rewritten fallback stays absolute
+    regardless of how the parent was supplied. The absolutization is purely
+    lexical (no ``resolve()``), so a user-visible symlink parent is preserved
+    rather than collapsed to its real target.
+
+    Symlinks under ``.git/hooks`` are skipped (never followed): a global
+    ``init.templateDir`` may seed symlinked hooks, and writing through one would
+    mutate a file OUTSIDE the staged Repo. Lefthook's own shims are always regular
+    files, so this only ever skips foreign links.
     """
     hooks = staging / ".git" / "hooks"
     if not hooks.is_dir():
         return
-    needle = str(staging)
-    replacement = str(dest)
+    needle = str(staging if staging.is_absolute() else Path.cwd() / staging)
+    replacement = str(dest if dest.is_absolute() else Path.cwd() / dest)
     for shim in hooks.iterdir():
-        if not shim.is_file():
+        if not shim.is_file() or shim.is_symlink():
             continue
-        body = shim.read_text(encoding="utf-8", errors="surrogateescape")
+        # `newline=""` disables universal-newline translation on BOTH ends: hook
+        # shims are POSIX bash scripts that must keep `\n` line endings verbatim,
+        # and the default write would rewrite them to `os.linesep` (`\r\n` on
+        # Windows), breaking the script under Git Bash (`\r: command not found`).
+        body = shim.read_text(encoding="utf-8", errors="surrogateescape", newline="")
         if needle not in body:
             continue
         shim.write_text(
             body.replace(needle, replacement),
             encoding="utf-8",
             errors="surrogateescape",
+            newline="",
         )
 
 

@@ -657,6 +657,53 @@ def test_create_relocates_baked_hook_paths_out_of_staging(tmp_path, git_identity
     ) == "#!/bin/sh\nexit 0\n"
 
 
+def test_create_relocates_hook_paths_to_absolute_under_relative_parent(
+    tmp_path, monkeypatch, git_identity
+):
+    # Relative-parent regression (#948, codex): `repo new NAME relative-parent`
+    # (and a direct `create_repo(..., Path("relative-parent"), ...)`) makes both
+    # staging and dest RELATIVE. lefthook still bakes an ABSOLUTE `os.Executable()`
+    # fallback, and a git hook runs with the repo as its cwd — so a fallback
+    # rewritten to a relative dest would resolve `<repo>/relative-parent/hello/...`
+    # and miss. The published shim must carry an ABSOLUTE destination path.
+    workdir = tmp_path / "workdir"
+    workdir.mkdir()
+    (workdir / "sub").mkdir()
+    monkeypatch.chdir(workdir)
+
+    def install_baking_absolute_staging_hook(root: Path) -> None:
+        # Mimic lefthook: bake the ABSOLUTE executable path even when creation
+        # staged under a relative parent (os.Executable() is always absolute).
+        abs_staging = Path.cwd() / root
+        hooks = root / ".git" / "hooks"
+        hooks.mkdir(parents=True, exist_ok=True)
+        (hooks / "pre-commit").write_text(
+            f'call_lefthook() {{ "{abs_staging}/.pixi/envs/lint/bin/lefthook" "$@"; }}\n',
+            encoding="utf-8",
+        )
+
+    order: list[str] = []
+    result = create_repo(
+        "hello",
+        Path("sub"),  # RELATIVE parent
+        ("rust",),
+        installer=install_baking_absolute_staging_hook,
+        provisioner=_Recorder(order, "provision", writes="pixi.lock"),
+        verifier=_Recorder(order, "verify"),
+        author_reader=lambda root: "Test Author",
+        year=2026,
+    )
+
+    assert result.destination == Path("sub") / "hello"  # reported path stays lexical
+    abs_dest = workdir / "sub" / "hello"
+    body = (result.destination / ".git" / "hooks" / "pre-commit").read_text(
+        encoding="utf-8"
+    )
+    assert f"{abs_dest}/.pixi/envs/lint/bin/lefthook" in body
+    # No leftover relative-staging reference survived the rewrite.
+    assert ".shipit-repo-new-" not in body
+
+
 def test_create_accepts_empty_destination_directory(tmp_path, git_identity):
     (tmp_path / "hello").mkdir()
     result = _fake_create(tmp_path, [])
