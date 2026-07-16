@@ -3151,6 +3151,10 @@ class _GhRecorder:
         # write is a brand-new path) makes the restore stage them all; a test
         # populates it to pin the tracked-path SKIP.
         self.tracked = set()
+        # What HEAD's tree carries, for the restore's blocked-path probe (#993
+        # review). None = "HEAD carries every managed write" (the scratch commit
+        # landed); a set models a HEAD that predates it.
+        self.head_carries = None
         self.pr_body = None
         self.hook_activations = []
         self.commit_paths = ()
@@ -3217,11 +3221,22 @@ class _GhRecorder:
         self.branch = branch
 
     def ls_files_matching(self, pathspecs, *, cwd):
-        # The restore's tracked-path probe (#993): it stages `staged_writes`
-        # MINUS this answer. Deliberately NOT recorded in `calls` — it is a read,
-        # and the step-order assertions pin git's MUTATIONS.
+        # The restore's tracked-path probe (#993). Deliberately NOT recorded in
+        # `calls` — it is a read, and the step-order assertions pin git's
+        # MUTATIONS.
         self.ls_files_pathspecs = tuple(pathspecs)
         return sorted(self.tracked.intersection(pathspecs))
+
+    def tree_paths(self, ref, pathspecs, *, cwd):
+        # What HEAD carries (#993 review): the restore stages `in_head` MINUS
+        # `tracked`. `head_carries=None` means "the scratch commit landed, so HEAD
+        # carries every managed write" — the default, since most of these tests
+        # drive the flow to completion; a test sets it to model a HEAD that
+        # predates the commit.
+        self.tree_paths_ref = ref
+        if self.head_carries is None:
+            return sorted(pathspecs)
+        return sorted(self.head_carries.intersection(pathspecs))
 
     def add(self, paths, *, cwd, index_file=None):
         # `index_file` routes the write staging at the MODE_PR scratch index
@@ -3313,6 +3328,7 @@ def rec(monkeypatch):
         "read_tree",
         "add",
         "ls_files_matching",
+        "tree_paths",
         "rm_cached",
         "staged_paths",
         "reset_index",
@@ -5223,6 +5239,66 @@ def test_restore_over_real_git_preserves_caller_staged_content_on_a_managed_path
     ).stdout.split()
     assert ".shipit-skills/foo.md" in scratch_tree
     assert "AGENTS.md" in scratch_tree
+
+
+def test_restore_over_real_git_stages_nothing_when_head_predates_the_reconcile(
+    tmp_path,
+):
+    # #993 review (regression, over REAL git): a step that dies AFTER
+    # `switch_create` but BEFORE the scratch-index `commit_all` leaves HEAD at
+    # origin/<base>, which carries NONE of apply's adds — so no untracked file can
+    # block the checkout and there is nothing to unblock. Staging the adds anyway
+    # would be a pure side effect: absent from HEAD and from the target branch,
+    # the switch PRESERVES them, dumping the operator back on their own branch
+    # with shipit's writes STAGED in their index. Assert the restore stages
+    # nothing and their index comes back clean.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t.co"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=repo, check=True)
+    (repo / "AGENTS.md").write_text("old managed\n")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "base"], cwd=repo, check=True)
+    base_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    # The flow moves the operator and writes, then dies before the reconcile
+    # commit: HEAD is origin/<base>, the adds are on disk and untracked.
+    git.switch_create(iapply.INSTALL_BRANCH, cwd=str(repo))
+    git.reset_soft(base_sha, cwd=str(repo))
+    (repo / ".shipit-skills").mkdir()
+    (repo / ".shipit-skills" / "foo.md").write_text("new shipit skill\n")
+    staged_writes = {"AGENTS.md", ".shipit-skills/foo.md"}
+
+    iapply._restore_caller_branch(str(repo), "main", staged_writes)
+
+    # Back on their branch…
+    assert git.current_branch(cwd=str(repo)) == "main"
+    # …with a CLEAN index: shipit's write was never staged into it.
+    assert not subprocess.run(
+        ["git", "diff", "--cached", "--name-only"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.split()
+    # The add survives on disk as an untracked leftover — the flow failed, so its
+    # writes are simply still there, exactly as on 1.2.2. Untracked is the point:
+    # it is not in the operator's index.
+    untracked = subprocess.run(
+        ["git", "ls-files", "--others", "--exclude-standard"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.split()
+    assert ".shipit-skills/foo.md" in untracked
 
 
 def test_pr_flow_from_detached_head_does_not_restore(tmp_path, rec, monkeypatch):

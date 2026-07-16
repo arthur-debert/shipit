@@ -588,11 +588,12 @@ def _restore_caller_branch(
     ``finally`` that calls this).
 
     ``staged_writes`` is the managed set apply left ON DISK. The members of it
-    that are UNTRACKED in the caller's REAL index — and ONLY those — are staged
-    into that index immediately before the switch (#993). The reconcile commit is
-    built on an ISOLATED scratch index (#992), so a managed path apply ADDED is on
-    disk but was never added to the real index — untracked. It is, however, in the
-    scratch-index commit now at HEAD, so switching back to a branch that lacks it
+    that git's checkout would actually TRIP OVER — and only those — are staged
+    into the caller's REAL index immediately before the switch (#993). That set is
+    precisely ``UNTRACKED in the real index AND carried by HEAD``. The reconcile
+    commit is built on an ISOLATED scratch index (#992), so a managed path apply
+    ADDED is on disk but was never added to the real index — untracked. It is,
+    however, in the scratch-index commit now at HEAD, so switching back to a branch that lacks it
     makes git refuse outright (``error: The following untracked working tree files
     would be removed by checkout: .shipit-skills/…``) and the operator is stranded
     on the scratch branch — the very #777 mode 1 surprise this exists to prevent,
@@ -601,20 +602,32 @@ def _restore_caller_branch(
     index-clean against HEAD, so the switch drops each one: the reconcile lives in
     the PR, not in the caller's tree.
 
-    Restricting the staging to the UNTRACKED members is what keeps the
-    :func:`git.reset_soft` contract — "the caller's staged state survives the flow
-    untouched" (#992) — true, and it is load-bearing, not an optimisation (#993
-    review). An untracked path has NO index entry, so staging it cannot overwrite
-    one. Staging the WHOLE of ``staged_writes`` would: the set spans NOOP units,
-    ``.shipit.toml``, splice files such as ``AGENTS.md``, and ``pixi.lock``, and
-    for a TRACKED member a blanket ``git add`` replaces whatever the caller had
-    staged at that path with apply's write — index-only content that the switch
-    then resets away, unrecoverable and unannounced. A tracked managed path never
-    needs the help anyway: it already HAS an index entry, so it raises no
-    untracked-file refusal. Where a caller's staged content diverges from both
-    HEAD and their branch, git refuses the switch and this logs it — git declining
-    to destroy their staged work is the better failure than silently destroying
-    it, and that strand is #992's to answer, not this restore's.
+    BOTH halves of that predicate are load-bearing, not optimisations (#993
+    review).
+
+    UNTRACKED keeps the :func:`git.reset_soft` contract — "the caller's staged
+    state survives the flow untouched" (#992) — true. An untracked path has NO
+    index entry, so staging it cannot overwrite one. Staging the WHOLE of
+    ``staged_writes`` would: the set spans NOOP units, ``.shipit.toml``, splice
+    files such as ``AGENTS.md``, and ``pixi.lock``, and for a TRACKED member a
+    blanket ``git add`` replaces whatever the caller had staged at that path with
+    apply's write — index-only content that the switch then resets away,
+    unrecoverable and unannounced. A tracked managed path never needs the help
+    anyway: it already HAS an index entry, so it raises no untracked-file refusal.
+    Where a caller's staged content diverges from both HEAD and their branch, git
+    refuses the switch and this logs it — git declining to destroy their staged
+    work is the better failure than silently destroying it, and that strand is
+    #992's to answer, not this restore's.
+
+    CARRIED BY HEAD is what makes the staging conditional on the blocked case
+    actually existing. Git aborts over an untracked file only when the CURRENT
+    HEAD carries it (leaving would have to remove it), so when the flow dies
+    BEFORE the scratch-index ``commit_all`` — HEAD still ``origin/<base>``, which
+    carries none of apply's adds — nothing blocks the switch at all. Staging then
+    would be pure side effect: the adds are absent from HEAD *and* from the target
+    branch, so the switch PRESERVES them and the operator lands back on their own
+    branch with shipit's writes sitting STAGED in their index. Reading HEAD's tree
+    (:func:`git.tree_paths`) keeps the remedy scoped to the disease.
 
     The staging is transient (the switch resets those entries to the target
     branch) and scoped to shipit's OWN writes, never a consumer-owned or unrelated
@@ -642,13 +655,16 @@ def _restore_caller_branch(
     try:
         if git.current_branch(cwd=cwd) == INSTALL_BRANCH:
             tracked = git.ls_files_matching(sorted(staged_writes), cwd=cwd)
-            # `None` is "not a git repo" — unreachable mid-flow, but it must fail
-            # CLOSED (stage nothing) rather than degrade into `staged_writes -
-            # set()`, i.e. the blanket staging that clobbers the caller's index.
-            if tracked is not None:
-                added = sorted(staged_writes - set(tracked))
-                if added:
-                    git.add(added, cwd=cwd)
+            in_head = git.tree_paths("HEAD", sorted(staged_writes), cwd=cwd)
+            # `None` is "unreadable" (not-a-repo / unborn HEAD) — unreachable
+            # mid-flow, but both must fail CLOSED (stage nothing) rather than
+            # degrade into a wider set: an empty `tracked` is the blanket staging
+            # that clobbers the caller's index, and an empty `in_head` stages adds
+            # that never blocked.
+            if tracked is not None and in_head is not None:
+                blocked = sorted(set(in_head) - set(tracked))
+                if blocked:
+                    git.add(blocked, cwd=cwd)
     except execrun.ExecError:
         logger.warning(
             "could not stage the newly added managed paths into the caller's "

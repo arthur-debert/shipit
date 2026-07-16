@@ -289,13 +289,40 @@ def ls_files_matching(pathspecs: list[str], *, cwd: str) -> list[str] | None:
     spaces/newlines survive, tracked-only for the same reason as :func:`ls_files`.
 
     The MODE_PR caller-restore (``shipit.install.apply._restore_caller_branch``,
-    #993) reads it for the COMPLEMENT: the managed writes it must stage before
-    switching are exactly ``staged_writes`` MINUS this answer — the paths the
-    isolated scratch index (:func:`read_tree`, #992) left untracked. Those, and
-    only those, block the switch, and having no index entry they are the only ones
-    staging cannot silently overwrite (see :func:`reset_soft`'s contract).
+    #993) reads it for the COMPLEMENT: of the managed writes, the ones it must
+    stage before switching are the paths the isolated scratch index
+    (:func:`read_tree`, #992) left UNTRACKED. Having no index entry, they are the
+    only ones staging cannot silently overwrite (see :func:`reset_soft`'s
+    contract) — it intersects that complement with :func:`tree_paths` to reach the
+    ones that actually block.
     """
     res = _probe(["ls-files", "-z", "--", *pathspecs], cwd=cwd)
+    if not res.ok:
+        return None
+    return [p for p in res.stdout.split("\0") if p.strip()]
+
+
+def tree_paths(ref: str, pathspecs: list[str], *, cwd: str) -> list[str] | None:
+    """Which of ``pathspecs`` the COMMIT ``ref`` carries, or ``None`` if unreadable.
+
+    ``git ls-tree -r --name-only -z <ref> -- <pathspecs>`` — the committed-tree
+    counterpart of :func:`ls_files_matching` (which reads the INDEX). A probe
+    read: an unborn/unreadable ``ref`` is a NORMAL answer (``None``), never an
+    exception.
+
+    The MODE_PR caller-restore (``shipit.install.apply._restore_caller_branch``,
+    #993 review) needs it to name git's actual refusal condition. A plain
+    :func:`switch` aborts over an untracked working-tree file only when the
+    CURRENT HEAD carries that path — the file would have to be removed to leave.
+    So "untracked" alone is not the blocked set: when the flow dies BEFORE the
+    scratch-index commit, HEAD is still ``origin/<base>`` and carries none of
+    apply's adds, nothing blocks the switch, and staging them anyway would carry
+    shipit's writes onto the caller's branch as STAGED entries the switch
+    preserves — a side effect the operator never asked for. Intersecting the
+    untracked complement with this answer keeps the staging to the paths that
+    genuinely block: untracked AND in HEAD.
+    """
+    res = _probe(["ls-tree", "-r", "--name-only", "-z", ref, "--", *pathspecs], cwd=cwd)
     if not res.ok:
         return None
     return [p for p in res.stdout.split("\0") if p.strip()]
