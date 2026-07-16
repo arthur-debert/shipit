@@ -6,6 +6,7 @@
   checkout, provisioning the wrong repo or rooting a coordinator session in it.
   Each script now follows its own link chain first — joining relative link
   targets against the directory physically holding the link, as the kernel does
-  — then resolves the final directory logically. Resolution is fail-open: a
-  missing or erroring `readlink` warns and uses the path as-is instead of
-  aborting the script.
+  — then resolves the final directory logically. Every resolution step is
+  fail-open: a missing or erroring `readlink`, or a `cd` into a directory that
+  is gone, warns and uses the path as-is instead of aborting the script or
+  silently degrading to a bare `.` root.

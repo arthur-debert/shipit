@@ -58,7 +58,7 @@ set -euo pipefail
 # Every resolution step degrades to "use the path as-is" rather than aborting:
 # under `set -e` a bare `readlink`/`cd` failure would kill the launch outright.
 resolve_script_dir() {
-	local path="$1" link dir hops=0
+	local path="$1" link dir dirpath hops=0
 	while [ -L "$path" ]; do
 		hops=$((hops + 1))
 		if [ "$hops" -gt 40 ]; then
@@ -78,7 +78,18 @@ resolve_script_dir() {
 		*) path="${dir}/${link}" ;;
 		esac
 	done
-	cd -- "$(dirname -- "$path")" && pwd
+	# The final step is guarded like every step above, and for the same reason:
+	# an unguarded `cd` (a link into a removed directory) aborted the launch
+	# outright under `set -e` — the exact hard-fail the degrade-to-as-is
+	# contract above rules out. Warn and degrade to the directory as-is; the
+	# `cd -- "$repo"` below still fails LOUDLY if that root is unusable.
+	dirpath="$(dirname -- "$path")" || dirpath="$path"
+	if ! dir="$(cd -- "$dirpath" && pwd)"; then
+		echo "agent-start: could not resolve the directory holding $path — using it as-is" >&2
+		printf '%s\n' "$dirpath"
+		return 0
+	fi
+	printf '%s\n' "$dir"
 }
 
 repo="$(resolve_script_dir "${BASH_SOURCE[0]}")"

@@ -1772,14 +1772,28 @@ def test_setup_dev_env_matches_shipits_own_copy():
     assert os.access(own, os.X_OK)
 
 
-def _bootstrap_function(name: str) -> str:
-    """Extract one top-level ``name() { … }`` block from the bootstrap script."""
-    lines = (
-        iunits.data_bytes("bootstrap", "setup-dev-env.sh").decode("utf-8").splitlines()
-    )
+def _bootstrap_function(name: str, unit: str = "setup-dev-env.sh") -> str:
+    """Extract one top-level ``name() { … }`` block from a bootstrap script."""
+    lines = iunits.data_bytes("bootstrap", unit).decode("utf-8").splitlines()
     start = lines.index(f"{name}() {{")
     end = start + lines[start:].index("}")
     return "\n".join(lines[start : end + 1])
+
+
+def _resolve_script_dir_driver(unit: str) -> str:
+    """A runnable driver around a bootstrap script's REAL ``resolve_script_dir``
+    that resolves the path handed to it on argv and prints what it landed on.
+
+    Both managed scripts carry the function; only setup-dev-env.sh's copy
+    reports through ``warn`` (agent-start writes its own stderr line), so the
+    driver pulls in that dependency only where the extracted body needs it.
+    """
+    parts = ["#!/usr/bin/env bash", "set -euo pipefail"]
+    if unit == "setup-dev-env.sh":
+        parts.append(_bootstrap_function("warn", unit))
+    parts.append(_bootstrap_function("resolve_script_dir", unit))
+    parts.append('resolve_script_dir "$1"')
+    return "\n".join(parts)
 
 
 def _repo_root_driver() -> str:
@@ -1917,6 +1931,40 @@ def test_setup_dev_env_repo_root_stays_fail_open_when_readlink_errors(tmp_path):
     resolved = proc.stdout.strip()
     assert resolved != "."  # the masked, silently-wrong pre-fix root
     assert Path(resolved).samefile(linkdir.parent), f"fell back to {resolved}"
+
+
+@pytest.mark.parametrize("unit", ["setup-dev-env.sh", "agent-start"])
+def test_resolve_script_dir_degrades_when_the_final_cd_fails(tmp_path, unit):
+    # #995 (copilot): resolve_script_dir's header promises that EVERY resolution
+    # step warns and degrades to "use the path as-is" rather than aborting under
+    # `set -euo pipefail` — but the final `cd ... && pwd` was unguarded, so a
+    # link resolving into a missing directory broke that promise, differently in
+    # each script: setup-dev-env.sh let the non-zero ride out through the
+    # caller's outer `dirname` (which exits 0 on the empty string), masking it
+    # into a bare "." root — silently wrong, the one outcome its fail-open
+    # contract forbids — while agent-start, whose assignment has no outer
+    # command to mask it, aborted the launch outright.
+    driver = tmp_path / "driver.sh"
+    driver.write_text(_resolve_script_dir_driver(unit))
+    driver.chmod(0o755)
+
+    # A link whose target lands in a directory that does not exist: the loop
+    # follows it to the end, then the final `cd` to its parent is what fails.
+    link = tmp_path / "link"
+    link.symlink_to(tmp_path / "gone" / "target")
+
+    bash = shutil.which("bash")
+    assert bash is not None
+    proc = subprocess.run(
+        [bash, str(driver), str(link)], capture_output=True, text=True, timeout=10
+    )
+    # Survived (degraded) and said so (LOUD) — the unguarded form instead
+    # returned non-zero here, taking the whole script down with it.
+    assert proc.returncode == 0, proc.stderr
+    assert "could not resolve the directory holding" in proc.stderr
+    resolved = proc.stdout.strip()
+    assert resolved != "."  # the masked, silently-wrong pre-fix root
+    assert resolved == str(tmp_path / "gone")  # the directory as-is
 
 
 @pytest.mark.parametrize("tool", ["sha256sum", "shasum"])

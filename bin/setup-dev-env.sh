@@ -222,7 +222,7 @@ resolve_script_dir() {
 	# Every resolution step warns and degrades to "use the path as-is" rather
 	# than aborting: under `set -e` a bare `readlink`/`cd` failure (readlink
 	# missing or unsupported) would hard-fail a script contracted to fail OPEN.
-	local path="$1" link dir hops=0
+	local path="$1" link dir dirpath hops=0
 	while [ -L "$path" ]; do
 		hops=$((hops + 1))
 		if [ "$hops" -gt 40 ]; then
@@ -242,7 +242,18 @@ resolve_script_dir() {
 		*) path="${dir}/${link}" ;;
 		esac
 	done
-	cd -- "$(dirname -- "$path")" && pwd
+	# The final step is guarded like every step above, and for the same reason:
+	# an unguarded `cd` (a dangling target, a removed parent) let a failure ride
+	# out through the caller's outer `dirname`, which masked it into a bare "."
+	# root — silently wrong, the one outcome this script's fail-open contract
+	# must never produce. Warn and degrade to the directory as-is instead.
+	dirpath="$(dirname -- "$path")" || dirpath="$path"
+	if ! dir="$(cd -- "$dirpath" && pwd)"; then
+		warn "could not resolve the directory holding $path — using it as-is"
+		printf '%s\n' "$dirpath"
+		return 0
+	fi
+	printf '%s\n' "$dir"
 }
 
 TRIPLE="$(resolve_triple)"
