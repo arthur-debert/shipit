@@ -1344,9 +1344,12 @@ def test_load_units_includes_the_agent_start_launcher():
     # spawned Run's shell cannot silently disarm the edit guard.
     assert "unset SHIPIT_LOG_CTX_ROLE" in text
     # #848 hardening (copilot on vscode#157, gemini on mkdocs-lex#22): resolve
-    # the launcher's own directory symlink- and dash-safely (`cd -P --` /
-    # `dirname --`), and launch FROM the repo root wherever invoked from.
-    assert 'cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")"' in text
+    # the launcher's own directory symlink- and dash-safely (`dirname --`),
+    # and launch FROM the repo root wherever invoked from. #994 sharpened the
+    # symlink half: the raw `cd -P -- "$(dirname …)"` never followed the
+    # launcher's OWN link chain — resolve_script_dir does (behavior covered by
+    # test_agent_start_resolves_the_repo_through_a_symlinked_launcher_path).
+    assert 'repo="$(resolve_script_dir "${BASH_SOURCE[0]}")"' in text
     assert 'cd -- "$repo"' in text
 
 
@@ -1752,8 +1755,11 @@ def test_load_units_includes_the_setup_dev_env_bootstrap():
     # Provisioning never mutates pixi.lock: the env solve is `--locked` only.
     assert "pixi install --locked" in text
     # #848 hardening (same family as the agent-start finding): the repo root
-    # resolves symlink- and dash-safely.
-    assert 'cd -P -- "$(dirname -- "$SELF")/.."' in text
+    # resolves symlink- and dash-safely. #994 replaced the `cd -P … /..` form
+    # — -P re-resolved every component, so `..` walked off a symlinked `bin`
+    # into the link TARGET's parent (behavior covered by
+    # test_setup_dev_env_repo_root_resolves_through_symlinks).
+    assert 'REPO_ROOT="$(dirname -- "$(resolve_script_dir "$SELF")")"' in text
 
 
 def test_setup_dev_env_matches_shipits_own_copy():
@@ -1766,14 +1772,199 @@ def test_setup_dev_env_matches_shipits_own_copy():
     assert os.access(own, os.X_OK)
 
 
-def _bootstrap_function(name: str) -> str:
-    """Extract one top-level ``name() { … }`` block from the bootstrap script."""
-    lines = (
-        iunits.data_bytes("bootstrap", "setup-dev-env.sh").decode("utf-8").splitlines()
-    )
+def _bootstrap_function(name: str, unit: str = "setup-dev-env.sh") -> str:
+    """Extract one top-level ``name() { … }`` block from a bootstrap script."""
+    lines = iunits.data_bytes("bootstrap", unit).decode("utf-8").splitlines()
     start = lines.index(f"{name}() {{")
     end = start + lines[start:].index("}")
     return "\n".join(lines[start : end + 1])
+
+
+def _resolve_script_dir_driver(unit: str) -> str:
+    """A runnable driver around a bootstrap script's REAL ``resolve_script_dir``
+    that resolves the path handed to it on argv and prints what it landed on.
+
+    Both managed scripts carry the function; only setup-dev-env.sh's copy
+    reports through ``warn`` (agent-start writes its own stderr line), so the
+    driver pulls in that dependency only where the extracted body needs it.
+    """
+    parts = ["#!/usr/bin/env bash", "set -euo pipefail"]
+    if unit == "setup-dev-env.sh":
+        parts.append(_bootstrap_function("warn", unit))
+    parts.append(_bootstrap_function("resolve_script_dir", unit))
+    parts.append('resolve_script_dir "$1"')
+    return "\n".join(parts)
+
+
+def _repo_root_driver() -> str:
+    """A runnable driver around the bootstrap's REAL repo-root resolution — its
+    ``warn`` and ``resolve_script_dir`` functions plus the verbatim
+    ``REPO_ROOT=`` line — that prints the root it resolved.
+
+    Driving the shipped lines (rather than the whole script) keeps the test on
+    the resolution under test and off the network-fetching provisioning body.
+    """
+    script = iunits.data_bytes("bootstrap", "setup-dev-env.sh").decode("utf-8")
+    repo_root_line = next(
+        line for line in script.splitlines() if line.startswith('REPO_ROOT="')
+    )
+    return "\n".join(
+        [
+            "#!/usr/bin/env bash",
+            "set -euo pipefail",
+            _bootstrap_function("warn"),
+            _bootstrap_function("resolve_script_dir"),
+            'SELF="${BASH_SOURCE[0]:-$0}"',
+            repo_root_line,
+            'printf "%s\\n" "$REPO_ROOT"',
+        ]
+    )
+
+
+@pytest.mark.parametrize(
+    "layout", ["plain", "symlinked-bin", "symlinked-script", "symlinked-bin-and-script"]
+)
+def test_setup_dev_env_repo_root_resolves_through_symlinks(tmp_path, layout):
+    # #994 (gemini on lex-fmt/mkdocs-lex#28): REPO_ROOT is what every later step
+    # reads (`${REPO_ROOT}/pixi.toml`), so mis-resolving it provisions the wrong
+    # checkout — or none, fail-open and silent. The old
+    # `cd -P -- "$(dirname -- "$SELF")/.."` resolved EVERY component
+    # physically: `..` stepped back from wherever a symlinked `bin` POINTED,
+    # and a symlinked script path was never followed at all. All three layouts
+    # must land on the checkout that owns the pixi.toml.
+    repo = tmp_path / "repo"  # the checkout every layout must resolve to
+    (repo / "bin").mkdir(parents=True)
+    (repo / "pixi.toml").write_text("[environments]\nlint = ['lint']\n")
+    driver = _repo_root_driver()
+
+    if layout == "plain":
+        # The ordinary install: no symlink anywhere, behavior unchanged.
+        entry = repo / "bin" / "setup-dev-env.sh"
+        entry.write_text(driver)
+    elif layout == "symlinked-bin":
+        # A symlinked intermediate dir: `bin` points OUT of the checkout at a
+        # shared script dir — the case that resolved to `shared/`, which has no
+        # pixi.toml in it.
+        shared = tmp_path / "shared" / "bin"
+        shared.mkdir(parents=True)
+        (shared / "setup-dev-env.sh").write_text(driver)
+        (repo / "bin").rmdir()
+        (repo / "bin").symlink_to(shared)
+        entry = repo / "bin" / "setup-dev-env.sh"
+    elif layout == "symlinked-script":
+        # A symlinked script path (`~/bin/setup-dev-env.sh` -> the checkout's
+        # copy) — the case that resolved to the LINK's own parent ($HOME).
+        (repo / "bin" / "setup-dev-env.sh").write_text(driver)
+        linkdir = tmp_path / "home" / "bin"
+        linkdir.mkdir(parents=True)
+        entry = linkdir / "setup-dev-env.sh"
+        entry.symlink_to(repo / "bin" / "setup-dev-env.sh")
+    else:
+        # BOTH at once (codex on #995): a symlinked parent dir reached through
+        # a RELATIVE script link. The kernel reads a relative link target
+        # against the dir PHYSICALLY holding the link, so joining it onto the
+        # LOGICAL dir walked `..` back from the alias instead of the link's real
+        # home. The decoy checkout below is what makes that silent rather than
+        # loud: it gives the wrong lexical path a real pixi.toml to land on, so
+        # the resolver would happily provision the WRONG checkout.
+        (repo / "bin" / "setup-dev-env.sh").write_text(driver)
+        tools = tmp_path / "tools"
+        tools.mkdir()
+        (tools / "setup-dev-env.sh").symlink_to("../repo/bin/setup-dev-env.sh")
+        alias = tmp_path / "alias"
+        alias.mkdir()
+        (alias / "bin").symlink_to(tools)
+        decoy = alias / "repo"  # what `alias/bin/../repo` lexically resolves to
+        (decoy / "bin").mkdir(parents=True)
+        (decoy / "pixi.toml").write_text("[environments]\nlint = ['lint']\n")
+        entry = alias / "bin" / "setup-dev-env.sh"
+
+    bash = shutil.which("bash")
+    assert bash is not None
+    proc = subprocess.run(
+        [bash, str(entry)], capture_output=True, text=True, timeout=10
+    )
+    assert proc.returncode == 0, proc.stderr
+    resolved = Path(proc.stdout.strip())
+    assert resolved.samefile(repo), f"resolved {resolved}, wanted {repo}"
+    assert (resolved / "pixi.toml").is_file()  # the root the later steps read
+
+
+def test_setup_dev_env_repo_root_stays_fail_open_when_readlink_errors(tmp_path):
+    # #995 (copilot): same fail-open contract as sha256_of below, same
+    # `set -euo pipefail` trap. An unguarded `readlink` turns a missing or
+    # erroring readlink into a HARD abort of a script that promises to degrade
+    # and exit 0. resolve_script_dir must warn and fall back to the path as-is.
+    stub_bin = tmp_path / "stubbin"
+    stub_bin.mkdir()
+    dirname = shutil.which("dirname")
+    assert dirname is not None
+    os.symlink(dirname, stub_bin / "dirname")
+    stub = stub_bin / "readlink"
+    stub.write_text("#!/bin/sh\necho 'readlink: boom' >&2\nexit 1\n")
+    stub.chmod(0o755)
+
+    # A symlinked script path, so resolution must enter the readlink loop.
+    repo = tmp_path / "repo"
+    (repo / "bin").mkdir(parents=True)
+    (repo / "bin" / "setup-dev-env.sh").write_text(_repo_root_driver())
+    linkdir = tmp_path / "home" / "bin"
+    linkdir.mkdir(parents=True)
+    entry = linkdir / "setup-dev-env.sh"
+    entry.symlink_to(repo / "bin" / "setup-dev-env.sh")
+
+    bash = shutil.which("bash")
+    assert bash is not None
+    proc = subprocess.run(
+        [bash, str(entry)],
+        env={"PATH": str(stub_bin)},  # hermetic: only the erroring readlink
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    # Survived (fail-open) and said so (LOUD) — the unguarded form instead let
+    # the readlink failure ride out through the outer `dirname`, which masked
+    # it into a bare "." root: silently wrong, the one outcome fail-open must
+    # never produce. The fallback is the link's own parent, used as-is.
+    assert proc.returncode == 0, proc.stderr
+    assert "could not read the symlink" in proc.stderr
+    resolved = proc.stdout.strip()
+    assert resolved != "."  # the masked, silently-wrong pre-fix root
+    assert Path(resolved).samefile(linkdir.parent), f"fell back to {resolved}"
+
+
+@pytest.mark.parametrize("unit", ["setup-dev-env.sh", "agent-start"])
+def test_resolve_script_dir_degrades_when_the_final_cd_fails(tmp_path, unit):
+    # #995 (copilot): resolve_script_dir's header promises that EVERY resolution
+    # step warns and degrades to "use the path as-is" rather than aborting under
+    # `set -euo pipefail` — but the final `cd ... && pwd` was unguarded, so a
+    # link resolving into a missing directory broke that promise, differently in
+    # each script: setup-dev-env.sh let the non-zero ride out through the
+    # caller's outer `dirname` (which exits 0 on the empty string), masking it
+    # into a bare "." root — silently wrong, the one outcome its fail-open
+    # contract forbids — while agent-start, whose assignment has no outer
+    # command to mask it, aborted the launch outright.
+    driver = tmp_path / "driver.sh"
+    driver.write_text(_resolve_script_dir_driver(unit))
+    driver.chmod(0o755)
+
+    # A link whose target lands in a directory that does not exist: the loop
+    # follows it to the end, then the final `cd` to its parent is what fails.
+    link = tmp_path / "link"
+    link.symlink_to(tmp_path / "gone" / "target")
+
+    bash = shutil.which("bash")
+    assert bash is not None
+    proc = subprocess.run(
+        [bash, str(driver), str(link)], capture_output=True, text=True, timeout=10
+    )
+    # Survived (degraded) and said so (LOUD) — the unguarded form instead
+    # returned non-zero here, taking the whole script down with it.
+    assert proc.returncode == 0, proc.stderr
+    assert "could not resolve the directory holding" in proc.stderr
+    resolved = proc.stdout.strip()
+    assert resolved != "."  # the masked, silently-wrong pre-fix root
+    assert resolved == str(tmp_path / "gone")  # the directory as-is
 
 
 @pytest.mark.parametrize("tool", ["sha256sum", "shasum"])
@@ -2874,6 +3065,82 @@ def test_agent_start_claude_execs_claude_with_a_minted_session_id(tmp_path: Path
 
     # A second launch mints a distinct id — no two sessions share a Tree id.
     assert launch()[1] != argv[1]
+
+
+def test_agent_start_resolves_the_repo_through_a_symlinked_launcher_path(
+    tmp_path: Path,
+):
+    # #994 (gemini on lex-fmt/mkdocs-lex#28): `repo` is the directory the
+    # launcher cd's to before dispatch (#848), and rooting the coordinator
+    # session in the wrong checkout is the whole failure. Reached through a
+    # symlink (`~/bin/agent-start` -> the checkout's copy), the old
+    # `cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")"` never followed the
+    # launcher's OWN link chain and rooted the session in the LINK's dir.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    agent_start = _lay_down_launcher(repo)
+    linkdir = tmp_path / "home" / "bin"
+    linkdir.mkdir(parents=True)
+    link = linkdir / "agent-start"
+    link.symlink_to(agent_start)
+
+    env = _fake_cli(tmp_path, "claude")
+    fake = tmp_path / "fakepath" / "claude"
+    fake.write_text("#!/usr/bin/env bash\npwd\n")  # where was the session rooted?
+    fake.chmod(0o755)
+
+    proc = subprocess.run(
+        [str(link), "claude"],
+        env=env,
+        cwd=str(linkdir),  # invoked from anywhere, as the launcher promises
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert proc.returncode == 0, proc.stderr
+    launched_from = Path(proc.stdout.strip())
+    assert launched_from.samefile(repo), f"rooted in {launched_from}, wanted {repo}"
+
+
+def test_agent_start_resolves_the_repo_through_a_symlinked_bin_and_relative_link(
+    tmp_path: Path,
+):
+    # #995 (codex): BOTH symlink shapes at once — a symlinked `bin` reached
+    # through a RELATIVE launcher link. The kernel reads a relative link target
+    # against the dir PHYSICALLY holding the link, so joining it onto the
+    # LOGICAL dir walked `..` back from the alias, not from the link's real
+    # home. The decoy checkout is what makes that silent instead of loud: it
+    # gives the wrong lexical path a real directory to land in, so the
+    # coordinator session is rooted in the WRONG checkout with no error at all.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    agent_start = _lay_down_launcher(repo)
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    (tools / "agent-start").symlink_to(Path("..") / repo.name / agent_start.name)
+    alias = tmp_path / "alias"
+    alias.mkdir()
+    (alias / "bin").symlink_to(tools)
+    decoy = alias / "repo"  # what `alias/bin/../repo` lexically resolves to
+    decoy.mkdir(parents=True)
+
+    env = _fake_cli(tmp_path, "claude")
+    fake = tmp_path / "fakepath" / "claude"
+    fake.write_text("#!/usr/bin/env bash\npwd\n")  # where was the session rooted?
+    fake.chmod(0o755)
+
+    proc = subprocess.run(
+        [str(alias / "bin" / "agent-start"), "claude"],
+        env=env,
+        cwd=str(tmp_path),  # invoked from anywhere, as the launcher promises
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert proc.returncode == 0, proc.stderr
+    launched_from = Path(proc.stdout.strip())
+    assert not launched_from.samefile(decoy), "rooted in the decoy checkout"
+    assert launched_from.samefile(repo), f"rooted in {launched_from}, wanted {repo}"
 
 
 def test_agent_start_codex_execs_the_pinned_launcher(tmp_path: Path):
