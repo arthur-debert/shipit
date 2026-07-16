@@ -193,9 +193,39 @@ manifest_defines_lint_env() {
 	' "${REPO_ROOT}/pixi.toml"
 }
 
+resolve_script_dir() {
+	# The directory holding this script, symlink-safe (#994). The old
+	# `cd -P -- "$(dirname -- "$SELF")/.."` looked equivalent but is not: -P
+	# resolves EVERY path component physically, so a symlinked intermediate
+	# `bin` (one pointing out of the checkout) applied `..` to the LINK
+	# TARGET's parent instead of the repo, and a symlinked script path
+	# (`~/bin/setup-dev-env.sh -> <repo>/bin/setup-dev-env.sh`) was never
+	# followed at all — both resolved REPO_ROOT to a directory with no
+	# pixi.toml in it. Follow the script's own link chain first, then resolve
+	# its directory LOGICALLY, so the caller's `..` is a lexical step back to
+	# the checkout this script was invoked through.
+	local path="$1" link dir hops=0
+	while [ -L "$path" ]; do
+		hops=$((hops + 1))
+		if [ "$hops" -gt 40 ]; then
+			warn "symlink loop resolving $1 — using it as-is"
+			break
+		fi
+		dir="$(cd -- "$(dirname -- "$path")" && pwd)"
+		link="$(readlink -- "$path")"
+		case "$link" in
+		/*) path="$link" ;;
+		*) path="${dir}/${link}" ;;
+		esac
+	done
+	cd -- "$(dirname -- "$path")" && pwd
+}
+
 TRIPLE="$(resolve_triple)"
 SELF="${BASH_SOURCE[0]:-$0}"
-REPO_ROOT="$(cd -P -- "$(dirname -- "$SELF")/.." && pwd)"
+# `dirname` on the already-absolute script dir: a lexical step to the repo
+# root, never a `..` that the filesystem could re-resolve through a symlink.
+REPO_ROOT="$(dirname -- "$(resolve_script_dir "$SELF")")"
 
 if ! mkdir -p "$BIN_DIR"; then
 	warn "could not create ${BIN_DIR} — nothing can be provisioned"

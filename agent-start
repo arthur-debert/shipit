@@ -35,7 +35,31 @@
 # Do not edit — `shipit install` overwrites this file.
 set -euo pipefail
 
-repo="$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# The directory this launcher lives in, symlink-safe (#994). `cd -P` on the
+# raw `$(dirname)` looks equivalent but is not: it never follows the SCRIPT's
+# own link chain, so a symlinked launcher path (`~/bin/agent-start ->
+# <checkout>/agent-start`) resolved `repo` to the LINK's directory and rooted
+# the coordinator session in the wrong checkout. Follow the link chain to the
+# real launcher first, then take its directory.
+resolve_script_dir() {
+	local path="$1" link dir hops=0
+	while [ -L "$path" ]; do
+		hops=$((hops + 1))
+		if [ "$hops" -gt 40 ]; then
+			echo "agent-start: symlink loop resolving $1 — using it as-is" >&2
+			break
+		fi
+		dir="$(cd -- "$(dirname -- "$path")" && pwd)"
+		link="$(readlink -- "$path")"
+		case "$link" in
+		/*) path="$link" ;;
+		*) path="${dir}/${link}" ;;
+		esac
+	done
+	cd -- "$(dirname -- "$path")" && pwd
+}
+
+repo="$(resolve_script_dir "${BASH_SOURCE[0]}")"
 
 # Launch FROM the repo root (#848): the launcher may be invoked from any cwd,
 # but the coordinator session it starts must be rooted in the checkout this

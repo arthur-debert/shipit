@@ -1344,9 +1344,12 @@ def test_load_units_includes_the_agent_start_launcher():
     # spawned Run's shell cannot silently disarm the edit guard.
     assert "unset SHIPIT_LOG_CTX_ROLE" in text
     # #848 hardening (copilot on vscode#157, gemini on mkdocs-lex#22): resolve
-    # the launcher's own directory symlink- and dash-safely (`cd -P --` /
-    # `dirname --`), and launch FROM the repo root wherever invoked from.
-    assert 'cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")"' in text
+    # the launcher's own directory symlink- and dash-safely (`dirname --`),
+    # and launch FROM the repo root wherever invoked from. #994 sharpened the
+    # symlink half: the raw `cd -P -- "$(dirname …)"` never followed the
+    # launcher's OWN link chain — resolve_script_dir does (behavior covered by
+    # test_agent_start_resolves_the_repo_through_a_symlinked_launcher_path).
+    assert 'repo="$(resolve_script_dir "${BASH_SOURCE[0]}")"' in text
     assert 'cd -- "$repo"' in text
 
 
@@ -1752,8 +1755,11 @@ def test_load_units_includes_the_setup_dev_env_bootstrap():
     # Provisioning never mutates pixi.lock: the env solve is `--locked` only.
     assert "pixi install --locked" in text
     # #848 hardening (same family as the agent-start finding): the repo root
-    # resolves symlink- and dash-safely.
-    assert 'cd -P -- "$(dirname -- "$SELF")/.."' in text
+    # resolves symlink- and dash-safely. #994 replaced the `cd -P … /..` form
+    # — -P re-resolved every component, so `..` walked off a symlinked `bin`
+    # into the link TARGET's parent (behavior covered by
+    # test_setup_dev_env_repo_root_resolves_through_symlinks).
+    assert 'REPO_ROOT="$(dirname -- "$(resolve_script_dir "$SELF")")"' in text
 
 
 def test_setup_dev_env_matches_shipits_own_copy():
@@ -1774,6 +1780,79 @@ def _bootstrap_function(name: str) -> str:
     start = lines.index(f"{name}() {{")
     end = start + lines[start:].index("}")
     return "\n".join(lines[start : end + 1])
+
+
+def _repo_root_driver() -> str:
+    """A runnable driver around the bootstrap's REAL repo-root resolution — its
+    ``warn`` and ``resolve_script_dir`` functions plus the verbatim
+    ``REPO_ROOT=`` line — that prints the root it resolved.
+
+    Driving the shipped lines (rather than the whole script) keeps the test on
+    the resolution under test and off the network-fetching provisioning body.
+    """
+    script = iunits.data_bytes("bootstrap", "setup-dev-env.sh").decode("utf-8")
+    repo_root_line = next(
+        line for line in script.splitlines() if line.startswith('REPO_ROOT="')
+    )
+    return "\n".join(
+        [
+            "#!/usr/bin/env bash",
+            "set -euo pipefail",
+            _bootstrap_function("warn"),
+            _bootstrap_function("resolve_script_dir"),
+            'SELF="${BASH_SOURCE[0]:-$0}"',
+            repo_root_line,
+            'printf "%s\\n" "$REPO_ROOT"',
+        ]
+    )
+
+
+@pytest.mark.parametrize("layout", ["plain", "symlinked-bin", "symlinked-script"])
+def test_setup_dev_env_repo_root_resolves_through_symlinks(tmp_path, layout):
+    # #994 (gemini on lex-fmt/mkdocs-lex#28): REPO_ROOT is what every later step
+    # reads (`${REPO_ROOT}/pixi.toml`), so mis-resolving it provisions the wrong
+    # checkout — or none, fail-open and silent. The old
+    # `cd -P -- "$(dirname -- "$SELF")/.."` resolved EVERY component
+    # physically: `..` stepped back from wherever a symlinked `bin` POINTED,
+    # and a symlinked script path was never followed at all. All three layouts
+    # must land on the checkout that owns the pixi.toml.
+    repo = tmp_path / "repo"  # the checkout every layout must resolve to
+    (repo / "bin").mkdir(parents=True)
+    (repo / "pixi.toml").write_text("[environments]\nlint = ['lint']\n")
+    driver = _repo_root_driver()
+
+    if layout == "plain":
+        # The ordinary install: no symlink anywhere, behavior unchanged.
+        entry = repo / "bin" / "setup-dev-env.sh"
+        entry.write_text(driver)
+    elif layout == "symlinked-bin":
+        # A symlinked intermediate dir: `bin` points OUT of the checkout at a
+        # shared script dir — the case that resolved to `shared/`, which has no
+        # pixi.toml in it.
+        shared = tmp_path / "shared" / "bin"
+        shared.mkdir(parents=True)
+        (shared / "setup-dev-env.sh").write_text(driver)
+        (repo / "bin").rmdir()
+        (repo / "bin").symlink_to(shared)
+        entry = repo / "bin" / "setup-dev-env.sh"
+    else:
+        # A symlinked script path (`~/bin/setup-dev-env.sh` -> the checkout's
+        # copy) — the case that resolved to the LINK's own parent ($HOME).
+        (repo / "bin" / "setup-dev-env.sh").write_text(driver)
+        linkdir = tmp_path / "home" / "bin"
+        linkdir.mkdir(parents=True)
+        entry = linkdir / "setup-dev-env.sh"
+        entry.symlink_to(repo / "bin" / "setup-dev-env.sh")
+
+    bash = shutil.which("bash")
+    assert bash is not None
+    proc = subprocess.run(
+        [bash, str(entry)], capture_output=True, text=True, timeout=10
+    )
+    assert proc.returncode == 0, proc.stderr
+    resolved = Path(proc.stdout.strip())
+    assert resolved.samefile(repo), f"resolved {resolved}, wanted {repo}"
+    assert (resolved / "pixi.toml").is_file()  # the root the later steps read
 
 
 @pytest.mark.parametrize("tool", ["sha256sum", "shasum"])
@@ -2874,6 +2953,41 @@ def test_agent_start_claude_execs_claude_with_a_minted_session_id(tmp_path: Path
 
     # A second launch mints a distinct id — no two sessions share a Tree id.
     assert launch()[1] != argv[1]
+
+
+def test_agent_start_resolves_the_repo_through_a_symlinked_launcher_path(
+    tmp_path: Path,
+):
+    # #994 (gemini on lex-fmt/mkdocs-lex#28): `repo` is the directory the
+    # launcher cd's to before dispatch (#848), and rooting the coordinator
+    # session in the wrong checkout is the whole failure. Reached through a
+    # symlink (`~/bin/agent-start` -> the checkout's copy), the old
+    # `cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")"` never followed the
+    # launcher's OWN link chain and rooted the session in the LINK's dir.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    agent_start = _lay_down_launcher(repo)
+    linkdir = tmp_path / "home" / "bin"
+    linkdir.mkdir(parents=True)
+    link = linkdir / "agent-start"
+    link.symlink_to(agent_start)
+
+    env = _fake_cli(tmp_path, "claude")
+    fake = tmp_path / "fakepath" / "claude"
+    fake.write_text("#!/usr/bin/env bash\npwd\n")  # where was the session rooted?
+    fake.chmod(0o755)
+
+    proc = subprocess.run(
+        [str(link), "claude"],
+        env=env,
+        cwd=str(linkdir),  # invoked from anywhere, as the launcher promises
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert proc.returncode == 0, proc.stderr
+    launched_from = Path(proc.stdout.strip())
+    assert launched_from.samefile(repo), f"rooted in {launched_from}, wanted {repo}"
 
 
 def test_agent_start_codex_execs_the_pinned_launcher(tmp_path: Path):
