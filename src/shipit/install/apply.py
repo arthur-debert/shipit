@@ -587,27 +587,42 @@ def _restore_caller_branch(
     the real apply outcome (or a git/gh error already unwinding through the
     ``finally`` that calls this).
 
-    ``staged_writes`` is the managed set apply left ON DISK, and it is staged into
-    the caller's REAL index immediately before the switch (#993). The reconcile
-    commit is built on an ISOLATED scratch index (#992), so a managed path apply
-    ADDED is on disk but was never added to the real index — untracked. It is,
-    however, in the scratch-index commit now at HEAD, so switching back to a
-    branch that lacks it makes git refuse outright (``error: The following
-    untracked working tree files would be removed by checkout: .shipit-skills/…``)
-    and the operator is stranded on the scratch branch — the very #777 mode 1
-    surprise this exists to prevent, back again whenever a reconcile adds a new
-    path (the ``skills/`` → ``.shipit-skills/`` store move). Staging the managed
-    writes makes them TRACKED and index-clean against HEAD, so the switch is a
-    plain branch change: git drops a path the caller's branch does not carry and
-    rewinds a managed path it does to their content — the reconcile lives in the
-    PR, not in their tree. The staging is transient (the switch resets those
-    entries to the target branch) and scoped to shipit's OWN writes, never a
-    consumer-owned or unrelated dirty path, and it is skipped unless the checkout
-    is actually ON the scratch branch — a flow that failed BEFORE ``switch_create``
-    never moved the operator, so its restore must leave their index untouched.
-    A staging failure is logged and the switch still ATTEMPTED: it is a
-    precondition for the blocked case only, so it must not itself strand the
-    caller.
+    ``staged_writes`` is the managed set apply left ON DISK. The members of it
+    that are UNTRACKED in the caller's REAL index — and ONLY those — are staged
+    into that index immediately before the switch (#993). The reconcile commit is
+    built on an ISOLATED scratch index (#992), so a managed path apply ADDED is on
+    disk but was never added to the real index — untracked. It is, however, in the
+    scratch-index commit now at HEAD, so switching back to a branch that lacks it
+    makes git refuse outright (``error: The following untracked working tree files
+    would be removed by checkout: .shipit-skills/…``) and the operator is stranded
+    on the scratch branch — the very #777 mode 1 surprise this exists to prevent,
+    back again whenever a reconcile adds a new path (the ``skills/`` →
+    ``.shipit-skills/`` store move). Staging those ADDS makes them TRACKED and
+    index-clean against HEAD, so the switch drops each one: the reconcile lives in
+    the PR, not in the caller's tree.
+
+    Restricting the staging to the UNTRACKED members is what keeps the
+    :func:`git.reset_soft` contract — "the caller's staged state survives the flow
+    untouched" (#992) — true, and it is load-bearing, not an optimisation (#993
+    review). An untracked path has NO index entry, so staging it cannot overwrite
+    one. Staging the WHOLE of ``staged_writes`` would: the set spans NOOP units,
+    ``.shipit.toml``, splice files such as ``AGENTS.md``, and ``pixi.lock``, and
+    for a TRACKED member a blanket ``git add`` replaces whatever the caller had
+    staged at that path with apply's write — index-only content that the switch
+    then resets away, unrecoverable and unannounced. A tracked managed path never
+    needs the help anyway: it already HAS an index entry, so it raises no
+    untracked-file refusal. Where a caller's staged content diverges from both
+    HEAD and their branch, git refuses the switch and this logs it — git declining
+    to destroy their staged work is the better failure than silently destroying
+    it, and that strand is #992's to answer, not this restore's.
+
+    The staging is transient (the switch resets those entries to the target
+    branch) and scoped to shipit's OWN writes, never a consumer-owned or unrelated
+    dirty path, and it is skipped unless the checkout is actually ON the scratch
+    branch — a flow that failed BEFORE ``switch_create`` never moved the operator,
+    so its restore must leave their index untouched. A staging failure is logged
+    and the switch still ATTEMPTED: it is a precondition for the blocked case
+    only, so it must not itself strand the caller.
     """
     if original_ref is None:
         return
@@ -626,12 +641,19 @@ def _restore_caller_branch(
         return
     try:
         if git.current_branch(cwd=cwd) == INSTALL_BRANCH:
-            git.add(sorted(staged_writes), cwd=cwd)
+            tracked = git.ls_files_matching(sorted(staged_writes), cwd=cwd)
+            # `None` is "not a git repo" — unreachable mid-flow, but it must fail
+            # CLOSED (stage nothing) rather than degrade into `staged_writes -
+            # set()`, i.e. the blanket staging that clobbers the caller's index.
+            if tracked is not None:
+                added = sorted(staged_writes - set(tracked))
+                if added:
+                    git.add(added, cwd=cwd)
     except execrun.ExecError:
         logger.warning(
-            "could not stage the managed writes into the caller's index before "
-            "the install PR restore — a newly added managed path may block the "
-            "switch back to %s",
+            "could not stage the newly added managed paths into the caller's "
+            "index before the install PR restore — a newly added managed path "
+            "may block the switch back to %s",
             original_ref,
             exc_info=True,
             extra={"root": cwd, "branch": original_ref},
@@ -1246,10 +1268,12 @@ def apply(
             # Success or failure, restore the caller's checkout: the operator
             # never asked to move off their branch, and a git/gh failure mid-flow
             # would otherwise strand them on the scratch branch too. The managed
-            # writes ride along because the restore must STAGE them into the real
-            # index first (#993): the scratch-index commit (#992) never touched
-            # that index, so a newly added managed path is untracked on disk and
-            # git refuses to switch away over it.
+            # writes ride along because the restore must STAGE the newly ADDED
+            # ones into the real index first (#993): the scratch-index commit
+            # (#992) never touched that index, so a newly added managed path is
+            # untracked on disk and git refuses to switch away over it. It stages
+            # only the untracked members — a tracked one needs no unblocking, and
+            # staging it would overwrite the caller's staged blob (#993 review).
             _restore_caller_branch(cwd, original_ref, staged_writes)
     except execrun.ExecError:
         # The failure propagates to the CLI error shell (clean `error: …` +

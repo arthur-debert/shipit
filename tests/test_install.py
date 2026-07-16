@@ -3145,6 +3145,12 @@ class _GhRecorder:
     def __init__(self):
         self.calls = []
         self.branch = "main"  # the caller's checkout, moved by switch/switch_create
+        # What `git ls-files` reports as TRACKED in the caller's REAL index. The
+        # restore stages the COMPLEMENT of this within the managed set (#993),
+        # so the default (empty — a virgin consumer repo where every managed
+        # write is a brand-new path) makes the restore stage them all; a test
+        # populates it to pin the tracked-path SKIP.
+        self.tracked = set()
         self.pr_body = None
         self.hook_activations = []
         self.commit_paths = ()
@@ -3209,6 +3215,13 @@ class _GhRecorder:
         # it started on after the PR flow.
         self.calls.append(("switch_back", branch))
         self.branch = branch
+
+    def ls_files_matching(self, pathspecs, *, cwd):
+        # The restore's tracked-path probe (#993): it stages `staged_writes`
+        # MINUS this answer. Deliberately NOT recorded in `calls` — it is a read,
+        # and the step-order assertions pin git's MUTATIONS.
+        self.ls_files_pathspecs = tuple(pathspecs)
+        return sorted(self.tracked.intersection(pathspecs))
 
     def add(self, paths, *, cwd, index_file=None):
         # `index_file` routes the write staging at the MODE_PR scratch index
@@ -3299,6 +3312,7 @@ def rec(monkeypatch):
         "switch",
         "read_tree",
         "add",
+        "ls_files_matching",
         "rm_cached",
         "staged_paths",
         "reset_index",
@@ -3371,9 +3385,10 @@ def test_fresh_install_writes_set_and_opens_draft_pr(tmp_path, rec):
     # a Tree cut from a stale remote shipit/install head can never stack a
     # conflicting commit; the read_tree seeds an ISOLATED index so the whole-index
     # commit never publishes the caller's real index (#992); the second `add`
-    # tracks the managed writes the scratch index left untracked so they cannot
-    # block the checkout (#993); the switch_back (#777 mode 1) returns the
-    # checkout to where it started.
+    # tracks the managed writes the scratch index left UNTRACKED (here, on a
+    # virgin repo, all of them) so they cannot block the checkout, and stages
+    # nothing the caller already tracks (#993 + its review); the switch_back
+    # (#777 mode 1) returns the checkout to where it started.
     assert rec.names() == [
         "fetch",
         "switch",
@@ -4982,6 +4997,38 @@ def test_pr_flow_stages_the_managed_writes_into_the_real_index_before_restoring(
     assert ".shipit.toml" in restore_add
 
 
+def test_pr_flow_restore_never_stages_a_managed_path_the_caller_already_tracks(
+    tmp_path, rec
+):
+    # #993 review: the restore stages the managed writes the scratch index left
+    # UNTRACKED and nothing else. A TRACKED managed path raises no untracked-file
+    # refusal, so staging it buys no unblocking — and it would overwrite whatever
+    # the caller had staged at that path, breaking `reset_soft`'s contract that
+    # "the caller's staged state survives the flow untouched" (#992). The
+    # data-level proof is
+    # `test_restore_over_real_git_preserves_caller_staged_content_on_a_managed_path`;
+    # here, pin the wiring — the tracked members are excluded from the add.
+    rec.tracked = {"AGENTS.md", ".shipit.toml"}
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    _apply(tmp_path, iapply.MODE_PR)
+
+    adds = [paths for name, paths in rec.calls if name == "add"]
+    # The restore's add is the one routed at the REAL index (`index_file is None`).
+    # `strict`: the recorder appends to both per `add`, so a length skew is a
+    # broken fake, not a passing test.
+    restore_adds = [
+        p for p, idx in zip(adds, rec.add_index_files, strict=True) if idx is None
+    ]
+    assert restore_adds, "the restore must still stage the untracked managed adds"
+    staged = restore_adds[0]
+    assert "AGENTS.md" not in staged
+    assert ".shipit.toml" not in staged
+    # …while the scratch-index staging for the PR still carries the full set: the
+    # exclusion is about the CALLER's index, never the published reconcile.
+    assert "AGENTS.md" in adds[0]
+    assert ".shipit.toml" in adds[0]
+
+
 def test_pr_flow_leaves_the_callers_index_alone_when_it_never_left_their_branch(
     tmp_path, rec, monkeypatch
 ):
@@ -5065,11 +5112,19 @@ def test_restore_caller_branch_over_real_git_survives_a_newly_added_managed_path
     # The contract: the operator is back on THEIR branch (1.2.2 left them here on
     # `shipit/install`, logging the failed switch at exit 0).
     assert git.current_branch(cwd=str(repo)) == "main"
-    # Their branch content is intact — the reconcile lives in the PR branch, not
-    # in their working tree: the added path is gone…
+    # The ADDED path — the one that blocked the checkout — is gone from their
+    # tree: staging it made it tracked, so the switch dropped it. That is the
+    # whole of what #993 fixes.
     assert not (repo / ".shipit-skills" / "foo.md").exists()
-    # …the updated managed file is back at their branch's content…
-    assert (repo / "AGENTS.md").read_text() == "old managed\n"
+    # The UPDATED managed file is left dirty at apply's render, exactly as it is
+    # on 1.2.2: it was already tracked, so the restore does not stage it (#993
+    # review — staging it would clobber a caller's staged blob, see
+    # `test_restore_over_real_git_preserves_caller_staged_content_on_a_managed_path`).
+    # The managed write outliving the flow in the working tree is #992's isolated
+    # scratch index leaking, NOT this restore's to launder — and it is harmless:
+    # the reconcile is published from the scratch index regardless, and the next
+    # `git checkout`/merge reconciles the file.
+    assert (repo / "AGENTS.md").read_text() == "new managed\n"
     # …their unrelated dirty edit survived, unstaged and unclobbered…
     assert (repo / "notes.txt").read_text() == "consumer — locally edited\n"
     assert not subprocess.run(
@@ -5088,6 +5143,86 @@ def test_restore_caller_branch_over_real_git_survives_a_newly_added_managed_path
         text=True,
     ).stdout.split()
     assert ".shipit-skills/foo.md" in scratch_tree
+
+
+def test_restore_over_real_git_preserves_caller_staged_content_on_a_managed_path(
+    tmp_path,
+):
+    # #993 review (regression, over REAL git): the caller had content STAGED at a
+    # managed path — index-only, never committed, and no longer on disk because
+    # apply overwrote the working tree with its own render. Staging the whole
+    # managed set into their real index would replace that entry with apply's
+    # write, and the switch would then reset it away: the staged blob is gone,
+    # silently, with no commit anywhere to recover it from. `reset_soft`'s
+    # contract says it survives (#992), so the restore stages only the UNTRACKED
+    # members.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t.co"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=repo, check=True)
+    (repo / "AGENTS.md").write_text("old managed\n")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "base"], cwd=repo, check=True)
+    base_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    # The operator stages their own edit to the splice file and NOTHING else…
+    (repo / "AGENTS.md").write_text("caller staged edit\n")
+    subprocess.run(["git", "add", "AGENTS.md"], cwd=repo, check=True)
+    staged_blob = subprocess.run(
+        ["git", "show", ":AGENTS.md"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+
+    # --- the MODE_PR staging flow, up to the point the restore runs ---
+    git.switch_create(iapply.INSTALL_BRANCH, cwd=str(repo))
+    git.reset_soft(base_sha, cwd=str(repo))
+    # apply's writes: it overwrites the tracked splice file on disk (so the staged
+    # blob now lives ONLY in the index) and adds a brand-new managed path.
+    (repo / "AGENTS.md").write_text("new managed\n")
+    (repo / ".shipit-skills").mkdir()
+    (repo / ".shipit-skills" / "foo.md").write_text("new shipit skill\n")
+    staged_writes = {"AGENTS.md", ".shipit-skills/foo.md"}
+    index_file = str(tmp_path / "scratch-index")
+    git.read_tree(base_sha, cwd=str(repo), index_file=index_file)
+    git.add(sorted(staged_writes), cwd=str(repo), index_file=index_file)
+    git.commit_all("reconcile", cwd=str(repo), no_verify=True, index_file=index_file)
+
+    iapply._restore_caller_branch(str(repo), "main", staged_writes)
+
+    # The contract: the caller's staged blob is EXACTLY as they left it. Blanket
+    # staging replaced it with "new managed" and the switch then reset it to
+    # "old managed" — either way their content was unrecoverable.
+    assert (
+        subprocess.run(
+            ["git", "show", ":AGENTS.md"],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        == staged_blob
+        == "caller staged edit\n"
+    )
+    # The reconcile is still published on the scratch branch either way — the
+    # restore never touches what the PR carries.
+    scratch_tree = subprocess.run(
+        ["git", "ls-tree", "-r", "--name-only", iapply.INSTALL_BRANCH],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.split()
+    assert ".shipit-skills/foo.md" in scratch_tree
+    assert "AGENTS.md" in scratch_tree
 
 
 def test_pr_flow_from_detached_head_does_not_restore(tmp_path, rec, monkeypatch):

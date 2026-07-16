@@ -287,6 +287,13 @@ def ls_files_matching(pathspecs: list[str], *, cwd: str) -> list[str] | None:
     not-a-repo is a NORMAL answer (``None`` — the caller falls back to its
     non-git heuristic), never an exception; NUL-delimited (``-z``) so paths with
     spaces/newlines survive, tracked-only for the same reason as :func:`ls_files`.
+
+    The MODE_PR caller-restore (``shipit.install.apply._restore_caller_branch``,
+    #993) reads it for the COMPLEMENT: the managed writes it must stage before
+    switching are exactly ``staged_writes`` MINUS this answer — the paths the
+    isolated scratch index (:func:`read_tree`, #992) left untracked. Those, and
+    only those, block the switch, and having no index entry they are the only ones
+    staging cannot silently overwrite (see :func:`reset_soft`'s contract).
     """
     res = _probe(["ls-files", "-z", "--", *pathspecs], cwd=cwd)
     if not res.ok:
@@ -751,12 +758,15 @@ def switch(branch: str, *, cwd: str) -> None:
     only ever moves HEAD to a ref that already exists and never creates one.
 
     A plain switch also REFUSES to run over an untracked working-tree file the
-    current HEAD carries, which is why the restore stages the managed writes into
-    the real index first (#993): the reconcile commits from an isolated scratch
-    index (:func:`read_tree`), so every managed path apply ADDED is untracked here
-    and would block the switch outright. Staging is the caller's job — this stays
-    a plain ``switch``, never a ``--force`` that would discard the operator's own
-    dirty files.
+    current HEAD carries, which is why the restore stages the newly ADDED managed
+    paths into the real index first (#993): the reconcile commits from an isolated
+    scratch index (:func:`read_tree`), so every managed path apply ADDED is
+    untracked here and would block the switch outright. Only the untracked ones
+    are staged — a tracked path raises no such refusal, and staging it would
+    overwrite whatever the caller had staged there (#993 review, and the
+    :func:`reset_soft` contract). Staging is the caller's job — this stays a plain
+    ``switch``, never a ``--force`` that would discard the operator's own dirty
+    files.
     """
     _git(["switch", branch], cwd=cwd)
 

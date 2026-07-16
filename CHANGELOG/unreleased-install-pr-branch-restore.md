@@ -9,7 +9,9 @@
   the failure and left the operator sitting on the `shipit/install` scratch
   branch — the exact strand the #777 restore exists to prevent. (The pushed PR
   and the exit code were always correct, so scripted fan-out was unaffected.)
-  The restore now stages shipit's own writes into the real index immediately
-  before the switch, so the checkout is a plain branch change: the reconcile
-  stays in the PR, the operator lands back on their branch, and their unrelated
-  dirty or staged work is never touched.
+  The restore now stages the newly ADDED managed paths — and only those — into
+  the real index immediately before the switch, so they are tracked and the
+  checkout is a plain branch change: the added path is dropped, the reconcile
+  stays in the PR, and the operator lands back on their branch. Managed paths
+  they already track are deliberately left alone, so anything they had staged
+  survives the flow untouched.
