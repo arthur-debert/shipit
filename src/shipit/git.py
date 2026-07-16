@@ -287,8 +287,55 @@ def ls_files_matching(pathspecs: list[str], *, cwd: str) -> list[str] | None:
     not-a-repo is a NORMAL answer (``None`` — the caller falls back to its
     non-git heuristic), never an exception; NUL-delimited (``-z``) so paths with
     spaces/newlines survive, tracked-only for the same reason as :func:`ls_files`.
+
+    The MODE_PR caller-restore (``shipit.install.apply._restore_caller_branch``,
+    #993) reads it for the COMPLEMENT: of the managed writes, the ones it must
+    stage before switching are the paths the isolated scratch index
+    (:func:`read_tree`, #992) left UNTRACKED. Having no index entry, they are the
+    only ones staging cannot silently overwrite (see :func:`reset_soft`'s
+    contract) — it intersects that complement with :func:`tree_paths` to reach the
+    ones that actually block.
+
+    That complement is NECESSARY but not sufficient there: a caller's staged
+    DELETION also leaves no index entry, so it reads as untracked here too. The
+    restore separates the two against the caller's own branch, not the index — see
+    :func:`tree_paths`.
     """
     res = _probe(["ls-files", "-z", "--", *pathspecs], cwd=cwd)
+    if not res.ok:
+        return None
+    return [p for p in res.stdout.split("\0") if p.strip()]
+
+
+def tree_paths(ref: str, pathspecs: list[str], *, cwd: str) -> list[str] | None:
+    """Which of ``pathspecs`` the COMMIT ``ref`` carries, or ``None`` if unreadable.
+
+    ``git ls-tree -r --name-only -z <ref> -- <pathspecs>`` — the committed-tree
+    counterpart of :func:`ls_files_matching` (which reads the INDEX). A probe
+    read: an unborn/unreadable ``ref`` is a NORMAL answer (``None``), never an
+    exception.
+
+    The MODE_PR caller-restore (``shipit.install.apply._restore_caller_branch``,
+    #993 review) needs it to name git's actual refusal condition. A plain
+    :func:`switch` aborts over an untracked working-tree file only when the
+    CURRENT HEAD carries that path — the file would have to be removed to leave.
+    So "untracked" alone is not the blocked set: when the flow dies BEFORE the
+    scratch-index commit, HEAD is still ``origin/<base>`` and carries none of
+    apply's adds, nothing blocks the switch, and staging them anyway would carry
+    shipit's writes onto the caller's branch as STAGED entries the switch
+    preserves — a side effect the operator never asked for.
+
+    The restore reads it TWICE, against two different refs, for two questions
+    (#993 review). Against ``HEAD`` it asks "does this path block?"; against the
+    caller's own branch (``original_ref``) it asks "is this untracked path a
+    genuine reconcile ADD, or the caller's staged DELETION?" — the latter is a
+    deletion of something their branch carries, the former is absent from it. That
+    second question has no answer in the index: with the reconcile on an isolated
+    scratch index (#992), both cases show the same empty index entry, so porcelain
+    status and ``diff --cached`` report them identically. Only a TREE read
+    separates them, which is why this exists rather than an index-status probe.
+    """
+    res = _probe(["ls-tree", "-r", "--name-only", "-z", ref, "--", *pathspecs], cwd=cwd)
     if not res.ok:
         return None
     return [p for p in res.stdout.split("\0") if p.strip()]
@@ -749,6 +796,17 @@ def switch(branch: str, *, cwd: str) -> None:
     (#777 mode 1 — leaving the operator on the staging branch with no notice is
     the surprise the issue reports). A plain ``switch`` (never ``-C``) so this
     only ever moves HEAD to a ref that already exists and never creates one.
+
+    A plain switch also REFUSES to run over an untracked working-tree file the
+    current HEAD carries, which is why the restore stages the newly ADDED managed
+    paths into the real index first (#993): the reconcile commits from an isolated
+    scratch index (:func:`read_tree`), so every managed path apply ADDED is
+    untracked here and would block the switch outright. Only the untracked ones
+    are staged — a tracked path raises no such refusal, and staging it would
+    overwrite whatever the caller had staged there (#993 review, and the
+    :func:`reset_soft` contract). Staging is the caller's job — this stays a plain
+    ``switch``, never a ``--force`` that would discard the operator's own dirty
+    files.
     """
     _git(["switch", branch], cwd=cwd)
 
