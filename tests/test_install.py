@@ -3155,6 +3155,17 @@ class _GhRecorder:
         # review). None = "HEAD carries every managed write" (the scratch commit
         # landed); a set models a HEAD that predates it.
         self.head_carries = None
+        # What the CALLER'S OWN branch carries, for the restore's staged-deletion
+        # probe (#993 review): an untracked path their branch carries is a staged
+        # DELETION, not a reconcile add, and staging over it would clobber their
+        # index. The default (empty — no managed path on the caller's branch, the
+        # virgin-consumer case) leaves every untracked add stageable; a test
+        # populates it to pin the staged-deletion SKIP.
+        self.original_carries = set()
+        # The refs the restore read a tree at, in order — so a test can pin that it
+        # asks BOTH questions (`HEAD`, then the caller's branch) rather than
+        # answering the second from the first.
+        self.tree_paths_refs = []
         self.pr_body = None
         self.hook_activations = []
         self.commit_paths = ()
@@ -3228,12 +3239,18 @@ class _GhRecorder:
         return sorted(self.tracked.intersection(pathspecs))
 
     def tree_paths(self, ref, pathspecs, *, cwd):
-        # What HEAD carries (#993 review): the restore stages `in_head` MINUS
-        # `tracked`. `head_carries=None` means "the scratch commit landed, so HEAD
-        # carries every managed write" — the default, since most of these tests
-        # drive the flow to completion; a test sets it to model a HEAD that
-        # predates the commit.
-        self.tree_paths_ref = ref
+        # The restore reads a TREE twice, against two refs, for two questions
+        # (#993 review): `HEAD` says which managed writes BLOCK the switch, and the
+        # caller's own branch says which untracked ones are really their staged
+        # DELETIONS. It stages `in_head - tracked - in_original`, so this fake must
+        # answer per REF — returning one tree for both would cancel the sets out.
+        #
+        # `head_carries=None` means "the scratch commit landed, so HEAD carries
+        # every managed write" — the default, since most of these tests drive the
+        # flow to completion; a test sets it to model a HEAD that predates it.
+        self.tree_paths_refs.append(ref)
+        if ref != "HEAD":
+            return sorted(self.original_carries.intersection(pathspecs))
         if self.head_carries is None:
             return sorted(pathspecs)
         return sorted(self.head_carries.intersection(pathspecs))
@@ -5045,6 +5062,36 @@ def test_pr_flow_restore_never_stages_a_managed_path_the_caller_already_tracks(
     assert ".shipit.toml" in adds[0]
 
 
+def test_pr_flow_restore_never_stages_over_a_caller_staged_deletion(tmp_path, rec):
+    # #993 review: an untracked managed path the CALLER'S OWN BRANCH carries is
+    # their staged DELETION (`git rm --cached`), not a reconcile add — staging
+    # apply's render over it breaks `reset_soft`'s contract exactly as the
+    # staged-content case does. The data-level proof is
+    # `test_restore_over_real_git_preserves_caller_staged_deletion_of_a_managed_path`;
+    # here, pin the wiring — the restore reads a tree at BOTH refs and subtracts
+    # what the caller's branch carries.
+    rec.original_carries = {"AGENTS.md"}
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    _apply(tmp_path, iapply.MODE_PR)
+
+    adds = [paths for name, paths in rec.calls if name == "add"]
+    restore_adds = [
+        p for p, idx in zip(adds, rec.add_index_files, strict=True) if idx is None
+    ]
+    assert restore_adds, "the restore must still stage the genuine untracked adds"
+    # Their staged deletion is left alone…
+    assert "AGENTS.md" not in restore_adds[0]
+    # …while the published reconcile still carries the path: the exclusion is about
+    # the CALLER's index, never what the PR ships.
+    assert "AGENTS.md" in adds[0]
+    # The two questions are asked at two DIFFERENT refs — answering the second from
+    # HEAD's tree would make every add look like a staged deletion.
+    assert "HEAD" in rec.tree_paths_refs
+    assert [r for r in rec.tree_paths_refs if r != "HEAD"], (
+        "the restore must read the caller's own branch to spot a staged deletion"
+    )
+
+
 def test_pr_flow_leaves_the_callers_index_alone_when_it_never_left_their_branch(
     tmp_path, rec, monkeypatch
 ):
@@ -5229,6 +5276,103 @@ def test_restore_over_real_git_preserves_caller_staged_content_on_a_managed_path
         == "caller staged edit\n"
     )
     # The reconcile is still published on the scratch branch either way — the
+    # restore never touches what the PR carries.
+    scratch_tree = subprocess.run(
+        ["git", "ls-tree", "-r", "--name-only", iapply.INSTALL_BRANCH],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.split()
+    assert ".shipit-skills/foo.md" in scratch_tree
+    assert "AGENTS.md" in scratch_tree
+
+
+def test_restore_over_real_git_preserves_caller_staged_deletion_of_a_managed_path(
+    tmp_path,
+):
+    # #993 review (regression, over REAL git): the caller had staged a DELETION of
+    # a managed path (`git rm --cached AGENTS.md`) — index-only intent, with no
+    # commit anywhere to recover it from. A staged deletion leaves NO index entry,
+    # so an "untracked" probe built on `git ls-files` alone reports the path as
+    # untracked; apply has since re-rendered it on disk and the scratch HEAD
+    # carries it, so `in_head - tracked` classified it as blocked and staged
+    # apply's render OVER their staged deletion. That is the same `reset_soft`
+    # contract breach as the staged-CONTENT case, just for a deletion entry.
+    #
+    # The discriminator cannot come from the index: with the reconcile built on an
+    # ISOLATED scratch index (#992), a genuine reconcile ADD and a caller's staged
+    # deletion are byte-identical in `git status --porcelain` (`D` + `??`) AND in
+    # `git diff --cached` — in both, the real index simply has no entry while HEAD
+    # carries the path. What separates them is the CALLER'S OWN BRANCH: a genuine
+    # add is absent from `original_ref`'s tree; a staged deletion is a deletion OF
+    # something that branch carries.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t.co"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=repo, check=True)
+    (repo / "AGENTS.md").write_text("old managed\n")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "base"], cwd=repo, check=True)
+    base_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    # The operator stages a deletion of the managed splice file and nothing else.
+    subprocess.run(["git", "rm", "-q", "--cached", "AGENTS.md"], cwd=repo, check=True)
+    (repo / "AGENTS.md").unlink()
+
+    # --- the MODE_PR staging flow, up to the point the restore runs ---
+    git.switch_create(iapply.INSTALL_BRANCH, cwd=str(repo))
+    git.reset_soft(base_sha, cwd=str(repo))
+    # apply's writes: it re-renders the splice file the caller had staged for
+    # deletion, and adds a brand-new managed path.
+    (repo / "AGENTS.md").write_text("new managed\n")
+    (repo / ".shipit-skills").mkdir()
+    (repo / ".shipit-skills" / "foo.md").write_text("new shipit skill\n")
+    staged_writes = {"AGENTS.md", ".shipit-skills/foo.md"}
+    index_file = str(tmp_path / "scratch-index")
+    git.read_tree(base_sha, cwd=str(repo), index_file=index_file)
+    git.add(sorted(staged_writes), cwd=str(repo), index_file=index_file)
+    git.commit_all("reconcile", cwd=str(repo), no_verify=True, index_file=index_file)
+
+    iapply._restore_caller_branch(str(repo), "main", staged_writes)
+
+    # The contract: their staged deletion is EXACTLY as they left it — the path is
+    # still absent from the index, NOT replaced by apply's render. Before the fix
+    # the index carried "new managed" here, and the switch then reset it away:
+    # their staged intent gone, silently, unrecoverably.
+    assert (
+        "AGENTS.md"
+        not in subprocess.run(
+            ["git", "ls-files"],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.split()
+    )
+    # Nothing of shipit's render reached their index at that path…
+    assert not subprocess.run(
+        [
+            "git",
+            "diff",
+            "--cached",
+            "--name-only",
+            "--diff-filter=AM",
+            "--",
+            "AGENTS.md",
+        ],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.split()
+    # …and the reconcile is still published on the scratch branch regardless: the
     # restore never touches what the PR carries.
     scratch_tree = subprocess.run(
         ["git", "ls-tree", "-r", "--name-only", iapply.INSTALL_BRANCH],

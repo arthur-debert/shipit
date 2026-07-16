@@ -12,6 +12,8 @@
   The restore now stages the newly ADDED managed paths — and only those — into
   the real index immediately before the switch, so they are tracked and the
   checkout is a plain branch change: the added path is dropped, the reconcile
-  stays in the PR, and the operator lands back on their branch. Managed paths
-  they already track are deliberately left alone, so anything they had staged
-  survives the flow untouched.
+  stays in the PR, and the operator lands back on their branch. Whatever the
+  operator had STAGED survives the flow untouched: a managed path they already
+  track is deliberately left alone, and so is one they had staged for deletion
+  (`git rm --cached`) — neither is a path the reconcile added, and staging over
+  either would destroy index-only work with no commit to recover it from.

@@ -590,7 +590,8 @@ def _restore_caller_branch(
     ``staged_writes`` is the managed set apply left ON DISK. The members of it
     that git's checkout would actually TRIP OVER — and only those — are staged
     into the caller's REAL index immediately before the switch (#993). That set is
-    precisely ``UNTRACKED in the real index AND carried by HEAD``. The reconcile
+    precisely ``UNTRACKED in the real index AND carried by HEAD AND absent from
+    the caller's own branch``. The reconcile
     commit is built on an ISOLATED scratch index (#992), so a managed path apply
     ADDED is on disk but was never added to the real index — untracked. It is,
     however, in the scratch-index commit now at HEAD, so switching back to a branch that lacks it
@@ -602,7 +603,7 @@ def _restore_caller_branch(
     index-clean against HEAD, so the switch drops each one: the reconcile lives in
     the PR, not in the caller's tree.
 
-    BOTH halves of that predicate are load-bearing, not optimisations (#993
+    ALL THREE parts of that predicate are load-bearing, not optimisations (#993
     review).
 
     UNTRACKED keeps the :func:`git.reset_soft` contract — "the caller's staged
@@ -628,6 +629,30 @@ def _restore_caller_branch(
     branch, so the switch PRESERVES them and the operator lands back on their own
     branch with shipit's writes sitting STAGED in their index. Reading HEAD's tree
     (:func:`git.tree_paths`) keeps the remedy scoped to the disease.
+
+    ABSENT FROM THE CALLER'S OWN BRANCH is what tells a genuine reconcile ADD from
+    a caller's STAGED DELETION (#993 review). ``git rm --cached AGENTS.md`` leaves
+    no index entry, so UNTRACKED alone reports it as untracked; apply then
+    re-renders the path on disk and the scratch HEAD carries it, so it lands in
+    ``in_head - tracked`` and a blanket ``add`` stages apply's render straight over
+    their staged deletion — the same ``reset_soft`` breach as the staged-CONTENT
+    case, just for a deletion entry.
+
+    That discriminator CANNOT come from the index. With the reconcile built on an
+    isolated scratch index (#992), the caller's real index has no entry for the
+    path in EITHER case, so a genuine add and a staged deletion are byte-identical
+    in ``git status --porcelain`` (both ``D`` + ``??``) and in ``git diff
+    --cached`` (both ``D``) — an index-status probe cannot separate them. What
+    separates them is the CALLER'S OWN BRANCH: a genuine reconcile add is absent
+    from ``original_ref``'s tree, whereas a staged deletion is by definition a
+    deletion OF something that branch carries. Reading ``original_ref``'s tree
+    (:func:`git.tree_paths` again, no new probe) is the whole test.
+
+    Excluding it means git refuses the switch and this logs it — the operator is
+    left on the scratch branch WITH their staged deletion intact. That is the same
+    trade the staged-content case already makes, and the right way round: git
+    declining to destroy their staged work beats silently destroying it, and the
+    strand is #992's to answer, not this restore's.
 
     The staging is transient (the switch resets those entries to the target
     branch) and scoped to shipit's OWN writes, never a consumer-owned or unrelated
@@ -656,13 +681,15 @@ def _restore_caller_branch(
         if git.current_branch(cwd=cwd) == INSTALL_BRANCH:
             tracked = git.ls_files_matching(sorted(staged_writes), cwd=cwd)
             in_head = git.tree_paths("HEAD", sorted(staged_writes), cwd=cwd)
-            # `None` is "unreadable" (not-a-repo / unborn HEAD) — unreachable
-            # mid-flow, but both must fail CLOSED (stage nothing) rather than
+            in_original = git.tree_paths(original_ref, sorted(staged_writes), cwd=cwd)
+            # `None` is "unreadable" (not-a-repo / unborn ref) — unreachable
+            # mid-flow, but all three must fail CLOSED (stage nothing) rather than
             # degrade into a wider set: an empty `tracked` is the blanket staging
-            # that clobbers the caller's index, and an empty `in_head` stages adds
-            # that never blocked.
-            if tracked is not None and in_head is not None:
-                blocked = sorted(set(in_head) - set(tracked))
+            # that clobbers the caller's index, an empty `in_head` stages adds that
+            # never blocked, and an empty `in_original` stages over a staged
+            # deletion.
+            if tracked is not None and in_head is not None and in_original is not None:
+                blocked = sorted(set(in_head) - set(tracked) - set(in_original))
                 if blocked:
                     git.add(blocked, cwd=cwd)
     except execrun.ExecError:

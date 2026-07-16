@@ -295,6 +295,11 @@ def ls_files_matching(pathspecs: list[str], *, cwd: str) -> list[str] | None:
     only ones staging cannot silently overwrite (see :func:`reset_soft`'s
     contract) — it intersects that complement with :func:`tree_paths` to reach the
     ones that actually block.
+
+    That complement is NECESSARY but not sufficient there: a caller's staged
+    DELETION also leaves no index entry, so it reads as untracked here too. The
+    restore separates the two against the caller's own branch, not the index — see
+    :func:`tree_paths`.
     """
     res = _probe(["ls-files", "-z", "--", *pathspecs], cwd=cwd)
     if not res.ok:
@@ -318,9 +323,17 @@ def tree_paths(ref: str, pathspecs: list[str], *, cwd: str) -> list[str] | None:
     scratch-index commit, HEAD is still ``origin/<base>`` and carries none of
     apply's adds, nothing blocks the switch, and staging them anyway would carry
     shipit's writes onto the caller's branch as STAGED entries the switch
-    preserves — a side effect the operator never asked for. Intersecting the
-    untracked complement with this answer keeps the staging to the paths that
-    genuinely block: untracked AND in HEAD.
+    preserves — a side effect the operator never asked for.
+
+    The restore reads it TWICE, against two different refs, for two questions
+    (#993 review). Against ``HEAD`` it asks "does this path block?"; against the
+    caller's own branch (``original_ref``) it asks "is this untracked path a
+    genuine reconcile ADD, or the caller's staged DELETION?" — the latter is a
+    deletion of something their branch carries, the former is absent from it. That
+    second question has no answer in the index: with the reconcile on an isolated
+    scratch index (#992), both cases show the same empty index entry, so porcelain
+    status and ``diff --cached`` report them identically. Only a TREE read
+    separates them, which is why this exists rather than an index-status probe.
     """
     res = _probe(["ls-tree", "-r", "--name-only", "-z", ref, "--", *pathspecs], cwd=cwd)
     if not res.ok:
