@@ -749,6 +749,14 @@ def switch(branch: str, *, cwd: str) -> None:
     (#777 mode 1 — leaving the operator on the staging branch with no notice is
     the surprise the issue reports). A plain ``switch`` (never ``-C``) so this
     only ever moves HEAD to a ref that already exists and never creates one.
+
+    A plain switch also REFUSES to run over an untracked working-tree file the
+    current HEAD carries, which is why the restore stages the managed writes into
+    the real index first (#993): the reconcile commits from an isolated scratch
+    index (:func:`read_tree`), so every managed path apply ADDED is untracked here
+    and would block the switch outright. Staging is the caller's job — this stays
+    a plain ``switch``, never a ``--force`` that would discard the operator's own
+    dirty files.
     """
     _git(["switch", branch], cwd=cwd)
 
