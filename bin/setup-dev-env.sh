@@ -204,6 +204,24 @@ resolve_script_dir() {
 	# pixi.toml in it. Follow the script's own link chain first, then resolve
 	# its directory LOGICALLY, so the caller's `..` is a lexical step back to
 	# the checkout this script was invoked through.
+	#
+	# The two `cd`s differ deliberately, and swapping either breaks a case:
+	#
+	# - PHYSICAL (`-P`) inside the loop, to join a RELATIVE link target: the
+	#   kernel interprets a link's relative target against the directory
+	#   PHYSICALLY holding the link, not the logical path we reached it
+	#   through. Joining onto the logical dir instead re-resolved `..` against
+	#   the wrong parent — with `~/bin -> /tools` and
+	#   `/tools/setup-dev-env.sh -> ../repo/bin/setup-dev-env.sh` it resolved
+	#   REPO_ROOT to `~/repo` (a real, WRONG checkout) instead of `/repo`.
+	#   `-P` makes the joined path fully physical, so its `..` is exact.
+	# - LOGICAL (no `-P`) for the final directory, whose last component is by
+	#   then never a link: this is what keeps the symlinked-`bin` case working,
+	#   where the caller's path IS the checkout we must resolve back to.
+	#
+	# Every resolution step warns and degrades to "use the path as-is" rather
+	# than aborting: under `set -e` a bare `readlink`/`cd` failure (readlink
+	# missing or unsupported) would hard-fail a script contracted to fail OPEN.
 	local path="$1" link dir hops=0
 	while [ -L "$path" ]; do
 		hops=$((hops + 1))
@@ -211,8 +229,14 @@ resolve_script_dir() {
 			warn "symlink loop resolving $1 — using it as-is"
 			break
 		fi
-		dir="$(cd -- "$(dirname -- "$path")" && pwd)"
-		link="$(readlink -- "$path")"
+		if ! dir="$(cd -P -- "$(dirname -- "$path")" && pwd)"; then
+			warn "could not resolve the directory holding $path — using it as-is"
+			break
+		fi
+		if ! link="$(readlink -- "$path")"; then
+			warn "could not read the symlink $path — using it as-is"
+			break
+		fi
 		case "$link" in
 		/*) path="$link" ;;
 		*) path="${dir}/${link}" ;;
