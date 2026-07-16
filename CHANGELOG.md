@@ -4,6 +4,40 @@
 
 ## Unreleased
 
+## 1.2.3 - 2026-07-16
+
+- The managed bootstrap scripts (`bin/setup-dev-env.sh`, `agent-start`) now
+  resolve their **repo root symlink-safely** (#994). `cd -P` resolves every
+  path component physically, so a symlinked intermediate `bin` sent `..` to the
+  LINK TARGET's parent, and a symlinked script path (`~/bin/agent-start` → the
+  checkout's copy) was never followed at all — both landed outside the
+  checkout, provisioning the wrong repo or rooting a coordinator session in it.
+  Each script now follows its own link chain first — joining relative link
+  targets against the directory physically holding the link, as the kernel does
+  — then resolves the final directory logically. Every resolution step is
+  fail-open: a missing or erroring `readlink`, or a `cd` into a directory that
+  is gone, warns and uses the path as-is instead of aborting the script or
+  silently degrading to a bare `.` root.
+- `install --pr` now **returns the operator to their branch** when the
+  reconcile adds a new managed path (#993). The reconcile commit is built on an
+  isolated scratch index (#992), so a newly written managed file — the
+  `.shipit-skills/` skill store, a fresh agent definition — sits on disk while
+  the checkout's real index has never heard of it. Git refuses to switch away
+  from a branch whose HEAD carries an untracked working-tree file
+  (`error: The following untracked working tree files would be removed by
+  checkout: .shipit-skills/…`), so the best-effort branch restore only logged
+  the failure and left the operator sitting on the `shipit/install` scratch
+  branch — the exact strand the #777 restore exists to prevent. (The pushed PR
+  and the exit code were always correct, so scripted fan-out was unaffected.)
+  The restore now stages the newly ADDED managed paths — and only those — into
+  the real index immediately before the switch, so they are tracked and the
+  checkout is a plain branch change: the added path is dropped, the reconcile
+  stays in the PR, and the operator lands back on their branch. Whatever the
+  operator had STAGED survives the flow untouched: a managed path they already
+  track is deliberately left alone, and so is one they had staged for deletion
+  (`git rm --cached`) — neither is a path the reconcile added, and staging over
+  either would destroy index-only work with no commit to recover it from.
+
 ## 1.2.2 - 2026-07-15
 
 - Local **AGY reviews** are faster: the `agy` reviewer backend now runs through
