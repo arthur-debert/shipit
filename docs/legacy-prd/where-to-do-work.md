@@ -89,8 +89,13 @@ that's an accepted, mild cost (and a useful record of provenance).
 15. As a **coordinator**, I want `shipit tree remove <id>` to safely delete one Tree, so
     that I can reclaim a finished workspace immediately.
 16. As a **coordinator**, I want `shipit tree gc` to sweep only Trees whose PR is merged,
-    working tree is clean, nothing is unpushed, and which are aged past a threshold, so
-    that I never lose unmerged or in-flight work to cleanup.
+    working tree is clean, and nothing is unpushed, so that I never lose unmerged or
+    in-flight work to cleanup. The merge is what makes the loss provably safe (the work
+    is on the remote), so it is decided BEFORE any age gate, held only by a short
+    post-merge **grace window** (12h — a write Tree has no liveness signal, so the window
+    covers an agent still working in a still-clean Tree just after its PR merged). An age
+    threshold gates only the UNMERGED shapes, where age is the sole abandonment signal
+    (#1009: gating the merged case on it parked 421 of a 503-Tree fleet).
 17. As a **coordinator**, I want Trees whose state is ambiguous to be *listed as stale*
     rather than auto-deleted, so that cleanup is conservative by default.
 18. As an **explorer**, I want to run read-only investigation in the main checkout without
@@ -206,9 +211,11 @@ Tested modules:
 - **`layout.plan`** — every spec shape (epic+ws, issue, freeform); hash lands on the dir and
   never on the branch; base ref resolution (`origin/<EPIC>/umbrella` for a work stream vs
   `origin/main`); slug sanitization edge cases.
-- **`cleanup.classify`** — the partition truth table: merged+clean+no-unpushed+aged →
-  removable; dirty → keep; unpushed → keep; unmerged PR → keep; abandoned-but-ambiguous →
-  stale (never removable).
+- **`cleanup.classify`** — the partition truth table, in ladder order:
+  dirty/unpushed → keep (the floor, beats everything); merged+clean+no-unpushed → removable
+  past the 12h grace window and keep within it (age never gates it, #1009); then, unmerged,
+  not-aged → keep; aged + in-flight PR → keep; aged + abandoned-but-ambiguous (no PR,
+  closed, UNKNOWN) → stale (never removable).
 - **`include.parse`** — `.treeinclude` gitignore-syntax → resolved file list, including
   negations and globs.
 - **policy deny-rules** — `EnterWorktree` and `git worktree add` → deny with the redirect

@@ -20,14 +20,19 @@ local work is *kept*.
 - **removable** — every safe-to-delete condition holds: the PR is **merged** on the
   remote ∧ the working tree is **clean** ∧ there are **no unpushed commits**
   (neither ahead of an upstream nor on no remote at all — ``_has_local_only_work``)
-  ∧ the Tree is **aged** past the threshold. There is nothing left to lose, so
-  ``gc`` reclaims it.
+  ∧ the Tree is past the short **merged grace window**
+  (:data:`MERGED_GRACE_SECONDS`). The work is on the remote; there is nothing left
+  to lose, so ``gc`` reclaims it. Age does NOT gate this case (#1009): a merged
+  Tree's safety is already provable, and the two-week threshold vetoing it parked a
+  fortnight of finished work.
 - **stale** — the Tree looks abandoned (aged, clean, nothing unpushed) but its PR did
   NOT merge and is no longer in flight (no PR, or a PR closed without merging). That
   is ambiguous — maybe finished elsewhere, maybe dropped — so it is **listed, never
-  auto-removed**; a human decides.
+  auto-removed**; a human decides. Age is the ONLY abandonment signal for these
+  unmerged shapes, so ``max_age_seconds`` still governs them.
 - **keep** — everything else: a dirty tree, unpushed commits, an in-flight (open/draft)
-  PR, or a Tree too recent to be aged. Live or local work is always protected.
+  PR, a merged Tree still inside its grace window, or an UNMERGED Tree too recent to
+  be aged. Live or local work is always protected.
 
 A **shared read-only (reviewer) Tree** (ADR-0018; ``…/review/<branch>``) is a
 distinct reclaim case the precedence ladder handles FIRST. It carries no local work
@@ -69,11 +74,22 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("shipit.tree")
 
-#: Default age threshold (seconds): a Tree must be untouched for longer than this
-#: before it is even a candidate for removal. Two weeks is deliberately generous —
+#: Default age threshold (seconds): an UNMERGED Tree must be untouched for longer than
+#: this before it is even a candidate for reclaim. Two weeks is deliberately generous —
 #: ``gc`` is conservative, and a Tree's mtime bumps on any write, so an actively used
 #: Tree never ages. Overridable per call so the boundary is exhaustively table-tested.
+#: It governs only the shapes where age is the SOLE abandonment signal (no PR / closed /
+#: UNKNOWN); a merged Tree is decided before it, on :data:`MERGED_GRACE_SECONDS` (#1009).
 DEFAULT_MAX_AGE_SECONDS = 14 * 86_400
+
+#: The write ladder's grace window (seconds) for a MERGED Tree: clean, fully pushed and
+#: merged, it is removable once older than this. 12h is what the age gate was really
+#: protecting — a write Tree has NO liveness signal (unlike the ephemeral kind, which
+#: has its pidfile), so this covers the window where an agent is still working in a
+#: still-clean Tree just after its PR merged. Hours, not weeks: once the merge is on the
+#: remote there is nothing left to lose, so age adds no safety, only 421 parked Trees
+#: (#1009). Overridable per call so the boundary is exhaustively table-tested.
+MERGED_GRACE_SECONDS = 12 * 3_600
 
 #: The ephemeral ladder's HARD time cap (seconds): past this age a clean, fully-
 #: pushed session Tree is removable EVEN IF its pidfile claims live (ADR-0027 rung
@@ -176,6 +192,7 @@ def classify(
     pr_states: Mapping[str, str | None],
     *,
     max_age_seconds: float = DEFAULT_MAX_AGE_SECONDS,
+    merged_grace_seconds: float = MERGED_GRACE_SECONDS,
     live_reviews: Mapping[str, bool] | None = None,
     live_sessions: Mapping[str, bool] | None = None,
     provision_shas: Mapping[str, frozenset[Sha]] | None = None,
@@ -196,9 +213,10 @@ def classify(
     Tree's ``path`` to the commit SHAs its provisioning recorded at birth
     (:mod:`shipit.tree.provision` — default: none, so nothing is excluded from the
     unpushed floor and every local-only commit protects). All are INPUTS, so this
-    function holds no clock and does no I/O. ``hard_cap_seconds`` /
-    ``grace_seconds`` override the ephemeral ladder's time backstops so its
-    boundaries are exhaustively table-tested.
+    function holds no clock and does no I/O. ``merged_grace_seconds`` (the write
+    ladder's post-merge window) and ``hard_cap_seconds`` / ``grace_seconds`` (the
+    ephemeral ladder's time backstops) override those boundaries so each is
+    exhaustively table-tested.
 
     The rules, in precedence order (the first that matches wins):
 
@@ -219,10 +237,19 @@ def classify(
        ``ahead == 0`` while still holding local-only commits (e.g. extra commits
        after the remote branch was deleted on merge); ``ahead`` alone would age
        such a Tree into ``removable`` and lose them (codex review).
-    2. **not aged** (``now - mtime <= max_age_seconds``) → **keep** — too recent to
-       reclaim; a Tree's mtime bumps on every write, so a live Tree never ages.
-    3. aged, clean, nothing unpushed — decide on the PR:
-       - **merged** → **removable** (the one safe-to-delete case);
+    2. **merged PR** (clean, nothing unpushed) → **removable** past the merged grace
+       window (``now - mtime > merged_grace_seconds``), else **keep**. Decided BEFORE
+       the age gate (#1009): the work is on the remote, so the merge already proves
+       the loss is safe and age adds nothing — gating this on ``max_age_seconds``
+       parked a fortnight of finished work (421 of a 503-Tree fleet). The short
+       window is the one thing age was really buying: a write Tree has no liveness
+       signal, so it covers an agent still working in a still-clean Tree just after
+       its PR merged. This mirrors the ephemeral ladder's rung 2 (ADR-0027), which
+       already decides ``_is_merged`` ahead of its liveness/age rungs.
+    3. **not aged** (``now - mtime <= max_age_seconds``) → **keep** — too recent to
+       call abandoned; a Tree's mtime bumps on every write, so a live Tree never
+       ages. Reaching here the PR is UNMERGED, which is the only shape age governs.
+    4. aged, clean, nothing unpushed, unmerged — decide on the PR:
        - **in flight** (open/draft) → **keep** (protect active review);
        - otherwise (no PR, closed-without-merge, or **UNKNOWN**) → **stale**
          (abandoned-but-ambiguous, listed for a human, NEVER auto-removed). An UNKNOWN
@@ -239,6 +266,7 @@ def classify(
             now=now,
             state=pr_states.get(record.path),
             max_age_seconds=max_age_seconds,
+            merged_grace_seconds=merged_grace_seconds,
             reviewer_live=reviews.get(record.path, False),
             session_live=sessions.get(record.path, False),
             provision=provisioned.get(record.path, frozenset()),
@@ -273,6 +301,7 @@ def _bucket_for(
     now: float,
     state: str | None,
     max_age_seconds: float,
+    merged_grace_seconds: float,
     reviewer_live: bool,
     session_live: bool,
     provision: frozenset[Sha],
@@ -301,11 +330,14 @@ def _bucket_for(
         )
     if _has_local_only_work(record):
         return "keep"
-    aged = (now - record.mtime) > max_age_seconds
-    if not aged:
-        return "keep"
+    age = now - record.mtime
     if _is_merged(state):
-        return "removable"
+        # Decided BEFORE the age gate (#1009): the merge already proves the loss is
+        # safe, so only the short no-liveness-signal grace window holds the Tree.
+        return "removable" if age > merged_grace_seconds else "keep"
+    # Unmerged from here down — the shapes where age IS the abandonment signal.
+    if age <= max_age_seconds:
+        return "keep"
     if _is_in_flight(state):
         return "keep"
     # UNKNOWN (state unreadable) lands here alongside no-PR / closed-without-merge:

@@ -455,21 +455,25 @@ def run_remove(
     type=DURATION,
     metavar="DURATION",
     help=(
-        "Age boundary a Tree must exceed to be reclaimable, as a human duration "
-        "(e.g. 14d, 36h, 90m). Defaults to 14d when omitted."
+        "Age boundary an UNMERGED Tree must exceed before it counts as abandoned, as "
+        "a human duration (e.g. 14d, 36h, 90m). Defaults to 14d when omitted. A "
+        "merged Tree is reclaimed on its own short grace window, not this boundary."
     ),
 )
 def gc_cmd(dry_run: bool, threshold: float | None) -> None:
     """Sweep the central root: remove only provably-safe Trees, list ambiguous ones.
 
     Scans every Tree, classifies the fleet, then deletes ONLY the Trees whose PR is
-    merged, working tree clean, nothing unpushed, and which are aged past the
-    threshold. Trees that merely look abandoned are LISTED as stale (never deleted),
-    and anything with live or local work is left untouched. Conservative by default.
+    merged, working tree clean, and nothing unpushed — the work is on the remote, so
+    there is nothing left to lose (a short post-merge grace window covers an agent
+    still working in a just-merged Tree). Trees that merely look abandoned are LISTED
+    as stale (never deleted), and anything with live or local work is left untouched.
+    Conservative by default.
 
     ``--dry-run`` prints the same partition the real sweep would act on and deletes
     nothing; ``--threshold DURATION`` (e.g. ``36h``) overrides the 14-day age boundary
-    for this run.
+    for this run — the boundary past which an UNMERGED Tree (no PR, or one closed
+    without merging) is called abandoned and listed as stale.
     """
     raise SystemExit(run_gc(dry_run=dry_run, max_age_seconds=threshold))
 
