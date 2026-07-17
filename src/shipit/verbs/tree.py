@@ -455,10 +455,10 @@ def run_remove(
     type=DURATION,
     metavar="DURATION",
     help=(
-        "How long a Tree must be IDLE — no file written anywhere in it — before it "
-        "counts as abandoned, as a human duration (e.g. 48h, 36h, 90m). Defaults to "
-        "48h when omitted. A Tree with uncommitted changes or unpushed commits is "
-        "kept no matter how idle."
+        "How long a Tree must be IDLE — nothing written anywhere in it and no commit "
+        "made — before it counts as abandoned, as a human duration (e.g. 48h, 36h, "
+        "90m). Defaults to 48h when omitted. A Tree with uncommitted changes or "
+        "unpushed commits is kept no matter how idle."
     ),
 )
 def gc_cmd(dry_run: bool, threshold: float | None) -> None:
@@ -470,10 +470,12 @@ def gc_cmd(dry_run: bool, threshold: float | None) -> None:
         KEEP  if  dirty  ||  unpushed  ||  idle < 48h
 
     Idle is measured, not inferred: the newest file mtime anywhere in the Tree (build
-    and env dirs pruned). Across the whole fleet the signal separates cleanly — a Tree
-    someone is working in reads under an hour idle, an abandoned one days — so there is
-    no ambiguous middle to list for a human, and no PR state, session pidfile or Tree
-    kind in the rule at all.
+    and env dirs pruned), maxed with HEAD's commit stamp so a commit that only DELETES
+    files still reads as activity the walk cannot see. The stamp can only ever push idle
+    down, i.e. only ever KEEP. Across the whole fleet the signal separates cleanly — a
+    Tree someone is working in reads under an hour idle, an abandoned one days — so
+    there is no ambiguous middle to list for a human, and no PR state, session pidfile
+    or Tree kind in the rule at all.
 
     ``--dry-run`` prints the same partition the real sweep would act on and deletes
     nothing; ``--threshold DURATION`` (e.g. ``36h``) overrides the 48h idle boundary
@@ -604,8 +606,9 @@ def _render_incomplete_view(view: gc.GcPlan | gc.GcResult, *, verb: str) -> None
     It used to name the PR read — a drained ``gh`` budget, then (once #1014 batched
     the read per repo) a single repo's failed ``gh pr list``. Reclaim no longer reads
     PR state at all, so neither can hide a Tree from the rule; what can is the rule's
-    own two unreadable-signal arms (:func:`~shipit.tree.cleanup.is_unexamined`), and
-    both are LOCAL — a failed ``git rev-list`` or a failed activity walk. So the
+    own unreadable-signal arms (:func:`~shipit.tree.cleanup.is_unexamined`), and every
+    one is LOCAL — a failed ``git rev-list``, a failed activity walk, or an unreadable
+    HEAD commit stamp (idle's other half, which blanks it just as the walk does). So the
     leads are local too: permissions, a vanished mount, a Tree being written as it was
     read. An operator sent to check `gh api rate_limit` for what is now a filesystem
     problem is an operator sent to the wrong machine entirely.
@@ -617,15 +620,15 @@ def _render_incomplete_view(view: gc.GcPlan | gc.GcResult, *, verb: str) -> None
         return
     print(
         f"gc: {verb} {view.judged} of {view.total}; {view.unexamined} kept UNEXAMINED "
-        "— a signal could not be read (the unpushed-commit list, or the activity "
-        "walk), so those Trees were kept without a verdict, not judged safe. This "
-        "verdict covers only part of the root.",
+        "— a signal could not be read (the unpushed-commit list, the activity walk, or "
+        "HEAD's commit stamp), so those Trees were kept without a verdict, not judged "
+        "safe. This verdict covers only part of the root.",
         file=sys.stderr,
     )
     print(
-        "gc: both signals are read from the Tree itself, so the likeliest causes are "
-        "local — a permissions change, a vanished mount, or a Tree being written as "
-        "it was read. Re-running usually clears a transient failure.",
+        "gc: every one of those signals is read from the Tree itself, so the likeliest "
+        "causes are local — a permissions change, a vanished mount, or a Tree being "
+        "written as it was read. Re-running usually clears a transient failure.",
         file=sys.stderr,
     )
     print(

@@ -78,9 +78,11 @@ class GcPlan:
         """Whether the fleet was only PARTIALLY judged.
 
         True when any Tree was kept on an unreadable signal rather than a verdict —
-        a failed ``git rev-list`` or a failed activity walk. gc says so loudly and
-        exits non-zero from both tails (#1011/#1012) rather than reporting a clean
-        bill of health for a root it could not fully read.
+        a failed ``git rev-list``, a failed activity walk, or an unreadable HEAD commit
+        stamp (the two halves of idle, either of which blanks it; see
+        :func:`~shipit.tree.cleanup.is_unexamined`). gc says so loudly and exits
+        non-zero from both tails (#1011/#1012) rather than reporting a clean bill of
+        health for a root it could not fully read.
         """
         return self.unexamined > 0
 
@@ -147,9 +149,10 @@ def plan(
     describe a Tree the very same run deleted.
 
     #1012's PROPERTY is kept, repointed at the signals that inherited the suppressing
-    role: :func:`~shipit.tree.cleanup.is_unexamined` — an unreadable ``unpushed`` read
-    or a failed activity walk. Those keep a Tree silently today, so they are exactly
-    what can now make a blind sweep look like a clean fleet.
+    role: :func:`~shipit.tree.cleanup.is_unexamined` — an unreadable ``unpushed`` read,
+    a failed activity walk, or an unreadable HEAD commit stamp. Those keep a Tree
+    silently today, so they are exactly what can now make a blind sweep look like a
+    clean fleet.
     """
     decision = classify(
         records,

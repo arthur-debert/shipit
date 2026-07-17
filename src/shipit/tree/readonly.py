@@ -68,14 +68,16 @@ _WRITE_BITS = 0o222
 #: reviewer Run takes this shared leaf (:func:`_stamp_acquisition`).
 #:
 #: It exists because acquiring a shared review Tree was, uniquely, ACTIVITY THAT LEFT
-#: NO TRACE. Reclaim measures the newest file mtime under the Tree
-#: (:func:`shipit.tree.activity.newest_mtime`, ADR-0072), and every step of a reuse
-#: misses it: ``fetch`` writes only under the pruned ``.git``; ``checkout``/``reset``
-#: at an UNCHANGED head rewrite no working file; ``chmod`` moves ctime, not mtime; and
-#: a reviewer only ever READS the checkout it was handed. So a shared leaf's newest
-#: mtime measures when its PR head last moved — not when a reviewer last used it — and
-#: a Tree cloned three days ago on a quiet head, handed to a reviewer THIS SECOND, is
-#: clean, fully pushed and >48h idle: removable, mid-review.
+#: NO TRACE. Reclaim measures idle as the newest of the pruned activity walk
+#: (:func:`shipit.tree.activity.newest_mtime`) and HEAD's commit stamp (ADR-0072), and
+#: a reuse is invisible to BOTH. The walk misses every step of it: ``fetch`` writes only
+#: under the pruned ``.git``; ``checkout``/``reset`` at an UNCHANGED head rewrite no
+#: working file; ``chmod`` moves ctime, not mtime; and a reviewer only ever READS the
+#: checkout it was handed. The commit stamp misses it for the same reason the head is
+#: unchanged — a reviewer commits nothing. So a shared leaf dates to when its PR head
+#: last moved, not to when a reviewer last used it, and a Tree cloned three days ago on
+#: a quiet head, handed to a reviewer THIS SECOND, is clean, fully pushed and >48h idle:
+#: removable, mid-review.
 #:
 #: The stamp fixes the EVENT, not the rule: it gives acquisition the filesystem trace
 #: it always should have had, so the one measured signal keeps answering the one

@@ -69,8 +69,9 @@ from .registry import TreeRecord
 logger = logging.getLogger("shipit.tree")
 
 #: The ONE reclaim threshold (seconds): a Tree with no local work that has been IDLE
-#: — no file written anywhere in it, build/env dirs pruned
-#: (:func:`shipit.tree.activity.newest_mtime`) — for longer than this is removable.
+#: — nothing written anywhere in it (build/env dirs pruned,
+#: :func:`shipit.tree.activity.newest_mtime`) and no commit made (HEAD's stamp, maxed
+#: in by :func:`_idle_seconds`) — for longer than this is removable.
 #:
 #: 48h replaces the four tunables the three ladders needed (``DEFAULT_MAX_AGE_SECONDS``
 #: 14d, ``MERGED_IDLE_GRACE_SECONDS`` 12h, ``EPHEMERAL_HARD_CAP_SECONDS`` 4d,
@@ -162,9 +163,12 @@ def classify(
     1. **dirty or unpushed → keep** — the never-lose-work floor
        (:func:`_has_local_only_work`). Local work is never at risk from ``gc``, and an
        UNREADABLE unpushed list counts as local work.
-    2. **idle unreadable → keep** — :attr:`~shipit.tree.registry.TreeRecord.newest_mtime`
-       is ``None`` (the walk failed, or found no eligible file). Unknown is not false;
-       a filesystem hiccup must never license a delete.
+    2. **idle unreadable → keep** — EITHER of idle's two inputs is ``None``
+       (:func:`is_unexamined`): the activity walk failed or found no eligible file
+       (:attr:`~shipit.tree.registry.TreeRecord.newest_mtime`), or HEAD's commit stamp
+       could not be read (:attr:`~shipit.tree.registry.TreeRecord.last_commit`). Either
+       alone blanks idle rather than falling back to the survivor (:func:`_idle_seconds`
+       states why). Unknown is not false; a hiccup must never license a delete.
     3. **idle > the threshold → removable**, else **keep** — the Tree holds nothing that
        is not on a remote and nobody has touched it for two days. Idle is the newest of
        the activity walk and HEAD's commit stamp (:func:`_idle_seconds`).
