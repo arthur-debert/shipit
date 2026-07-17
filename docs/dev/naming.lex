@@ -56,17 +56,46 @@ mid-stream. Agents derive WS codes and all names from them.
     A coordinator session Tree is born on `ephemeral/<id>` — e.g.
     `ephemeral/sess-20260702-121314-4242` — cut from `origin/main`, where `<id>`
     is the per-launch session id (the `claude --worktree <id>` value, minted by
-    `agent-start claude`). The slash groups every session branch under the `ephemeral/`
-    ref directory, mirroring the Tree dir `<root>/<org>/<repo>/ephemeral/<id>`.
+    `agent-start claude`). The slash groups every session branch under the
+    `ephemeral/` ref directory. It mirrors no Tree dir — Tree dirs are flat and
+    share no shape with any ref (§4, ADR-0074).
     Unlike every other form, this branch is NOT the work's name: a session Tree
-    is ephemeral-by-path, work-by-branch (ADR-0027). The dir leaf is the SESSION
-    — disposable, never renamed — while the branch mirrors it only at birth and
-    is expected to move to the real work (`EPIC/umbrella`, `docs/<slug>`,
-    `issues/<id>/<session>`, …) inside the fixed dir as the session discovers
-    what it is doing; `shipit tree list` reads the live branch, so nothing is
-    lost but the cosmetic dir-branch symmetry.
+    is ephemeral-by-path, work-by-branch (ADR-0027). The dir records the SESSION
+    — disposable, never renamed — while the branch is expected to move to the
+    real work (`EPIC/umbrella`, `docs/<slug>`, `issues/<id>/<session>`, …)
+    inside the fixed dir as the session discovers what it is doing;
+    `shipit tree list` reads the live branch, so the real branch is always shown.
 
     Grandfathered: epics already in-flight when this slash scheme landed keep
     their original hyphen form (bare `EPIC` epic branch, `EPIC-WSnn` workstreams)
     — e.g. `HAR02` / `HAR02-WS03`. The slash/umbrella form applies to epics
     created after; in-flight epics are NOT retroactively renamed (see ADR-0016).
+
+4. Tree directories
+
+    Tree dirs are FLAT and self-describing, one shape for every Tree
+    (ADR-0074):
+
+        <root>/<repo>-<agent>-<timestamp>-<id>
+
+    e.g. `~/workspace/trees/shipit-claude-20260717-081333-72218`. The `<root>`
+    is the central root (`SHIPIT_TREES_ROOT`, default `~/workspace/trees`);
+    `<agent>` is the backend (`claude` / `codex`); `<timestamp>` is
+    `%Y%m%d-%H%M%S`, so a lexical sort is chronological within a repo; `<id>` is
+    the harness's per-launch token.
+
+    Repo comes FIRST because it is the axis a human narrows on — `ls | grep
+    shipit` is the tooling-free narrowing this grammar exists to give. There is
+    no owner segment (repo identity is resolved from the origin remote, never
+    parsed from the path) and no kind segment (reclaim treats every kind alike —
+    ADR-0072 — and read-only-ness is a create-time argument, observable from the
+    directory mode).
+
+    Dirs and refs share NO grammar, and this is deliberate. Refs are slashed for
+    a git ref-collision reason (§3) that has no filesystem analogue; the old
+    nested Tree dir mirrored the ref namespace for a constraint it never had.
+    The dir records WHO and WHEN; git records WHAT.
+
+    The name is for humans and `shipit tree list` — `gc` never reads it.
+    Creation-age is not activity-age, so reclaiming on the timestamp would
+    delete live sessions (ADR-0072); reclaim measures file activity instead.
