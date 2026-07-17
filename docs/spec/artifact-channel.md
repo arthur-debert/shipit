@@ -128,6 +128,45 @@ The load-bearing decisions and their trade-offs are recorded as ADRs:
   `provision lexd` retires; gate uniformity via a managed lint block.
 - [ADR-0067](../adr/0067-artifact-pinned-updates-push-derived-fanout.md) —
   push propagation with a derived fan-out.
+- [ADR-0070](../adr/0070-publish-fires-a-selectable-endpoint-subset.md) —
+  `publish --endpoint` selects a subset of endpoints; the Release stays whole.
+  This is what makes the seed below safe.
+- [ADR-0071](../adr/0071-the-readiness-gate-is-the-served-subdirs-that-are-not-paused.md)
+  — the readiness gate is the served subdirs that are not owner-paused; amends
+  ADR-0066.
+
+### Seeding the channel
+
+The channel starts empty, and the obvious seed is unsafe: one release event
+fires every declared endpoint of every artifact, so a stable `lex-fmt/lex`
+release publishes the `.conda` **and** `lexd`→crates.io **and**
+`@lex-fmt/lex-wasm`→npm — two irreversible, owner-gated third-party publishes.
+The `-release-rc` live-fire guard is no help either: it skips *every* external
+endpoint, and `conda` is external, so a rehearsal tag never seeds. Hence
+ADR-0070.
+
+The seed is an ordinary release run with an endpoint selector:
+
+```sh
+# an ORDINARY prerelease tag — NOT the reserved `-release-rc` suffix, which
+# would skip `conda` along with every other external endpoint.
+shipit release publish --endpoint gh-release --endpoint conda
+```
+
+> **Not yet runnable.** `--endpoint` is ADR-0070's decision, implemented by
+> ARF02-WS01 (shipit#1000). Until that lands the flag does not exist and this
+> command errors out — the channel stays unseedable, which is the point of the
+> workstream. Do not reach for a manual `rattler-build` + upload instead: that
+> bypasses the endpoint under test and escapes the parity drift guard.
+
+The Release stays whole (every artifact builds, signs, and lands on the GitHub
+release — ADR-0009); only distribution narrows. `crates` and `npm` are recorded
+in the plan as selector-skipped. `conda` is rc-inclusive (ADR-0064), so a
+prerelease seeds the channel for pin-testing; the `provision` cutover's gate
+still requires a **stable** `lexd` (§Risks And Rabbit Holes).
+
+Preview with a plan-only run first: the plan is the safety surface, and it
+names every endpoint that will fire before anything external happens.
 
 ## Alternatives Considered
 
@@ -163,19 +202,27 @@ prefix-scoped IAM (leak-prone under UBLA), a capability URL (leaks via
   (`pixi run -e lint lint` re-solves the lint env) until the channel serves
   `lexd`. Readiness gate — all three required before the cutover PR can go
   green:
-  1. the public bucket exists (WS03 — `shipit-artifacts-public`);
+  1. the public bucket exists (WS03 — `shipit-artifacts-public`). **WS03 shipped
+     an idempotent provisioner, not a provisioned bucket** — it is an opt-in
+     operator entrypoint needing the operator's own `gcloud` credentials, so it
+     never runs in CI or `pixi run test`, and the closed workstream implies no
+     live infra. The bucket exists only once a human has run it; verify with the
+     probe below rather than assuming;
   2. `lex-fmt/lex` has published a stable `lexd` release through the `conda`
-     endpoint, so its per-repo channel holds `lexd` for **every** served subdir
-     of the closed platform matrix (`osx-arm64`, `linux-64`, `linux-aarch64`,
-     `win-64` — no osx-64, no musl); and
-  3. the channel serves `repodata.json` authless for **each** served subdir —
-     repodata is per-subdir, so a single probe can miss a partial publish;
-     repeat the check for all four subdirs (the snippet is copy-pasteable —
-     any non-zero exit means the gate is not yet met):
+     endpoint, so its per-repo channel holds `lexd` for every served subdir
+     **that is not owner-paused** (ADR-0071) — today `osx-arm64`, `linux-64`,
+     `linux-aarch64`. `win-64` stays in the closed served set but is not
+     produced while Windows is paused (shipit#895); it re-enters this gate when
+     the pause lifts. Still no osx-64 and no musl subdir; and
+  3. the channel serves `repodata.json` authless for **each** non-paused served
+     subdir — repodata is per-subdir, so a single probe can miss a partial
+     publish; repeat the check for all three (the snippet is copy-pasteable —
+     any non-zero exit means the gate is not yet met; re-add `win-64` when #895
+     lifts):
 
      ```sh
      host="https://storage.googleapis.com"
-     for subdir in osx-arm64 linux-64 linux-aarch64 win-64; do
+     for subdir in osx-arm64 linux-64 linux-aarch64; do
        curl -fsS "$host/shipit-artifacts-public/lex-fmt/lex/$subdir/repodata.json" > /dev/null
      done
      ```
