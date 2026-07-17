@@ -107,9 +107,12 @@ symlink fixes memory and resume together. Codex needs no change —
 `applies_to:` metadata filter rather than the storage key.
 
 **3. Trees are flat** (ADR-0074). `<root>/<repo>-<agent>-<timestamp>-<id>`, one
-uniform shape, e.g. `shipit-claude-20260717-081333-72218`. Repo first so `ls`
+uniform shape, e.g. `shipit-claude-20260717-081333-619cf51a-f501-44dc-992f-74df773204aa`. Repo first so `ls`
 groups by the axis humans narrow on; agent and timestamp are already in the
-ephemeral leaf today, by accident, and get promoted to deliberate fields.
+ephemeral leaf today, by accident, and get promoted to deliberate fields. `<id>`
+is the harness's session UUID in full, not the reused pid and not truncated —
+the Tree name is the resume handle, and `--resume` rejects a prefix (measured),
+so a short id would force an `ls` of the Session store before every resume.
 
 ## Design Decisions
 

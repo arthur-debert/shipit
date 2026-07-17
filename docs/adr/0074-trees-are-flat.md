@@ -71,12 +71,35 @@ to 10 hours. Creation time is recorded nowhere except, as text, inside an
 <root>/<repo>-<agent>-<timestamp>-<id>
 ```
 
-e.g. `~/workspace/trees/shipit-claude-20260717-081333-72218`
+e.g. `~/workspace/trees/shipit-claude-20260717-081333-619cf51a-f501-44dc-992f-74df773204aa`
 
 - **Repo first**, because it is the axis on which a human narrows, and a plain
   `ls` then groups by it. **Agent second** (`claude` / `codex`).
   **Timestamp** in the existing `%Y%m%d-%H%M%S` form, so lexical sort is
-  chronological within a repo. **`<id>`** is the harness's own unique token.
+  chronological within a repo.
+- **`<id>` is the harness's session UUID, in full** — e.g.
+  `619cf51a-f501-44dc-992f-74df773204aa`. **Not the PID**, and **not truncated.**
+
+  Not the PID because PIDs are reused: the same token eventually names two
+  unrelated sessions. That ambiguity is what forced the liveness probe's
+  create-time tolerance; ADR-0072 deletes the probe, but the ambiguity in the
+  *name* would outlive it.
+
+  Not truncated because **the Tree name is the resume handle**, and a prefix is
+  not one. Measured against Claude Code 2.1.212: `--resume` accepts a full UUID
+  or a session title and rejects an 8-hex prefix outright ("is not a UUID and
+  does not match any session title"). Session titles are derived from the Tree
+  dir basename plus an unpredictable 2-char suffix, so they need a lookup too.
+  Truncating to 8 hex — matching the existing hash8 leaf convention
+  (`create.py:122`) — would therefore force `ls`-ing the Session store to
+  recover the full id before every resume, i.e. it would buy back the very
+  tooling this shape exists to remove. The full UUID makes
+  `claude --resume <the-thing-after-the-timestamp>` work by reading the
+  directory name, which is the point.
+
+  The cost is a ~66-character leaf. That is real and accepted: repo-first
+  prefixing means `ls | grep shipit` narrows on the head of the name, so the
+  long tail never obstructs the axis a human actually scans on.
 - **The name is for humans and `tree list`; `gc` does not read it.** ADR-0072
   reclaims on measured activity. The timestamp finally gives `tree list` a real
   created column — which it has never had — without becoming a reclaim signal.

@@ -78,11 +78,23 @@ mid-stream. Agents derive WS codes and all names from them.
 
         <root>/<repo>-<agent>-<timestamp>-<id>
 
-    e.g. `~/workspace/trees/shipit-claude-20260717-081333-72218`. The `<root>`
-    is the central root (`SHIPIT_TREES_ROOT`, default `~/workspace/trees`);
-    `<agent>` is the backend (`claude` / `codex`); `<timestamp>` is
-    `%Y%m%d-%H%M%S`, so a lexical sort is chronological within a repo; `<id>` is
-    the harness's per-launch token.
+    e.g.
+    `~/workspace/trees/shipit-claude-20260717-081333-619cf51a-f501-44dc-992f-74df773204aa`.
+    The `<root>` is the central root (`SHIPIT_TREES_ROOT`, default
+    `~/workspace/trees`); `<agent>` is the backend (`claude` / `codex`);
+    `<timestamp>` is `%Y%m%d-%H%M%S`, so a lexical sort is chronological within a
+    repo.
+
+    `<id>` is the harness's SESSION UUID, in FULL — never the pid, never
+    truncated. Not the pid because pids are reused, so one token eventually
+    names two unrelated sessions. Not truncated because the Tree name IS the
+    resume handle: `claude --resume` takes a full UUID or a session title and
+    rejects a prefix, and titles carry an unpredictable derived suffix, so a
+    short id would force an `ls` of the Session store before every resume — the
+    tooling this grammar exists to remove. Reading the dir name is enough to
+    resume the session that made it. The ~66-character leaf is the accepted
+    price; repo-first prefixing means `ls | grep shipit` narrows on the head, so
+    the long tail never obstructs the scan.
 
     Repo comes FIRST because it is the axis a human narrows on — `ls | grep
     shipit` is the tooling-free narrowing this grammar exists to give. There is
