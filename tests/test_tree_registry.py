@@ -22,6 +22,7 @@ from shipit import gh, git
 from shipit.execrun import ExecError
 from shipit.identity import Sha
 from shipit.tree import registry
+from shipit.tree.cleanup import classify
 
 
 def _make_clone(root: Path, rel: str) -> Path:
@@ -319,13 +320,13 @@ def test_scan_workers_ignores_the_core_count(monkeypatch):
         assert registry._scan_workers(2) == 2
 
 
-# --- the write ladder's activity signal, over REAL git (#1009, codex review) ---------
+# --- the reclaim activity signal, over REAL git (#1018, ADR-0072) --------------------
 #
-# The rest of this module patches the git boundary; these two do NOT. The whole point
-# of the `last_commit` signal is an empirical claim about the filesystem — that root
-# mtime does not observe an agent working, and that a commit timestamp does — and a
-# test built on injected values cannot check that claim. So these drive real `git`
-# against a real clone and read the record `scan` builds from it.
+# The rest of this module patches the git boundary; these do NOT. The whole point of
+# the activity signal is an empirical claim about the filesystem — that the clone
+# ROOT's mtime does not observe an agent working, and that the newest file mtime does
+# — and a test built on injected values cannot check that claim. So these drive real
+# `git` against a real clone and read the record `scan` builds from it.
 
 
 def _git(args: list[str], *, cwd: Path) -> subprocess.CompletedProcess:
@@ -358,12 +359,13 @@ def real_git(monkeypatch):
     monkeypatch.setattr(gh, "pr_for_head", lambda branch, *, cwd=None: None)
 
 
-def test_root_mtime_does_not_observe_work_but_last_commit_does(tmp_path, real_git):
-    # The finding this signal exists for, reproduced end-to-end: an agent edits and
-    # commits under `src/`, and the clone ROOT's mtime does not move — a directory's
-    # mtime bumps only when an entry is added or removed in THAT directory. Reading
-    # idleness from mtime alone would call this actively-worked Tree idle and let gc
-    # delete a live agent's cwd. The HEAD committer stamp is what sees the work.
+def test_root_mtime_does_not_observe_work_but_newest_mtime_does(tmp_path, real_git):
+    # The finding the signal exists for, reproduced end-to-end (#1018): an agent edits
+    # and commits under `src/`, and the clone ROOT's mtime does not move — a
+    # directory's mtime bumps only when an entry is added or removed in THAT
+    # directory. That is the clock the old ladder read, and reading idleness from it
+    # is what let gc delete a live agent's cwd (measured lag: up to 10 hours). The
+    # record's `newest_mtime` sees the write wherever it lands.
     clone = tmp_path / "trees" / "acme/widget/issues/1/work-aaaa"
     _real_clone(clone)
     # Backdate the root dir to simulate a Tree cut days ago: nothing has been added to
@@ -381,10 +383,14 @@ def test_root_mtime_does_not_observe_work_but_last_commit_does(tmp_path, real_gi
     assert clone.stat().st_mtime == mtime_before
     assert time.time() - clone.stat().st_mtime > 9 * 86_400
 
-    # ...while the record's `last_commit` reads FRESH, so the ladder sees the agent.
+    # ...while the record's `newest_mtime` — the signal gc reclaims on — reads FRESH,
+    # so the rule sees the agent and keeps the Tree. (`last_commit` sees this
+    # particular shape too, but only because the agent committed; it is a display
+    # stamp now, blind to the uncommitted session #1018 actually deleted.)
     (record,) = registry.scan(tmp_path / "trees")
+    assert record.newest_mtime is not None
+    assert time.time() - record.newest_mtime < 60
     assert record.last_commit is not None
-    assert time.time() - record.last_commit < 60
 
 
 def test_last_commit_is_committer_time_so_a_rebase_refreshes_it(tmp_path, real_git):
@@ -406,6 +412,66 @@ def test_last_commit_is_committer_time_so_a_rebase_refreshes_it(tmp_path, real_g
     assert time.time() - author_at > 365 * 86_400
     assert record.last_commit is not None
     assert time.time() - record.last_commit < 60
+
+
+def test_a_deletion_only_commit_is_activity_the_walk_alone_cannot_see(
+    tmp_path, real_git
+):
+    # The hole `last_commit` is maxed in to cover, driven end-to-end rather than
+    # asserted from injected values — the claim is empirical, about what git and the
+    # filesystem actually do.
+    #
+    # An agent working in an OLD Tree deletes a tracked file and commits. Every trace
+    # of that work is somewhere `newest_mtime` cannot look: the removed file is gone,
+    # its parent DIRECTORY's mtime bumped (dirs are not eligible), and the commit
+    # itself landed in `.git` (pruned). No surviving file was written, so the walk
+    # still reports the Tree's pre-deletion age. If idle read the walk alone, this
+    # Tree — clean, fully pushed, and being worked in RIGHT NOW — is removable.
+    clone = tmp_path / "trees" / "acme/widget/issues/3/work-cccc"
+    _real_clone(clone)
+    (clone / "src" / "doomed.py").write_text("delete me\n")
+    _git(["add", "-A"], cwd=clone)
+    _git(["commit", "-qm", "add"], cwd=clone)
+
+    # A real remote, and the work PUSHED to it. Load-bearing, not scenery: without it
+    # every commit is local-only, the never-lose-work floor keeps the Tree, and the
+    # activity arm under test is never reached — the test would pass against the very
+    # bug it exists to catch.
+    origin = tmp_path / "origin.git"
+    _git(["init", "-q", "--bare", str(origin)], cwd=tmp_path)
+    _git(["remote", "add", "origin", str(origin)], cwd=clone)
+    _git(["push", "-q", "origin", "HEAD"], cwd=clone)
+
+    # Age every file in the clone: the Tree was cut days ago and has sat quiet since.
+    stale = time.time() - 10 * 86_400
+    for path in clone.rglob("*"):
+        if path.is_file():
+            os.utime(path, (stale, stale))
+    os.utime(clone, (stale, stale))
+
+    # The work: a commit that only REMOVES. `git rm` deletes the file from disk.
+    _git(["rm", "-q", "src/doomed.py"], cwd=clone)
+    _git(["commit", "-qm", "drop the dead module"], cwd=clone)
+    _git(["push", "-q", "origin", "HEAD"], cwd=clone)
+
+    (record,) = registry.scan(tmp_path / "trees")
+    # The floor is silent: nothing is dirty and every commit is on the remote, so the
+    # Tree's fate rests entirely on the activity arm.
+    assert record.dirty is False
+    assert record.unpushed_shas == ()
+    # The empirical claim, asserted rather than assumed: the walk saw nothing. Every
+    # remaining file still carries its backdated stamp.
+    assert record.newest_mtime is not None
+    assert time.time() - record.newest_mtime > 9 * 86_400
+    # ...while the commit stamp did see it.
+    assert record.last_commit is not None
+    assert time.time() - record.last_commit < 60
+
+    # So the rule keeps the Tree. Reading the walk alone, it would be deleted seconds
+    # after real work — #1018's shape, through a gap in the measurement.
+    decision = classify([record], time.time())
+    assert decision.removable == []
+    assert [r.path for r in decision.keep] == [record.path]
 
 
 def test_unreadable_last_commit_reads_as_none(tmp_path, real_git):
@@ -636,3 +702,43 @@ def test_pr_state_is_a_required_field_so_a_forgetful_caller_cannot_fake_a_read()
     # omitting them reads as keep, so they are not the same hazard.
     record = registry.TreeRecord(**complete)
     assert record.unpushed_shas is None and record.last_commit is None
+
+
+def test_scan_reads_newest_mtime_from_an_uncommitted_edit(tmp_path, real_git):
+    # The #1018 session's exact shape, end to end through a real clone: the agent has
+    # committed NOTHING (its work is external `gcloud` calls) and the root mtime is
+    # ancient — so every signal the old ladder had reads "idle" or "not live". The one
+    # true thing is that a file under `src/` was just written, and `scan` reports it.
+    clone = tmp_path / "trees" / "acme/widget/ephemeral/sess-aaaa"
+    _real_clone(clone)
+    stale = time.time() - 10 * 86_400
+    os.utime(clone, (stale, stale))
+    for path in (clone / "src" / "a.py", clone / "src"):
+        os.utime(path, (stale, stale))
+
+    # A single scratch write under a subdir — no commit, no push, no PR.
+    (clone / "src" / "scratch.log").write_text("provisioning bucket ...\n")
+
+    (record,) = registry.scan(tmp_path / "trees")
+
+    assert time.time() - record.mtime > 9 * 86_400  # the old clock: ancient
+    assert record.newest_mtime is not None
+    assert time.time() - record.newest_mtime < 60  # the measured one: just now
+
+
+def test_scan_prunes_the_env_dirs_from_the_activity_signal(tmp_path, real_git):
+    # `.pixi` is ~97% of a Tree's file count and its mtimes are an env solve, not an
+    # agent: a fresh file there must not make an abandoned Tree look alive (and the
+    # walk must not pay to descend it — 1.9ms pruned vs 191.7ms naive).
+    clone = tmp_path / "trees" / "acme/widget/issues/9/work-cccc"
+    _real_clone(clone)
+    stale = time.time() - 10 * 86_400
+    for path in (clone / "src" / "a.py", clone / "src", clone):
+        os.utime(path, (stale, stale))
+    (clone / ".pixi" / "envs" / "default").mkdir(parents=True)
+    (clone / ".pixi" / "envs" / "default" / "lib.so").write_text("fresh env solve")
+
+    (record,) = registry.scan(tmp_path / "trees")
+
+    assert record.newest_mtime is not None
+    assert time.time() - record.newest_mtime > 9 * 86_400  # still reads as abandoned

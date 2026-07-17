@@ -19,6 +19,7 @@ import logging
 import os
 import stat
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -26,13 +27,18 @@ import pytest
 from shipit import git
 from shipit.execrun import ExecError
 from shipit.identity import repo_from_slug
+from shipit.tree import readonly
+from shipit.tree.activity import newest_mtime
+from shipit.tree.cleanup import classify
 from shipit.tree.readonly import (
+    _stamp_acquisition,
     chmod_readonly,
     chmod_writable,
     create_readonly,
     readonly_plan,
     remove_tree,
 )
+from shipit.tree.registry import TreeRecord
 
 #: The canonical Repo identity the plans in this file namespace under.
 REPO = repo_from_slug("acme/widget")
@@ -301,6 +307,240 @@ def test_create_readonly_reuse_refreshes_to_current_head_and_re_guards(
     # co-tenant never reads stale submodule content after the head advanced.
     assert counts["submodule"] == 2
     assert not (work.stat().st_mode & 0o222)  # read-only guard re-applied
+
+
+def test_reusing_an_aged_review_tree_at_an_unchanged_head_keeps_it_from_gc(
+    tmp_path, monkeypatch
+):
+    # The regression the acquisition stamp exists for. A shared review Tree is the one
+    # Tree whose USE writes nothing: the reviewer only reads, and on reuse at an
+    # UNCHANGED head every refresh step misses the activity walk — fetch writes under
+    # the pruned `.git`, checkout/reset rewrite no working file, chmod moves ctime.
+    # So an aged leaf handed to a reviewer THIS SECOND was clean, fully pushed and
+    # >48h idle: removable, mid-review. #1018's shape, on the review path.
+    plan = readonly_plan(repo=REPO, branch="feat/x", root=tmp_path / "trees")
+    _mock_git_boundary(monkeypatch, files={"README.md": "hi\n"})
+    create_readonly(plan, source_repo="/ref", github_url="url")
+
+    # The Tree ages: its head has not moved and nobody has touched it for days.
+    stale = time.time() - 10 * 86_400
+    for path in plan.dir.rglob("*"):
+        if path.is_file():
+            os.utime(path, (stale, stale))
+    os.utime(plan.dir, (stale, stale))
+    assert time.time() - newest_mtime(plan.dir) > 9 * 86_400  # aged, pre-acquisition
+
+    # A reviewer acquires it — the reuse path, at the same head.
+    create_readonly(plan, source_repo="/ref", github_url="url")
+
+    # The acquisition is now visible to the signal gc reclaims on.
+    assert time.time() - newest_mtime(plan.dir) < 60
+
+    # And the rule keeps it, ON THE STAMP. Built as the scan would see a read-only leaf:
+    # never dirty, sitting on origin/<branch> with nothing local-only — and with every
+    # OTHER signal readable and stale, so the keep can only come from the acquisition.
+    # `last_commit` is pinned aged for that reason: leaving it None would blank idle and
+    # keep this Tree unexamined no matter what the stamp did (ADR-0072), which would make
+    # the assertion below pass against a leaf that was never stamped at all.
+    decision = classify([_aged_leaf_record(plan.dir, stale=stale)], time.time())
+    assert decision.removable == []
+    assert [r.path for r in decision.keep] == [str(plan.dir)]
+
+
+def _aged_leaf_record(tree_dir: Path, *, stale: float) -> TreeRecord:
+    """A read-only leaf as ``registry.scan`` reads it, with only its activity live.
+
+    Every signal but the walk is pinned to an AGED, READABLE value: a review clone is
+    never dirty and sits on ``origin/<branch>`` with nothing local-only, and its head
+    last moved days ago. So the only thing that can keep this record is fresh activity —
+    which on a Tree whose use writes nothing means the acquisition stamp.
+    """
+    return TreeRecord(
+        path=str(tree_dir),
+        branch="feat/x",
+        base="origin/feat/x",
+        dirty=False,
+        ahead=0,
+        behind=0,
+        pr=None,
+        pr_state=None,
+        mtime=stale,
+        unpushed_shas=(),
+        last_commit=stale,
+        newest_mtime=newest_mtime(tree_dir),
+    )
+
+
+def test_gc_cannot_reclaim_an_aged_leaf_while_its_acquisition_is_still_refreshing(
+    tmp_path, monkeypatch
+):
+    # The window the stamp's PLACEMENT closes (codex, #1029 review round 2). Stamping
+    # after the refresh leaves the leaf reading at its old activity for the whole of it
+    # — a fetch plus a recursive submodule update, the slowest, most network-bound thing
+    # on this path — so a gc that scans during that interval still sees an aged, clean,
+    # fully-pushed Tree and deletes it out from under the reviewer who is acquiring it.
+    # Claiming the leaf BEFORE the work is what makes the acquisition atomic to reclaim.
+    plan = readonly_plan(repo=REPO, branch="feat/x", root=tmp_path / "trees")
+    _mock_git_boundary(monkeypatch, files={"README.md": "hi\n"})
+    create_readonly(plan, source_repo="/ref", github_url="url")
+
+    stale = time.time() - 10 * 86_400
+    for path in plan.dir.rglob("*"):
+        if path.is_file():
+            os.utime(path, (stale, stale))
+    os.utime(plan.dir, (stale, stale))
+
+    # A concurrent gc scans this leaf at the slowest moment of the acquisition: mid-fetch,
+    # with the refresh paused here and the reviewer already holding the Tree.
+    seen: dict[str, object] = {}
+
+    def fetch_that_a_gc_run_races(**kwargs):
+        seen["verdict"] = classify(
+            [_aged_leaf_record(plan.dir, stale=stale)], time.time()
+        )
+
+    monkeypatch.setattr(git, "fetch", fetch_that_a_gc_run_races)
+
+    create_readonly(plan, source_repo="/ref", github_url="url")
+
+    verdict = seen["verdict"]
+    assert verdict.removable == []  # not deleted mid-acquisition...
+    assert [r.path for r in verdict.keep] == [str(plan.dir)]  # ...it is already claimed
+
+
+def test_gc_cannot_reclaim_an_aged_leaf_while_its_acquisition_is_still_chmod_ing(
+    tmp_path, monkeypatch
+):
+    # The OTHER half of the same window (codex, #1029 review round 3). Round 2 moved the
+    # stamp ahead of the refresh, but left it behind `chmod_writable` — which is not a
+    # rounding error: it walks the whole tree and chmods every working path, the same
+    # order of work as the activity walk gc itself pays for. A gc scanning while that
+    # walk ran still saw an aged, clean, fully-pushed leaf and deleted it under the
+    # reviewer. Racing gc at the moment the walk STARTS pins the claim ahead of it.
+    plan = readonly_plan(repo=REPO, branch="feat/x", root=tmp_path / "trees")
+    _mock_git_boundary(monkeypatch, files={"README.md": "hi\n"})
+    create_readonly(plan, source_repo="/ref", github_url="url")
+
+    stale = time.time() - 10 * 86_400
+    for path in plan.dir.rglob("*"):
+        if path.is_file():
+            os.utime(path, (stale, stale))
+    os.utime(plan.dir, (stale, stale))
+    assert time.time() - newest_mtime(plan.dir) > 9 * 86_400  # aged, pre-acquisition
+
+    seen: dict[str, object] = {}
+    real_chmod_writable = readonly.chmod_writable
+
+    def chmod_writable_that_a_gc_run_races(tree_dir):
+        # gc scans at the boundary: the acquisition is under way and the guard walk has
+        # not yet returned. The claim must already be readable here.
+        seen["verdict"] = classify(
+            [_aged_leaf_record(plan.dir, stale=stale)], time.time()
+        )
+        return real_chmod_writable(tree_dir)
+
+    monkeypatch.setattr(readonly, "chmod_writable", chmod_writable_that_a_gc_run_races)
+
+    create_readonly(plan, source_repo="/ref", github_url="url")
+
+    verdict = seen["verdict"]
+    assert verdict.removable == []  # not deleted mid-chmod...
+    assert [r.path for r in verdict.keep] == [str(plan.dir)]  # ...it is already claimed
+
+
+def test_the_acquisition_stamp_survives_a_leaf_still_under_the_read_only_guard(
+    tmp_path, monkeypatch
+):
+    # The stamp now runs FIRST on the reuse path, i.e. against a leaf whose root dir is
+    # still read-only from the last acquisition's re-guard. It must establish its own
+    # writability rather than depend on a caller having cleared the bits — otherwise the
+    # claim silently fails (best-effort, swallowed at DEBUG) and every leaf falls back to
+    # being dated by its head. Asserted directly, with no chmod_writable in front of it.
+    plan = readonly_plan(repo=REPO, branch="feat/x", root=tmp_path / "trees")
+    _mock_git_boundary(monkeypatch, files={"README.md": "hi\n"})
+    create_readonly(plan, source_repo="/ref", github_url="url")
+
+    stale = time.time() - 10 * 86_400
+    stamp = plan.dir / ".shipit-acquired"
+    # A leaf cloned BEFORE the stamp existed: nothing to refresh in place. Dropping the
+    # file needs the root writable, so the guard is restored right after — the state
+    # under test is a read-only root with no stamp in it.
+    plan.dir.chmod(plan.dir.stat().st_mode | 0o222)
+    stamp.unlink()
+    plan.dir.chmod(plan.dir.stat().st_mode & ~0o222)
+    os.utime(plan.dir, (stale, stale))
+    assert not (plan.dir.stat().st_mode & 0o222)  # root still under the guard
+
+    _stamp_acquisition(plan.dir)
+
+    assert stamp.exists()  # created under the guard, not skipped
+    assert time.time() - stamp.stat().st_mtime < 60
+
+
+def test_the_acquisition_stamp_never_makes_a_review_tree_look_dirty(
+    tmp_path, monkeypatch
+):
+    # The stamp lives at the Tree ROOT (the walk prunes `.git`), so git would see it as
+    # an untracked file and `registry.scan` would read the Tree as DIRTY — a permanent
+    # local-work floor, which keeps every review Tree forever and quietly swallows the
+    # whole reclaim rule. The exclude is what makes the stamp free, so pin it here
+    # against REAL git rather than trusting the write.
+    plan = readonly_plan(repo=REPO, branch="feat/x", root=tmp_path / "trees")
+    dest = plan.dir
+    dest.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", "."], cwd=str(dest), check=True)
+    (dest / "README.md").write_text("hi\n")
+    subprocess.run(["git", "add", "-A"], cwd=str(dest), check=True)
+    subprocess.run(
+        ["git", "-c", "user.email=t@e.com", "-c", "user.name=t", "commit", "-qm", "i"],
+        cwd=str(dest),
+        check=True,
+    )
+
+    _stamp_acquisition(dest)
+
+    assert (dest / ".shipit-acquired").exists()  # the walk can see it...
+    status = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=str(dest),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert status.stdout == ""  # ...and git cannot.
+
+
+def test_the_acquisition_stamp_is_idempotent_across_repeated_reuse(
+    tmp_path, monkeypatch
+):
+    # A busy shared leaf is refreshed on every reviewer acquisition; the exclude line
+    # is appended only when absent, so a hundred acquisitions leave one line rather
+    # than a hundred-line exclude file that grows without bound.
+    plan = readonly_plan(repo=REPO, branch="feat/x", root=tmp_path / "trees")
+    dest = plan.dir
+    (dest / ".git" / "info").mkdir(parents=True)
+
+    for _ in range(3):
+        _stamp_acquisition(dest)
+
+    exclude = (dest / ".git" / "info" / "exclude").read_text().splitlines()
+    assert exclude.count(".shipit-acquired") == 1
+
+
+def test_a_failed_acquisition_stamp_never_fails_the_acquisition(tmp_path, monkeypatch):
+    # The stamp only ever KEEPS a Tree, so a failure to write it cannot cause a wrong
+    # delete — it just returns the Tree to measuring its head's age. Failing a
+    # reviewer's real work over that bookkeeping write would be the worse trade.
+    plan = readonly_plan(repo=REPO, branch="feat/x", root=tmp_path / "trees")
+    _mock_git_boundary(monkeypatch, files={"README.md": "hi\n"})
+
+    def _boom(*a, **k):
+        raise PermissionError("read-only filesystem")
+
+    monkeypatch.setattr(Path, "touch", _boom)
+    tree = create_readonly(plan, source_repo="/ref", github_url="url")
+
+    assert Path(tree.path) == plan.dir  # the acquisition still succeeded
 
 
 def test_create_readonly_reuse_re_guards_even_when_refresh_fails(tmp_path, monkeypatch):

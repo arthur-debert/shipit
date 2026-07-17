@@ -108,9 +108,12 @@ isolation, I/O kept thin at the edges):
   read-only, shared per ``(repo, branch)`` so co-tenant reviewers reuse one clone.
 - :mod:`shipit.tree.registry` — manifest-less fleet scan behind ``list``:
   ``scan(root) -> [TreeRecord]`` reads each clone's state straight off disk.
-- :mod:`shipit.tree.cleanup` — pure ``gc`` partition: ``classify(records, now,
-  pr_states) -> Cleanup`` splits the fleet into removable / stale / keep,
-  conservative by default.
+- :mod:`shipit.tree.activity` — the reclaim signal (ADR-0072):
+  ``newest_mtime(path)`` measures when anyone last wrote a file in a Tree, over a
+  walk with the build/env dirs pruned; unreadable answers ``None``.
+- :mod:`shipit.tree.cleanup` — pure ``gc`` partition: ``classify(records, now) ->
+  Cleanup`` splits the fleet into removable / keep on ONE rule for every kind —
+  ``KEEP if dirty || unpushed || idle < 48h`` (ADR-0072).
 
 The ``verbs/tree.py`` click group is the thin CLI over these.
 """

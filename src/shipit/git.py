@@ -223,6 +223,14 @@ def head_committed_at(*, cwd: str) -> float | None:
     malformed output): the CALLER must treat "unknown" conservatively (keep), exactly
     as :func:`unpushed_shas` requires. Collapsing unreadable to "ancient" would let a
     git hiccup license a delete.
+
+    Those cases are ONE ``None`` on purpose, not for lack of trying: an unborn HEAD and
+    a broken repo are indistinguishable here — ``git log -1 HEAD`` exits 128 with a
+    ``fatal`` for both — so the caller cannot be handed a distinction git does not
+    offer without a second probe per call. It does not need one: reclaim's only
+    consumer keeps a Tree on this ``None`` either way, and every unborn Tree it could
+    reach is already kept by an earlier arm (see
+    :func:`shipit.tree.cleanup._idle_seconds`).
     """
     try:
         result = _probe(["log", "-1", "--format=%ct", "HEAD"], cwd=cwd)

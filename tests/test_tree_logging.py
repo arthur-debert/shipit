@@ -231,9 +231,10 @@ def test_create_binding_does_not_leak_past_return(tmp_path, monkeypatch, jsonl_l
 
 
 def _tree_record(path: str, *, mtime: float, dirty: bool = False) -> TreeRecord:
-    # `last_commit` tracks `mtime`: the write ladder reads idle from the NEWEST of the
-    # two, so a record meaning "aged" must pin both (the TreeRecord default of None —
-    # stamp unreadable — is conservatively ACTIVE and would keep every Tree).
+    # `newest_mtime` and `last_commit` both track `mtime`: idle is the newest of the walk
+    # and the commit stamp, and either TreeRecord default of None (unreadable) blanks it
+    # into a conservative ACTIVE that would keep every Tree. Pinning both readable is what
+    # makes `mtime=0.0` mean "nobody has touched this Tree" rather than "no idea".
     return TreeRecord(
         path=path,
         branch="issues/7/work",
@@ -245,39 +246,38 @@ def _tree_record(path: str, *, mtime: float, dirty: bool = False) -> TreeRecord:
         pr_state=None,
         mtime=mtime,
         unpushed_shas=(),
+        newest_mtime=mtime,
         last_commit=mtime,
     )
 
 
 def test_classify_records_one_decision_per_tree_with_its_bucket(caplog):
-    now = 20 * 86_400.0  # past the 14-day default age boundary
-    aged_merged = _tree_record("/trees/acme/widget/issues/7/one", mtime=0.0)
+    now = 20 * 86_400.0  # past the 48h default idle boundary
+    idle = _tree_record("/trees/acme/widget/issues/7/one", mtime=0.0)
     fresh = _tree_record("/trees/acme/widget/issues/8/two", mtime=now)
-    states = {aged_merged.path: "MERGED", fresh.path: None}
 
     with caplog.at_level(logging.DEBUG, logger="shipit.tree"):
-        decision = cleanup.classify([aged_merged, fresh], now, states)
+        decision = cleanup.classify([idle, fresh], now)
 
     decisions = {(r.tree, r.bucket) for r in caplog.records if hasattr(r, "bucket")}
     # One decision record per Tree, agreeing with the returned partition.
     assert decisions == {
-        (aged_merged.path, "removable"),
+        (idle.path, "removable"),
         (fresh.path, "keep"),
     }
-    assert [r.path for r in decision.removable] == [aged_merged.path]
+    assert [r.path for r in decision.removable] == [idle.path]
     assert [r.path for r in decision.keep] == [fresh.path]
 
 
 def test_classify_partition_is_unchanged_by_logging(caplog):
     """The decision record is the ONLY side effect — same inputs, same partition,
     with or without a capturing handler (mirrors the prstate precedent)."""
-    now = 20 * 86_400.0  # past the 14-day default age boundary
+    now = 20 * 86_400.0  # past the 48h default idle boundary
     record = _tree_record("/trees/acme/widget/issues/7/one", mtime=0.0)
-    states = {record.path: "MERGED"}
 
-    quiet = cleanup.classify([record], now, states)
+    quiet = cleanup.classify([record], now)
     with caplog.at_level(logging.DEBUG, logger="shipit.tree"):
-        captured = cleanup.classify([record], now, states)
+        captured = cleanup.classify([record], now)
 
     assert quiet == captured
 
@@ -311,10 +311,10 @@ def test_gc_sweep_logs_milestone_and_incomplete_view_warning(tmp_path, caplog):
     (leaf / ".git").mkdir(parents=True)
     plan = gc_mod.GcPlan(
         partition=cleanup.Cleanup(
-            removable=[_tree_record(str(leaf), mtime=0.0)], stale=[], keep=[]
+            removable=[_tree_record(str(leaf), mtime=0.0)], keep=[]
         ),
         total=3,
-        unknown=1,
+        unexamined=1,
     )
 
     with caplog.at_level(logging.INFO, logger="shipit.tree"):
@@ -336,9 +336,9 @@ def test_gc_sweep_failure_is_a_warning_with_the_exception_and_continues(
 ):
     record = _tree_record(str(tmp_path / "stuck"), mtime=0.0)
     plan = gc_mod.GcPlan(
-        partition=cleanup.Cleanup(removable=[record], stale=[], keep=[]),
+        partition=cleanup.Cleanup(removable=[record], keep=[]),
         total=1,
-        unknown=0,
+        unexamined=0,
     )
 
     def boom(path):

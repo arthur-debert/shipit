@@ -445,7 +445,7 @@ def run_remove(
     "--dry-run",
     is_flag=True,
     help=(
-        "Preview only: print the removable/stale/keep partition for the whole fleet "
+        "Preview only: print the removable/keep partition for the whole fleet "
         "and delete NOTHING. The preview is the exact decision the real sweep acts on."
     ),
 )
@@ -455,45 +455,52 @@ def run_remove(
     type=DURATION,
     metavar="DURATION",
     help=(
-        "Age boundary an UNMERGED Tree must exceed before it counts as abandoned, as "
-        "a human duration (e.g. 14d, 36h, 90m). Defaults to 14d when omitted. A "
-        "merged Tree is reclaimed on its own short idle window, not this boundary."
+        "How long a Tree must be IDLE — nothing written anywhere in it and no commit "
+        "made — before it counts as abandoned, as a human duration (e.g. 48h, 36h, "
+        "90m). Defaults to 48h when omitted. A Tree with uncommitted changes or "
+        "unpushed commits is kept no matter how idle."
     ),
 )
 def gc_cmd(dry_run: bool, threshold: float | None) -> None:
-    """Sweep the central root: remove only provably-safe Trees, list ambiguous ones.
+    """Sweep the central root: remove only provably-safe Trees.
 
-    Scans every Tree, classifies the fleet, then deletes ONLY the Trees whose PR is
-    merged, working tree clean, and nothing unpushed — the work is on the remote, so
-    there is nothing left to lose (a short grace window holds a merged Tree until it
-    has been IDLE for 12h, standing in for the liveness signal a write Tree lacks, so
-    an agent still working in a just-merged Tree keeps it). Trees that merely look
-    abandoned are LISTED
-    as stale (never deleted), and anything with live or local work is left untouched.
-    Conservative by default.
+    Scans every Tree and deletes ONLY those that hold nothing you could lose and that
+    nobody has touched in two days::
+
+        KEEP  if  dirty  ||  unpushed  ||  idle < 48h
+
+    Idle is measured, not inferred: the newest file mtime anywhere in the Tree (build
+    and env dirs pruned), maxed with HEAD's commit stamp so a commit that only DELETES
+    files still reads as activity the walk cannot see. The stamp can only ever push idle
+    down, i.e. only ever KEEP. Across the whole fleet the signal separates cleanly — a
+    Tree someone is working in reads under an hour idle, an abandoned one days — so
+    there is no ambiguous middle to list for a human, and no PR state, session pidfile
+    or Tree kind in the rule at all.
 
     ``--dry-run`` prints the same partition the real sweep would act on and deletes
-    nothing; ``--threshold DURATION`` (e.g. ``36h``) overrides the 14-day age boundary
-    for this run — the boundary past which an UNMERGED Tree (no PR, or one closed
-    without merging) is called abandoned and listed as stale.
+    nothing; ``--threshold DURATION`` (e.g. ``36h``) overrides the 48h idle boundary
+    for this run.
 
     Each Tree is reported as it is removed, so an interrupted sweep still leaves a
-    record of what it destroyed. Exits 1 if any Tree's PR state could not be read:
-    the fleet was only partly seen, so "nothing to reclaim" would be a guess.
+    record of what it destroyed. Exits 1 if any Tree was kept because a signal could
+    not be read rather than because it was judged safe: the fleet was only partly
+    judged, so "nothing to reclaim" would be a guess.
     """
-    raise SystemExit(run_gc(dry_run=dry_run, max_age_seconds=threshold))
+    raise SystemExit(run_gc(dry_run=dry_run, idle_threshold_seconds=threshold))
 
 
 @cli_errors
-def run_gc(*, dry_run: bool = False, max_age_seconds: float | None = None) -> int:
+def run_gc(
+    *, dry_run: bool = False, idle_threshold_seconds: float | None = None
+) -> int:
     """Build the gc plan, then either preview it or sweep it. Returns an exit code.
 
     Glue over the promoted domain (:mod:`shipit.tree.gc`): ONE
     :func:`~shipit.tree.gc.plan_fleet` call builds the frozen plan BOTH modes
     consume, so a ``--dry-run`` preview can NEVER drift from the action — it
     renders the very plan the real :func:`~shipit.tree.gc.sweep` applies; only
-    the "render vs delete" tail differs. ``max_age_seconds`` overrides the
-    14-day age boundary (the ``--threshold`` flag, already parsed to seconds
+    the "render vs delete" tail differs. ``idle_threshold_seconds`` overrides
+    the 48h idle boundary (the ``--threshold`` flag, already parsed to seconds
     at click per the two-tier exit contract: a malformed duration is a usage
     error, exit 2).
 
@@ -503,14 +510,17 @@ def run_gc(*, dry_run: bool = False, max_age_seconds: float | None = None) -> in
     maps to ``error: …`` + exit 1 through the shared shell. Repo identity is
     irrelevant — ``gc`` spans the whole central root, like ``list``.
 
-    Returns 1 — the contract's runtime-failure tier, both modes alike — when
-    the fleet was only PARTIALLY seen (:attr:`~shipit.tree.gc.GcPlan.incomplete`):
+    Returns 1 — the contract's runtime-failure tier, both modes alike — when the
+    fleet was only PARTIALLY judged (:attr:`~shipit.tree.gc.GcPlan.incomplete`):
     gc's job is to decide the whole root, and a run that could not read part of
     it did not do that job, however many Trees it reclaimed along the way.
     Reporting that as success is what let 526 Trees accumulate (#1011) — a
     drained ``gh`` budget turned 371 removable Trees into ``removable 0``, exit
-    0, indistinguishable from a clean fleet. The exit code carries no
-    threshold: one unreadable Tree and five hundred are the same claim ("this
+    0, indistinguishable from a clean fleet. That exact CAUSE is gone with the PR
+    read (ADR-0072), but the shape is not: the rule's own unreadable-signal arms
+    inherited it, and a fleet-wide walk or ``rev-list`` failure would now keep
+    everything and report the same clean bill of health. The exit code carries no
+    threshold: one unexamined Tree and five hundred are the same claim ("this
     verdict is not the whole root"), and the counts say which it was.
 
     Removals are streamed as they happen rather than rendered at the end (the
@@ -520,10 +530,10 @@ def run_gc(*, dry_run: bool = False, max_age_seconds: float | None = None) -> in
     """
     plan = gc.plan_fleet(
         layout.central_root(),
-        max_age_seconds=(
-            cleanup.DEFAULT_MAX_AGE_SECONDS
-            if max_age_seconds is None
-            else max_age_seconds
+        idle_threshold_seconds=(
+            cleanup.IDLE_THRESHOLD_SECONDS
+            if idle_threshold_seconds is None
+            else idle_threshold_seconds
         ),
     )
     if dry_run:
@@ -547,7 +557,7 @@ def _print_removed(path: str) -> None:
 
 
 def _render_gc_result(result: gc.GcResult) -> None:
-    """Render the sweep's tail: the failures, the stale list, and the summary.
+    """Render the sweep's tail: the failures and the summary.
 
     The terminal half of the plan+sweep split: every fact printed here came
     back in the :class:`~shipit.tree.gc.GcResult` — the delete failures the
@@ -555,77 +565,81 @@ def _render_gc_result(result: gc.GcResult) -> None:
     actually came off disk, and the incomplete-view report. The ``REMOVED``
     lines are NOT printed here: :func:`_print_removed` already streamed them
     from inside the sweep, and reprinting them would double the audit trail.
+    There is no STALE list to print any more — the bucket it rendered is gone
+    (ADR-0072), and a Tree that is not removable is simply kept.
     """
     for failure in result.failed:
         print(f"FAILED  {failure.path}: {failure.error}", file=sys.stderr)
-    for path in result.stale:
-        print(f"STALE   {path} (ambiguous — left for review, not removed)")
-    counts = (
-        f"removed {len(result.removed)}, stale {len(result.stale)}, kept {result.kept}"
-    )
+    counts = f"removed {len(result.removed)}, kept {result.kept}"
     print(f"gc: {_lead(result)}{counts}")
-    _render_incomplete_view(result, verb="swept")
+    _render_incomplete_view(result, verb="judged")
 
 
 def _lead(view: gc.GcPlan | gc.GcResult) -> str:
     """The summary's leading clause — empty for a complete view, loud otherwise.
 
     An incomplete run's counts describe only the part of the root gc could
-    read, so the skip goes IN FRONT of them: ``gc: INCOMPLETE — 502 of 512
-    skipped …`` can't be skimmed as the healthy ``gc: removed 0, …`` that hid
+    judge, so the gap goes IN FRONT of them: ``gc: INCOMPLETE — 502 of 512
+    unexamined …`` can't be skimmed as the healthy ``gc: removed 0, …`` that hid
     this failure for a whole fleet's lifetime (#1011). A complete view reads
     exactly as it always has.
     """
     if not view.incomplete:
         return ""
-    return f"INCOMPLETE — {view.unknown} of {view.total} skipped (PR state unknown); "
+    return (
+        f"INCOMPLETE — {view.unexamined} of {view.total} unexamined "
+        "(a signal could not be read); "
+    )
 
 
 def _render_incomplete_view(view: gc.GcPlan | gc.GcResult, *, verb: str) -> None:
-    """Explain a partially-seen fleet on stderr, or print nothing if it was whole.
+    """Explain a partially-judged fleet on stderr, or print nothing if it was whole.
 
     The summary's leading clause states THAT the view was incomplete; this states
-    what it means and what to do — that the skipped Trees were kept unexamined
-    rather than judged safe, and what most likely caused it. Naming a cause is the
-    point: "502 skipped (PR state unknown)" reads as a fleet mystery, and an
-    operator with no lead will either ignore it or go hunting (#1011).
+    what it means and what to do — that the unexamined Trees were kept because a
+    signal could not be read, not because they were judged safe, and what most
+    likely caused it. Naming a cause is the point: a bare "502 unexamined" reads as
+    a fleet mystery, and an operator with no lead will either ignore it or go
+    hunting (#1011).
 
-    Which cause leads changed when the PR read was batched to one ``gh`` call per
-    REPO. Before that, a sweep made a call per Tree — ~1000 on a large fleet — so a
-    drained hourly GraphQL quota was overwhelmingly the likeliest explanation and
-    this told the operator to wait for the reset. A sweep now makes one call per
-    repo (a couple of dozen), which cannot plausibly exhaust a 5000-unit budget, so
-    the likeliest cause is instead that a single repo's ``gh pr list`` failed —
-    while the blast radius of one such failure GREW, since one call now answers for
-    every Tree in its repo. Leading with the drained budget would now send an
-    operator to wait out a reset that is not their problem, so it is demoted to the
-    fleet-wide case where it is still the right lead. ``verb`` is the mode's tense
-    (``swept`` / ``would sweep``), the only difference between the two gc tails.
+    The cause text follows the SIGNALS, and ADR-0072 changed which ones can do this.
+    It used to name the PR read — a drained ``gh`` budget, then (once #1014 batched
+    the read per repo) a single repo's failed ``gh pr list``. Reclaim no longer reads
+    PR state at all, so neither can hide a Tree from the rule; what can is the rule's
+    own unreadable-signal arms (:func:`~shipit.tree.cleanup.is_unexamined`), and every
+    one is LOCAL — a failed ``git rev-list``, a failed activity walk, or an unreadable
+    HEAD commit stamp (idle's other half, which blanks it just as the walk does). So the
+    leads are local too: permissions, a vanished mount, a Tree being written as it was
+    read. An operator sent to check `gh api rate_limit` for what is now a filesystem
+    problem is an operator sent to the wrong machine entirely.
+
+    ``verb`` is the mode's tense (``judged`` / ``would judge``), the only difference
+    between the two gc tails.
     """
     if not view.incomplete:
         return
     print(
-        f"gc: {verb} {view.swept} of {view.total}; {view.unknown} skipped — their PR "
-        "state could not be read, so those Trees were kept UNEXAMINED, not judged "
+        f"gc: {verb} {view.judged} of {view.total}; {view.unexamined} kept UNEXAMINED "
+        "— a signal could not be read (the unpushed-commit list, the activity walk, or "
+        "HEAD's commit stamp), so those Trees were kept without a verdict, not judged "
         "safe. This verdict covers only part of the root.",
         file=sys.stderr,
     )
     print(
-        "gc: the PR state is read once per repo, so one failed read blanks every Tree "
-        "in that repo — the skipped Trees above are the likeliest place to look. "
-        "Re-running usually clears a transient failure.",
+        "gc: every one of those signals is read from the Tree itself, so the likeliest "
+        "causes are local — a permissions change, a vanished mount, or a Tree being "
+        "written as it was read. Re-running usually clears a transient failure.",
         file=sys.stderr,
     )
     print(
-        "gc: if the skip covers most of the fleet, suspect an exhausted gh API budget "
-        "instead — check `gh api rate_limit` (the GraphQL quota refills hourly) and "
-        "re-run once it has reset.",
+        "gc: if the gap covers most of the fleet, suspect the root itself rather than "
+        "any one Tree — check that the central root is readable and fully mounted.",
         file=sys.stderr,
     )
 
 
 def _render_gc_preview(plan: gc.GcPlan) -> None:
-    """Render the removable/stale/keep partition WITHOUT touching disk (``--dry-run``).
+    """Render the removable/keep partition WITHOUT touching disk (``--dry-run``).
 
     Renders the exact plan the real sweep would apply, so a preview can never
     disagree with the sweep that follows it. The buckets are walked GENERICALLY
@@ -650,11 +664,11 @@ def _render_gc_preview(plan: gc.GcPlan) -> None:
     logger.debug("gc --dry-run: %s", ", ".join(counts))
     if plan.incomplete:
         logger.warning(
-            "gc --dry-run: would sweep %d of %d; %d skipped (PR state unknown — "
-            "incomplete view of the fleet)",
-            plan.swept,
+            "gc --dry-run: would judge %d of %d; %d kept unexamined (a signal could "
+            "not be read — incomplete view of the fleet)",
+            plan.judged,
             plan.total,
-            plan.unknown,
+            plan.unexamined,
         )
     print(f"gc --dry-run (no Trees deleted): {_lead(plan)}{', '.join(counts)}")
-    _render_incomplete_view(plan, verb="would sweep")
+    _render_incomplete_view(plan, verb="would judge")
