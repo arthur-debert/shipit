@@ -542,12 +542,15 @@ def test_scan_failed_batch_makes_only_that_repos_trees_unknown(tmp_path, monkeyp
 
 
 def test_scan_unresolvable_remote_is_unknown_never_no_pr(tmp_path, monkeypatch):
-    """A clone with no origin remote reads UNKNOWN — the safe arm.
+    """A clone with no origin remote reads UNKNOWN — the honest arm.
 
-    Its repo cannot be resolved, so it joins no batch. It must NOT fall through to
-    "no PR": that is a rung gc reclaims on, so the conflation would delete a Tree the
-    old per-Tree read kept (that read returned UNKNOWN here too — gh would have failed
-    the same way).
+    Its repo cannot be resolved, so it joins no batch. It must NOT fall through to "no
+    PR", which would be a positive claim we cannot make. Not because the bucket would
+    change — it wouldn't; no-PR and UNKNOWN bucket identically on every ladder — but
+    because only UNKNOWN is counted by `plan.unknown`, and that count is what makes gc
+    admit it saw part of the root. Saying "no PR" here would hide this Tree inside a
+    confidently-complete sweep. (The old per-Tree read also returned UNKNOWN for this
+    clone — gh would have failed on it the same way.)
     """
     root = tmp_path / "trees"
     clone = _make_clone(root, "acme/widget/issues/1/work-a")
@@ -598,15 +601,20 @@ def test_scan_pr_label_and_state_are_two_views_of_one_read(tmp_path, monkeypatch
     assert record.pr_state == "DRAFT"
 
 
-def test_pr_state_is_a_required_field_so_forgetting_it_cannot_license_a_delete():
-    """``pr_state`` has NO default, deliberately — the lazy path must not be the deadly one.
+def test_pr_state_is_a_required_field_so_a_forgetful_caller_cannot_fake_a_read():
+    """``pr_state`` has NO default, deliberately — there is no correct thing to default to.
 
-    ``None`` means "no PR", which is a rung gc DELETES on. A default would mean any
-    future construction site that forgot the field silently handed gc a delete licence
-    for a Tree whose PR state nobody read. That is the inverse of this record's other
-    optional fields, where ``None`` means *unreadable* and therefore KEEP — those
-    defaults fail safe, this one would not. Requiring it makes the omission a TypeError
-    at construction rather than a deleted Tree months later. (#1011)
+    The field means *what the scan learned about this PR*, and a constructor that never
+    read one has learned nothing: ``None`` would assert "provably no PR" and
+    ``"UNKNOWN"`` would assert "we tried and failed". Both claim knowledge the caller
+    does not have.
+
+    ``None`` would be the more dangerous of the two — not because it deletes anything
+    (no-PR and UNKNOWN bucket identically on every ladder) but because it is SILENT:
+    ``plan.unknown`` counts only ``"UNKNOWN"``, so a forgotten field would zero the
+    count and let gc report a complete view of a fleet it never read — #1011's
+    exit-0-on-success-it-didn't-have, reintroduced through a default argument.
+    Requiring the field makes that a TypeError at construction instead. (#1011)
     """
     complete = dict(
         path="/t",

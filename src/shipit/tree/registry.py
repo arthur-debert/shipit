@@ -114,17 +114,26 @@ class TreeRecord:
       because ``gc`` branches on the STATE and used to re-read every Tree's PR itself to
       get it — a second per-Tree round-trip on top of the scan's (issue #1011). Reading
       it off the record is what lets a gc sweep cost the same one-call-per-repo the
-      scan already paid. ``"UNKNOWN"`` stays distinct from ``None`` here for the same
-      reason it does everywhere: gc keeps UNKNOWN and reclaims on no-PR.
+      scan already paid.
+
+      ``"UNKNOWN"`` stays distinct from ``None`` — but NOT because they bucket
+      differently. They do not: ``classify`` sends both to the same non-deleting
+      bucket on all three ladders (write → stale, review → keep, ephemeral → decided
+      on liveness/age without consulting the PR at all). The distinction is load-
+      bearing for gc's HONESTY rather than its safety: ``plan.unknown`` counts
+      ``"UNKNOWN"``, and that count is what makes a sweep announce it saw only part of
+      the root and exit non-zero. Report ``None`` where the truth was unreadable and
+      the count reads 0 — so gc claims a complete view of a fleet it could not read
+      and exits 0 having swept nothing, which IS the #1011 failure that let 526 Trees
+      accumulate. The lie is the bug; the delete never happens.
 
       **Deliberately has no default, unlike every other optional-looking field here.**
-      ``None`` means "no PR", which is a rung ``gc`` DELETES on — so a defaulted
-      ``pr_state`` would make the lazy path the dangerous one: any construction site
-      that forgot the field would silently hand gc a delete licence for a Tree nobody
-      had read the PR state of. That inverts what ``unpushed_shas`` and ``last_commit``
-      do, where ``None`` means *unreadable* and therefore KEEP — their defaults fail
-      safe, and this one would not. Requiring it turns "forgot to think about the PR
-      state" into a ``TypeError`` at construction instead of a deletion months later.
+      There is no correct default, because the field means *what the scan learned* and
+      a constructor that did not read cannot claim to have learned anything: ``None``
+      would assert "provably no PR" and ``"UNKNOWN"`` would assert "we tried and
+      failed", and both are a claim to knowledge the caller does not have. ``None``
+      would additionally be the silent one — zeroing the count above. So requiring it
+      turns "forgot to think about the PR state" into a ``TypeError`` at construction.
       It is also simply the same fact as ``pr``, which is required too: one read, two
       views, so exactly one of them defaulting would be incoherent.
     - ``mtime`` — the clone ROOT directory's mtime (epoch seconds); the verb renders
@@ -286,9 +295,12 @@ def _start_pr_batches(
 
     A clone whose repo is unresolvable (``None`` here), and every clone of a repo whose
     batch call fails, end up :data:`~shipit.gh.UNKNOWN` — the undetermined arm, never a
-    silent "no PR". That distinction is load-bearing for ``gc``: ``UNKNOWN`` means keep,
-    while "no PR" is a rung it reclaims on, so conflating them would delete Trees the
-    old code kept.
+    silent "no PR". That distinction does not change any ladder's bucket (both are
+    non-deleting everywhere); it is what keeps ``gc`` HONEST. ``plan.unknown`` counts
+    the UNKNOWNs, and that count is the whole basis of the incomplete-view warning and
+    the non-zero exit. Answering "no PR" for a repo we failed to read would zero it and
+    let ``gc`` report a clean bill of health for Trees it never saw — #1011's silent
+    success, rebuilt one repo at a time.
     """
     with ThreadPoolExecutor(max_workers=_scan_workers(len(clone_dirs))) as pool:
         slugs = dict(zip(clone_dirs, pool.map(_repo_slug, clone_dirs), strict=True))

@@ -383,9 +383,11 @@ def test_prs_by_head_undetermined_view_is_unknown(monkeypatch, result):
 )
 def test_prs_by_head_one_bad_row_fails_the_whole_repo(monkeypatch, rows):
     # A single unusable row must NOT be skipped: skipping drops that head from the
-    # index, and a missing head reads as a provable "no PR" — turning shape drift
-    # into a silent lie about one Tree, on the exact rung gc deletes. Failing the
-    # whole repo keeps the never-lie invariant. Note the GOOD row is discarded too.
+    # index, and a missing head reads as a provable "no PR" — so shape drift would
+    # become a confident false claim about one Tree. Not a delete (no-PR and UNKNOWN
+    # bucket the same everywhere) but worse in kind: gc would count that Tree as READ
+    # and report a complete view it never had. Failing the whole repo keeps the
+    # never-lie invariant. Note the GOOD row is discarded too.
     _capture_argv(monkeypatch, _ok(json.dumps(rows)))
     assert gh.prs_by_head("acme/widget") is gh.UNKNOWN
 

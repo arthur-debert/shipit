@@ -973,14 +973,19 @@ def prs_by_head(repo: str) -> dict[str, HeadPr] | UnknownPr:
 
     ``--state all`` is load-bearing: ``gh pr list`` defaults to OPEN only, while
     :func:`pr_for_head` matches MERGED/CLOSED heads too — an open-only index would
-    make every merged Tree read as "no PR", which is precisely the rung ``gc``
-    reclaims on, so the two reads must see the same PRs.
+    make every merged Tree read as "no PR". MERGED is precisely the rung ``gc``
+    reclaims on, so an open-only index would silently stop the fleet being reclaimed
+    at all; the two reads must see the same PRs.
 
-    A SINGLE malformed row fails the WHOLE repo rather than being skipped. Skipping
-    it would drop that head from the index, and a missing head is read as a provable
-    "no PR" — turning a shape-drift bug into a silent, gc-visible lie about one
-    Tree. Failing the repo keeps the never-lie invariant: this function only ever
-    returns an index it can vouch for entirely.
+    A SINGLE malformed row fails the WHOLE repo rather than being skipped. Skipping it
+    would drop that head from the index, and a missing head reads as a provable "no
+    PR" — so a shape-drift bug would become a confident false claim about one Tree.
+    What that costs is not a delete (no-PR and UNKNOWN land in the same non-deleting
+    bucket on every ladder — see :func:`shipit.tree.cleanup.classify`); it is that
+    ``gc`` would count the Tree as *read* and report a complete view of a fleet it had
+    not actually read — the exact silent-success failure of #1011. Failing the repo
+    keeps the never-lie invariant: this function only ever returns an index it can
+    vouch for entirely.
 
     Where several PRs share one head (a rebuilt branch), the FIRST wins: ``gh pr
     list`` returns newest-first, so that is the highest-numbered PR — matching what
