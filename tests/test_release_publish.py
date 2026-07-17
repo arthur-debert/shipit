@@ -585,7 +585,10 @@ def test_plan_selector_unknown_endpoint_is_loud_and_names_the_known_set():
             selector=["gh-release", "conda-forge"],
         )
     assert "`conda-forge`" in str(err.value)
-    assert "gh-release, crates, pypi, npm" in str(err.value)
+    # Derived from the registry, not hard-coded: the point is that the known set
+    # is NAMED, not that it has a particular order — a new endpoint must not
+    # break this test.
+    assert ", ".join(publish_mod.names()) in str(err.value)
 
 
 def test_plan_selector_undeclared_endpoint_is_loud():

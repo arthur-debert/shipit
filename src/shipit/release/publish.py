@@ -573,8 +573,10 @@ def _check_selector(
         raise ReleaseError(
             "publish refused — `--endpoint` selects "
             + ", ".join(f"`{name}`" for name in undeclared)
-            + ", which no artifact in this repo declares: the run would "
-            "publish nothing under the selected endpoint(s). Declared here: "
+            + ", which no artifact in this repo declares: nothing would "
+            "publish under "
+            + ("that endpoint" if len(undeclared) == 1 else "those endpoints")
+            + ". Declared here: "
             + (", ".join(sorted(declared)) if declared else "(none)")
         )
     if RELEASE_ENDPOINT in declared and RELEASE_ENDPOINT not in selector:
