@@ -242,6 +242,7 @@ def _tree_record(path: str, *, mtime: float, dirty: bool = False) -> TreeRecord:
         ahead=0,
         behind=0,
         pr=None,
+        pr_state=None,
         mtime=mtime,
         unpushed_shas=(),
         last_commit=mtime,

@@ -596,3 +596,35 @@ def test_scan_pr_label_and_state_are_two_views_of_one_read(tmp_path, monkeypatch
     (record,) = registry.scan(root)
     assert record.pr == "#8 DRAFT"
     assert record.pr_state == "DRAFT"
+
+
+def test_pr_state_is_a_required_field_so_forgetting_it_cannot_license_a_delete():
+    """``pr_state`` has NO default, deliberately — the lazy path must not be the deadly one.
+
+    ``None`` means "no PR", which is a rung gc DELETES on. A default would mean any
+    future construction site that forgot the field silently handed gc a delete licence
+    for a Tree whose PR state nobody read. That is the inverse of this record's other
+    optional fields, where ``None`` means *unreadable* and therefore KEEP — those
+    defaults fail safe, this one would not. Requiring it makes the omission a TypeError
+    at construction rather than a deleted Tree months later. (#1011)
+    """
+    complete = dict(
+        path="/t",
+        branch="b",
+        base="origin/main",
+        dirty=False,
+        ahead=0,
+        behind=0,
+        pr=None,
+        pr_state=None,
+        mtime=0.0,
+    )
+    assert registry.TreeRecord(**complete).pr_state is None  # explicit no-PR is fine
+
+    with pytest.raises(TypeError, match="pr_state"):
+        registry.TreeRecord(**{k: v for k, v in complete.items() if k != "pr_state"})
+
+    # The fields whose None genuinely means "unreadable" keep their fail-SAFE defaults:
+    # omitting them reads as keep, so they are not the same hazard.
+    record = registry.TreeRecord(**complete)
+    assert record.unpushed_shas is None and record.last_commit is None

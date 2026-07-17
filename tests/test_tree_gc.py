@@ -51,6 +51,7 @@ def _record(**over) -> TreeRecord:
         ahead=0,
         behind=0,
         pr=None,
+        pr_state=None,
         mtime=0.0,
         unpushed_shas=(),
     )

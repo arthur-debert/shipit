@@ -55,6 +55,7 @@ def _record(path: str = "/trees/t", **over) -> TreeRecord:
         ahead=0,
         behind=0,
         pr=None,
+        pr_state=None,
         mtime=AGED_MTIME,
         unpushed_shas=(),
     )

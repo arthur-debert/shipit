@@ -116,6 +116,17 @@ class TreeRecord:
       it off the record is what lets a gc sweep cost the same one-call-per-repo the
       scan already paid. ``"UNKNOWN"`` stays distinct from ``None`` here for the same
       reason it does everywhere: gc keeps UNKNOWN and reclaims on no-PR.
+
+      **Deliberately has no default, unlike every other optional-looking field here.**
+      ``None`` means "no PR", which is a rung ``gc`` DELETES on — so a defaulted
+      ``pr_state`` would make the lazy path the dangerous one: any construction site
+      that forgot the field would silently hand gc a delete licence for a Tree nobody
+      had read the PR state of. That inverts what ``unpushed_shas`` and ``last_commit``
+      do, where ``None`` means *unreadable* and therefore KEEP — their defaults fail
+      safe, and this one would not. Requiring it turns "forgot to think about the PR
+      state" into a ``TypeError`` at construction instead of a deletion months later.
+      It is also simply the same fact as ``pr``, which is required too: one read, two
+      views, so exactly one of them defaulting would be incoherent.
     - ``mtime`` — the clone ROOT directory's mtime (epoch seconds); the verb renders
       it as age. Note what this does and does not observe: a directory's mtime bumps
       only when an entry is added or removed in THAT directory, so it catches
@@ -137,8 +148,8 @@ class TreeRecord:
     ahead: int
     behind: int
     pr: str | None
+    pr_state: str | None
     mtime: float
-    pr_state: str | None = None
     unpushed_shas: tuple[Sha, ...] | None = None
     last_commit: float | None = None
 
