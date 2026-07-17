@@ -932,6 +932,44 @@ def test_run_gc_incomplete_sweep_is_loud_and_exits_nonzero(
     )
 
 
+def test_run_gc_incomplete_view_leads_with_the_repo_shaped_cause(
+    tmp_path, monkeypatch, capsys
+):
+    # #1011: the PR state is now read once per REPO, so a sweep makes ~20 calls, not
+    # ~1000. A drained hourly quota is therefore no longer the likely cause of an
+    # UNKNOWN — one repo's `gh pr list` failing is — and one such failure blanks every
+    # Tree in that repo. So the repo-shaped cause LEADS and the rate limit is demoted
+    # to the fleet-wide case where it is still right. Pointing an operator at a quota
+    # that is fine costs them a 25-minute wait for nothing: a confident wrong
+    # diagnosis is worse than none.
+    root = tmp_path / "trees"
+    unknown = _make_tree_dir(root, "acme/widget/issues/1/work-unknown")
+    records = [
+        _record(
+            path=str(unknown),
+            branch="b1",
+            dirty=False,
+            ahead=0,
+            mtime=0.0,
+            pr_state="UNKNOWN",
+        ),
+    ]
+    monkeypatch.setattr(layout_mod, "central_root", lambda: str(root))
+    monkeypatch.setattr(registry_mod, "scan", lambda r: records)
+
+    rc = tree_verb.run_gc(dry_run=True)
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    per_repo = err.index("read once per repo")
+    rate_limit = err.index("gh api rate_limit")
+    # Both are offered, but the repo-shaped cause comes FIRST.
+    assert per_repo < rate_limit
+    # The budget line is explicitly conditional now, not stated as "the usual cause".
+    assert "if the skip covers most of the fleet" in err
+    assert "the usual cause is an exhausted gh API budget" not in err
+
+
 def test_run_gc_dry_run_warns_on_unknown_and_deletes_nothing(
     tmp_path, monkeypatch, capsys
 ):
