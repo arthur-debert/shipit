@@ -50,10 +50,10 @@ other working shipit Repo; creation must not invent parallel behavior for those
 commands.
 
 The completed creator also exposes an accidental remote dependency. For example,
-`shipit repo new --stack rust hekka` can create and commit the Repo successfully
-while its managed `post-commit` path emits `No such remote 'origin'`. The hook is
-running before any remote exists, but a missing optional remote is rendered like
-a creation failure.
+`shipit repo new --stack rust --no-remote hekka` can create and commit the Repo
+successfully while its managed `post-commit` path emits `No such remote 'origin'`.
+The hook is running before any remote exists, but a missing optional remote is
+rendered like a creation failure.
 
 Most new Repos should then be pushed so their generated CI can run, but Shipit
 does not currently offer an explicit, safe remote policy as part of creation.
@@ -146,10 +146,20 @@ The GitHub slug is explicit and authoritative: it must have the full
 name. Omission or combination of remote modes is a usage error.
 
 Remote modes use shipit's existing `gh` Tool adapter and require an installed,
-authenticated `gh` CLI. `--no-remote` does not require `gh` or GitHub
-authentication. Reusing a remote never force-pushes, merges, rebases, or
-otherwise reconciles remote history; a normal push rejection is reported as a
-remote-publication failure.
+authenticated `gh` CLI for the GitHub API operations (Repo creation and lookup).
+Attachment and push run through ordinary Git rather than the `gh` API, so they
+additionally require a working Git credential for `origin`: an authenticated
+`gh` API session does not by itself authorize `git push`. `origin` is attached
+over HTTPS from the `OWNER/REPO` slug, so the push is satisfied by any credential
+that makes `git push https://github.com/OWNER/REPO` succeed—for example
+`gh auth setup-git` or another configured credential helper on a laptop, or a
+token-bearing credential on a runner. A push that fails because `gh` API
+authentication is present but no such Git credential is available is reported as
+a remote-publication failure at the push stage, with recovery guidance, exactly
+like any other push rejection. `--no-remote` requires neither `gh`, GitHub
+authentication, nor a Git credential. Reusing a remote never force-pushes,
+merges, rebases, or otherwise reconciles remote history; a normal push rejection
+is reported as a remote-publication failure.
 
 `<name>` uses canonical lowercase kebab-case: it begins with an ASCII lowercase
 letter and continues with lowercase alphanumeric segments separated by single
@@ -454,9 +464,11 @@ depend on an interactive `pixi shell`.
 - A successful push is followed by one best-effort listing of Actions runs for
   the initial commit. Shipit neither waits for runs nor treats absence, query
   failure, or a later run verdict as repository-creation failure.
-- GitHub operations continue through the existing `gh` Tool adapter and its
-  authenticated `gh` CLI. GitHub availability is a dependency only of the two
-  post-creation remote modes, not of local creation or `--no-remote`.
+- GitHub API operations continue through the existing `gh` Tool adapter and its
+  authenticated `gh` CLI, while attachment and push run through ordinary Git and
+  additionally require a working Git credential for `origin`. Both are a
+  dependency only of the two post-creation remote modes, not of local creation or
+  `--no-remote`.
 - Managed post-commit behavior treats a missing `origin` as an expected optional
   state and emits no user-facing error, preserving the validity of local-only
   Repos beyond this command.
@@ -540,7 +552,8 @@ depend on an interactive `pixi shell`.
 ## Cross-Cutting Concerns
 
 - **Secrets and privacy:** creation never writes GitHub credentials. Remote modes
-  rely on the user's authenticated `gh` session; `--remote-create` always creates
+  rely on the user's authenticated `gh` session and existing Git credential for
+  `origin`; `--remote-create` always creates
   a private Repo before pushing project content. Local environment files are
   ignored.
 - **Git identity:** creation relies on normal user Git configuration and never
@@ -592,10 +605,14 @@ depend on an interactive `pixi shell`.
   assert `origin` is attached and `main` receives a normal upstream-setting push
   with no force or history-reconciliation path. For creation, assert the GitHub
   Repo is private, becomes `origin`, and receives the same push.
-- Exercise failure at GitHub creation, remote attachment, and push. In every
-  case, assert the completed local Repo remains usable and unchanged, no local
-  or GitHub rollback is attempted, the command exits zero, and output identifies
-  the failed stage with actionable recovery commands.
+- Exercise failure at GitHub creation, remote attachment, and push, including a
+  push that fails because `gh` API authentication is present but no Git credential
+  for `origin` is available. In every case, assert the local Repo's `main` HEAD,
+  committed contents, and working tree are unchanged and that no local or GitHub
+  rollback is attempted; successfully completed earlier bootstrap stages are
+  retained rather than reverted—an attachment or push failure leaves `origin`
+  attached—while the command exits zero and output identifies the failed stage
+  with actionable recovery commands that resume from it.
 - After a successful push, cover visible queued/running Actions runs, no runs yet
   visible, and a failed status query. Assert Shipit makes no wait/poll request and
   that status discovery never changes the successful command outcome.
