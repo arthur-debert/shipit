@@ -294,8 +294,24 @@ def _refresh_readonly(dest: Path, branch: str) -> None:
     the ADR-0018 guarantee for every co-tenant reviewer reusing the slot. Restoring the
     read-only guard before the error re-raises keeps the FS guard load-bearing even on the
     failure path (the caller still sees the original exception and rolls the leaf back).
+
+    The acquisition is stamped BEFORE the refresh, not after it (:func:`_stamp_acquisition`,
+    and :data:`_ACQUIRED_STAMP` for why the trace must exist at all). The refresh is the
+    slowest thing here — a ``fetch`` and a recursive submodule update, both over the
+    network — and until the stamp lands the leaf still reads at its OLD activity, i.e. as
+    idle as it was a moment ago. Stamping afterwards would leave a concurrent ``gc`` free
+    to measure this Tree as removable and delete it *while this reviewer is refreshing
+    it* — the precise mid-review deletion the stamp exists to prevent, merely narrowed to
+    the acquisition window (codex, #1029 review round 2). Claiming it first also subsumes
+    what the old ``finally`` placement was for: a reviewer whose ``reset`` hit a conflict
+    still holds this leaf, and a Tree deleted under a failing Run is the same #1018 bug as
+    one deleted under a healthy one — stamping before the ``try`` covers that failure path
+    without needing to re-stamp on the way out. Ordered after ``chmod_writable`` because
+    the stamp needs the root dir writable, and the git work leaves it alone: ``reset
+    --hard`` does not touch an excluded untracked file.
     """
     chmod_writable(dest)
+    _stamp_acquisition(dest)
     try:
         git.fetch(cwd=str(dest))
         git.checkout(branch, cwd=str(dest))
@@ -305,13 +321,6 @@ def _refresh_readonly(dest: Path, branch: str) -> None:
         # co-tenant reads stale submodule content. Before the re-guard, while it is writable.
         git.submodule_update_init(cwd=str(dest))
     finally:
-        # In the FINALLY, with the re-guard, and BEFORE it: this is the acquisition
-        # that reclaim would otherwise never see (:data:`_ACQUIRED_STAMP`), and it is
-        # just as real when the refresh failed. A reviewer whose reset hit a conflict
-        # is still a reviewer holding this leaf, and a Tree deleted under a failing Run
-        # is the same #1018 bug as one deleted under a healthy one. Ordered before
-        # chmod_readonly because the stamp needs the root dir writable.
-        _stamp_acquisition(dest)
         chmod_readonly(dest)
 
 
@@ -320,7 +329,11 @@ def _stamp_acquisition(dest: Path) -> None:
 
     Excludes then touches :data:`_ACQUIRED_STAMP` (see there for why the trace has to
     exist at all). Called on both acquisition paths — a fresh clone and a reuse — while
-    the Tree is still writable, i.e. BEFORE :func:`chmod_readonly` re-applies the guard.
+    the Tree is still writable, i.e. BEFORE :func:`chmod_readonly` re-applies the guard,
+    and on the reuse path BEFORE the refresh it is claiming the leaf against
+    (:func:`_refresh_readonly`). Once written it stays written: the refresh's ``reset
+    --hard`` does not touch an excluded untracked file, so the claim is made once and
+    holds for the whole acquisition.
 
     The exclude is written BEFORE the stamp, never after: between creating an untracked
     root file and hiding it, ``git status --porcelain`` reports the Tree ``dirty``, and
@@ -334,8 +347,9 @@ def _stamp_acquisition(dest: Path) -> None:
     Tree, so failing to write it cannot cause a wrong delete on its own — it just
     returns the Tree to the pre-existing behaviour of measuring its head's age. Raising
     instead would be strictly worse: it would fail a reviewer's acquisition — the real
-    work — over a bookkeeping write, and on the reuse path it would abort a refresh that
-    had already re-pinned the checkout.
+    work — over a bookkeeping write, and on the reuse path it would now abort the refresh
+    before it ever re-pinned the checkout, turning a bookkeeping hiccup into a reviewer
+    who cannot read the PR at all.
     """
     try:
         exclude = dest / _GIT_DIR / _GIT_EXCLUDE

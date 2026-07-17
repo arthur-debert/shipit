@@ -45,8 +45,9 @@ Tree — holds with a 48× margin over the busiest observed live Tree.
 **Unknown is not false — an unreadable signal KEEPS** (ADR-0072). The rule is written
 over three booleans and a boolean has nowhere to put "I could not tell", so that gap is
 closed explicitly: an unreadable unpushed list (``unpushed_shas is None``) reads as
-has-local-work, and an unreadable activity signal (``newest_mtime is None``) reads as
-recently active. The asymmetry is the whole point and must be re-derived from the
+has-local-work, and an unreadable activity signal reads as recently active — EITHER half
+of it (``newest_mtime is None`` or ``last_commit is None``), since idle is the newest of
+both and neither covers the other's blind spot. The asymmetry is the whole point and must be re-derived from the
 consequence, never inherited by accident: a wrongly-KEPT Tree costs disk until the next
 sweep; a wrongly-DELETED one costs work that no longer exists.
 
@@ -229,11 +230,25 @@ def _idle_seconds(record: TreeRecord, *, now: float) -> float | None:
     (:attr:`~shipit.tree.registry.TreeRecord.last_commit`). Both ride the record the scan
     already paid for, so this stays pure — no clock, no I/O (ADR-0030).
 
-    ``None`` propagates when the WALK failed: that is the signal that could not be
-    established, and an unreadable signal is not evidence of idleness, so the caller
-    keeps the Tree (ADR-0072's unknown-is-not-false rule, and ``unpushed_shas``'
-    unreadable-reads-conservative discipline). A missing ``last_commit`` is not the same
-    thing and does not blank the answer — the walk still measured it.
+    ``None`` propagates when EITHER input is unknown — never "fall back to the other"
+    (ADR-0072, and ``unpushed_shas``' unreadable-reads-conservative discipline). Each
+    signal is here precisely because it covers the other's blind spot, so a missing one
+    is not a smaller answer, it is a HOLE the survivor cannot see into: an unreadable
+    ``last_commit`` leaves the walk reporting an old Tree while the very thing the stamp
+    was added to catch — a commit that only DELETES files (see below) — is exactly what
+    it cannot rule out. Falling back to the walk there is round 1's finding again with
+    the stamp unreadable rather than ignored, and it licenses the same wrong delete
+    (codex, #1029 review round 2).
+
+    **Unborn HEAD collapses into that same unknown, and it costs nothing.** ``git log -1
+    HEAD`` cannot distinguish "no commit exists" from "the read failed" — both exit 128
+    with a ``fatal`` — so separating them would need a second probe per Tree on a scan
+    that walks 155 of them. It would buy no keep it does not already have: a Tree with
+    no commits and any file at all is UNTRACKED, i.e. ``dirty``, and the floor keeps it
+    before idle is ever consulted; one with no eligible file at all has ``newest_mtime
+    is None`` and is already kept (and already ``is_unexamined``). Both unborn shapes
+    are kept either way, so the cheap collapse and the expensive distinction agree on
+    every reachable Tree.
 
     **Why the commit stamp is maxed in, when ADR-0072 calls it a proxy.** It is one, and
     it would be wrong ALONE — that is the ADR's point, and why the walk decides. But
@@ -254,12 +269,9 @@ def _idle_seconds(record: TreeRecord, *, now: float) -> float | None:
     strictly weaker than the walk, which already observes everything it does and more
     (ADR-0072 measured it lagging by up to 10h), so it would add cost and no keeps.
     """
-    if record.newest_mtime is None:
+    if record.newest_mtime is None or record.last_commit is None:
         return None
-    newest = record.newest_mtime
-    if record.last_commit is not None:
-        newest = max(newest, record.last_commit)
-    return now - newest
+    return now - max(record.newest_mtime, record.last_commit)
 
 
 def _has_local_only_work(record: TreeRecord) -> bool:
@@ -306,9 +318,10 @@ def is_unexamined(record: TreeRecord) -> bool:
       the floor already decided and the walk was never reached.
     - ``unpushed_shas is None`` → **unexamined**. The floor fired on a read that failed
       (:func:`_has_local_only_work`), so the keep rests on a git hiccup, not a fact.
-    - ``newest_mtime is None`` → **unexamined**. The activity walk failed or found no
-      eligible file, so the idle question was never answered
-      (:func:`shipit.tree.activity.newest_mtime`).
+    - ``newest_mtime is None`` **or** ``last_commit is None`` → **unexamined**. Idle was
+      never answered, because it is the newest of BOTH and either one unknown blanks it
+      (:func:`_idle_seconds`) — a failed activity walk (or one finding no eligible file)
+      and an unreadable HEAD stamp are the same kind of hole, and both keep.
     - otherwise → **examined**: idle was measured and compared.
 
     This is the load-bearing half of ADR-0072's unknown-is-not-false rule. The keep is
@@ -324,4 +337,4 @@ def is_unexamined(record: TreeRecord) -> bool:
         return True
     if record.unpushed_shas:
         return False
-    return record.newest_mtime is None
+    return record.newest_mtime is None or record.last_commit is None

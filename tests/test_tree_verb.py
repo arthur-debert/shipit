@@ -315,6 +315,10 @@ def _record(**over) -> TreeRecord:
     # keep every Tree. It follows `mtime` unless a row states it, so `mtime=<aged>`
     # means "nobody has touched this Tree" rather than "aged dir, unknown activity".
     base.setdefault("newest_mtime", base["mtime"])
+    # And `last_commit`, idle's other half: it is maxed into the walk and either one
+    # unreadable blanks idle entirely, so the TreeRecord default of None would likewise
+    # keep every Tree. It tracks the walk unless a row states it.
+    base.setdefault("last_commit", base["newest_mtime"])
     return TreeRecord(**base)
 
 

@@ -32,8 +32,9 @@ AGED_NOW = 20 * 86_400.0
 
 def _record(**over) -> TreeRecord:
     # The removable baseline: clean, every commit on some remote (`unpushed_shas=()`)
-    # and idle since the epoch. Both TreeRecord unreadable defaults (`unpushed_shas`
-    # and `newest_mtime` = None) read as KEEP, so a removable row must pin them.
+    # and idle since the epoch. All three TreeRecord unreadable defaults (`unpushed_shas`,
+    # `newest_mtime` and `last_commit` = None) read as KEEP, so a removable row must pin
+    # them.
     base = dict(
         path="/trees/acme/widget/issues/7/work-aaaa",
         branch="issues/7/work",
@@ -48,6 +49,10 @@ def _record(**over) -> TreeRecord:
         newest_mtime=0.0,
     )
     base.update(over)
+    # Idle is the newest of the walk and the commit stamp, and either one unreadable
+    # blanks it, so the stamp tracks the walk unless a row names it: a row that says
+    # `newest_mtime=None` means "activity is unknown", not "unknown walk, fresh commit".
+    base.setdefault("last_commit", base["newest_mtime"])
     return TreeRecord(**base)
 
 
@@ -88,21 +93,24 @@ def test_an_unknown_pr_state_is_not_reported_as_skipped_because_it_is_not_skippe
 
 def test_unexamined_counts_the_signals_that_actually_suppress_a_removal():
     # #1012's property, repointed: the count names Trees kept because a signal could
-    # not be READ, which is now the unpushed list and the activity walk. Each is a
-    # silent conservative keep, and a fleet-wide failure of either would keep
-    # everything while reporting `removed 0` — the #1011 shape, on the new signals.
+    # not be READ, which is now the unpushed list and the activity signal — BOTH of the
+    # latter's halves, since idle is the newest of the walk and the commit stamp and
+    # either one unknown blanks it. Each is a silent conservative keep, and a
+    # fleet-wide failure of any would keep everything while reporting `removed 0` —
+    # the #1011 shape, on the new signals.
     walk_failed = _record(path="/t/1", newest_mtime=None)
     rev_list_failed = _record(path="/t/2", unpushed_shas=None)
+    stamp_failed = _record(path="/t/4", last_commit=None)
     judged = _record(path="/t/3")
 
-    plan = gc.plan([walk_failed, rev_list_failed, judged], now=AGED_NOW)
+    plan = gc.plan([walk_failed, rev_list_failed, stamp_failed, judged], now=AGED_NOW)
 
-    assert plan.unexamined == 2
+    assert plan.unexamined == 3
     assert plan.judged == 1
     assert plan.incomplete is True
     # The invariant that makes the report honest: unexamined is a subset of `keep`,
     # so a counted Tree can never be one the same run removed.
-    assert {r.path for r in plan.partition.keep} == {"/t/1", "/t/2"}
+    assert {r.path for r in plan.partition.keep} == {"/t/1", "/t/2", "/t/4"}
     assert [r.path for r in plan.partition.removable] == ["/t/3"]
 
 

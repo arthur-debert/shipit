@@ -38,9 +38,10 @@ SHA_OTHER = Sha("c" * 40)
 
 def _record(path: str = "/trees/t", **over) -> TreeRecord:
     # The baseline is the ONLY removable shape: clean, every commit on some remote
-    # (`unpushed_shas=()`), and idle past the threshold. Both unreadable defaults on
-    # TreeRecord (`unpushed_shas=None`, `newest_mtime=None`) read as KEEP, so a row
-    # must pin them to mean anything else.
+    # (`unpushed_shas=()`), and idle past the threshold — with every signal READABLE,
+    # which is part of the shape and not a detail. All three unreadable defaults on
+    # TreeRecord (`unpushed_shas=None`, `newest_mtime=None`, `last_commit=None`) read
+    # as KEEP, so a row must pin them to mean anything else.
     base = dict(
         path=path,
         branch="issues/7/work",
@@ -55,6 +56,13 @@ def _record(path: str = "/trees/t", **over) -> TreeRecord:
         newest_mtime=IDLE_MTIME,
     )
     base.update(over)
+    # Idle is the newest of the walk and the commit stamp, and BOTH must be readable for
+    # it to be answered at all. So a row that moves the activity signal means to move the
+    # whole of it: last_commit tracks the walk unless the row names it, which keeps `max`
+    # a no-op and lets each row below say exactly one thing. Rows probing the stamp — or
+    # either unreadable arm — pass both halves explicitly.
+    if "last_commit" not in over:
+        base["last_commit"] = base["newest_mtime"]
     return TreeRecord(**base)
 
 
@@ -80,7 +88,7 @@ TABLE = [
     # reads as ACTIVE. A filesystem hiccup must never license a delete.
     (
         "UNREADABLE activity signal -> keep (unknown is not idle)",
-        {"newest_mtime": None},
+        {"newest_mtime": None, "last_commit": IDLE_MTIME},
         "keep",
     ),
     # --- the never-lose-work floor, on a Tree that is otherwise removable ---
@@ -139,14 +147,23 @@ TABLE = [
         {"last_commit": IDLE_MTIME, "newest_mtime": ACTIVE_MTIME},
         "keep",
     ),
+    # ...and it is only ever maxed in when it can be READ. Idle is the newest of the two,
+    # so an unknown half is a hole and not a lesser answer: the walk cannot see the
+    # deletion-only commit the stamp was added for, so deferring to it here would license
+    # exactly the delete the row above exists to prevent (codex, #1029 review round 2).
     (
-        "an absent last_commit leaves the walk to decide",
+        "UNREADABLE last_commit -> keep (it blanks idle, it does not defer to the walk)",
         {"last_commit": None, "newest_mtime": IDLE_MTIME},
-        "removable",
+        "keep",
     ),
     (
-        "an absent last_commit does not blank a readable walk",
+        "UNREADABLE last_commit -> keep, even with an active walk",
         {"last_commit": None, "newest_mtime": ACTIVE_MTIME},
+        "keep",
+    ),
+    (
+        "BOTH activity halves unreadable -> keep",
+        {"last_commit": None, "newest_mtime": None},
         "keep",
     ),
 ]

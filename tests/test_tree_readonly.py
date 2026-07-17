@@ -335,10 +335,27 @@ def test_reusing_an_aged_review_tree_at_an_unchanged_head_keeps_it_from_gc(
     # The acquisition is now visible to the signal gc reclaims on.
     assert time.time() - newest_mtime(plan.dir) < 60
 
-    # And the rule keeps it. Built as the scan would see a read-only leaf: never
-    # dirty, sitting on origin/<branch> with nothing local-only.
-    record = TreeRecord(
-        path=str(plan.dir),
+    # And the rule keeps it, ON THE STAMP. Built as the scan would see a read-only leaf:
+    # never dirty, sitting on origin/<branch> with nothing local-only — and with every
+    # OTHER signal readable and stale, so the keep can only come from the acquisition.
+    # `last_commit` is pinned aged for that reason: leaving it None would blank idle and
+    # keep this Tree unexamined no matter what the stamp did (ADR-0072), which would make
+    # the assertion below pass against a leaf that was never stamped at all.
+    decision = classify([_aged_leaf_record(plan.dir, stale=stale)], time.time())
+    assert decision.removable == []
+    assert [r.path for r in decision.keep] == [str(plan.dir)]
+
+
+def _aged_leaf_record(tree_dir: Path, *, stale: float) -> TreeRecord:
+    """A read-only leaf as ``registry.scan`` reads it, with only its activity live.
+
+    Every signal but the walk is pinned to an AGED, READABLE value: a review clone is
+    never dirty and sits on ``origin/<branch>`` with nothing local-only, and its head
+    last moved days ago. So the only thing that can keep this record is fresh activity —
+    which on a Tree whose use writes nothing means the acquisition stamp.
+    """
+    return TreeRecord(
+        path=str(tree_dir),
         branch="feat/x",
         base="origin/feat/x",
         dirty=False,
@@ -348,11 +365,46 @@ def test_reusing_an_aged_review_tree_at_an_unchanged_head_keeps_it_from_gc(
         pr_state=None,
         mtime=stale,
         unpushed_shas=(),
-        newest_mtime=newest_mtime(plan.dir),
+        last_commit=stale,
+        newest_mtime=newest_mtime(tree_dir),
     )
-    decision = classify([record], time.time())
-    assert decision.removable == []
-    assert [r.path for r in decision.keep] == [str(plan.dir)]
+
+
+def test_gc_cannot_reclaim_an_aged_leaf_while_its_acquisition_is_still_refreshing(
+    tmp_path, monkeypatch
+):
+    # The window the stamp's PLACEMENT closes (codex, #1029 review round 2). Stamping
+    # after the refresh leaves the leaf reading at its old activity for the whole of it
+    # — a fetch plus a recursive submodule update, the slowest, most network-bound thing
+    # on this path — so a gc that scans during that interval still sees an aged, clean,
+    # fully-pushed Tree and deletes it out from under the reviewer who is acquiring it.
+    # Claiming the leaf BEFORE the work is what makes the acquisition atomic to reclaim.
+    plan = readonly_plan(repo=REPO, branch="feat/x", root=tmp_path / "trees")
+    _mock_git_boundary(monkeypatch, files={"README.md": "hi\n"})
+    create_readonly(plan, source_repo="/ref", github_url="url")
+
+    stale = time.time() - 10 * 86_400
+    for path in plan.dir.rglob("*"):
+        if path.is_file():
+            os.utime(path, (stale, stale))
+    os.utime(plan.dir, (stale, stale))
+
+    # A concurrent gc scans this leaf at the slowest moment of the acquisition: mid-fetch,
+    # with the refresh paused here and the reviewer already holding the Tree.
+    seen: dict[str, object] = {}
+
+    def fetch_that_a_gc_run_races(**kwargs):
+        seen["verdict"] = classify(
+            [_aged_leaf_record(plan.dir, stale=stale)], time.time()
+        )
+
+    monkeypatch.setattr(git, "fetch", fetch_that_a_gc_run_races)
+
+    create_readonly(plan, source_repo="/ref", github_url="url")
+
+    verdict = seen["verdict"]
+    assert verdict.removable == []  # not deleted mid-acquisition...
+    assert [r.path for r in verdict.keep] == [str(plan.dir)]  # ...it is already claimed
 
 
 def test_the_acquisition_stamp_never_makes_a_review_tree_look_dirty(

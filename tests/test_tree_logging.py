@@ -231,9 +231,10 @@ def test_create_binding_does_not_leak_past_return(tmp_path, monkeypatch, jsonl_l
 
 
 def _tree_record(path: str, *, mtime: float, dirty: bool = False) -> TreeRecord:
-    # `newest_mtime` tracks `mtime`: the rule reads idle from the activity walk, and the
-    # TreeRecord default of None (walk unreadable) is conservatively ACTIVE and would
-    # keep every Tree. `mtime=0.0` therefore means "nobody has touched this Tree".
+    # `newest_mtime` and `last_commit` both track `mtime`: idle is the newest of the walk
+    # and the commit stamp, and either TreeRecord default of None (unreadable) blanks it
+    # into a conservative ACTIVE that would keep every Tree. Pinning both readable is what
+    # makes `mtime=0.0` mean "nobody has touched this Tree" rather than "no idea".
     return TreeRecord(
         path=path,
         branch="issues/7/work",
@@ -246,6 +247,7 @@ def _tree_record(path: str, *, mtime: float, dirty: bool = False) -> TreeRecord:
         mtime=mtime,
         unpushed_shas=(),
         newest_mtime=mtime,
+        last_commit=mtime,
     )
 
 

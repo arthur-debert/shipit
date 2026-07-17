@@ -125,7 +125,10 @@ over three booleans, and a boolean has nowhere to put "I could not tell." That
 gap is a deletion licence, so it is closed here explicitly rather than left to an
 implementer: **any signal that cannot be determined reads as KEEP, never as
 `False`.** Concretely — `git status` or `git rev-list` failing, erroring, or
-timing out; the walk hitting an unreadable dir, a broken symlink, or a
+timing out; `git log` failing to yield HEAD's commit stamp, which includes a
+repository with no commit at all (the read cannot tell the two apart, and does
+not need to: every Tree in that state is already kept by the floor or by an
+empty walk); the walk hitting an unreadable dir, a broken symlink, or a
 concurrent removal; a walk yielding no eligible files at all; a `stat` raising.
 Every one of those keeps the Tree and is reported, not swallowed.
 

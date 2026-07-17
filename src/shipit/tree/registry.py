@@ -159,6 +159,9 @@ class TreeRecord:
       decides on it. It earns that place by covering the one thing ``newest_mtime``
       structurally cannot — a commit that only DELETES files writes no file whose
       mtime survives it, so the walk alone reads such a Tree at its pre-deletion age.
+      ``None`` means unreadable, which — like ``newest_mtime``'s — reads as ACTIVE and
+      BLANKS idle rather than deferring to the walk: the two cover each other's blind
+      spots, so an unknown half is a hole, not a lesser answer (ADR-0072).
     """
 
     path: str
