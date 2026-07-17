@@ -153,11 +153,10 @@ The seed is an ordinary release run with an endpoint selector:
 shipit release publish --endpoint gh-release --endpoint conda
 ```
 
-> **Not yet runnable.** `--endpoint` is ADR-0070's decision, implemented by
-> ARF02-WS01 (shipit#1000). Until that lands the flag does not exist and this
-> command errors out — the channel stays unseedable, which is the point of the
-> workstream. Do not reach for a manual `rattler-build` + upload instead: that
-> bypasses the endpoint under test and escapes the parity drift guard.
+> Never seed by hand. A manual `rattler-build` + upload bypasses the endpoint
+> under test and escapes the parity drift guard that keeps the `conda` entry
+> mirrored across `ENDPOINTS` / `ENDPOINT_SECRETS` / the publish adapter
+> registry — so it proves nothing about the path a real release takes.
 
 The Release stays whole (every artifact builds, signs, and lands on the GitHub
 release — ADR-0009); only distribution narrows. `crates` and `npm` are recorded

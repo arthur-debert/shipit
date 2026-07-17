@@ -113,10 +113,12 @@ for the WS06 ``wf-publish`` block and a laptop invocation (ADR-0040):
   ``if:`` per YAML job.
 - :func:`plan` — the two-stage ordering (PRD story 35): every ``release``
   endpoint dispatches before any ``derived`` one, because brew needs the
-  final release-asset URLs/SHAs. The plan carries the skip verdicts (RC
-  guard, brew's stable-only rule) as data, so a run is inspectable before
-  anything external happens. Preflight (WS02) will consume this same core
-  rather than re-deriving decisions.
+  final release-asset URLs/SHAs. The plan carries the skip verdicts as data,
+  so a run is inspectable before anything external happens, and it is the ONE
+  place that decides what fires: the RC guard, the ``stable_only`` rule, and
+  the per-invocation ``--endpoint`` selector (ADR-0070) are three inputs to
+  one intersection rather than three scattered behaviors. Preflight (WS02)
+  will consume this same core rather than re-deriving decisions.
 
 Every adapter is idempotent-resumable (ADR-0009 phase 2): external endpoints
 cannot roll back, so a re-run CONVERGES — already-published is success,
@@ -520,6 +522,13 @@ SKIP_ZED_PRERELEASE = (
     "the zed extensions registry serves stable versions: a prerelease renders "
     "no registry entry"
 )
+SKIP_SELECTOR = "--endpoint selector: this run publishes only the selected endpoints"
+
+#: The endpoint the selector can never deselect (ADR-0070): gh-release IS the
+#: Release. ``--endpoint`` narrows DISTRIBUTION — the Release that lands still
+#: carries every declared artifact's assets, so a subsetted publish is never a
+#: partial release (ADR-0009).
+RELEASE_ENDPOINT = "gh-release"
 
 
 @dataclass(frozen=True)
@@ -532,11 +541,61 @@ class Dispatch:
     skip: str | None = None
 
 
+def _check_selector(
+    selector: Sequence[str], artifacts: Sequence[config.Artifact]
+) -> None:
+    """Refuse an unusable ``--endpoint`` selector BEFORE planning. Pure.
+
+    Three refusals, each of them a shape that would otherwise publish a subset
+    the operator did not ask for (ADR-0070 — an unknown or misspelled endpoint
+    is an error, never a silent no-op):
+
+    - a name outside the CLOSED registry (a typo — ``--endpoint conda-forge``)
+      names the known set, exactly as a rogue ``[artifacts]`` declaration does;
+    - a registry-valid name NO artifact declares (``--endpoint pypi`` in a repo
+      with no pypi endpoint) — the run would publish everything BUT what was
+      asked for, the silent no-op in its most confusing form;
+    - deselecting ``gh-release`` when it is declared: it is the Release, not a
+      distribution channel (ADR-0009 partial-release prevention). A repo that
+      declares no gh-release has none to deselect — the derived-endpoint
+      invariants below still refuse a conda/brew/notify that would strand.
+    """
+    declared = {name for artifact in artifacts for name in artifact.endpoints}
+    unknown = [name for name in selector if adapter_for(name) is None]
+    if unknown:
+        raise ReleaseError(
+            "publish refused — `--endpoint` names unknown endpoint(s) "
+            + ", ".join(f"`{name}`" for name in unknown)
+            + f"; known endpoints: {', '.join(names())}"
+        )
+    undeclared = [name for name in selector if name not in declared]
+    if undeclared:
+        raise ReleaseError(
+            "publish refused — `--endpoint` selects "
+            + ", ".join(f"`{name}`" for name in undeclared)
+            + ", which no artifact in this repo declares: nothing would "
+            "publish under "
+            + ("that endpoint" if len(undeclared) == 1 else "those endpoints")
+            + ". Declared here: "
+            + (", ".join(sorted(declared)) if declared else "(none)")
+        )
+    if RELEASE_ENDPOINT in declared and RELEASE_ENDPOINT not in selector:
+        raise ReleaseError(
+            "publish refused — `--endpoint` cannot deselect `gh-release`: it "
+            "is the Release itself, not a distribution channel. The selector "
+            "narrows which registries publish; the Release that lands always "
+            "carries every declared artifact's assets (ADR-0009 — a partial "
+            f"release is structurally impossible). Add `--endpoint "
+            f"{RELEASE_ENDPOINT}` to the selection."
+        )
+
+
 def plan(
     artifacts: Sequence[config.Artifact],
     *,
     prerelease: bool,
     live_fire: bool,
+    selector: Sequence[str] | None = None,
 ) -> tuple[Dispatch, ...]:
     """The ordered dispatch plan over the declared endpoints. Pure.
 
@@ -550,6 +609,19 @@ def plan(
     notify-downstreams (a prerelease notifies no one, TOL02-WS16 #792). An
     endpoint name outside the closed registry is a hard
     :class:`ReleaseError` naming the known set.
+
+    ``selector`` is the per-invocation ``--endpoint`` subset (ADR-0070), the
+    THIRD input to that one intersection: when given, every endpoint outside
+    it is skipped with :data:`SKIP_SELECTOR` — its own stated reason, shown in
+    the plan alongside the RC-guard and stable-only skips, so the preview says
+    exactly what will fire before anything external happens. ``None`` (the
+    default, and what an absent flag parses to) leaves behavior unchanged: the
+    full plan fires. The selector only ever ADDS skips, so it composes with the
+    guards by INTERSECTION — a ``-release-rc`` cut still skips every external
+    endpoint including a selected conda, and the selector can never resurrect
+    a live-fire rehearsal into a real publish. :func:`_check_selector` refuses
+    the unusable selections (unknown name, undeclared name, a deselected
+    gh-release) before any of this.
 
     Cross-endpoint invariant: an unskipped brew, notify-downstreams, OR conda
     dispatch REQUIRES an unskipped gh-release in the same plan. brew's formula
@@ -565,6 +637,8 @@ def plan(
     itself idempotent-resumable, so a repair run simply lists it alongside the
     derived endpoint.
     """
+    if selector is not None:
+        _check_selector(selector, artifacts)
     dispatches: list[Dispatch] = []
     for stage in ("release", "derived"):
         for artifact in artifacts:
@@ -579,10 +653,15 @@ def plan(
                 if adapter.stage != stage:
                     continue
                 skip = None
+                # The guards are stated FIRST: both reasons are true for a
+                # non-selected external endpoint on an rc cut, and the plan
+                # must never understate the guard that makes a rehearsal safe.
                 if live_fire and adapter.external:
                     skip = SKIP_RC_GUARD
                 elif prerelease and adapter.stable_only:
                     skip = adapter.stable_skip_reason
+                elif selector is not None and name not in selector:
+                    skip = SKIP_SELECTOR
                 dispatches.append(Dispatch(artifact, adapter, skip))
     live = [d.adapter.name for d in dispatches if d.skip is None]
     if "brew" in live and "gh-release" not in live:
