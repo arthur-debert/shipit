@@ -445,7 +445,7 @@ def run_remove(
     "--dry-run",
     is_flag=True,
     help=(
-        "Preview only: print the removable/stale/keep partition for the whole fleet "
+        "Preview only: print the removable/keep partition for the whole fleet "
         "and delete NOTHING. The preview is the exact decision the real sweep acts on."
     ),
 )
@@ -455,45 +455,49 @@ def run_remove(
     type=DURATION,
     metavar="DURATION",
     help=(
-        "Age boundary an UNMERGED Tree must exceed before it counts as abandoned, as "
-        "a human duration (e.g. 14d, 36h, 90m). Defaults to 14d when omitted. A "
-        "merged Tree is reclaimed on its own short idle window, not this boundary."
+        "How long a Tree must be IDLE — no file written anywhere in it — before it "
+        "counts as abandoned, as a human duration (e.g. 48h, 36h, 90m). Defaults to "
+        "48h when omitted. A Tree with uncommitted changes or unpushed commits is "
+        "kept no matter how idle."
     ),
 )
 def gc_cmd(dry_run: bool, threshold: float | None) -> None:
-    """Sweep the central root: remove only provably-safe Trees, list ambiguous ones.
+    """Sweep the central root: remove only provably-safe Trees.
 
-    Scans every Tree, classifies the fleet, then deletes ONLY the Trees whose PR is
-    merged, working tree clean, and nothing unpushed — the work is on the remote, so
-    there is nothing left to lose (a short grace window holds a merged Tree until it
-    has been IDLE for 12h, standing in for the liveness signal a write Tree lacks, so
-    an agent still working in a just-merged Tree keeps it). Trees that merely look
-    abandoned are LISTED
-    as stale (never deleted), and anything with live or local work is left untouched.
-    Conservative by default.
+    Scans every Tree and deletes ONLY those that hold nothing you could lose and that
+    nobody has touched in two days::
+
+        KEEP  if  dirty  ||  unpushed  ||  idle < 48h
+
+    Idle is measured, not inferred: the newest file mtime anywhere in the Tree (build
+    and env dirs pruned). Across the whole fleet the signal separates cleanly — a Tree
+    someone is working in reads under an hour idle, an abandoned one days — so there is
+    no ambiguous middle to list for a human, and no PR state, session pidfile or Tree
+    kind in the rule at all.
 
     ``--dry-run`` prints the same partition the real sweep would act on and deletes
-    nothing; ``--threshold DURATION`` (e.g. ``36h``) overrides the 14-day age boundary
-    for this run — the boundary past which an UNMERGED Tree (no PR, or one closed
-    without merging) is called abandoned and listed as stale.
+    nothing; ``--threshold DURATION`` (e.g. ``36h``) overrides the 48h idle boundary
+    for this run.
 
     Each Tree is reported as it is removed, so an interrupted sweep still leaves a
     record of what it destroyed. Exits 1 if any Tree's PR state could not be read:
     the fleet was only partly seen, so "nothing to reclaim" would be a guess.
     """
-    raise SystemExit(run_gc(dry_run=dry_run, max_age_seconds=threshold))
+    raise SystemExit(run_gc(dry_run=dry_run, idle_threshold_seconds=threshold))
 
 
 @cli_errors
-def run_gc(*, dry_run: bool = False, max_age_seconds: float | None = None) -> int:
+def run_gc(
+    *, dry_run: bool = False, idle_threshold_seconds: float | None = None
+) -> int:
     """Build the gc plan, then either preview it or sweep it. Returns an exit code.
 
     Glue over the promoted domain (:mod:`shipit.tree.gc`): ONE
     :func:`~shipit.tree.gc.plan_fleet` call builds the frozen plan BOTH modes
     consume, so a ``--dry-run`` preview can NEVER drift from the action — it
     renders the very plan the real :func:`~shipit.tree.gc.sweep` applies; only
-    the "render vs delete" tail differs. ``max_age_seconds`` overrides the
-    14-day age boundary (the ``--threshold`` flag, already parsed to seconds
+    the "render vs delete" tail differs. ``idle_threshold_seconds`` overrides
+    the 48h idle boundary (the ``--threshold`` flag, already parsed to seconds
     at click per the two-tier exit contract: a malformed duration is a usage
     error, exit 2).
 
@@ -520,10 +524,10 @@ def run_gc(*, dry_run: bool = False, max_age_seconds: float | None = None) -> in
     """
     plan = gc.plan_fleet(
         layout.central_root(),
-        max_age_seconds=(
-            cleanup.DEFAULT_MAX_AGE_SECONDS
-            if max_age_seconds is None
-            else max_age_seconds
+        idle_threshold_seconds=(
+            cleanup.IDLE_THRESHOLD_SECONDS
+            if idle_threshold_seconds is None
+            else idle_threshold_seconds
         ),
     )
     if dry_run:
@@ -547,7 +551,7 @@ def _print_removed(path: str) -> None:
 
 
 def _render_gc_result(result: gc.GcResult) -> None:
-    """Render the sweep's tail: the failures, the stale list, and the summary.
+    """Render the sweep's tail: the failures and the summary.
 
     The terminal half of the plan+sweep split: every fact printed here came
     back in the :class:`~shipit.tree.gc.GcResult` — the delete failures the
@@ -555,14 +559,12 @@ def _render_gc_result(result: gc.GcResult) -> None:
     actually came off disk, and the incomplete-view report. The ``REMOVED``
     lines are NOT printed here: :func:`_print_removed` already streamed them
     from inside the sweep, and reprinting them would double the audit trail.
+    There is no STALE list to print any more — the bucket it rendered is gone
+    (ADR-0072), and a Tree that is not removable is simply kept.
     """
     for failure in result.failed:
         print(f"FAILED  {failure.path}: {failure.error}", file=sys.stderr)
-    for path in result.stale:
-        print(f"STALE   {path} (ambiguous — left for review, not removed)")
-    counts = (
-        f"removed {len(result.removed)}, stale {len(result.stale)}, kept {result.kept}"
-    )
+    counts = f"removed {len(result.removed)}, kept {result.kept}"
     print(f"gc: {_lead(result)}{counts}")
     _render_incomplete_view(result, verb="swept")
 
@@ -625,7 +627,7 @@ def _render_incomplete_view(view: gc.GcPlan | gc.GcResult, *, verb: str) -> None
 
 
 def _render_gc_preview(plan: gc.GcPlan) -> None:
-    """Render the removable/stale/keep partition WITHOUT touching disk (``--dry-run``).
+    """Render the removable/keep partition WITHOUT touching disk (``--dry-run``).
 
     Renders the exact plan the real sweep would apply, so a preview can never
     disagree with the sweep that follows it. The buckets are walked GENERICALLY

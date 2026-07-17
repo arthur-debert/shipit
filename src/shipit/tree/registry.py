@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING
 
 from .. import gh, git, identity
 from ..execrun import ExecError
+from . import activity
 
 if TYPE_CHECKING:
     from ..identity import Sha
@@ -143,14 +144,22 @@ class TreeRecord:
       it as age. Note what this does and does not observe: a directory's mtime bumps
       only when an entry is added or removed in THAT directory, so it catches
       root-level churn and checkout activity but NOT an edit or commit under ``src/``.
-      It is an activity signal only in combination with ``last_commit``.
+      It is a DISPLAY signal, not the reclaim one: ``gc`` measured age from it and
+      deleted a live session's Tree out from under it (#1018), because against the
+      live fleet it lags real activity by up to 10 hours. :attr:`newest_mtime` is what
+      reclaim reads.
+    - ``newest_mtime`` — the newest mtime of any FILE in the clone, over a walk with
+      the build/env dirs pruned (:func:`shipit.tree.activity.newest_mtime`), or
+      ``None`` when it could not be established. **The reclaim signal** (ADR-0072):
+      unlike ``mtime`` it observes an agent editing under ``src/``, and unlike a
+      commit stamp or a PR read it observes a session that has committed nothing.
+      ``None`` means unreadable, which reads as ACTIVE downstream — an unreadable
+      signal must never license a delete (``unpushed_shas``' precedent).
     - ``last_commit`` — ``HEAD``'s COMMITTER timestamp (epoch seconds), or ``None``
-      when it could not be read. The signal that actually observes an agent working
-      (:func:`shipit.git.head_committed_at`): it moves on every commit, amend and
-      rebase, none of which touch ``mtime``. The write gc ladder takes the NEWEST of
-      the two as the Tree's last activity, and reads ``None`` conservatively as
-      ACTIVE — an unreadable timestamp must never license a delete (``unpushed_shas``'
-      precedent).
+      when it could not be read (:func:`shipit.git.head_committed_at`). A display /
+      diagnostic stamp: it moves on every commit, amend and rebase. It is no longer a
+      reclaim input — ``newest_mtime`` observes every commit's file writes too, and
+      more besides.
     """
 
     path: str
@@ -164,6 +173,7 @@ class TreeRecord:
     mtime: float
     unpushed_shas: tuple[Sha, ...] | None = None
     last_commit: float | None = None
+    newest_mtime: float | None = None
 
     @property
     def unpushed(self) -> int | None:
@@ -345,7 +355,9 @@ def _read_record(path: Path, pending: Future[PrIndex] | None) -> TreeRecord:
     """Snapshot one clone at ``path``, joining its repo's in-flight PR batch LAST.
 
     All git reads go through the :mod:`shipit.git` / :mod:`shipit.gh` boundaries so
-    tests patch those modules; this function holds only the mapping from those reads to
+    tests patch those modules; the activity walk goes through
+    :func:`shipit.tree.activity.newest_mtime` (~1.9ms, build/env dirs pruned — the
+    reclaim signal, ADR-0072). This function holds only the mapping from those reads to
     a :class:`TreeRecord`. This task issues NO network call of its own (the PR read is
     one per repo, not per Tree — issue #1011); it only waits on the shared batch its
     repo already has in flight, and does so AFTER its local git reads so the two
@@ -359,6 +371,7 @@ def _read_record(path: Path, pending: Future[PrIndex] | None) -> TreeRecord:
     unpushed_shas = git.unpushed_shas(cwd=cwd)
     mtime = path.stat().st_mtime
     last_commit = git.head_committed_at(cwd=cwd)
+    newest = activity.newest_mtime(path)
     # Last: the only blocking wait, after every local read has had its chance to run.
     head_pr = _pr_for_branch(_await_pr_index(pending), branch) if branch else None
     return TreeRecord(
@@ -373,6 +386,7 @@ def _read_record(path: Path, pending: Future[PrIndex] | None) -> TreeRecord:
         mtime=mtime,
         unpushed_shas=unpushed_shas,
         last_commit=last_commit,
+        newest_mtime=newest,
     )
 
 

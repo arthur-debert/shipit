@@ -8,16 +8,17 @@ for the next ``tree gc`` sweep.
 
 **Best-effort only, fail-OPEN** — the same posture as ``hook sessionstart``, the
 OPPOSITE of ``hook worktreecreate``. The spike behind ADR-0027 showed this event
-does NOT fire in headless mode, so nothing may depend on it: the ``gc`` ephemeral
-ladder (:func:`shipit.tree.cleanup.classify`) is the load-bearing cleanup and this
-hook is only its fast path. ANY failure — bad payload, unreadable git state, a
+does NOT fire in headless mode, so nothing may depend on it: the ``gc`` reclaim rule
+(:func:`shipit.tree.cleanup.classify`) is the load-bearing cleanup and this hook is
+only its fast path. ANY failure — bad payload, unreadable git state, a
 failed delete — logs at WARNING (the fail-open canon in :mod:`shipit.verbs.hook`:
 a swallowed failure is a degraded-but-continuing outcome) and exits 0; a teardown
 hiccup must never turn a clean session exit into an error. A by-design refusal
 (nothing ephemeral in the payload, a dirty/unpushed Tree left for the gc ladder)
 is a clean no-op and stays at DEBUG.
 
-Fast does not mean careless — the ladder's absolute floor holds here too:
+Fast does not mean careless — the reclaim rule's never-lose-work floor holds here
+too:
 
 - Only an **ephemeral** Tree (``…/ephemeral/<id>``, by the leaf's parent segment)
   **under the central root** is ever touched. Every other kind — a write Tree, a
@@ -26,17 +27,22 @@ Fast does not mean careless — the ladder's absolute floor holds here too:
 - A **dirty** Tree or one with **unpushed** commits (the upstream-independent
   list — commits on NO remote, so a fresh no-upstream ``ephemeral/<id>`` branch
   is judged by what it actually holds) is NEVER auto-removed, even on a clean
-  exit; it ages into the gc ladder where the same floor keeps it. An UNREADABLE
-  list blocks removal the same way — unknown must never read as "nothing to lose".
-  Mirroring that ladder's rung-1 carve-out (#232), the commit SHA(s) recorded by
-  the Tree's own provisioning (:mod:`shipit.tree.provision` — the managed-set
-  reconcile a drift window commits at birth) are excluded from the block: they
-  are shipit's commit, not the session's work, and without the exclusion every
-  drift-window session Tree would dodge the fast path on a clean exit. The
-  ladder's ``ahead`` side holds too: an upstream-ahead count the exclusion does
-  not account for (commits pushed to some other branch, or a miscount) blocks
-  the fast path exactly as :func:`shipit.tree.cleanup._has_local_only_work`
-  conservatively keeps (codex review on #233).
+  exit; it falls through to the gc rule, whose own floor
+  (:func:`shipit.tree.cleanup._has_local_only_work`) keeps it for the same
+  reason. An UNREADABLE list blocks removal the same way — unknown must never
+  read as "nothing to lose".
+  The fast path additionally carves out (#232) the commit SHA(s) recorded by the
+  Tree's own provisioning (:mod:`shipit.tree.provision` — the managed-set
+  reconcile a drift window commits at birth): they are shipit's commit, not the
+  session's work, and without the exclusion every drift-window session Tree would
+  dodge the fast path on a clean exit. It also blocks on an upstream-``ahead``
+  count the exclusion does not account for (commits pushed to some other branch,
+  or a miscount), conservatively (codex review on #233). Both are this hook's own
+  conservatism now: the gc rule dropped the carve-out and the ``ahead`` reading
+  with the ephemeral ladder (ADR-0072), so the fast path is STRICTLY the more
+  cautious of the two — it can only decline to reclaim a Tree gc would, which is
+  the safe direction for a fast path. WS03 retires this hook's machinery with the
+  rest of ADR-0072's consequences.
 """
 
 from __future__ import annotations
@@ -139,18 +145,21 @@ def _target_tree(payload: dict[str, object]) -> Path | None:
 def _removal_blocker(tree: Path) -> str | None:
     """Why ``tree`` must NOT be fast-path removed — or ``None`` when it is safe.
 
-    The gc ladder's absolute floor, applied at the fast path: uncommitted changes
-    or commits that exist on no remote (read fresh through the ``gh`` boundary —
-    the hook has no registry scan to lean on) block removal; the Tree then simply
-    ages into the ``gc`` sweep, whose ladder keeps it for the same reason. An
-    unreadable unpushed list blocks too: unknown never reads as "nothing to lose".
-    The one carve-out mirrors the ladder's (#232): SHAs the Tree's own provisioning
-    recorded at birth are shipit's managed-set reconcile, not session work, so
-    exactly they — and nothing else — do not block. And as in the ladder's
-    :func:`~shipit.tree.cleanup._has_local_only_work`, the carve-out must also
-    explain the ``ahead`` reading: an upstream-ahead count beyond the local-only
-    commits (work pushed to some other branch, or a miscount) blocks
-    conservatively rather than letting the fast path outrun the gc floor.
+    The never-lose-work floor, applied at the fast path: uncommitted changes or
+    commits that exist on no remote (read fresh through the ``gh`` boundary — the
+    hook has no registry scan to lean on) block removal; the Tree then simply falls
+    through to the ``gc`` sweep, whose own floor
+    (:func:`~shipit.tree.cleanup._has_local_only_work`) keeps it for the same
+    reason. An unreadable unpushed list blocks too: unknown never reads as "nothing
+    to lose".
+
+    Two conditions here are stricter than gc's floor, and deliberately so — a fast
+    path may only ever decline to reclaim what gc would: SHAs the Tree's own
+    provisioning recorded at birth do NOT block (#232 — shipit's managed-set
+    reconcile, not session work), and an upstream-``ahead`` count beyond the
+    local-only commits (work pushed to some other branch, or a miscount) DOES block.
+    Since ADR-0072 gc's floor reads neither, so these are this hook's own reading
+    rather than a mirror of the rule; WS03 retires them with the rest.
     """
     cwd = str(tree)
     if git.status_porcelain(cwd=cwd):

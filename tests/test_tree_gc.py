@@ -11,38 +11,29 @@ Typed tests for :mod:`shipit.tree.gc` — the promoted domain half of
   the ``on_removed`` sink for the streamed audit trail (#1011), which is
   captured as a list here: the domain prints nothing, so the sink is a value
   like any other;
-- :func:`~shipit.tree.gc.plan_fleet` is the gather — its boundary reads
-  (scan / PR state / liveness / provisioning record) are patched at their one
-  seam each.
+- :func:`~shipit.tree.gc.plan_fleet` is the gather — its one boundary read
+  (:func:`~shipit.tree.registry.scan`) is patched at its seam. Since ADR-0072
+  the rule reads nothing but the scanned record, so there is nothing else to
+  patch: no PR read, no liveness probe, no provisioning record.
 """
 
 from __future__ import annotations
 
-import json
-import time as _time
-
 import pytest
 
 from shipit import gh
-from shipit.identity import Sha
-from shipit.session import liveness
-from shipit.tree import cleanup, gc, provision, registry
-from shipit.tree.cleanup import Cleanup
+from shipit.tree import gc, registry
+from shipit.tree.cleanup import IDLE_THRESHOLD_SECONDS, Cleanup
 from shipit.tree.registry import TreeRecord
 
-
-def _plant_legacy_record(tree, shas: list[Sha]) -> None:
-    """Plant the pre-ADR-0033 provision record a drift-window birth once wrote
-    (the writer is retired; Trees born before the pin still carry these)."""
-    provision.record_path(tree).write_text(
-        json.dumps({"commits": [str(sha) for sha in shas]}), encoding="utf-8"
-    )
+#: A `now` far past the 48h default boundary for `newest_mtime=0.0` records.
+AGED_NOW = 20 * 86_400.0
 
 
 def _record(**over) -> TreeRecord:
-    # `unpushed_shas=()` (every commit on some remote), NOT the TreeRecord default
-    # of None (list unreadable): classify's write/ephemeral ladders read None
-    # conservatively as has-local-work and would KEEP every record.
+    # The removable baseline: clean, every commit on some remote (`unpushed_shas=()`)
+    # and idle since the epoch. Both TreeRecord unreadable defaults (`unpushed_shas`
+    # and `newest_mtime` = None) read as KEEP, so a removable row must pin them.
     base = dict(
         path="/trees/acme/widget/issues/7/work-aaaa",
         branch="issues/7/work",
@@ -54,24 +45,10 @@ def _record(**over) -> TreeRecord:
         pr_state=None,
         mtime=0.0,
         unpushed_shas=(),
+        newest_mtime=0.0,
     )
     base.update(over)
-    # Likewise `last_commit`: the write ladder reads idle from the NEWEST of it and
-    # `mtime`, and the TreeRecord default of None (stamp unreadable) is conservatively
-    # ACTIVE. It follows `mtime` unless a row states it, so `mtime=<aged>` means "this
-    # Tree is idle" rather than "aged directory, unknown commit stamp".
-    base.setdefault("last_commit", base["mtime"])
     return TreeRecord(**base)
-
-
-def _head_pr(number: int, state: str, *, is_draft: bool = False) -> gh.HeadPr:
-    # The typed pr_for_head hit (PROC03): gc only branches on number/state/
-    # is_draft, so the base is a fixed placeholder.
-    return gh.HeadPr(number=number, state=state, is_draft=is_draft, base_ref="main")
-
-
-#: A `now` far past the 14-day default boundary for mtime=0.0 records.
-AGED_NOW = 20 * 86_400.0
 
 
 # --- plan: the pure decision -------------------------------------------------------
@@ -79,23 +56,22 @@ AGED_NOW = 20 * 86_400.0
 
 def test_plan_partitions_the_fleet():
     removable = _record(path="/t/1")
-    stale = _record(path="/t/2")
-    keep_dirty = _record(path="/t/3", dirty=True)
-    keep_open = _record(path="/t/4")
-    states = {"/t/1": "MERGED", "/t/2": None, "/t/3": "MERGED", "/t/4": "OPEN"}
+    keep_dirty = _record(path="/t/2", dirty=True)
+    keep_active = _record(path="/t/3", newest_mtime=AGED_NOW - 60)
+    states = {"/t/1": "MERGED", "/t/2": "MERGED", "/t/3": "OPEN"}
 
-    plan = gc.plan(
-        [removable, stale, keep_dirty, keep_open], now=AGED_NOW, pr_states=states
-    )
+    plan = gc.plan([removable, keep_dirty, keep_active], now=AGED_NOW, pr_states=states)
 
     assert [r.path for r in plan.partition.removable] == ["/t/1"]
-    assert [r.path for r in plan.partition.stale] == ["/t/2"]
-    assert {r.path for r in plan.partition.keep} == {"/t/3", "/t/4"}
-    assert plan.total == 4
+    assert {r.path for r in plan.partition.keep} == {"/t/2", "/t/3"}
+    assert plan.total == 3
     assert plan.unknown == 0
 
 
-def test_plan_counts_unknown_states_and_keeps_them_unremovable():
+def test_plan_counts_unknown_states_without_letting_them_decide():
+    # The count feeds the partly-seen-fleet report (#1012) and nothing else: since
+    # ADR-0072 the PR state has no vote in the rule, so an UNKNOWN Tree is bucketed on
+    # its activity like every other — here, removable — while still being counted.
     readable = _record(path="/t/1")
     unreadable = _record(path="/t/2")
     states = {"/t/1": "MERGED", "/t/2": "UNKNOWN"}
@@ -104,34 +80,32 @@ def test_plan_counts_unknown_states_and_keeps_them_unremovable():
 
     assert plan.unknown == 1
     assert plan.total == 2
-    # The unreadable Tree is conservatively STALE — never in the removable set.
-    assert [r.path for r in plan.partition.stale] == ["/t/2"]
+    assert plan.incomplete is True
+    assert {r.path for r in plan.partition.removable} == {"/t/1", "/t/2"}
 
 
-def test_plan_threshold_overrides_the_age_boundary():
-    # `plan` threads max_age_seconds down to `classify`. Probed on an UNMERGED (no PR)
-    # Tree — the only shape the age boundary governs (#1009): a merged Tree is decided
-    # before the gate, on its own grace window, which `plan` does NOT thread (mirroring
-    # the ephemeral backstops).
-    record = _record(mtime=0.0)
-    aged_only_for_short_threshold = gc.plan(
+def test_plan_threshold_overrides_the_idle_boundary():
+    # `plan` threads idle_threshold_seconds down to `classify` — the ONE boundary.
+    record = _record(newest_mtime=0.0)
+    idle_only_for_a_short_threshold = gc.plan(
         [record],
         now=3_600.0 * 2,
         pr_states={record.path: None},
-        max_age_seconds=3_600.0,
+        idle_threshold_seconds=3_600.0,
     )
     kept_by_default = gc.plan([record], now=3_600.0 * 2, pr_states={record.path: None})
 
-    assert [r.path for r in aged_only_for_short_threshold.partition.stale] == [
+    assert [r.path for r in idle_only_for_a_short_threshold.partition.removable] == [
         record.path
     ]
+    # 2h idle is well inside the 48h default.
     assert [r.path for r in kept_by_default.partition.keep] == [record.path]
 
 
 def test_plan_empty_fleet_is_a_valid_plan():
     plan = gc.plan([], now=AGED_NOW, pr_states={})
     assert plan == gc.GcPlan(
-        partition=Cleanup(removable=[], stale=[], keep=[]), total=0, unknown=0
+        partition=Cleanup(removable=[], keep=[]), total=0, unknown=0
     )
 
 
@@ -145,7 +119,7 @@ def _clone(root, rel: str):
 
 
 def _plan_of(partition: Cleanup, *, total: int | None = None, unknown: int = 0):
-    buckets = len(partition.removable) + len(partition.stale) + len(partition.keep)
+    buckets = len(partition.removable) + len(partition.keep)
     return gc.GcPlan(
         partition=partition,
         total=total if total is not None else buckets,
@@ -154,13 +128,11 @@ def _plan_of(partition: Cleanup, *, total: int | None = None, unknown: int = 0):
 
 
 def test_sweep_removes_only_the_removable_bucket(tmp_path):
-    removable = _clone(tmp_path, "issues/1/work-merged")
-    stale = _clone(tmp_path, "issues/2/work-orphan")
-    keep = _clone(tmp_path, "issues/3/work-open")
+    removable = _clone(tmp_path, "issues/1/work-idle")
+    keep = _clone(tmp_path, "issues/3/work-active")
     plan = _plan_of(
         Cleanup(
             removable=[_record(path=str(removable))],
-            stale=[_record(path=str(stale))],
             keep=[_record(path=str(keep))],
         )
     )
@@ -168,9 +140,8 @@ def test_sweep_removes_only_the_removable_bucket(tmp_path):
     result = gc.sweep(plan)
 
     assert not removable.exists()
-    assert stale.exists() and keep.exists()
+    assert keep.exists()
     assert result.removed == (str(removable),)
-    assert result.stale == (str(stale),)
     assert result.kept == 1
     assert result.failed == ()
 
@@ -179,11 +150,7 @@ def test_sweep_continues_past_a_failed_delete(tmp_path):
     bad = _clone(tmp_path, "issues/1/work-bad")
     good = _clone(tmp_path, "issues/2/work-good")
     plan = _plan_of(
-        Cleanup(
-            removable=[_record(path=str(bad)), _record(path=str(good))],
-            stale=[],
-            keep=[],
-        )
+        Cleanup(removable=[_record(path=str(bad)), _record(path=str(good))], keep=[])
     )
     from shipit.tree.readonly import remove_tree
 
@@ -208,9 +175,7 @@ def test_sweep_does_not_count_an_already_gone_tree(tmp_path):
     gone = tmp_path / "issues/2/work-gone"  # never created on disk
     plan = _plan_of(
         Cleanup(
-            removable=[_record(path=str(present)), _record(path=str(gone))],
-            stale=[],
-            keep=[],
+            removable=[_record(path=str(present)), _record(path=str(gone))], keep=[]
         )
     )
 
@@ -221,7 +186,7 @@ def test_sweep_does_not_count_an_already_gone_tree(tmp_path):
 
 
 def test_sweep_carries_the_plan_counts_through():
-    plan = _plan_of(Cleanup(removable=[], stale=[], keep=[]), total=5, unknown=2)
+    plan = _plan_of(Cleanup(removable=[], keep=[]), total=5, unknown=2)
     result = gc.sweep(plan)
     assert result.total == 5
     assert result.unknown == 2
@@ -239,9 +204,7 @@ def test_sweep_announces_each_path_as_it_comes_off_disk(tmp_path):
     second = _clone(tmp_path, "issues/2/work-b")
     plan = _plan_of(
         Cleanup(
-            removable=[_record(path=str(first)), _record(path=str(second))],
-            stale=[],
-            keep=[],
+            removable=[_record(path=str(first)), _record(path=str(second))], keep=[]
         )
     )
     disk_at_announce: list[tuple[str, bool, bool]] = []
@@ -273,7 +236,6 @@ def test_interrupted_sweep_still_announced_what_it_destroyed(tmp_path):
                 _record(path=str(interrupted_at)),
                 _record(path=str(never_reached)),
             ],
-            stale=[],
             keep=[],
         )
     )
@@ -308,7 +270,6 @@ def test_sweep_announces_only_what_actually_came_off_disk(tmp_path):
                 _record(path=str(gone)),
                 _record(path=str(good)),
             ],
-            stale=[],
             keep=[],
         )
     )
@@ -327,10 +288,8 @@ def test_sweep_announces_only_what_actually_came_off_disk(tmp_path):
 
 def test_sweep_without_a_sink_is_unchanged(tmp_path):
     # `on_removed` is optional: the domain has no default sink to print through.
-    removable = _clone(tmp_path, "issues/1/work-merged")
-    plan = _plan_of(
-        Cleanup(removable=[_record(path=str(removable))], stale=[], keep=[])
-    )
+    removable = _clone(tmp_path, "issues/1/work-idle")
+    plan = _plan_of(Cleanup(removable=[_record(path=str(removable))], keep=[]))
 
     result = gc.sweep(plan)
 
@@ -343,7 +302,9 @@ def test_sweep_without_a_sink_is_unchanged(tmp_path):
 
 def test_incomplete_is_the_unknown_count_on_both_plan_and_result():
     # One predicate, shared by the two gc tails: any unreadable PR state means the
-    # fleet was only partly seen, whatever the removable count says.
+    # fleet was only partly seen, whatever the removable count says. Orthogonal to the
+    # ladder ADR-0072 replaced, and still correct — it reports on the SWEEP's coverage,
+    # it does not decide any Tree.
     partial = gc.plan(
         [_record(path="/t/1"), _record(path="/t/2")],
         now=AGED_NOW,
@@ -373,12 +334,10 @@ def test_pr_state_projects_the_records_state_without_reading_gh(monkeypatch):
 
 def test_pr_state_unknown_stays_distinct_from_no_pr():
     # The load-bearing split: "UNKNOWN" (state unreadable) must never collapse into
-    # None (no branch / no PR). NOT because they bucket differently — they bucket
-    # identically on every ladder (see
-    # test_no_pr_and_unknown_bucket_identically_on_every_ladder) — but because only
-    # "UNKNOWN" is counted by GcPlan.unknown, which is what makes a sweep admit it read
-    # part of the root and exit non-zero. The split buys gc's REPORTING honesty, not
-    # its safety.
+    # None (no branch / no PR). Not because they bucket differently — since ADR-0072 no
+    # PR state buckets anything — but because only "UNKNOWN" is counted by
+    # GcPlan.unknown, which is what makes a sweep admit it read only part of the root
+    # and exit non-zero. The split buys gc's REPORTING honesty.
     assert gc.pr_state(_record(path="/trees/x", pr_state="UNKNOWN")) == "UNKNOWN"
     assert gc.pr_state(_record(path="/trees/y", branch=None, pr_state=None)) is None
     assert gc.pr_state(_record(path="/trees/z", pr_state=None)) is None
@@ -387,109 +346,66 @@ def test_pr_state_unknown_stays_distinct_from_no_pr():
 # --- plan_fleet: the effectful gather -------------------------------------------------
 
 
-def test_plan_fleet_composes_scan_states_and_classify(monkeypatch):
-    # The states ride the records the scan returns (#1011) — the gather adds no PR
-    # reads of its own.
+def test_plan_fleet_composes_scan_and_classify(monkeypatch):
+    # Everything the rule needs rides the records the scan returns — the activity
+    # signal included — so the gather adds no per-Tree reads of its own.
+    import time as _time
+
+    now = _time.time()
     records = [
-        _record(path="/t/merged", branch="b1", pr_state="MERGED"),
-        _record(path="/t/open", branch="b2", pr_state="OPEN"),
+        _record(path="/t/idle", branch="b1", newest_mtime=now - (49 * 3_600)),
+        _record(path="/t/active", branch="b2", newest_mtime=now - 60),
     ]
     monkeypatch.setattr(registry, "scan", lambda root: records)
 
     plan = gc.plan_fleet("/trees")
 
-    assert [r.path for r in plan.partition.removable] == ["/t/merged"]
-    assert [r.path for r in plan.partition.keep] == ["/t/open"]
+    assert [r.path for r in plan.partition.removable] == ["/t/idle"]
+    assert [r.path for r in plan.partition.keep] == ["/t/active"]
     assert plan.total == 2 and plan.unknown == 0
 
 
-def _ephemeral_clone(root, leaf: str) -> str:
-    tree = root / "acme" / "widget" / "ephemeral" / leaf
-    (tree / ".git").mkdir(parents=True)
-    return str(tree)
+def test_plan_fleet_keeps_a_tree_someone_is_working_in_whatever_its_kind(monkeypatch):
+    # The #1018 shape at the gather: an ephemeral session Tree, clean, no PR, whose
+    # only sign of life is a file written a minute ago. It must survive the sweep — and
+    # a review/write Tree in the same state must too: kind is not a decision input
+    # (ADR-0072).
+    import time as _time
 
-
-def test_plan_fleet_reads_session_liveness_for_ephemeral_trees(tmp_path, monkeypatch):
-    # End to end through the gather: liveness comes from the pidfile + probe, and
-    # the ephemeral ladder keeps the live session's Tree while reclaiming the dead
-    # one (both clean, pushed, and past the grace window).
-    root = tmp_path / "trees"
-    live_path = _ephemeral_clone(root, "sess-live")
-    dead_path = _ephemeral_clone(root, "sess-dead")
-    created = 1_750_000_000.0
-    liveness.write_pidfile(
-        live_path, liveness.LivenessRecord(pid=100, session_id="a", create_time=created)
-    )
-    liveness.write_pidfile(
-        dead_path, liveness.LivenessRecord(pid=200, session_id="b", create_time=created)
-    )
-
-    #: pid 100 is alive and IS the recorded claude session; pid 200 is gone.
-    def probe(pid):
-        if pid == 100:
-            return liveness.ProcessInfo(
-                pid=100,
-                ppid=1,
-                create_time=created,
-                argv="node /x/claude-code/cli.js -w sess-live",
-            )
-        return None
-
-    monkeypatch.setattr(liveness, "os_probe", probe)
-    past_grace = _time.time() - (cleanup.EPHEMERAL_GRACE_SECONDS + 60)
+    now = _time.time()
+    live_paths = [
+        "/trees/acme/widget/ephemeral/sess-live",
+        "/trees/acme/widget/review/tre03-ws03",
+        "/trees/acme/widget/issues/7/work-aaaa",
+    ]
     records = [
-        _record(
-            path=live_path, branch="ephemeral/sess-live", base=None, mtime=past_grace
-        ),
-        _record(
-            path=dead_path, branch="ephemeral/sess-dead", base=None, mtime=past_grace
-        ),
+        _record(path=path, branch="b", newest_mtime=now - 60) for path in live_paths
     ]
     monkeypatch.setattr(registry, "scan", lambda root: records)
-    monkeypatch.setattr(gh, "pr_for_head", lambda branch, *, cwd=None: None)
 
-    plan = gc.plan_fleet(str(root))
+    plan = gc.plan_fleet("/trees")
 
-    assert [r.path for r in plan.partition.keep] == [live_path]
-    assert [r.path for r in plan.partition.removable] == [dead_path]
+    assert plan.partition.removable == []
+    assert {r.path for r in plan.partition.keep} == set(live_paths)
 
 
-def test_plan_fleet_excludes_the_recorded_provisioning_commit(tmp_path, monkeypatch):
-    # End to end through the gather (#232): two dead, clean ephemeral Trees past
-    # the grace window, each carrying ONE local-only commit (the drift-window
-    # managed-set reconcile). The one whose provisioning RECORDED that commit's
-    # SHA is reclaimable; the one without a record keeps — the exclusion is
-    # exact-identity, never a guess.
-    root = tmp_path / "trees"
-    recorded_path = _ephemeral_clone(root, "sess-recorded")
-    unrecorded_path = _ephemeral_clone(root, "sess-unrecorded")
-    sha = Sha("a" * 40)
-    _plant_legacy_record(recorded_path, [sha])
+def test_plan_fleet_threshold_defaults_to_48h(monkeypatch):
+    import time as _time
 
-    past_grace = _time.time() - (cleanup.EPHEMERAL_GRACE_SECONDS + 60)
+    now = _time.time()
     records = [
-        _record(
-            path=recorded_path,
-            branch="ephemeral/sess-recorded",
-            base=None,
-            unpushed_shas=(sha,),
-            mtime=past_grace,
-        ),
-        _record(
-            path=unrecorded_path,
-            branch="ephemeral/sess-unrecorded",
-            base=None,
-            unpushed_shas=(sha,),
-            mtime=past_grace,
-        ),
+        _record(path="/t/just-under", newest_mtime=now - (IDLE_THRESHOLD_SECONDS - 60)),
+        _record(path="/t/just-over", newest_mtime=now - (IDLE_THRESHOLD_SECONDS + 60)),
     ]
     monkeypatch.setattr(registry, "scan", lambda root: records)
-    monkeypatch.setattr(gh, "pr_for_head", lambda branch, *, cwd=None: None)
 
-    plan = gc.plan_fleet(str(root))
+    plan = gc.plan_fleet("/trees")
 
-    assert [r.path for r in plan.partition.removable] == [recorded_path]
-    assert [r.path for r in plan.partition.keep] == [unrecorded_path]
+    assert [r.path for r in plan.partition.removable] == ["/t/just-over"]
+    assert [r.path for r in plan.partition.keep] == ["/t/just-under"]
+
+
+# --- the dead gather helpers (no caller since ADR-0072; deleted in WS03) --------------
 
 
 def test_live_sessions_maps_only_ephemeral_trees():
@@ -504,3 +420,17 @@ def test_provision_shas_maps_only_ephemeral_trees(tmp_path):
     # The write Tree is absent; the ephemeral one reads the (missing) record as
     # the empty set — the safe direction.
     assert shas == {ephemeral.path: frozenset()}
+
+
+def test_the_gather_no_longer_calls_the_dead_helpers(monkeypatch):
+    # The behaviour half of "liveness and provisioning are retired" (ADR-0072): the
+    # functions still exist (WS03 deletes them), but plan_fleet must not consult them —
+    # the liveness probe's false-negatives are exactly what deleted a live Tree (#1018).
+    def _fail(*args, **kwargs):
+        raise AssertionError("the gc gather must not read liveness or provisioning")
+
+    monkeypatch.setattr(gc, "live_sessions", _fail)
+    monkeypatch.setattr(gc, "provision_shas", _fail)
+    monkeypatch.setattr(registry, "scan", lambda root: [_record()])
+
+    gc.plan_fleet("/trees")
