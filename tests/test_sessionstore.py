@@ -337,6 +337,42 @@ def _plant_concurrently(checkouts: list[Path], home: Path) -> list[Exception]:
 
 
 @pytest.fixture
+def stale_classification(monkeypatch):
+    """Pin both planters inside the classify -> lock window, deterministically.
+
+    `plant` classifies the slug dir BEFORE it takes the store lock, and the same-checkout
+    race is two planters both still holding that pre-lock answer — "a real directory" —
+    when the winner turns the dir into a symlink. Synchronizing thread START does not
+    produce that interleaving: the winner can finish the whole ladder before the loser's
+    first `_settle` ever runs, and the loser then reads the symlink on its FIRST
+    classification and takes the no-op rung — a schedule the old, data-losing
+    implementation survives too, which would leave this regression test unable to fail.
+
+    So the barrier goes at the boundary that carries the race instead: each thread's FIRST
+    `_settle` return, i.e. its pre-lock decision. Neither thread can reach `_store_lock`
+    until BOTH have provably observed the real directory. Later `_settle` calls — the
+    under-lock re-check this fixture exists to exercise — delegate straight through.
+
+    A thread that never arrives breaks the barrier rather than hanging: `BrokenBarrierError`
+    escapes into `_plant_concurrently`'s error list and fails the test loudly.
+    """
+    original = sessionstore._settle
+    barrier = threading.Barrier(2, timeout=30)
+    first_call = threading.local()
+
+    def settle_in_lockstep(link: Path, store: Path):
+        is_first = not getattr(first_call, "done", False)
+        first_call.done = True
+        result = original(link, store)
+        if is_first:
+            # Hold the pre-lock decision until the other planter has made its own.
+            barrier.wait()
+        return result
+
+    monkeypatch.setattr(sessionstore, "_settle", settle_in_lockstep)
+
+
+@pytest.fixture
 def slow_move(monkeypatch):
     """Widen the classify -> copy window that the adoption race lives in.
 
@@ -344,7 +380,9 @@ def slow_move(monkeypatch):
     two adopters both classifying one destination as absent before either copies. A
     sleep at the top of `_move_file` sits exactly in that window and makes the interleave
     near-certain instead of a rare scheduling accident — with the per-store lock removed,
-    the test below fails reliably; with it, the sleep only slows the test down.
+    `test_concurrent_adopters_never_lose_content` fails reliably (verified 8/8); with the
+    lock, the sleep only slows it down. Its identical-bytes sibling shares this fixture but
+    cannot fail on the lock — see that test's docstring for why.
     """
     original = sessionstore._move_file
 
@@ -388,12 +426,17 @@ def test_concurrent_adopters_never_lose_content(home: Path, tmp_path: Path, slow
 def test_concurrent_adopters_dedupe_identical_content(
     home: Path, tmp_path: Path, slow_move
 ):
-    """The same race, identical bytes: keep-both must not fire, and neither must a race.
+    """The same race, identical bytes: the identical-drop rung must fire, not keep-both.
 
     Two checkouts carrying the SAME memory (the real migration shape — one store copied
-    to two places) must converge on ONE file, not on `MEMORY.adopted-1.md`. Serialization
-    is what makes the second adopter see the first's file and take the identical-drop
-    rung; the verify-then-unlink is safe only because nobody rewrites the target mid-check.
+    to two places) must converge on ONE file, not on `MEMORY.adopted-1.md`.
+
+    Unlike its sibling above, this test does NOT pin serialization, and should not be read
+    as doing so: with identical bytes every interleaving converges on the same one-file
+    result, so it passes with the store lock removed (verified). What it pins is the RUNG
+    CHOICE under concurrency — that a byte-identical memory is dropped as a duplicate
+    rather than minted into a second name. `test_concurrent_adopters_never_lose_content`
+    is the lock's regression test; this one is the matrix'.
     """
     checkouts = [tmp_path / "tree-a", tmp_path / "tree-b"]
     for checkout in checkouts:
@@ -413,7 +456,9 @@ def test_concurrent_adopters_dedupe_identical_content(
     )
 
 
-def test_concurrent_planters_of_one_checkout_keep_the_store(home: Path, tmp_path: Path):
+def test_concurrent_planters_of_one_checkout_keep_the_store(
+    home: Path, tmp_path: Path, stale_classification
+):
     """The same-checkout race: the loser must not adopt the store INTO ITSELF.
 
     Two planters of ONE checkout (two `shipit install` runs in the canonical checkout)
@@ -425,8 +470,10 @@ def test_concurrent_planters_of_one_checkout_keep_the_store(home: Path, tmp_path
     copy. Revalidating under the lock is what makes the loser see the winner's symlink and
     take the no-op rung instead.
 
-    No `slow_move` here: the stale window is classify-to-lock, which the barrier already
-    lands both threads inside.
+    No `slow_move` here: the stale window is classify-to-lock, not classify-to-copy.
+    `stale_classification` is what lands both threads inside it — starting them together
+    does not, since the winner may finish planting before the loser classifies at all.
+    Removing the under-lock re-check in `plant` makes this test fail (verified).
     """
     checkout = tmp_path / "checkout"
     checkout.mkdir()
