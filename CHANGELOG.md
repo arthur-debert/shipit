@@ -4,6 +4,28 @@
 
 ## Unreleased
 
+- `tree gc` now **runs automatically** — the SessionStart hook fires a debounced,
+  detached fleet sweep, so stale Trees are reclaimed continuously instead of
+  piling up until a human remembers to sweep by hand (#1011, ADR-0072). gc had
+  exactly one caller, the manual verb, which is how 526 stale Trees once
+  accumulated. Now that a sweep streams its removals, exits loud on a partly-seen
+  fleet, and costs ~one `gh` call per repo, it is safe to automate. The trigger
+  lives at the SessionStart boundary (already the Tree-lifecycle/liveness seam);
+  the sweep is spawned DETACHED so it never sits on the session-start latency
+  path; and a stamp at the central root debounces it to **~one sweep per 30
+  minutes** — touched before the spawn so the herd of concurrent session starts
+  (every session, coordinator and subagent, fires the hook) collapses to a single
+  sweep per window. The trigger is fail-open: any error costs the session nothing
+  and the manual `shipit tree gc` verb is unchanged.
+- `tree list` and `tree gc` now **read every Tree's PR state in one `gh` call
+  per repo** instead of one per Tree (#1011). The old path issued a `gh pr view`
+  for each Tree — ~512 sequential GraphQL calls on a large fleet — which both
+  made `list` ~60s (70% of it that call) and, worse, **exhausted the hourly
+  GraphQL budget mid-sweep**: once drained, every remaining PR read returned
+  UNKNOWN, the ladder conservatively kept them, and a sweep that should have
+  reclaimed 371 Trees reclaimed 0. A single `gh pr list --json` per repo replaces
+  the whole fan-out with ~a dozen calls, so neither `list` time nor the sweep's
+  budget cost scales with fleet size.
 - `tree gc` now **reclaims a merged Tree without waiting out the age
   threshold** (#1009). The write ladder gated on age BEFORE it looked at the PR,
   so a Tree whose PR merged days ago — clean, nothing unpushed, the work safely
@@ -39,6 +61,24 @@
   being deleted. Every never-lose-work guarantee is untouched: a dirty tree,
   unpushed commits, an unreadable commit list, an in-flight PR, or an unreadable
   PR state all still keep, whatever the Tree's age or merge state.
+- `tree gc` now **streams each removal as it happens and exits loud on a
+  partly-seen fleet** (#1011). Two failures are fixed. First, the sweep used to
+  buffer every `REMOVED <path>` line until the whole run finished, so a sweep
+  interrupted at minute 14 (a `timeout`, a Ctrl-C reacting to what looked like a
+  hang) had deleted Trees and printed **nothing** — no record of which ones. Each
+  path is now streamed from inside `sweep` as it is removed, making a multi-minute
+  destructive operation legible and its audit trail interrupt-safe. Second, a run
+  that could only PARTIALLY see the fleet — some PR states unreadable — used to
+  exit 0 reporting `removed 0`, indistinguishable from a genuinely clean fleet;
+  that is what let 526 stale Trees accumulate. An incomplete view now exits
+  **non-zero** and leads its summary with the skip, because gc's job is to decide
+  the whole root and a run that could not read part of it did not do that job.
+- **Docs:** the write-ladder's "an UNKNOWN PR state is never removable" rule is
+  now documented as scoped to the write ladder specifically, rather than reading
+  as a fleet-wide invariant (#1011). The clarification keeps the gc ladder's
+  conservative keep-on-UNKNOWN behaviour legible next to the batched PR read that
+  makes UNKNOWN rare, so a future reader does not mistake a defensive default for
+  a hard guarantee that spans every Tree kind.
 
 ## 1.2.3 - 2026-07-16
 

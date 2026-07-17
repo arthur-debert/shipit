@@ -14,8 +14,10 @@ import builtins
 import io
 import json
 import logging
+import os
 import shlex
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -1008,3 +1010,180 @@ def test_no_manifest_is_a_clean_noop_for_the_task_advisory(tmp_path):
 def test_malformed_manifest_fails_open_silently(tmp_path):
     (tmp_path / "pixi.toml").write_text("not = valid = toml\n")
     assert "defines no `test` task" not in _task_run(tmp_path)
+
+
+# --------------------------------------------------------------------------
+# Fleet-sweep trigger — the automatic `tree gc` (ADR-0072)
+# --------------------------------------------------------------------------
+
+GC_ARGV = ["shipit", "tree", "gc"]
+
+
+@pytest.fixture
+def fleet_root(tmp_path, monkeypatch):
+    """A central root registered via SHIPIT_TREES_ROOT (what the trigger stamps)."""
+    root = tmp_path / "trees"
+    root.mkdir()
+    monkeypatch.setenv(layout.CENTRAL_ROOT_ENV, str(root))
+    return root
+
+
+def _spawn_recorder():
+    """An `execrun.spawn_detached`-shaped stub recording (argv, kwargs) per call."""
+    calls: list[tuple[list, dict]] = []
+
+    def spawn(argv, **kwargs):
+        calls.append(([str(a) for a in argv], kwargs))
+        return None
+
+    return calls, spawn
+
+
+def _run_sweep(root: Path, spawn) -> int:
+    """Run the hook with an injected spawn boundary, nothing else doing work.
+
+    The payload cwd is the root's parent (a bare tmp dir — no `.git`, no
+    manifest, not under the central root) so every OTHER step is a clean no-op
+    and the sweep trigger is what the assertions observe.
+    """
+    payload = {"cwd": str(root.parent)}
+    return sessionstart.run(
+        stdin=io.StringIO(json.dumps(payload)), environ={}, spawn=spawn
+    )
+
+
+def test_absent_stamp_touches_then_spawns_the_gc_argv(fleet_root):
+    # No stamp yet → the sweep fires: the stamp is created AND the detached child
+    # is `shipit tree gc`.
+    stamp = fleet_root / sessionstart.GC_SWEEP_STAMP_NAME
+    assert not stamp.exists()
+    calls, spawn = _spawn_recorder()
+    start = time.time()
+    code = _run_sweep(fleet_root, spawn)
+    assert code == 0
+    assert [argv for argv, _ in calls] == [GC_ARGV]
+    assert stamp.exists()
+    assert stamp.stat().st_mtime >= start - 1
+
+
+def test_child_inherits_the_environment(fleet_root):
+    # The env caveat (ADR-0072): the child must inherit the parent environment so
+    # SHIPIT_TREES_ROOT reaches it — i.e. NO scrubbed `env=` is passed.
+    calls, spawn = _spawn_recorder()
+    _run_sweep(fleet_root, spawn)
+    assert len(calls) == 1
+    _, kwargs = calls[0]
+    assert kwargs.get("env") is None
+
+
+def test_fresh_stamp_debounces_no_spawn(fleet_root):
+    # A stamp younger than the window → no sweep, and the stamp is left untouched.
+    stamp = fleet_root / sessionstart.GC_SWEEP_STAMP_NAME
+    stamp.touch()
+    before = stamp.stat().st_mtime
+    calls, spawn = _spawn_recorder()
+    code = _run_sweep(fleet_root, spawn)
+    assert code == 0
+    assert calls == []
+    assert stamp.stat().st_mtime == before  # not refreshed
+
+
+def test_stamp_older_than_the_window_spawns_and_refreshes(fleet_root):
+    # A stamp older than GC_SWEEP_DEBOUNCE_SECONDS → the sweep fires again and the
+    # stamp is refreshed to ~now.
+    stamp = fleet_root / sessionstart.GC_SWEEP_STAMP_NAME
+    stamp.touch()
+    old = time.time() - sessionstart.GC_SWEEP_DEBOUNCE_SECONDS - 60
+    os.utime(stamp, (old, old))
+    calls, spawn = _spawn_recorder()
+    start = time.time()
+    code = _run_sweep(fleet_root, spawn)
+    assert code == 0
+    assert [argv for argv, _ in calls] == [GC_ARGV]
+    assert stamp.stat().st_mtime >= start - 1
+
+
+def test_touch_precedes_spawn(fleet_root):
+    # The ordering that collapses the concurrent-SessionStart herd: the stamp is
+    # refreshed BEFORE the child is spawned, so a session starting mid-sweep sees
+    # a fresh stamp. Observe it from inside the spawn callback.
+    stamp = fleet_root / sessionstart.GC_SWEEP_STAMP_NAME
+    seen: dict = {}
+    start = time.time()
+
+    def spawn(argv, **kwargs):
+        seen["existed"] = stamp.exists()
+        seen["mtime"] = stamp.stat().st_mtime if stamp.exists() else None
+
+    code = _run_sweep(fleet_root, spawn)
+    assert code == 0
+    assert seen["existed"] is True
+    assert seen["mtime"] >= start - 1
+
+
+def test_raising_spawn_fails_open_at_warning(fleet_root, caplog):
+    # A trigger that raises (a spawn failure, an OS error) must NOT break the
+    # session: exit 0, one WARNING, and every other step still ran.
+    def spawn(argv, **kwargs):
+        raise RuntimeError("boom")
+
+    with caplog.at_level(logging.DEBUG, logger=HOOK_LOGGER):
+        code = _run_sweep(fleet_root, spawn)
+    assert code == 0
+    assert any(
+        r.levelno == logging.WARNING
+        and r.name == HOOK_LOGGER
+        and "fleet-sweep trigger failed open" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_absent_central_root_is_a_clean_noop(tmp_path, monkeypatch):
+    # SHIPIT_TREES_ROOT pointing at a dir that does not exist → nothing to sweep:
+    # no spawn, no stamp created (the root itself is never conjured).
+    root = tmp_path / "nonexistent"
+    monkeypatch.setenv(layout.CENTRAL_ROOT_ENV, str(root))
+    calls, spawn = _spawn_recorder()
+    code = sessionstart.run(
+        stdin=io.StringIO(json.dumps({"cwd": str(tmp_path)})),
+        environ={},
+        spawn=spawn,
+    )
+    assert code == 0
+    assert calls == []
+    assert not root.exists()
+
+
+def test_unresolvable_root_gate_fails_open_at_debug(tmp_path, monkeypatch, caplog):
+    # A broken SHIPIT_TREES_ROOT (relative, which central_root() rejects) is
+    # environment-shaped: the GATE skips at DEBUG, never WARNING — a broken env
+    # must not warn on every session start for an additive sweep (#348).
+    monkeypatch.setenv(layout.CENTRAL_ROOT_ENV, "relative/trees")
+    calls, spawn = _spawn_recorder()
+    with caplog.at_level(logging.DEBUG, logger=HOOK_LOGGER):
+        code = _run_sweep(tmp_path, spawn)
+    assert code == 0
+    assert calls == []
+    gate = [
+        r
+        for r in caplog.records
+        if r.name == HOOK_LOGGER and "fleet-sweep gate" in r.getMessage()
+    ]
+    assert gate and all(r.levelno == logging.DEBUG for r in gate)
+
+
+def test_default_spawn_boundary_is_spawn_detached(fleet_root, monkeypatch):
+    # When no spawn is injected, the hook uses execrun.spawn_detached — the one
+    # detached seam. Patch it and confirm the real default routes there.
+    detached: list = []
+    monkeypatch.setattr(
+        sessionstart.execrun,
+        "spawn_detached",
+        lambda argv, **kw: detached.append([str(a) for a in argv]),
+    )
+    code = sessionstart.run(
+        stdin=io.StringIO(json.dumps({"cwd": str(fleet_root.parent)})),
+        environ={},
+    )
+    assert code == 0
+    assert detached == [GC_ARGV]

@@ -2,9 +2,11 @@
 
 THIN by design (mirrors ``hook pretooluse``); independent, additive steps per
 session start — three writes, the advisory emits (the source-clone nudge, the
-ADR-0033 pin-staleness line, the #444 missing-``test``-task line), and the
+ADR-0033 pin-staleness line, the #444 missing-``test``-task line), the
 ``session.started`` dev-cycle event (ADR-0032, :func:`_emit_session_started` —
-the hook is the one verb that witnesses a session beginning):
+the hook is the one verb that witnesses a session beginning), and the debounced
+detached fleet sweep (ADR-0072, :func:`_maybe_sweep_fleet` — the automatic
+trigger for ``tree gc``):
 
 1. **Activation** — detect the toolchain governing the session's ``cwd`` → capture
    pixi's activation (``pixi shell-hook --json`` via
@@ -83,6 +85,7 @@ import logging
 import os
 import shlex
 import sys
+import time
 import tomllib
 from pathlib import Path
 from typing import TextIO
@@ -125,6 +128,22 @@ SHIPIT_MAIN = "main"
 #: a lying verification command mid-run.
 CONTRACT_TEST_TASK = "test"
 
+#: The stamp whose mtime debounces the automatic fleet sweep. It lives at the
+#: central root — ONE stamp for the whole fleet — so every session (they all
+#: share the root) reads and refreshes the same clock (ADR-0072).
+GC_SWEEP_STAMP_NAME = ".shipit-gc-stamp"
+
+#: How long a fleet sweep suppresses the next one. gc is now cheap enough to
+#: automate — it streams its removals, exits loud on a partly-seen fleet (#1012),
+#: and costs ~one ``gh`` call per repo rather than one per Tree (#1014) — but
+#: EVERY session (coordinator and subagent) fires the SessionStart hook, so
+#: re-sweeping the whole root on each start would be pure redundant work. 30
+#: minutes collapses that herd to ~one sweep per window while still sweeping
+#: often enough that stale Trees never pile up the way 526 once did (#1011).
+#: The debounce buys against wasted scans, not corruption (gc's removals are
+#: race-guarded), so a residual double-sweep is harmless — see ADR-0072.
+GC_SWEEP_DEBOUNCE_SECONDS = 30 * 60
+
 
 @click.command(name="sessionstart")
 def cmd() -> None:
@@ -132,9 +151,10 @@ def cmd() -> None:
 
     Reads the ``SessionStart`` payload as JSON on stdin. Always exits 0; each of
     the steps (activation, log-context export, liveness pidfile, session event,
-    source-clone warning) fails OPEN independently on any error, and a repo with
-    no activatable toolchain / no session-host ancestor / a cwd that is not a source
-    clone or not an ephemeral Tree is a clean no-op for that check.
+    source-clone warning, fleet-sweep trigger) fails OPEN independently on any
+    error, and a repo with no activatable toolchain / no session-host ancestor / a
+    cwd that is not a source clone or not an ephemeral Tree / a fleet swept within
+    the debounce window is a clean no-op for that check.
     """
     raise SystemExit(run())
 
@@ -147,22 +167,26 @@ def run(
     probe: liveness.Probe | None = None,
     self_pid: int | None = None,
     commits_ahead=None,
+    spawn=None,
 ) -> int:
     """Parse stdin → the advisories (source-clone cwd, stale pin, missing
     ``test`` task) → write activation → export the log context → write the
-    liveness pidfile → emit the ``session.started`` event. Returns 0 always.
+    liveness pidfile → emit the ``session.started`` event → maybe trigger a
+    detached fleet sweep. Returns 0 always.
 
-    ``stdout``, ``environ``, ``runner``, ``probe``, ``self_pid``, and
-    ``commits_ahead`` are the injectable boundaries (defaults: the real
-    ``sys.stdout`` / ``os.environ`` / :func:`shipit.execrun.run` /
+    ``stdout``, ``environ``, ``runner``, ``probe``, ``self_pid``,
+    ``commits_ahead``, and ``spawn`` are the injectable boundaries (defaults: the
+    real ``sys.stdout`` / ``os.environ`` / :func:`shipit.execrun.run` /
     :func:`shipit.session.liveness.os_probe` / ``os.getpid()`` /
-    :func:`shipit.gh.commits_ahead`) so tests assert every step without a live
-    pixi, a real session-host process tree, or the network. Each check is wrapped fail-open on its own, so a
-    bad payload, a pixi failure, an unwritable env file, a probe error, or a
-    detection error can never crash the session — and a failure in one check
-    never suppresses the others. The log-context export runs AFTER activation so
-    its lines land after the pixi exports in the shared env file — but it does
-    not depend on activation having succeeded (or on a toolchain existing).
+    :func:`shipit.gh.commits_ahead` / :func:`shipit.execrun.spawn_detached`) so
+    tests assert every step without a live pixi, a real session-host process
+    tree, the network, or a real fork. Each check is wrapped fail-open on its
+    own, so a bad payload, a pixi failure, an unwritable env file, a probe error,
+    a detection error, or a spawn failure can never crash the session — and a
+    failure in one check never suppresses the others. The log-context export runs
+    AFTER activation so its lines land after the pixi exports in the shared env
+    file — but it does not depend on activation having succeeded (or on a
+    toolchain existing).
     """
     env = environ if environ is not None else os.environ
     out = stdout if stdout is not None else sys.stdout
@@ -180,6 +204,7 @@ def run(
     _write_log_context(raw, env)
     _write_liveness(raw, probe=probe, self_pid=self_pid)
     _emit_session_started(raw)
+    _maybe_sweep_fleet(spawn or execrun.spawn_detached)
     return 0
 
 
@@ -494,6 +519,98 @@ def _emit_session_started(raw: str) -> None:
         # advisory correlation, nothing durable degrades when it breaks.
         logger.debug(
             "sessionstart: session.started emission failed open", exc_info=True
+        )
+
+
+def _maybe_sweep_fleet(spawn) -> None:
+    """The auto-trigger for ``tree gc``: a debounced, DETACHED fleet sweep (ADR-0072).
+
+    gc has only ever had one caller — a human typing ``shipit tree gc`` — so the
+    fleet's stale Trees pile up until someone remembers to sweep (526 accumulated
+    before anyone did, #1011). Now that a sweep streams its removals and exits
+    loud on a partly-seen fleet (#1012) and costs ~one ``gh`` call per repo rather
+    than one per Tree (#1014), it is safe to fire automatically. SessionStart is
+    the trigger: it is already the ADR-0027 Tree-lifecycle/liveness boundary and
+    already resolves :func:`~shipit.tree.layout.central_root`, so the sweep rides
+    a boundary that already exists rather than a new cron off-convention.
+
+    Two guards, in THIS order — stat a stamp at the central root, then
+    touch-before-spawn:
+
+    * **Debounce.** If the stamp's mtime is younger than
+      :data:`GC_SWEEP_DEBOUNCE_SECONDS`, no-op — a recent-enough sweep already
+      covered this window.
+    * **Touch-before-spawn.** Otherwise refresh the stamp FIRST, THEN spawn. This
+      is what collapses the herd: EVERY session (coordinator and subagent) fires
+      this hook, and a second session starting mid-sweep sees the fresh stamp and
+      no-ops, so the herd of concurrent starts collapses to ~one sweep per window.
+
+    The sweep is spawned DETACHED (:func:`shipit.execrun.spawn_detached`, injected
+    as ``spawn``) so a sweep that takes tens of seconds on a large fleet never
+    sits on the session-start latency path. The child inherits this process's
+    environment unchanged (``env`` defaulted) — deliberately, so ``SHIPIT_TREES_ROOT``
+    reaches the child and it sweeps the SAME fleet the stamp lives in; a scrubbed
+    env that dropped it would point the child at a different root.
+
+    No lock: concurrency is tolerated without corruption (``tree gc``'s removals
+    are guarded by ``os.path.lexists`` and a lost race surfaces as a caught
+    ``GcFailure`` WARNING, not a bad delete — tree/gc.py, tree/readonly.py), so a
+    residual race yielding two concurrent sweeps is wasted work, never damage. The
+    debounce exists to avoid that waste, not to prevent corruption (ADR-0072).
+
+    Fail-open like every other step in this hook, in two independently-calibrated
+    halves (the same split as the log-context export). The GATE — resolving the
+    central root and reading the stamp — skips at DEBUG on any error: an
+    unresolvable ``SHIPIT_TREES_ROOT`` is environment-shaped, the #348 calibration
+    (a broken env must not WARN on EVERY session start for an additive sweep). The
+    ACTION — touch-then-spawn, reached only once the gate decided to sweep — logs
+    at WARNING on failure: an unwritable stamp or a failed fork is a genuine
+    degraded outcome (the sweep we committed to did not run), like the activation
+    and liveness write halves. Either way the session pays nothing and the manual
+    ``tree gc`` verb still works.
+    """
+    try:
+        root = layout.central_root()
+        if not root.is_dir():
+            logger.debug(
+                "sessionstart: no central root at %s yet — no fleet to sweep", root
+            )
+            return
+        stamp = root / GC_SWEEP_STAMP_NAME
+        try:
+            age = time.time() - stamp.stat().st_mtime
+        except FileNotFoundError:
+            age = None
+        if age is not None and age < GC_SWEEP_DEBOUNCE_SECONDS:
+            logger.debug(
+                "sessionstart: fleet sweep debounced (stamp %.0fs old < %ds window)",
+                age,
+                GC_SWEEP_DEBOUNCE_SECONDS,
+            )
+            return
+    except Exception:  # noqa: BLE001 — fail-open, DEBUG by design: an unresolvable
+        # root / unreadable stamp is environment-shaped; a broken env must not WARN
+        # on every session start for an additive sweep (the #348 calibration).
+        logger.debug(
+            "sessionstart: fleet-sweep gate failed open — no sweep spawned",
+            exc_info=True,
+        )
+        return
+    try:
+        # Touch-before-spawn (see docstring): refresh the clock FIRST so a
+        # concurrent SessionStart sees a fresh stamp and no-ops, THEN spawn.
+        stamp.touch()
+        spawn(["shipit", "tree", "gc"])
+        logger.debug(
+            "sessionstart: spawned detached fleet sweep (shipit tree gc), "
+            "stamp refreshed at %s",
+            stamp,
+        )
+    except Exception:  # noqa: BLE001 — fail-open: the sweep is additive; the
+        # session never pays, and the manual `tree gc` verb still works.
+        logger.warning(
+            "sessionstart: fleet-sweep trigger failed open (no sweep spawned)",
+            exc_info=True,
         )
 
 

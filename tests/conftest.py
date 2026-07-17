@@ -236,6 +236,29 @@ def _no_network_staleness_read(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_detached_fleet_sweep(request, monkeypatch):
+    """Keep the SessionStart fleet-sweep trigger from forking a real ``tree gc``.
+
+    The hook now spawns a DETACHED ``shipit tree gc`` on session start
+    (ADR-0072), resolving the fleet from :func:`shipit.tree.layout.central_root`
+    — which DEFAULTS to a real directory (``~/workspace/trees``). A test that
+    drives :func:`shipit.verbs.hook.sessionstart.run` without injecting its own
+    spawn (e.g. the fail-open tests, or a ``Path.cwd()`` fallback into this very
+    checkout) would otherwise fork a real sweep of the developer's actual fleet.
+    Stub the one detached seam to a no-op everywhere EXCEPT the tests that
+    exercise it directly (``test_execrun`` patches :class:`subprocess.Popen`
+    beneath it and asserts the real launch behavior). Sweep-trigger tests inject
+    their own spawn through ``run(..., spawn=...)``, which takes precedence over
+    this stub.
+    """
+    if request.module.__name__.endswith("test_execrun"):
+        return
+    from shipit import execrun
+
+    monkeypatch.setattr(execrun, "spawn_detached", lambda *args, **kwargs: None)
+
+
+@pytest.fixture(autouse=True)
 def _clean_domain_key_context():
     """Isolate the ADR-0029 domain-key log context around every test.
 
