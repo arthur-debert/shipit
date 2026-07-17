@@ -229,6 +229,7 @@ def run_fanout_review(
     dry_run: bool = False,
     launcher: launch.Runner | None = None,
     artifacts_base_dir: Path | None = None,
+    review_tree_naming: Mapping[str, str] | None = None,
 ) -> FanoutOutcome:
     """Run ``backend``'s round-1 review of ``target`` — ONE monolithic
     full-scope pass by default (ADR-0052), or the dimension fan-out when
@@ -330,7 +331,11 @@ def run_fanout_review(
     ``review.pass.launched`` / ``review.pass.settled`` progress events with
     ``run_id``/``dimension``/``round_id`` extras. ``artifacts_base_dir``
     overrides the bundle family root (tests), mirroring the store's
-    ``base_dir``.
+    ``base_dir``. ``review_tree_naming`` (#1039) hands the pre-minted flat-leaf
+    coordinates the spawn coordinator already reported straight through to
+    :func:`shipit.review.producer.provision_review_tree`, so the per-Run Tree the
+    live path clones lands at the SPAWNED payload's ``tree`` path; ``None`` (every
+    non-reviewer-spawn caller, and the offline replay) mints the Tree's leaf here.
 
     With ``dry_run=True``: prints each pass's would-run argv (one per
     dimension, or the one monolithic/incremental pass, no clone, no model
@@ -475,7 +480,7 @@ def run_fanout_review(
     workdir = (
         range_view.workdir
         if range_view is not None
-        else producer.provision_review_tree(target, backend)
+        else producer.provision_review_tree(target, backend, naming=review_tree_naming)
     )
     label = label_from_env()
     # The round's observability identity (RVW03-WS02): ONE round id per fan-out

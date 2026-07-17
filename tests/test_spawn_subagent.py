@@ -23,6 +23,8 @@ import pytest
 from shipit import events, execrun, gh, logcontext
 from shipit.execrun import ExecError
 from shipit.identity import repo_from_slug
+from shipit.review import producer
+from shipit.review.diff import review_view
 from shipit.spawn import launch
 from shipit.spawn.subagent import (
     Boundaries,
@@ -112,10 +114,11 @@ def bounds(
         calls["status_cwd"] = cwd
         return list(status_lines or [])
 
-    def run_review(backend, target, *, run_id):
+    def run_review(backend, target, *, run_id, review_tree_naming=None):
         calls["review_backend"] = backend
         calls["review_target"] = target
         calls["review_run_id"] = run_id
+        calls["review_tree_naming"] = review_tree_naming
         return {"review": {}, "post": {}}
 
     return (
@@ -1095,6 +1098,59 @@ def test_reviewer_delegates_to_the_captured_review_service(tmp_path):
     assert result_tree.parent == layout.central_root()
     assert result_tree.name.startswith("widget-codex-")
     assert "review" not in result_tree.parts
+
+
+def test_reviewer_payload_tree_is_the_producers_actual_tree(tmp_path, monkeypatch):
+    # #1039: the SPAWNED `tree` the coordinator reports must be the SAME per-Run
+    # read-only Tree the producer clones the reviewer into — not a speculative
+    # coordinate. The boundary mints the flat-leaf naming ONCE and threads it down
+    # via `review_tree_naming`, so `provision_review_tree` clones under that exact id
+    # instead of minting its own (which, since ADR-0074's per-Run UUIDs, would differ).
+
+    # The producer clones under the plan's dir — echo it back as the Tree path so the
+    # proof needs no real clone; fake the remote read the same way `provision_review_tree`
+    # would hit it.
+    monkeypatch.setattr(
+        producer,
+        "create_readonly",
+        lambda plan, *, source_repo, github_url: Tree(
+            path=str(plan.dir), branch=plan.branch, base=f"origin/{plan.branch}"
+        ),
+    )
+    monkeypatch.setattr(producer.git, "remote_url", lambda *, cwd: "https://x/y.git")
+
+    provisioned: dict = {}
+
+    def run_review(backend, target, *, run_id, review_tree_naming=None):
+        # Stand in for the review service's detached child: provision the reviewer's
+        # ACTUAL Tree with the coordinate the boundary handed down, exactly as the live
+        # run_detached_review → generate_review → provision_review_tree chain does.
+        ctx = review_view(
+            number=target.number,
+            repo=target.slug,
+            head_sha="deadbeef" * 5,
+            base_ref="TRE03/umbrella",
+            base_sha="cafe" * 10,
+            diff="diff --git a/x b/x\n",
+            is_draft=False,
+            changed_files=["x"],
+            workdir="/checkout",
+            head_ref="TRE03/WS03",  # the reviewer's PR head — same branch the payload names
+        )
+        provisioned["tree"] = producer.provision_review_tree(
+            ctx, backend, naming=review_tree_naming
+        )
+        return {"review": {}, "post": {}}
+
+    b, _ = bounds(tmp_path)
+    result = spawn_subagent(
+        spec(role="reviewer", ws=3, issue=None, backend="codex"),
+        replace(b, run_review=run_review),
+    )
+
+    # The coordinate the boundary REPORTED is the exact path the producer PROVISIONED
+    # — no longer a speculative path with a different per-Run UUID (the pre-#1039 bug).
+    assert provisioned["tree"] == result.tree
 
 
 def test_issue_only_reviewer_pins_the_issue_head(tmp_path):
