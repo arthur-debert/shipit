@@ -1221,12 +1221,14 @@ def _launch_reviewer(
     """Reviewer tail: resolve the PR, then delegate capture + post to the service.
 
     The product review service owns the ONE reviewer result contract: it resolves
-    the PR view, provisions its OWN per-Run read-only Tree (ADR-0074 — cross-reviewer
-    sharing retired), launches the funnel backend with its bounded defense-in-depth
-    posture, captures structured output, and posts through the backend's App identity.
-    This spawn boundary only proves that ``branch`` has an OPEN PR and hands its typed
-    identity to that service. The retired generic child task never asks an agent to
-    self-post.
+    the PR view, provisions the per-Run read-only Tree (ADR-0074 — cross-reviewer
+    sharing retired) under the flat-leaf naming THIS boundary mints and threads down
+    (``review_tree_naming``, #1039), launches the funnel backend with its bounded
+    defense-in-depth posture, captures structured output, and posts through the
+    backend's App identity. This spawn boundary proves that ``branch`` has an OPEN PR,
+    names the reviewer Tree's coordinates, and hands its typed identity to that
+    service — so the ``tree`` it reports is the reviewer's ACTUAL Tree. The retired
+    generic child task never asks an agent to self-post.
     """
     events.emit(
         logger,
@@ -1261,12 +1263,12 @@ def _launch_reviewer(
 
     # The reviewer Tree is per-Run (ADR-0074): the review service provisions its OWN
     # flat clone internally. This boundary does not create a Tree, so it names the
-    # reviewer Tree's coordinates ONCE — a single flat-leaf naming used for BOTH the
-    # SPAWNED record and the log-context bind (the id below is the SAME one the record
-    # reports, never a second unrelated UUID). The service mints its own per-Run clone
-    # when it runs; surfacing that exact path into the SPAWNED payload would require the
-    # review producer to return its provisioned Tree (a review-service change beyond
-    # this flat-layout work).
+    # reviewer Tree's coordinates ONCE — a single flat-leaf naming used for the SPAWNED
+    # record, the log-context bind, AND (threaded down via run_review's
+    # ``review_tree_naming``, #1039) the id the review producer clones under. So the
+    # ``tree`` this boundary reports is the SAME path the reviewer actually runs in,
+    # not a speculative coordinate (the id below is that one shared UUID, never a
+    # second unrelated one).
     naming = new_tree_naming(agent_backend.by_name(adapter.name).binary)
     tree_path = str(readonly_plan(repo=repo, branch=branch, **naming).dir)
     logcontext.bind(
@@ -1299,6 +1301,7 @@ def _launch_reviewer(
             review_backend,
             PrId(repo=repo, number=pr.number),
             run_id=None,
+            review_tree_naming=naming,
         )
     except Exception as exc:  # noqa: BLE001 - normalize the product boundary
         raise _refusal(

@@ -74,7 +74,7 @@ import os
 import shutil
 import tempfile
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from .. import execrun, gh, git, workenv
@@ -355,7 +355,9 @@ def range_pass_task_text(
     )
 
 
-def provision_review_tree(ctx, backend: Backend) -> str:
+def provision_review_tree(
+    ctx, backend: Backend, *, naming: Mapping[str, str] | None = None
+) -> str:
     """Provision the per-Run read-only Tree on ``ctx``'s PR head and return its path.
 
     The one Tree resolution the review producers share: resolve the repo
@@ -367,6 +369,14 @@ def provision_review_tree(ctx, backend: Backend) -> str:
     :func:`run_tree_review` provisions through here too when no ``tree_path`` was
     handed in. Raises ``RuntimeError`` when the head branch is unknown (no Tree can
     be provisioned).
+
+    ``naming`` (#1039) hands in the flat-leaf coordinates the coordinator ALREADY
+    minted for this reviewer Run — the ``{agent, created, tree_id}`` dict from
+    :func:`shipit.tree.create.new_tree_naming` — so the Tree this provisions lands
+    at the EXACT path the spawn boundary reported in its SPAWNED ``tree`` payload.
+    ``None`` (every other caller) keeps today's behaviour: mint a fresh naming here
+    from ``backend``'s binary. A supplied naming already carries its own ``agent``,
+    so ``backend`` is not consulted for the leaf name in that case.
     """
     repo = _resolve_repo(ctx)
     branch = (ctx.head_ref or "").strip()
@@ -375,8 +385,9 @@ def provision_review_tree(ctx, backend: Backend) -> str:
             f"cannot review PR #{ctx.number}: its head branch (headRefName) is "
             "unknown, so the read-only Tree cannot be provisioned."
         )
+    leaf = dict(naming) if naming is not None else new_tree_naming(backend.binary)
     tree = create_readonly(
-        readonly_plan(repo=repo, branch=branch, **new_tree_naming(backend.binary)),
+        readonly_plan(repo=repo, branch=branch, **leaf),
         source_repo=ctx.workdir,
         github_url=_github_url(ctx),
     )
