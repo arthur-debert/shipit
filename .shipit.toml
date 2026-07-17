@@ -70,14 +70,31 @@ copilot = { rerun = true }
 #
 # Local review models are pinned EXPLICITLY (issue #989) rather than left on the
 # backend defaults (which launch gpt-5.5 for codex and Gemini 3.1 Pro (High) for
-# agy). The dogfood roster wants the faster review tier: codex on `gpt-5.6-sol`
-# (a verbatim id — passes through the alias table unchanged) and agy on `flash`
-# (the existing honest alias → Gemini 3.5 Flash (High)). The spike measured the
-# agy reviewer ~20% faster on 3.5 Flash with a native reviewer agent and no loss
-# of the seeded defects (see ADR-0020 §agy). This pins the per-reviewer `model`
-# only; it does NOT remap agy's `pro` alias or touch any write-agent default.
+# agy). codex rides `gpt-5.6-sol` (a verbatim id — passes through the alias table
+# unchanged); it works and is unaffected by the below.
+#
+# agy is pinned to `pro` (→ Gemini 3.1 Pro (High)) — REVERTED from the `flash` the
+# #989 spike recommended, because that pin shipped a DEAD reviewer (issue #1006).
+# Gemini Flash goes agentic in agy's headless `--print` mode: it narrates its hunt
+# for a diff and never emits a verdict, so EVERY `agy-local` run settles `failed`.
+# Measured on this repo: `agy-local` failed on every PR of the TREE03 epic — ~10
+# review rounds across #1027/#1028/#1029 — while codex and Copilot kept passing,
+# so the roster promised three required reviewers and delivered two. The engine
+# behaved correctly throughout: it declines to let a degraded reviewer block
+# Ready, which is exactly what made the outage silent.
+#
+# The spike's ~20% speed win is forfeited DELIBERATELY: a reviewer that never
+# returns a verdict is not faster, it is absent. This pins the per-reviewer
+# `model` only; it does NOT remap agy's `pro` alias or touch any write-agent
+# default.
+#
+# This is the config revert ALONE, split out of #1008 to stop the bleeding now.
+# #1008 additionally makes the hazard MECHANICAL — declaring `flash` unusable for
+# a review run on the agy backend identity, so re-pinning it is refused loudly at
+# preflight rather than failing silently on the PR. That belongs there, not here:
+# it is a real change under review, and this line should not wait on it.
 codex = { window = 2700, model = "gpt-5.6-sol" }
-agy = { window = 2700, model = "flash" }
+agy = { window = 2700, model = "pro" }
 
 # Table-level review-run policy, set FROM the WS05 baseline study (#638):
 #
