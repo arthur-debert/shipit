@@ -664,6 +664,104 @@ def test_tree_leaf_rejects_empty_created_or_id(bad):
         layout.tree_leaf(REPO, AGENT, CREATED, bad)
 
 
+@pytest.mark.parametrize(
+    "bad_created",
+    [
+        "2026-07-17",  # wrong separators / shape
+        "20260717081333",  # no hyphen
+        "20261317-081333",  # month 13 — in-shape but not a real time
+        "20260717-250000",  # hour 25
+        "20260717-081333-extra",  # trailing junk
+    ],
+)
+def test_tree_leaf_rejects_a_malformed_timestamp(bad_created):
+    # ADR-0074: <timestamp> is strictly %Y%m%d-%H%M%S — a real calendar time, not just
+    # the digit shape, so an impossible stamp is refused at the construction boundary.
+    with pytest.raises(ValueError, match="created"):
+        layout.tree_leaf(REPO, AGENT, bad_created, TREE_ID)
+
+
+@pytest.mark.parametrize(
+    "bad_id",
+    [
+        "d1",  # a pid-ish token
+        "619cf51a",  # a truncated prefix (claude --resume rejects it)
+        "619cf51af50144dc992f74df773204aa",  # no hyphens
+        "619cf51a-f501-44dc-992f-74df773204aa-extra",  # trailing junk
+        "zzzzzzzz-f501-44dc-992f-74df773204aa",  # non-hex
+    ],
+)
+def test_tree_leaf_rejects_a_non_uuid_id(bad_id):
+    # ADR-0074: <id> is a FULL UUID — never a pid, never a truncated prefix.
+    with pytest.raises(ValueError, match="tree_id"):
+        layout.tree_leaf(REPO, AGENT, CREATED, bad_id)
+
+
+# --------------------------------------------------------------------------
+# is_full_uuid / is_created_stamp / parse_flat_leaf — the shared flat-leaf grammar
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("good", [TREE_ID, TREE_ID.upper()])
+def test_is_full_uuid_accepts_a_full_uuid_either_case(good):
+    assert layout.is_full_uuid(good) is True
+
+
+@pytest.mark.parametrize(
+    "bad", ["", "d1", "619cf51a", "not-a-uuid", None, 123, f"{TREE_ID}x"]
+)
+def test_is_full_uuid_rejects_non_uuids(bad):
+    assert layout.is_full_uuid(bad) is False
+
+
+def test_is_created_stamp_accepts_a_real_stamp():
+    assert layout.is_created_stamp(CREATED) is True
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ["", "2026-07-17", "20261317-081333", "20260717-250000", None, 20260717],
+)
+def test_is_created_stamp_rejects_malformed_or_impossible(bad):
+    assert layout.is_created_stamp(bad) is False
+
+
+def test_parse_flat_leaf_recovers_all_four_coordinates():
+    leaf = layout.parse_flat_leaf(LEAF)
+    assert leaf is not None
+    assert leaf.repo == "widget"
+    assert leaf.agent == AGENT
+    assert leaf.created == CREATED
+    assert leaf.tree_id == TREE_ID
+
+
+def test_parse_flat_leaf_handles_a_hyphenated_repo_head():
+    leaf = layout.parse_flat_leaf(f"my-cool-repo-codex-{CREATED}-{TREE_ID}")
+    assert leaf is not None
+    assert leaf.repo == "my-cool-repo"
+    assert leaf.agent == "codex"
+    assert leaf.tree_id == TREE_ID
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "widget",  # bare, no tail
+        "acme",  # an OLD nested Tree's owner segment
+        "epics",  # an OLD nested kind segment
+        "review",
+        f"widget-Claude-{CREATED}-{TREE_ID}",  # uppercase agent
+        f"widget-claude-20261317-081333-{TREE_ID}",  # impossible stamp
+        f"widget-claude-{CREATED}-d1",  # non-UUID id
+        f"widget-claude-{CREATED}-619cf51a",  # truncated id
+        "sess-20260702-121314-4242",  # a nested/legacy leaf (short tail)
+        None,
+    ],
+)
+def test_parse_flat_leaf_is_none_for_non_conforming_names(bad):
+    assert layout.parse_flat_leaf(bad) is None
+
+
 def test_tree_dir_is_root_over_the_flat_leaf():
     assert layout.tree_dir(REPO, AGENT, CREATED, TREE_ID, ROOT) == ROOT / LEAF
 

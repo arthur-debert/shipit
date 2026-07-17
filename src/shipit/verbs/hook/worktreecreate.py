@@ -54,7 +54,7 @@ import click
 from ... import git, identity, workenv
 from ...harness import worktree_adapter
 from ...tree.create import create_from_source, new_tree_id, new_tree_naming
-from ...tree.layout import TreeSpec, sanitize_slug
+from ...tree.layout import TreeSpec, is_full_uuid, sanitize_slug
 
 logger = logging.getLogger("shipit.hook")
 
@@ -163,13 +163,15 @@ def _coordinator_tree_id(payload: dict[str, object]) -> str:
     The WorktreeCreate payload's ``session_id`` names the very session about to adopt
     this cwd (ADR-0027), so using it as the flat dir's ``<id>`` makes the directory
     name the resume handle a human types into ``claude --resume`` — the one creation
-    path where the dir name IS the resume handle. A payload missing/empty
-    ``session_id`` (defensive — the contract always supplies one on the coordinator
-    arm) falls back to a freshly minted UUID rather than blocking the launch. Never a
-    pid: the id is a full UUID either way.
+    path where the dir name IS the resume handle. It is adopted ONLY when it is a full
+    UUID (:func:`shipit.tree.layout.is_full_uuid`, the SAME grammar :func:`tree_leaf`
+    enforces): a ``session_id`` that is missing, empty, or malformed (a pid, a
+    truncated prefix, a path-bearing value) falls back to a freshly minted UUID rather
+    than minting an unresolvable Tree or one whose leaf escapes the central root. Never
+    a pid: the id is a full UUID either way.
     """
     sid = str(payload.get("session_id") or "")
-    return sid if sid.strip() else new_tree_id()
+    return sid if is_full_uuid(sid) else new_tree_id()
 
 
 def _resolve_branch(payload: dict[str, object]) -> str:

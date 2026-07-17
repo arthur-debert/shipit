@@ -131,6 +131,16 @@ def test_flat_tree_has_no_kind_carveout_and_is_reclaimed(root, clean_git):
     assert not other_leaf.exists()
 
 
+def test_the_central_root_itself_is_never_targeted(root, clean_git):
+    # A payload path EQUAL to the central root must be refused even when the root carries
+    # a `.git` (e.g. a `git init` in ~/workspace/trees): `Path.is_relative_to` is True for
+    # an equal path, so a Tree being STRICTLY below the root is enforced explicitly —
+    # otherwise the root itself would be handed up for removal (agy critical, ADR-0074).
+    (root / ".git").mkdir(parents=True)
+    assert _run({"cwd": str(root)}) == 0
+    assert root.exists() and (root / ".git").is_dir()  # the root is untouched
+
+
 def test_path_outside_the_central_root_is_never_touched(tmp_path, root, clean_git):
     # A Tree-shaped path OUTSIDE the root (hostile or confused payload) fails the
     # under-root gate — the flat leaf shape does not matter, only that it is under root.

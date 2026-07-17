@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from shipit import logcontext
 from shipit.session import current
 from shipit.tree import layout
@@ -107,3 +109,44 @@ def test_empty_export_falls_through_to_the_path(tmp_path, monkeypatch):
     monkeypatch.setenv(layout.CENTRAL_ROOT_ENV, str(root))
     env = {logcontext.ENV_PREFIX + "SESSION": ""}
     assert current.current_session_id(env, cwd=tree) == SESSION_ID
+
+
+# --------------------------------------------------------------------------
+# containing_tree — a first segment is a Tree ONLY if it is a conforming flat leaf
+# --------------------------------------------------------------------------
+
+
+def test_containing_tree_returns_the_dir_for_a_conforming_leaf(tmp_path, monkeypatch):
+    root = tmp_path / "trees"
+    tree = _flat_tree(root)
+    monkeypatch.setenv(layout.CENTRAL_ROOT_ENV, str(root))
+    assert current.containing_tree(tree) == tree
+
+
+def test_containing_tree_is_none_for_an_old_nested_path(tmp_path, monkeypatch):
+    # An OLD nested Tree's top segment is an owner/kind, never a flat leaf.
+    root = tmp_path / "trees"
+    nested = root / "acme" / "widget" / "epics" / "TRE03"
+    nested.mkdir(parents=True)
+    monkeypatch.setenv(layout.CENTRAL_ROOT_ENV, str(root))
+    assert current.containing_tree(nested) is None
+
+
+@pytest.mark.parametrize(
+    "leaf",
+    [
+        f"shipit-claude-20261317-041649-{SESSION_ID}",  # impossible month
+        "shipit-claude-20260703-041649-notauuid",  # non-UUID id
+        f"shipit-Claude-20260703-041649-{SESSION_ID}",  # uppercase agent
+    ],
+)
+def test_uuid_tailed_but_malformed_leaf_is_not_a_tree(tmp_path, monkeypatch, leaf):
+    # REGRESSION: a name that merely ENDS in a UUID (but whose whole leaf does not
+    # conform — an impossible stamp, a bad id, a non-binary agent) must NOT be mistaken
+    # for a flat Tree. The stricter parse (not a trailing-UUID search) is what refuses it.
+    root = tmp_path / "trees"
+    tree = root / leaf
+    tree.mkdir(parents=True)
+    monkeypatch.setenv(layout.CENTRAL_ROOT_ENV, str(root))
+    assert current.containing_tree(tree) is None
+    assert current.current_session_id({}, cwd=tree) is None

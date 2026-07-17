@@ -13,14 +13,14 @@ base override supplied by callers that have probed a remote head, and the coordi
 adding a shape is adding a field plus a branch in :func:`plan`, not reshaping
 callers.
 
-The three load-bearing invariants the tests pin (from the PRD):
+The load-bearing invariants the tests pin (from the PRD and ADR-0074):
 
-- the **agent hash lands on the dir, never on the branch** — two sessions sharing
-  one branch is fine, two Trees in one dir is not; the hash disambiguates the dir
-  while the branch stays a stable, meaningful namespace. Two shapes carry no hash
-  at all: a ``review`` Tree is *shared* per ``(repo, branch)`` (ADR-0018), and an
-  ``ephemeral`` session Tree's dir leaf IS the per-launch session id (ADR-0027) —
-  in both, the leaf itself is the disambiguator, so a hash would be noise;
+- the **dir is ONE flat, self-describing leaf** — ``<repo>-<agent>-<timestamp>-<id>``
+  (:func:`tree_leaf`), the SAME shape for every Tree, with no owner and no kind
+  segment. The leaf records who/when (repo name, backend binary, ``%Y%m%d-%H%M%S``
+  stamp, full-UUID id) while the branch/base carry what the Tree is *for*; the id
+  disambiguates two Trees that share one branch. Tree identity is resolved from the
+  origin remote, never parsed back out of the path;
 - the **git branch form is slash-namespaced** (naming.lex §3): a work stream is
   ``EPIC/WSnn`` cut from ``origin/EPIC/umbrella``, siblings under ``refs/heads/EPIC/``
   — the umbrella name dodges the bare-``EPIC`` ref/dir collision. The plain-language
@@ -36,6 +36,7 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from ..identity import Repo
@@ -91,6 +92,113 @@ _CREATED_TAIL = re.compile(
     re.IGNORECASE,
 )
 
+#: The strptime format a flat leaf's ``<timestamp>`` must parse under — ``%Y%m%d-%H%M%S``
+#: UTC (ADR-0074 / naming.lex §4). Shared by :func:`is_created_stamp` and the minting
+#: side (:func:`shipit.tree.create.tree_created_stamp`) so validator and generator agree.
+_CREATED_FORMAT = "%Y%m%d-%H%M%S"
+
+#: A flat leaf's ``<timestamp>`` SHAPE (``\d{8}-\d{6}``). Shape is necessary but not
+#: sufficient — :func:`is_created_stamp` additionally proves it is a real calendar time
+#: (``strptime``), so an in-shape but impossible stamp (month 13, hour 25) is rejected.
+_CREATED_STAMP_SHAPE = re.compile(r"\d{8}-\d{6}")
+
+#: A flat leaf's ``<id>``: a full 8-4-4-4-12 hex UUID (ADR-0074 / naming.lex §4). Never a
+#: pid (reused — one token eventually names two sessions) and never truncated
+#: (``claude --resume`` rejects a prefix).
+_FULL_UUID = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+    re.IGNORECASE,
+)
+
+#: The WHOLE flat leaf ``<repo>-<agent>-<timestamp>-<id>``, anchored end to end (used
+#: by :func:`parse_flat_leaf`). ``<repo>`` may itself carry hyphens, so it is matched
+#: non-greedily up to the ``<agent>`` (a lowercase alphanumeric backend binary) that
+#: immediately precedes the ``<timestamp>-<id>`` tail; only the hex ``<id>`` is
+#: case-insensitive, so ``<agent>`` stays lowercase by its own character class.
+_FLAT_LEAF = re.compile(
+    r"(?P<repo>.+?)-"
+    r"(?P<agent>[a-z0-9]+)-"
+    r"(?P<created>\d{8}-\d{6})-"
+    r"(?P<tree_id>[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}"
+    r"-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
+)
+
+
+def is_full_uuid(value: object) -> bool:
+    """Whether ``value`` is a full 8-4-4-4-12 hex UUID — a flat leaf's ``<id>`` (ADR-0074).
+
+    The single predicate every flat-leaf boundary shares for "is this a real Tree id?":
+    :func:`tree_leaf` (guarding the dir it builds), the ``WorktreeCreate`` coordinator
+    arm (guarding the harness ``session_id`` it adopts as ``<id>`` —
+    :func:`shipit.verbs.hook.worktreecreate._coordinator_tree_id`), and
+    :func:`parse_flat_leaf` (recognizing a conforming leaf). A pid or a truncated prefix
+    is rejected: reuse and ``claude --resume`` both need the FULL UUID. Non-``str`` is
+    ``False``, never a raise.
+    """
+    return isinstance(value, str) and _FULL_UUID.fullmatch(value) is not None
+
+
+def is_created_stamp(value: object) -> bool:
+    """Whether ``value`` is a strict ``%Y%m%d-%H%M%S`` UTC stamp — a flat leaf's ``<timestamp>``.
+
+    Both SHAPE (``\\d{8}-\\d{6}``) and real-calendar-time (``strptime`` under
+    :data:`_CREATED_FORMAT`), so an in-shape but impossible stamp (month 13, hour 25) is
+    rejected too. The companion of :func:`is_full_uuid` for the ``<timestamp>`` slot,
+    shared by the same boundaries. Non-``str`` is ``False``, never a raise.
+    """
+    if not isinstance(value, str) or not _CREATED_STAMP_SHAPE.fullmatch(value):
+        return False
+    try:
+        datetime.strptime(value, _CREATED_FORMAT)
+    except ValueError:
+        return False
+    return True
+
+
+@dataclass(frozen=True)
+class FlatLeaf:
+    """The four coordinates recovered from a flat Tree dir leaf (ADR-0074 / naming.lex §4).
+
+    The parse is for SHAPE recognition, not identity: repo identity is still resolved
+    from the origin remote, never trusted from a path (see :class:`TreeSpec`). ``repo``
+    and ``agent`` are exposed for completeness; the load-bearing consumer reads
+    ``tree_id`` (the session/resume handle) once :func:`parse_flat_leaf` has confirmed
+    the leaf conforms.
+    """
+
+    repo: str
+    agent: str
+    created: str
+    tree_id: str
+
+
+def parse_flat_leaf(name: object) -> FlatLeaf | None:
+    """Parse a dir ``name`` as a flat Tree leaf, or ``None`` when it does not conform.
+
+    The single recognizer of "is this directory a flat Tree?" (ADR-0074): a name is a
+    flat leaf IFF it is exactly ``<repo>-<agent>-<timestamp>-<id>`` with ``<agent>`` a
+    lowercase alphanumeric backend binary name, ``<timestamp>`` a real
+    ``%Y%m%d-%H%M%S`` stamp (:func:`is_created_stamp`), and ``<id>`` a full UUID. Used by
+    :mod:`shipit.session.current` to tell a flat Tree from an OLD nested Tree (which
+    coexists by attrition) or an arbitrary non-Tree directory under the central root, so
+    neither is mis-read as a Tree. Returns the parsed coordinates for the caller that
+    wants the ``tree_id``; ``None`` otherwise. Never raises.
+    """
+    if not isinstance(name, str):
+        return None
+    match = _FLAT_LEAF.fullmatch(name)
+    if match is None:
+        return None
+    created = match.group("created")
+    if not is_created_stamp(created):
+        return None
+    return FlatLeaf(
+        repo=match.group("repo"),
+        agent=match.group("agent"),
+        created=created,
+        tree_id=match.group("tree_id"),
+    )
+
 
 def created_from_leaf(name: str) -> str | None:
     """The ``%Y%m%d-%H%M%S`` creation stamp encoded in a flat Tree leaf, or ``None``.
@@ -122,24 +230,27 @@ def tree_leaf(repo: Repo, agent: str, created: str, tree_id: str) -> str:
     every other path mints its own), but the leaf never records which.
 
     Repo comes FIRST because it is the axis a human narrows on — ``ls | grep shipit``
-    is the tooling-free narrowing this grammar exists to give. ``agent`` is validated
-    as a lowercase alphanumeric token and ``created`` / ``tree_id`` must be non-empty,
-    so a malformed leaf never reaches the filesystem. Raises :class:`ValueError`.
+    is the tooling-free narrowing this grammar exists to give. Every slot is validated
+    at this ONE construction boundary: ``agent`` a lowercase alphanumeric backend binary
+    token, ``created`` a strict ``%Y%m%d-%H%M%S`` stamp (:func:`is_created_stamp`), and
+    ``tree_id`` a full UUID (:func:`is_full_uuid`, never a pid or a truncated prefix) —
+    so a malformed leaf never reaches the filesystem and :func:`created_from_leaf` /
+    :func:`parse_flat_leaf` can always recover the tail. Raises :class:`ValueError`.
     """
     if not isinstance(agent, str) or not _AGENT_TOKEN.fullmatch(agent):
         raise ValueError(
             "tree.layout.tree_leaf: agent must be a lowercase alphanumeric backend "
             f"binary name (claude/codex/agy, naming.lex §4); got {agent!r}."
         )
-    if not isinstance(created, str) or not created.strip():
+    if not is_created_stamp(created):
         raise ValueError(
-            f"tree.layout.tree_leaf: created stamp must be a non-empty "
-            f"%Y%m%d-%H%M%S string; got {created!r}."
+            "tree.layout.tree_leaf: created must be a strict %Y%m%d-%H%M%S UTC stamp "
+            f"(ADR-0074 / naming.lex §4); got {created!r}."
         )
-    if not isinstance(tree_id, str) or not tree_id.strip():
+    if not is_full_uuid(tree_id):
         raise ValueError(
-            f"tree.layout.tree_leaf: tree_id must be a non-empty full UUID; got "
-            f"{tree_id!r}."
+            "tree.layout.tree_leaf: tree_id must be a full UUID (never a pid or a "
+            f"truncated prefix; ADR-0074 / naming.lex §4); got {tree_id!r}."
         )
     return f"{repo.name}-{agent}-{created}-{tree_id}"
 

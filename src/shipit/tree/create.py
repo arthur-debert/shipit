@@ -15,8 +15,9 @@ summary (``{path, branch, base}``). The whole pipeline hides behind this one cal
    ``git submodule sync --recursive`` then ``update --init --recursive``
    (:func:`shipit.git.submodule_update_init`, #485/#486) — a dissociated clone leaves
    submodules as empty gitlinks, so a Tree of a submodule-using consumer must populate
-   them to match CI's ``submodules: recursive`` (the ``sync`` first keeps a reused
-   reviewer clone's submodule URLs in step with an advanced head).
+   them to match CI's ``submodules: recursive`` (the ``sync`` first is defensive —
+   it copies the checked-out ``.gitmodules`` URLs into ``.git/config`` before the
+   update; on a fresh clone it is a harmless no-op).
 3. apply ``.treeinclude`` — copy the gitignored-but-needed files (``.env``,
    Doppler config, models) from the source checkout into the new Tree
    (:mod:`shipit.tree.include`).

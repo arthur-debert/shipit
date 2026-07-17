@@ -85,15 +85,12 @@ from ..agent import backend as agent_backend
 from ..harness import roleprofile
 from ..pr import PrId
 from ..review import service as review_service
-from ..tree.create import Tree, create, new_tree_id, new_tree_naming
+from ..tree.create import Tree, create, new_tree_naming
 from ..tree.layout import (
     TreeSpec,
     epic_umbrella_base,
     issue_branch,
     work_stream_branch,
-)
-from ..tree.layout import (
-    plan as plan_tree,
 )
 from ..tree.readonly import readonly_plan
 from . import backends, launch
@@ -216,9 +213,6 @@ class Boundaries:
     pr_for_head: Callable[..., gh.HeadPr | gh.UnknownPr | None] = gh.pr_for_head
     pr_for_number: Callable[..., gh.PrAttachment] = gh.pr_for_number
     status_porcelain: Callable[..., list[str]] = git.status_porcelain
-    refresh_attached_tree: Callable[..., None] = lambda path, branch: (
-        _refresh_attached_tree(path, branch)
-    )
     runner: launch.Runner | None = None
     run_review: Callable[..., dict] = review_service.run_detached_review
 
@@ -1008,53 +1002,6 @@ def _launch_write(
     return result
 
 
-def _refresh_attached_tree(path: str, branch: str) -> None:
-    """Refresh a clean, fully-pushed shepherd Tree to the remote PR head.
-
-    A reused attachment may contain work from an interrupted prior round. Refuse
-    rather than letting checkout/reset hide uncommitted changes or discard the
-    branch pointer that makes local-only commits recoverable.
-    """
-    dirty = git.status_porcelain(cwd=path)
-    if dirty:
-        raise ValueError(
-            f"refused to refresh shepherd attachment {path}: "
-            f"{len(dirty)} uncommitted path(s) would be overwritten"
-        )
-    git.fetch(cwd=path)
-    git.checkout(branch, cwd=path)
-    unpushed = git.unpushed_shas(cwd=path)
-    if unpushed is None:
-        raise ValueError(
-            f"refused to refresh shepherd attachment {path}: could not determine "
-            "whether the attached branch has local-only commits"
-        )
-    if unpushed:
-        raise ValueError(
-            f"refused to refresh shepherd attachment {path}: "
-            f"{len(unpushed)} local-only commit(s) would be discarded"
-        )
-    git.reset_hard(f"origin/{branch}", cwd=path)
-    git.submodule_update_init(cwd=path)
-
-
-def _create_or_reuse_attached_tree(
-    spec: TreeSpec,
-    *,
-    source_repo: str,
-    github_url: str,
-    head_branch: str,
-    bounds: Boundaries,
-) -> Tree:
-    """Materialize or refresh the stable writable Tree attached to one PR."""
-    try:
-        return bounds.create_tree(spec, source_repo=source_repo, github_url=github_url)
-    except FileExistsError:
-        planned = plan_tree(spec)
-        bounds.refresh_attached_tree(str(planned.dir), head_branch)
-        return Tree(path=str(planned.dir), branch=planned.branch, base=planned.base)
-
-
 def _resolve_pr_attachment(
     *,
     repo: identity.Repo,
@@ -1149,10 +1096,14 @@ def _launch_existing_pr_write(
     """Shepherd tail: attach to an existing PR head and push fixes in place.
 
     The shepherd lifecycle is writable, but it is NOT the implementer's
-    new-branch/draft-PR result channel. It resolves a PR by number, creates or
-    refreshes a stable per-PR Tree from ``origin/<head>``, verifies that the head
-    branch still maps to the same open PR, launches the shepherd task, and returns
-    the existing PR linkage without running the draft-PR handshake.
+    new-branch/draft-PR result channel. It resolves a PR by number, creates a fresh
+    PER-RUN write Tree from ``origin/<head>`` (ADR-0074: flat naming mints a unique
+    ``<id>`` per spawn, so — like review Trees — each shepherd round gets its own
+    clone; there is no derivable per-PR path to reuse, and resume rebuilds from the
+    durable per-repo logs, not from a persisted Tree), verifies that the head branch
+    still maps to the same open PR, launches the shepherd task, and returns the
+    existing PR linkage without running the draft-PR handshake. Cross-round identity
+    rides the log context (``agent=pr<N>``), not a shared directory.
     """
     assert pr_number is not None  # validate() enforces this before dispatch.
     attach = _resolve_pr_attachment(repo=repo, pr_number=pr_number, bounds=bounds)
@@ -1173,14 +1124,12 @@ def _launch_existing_pr_write(
         extra={"phase": "pr_attachment", "role": role, "backend": backend},
     )
     try:
-        tree = _create_or_reuse_attached_tree(
-            tree_spec,
-            source_repo=source_repo,
-            github_url=github_url,
-            head_branch=branch,
-            bounds=bounds,
+        tree = bounds.create_tree(
+            tree_spec, source_repo=source_repo, github_url=github_url
         )
     except (ValueError, execrun.ExecError, OSError) as exc:
+        # FileExistsError ⊂ OSError: with a fresh per-Run UUID a collision is a real
+        # error (not a reuse signal), so it fails closed like any other create failure.
         raise _refusal(
             f"existing-PR tree attachment failed: {exc}",
             exc=exc,
@@ -1272,17 +1221,13 @@ def _launch_reviewer(
     """Reviewer tail: resolve the PR, then delegate capture + post to the service.
 
     The product review service owns the ONE reviewer result contract: it resolves
-    the PR view, provisions/reuses ADR-0018's per-Run read-only Tree, launches the
-    funnel backend with its bounded defense-in-depth posture, captures structured
-    output, and posts through the backend's App identity. This spawn boundary only
-    proves that ``branch`` has an OPEN PR and hands its typed identity to that
-    service. The retired generic child task never asks an agent to self-post.
+    the PR view, provisions its OWN per-Run read-only Tree (ADR-0074 — cross-reviewer
+    sharing retired), launches the funnel backend with its bounded defense-in-depth
+    posture, captures structured output, and posts through the backend's App identity.
+    This spawn boundary only proves that ``branch`` has an OPEN PR and hands its typed
+    identity to that service. The retired generic child task never asks an agent to
+    self-post.
     """
-    plan = readonly_plan(
-        repo=repo,
-        branch=branch,
-        **new_tree_naming(agent_backend.by_name(adapter.name).binary),
-    )
     events.emit(
         logger,
         "agent.phase",
@@ -1314,12 +1259,19 @@ def _launch_reviewer(
             pr=pr.number,
         )
 
-    # The reviewer Tree is per-Run now (ADR-0074): the review service provisions its
-    # OWN flat clone internally, so this plan names the reviewer Tree's coordinates
-    # for the spawn record rather than a dir this boundary shares with the service.
-    # Bind the identity before delegation so the capture/post records carry the story.
-    tree_path = str(plan.dir)
-    logcontext.bind(tree=tree_path, agent=new_tree_id(), pr=pr.number, repo=repo.slug)
+    # The reviewer Tree is per-Run (ADR-0074): the review service provisions its OWN
+    # flat clone internally. This boundary does not create a Tree, so it names the
+    # reviewer Tree's coordinates ONCE — a single flat-leaf naming used for BOTH the
+    # SPAWNED record and the log-context bind (the id below is the SAME one the record
+    # reports, never a second unrelated UUID). The service mints its own per-Run clone
+    # when it runs; surfacing that exact path into the SPAWNED payload would require the
+    # review producer to return its provisioned Tree (a review-service change beyond
+    # this flat-layout work).
+    naming = new_tree_naming(agent_backend.by_name(adapter.name).binary)
+    tree_path = str(readonly_plan(repo=repo, branch=branch, **naming).dir)
+    logcontext.bind(
+        tree=tree_path, agent=naming["tree_id"], pr=pr.number, repo=repo.slug
+    )
     logger.info(
         "spawn subagent: delegating reviewer run on %s to the captured review service",
         branch,

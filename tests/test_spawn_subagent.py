@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from shipit import events, execrun, gh, git, logcontext
+from shipit import events, execrun, gh, logcontext
 from shipit.execrun import ExecError
 from shipit.identity import repo_from_slug
 from shipit.spawn import launch
@@ -28,7 +28,6 @@ from shipit.spawn.subagent import (
     Boundaries,
     SpawnError,
     SubagentSpec,
-    _refresh_attached_tree,
     audit_handshake,
     spawn_subagent,
 )
@@ -63,7 +62,6 @@ def bounds(
     umbrella: bool = True,
     org_repo: str = "acme/widget",
     status_lines: list[str] | None = None,
-    create_exists: bool = False,
 ) -> tuple[Boundaries, dict]:
     """Fake every effectful edge as a recording callable; return (bounds, calls).
 
@@ -84,8 +82,6 @@ def bounds(
         calls["spec"] = tree_spec
         calls["source_repo"] = source_repo
         calls["github_url"] = github_url
-        if create_exists:
-            raise FileExistsError("attached tree already exists")
         tree_dir.mkdir(parents=True, exist_ok=True)
         tp = layout.plan(tree_spec)
         return Tree(path=str(tree_dir), branch=tp.branch, base=tp.base)
@@ -122,10 +118,6 @@ def bounds(
         calls["review_run_id"] = run_id
         return {"review": {}, "post": {}}
 
-    def refresh_attached_tree(path, branch):
-        calls["refresh_path"] = path
-        calls["refresh_branch"] = branch
-
     return (
         Boundaries(
             repo_root=lambda: str(parent),
@@ -136,7 +128,6 @@ def bounds(
             pr_for_head=pr_for_head,
             pr_for_number=pr_for_number,
             status_porcelain=status_porcelain,
-            refresh_attached_tree=refresh_attached_tree,
             runner=runner,
             run_review=run_review,
         ),
@@ -257,8 +248,9 @@ def test_shepherd_spawn_attaches_to_existing_pr_head_without_new_pr(tmp_path):
     assert tree_spec.base == "origin/TRE03/WS04"
     # ADR-0074: the spec's naming half is now three flat-leaf fields — the backend
     # binary <agent>, a <timestamp>, and a full-UUID <id> — not a per-PR `agent_hash`.
-    # The stable per-PR identity across rounds now rides the log context (`agent=pr321`),
-    # asserted by test_shepherd_resume_reuses_stable_tree.
+    # Shepherd Trees are per-Run (like review Trees): each round mints a fresh <id>, so
+    # the cross-round identity rides the log context (`agent=pr321`), asserted by
+    # test_shepherd_round_mints_a_fresh_per_run_tree.
     assert tree_spec.agent == "claude"
     assert tree_spec.tree_id and "-" in tree_spec.tree_id  # a full UUID, never a pid
     assert tree_spec.issue is None and tree_spec.epic is None and tree_spec.ws is None
@@ -282,9 +274,12 @@ def test_shepherd_spawn_attaches_to_existing_pr_head_without_new_pr(tmp_path):
     }
 
 
-def test_shepherd_resume_reuses_stable_tree_and_refreshes_current_head(
-    tmp_path, monkeypatch
-):
+def test_shepherd_round_mints_a_fresh_per_run_tree(tmp_path, monkeypatch):
+    # ADR-0074: shepherd Trees are PER-RUN, like review Trees. Flat naming mints a fresh
+    # UUID <id> per spawn, so there is no derivable per-PR path to reuse across rounds —
+    # each round provisions its own clone via create_tree (never a FileExistsError-driven
+    # reuse/refresh), and resume rebuilds from the durable per-repo logs, not a persisted
+    # Tree. Two rounds on the SAME PR mint DISTINCT tree_ids.
     monkeypatch.setenv("SHIPIT_TREES_ROOT", str(tmp_path / "trees"))
     attached = gh.PrAttachment(
         number=321,
@@ -295,53 +290,33 @@ def test_shepherd_resume_reuses_stable_tree_and_refreshes_current_head(
         is_cross_repository=False,
         maintainer_can_modify=False,
     )
-    b, calls = bounds(
-        tmp_path,
-        attached_pr=attached,
-        pr=gh.HeadPr(
-            number=321,
-            state="OPEN",
-            is_draft=True,
-            base_ref="TRE03/umbrella",
-        ),
-        create_exists=True,
-    )
 
-    result = spawn_subagent(shepherd_spec(), b)
+    def run_round():
+        b, calls = bounds(
+            tmp_path,
+            attached_pr=attached,
+            pr=gh.HeadPr(
+                number=321,
+                state="OPEN",
+                is_draft=True,
+                base_ref="TRE03/umbrella",
+            ),
+        )
+        result = spawn_subagent(shepherd_spec(), b)
+        return calls, result
 
-    planned = layout.plan(calls["spec"])
-    assert calls["refresh_path"] == str(planned.dir)
-    assert calls["refresh_branch"] == "TRE03/WS04"
-    assert result.tree == str(planned.dir)
-    assert result.branch == "TRE03/WS04"
+    first_calls, first = run_round()
+    second_calls, _second = run_round()
 
-
-def test_shepherd_refresh_refuses_uncommitted_work_before_mutating(monkeypatch):
-    monkeypatch.setattr(git, "status_porcelain", lambda *, cwd: [" M work.py"])
-    monkeypatch.setattr(
-        git,
-        "fetch",
-        lambda **kwargs: pytest.fail("dirty attachment must not be fetched"),
-    )
-
-    with pytest.raises(ValueError, match="1 uncommitted path"):
-        _refresh_attached_tree("/tree", "TRE03/WS04")
-
-
-@pytest.mark.parametrize("unpushed", [None, ("a" * 40,)])
-def test_shepherd_refresh_refuses_unknown_or_local_only_commits(monkeypatch, unpushed):
-    monkeypatch.setattr(git, "status_porcelain", lambda *, cwd: [])
-    monkeypatch.setattr(git, "fetch", lambda *, cwd: None)
-    monkeypatch.setattr(git, "checkout", lambda branch, *, cwd: None)
-    monkeypatch.setattr(git, "unpushed_shas", lambda *, cwd: unpushed)
-    monkeypatch.setattr(
-        git,
-        "reset_hard",
-        lambda *args, **kwargs: pytest.fail("unsafe attachment must not be reset"),
-    )
-
-    with pytest.raises(ValueError, match="could not determine|local-only commit"):
-        _refresh_attached_tree("/tree", "TRE03/WS04")
+    # Each round creates a Tree directly — no refresh/reuse seam exists any more.
+    assert first_calls["spec"].branch == "TRE03/WS04"
+    assert first_calls["spec"].base == "origin/TRE03/WS04"
+    assert first.branch == "TRE03/WS04"
+    # Per-Run: the two rounds mint DISTINCT full-UUID <id>s for the same PR.
+    first_id = first_calls["spec"].tree_id
+    second_id = second_calls["spec"].tree_id
+    assert first_id != second_id
+    assert "-" in first_id and "-" in second_id  # full UUIDs, never pids
 
 
 def test_shepherd_wrong_head_pr_is_refused_before_launch(tmp_path):

@@ -124,8 +124,12 @@ def _target_tree(payload: dict[str, object]) -> Path | None:
     """The Tree the payload names, or ``None`` when it names no reclaimable Tree.
 
     Tries each of :data:`_PATH_FIELDS` in order and returns the first value that
-    passes ALL the identity gates: an absolute-izable path that lives UNDER the
-    central root and is a real clone (its ``.git`` is a directory). ADR-0074 retired
+    passes ALL the identity gates: an absolute-izable path that lives STRICTLY UNDER
+    the central root (a Tree is one leaf BELOW the root — the root itself is never a
+    Tree, and ``Path.is_relative_to`` is ``True`` for an equal path, so equality is
+    rejected explicitly lest a payload naming the root, if the root carries a ``.git``,
+    hand the root itself up for removal) and is a real clone (its ``.git`` is a
+    directory). ADR-0074 retired
     the kind segment, so there is no ``ephemeral``-vs-other test to make here — the
     flat leaf carries no kind, this event fires only for the worktree the session
     adopted, and the never-lose-work floor (:func:`_removal_blocker`) is what keeps a
@@ -139,7 +143,7 @@ def _target_tree(payload: dict[str, object]) -> Path | None:
         if not isinstance(value, str) or not value:
             continue
         candidate = Path(value).resolve()
-        if not candidate.is_relative_to(root):
+        if candidate == root or not candidate.is_relative_to(root):
             continue
         if not (candidate / ".git").is_dir():
             continue

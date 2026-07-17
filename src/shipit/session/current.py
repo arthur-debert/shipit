@@ -24,24 +24,11 @@ every resolver agree on what a Tree looks like by construction.
 from __future__ import annotations
 
 import os
-import re
 from collections.abc import Mapping
 from pathlib import Path
 
 from .. import logcontext
 from ..tree import layout
-
-#: A Tree dir leaf's trailing ``<id>`` — a full UUID (ADR-0074 / naming.lex §4). The
-#: flat leaf is ``<repo>-<agent>-<timestamp>-<id>`` where ``<repo>`` may itself carry
-#: hyphens and ``<timestamp>`` is ``YYYYmmdd-HHMMSS`` (one hyphen), so a plain split is
-#: ambiguous — the UUID is recovered by matching its ``8-4-4-4-12`` hex shape ANCHORED
-#: to the end of the leaf. For a coordinator session Tree this ``<id>`` IS the harness
-#: session UUID (worktreecreate binds it — ADR-0074), so it is the resume/log-context
-#: session id; for a minted Tree it is that Run's own UUID.
-_TREE_ID_TAIL = re.compile(
-    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
-    re.IGNORECASE,
-)
 
 
 def containing_tree(cwd: Path) -> Path | None:
@@ -59,6 +46,13 @@ def containing_tree(cwd: Path) -> Path | None:
     WITHIN it (a bare shell wanders into ``src/``): truncating to the first segment
     below the root recovers the Tree either way.
 
+    The first segment must be a CONFORMING flat leaf
+    (:func:`shipit.tree.layout.parse_flat_leaf`) — its ``<agent>`` a backend binary,
+    ``<timestamp>`` a real ``%Y%m%d-%H%M%S`` stamp, ``<id>`` a full UUID — else
+    ``None``. That is what keeps an OLD nested Tree (whose top segment is an owner
+    or a kind, not a flat leaf; it coexists by attrition) and any arbitrary non-Tree
+    directory under the root from being mis-identified as a Tree.
+
     Raises whatever the environment read raises (a relative ``SHIPIT_TREES_ROOT`` is a
     :class:`ValueError` from ``central_root``); callers pick their own fail-open
     calibration — the SessionStart hook skips at DEBUG, :func:`current_session_id`
@@ -71,6 +65,8 @@ def containing_tree(cwd: Path) -> Path | None:
     parts = resolved.relative_to(root).parts
     if not parts:
         return None
+    if layout.parse_flat_leaf(parts[0]) is None:
+        return None
     return root / parts[0]
 
 
@@ -82,14 +78,15 @@ def current_session_id(
     Environment first — ``SHIPIT_LOG_CTX_SESSION``, the SessionStart hook's export
     (the var name comes from :data:`shipit.logcontext.ENV_PREFIX`, so exporter and
     resolver can never disagree on naming) — then the containing flat Tree's ``<id>``
-    for the hook-less case (a bare shell ``cd``'d into a Tree). The path fallback
-    recovers the trailing UUID from the leaf (:data:`_TREE_ID_TAIL`), which for a
-    coordinator session Tree IS the harness session id. Never raises: any detection
-    error (a broken ``SHIPIT_TREES_ROOT``, a vanished cwd) degrades to ``None``,
-    because "which session am I in" is an identification question and an
-    unidentifiable session is a valid answer, not a crash. ``env``/``cwd`` default to
-    the real process environment and working directory; both are injectable so tests
-    never read the real ones.
+    for the hook-less case (a bare shell ``cd``'d into a Tree). The path fallback reads
+    the ``<id>`` from the leaf through :func:`shipit.tree.layout.parse_flat_leaf` — the
+    SAME recognizer :func:`containing_tree` gated on, so a non-conforming leaf never
+    reaches here — which for a coordinator session Tree IS the harness session id.
+    Never raises: any detection error (a broken ``SHIPIT_TREES_ROOT``, a vanished cwd)
+    degrades to ``None``, because "which session am I in" is an identification question
+    and an unidentifiable session is a valid answer, not a crash. ``env``/``cwd``
+    default to the real process environment and working directory; both are injectable
+    so tests never read the real ones.
     """
     env = os.environ if env is None else env
     exported = env.get(logcontext.ENV_PREFIX + "SESSION")
@@ -101,5 +98,5 @@ def current_session_id(
         return None
     if tree is None:
         return None
-    match = _TREE_ID_TAIL.search(tree.name)
-    return match.group(0) if match else None
+    leaf = layout.parse_flat_leaf(tree.name)
+    return leaf.tree_id if leaf is not None else None

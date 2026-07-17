@@ -419,6 +419,33 @@ def test_coordinator_tree_id_is_the_harness_session_uuid_never_a_pid(fake_repo):
     assert "4242" not in out  # the launch name's pid never reaches the dir
 
 
+@pytest.mark.parametrize(
+    "bad_sid", ["d1", "c6010bf9", "", "not-a-uuid", "../escape", "c6010bf9-1234"]
+)
+def test_coordinator_non_uuid_session_id_is_refused_and_a_uuid_minted(
+    bad_sid, fake_repo
+):
+    # Finding B (ADR-0074): a coordinator `session_id` that is NOT a full UUID — a pid, a
+    # truncated prefix, empty, or a path-bearing value — must never become the flat dir
+    # <id>: it would mint an unresolvable session Tree (or one whose leaf escapes the
+    # central root). The hook mints a fresh full UUID instead of trusting the raw value,
+    # so the leaf is always a real, resolvable, full-UUID <id>.
+    payload = json.dumps(
+        {
+            "session_id": bad_sid,
+            "cwd": "/coordinator/checkout",
+            "hook_event_name": "WorktreeCreate",
+            "name": "sess-1",
+        }
+    )
+    code, out = _run(payload)
+    assert code == 0
+    spec = fake_repo["spec"]
+    assert spec.tree_id != bad_sid  # the raw value is refused
+    assert re.fullmatch(_UUID_RE, spec.tree_id)  # a freshly minted full UUID
+    assert out.strip().endswith(spec.tree_id)
+
+
 def test_helper_tree_id_is_minted_not_the_parents_session_id(monkeypatch, fake_repo):
     # ADR-0074: on the helper arm the payload's session_id is the PARENT's, so the
     # hook MINTS a fresh UUID for the dir <id> rather than carrying it — naming the
