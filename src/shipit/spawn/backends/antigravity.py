@@ -130,22 +130,8 @@ def supports_agent_flag(*, binary: str = "agy") -> bool:
 
 
 def require_agent_support(*, binary: str = "agy") -> None:
-    """Raise a clean UPGRADE error if the installed ``agy`` lacks ``--agent``.
-
-    The reviewer posture (:meth:`AntigravityAdapter.build_command` with
-    ``read_only=True`` and the reviewer role) now depends on the native
-    ``--agent`` flag (issue #989). A real reviewer launch calls this at preflight
-    so an ``agy`` older than 1.1.2 fails with a targeted "upgrade agy" message
-    instead of a confusing ``unknown option --agent`` from the CLI mid-run. Raises
-    :class:`RuntimeError`; the producer maps preflight failures to a clean funnel
-    outcome. No-ops when the flag is present.
-    """
-    if not supports_agent_flag(binary=binary):
-        raise RuntimeError(
-            f"the installed '{binary}' CLI does not support the '--agent' flag, "
-            "which the shipit reviewer posture now requires (AGY >= 1.1.2, issue "
-            f"#989). Upgrade '{binary}' to 1.1.2 or newer and re-run."
-        )
+    """No longer required (was used for issue #989, reverted in #1033)."""
+    pass
 
 
 def resolve_model(model: str) -> str:
@@ -252,12 +238,12 @@ class AntigravityAdapter(BackendAdapter):
                 "ignores its process cwd and roots only via `--add-dir <Tree>`; without "
                 "it the Run's writes land in agy's scratch dir, not the Tree."
             )
-        # The reviewer posture (read-only + the reviewer role) rides AGY 1.1.2's native
-        # custom-agent def (#989): select `--agent reviewer` and pass the review task
-        # unadorned. Every other posture conveys its role by prompt-prepend.
-        reviewer_posture = read_only and role == REVIEWER_AGENT
-        agent_flag = ["--agent", REVIEWER_AGENT] if reviewer_posture else []
-        prompt = task if reviewer_posture else role_prompt(task, role)
+        # The reviewer posture used to ride AGY 1.1.2's native custom-agent def
+        # (#989) via `--agent reviewer`. This was reverted in #1033 because Flash
+        # or the custom-agent posture caused it to explore instead of returning JSON.
+        # It now conveys its role by prompt-prepend like every other posture.
+        agent_flag = []
+        prompt = role_prompt(task, role)
         permission = [] if read_only else ["--dangerously-skip-permissions"]
         return [
             "agy",

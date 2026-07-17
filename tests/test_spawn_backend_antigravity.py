@@ -66,10 +66,10 @@ def test_build_command_carries_bypass_permissions_for_a_write_run():
     assert "--dangerously-skip-permissions" in cmd
 
 
-def test_reviewer_build_command_uses_the_native_agent_and_direct_task():
-    # Reviewer posture (#989): read_only + the reviewer role selects AGY 1.1.2's native
-    # `--agent reviewer` def and passes the review task DIRECTLY (no legacy role-prepend
-    # sentence). It still OMITS --dangerously-skip-permissions (WS04a: agy runs the
+def test_reviewer_build_command_uses_direct_task_and_no_agent():
+    # Reviewer posture (issue #1033): read_only + the reviewer role. We reverted the
+    # `--agent reviewer` def since it goes agentic and fails. We now pass the review task
+    # using prompt-prepend. It still OMITS --dangerously-skip-permissions (WS04a: agy runs the
     # network shell commands a reviewer needs without it, and read-only rides the chmod'd
     # Tree, ADR-0020 §Decision 3), and the --add-dir cwd-rooting / model / timeout are
     # unchanged.
@@ -82,10 +82,8 @@ def test_reviewer_build_command_uses_the_native_agent_and_direct_task():
         TREE,
         "--model=Gemini 3.1 Pro (High)",
         "--print-timeout=600s",
-        "--agent",
-        "reviewer",
         "--print",
-        "review it",
+        "You are acting as the 'reviewer' role for this Run.\n\nreview it",
     ]
 
 
@@ -97,17 +95,15 @@ def test_reviewer_build_command_still_requires_cwd():
 
 
 def test_write_and_reviewer_argv_differ_by_posture():
-    # The reviewer posture (#989) differs from the write posture in exactly three ways:
-    # it drops --dangerously-skip-permissions, adds `--agent reviewer`, and passes the
-    # task directly instead of prompt-prepending the role. The write run is unchanged.
+    # The reviewer posture differs from the write posture in exactly one way:
+    # it drops --dangerously-skip-permissions. The write run is unchanged.
     write = AGY.build_command("t", "reviewer", cwd=TREE)
     reviewer = AGY.build_command("t", "reviewer", cwd=TREE, read_only=True)
     assert write != reviewer
     assert "--dangerously-skip-permissions" in write
     assert "--agent" not in write
     assert write[-1] == "You are acting as the 'reviewer' role for this Run.\n\nt"
-    assert reviewer[reviewer.index("--agent") + 1] == "reviewer"
-    assert reviewer[-1] == "t"
+    assert reviewer[-1] == "You are acting as the 'reviewer' role for this Run.\n\nt"
 
 
 def test_read_only_non_reviewer_role_keeps_prompt_prepend_and_no_agent():
@@ -156,29 +152,6 @@ def test_supports_agent_flag_probes_agy_help(monkeypatch):
     monkeypatch.setattr(agy_backend.execrun, "run", fake_run)
     assert agy_backend.supports_agent_flag() is True
     assert calls["argv"] == ["agy", "--help"]
-    agy_backend.require_agent_support()  # no raise when supported
-
-
-def test_require_agent_support_raises_upgrade_message_when_flag_absent(monkeypatch):
-    # An `agy` predating `--agent` fails with a targeted UPGRADE error, never a
-    # confusing mid-run "unknown option" from the CLI.
-    from shipit import execrun
-
-    monkeypatch.setattr(agy_backend.shutil, "which", lambda _b: "/usr/bin/agy")
-    monkeypatch.setattr(
-        agy_backend.execrun,
-        "run",
-        lambda *a, **k: execrun.ExecResult(
-            argv=("agy", "--help"),
-            rc=0,
-            stdout="usage: agy ...\n",
-            stderr="",
-            duration_ms=0,
-        ),
-    )
-    assert agy_backend.supports_agent_flag() is False
-    with pytest.raises(RuntimeError, match="does not support the '--agent' flag"):
-        agy_backend.require_agent_support()
 
 
 def test_supports_agent_flag_false_when_binary_missing(monkeypatch):
