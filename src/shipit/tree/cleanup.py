@@ -19,13 +19,18 @@ untouched by it.
 - **``unpushed``** — commits that exist on NO remote. Retained deliberately: a clean
   Tree whose commits were never pushed reads as idle, and without this floor it is
   deleted at 48h and those commits die with ``.git``, unrecoverable.
-- **``idle``** — ``now - newest file mtime``, over a pruned walk
-  (:func:`shipit.tree.activity.newest_mtime`, carried on the record as
-  :attr:`~shipit.tree.registry.TreeRecord.newest_mtime`).
+- **``idle``** — how long since anyone touched the Tree: ``now`` less the NEWEST of the
+  pruned activity walk (:func:`shipit.tree.activity.newest_mtime`, carried on the
+  record as :attr:`~shipit.tree.registry.TreeRecord.newest_mtime`) and HEAD's commit
+  stamp. The walk decides; the commit stamp is maxed in and can only ever KEEP, and it
+  earns that for one shape the walk structurally cannot see — a commit that only
+  DELETES files writes no file whose mtime survives it (:func:`_idle_seconds`).
 
 Three signals. **No PR state, no pidfile, no ``ps`` probe, no kind dispatch** — review,
 ephemeral and write Trees reclaim identically, and the ``stale`` bucket is gone with the
-ambiguity it managed.
+ambiguity it managed. The line any new signal has to clear is the one ``idle`` shows: a
+stamp may be maxed in where it can only keep a Tree. A signal that can turn a keep into
+a delete is a new decision input and belongs in an ADR.
 
 Why this replaced three ladders (ADR-0072): they measured PROXIES for "is anyone working
 here", and every proxy was wrong. ``gc`` deleted the worktree of a LIVE Claude session
@@ -44,6 +49,13 @@ has-local-work, and an unreadable activity signal (``newest_mtime is None``) rea
 recently active. The asymmetry is the whole point and must be re-derived from the
 consequence, never inherited by accident: a wrongly-KEPT Tree costs disk until the next
 sweep; a wrongly-DELETED one costs work that no longer exists.
+
+The ADR asks for that keep **and** its report, in the same breath — every such signal
+"keeps the Tree *and is reported, not swallowed*". :func:`is_unexamined` is the second
+half: it names the Trees kept because a signal could not be read rather than because
+they were judged, which is what ``gc`` exits non-zero over. A silent conservative keep
+is indistinguishable from a clean fleet, and that is the failure that let 526 Trees
+accumulate behind a cheerful ``removed 0`` (#1011/#1012).
 """
 
 from __future__ import annotations
@@ -85,8 +97,13 @@ def parse_duration(text: str) -> float:
     with a single unit — ``d`` days, ``h`` hours, ``m`` minutes, ``s`` seconds — and
     returns the equivalent seconds as a float (the type ``classify``'s
     ``idle_threshold_seconds`` expects). A missing/unknown unit, a non-positive or
-    non-integer magnitude, or empty input raises :class:`ValueError`, so a malformed
-    ``--threshold`` becomes a clean exit-1 message rather than a silent default.
+    non-integer magnitude, or empty input raises :class:`ValueError` carrying the
+    reason, so a malformed duration is rejected here rather than silently defaulting.
+
+    Raising is the whole contract: this is a pure parser and holds no exit code.
+    What a caller does with the ``ValueError`` is the caller's to state — the CLI
+    reaches this through :class:`~shipit.verbs._params.DurationParam`, which turns it
+    into a click usage error at argv parse (ADR-0030's exit contract).
     """
     raw = text.strip().lower()
     if not raw:
@@ -148,13 +165,19 @@ def classify(
        is ``None`` (the walk failed, or found no eligible file). Unknown is not false;
        a filesystem hiccup must never license a delete.
     3. **idle > the threshold → removable**, else **keep** — the Tree holds nothing that
-       is not on a remote and nobody has written a file in it for two days.
+       is not on a remote and nobody has touched it for two days. Idle is the newest of
+       the activity walk and HEAD's commit stamp (:func:`_idle_seconds`).
 
     PR state, session liveness, provisioning SHAs and the Tree's kind are all absent on
     purpose: they were proxies for step 3's question, and the walk answers it directly
     (see the module docstring and ADR-0072). Do NOT reintroduce one as a "backstop" —
     a liveness probe would fire only for a session that writes no file for two days,
     which is precisely the regime its false-negatives inhabit (#1018).
+
+    The bar any future signal must clear is the one :func:`_idle_seconds` states: a
+    stamp may only be MAXED INTO step 3, where it can keep a Tree and never delete one.
+    A signal that can flip a keep to a removable is a new decision input and belongs in
+    an ADR, not in this function.
     """
     buckets: dict[str, list[TreeRecord]] = {"removable": [], "keep": []}
     for record in records:
@@ -199,22 +222,44 @@ def _is_removable(
 
 
 def _idle_seconds(record: TreeRecord, *, now: float) -> float | None:
-    """How long since ANY file in the Tree was written — ``None`` when unreadable. Pure.
+    """How long since anyone last worked in the Tree — ``None`` when unreadable. Pure.
 
-    Reads :attr:`~shipit.tree.registry.TreeRecord.newest_mtime`, the pruned walk the
-    scan already paid for (:func:`shipit.tree.activity.newest_mtime`, ~1.9ms), so this
-    stays pure — no clock, no I/O (ADR-0030).
+    The newest of the activity walk (:attr:`~shipit.tree.registry.TreeRecord.newest_mtime`,
+    ADR-0072's measured signal) and HEAD's committer stamp
+    (:attr:`~shipit.tree.registry.TreeRecord.last_commit`). Both ride the record the scan
+    already paid for, so this stays pure — no clock, no I/O (ADR-0030).
 
-    ``None`` propagates: it means the signal could not be established, which is NOT
-    evidence of idleness, so the caller keeps the Tree (``unpushed_shas``'
-    unreadable-reads-conservative discipline). It is deliberately NOT combined with the
-    root mtime or the commit stamp: both are strictly weaker (the root's lags by up to
-    10h and the commit stamp is blind to an uncommitted session), and a Tree whose walk
-    failed is kept anyway, so neither adds safety here.
+    ``None`` propagates when the WALK failed: that is the signal that could not be
+    established, and an unreadable signal is not evidence of idleness, so the caller
+    keeps the Tree (ADR-0072's unknown-is-not-false rule, and ``unpushed_shas``'
+    unreadable-reads-conservative discipline). A missing ``last_commit`` is not the same
+    thing and does not blank the answer — the walk still measured it.
+
+    **Why the commit stamp is maxed in, when ADR-0072 calls it a proxy.** It is one, and
+    it would be wrong ALONE — that is the ADR's point, and why the walk decides. But
+    ``max`` cannot make a weak signal dangerous: every extra stamp can only push idle
+    DOWN, i.e. only ever KEEP. What it buys is a hole the walk cannot see. A file's mtime
+    records writes to that file, and a commit that DELETES a file writes nothing that
+    survives it: the entry leaves its parent directory (dirs are not eligible) and the
+    commit lands in ``.git`` (pruned). So an agent in an old Tree that deletes a file,
+    commits and pushes leaves the Tree clean, fully pushed, and reading its PRE-deletion
+    mtime — removable, seconds after real work. That is #1018's own shape (a live Run's
+    Tree deleted under it) reappearing through a gap in the measurement, and the ADR's
+    asymmetry — a wrongly-kept Tree costs disk, a wrongly-deleted one costs a running
+    session — settles which way to resolve it. This restores to the one rule the
+    ``max(..., last_commit)`` the WRITE ladder already had and the ephemeral one never
+    got (ADR-0072's Context names that missing patch as the root cause).
+
+    The root mtime (:attr:`~shipit.tree.registry.TreeRecord.mtime`) stays out: it is
+    strictly weaker than the walk, which already observes everything it does and more
+    (ADR-0072 measured it lagging by up to 10h), so it would add cost and no keeps.
     """
     if record.newest_mtime is None:
         return None
-    return now - record.newest_mtime
+    newest = record.newest_mtime
+    if record.last_commit is not None:
+        newest = max(newest, record.last_commit)
+    return now - newest
 
 
 def _has_local_only_work(record: TreeRecord) -> bool:
@@ -241,3 +286,42 @@ def _has_local_only_work(record: TreeRecord) -> bool:
     if record.dirty:
         return True
     return record.unpushed_shas is None or bool(record.unpushed_shas)
+
+
+def is_unexamined(record: TreeRecord) -> bool:
+    """Whether ``record`` is kept because a signal was UNREADABLE, not because it was
+    judged. Pure.
+
+    Not a third bucket (:class:`Cleanup` has two, and ADR-0072 deleted ``stale`` on
+    purpose): every unexamined Tree is already in ``keep``. This only asks WHY it is
+    there — "the rule ran and said keep" or "the rule could not run". Both are keeps;
+    only the second means gc could not see the fleet, and that is a reporting fact, not
+    a decision one, so nothing here reaches :func:`_is_removable`.
+
+    The arms mirror the rule's short-circuit exactly, because "the signal that decided
+    it" is only meaningful in the order the rule actually consults them:
+
+    - ``dirty``, or a readable non-empty ``unpushed_shas`` → **examined**. The Tree is
+      kept on POSITIVE evidence; an unreadable walk underneath changes nothing, because
+      the floor already decided and the walk was never reached.
+    - ``unpushed_shas is None`` → **unexamined**. The floor fired on a read that failed
+      (:func:`_has_local_only_work`), so the keep rests on a git hiccup, not a fact.
+    - ``newest_mtime is None`` → **unexamined**. The activity walk failed or found no
+      eligible file, so the idle question was never answered
+      (:func:`shipit.tree.activity.newest_mtime`).
+    - otherwise → **examined**: idle was measured and compared.
+
+    This is the load-bearing half of ADR-0072's unknown-is-not-false rule. The keep is
+    the safe half and :func:`_is_removable` already does it; the ADR asks for the other
+    half in the same breath — every such signal "keeps the Tree **and is reported, not
+    swallowed**". A silent conservative keep is indistinguishable from a clean fleet,
+    which is the whole of #1011/#1012: a sweep that reads nothing reports ``removed 0``
+    and exits 0, and looks exactly like a sweep with nothing to do.
+    """
+    if record.dirty:
+        return False
+    if record.unpushed_shas is None:
+        return True
+    if record.unpushed_shas:
+        return False
+    return record.newest_mtime is None

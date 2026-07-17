@@ -725,7 +725,7 @@ def test_run_gc_renders_sweep_failures_on_stderr(monkeypatch, capsys):
         failed=(tree_verb.gc.GcFailure(path="/trees/bad", error="read-only file"),),
         kept=0,
         total=2,
-        unknown=0,
+        unexamined=0,
     )
     monkeypatch.setattr(layout_mod, "central_root", lambda: "/trees")
     monkeypatch.setattr(registry_mod, "scan", lambda r: [])
@@ -803,7 +803,7 @@ def _capture_plan_fleet(monkeypatch) -> dict:
         return tree_verb.gc.GcPlan(
             partition=tree_verb.cleanup.Cleanup(removable=[], keep=[]),
             total=0,
-            unknown=0,
+            unexamined=0,
         )
 
     monkeypatch.setattr(tree_verb.gc, "plan_fleet", fake_plan_fleet)
@@ -859,65 +859,85 @@ def test_gc_bad_threshold_is_a_usage_error(monkeypatch, capsys):
 def test_run_gc_incomplete_sweep_is_loud_and_exits_nonzero(
     tmp_path, monkeypatch, capsys
 ):
-    # When any Tree's PR state is UNKNOWN the sweep saw only part of the root, so it
-    # reports FAILURE (#1012): exit 1, and a summary that LEADS with the skip rather
-    # than burying it under a healthy-looking count. The report is orthogonal to the
-    # rule (which reads no PR state at all since ADR-0072) and still correct: a repo
-    # whose read failed is one this sweep cannot claim to have fully vouched for.
+    # When a Tree is kept because a signal could not be READ, the run judged only part
+    # of the root, so it reports FAILURE (#1012): exit 1, and a summary that LEADS with
+    # the gap rather than burying it under a healthy-looking count.
     root = tmp_path / "trees"
-    readable = _make_tree_dir(root, "acme/widget/issues/1/work-idle")
-    unknown = _make_tree_dir(root, "acme/widget/issues/2/work-unknown")
+    judged = _make_tree_dir(root, "acme/widget/issues/1/work-idle")
+    blind = _make_tree_dir(root, "acme/widget/issues/2/work-unreadable")
     records = [
-        _record(path=str(readable), branch="b1", mtime=0.0, pr_state="MERGED"),
-        _record(
-            path=str(unknown),
-            branch="b2",
-            mtime=_time.time(),  # a file was written just now -> kept on ACTIVITY
-            pr_state="UNKNOWN",
-        ),
+        _record(path=str(judged), branch="b1", mtime=0.0),
+        # The activity walk failed: unreadable, so kept WITHOUT a verdict.
+        _record(path=str(blind), branch="b2", mtime=0.0, newest_mtime=None),
     ]
     monkeypatch.setattr(layout_mod, "central_root", lambda: str(root))
     monkeypatch.setattr(registry_mod, "scan", lambda r: records)
 
     rc = tree_verb.run_gc()
 
-    assert rc == 1  # a partly-seen root is not a successful sweep
-    assert not readable.exists()  # the idle Tree is reclaimed
-    assert unknown.exists()  # the active one is kept — on its activity, not its PR
+    assert rc == 1  # a partly-judged root is not a successful sweep
+    assert not judged.exists()  # the idle Tree is reclaimed
+    assert blind.exists()  # the unreadable one is kept, unexamined
     captured = capsys.readouterr()
-    assert "swept 1 of 2; 1 skipped" in captured.err
-    # The operator is told the skipped Trees were not judged safe ...
-    assert "kept UNEXAMINED" in captured.err
-    # ... and what actually causes this, rather than being left with a mystery.
-    assert "gh api rate_limit" in captured.err
-    # The summary leads with the skip; the counts follow.
+    assert "judged 1 of 2; 1 kept UNEXAMINED" in captured.err
+    # The operator is told those Trees were not judged safe ...
+    assert "not judged safe" in captured.err
+    # ... and is pointed at the machine the failure is actually on. The old text sent
+    # them to `gh api rate_limit` — a network budget that no longer gates anything.
+    assert "gh api rate_limit" not in captured.err
+    assert "local" in captured.err
+    # The summary leads with the gap; the counts follow.
     assert (
-        "gc: INCOMPLETE — 1 of 2 skipped (PR state unknown); "
+        "gc: INCOMPLETE — 1 of 2 unexamined (a signal could not be read); "
         "removed 1, kept 1" in captured.out
     )
 
 
-def test_run_gc_incomplete_view_leads_with_the_repo_shaped_cause(
+def test_run_gc_never_reports_a_tree_it_deleted_as_unexamined(
     tmp_path, monkeypatch, capsys
 ):
-    # #1011: the PR state is now read once per REPO, so a sweep makes ~20 calls, not
-    # ~1000. A drained hourly quota is therefore no longer the likely cause of an
-    # UNKNOWN — one repo's `gh pr list` failing is — and one such failure blanks every
-    # Tree in that repo. So the repo-shaped cause LEADS and the rate limit is demoted
-    # to the fleet-wide case where it is still right. Pointing an operator at a quota
-    # that is fine costs them a 25-minute wait for nothing: a confident wrong
-    # diagnosis is worse than none.
+    # The regression, end-to-end through the real verb (the unit test pins the count;
+    # this pins what an operator actually READS). An UNKNOWN PR state used to be
+    # counted as skipped while the very same run deleted the Tree, printing
+    # `INCOMPLETE - 1 of 2 skipped; removed 2, kept 0` and exiting 1 — a destructive
+    # command's audit trail contradicting the destruction. PR state decides nothing
+    # now, so it says nothing either.
     root = tmp_path / "trees"
-    unknown = _make_tree_dir(root, "acme/widget/issues/1/work-unknown")
+    plain = _make_tree_dir(root, "acme/widget/issues/1/work-idle")
+    unknown = _make_tree_dir(root, "acme/widget/issues/2/work-unknown")
     records = [
-        _record(
-            path=str(unknown),
-            branch="b1",
-            dirty=False,
-            ahead=0,
-            mtime=0.0,
-            pr_state="UNKNOWN",
-        ),
+        _record(path=str(plain), branch="b1", mtime=0.0, pr_state="MERGED"),
+        # Idle, clean, fully pushed — and its PR read failed. It IS removable.
+        _record(path=str(unknown), branch="b2", mtime=0.0, pr_state="UNKNOWN"),
+    ]
+    monkeypatch.setattr(layout_mod, "central_root", lambda: str(root))
+    monkeypatch.setattr(registry_mod, "scan", lambda r: records)
+
+    rc = tree_verb.run_gc()
+
+    captured = capsys.readouterr()
+    assert not plain.exists()
+    assert not unknown.exists()  # both were deleted ...
+    assert "removed 2, kept 0" in captured.out  # ... and the report says exactly that
+    assert "INCOMPLETE" not in captured.out
+    assert "UNEXAMINED" not in captured.err
+    assert rc == 0  # the whole root was judged; nothing was skipped
+
+
+def test_run_gc_incomplete_view_names_a_local_cause_not_a_network_one(
+    tmp_path, monkeypatch, capsys
+):
+    # Naming a cause is the point (#1011): a bare "1 unexamined" is a mystery an
+    # operator will either ignore or go hunting over. But the cause text has to follow
+    # the SIGNALS, and ADR-0072 changed which ones can hide a Tree from the rule. It
+    # used to name the PR read (a drained `gh` budget, then one repo's failed
+    # `gh pr list`); reclaim reads no PR state at all now. What is left is the rule's
+    # own two arms, and both are LOCAL. Sending an operator to check `gh api rate_limit`
+    # for what is a filesystem problem is a confident wrong diagnosis — worse than none.
+    root = tmp_path / "trees"
+    blind = _make_tree_dir(root, "acme/widget/issues/1/work-unreadable")
+    records = [
+        _record(path=str(blind), branch="b1", mtime=0.0, unpushed_shas=None),
     ]
     monkeypatch.setattr(layout_mod, "central_root", lambda: str(root))
     monkeypatch.setattr(registry_mod, "scan", lambda r: records)
@@ -926,41 +946,30 @@ def test_run_gc_incomplete_view_leads_with_the_repo_shaped_cause(
 
     assert rc == 1
     err = capsys.readouterr().err
-    per_repo = err.index("read once per repo")
-    rate_limit = err.index("gh api rate_limit")
-    # Both are offered, but the repo-shaped cause comes FIRST.
-    assert per_repo < rate_limit
-    # The budget line is explicitly conditional now, not stated as "the usual cause".
-    assert "if the skip covers most of the fleet" in err
-    assert "the usual cause is an exhausted gh API budget" not in err
+    # It names the two signals that can actually do this ...
+    assert "unpushed-commit list" in err
+    assert "activity walk" in err
+    # ... and points at the right machine.
+    assert "local" in err
+    assert "gh api rate_limit" not in err
+    assert "read once per repo" not in err
 
 
-def test_run_gc_dry_run_warns_on_unknown_and_deletes_nothing(
+def test_run_gc_dry_run_warns_on_an_unexamined_tree_and_deletes_nothing(
     tmp_path, monkeypatch, capsys
 ):
-    # A --dry-run preview over a fleet that contains an unreadable-state Tree must
-    # still surface the incomplete-view warning, yet touch nothing on disk. The
-    # UNKNOWN Tree lands in STALE (conservative).
+    # A --dry-run preview over a fleet holding an unreadable Tree must still surface
+    # the incomplete-view warning, yet touch nothing on disk. The preview is the mode
+    # an operator uses to ASK whether the fleet is clean, so it is the mode that most
+    # has to admit when it does not know (#1011).
     root = tmp_path / "trees"
-    merged = _make_tree_dir(root, "acme/widget/issues/1/work-merged")
-    unknown = _make_tree_dir(root, "acme/widget/issues/2/work-unknown")
+    idle = _make_tree_dir(root, "acme/widget/issues/1/work-idle")
+    blind = _make_tree_dir(root, "acme/widget/issues/2/work-unreadable")
     aged = 0.0
     records = [
-        _record(
-            path=str(merged),
-            branch="b1",
-            dirty=False,
-            ahead=0,
-            mtime=aged,
-            pr_state="MERGED",
-        ),
-        _record(
-            path=str(unknown),
-            branch="b2",
-            dirty=True,  # local work -> kept on the FLOOR, not on its PR state
-            mtime=aged,
-            pr_state="UNKNOWN",
-        ),
+        _record(path=str(idle), branch="b1", dirty=False, ahead=0, mtime=aged),
+        # The walk failed -> kept WITHOUT a verdict, and counted as such.
+        _record(path=str(blind), branch="b2", mtime=aged, newest_mtime=None),
     ]
     monkeypatch.setattr(layout_mod, "central_root", lambda: str(root))
     monkeypatch.setattr(registry_mod, "scan", lambda r: records)
@@ -973,16 +982,15 @@ def test_run_gc_dry_run_warns_on_unknown_and_deletes_nothing(
     rc = tree_verb.run_gc(dry_run=True)
 
     assert rc == 1  # the preview cannot answer "is the fleet clean?" either
-    assert merged.exists() and unknown.exists()  # nothing deleted in dry-run
+    assert idle.exists() and blind.exists()  # nothing deleted in dry-run
     captured = capsys.readouterr()
     # Preview lists the partition ...
-    assert f"REMOVABLE {merged}" in captured.out
-    assert f"KEEP      {unknown}" in captured.out
+    assert f"REMOVABLE {idle}" in captured.out
+    assert f"KEEP      {blind}" in captured.out
     assert "no Trees deleted" in captured.out
-    # ... and leads its counts with the skip, in the preview's own tense.
-    assert "INCOMPLETE — 1 of 2 skipped (PR state unknown)" in captured.out
-    assert "would sweep 1 of 2; 1 skipped" in captured.err
-    assert "gh api rate_limit" in captured.err
+    # ... and leads its counts with the gap, in the preview's own tense.
+    assert "INCOMPLETE — 1 of 2 unexamined (a signal could not be read)" in captured.out
+    assert "would judge 1 of 2" in captured.err
 
 
 def test_run_gc_streams_removals_before_the_summary(tmp_path, monkeypatch, capsys):

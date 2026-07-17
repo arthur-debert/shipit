@@ -22,6 +22,7 @@ from shipit import gh, git
 from shipit.execrun import ExecError
 from shipit.identity import Sha
 from shipit.tree import registry
+from shipit.tree.cleanup import classify
 
 
 def _make_clone(root: Path, rel: str) -> Path:
@@ -411,6 +412,66 @@ def test_last_commit_is_committer_time_so_a_rebase_refreshes_it(tmp_path, real_g
     assert time.time() - author_at > 365 * 86_400
     assert record.last_commit is not None
     assert time.time() - record.last_commit < 60
+
+
+def test_a_deletion_only_commit_is_activity_the_walk_alone_cannot_see(
+    tmp_path, real_git
+):
+    # The hole `last_commit` is maxed in to cover, driven end-to-end rather than
+    # asserted from injected values — the claim is empirical, about what git and the
+    # filesystem actually do.
+    #
+    # An agent working in an OLD Tree deletes a tracked file and commits. Every trace
+    # of that work is somewhere `newest_mtime` cannot look: the removed file is gone,
+    # its parent DIRECTORY's mtime bumped (dirs are not eligible), and the commit
+    # itself landed in `.git` (pruned). No surviving file was written, so the walk
+    # still reports the Tree's pre-deletion age. If idle read the walk alone, this
+    # Tree — clean, fully pushed, and being worked in RIGHT NOW — is removable.
+    clone = tmp_path / "trees" / "acme/widget/issues/3/work-cccc"
+    _real_clone(clone)
+    (clone / "src" / "doomed.py").write_text("delete me\n")
+    _git(["add", "-A"], cwd=clone)
+    _git(["commit", "-qm", "add"], cwd=clone)
+
+    # A real remote, and the work PUSHED to it. Load-bearing, not scenery: without it
+    # every commit is local-only, the never-lose-work floor keeps the Tree, and the
+    # activity arm under test is never reached — the test would pass against the very
+    # bug it exists to catch.
+    origin = tmp_path / "origin.git"
+    _git(["init", "-q", "--bare", str(origin)], cwd=tmp_path)
+    _git(["remote", "add", "origin", str(origin)], cwd=clone)
+    _git(["push", "-q", "origin", "HEAD"], cwd=clone)
+
+    # Age every file in the clone: the Tree was cut days ago and has sat quiet since.
+    stale = time.time() - 10 * 86_400
+    for path in clone.rglob("*"):
+        if path.is_file():
+            os.utime(path, (stale, stale))
+    os.utime(clone, (stale, stale))
+
+    # The work: a commit that only REMOVES. `git rm` deletes the file from disk.
+    _git(["rm", "-q", "src/doomed.py"], cwd=clone)
+    _git(["commit", "-qm", "drop the dead module"], cwd=clone)
+    _git(["push", "-q", "origin", "HEAD"], cwd=clone)
+
+    (record,) = registry.scan(tmp_path / "trees")
+    # The floor is silent: nothing is dirty and every commit is on the remote, so the
+    # Tree's fate rests entirely on the activity arm.
+    assert record.dirty is False
+    assert record.unpushed_shas == ()
+    # The empirical claim, asserted rather than assumed: the walk saw nothing. Every
+    # remaining file still carries its backdated stamp.
+    assert record.newest_mtime is not None
+    assert time.time() - record.newest_mtime > 9 * 86_400
+    # ...while the commit stamp did see it.
+    assert record.last_commit is not None
+    assert time.time() - record.last_commit < 60
+
+    # So the rule keeps the Tree. Reading the walk alone, it would be deleted seconds
+    # after real work — #1018's shape, through a gap in the measurement.
+    decision = classify([record], time.time())
+    assert decision.removable == []
+    assert [r.path for r in decision.keep] == [record.path]
 
 
 def test_unreadable_last_commit_reads_as_none(tmp_path, real_git):

@@ -312,7 +312,7 @@ def test_gc_sweep_logs_milestone_and_incomplete_view_warning(tmp_path, caplog):
             removable=[_tree_record(str(leaf), mtime=0.0)], keep=[]
         ),
         total=3,
-        unknown=1,
+        unexamined=1,
     )
 
     with caplog.at_level(logging.INFO, logger="shipit.tree"):
@@ -336,7 +336,7 @@ def test_gc_sweep_failure_is_a_warning_with_the_exception_and_continues(
     plan = gc_mod.GcPlan(
         partition=cleanup.Cleanup(removable=[record], keep=[]),
         total=1,
-        unknown=0,
+        unexamined=0,
     )
 
     def boom(path):

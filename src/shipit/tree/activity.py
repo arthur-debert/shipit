@@ -25,12 +25,20 @@ file count (ADR-0072; re-measured here at ~425ms vs ~7ms on a 155-Tree fleet, th
 this signal deletes, which is why :data:`PRUNE_DIRS` is part of the decision and not
 a tuning knob.
 
-**Unreadable is not idle** (ADR-0072): every failure mode — an unreadable directory,
-a broken symlink, a file removed mid-walk, a ``stat`` that raises, a Tree with no
-eligible file at all — returns ``None``, which every caller reads as KEEP. A boolean
-rule has nowhere to put "I could not tell", and that gap would be a deletion licence:
-a wrongly-kept Tree costs disk until the next sweep, a wrongly-deleted one costs work
-that no longer exists.
+**Unreadable is not idle** (ADR-0072): every failure mode — an unreadable directory
+(``os.walk``'s errors are re-raised, not swallowed; see :func:`_reraise`), a file
+removed mid-walk, a ``stat`` that raises, a Tree with no eligible file at all —
+returns ``None``, which every caller reads as KEEP. A boolean rule has nowhere to put
+"I could not tell", and that gap would be a deletion licence: a wrongly-kept Tree
+costs disk until the next sweep, a wrongly-deleted one costs work that no longer
+exists.
+
+A broken symlink is NOT among those failure modes, though ADR-0072 lists it as one.
+The ADR is enumerating cases where the answer cannot be established, and for this one
+it can: the walk reads links with ``lstat``, so a link whose target is gone still has
+its OWN mtime, which is the stamp we want and is exactly as readable as any file's.
+Blanking the whole Tree's signal over it would be strictly worse than the ADR's own
+intent — it is the unknown-is-KEEP rule applied to something that is not unknown.
 """
 
 from __future__ import annotations
@@ -59,6 +67,20 @@ PRUNE_DIRS = frozenset(
         "__pycache__",
     }
 )
+
+
+def _reraise(error: OSError) -> None:
+    """Re-raise a traversal error out of :func:`os.walk` — the unknown-is-KEEP hinge.
+
+    ``os.walk`` SWALLOWS ``scandir`` failures by default: an unreadable directory is
+    silently skipped and the walk completes normally, returning the maximum over
+    whatever it *could* read. For this signal that default is a deletion licence —
+    a Tree with an unreadable subtree would report the stale mtime of its readable
+    files, and that number, unlike ``None``, licenses a delete (ADR-0072's
+    unknown-is-not-false rule). Passing this as ``onerror`` turns the swallowed error
+    back into the ``OSError`` that :func:`newest_mtime` catches and reports as ``None``.
+    """
+    raise error
 
 
 def newest_mtime(path: str | Path) -> float | None:
@@ -91,7 +113,7 @@ def newest_mtime(path: str | Path) -> float | None:
         if not root.is_dir():
             logger.debug("tree activity: %s is not a directory; idle unreadable", root)
             return None
-        for dirpath, dirnames, filenames in os.walk(root):
+        for dirpath, dirnames, filenames in os.walk(root, onerror=_reraise):
             # Prune IN PLACE so os.walk never descends — the whole point (ADR-0072).
             dirnames[:] = [name for name in dirnames if name not in PRUNE_DIRS]
             for name in filenames:

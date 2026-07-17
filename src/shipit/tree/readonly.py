@@ -20,6 +20,15 @@ This is a clean variant of the write path, not a fork: it reuses the same
 and skips exactly the two write-only steps (include + provision). The
 ``chmod``-read-only is a guardrail, not the security boundary (ADR-0018): it
 catches an accidental write and keeps a shared clone trustworthy for its co-tenants.
+
+Every acquisition — a fresh clone and a reuse alike — leaves an ACTIVITY STAMP
+(:data:`_ACQUIRED_STAMP`). Sharing is what makes it necessary: a per-Run Tree is
+written at create, so its own files date it, but a shared leaf outlives every Run
+that used it and a reviewer only ever READS the checkout it was handed. Nothing else
+on the reuse path writes an eligible file either, so without the stamp reclaim would
+date an aged shared leaf by its PR head's last movement and delete it under a
+reviewer who acquired it a second ago (ADR-0072). ADR-0074 makes review Trees per-Run
+and dissolves this along with the sharing.
 """
 
 from __future__ import annotations
@@ -54,6 +63,36 @@ _GIT_DIR = ".git"
 #: read bits (and any execute bits) are left untouched, so a reviewer can still
 #: read every file and run a tracked script while a write fails fast.
 _WRITE_BITS = 0o222
+
+#: The acquisition stamp: an empty file at the Tree ROOT, (re)touched every time a
+#: reviewer Run takes this shared leaf (:func:`_stamp_acquisition`).
+#:
+#: It exists because acquiring a shared review Tree was, uniquely, ACTIVITY THAT LEFT
+#: NO TRACE. Reclaim measures the newest file mtime under the Tree
+#: (:func:`shipit.tree.activity.newest_mtime`, ADR-0072), and every step of a reuse
+#: misses it: ``fetch`` writes only under the pruned ``.git``; ``checkout``/``reset``
+#: at an UNCHANGED head rewrite no working file; ``chmod`` moves ctime, not mtime; and
+#: a reviewer only ever READS the checkout it was handed. So a shared leaf's newest
+#: mtime measures when its PR head last moved — not when a reviewer last used it — and
+#: a Tree cloned three days ago on a quiet head, handed to a reviewer THIS SECOND, is
+#: clean, fully pushed and >48h idle: removable, mid-review.
+#:
+#: The stamp fixes the EVENT, not the rule: it gives acquisition the filesystem trace
+#: it always should have had, so the one measured signal keeps answering the one
+#: question. That is deliberately not a fourth signal — ADR-0072 fixed the rule at
+#: three, and a Tree kind or a lease read would be exactly the proxy it deleted.
+#:
+#: At the root (not in ``.git``) because the walk prunes ``.git``; git-EXCLUDED
+#: because an untracked file at the root would read as ``dirty``, and a permanently
+#: dirty Tree is a permanently unreclaimable one — the floor would swallow the whole
+#: rule for every review Tree. ADR-0074 dissolves the need entirely: per-Run review
+#: Trees are written at create, so their mtimes are their Run's own.
+_ACQUIRED_STAMP = ".shipit-acquired"
+
+#: Where git keeps a clone-local ignore list that needs no tracked ``.gitignore`` —
+#: the one place to hide :data:`_ACQUIRED_STAMP` from ``git status`` without touching
+#: a file the PR under review might itself be changing.
+_GIT_EXCLUDE = "info/exclude"
 
 
 @dataclass(frozen=True)
@@ -163,6 +202,12 @@ def create_readonly(plan: ReadOnlyPlan, *, source_repo: str, github_url: str) ->
         # over submodule-backed content must see the real files, not an empty gitlink.
         # Run BEFORE chmod_readonly so git can still write the submodule working trees.
         git.submodule_update_init(cwd=str(tmp))
+        # Stamp BEFORE the guard: chmod_readonly clears the write bits on the root dir
+        # too, and a new file cannot be created in it afterwards. A fresh clone's files
+        # are all newly written, so this stamp is redundant TODAY — it matters on the
+        # reuse path. It is written here anyway so the exclude line exists from the
+        # start, and every leaf carries the stamp regardless of which path made it.
+        _stamp_acquisition(tmp)
         chmod_readonly(tmp)
     except BaseException:
         # Propagating failure at ERROR with the exception attached (spray
@@ -260,7 +305,53 @@ def _refresh_readonly(dest: Path, branch: str) -> None:
         # co-tenant reads stale submodule content. Before the re-guard, while it is writable.
         git.submodule_update_init(cwd=str(dest))
     finally:
+        # In the FINALLY, with the re-guard, and BEFORE it: this is the acquisition
+        # that reclaim would otherwise never see (:data:`_ACQUIRED_STAMP`), and it is
+        # just as real when the refresh failed. A reviewer whose reset hit a conflict
+        # is still a reviewer holding this leaf, and a Tree deleted under a failing Run
+        # is the same #1018 bug as one deleted under a healthy one. Ordered before
+        # chmod_readonly because the stamp needs the root dir writable.
+        _stamp_acquisition(dest)
         chmod_readonly(dest)
+
+
+def _stamp_acquisition(dest: Path) -> None:
+    """Record that a reviewer Run just took ``dest`` — the acquisition's FS trace.
+
+    Excludes then touches :data:`_ACQUIRED_STAMP` (see there for why the trace has to
+    exist at all). Called on both acquisition paths — a fresh clone and a reuse — while
+    the Tree is still writable, i.e. BEFORE :func:`chmod_readonly` re-applies the guard.
+
+    The exclude is written BEFORE the stamp, never after: between creating an untracked
+    root file and hiding it, ``git status --porcelain`` reports the Tree ``dirty``, and
+    a concurrent ``registry.scan`` landing in that window would read a permanent
+    local-work floor off a file shipit itself planted. Both steps are idempotent — the
+    exclude line is appended only if absent, so refreshing a leaf a hundred times leaves
+    one line.
+
+    Best-effort ON PURPOSE, and this is the one direction that needs an argument: a
+    failure here is swallowed at DEBUG rather than raised. The stamp only ever KEEPS a
+    Tree, so failing to write it cannot cause a wrong delete on its own — it just
+    returns the Tree to the pre-existing behaviour of measuring its head's age. Raising
+    instead would be strictly worse: it would fail a reviewer's acquisition — the real
+    work — over a bookkeeping write, and on the reuse path it would abort a refresh that
+    had already re-pinned the checkout.
+    """
+    try:
+        exclude = dest / _GIT_DIR / _GIT_EXCLUDE
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        entries = exclude.read_text().splitlines() if exclude.exists() else []
+        if _ACQUIRED_STAMP not in entries:
+            with exclude.open("a") as handle:
+                handle.write(f"{_ACQUIRED_STAMP}\n")
+        (dest / _ACQUIRED_STAMP).touch()
+    except OSError:
+        logger.debug(
+            "read-only tree: could not stamp acquisition at %s",
+            dest,
+            exc_info=True,
+            extra={"tree": str(dest)},
+        )
 
 
 def _summary(dest: Path, branch: str) -> Tree:

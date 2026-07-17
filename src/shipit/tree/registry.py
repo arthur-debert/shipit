@@ -118,18 +118,15 @@ class TreeRecord:
       it off the record is what lets a gc sweep cost the same one-call-per-repo the
       scan already paid.
 
-      ``"UNKNOWN"`` stays distinct from ``None`` — but NOT because they bucket
-      differently. They do not: ``classify`` buckets them IDENTICALLY on all three
-      ladders — an aged write Tree goes ``stale`` on either, a review Tree ``keep`` on
-      either, and an ephemeral Tree is decided on local work, liveness and age without
-      consulting the PR at all (so it may well be reclaimed — but on its age, at the
-      identical rung, for either state). The distinction is load-bearing for gc's
-      HONESTY rather than its safety: ``plan.unknown`` counts ``"UNKNOWN"``, and that
-      count is what makes a sweep announce it saw only part of the root and exit
-      non-zero. Report ``None`` where the truth was unreadable and the count reads 0 —
-      so gc claims a complete view of a fleet it could not read and exits 0 having
-      swept nothing, which IS the #1011 failure that let 526 Trees accumulate. What
-      swapping one for the other changes is the REPORT, never a bucket.
+      ``"UNKNOWN"`` stays distinct from ``None`` — the scan reports what it learned,
+      and "I could not read this" is not "there is no PR". The distinction no longer
+      buys ``gc`` anything, though: it used to be load-bearing for the incomplete-view
+      report, which counted the UNKNOWNs, but reclaim reads no PR state at all since
+      ADR-0072, so the count moved to the signals that actually decide
+      (:func:`~shipit.tree.cleanup.is_unexamined`). Both fields, and the whole ``gh``
+      read behind them, are deleted in WS03; until then this stays honest about what
+      it saw because a field that quietly rounds "unreadable" down to "absent" is a
+      bad habit wherever it lives.
 
       **Deliberately has no default, unlike every other optional-looking field here.**
       There is no correct default, because the field means *what the scan learned* and
@@ -156,10 +153,12 @@ class TreeRecord:
       ``None`` means unreadable, which reads as ACTIVE downstream — an unreadable
       signal must never license a delete (``unpushed_shas``' precedent).
     - ``last_commit`` — ``HEAD``'s COMMITTER timestamp (epoch seconds), or ``None``
-      when it could not be read (:func:`shipit.git.head_committed_at`). A display /
-      diagnostic stamp: it moves on every commit, amend and rebase. It is no longer a
-      reclaim input — ``newest_mtime`` observes every commit's file writes too, and
-      more besides.
+      when it could not be read (:func:`shipit.git.head_committed_at`). It moves on
+      every commit, amend and rebase. A reclaim input, but only ever a KEEPING one:
+      ``gc`` maxes it into idle (:func:`shipit.tree.cleanup._idle_seconds`) and never
+      decides on it. It earns that place by covering the one thing ``newest_mtime``
+      structurally cannot — a commit that only DELETES files writes no file whose
+      mtime survives it, so the walk alone reads such a Tree at its pre-deletion age.
     """
 
     path: str
@@ -308,12 +307,9 @@ def _start_pr_batches(
 
     A clone whose repo is unresolvable (``None`` here), and every clone of a repo whose
     batch call fails, end up :data:`~shipit.gh.UNKNOWN` — the undetermined arm, never a
-    silent "no PR". That distinction does not change any ladder's bucket (the two
-    bucket identically on every one); it is what keeps ``gc`` HONEST. ``plan.unknown``
-    counts the UNKNOWNs, and that count is the whole basis of the incomplete-view
-    warning and the non-zero exit. Answering "no PR" for a repo we failed to read would zero it and
-    let ``gc`` report a clean bill of health for Trees it never saw — #1011's silent
-    success, rebuilt one repo at a time.
+    silent "no PR". Nothing in reclaim reads either any more (ADR-0072), so this no
+    longer decides or reports anything; it is kept truthful, and deleted whole with the
+    ``gh`` dependency in WS03.
     """
     with ThreadPoolExecutor(max_workers=_scan_workers(len(clone_dirs))) as pool:
         slugs = dict(zip(clone_dirs, pool.map(_repo_slug, clone_dirs), strict=True))
@@ -392,12 +388,12 @@ def _read_record(path: Path, pending: Future[PrIndex] | None) -> TreeRecord:
 
 def _pr_display_state(pr: gh.HeadPr | None | gh.UnknownPr) -> str | None:
     """The PR's state alone (``"OPEN"`` / ``"DRAFT"`` / ``"MERGED"`` / ``"CLOSED"`` /
-    ``"UNKNOWN"``), or ``None`` when there is no PR — the view ``gc``'s ladder branches on.
+    ``"UNKNOWN"``), or ``None`` when there is no PR — a ``tree list`` display view.
 
     The state half of the same snapshot :func:`_pr_label` renders, so the label and the
     state can never disagree: one read, two views (:attr:`TreeRecord.unpushed`'s
-    precedent). ``gc`` reading this off the record is what keeps it from re-reading every
-    Tree's PR itself.
+    precedent). ``gc`` used to branch on it and no longer reads it at all (ADR-0072);
+    it goes with the rest of the ``gh`` path in WS03.
     """
     if pr is gh.UNKNOWN:
         return "UNKNOWN"

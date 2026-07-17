@@ -126,11 +126,28 @@ TABLE = [
         {"mtime": ACTIVE_MTIME, "newest_mtime": IDLE_MTIME},
         "removable",
     ),
-    # Same for the commit stamp: it is blind to a session that never commits.
+    # The commit stamp is the one signal maxed IN, and only ever to keep. It cannot
+    # decide alone (it is blind to a session that never commits) but it sees the one
+    # thing the walk structurally cannot: a commit that only DELETES files.
     (
-        "fresh last_commit does not keep an IDLE Tree",
+        "fresh last_commit keeps an idle-LOOKING Tree",
         {"last_commit": ACTIVE_MTIME},
+        "keep",
+    ),
+    (
+        "stale last_commit does not remove an ACTIVE Tree",
+        {"last_commit": IDLE_MTIME, "newest_mtime": ACTIVE_MTIME},
+        "keep",
+    ),
+    (
+        "an absent last_commit leaves the walk to decide",
+        {"last_commit": None, "newest_mtime": IDLE_MTIME},
         "removable",
+    ),
+    (
+        "an absent last_commit does not blank a readable walk",
+        {"last_commit": None, "newest_mtime": ACTIVE_MTIME},
+        "keep",
     ),
 ]
 

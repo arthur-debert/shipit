@@ -133,3 +133,38 @@ def test_an_unreadable_directory_blanks_the_signal(tmp_path, monkeypatch):
 
     monkeypatch.setattr(os, "walk", _boom)
     assert newest_mtime(tmp_path) is None
+
+
+@pytest.mark.skipif(os.getuid() == 0, reason="root reads unreadable dirs anyway")
+def test_a_really_unreadable_subdir_blanks_the_signal_rather_than_reporting_the_rest(
+    tmp_path,
+):
+    # The REAL failure mode, driven on disk rather than by replacing `os.walk`:
+    # `os.walk` SWALLOWS scandir errors by default, so an unreadable subtree is simply
+    # skipped and the walk returns a normal-looking maximum over what it COULD read.
+    # Here that maximum is OLD -> "idle since 1970" -> delete, while the recent work
+    # sits unread inside `secret/`. The signal must go None instead: the walk did not
+    # see the Tree, so it has no idea how idle it is.
+    _write(tmp_path / "old.txt", mtime=OLD)
+    _write(tmp_path / "secret" / "recent.txt", mtime=NEW)
+    (tmp_path / "secret").chmod(0o000)
+    try:
+        assert newest_mtime(tmp_path) is None
+    finally:
+        # Restore before tmp_path cleanup, or teardown cannot remove the dir.
+        (tmp_path / "secret").chmod(0o755)
+
+
+@pytest.mark.skipif(os.getuid() == 0, reason="root reads unreadable dirs anyway")
+def test_an_unreadable_dir_inside_a_pruned_dir_does_not_blank_the_signal(tmp_path):
+    # The prune set runs BEFORE the error can happen: `.pixi` is never descended into,
+    # so an unreadable dir inside it is never even opened. This keeps the failure arm
+    # honest — it blanks on what the walk needed and could not read, not on every
+    # unreadable byte under the Tree, most of which is env dirs it deliberately skips.
+    _write(tmp_path / "src" / "mod.py", mtime=NEW)
+    (tmp_path / ".pixi" / "envs").mkdir(parents=True)
+    (tmp_path / ".pixi" / "envs").chmod(0o000)
+    try:
+        assert newest_mtime(tmp_path) == NEW
+    finally:
+        (tmp_path / ".pixi" / "envs").chmod(0o755)

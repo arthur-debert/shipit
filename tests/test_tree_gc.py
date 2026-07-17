@@ -58,30 +58,66 @@ def test_plan_partitions_the_fleet():
     removable = _record(path="/t/1")
     keep_dirty = _record(path="/t/2", dirty=True)
     keep_active = _record(path="/t/3", newest_mtime=AGED_NOW - 60)
-    states = {"/t/1": "MERGED", "/t/2": "MERGED", "/t/3": "OPEN"}
 
-    plan = gc.plan([removable, keep_dirty, keep_active], now=AGED_NOW, pr_states=states)
+    plan = gc.plan([removable, keep_dirty, keep_active], now=AGED_NOW)
 
     assert [r.path for r in plan.partition.removable] == ["/t/1"]
     assert {r.path for r in plan.partition.keep} == {"/t/2", "/t/3"}
     assert plan.total == 3
-    assert plan.unknown == 0
+    assert plan.unexamined == 0
 
 
-def test_plan_counts_unknown_states_without_letting_them_decide():
-    # The count feeds the partly-seen-fleet report (#1012) and nothing else: since
-    # ADR-0072 the PR state has no vote in the rule, so an UNKNOWN Tree is bucketed on
-    # its activity like every other — here, removable — while still being counted.
-    readable = _record(path="/t/1")
-    unreadable = _record(path="/t/2")
-    states = {"/t/1": "MERGED", "/t/2": "UNKNOWN"}
+def test_an_unknown_pr_state_is_not_reported_as_skipped_because_it_is_not_skipped():
+    # The regression that repointed the count. PR state stopped deciding anything
+    # (ADR-0072), so an UNKNOWN Tree is bucketed on its activity like every other —
+    # here, removable. Counting it as "unexamined" would have the report describe a
+    # Tree this very run DELETES: `INCOMPLETE - 1 of 2 skipped; removed 2, kept 0`.
+    # A destructive command's audit trail may not contradict the destruction.
+    plan = gc.plan(
+        [
+            _record(path="/t/1", pr_state="MERGED"),
+            _record(path="/t/2", pr_state="UNKNOWN"),
+        ],
+        now=AGED_NOW,
+    )
 
-    plan = gc.plan([readable, unreadable], now=AGED_NOW, pr_states=states)
-
-    assert plan.unknown == 1
-    assert plan.total == 2
-    assert plan.incomplete is True
     assert {r.path for r in plan.partition.removable} == {"/t/1", "/t/2"}
+    assert plan.unexamined == 0
+    assert plan.incomplete is False
+
+
+def test_unexamined_counts_the_signals_that_actually_suppress_a_removal():
+    # #1012's property, repointed: the count names Trees kept because a signal could
+    # not be READ, which is now the unpushed list and the activity walk. Each is a
+    # silent conservative keep, and a fleet-wide failure of either would keep
+    # everything while reporting `removed 0` — the #1011 shape, on the new signals.
+    walk_failed = _record(path="/t/1", newest_mtime=None)
+    rev_list_failed = _record(path="/t/2", unpushed_shas=None)
+    judged = _record(path="/t/3")
+
+    plan = gc.plan([walk_failed, rev_list_failed, judged], now=AGED_NOW)
+
+    assert plan.unexamined == 2
+    assert plan.judged == 1
+    assert plan.incomplete is True
+    # The invariant that makes the report honest: unexamined is a subset of `keep`,
+    # so a counted Tree can never be one the same run removed.
+    assert {r.path for r in plan.partition.keep} == {"/t/1", "/t/2"}
+    assert [r.path for r in plan.partition.removable] == ["/t/3"]
+
+
+def test_a_definite_keep_is_examined_even_if_another_signal_is_unreadable():
+    # `unexamined` asks which signal DECIDED, in the rule's short-circuit order. A
+    # dirty Tree is kept on positive evidence; the walk under it was never reached, so
+    # its failure changes nothing and must not inflate the incomplete-view count into
+    # crying wolf on every Tree with an unreadable corner.
+    plan = gc.plan(
+        [_record(path="/t/1", dirty=True, newest_mtime=None)],
+        now=AGED_NOW,
+    )
+
+    assert plan.unexamined == 0
+    assert plan.incomplete is False
 
 
 def test_plan_threshold_overrides_the_idle_boundary():
@@ -90,10 +126,9 @@ def test_plan_threshold_overrides_the_idle_boundary():
     idle_only_for_a_short_threshold = gc.plan(
         [record],
         now=3_600.0 * 2,
-        pr_states={record.path: None},
         idle_threshold_seconds=3_600.0,
     )
-    kept_by_default = gc.plan([record], now=3_600.0 * 2, pr_states={record.path: None})
+    kept_by_default = gc.plan([record], now=3_600.0 * 2)
 
     assert [r.path for r in idle_only_for_a_short_threshold.partition.removable] == [
         record.path
@@ -103,9 +138,9 @@ def test_plan_threshold_overrides_the_idle_boundary():
 
 
 def test_plan_empty_fleet_is_a_valid_plan():
-    plan = gc.plan([], now=AGED_NOW, pr_states={})
+    plan = gc.plan([], now=AGED_NOW)
     assert plan == gc.GcPlan(
-        partition=Cleanup(removable=[], keep=[]), total=0, unknown=0
+        partition=Cleanup(removable=[], keep=[]), total=0, unexamined=0
     )
 
 
@@ -118,12 +153,12 @@ def _clone(root, rel: str):
     return path
 
 
-def _plan_of(partition: Cleanup, *, total: int | None = None, unknown: int = 0):
+def _plan_of(partition: Cleanup, *, total: int | None = None, unexamined: int = 0):
     buckets = len(partition.removable) + len(partition.keep)
     return gc.GcPlan(
         partition=partition,
         total=total if total is not None else buckets,
-        unknown=unknown,
+        unexamined=unexamined,
     )
 
 
@@ -186,11 +221,11 @@ def test_sweep_does_not_count_an_already_gone_tree(tmp_path):
 
 
 def test_sweep_carries_the_plan_counts_through():
-    plan = _plan_of(Cleanup(removable=[], keep=[]), total=5, unknown=2)
+    plan = _plan_of(Cleanup(removable=[], keep=[]), total=5, unexamined=2)
     result = gc.sweep(plan)
     assert result.total == 5
-    assert result.unknown == 2
-    assert result.swept == 3
+    assert result.unexamined == 2
+    assert result.judged == 3
     assert result.incomplete is True
 
 
@@ -300,20 +335,18 @@ def test_sweep_without_a_sink_is_unchanged(tmp_path):
 # --- the incomplete-view predicate ---------------------------------------------------
 
 
-def test_incomplete_is_the_unknown_count_on_both_plan_and_result():
-    # One predicate, shared by the two gc tails: any unreadable PR state means the
-    # fleet was only partly seen, whatever the removable count says. Orthogonal to the
-    # ladder ADR-0072 replaced, and still correct — it reports on the SWEEP's coverage,
-    # it does not decide any Tree.
+def test_incomplete_is_the_unexamined_count_on_both_plan_and_result():
+    # One predicate, shared by the two gc tails: any Tree kept on an unreadable signal
+    # means the fleet was only partly judged, whatever the removable count says. It
+    # reports on the run's COVERAGE; it decides no Tree.
     partial = gc.plan(
-        [_record(path="/t/1"), _record(path="/t/2")],
+        [_record(path="/t/1"), _record(path="/t/2", newest_mtime=None)],
         now=AGED_NOW,
-        pr_states={"/t/1": "MERGED", "/t/2": "UNKNOWN"},
     )
-    whole = gc.plan([_record(path="/t/1")], now=AGED_NOW, pr_states={"/t/1": "MERGED"})
+    whole = gc.plan([_record(path="/t/1")], now=AGED_NOW)
 
     assert partial.incomplete is True
-    assert partial.swept == 1
+    assert partial.judged == 1
     assert whole.incomplete is False
     assert gc.sweep(_plan_of(whole.partition, total=1)).incomplete is False
 
@@ -333,11 +366,10 @@ def test_pr_state_projects_the_records_state_without_reading_gh(monkeypatch):
 
 
 def test_pr_state_unknown_stays_distinct_from_no_pr():
-    # The load-bearing split: "UNKNOWN" (state unreadable) must never collapse into
-    # None (no branch / no PR). Not because they bucket differently — since ADR-0072 no
-    # PR state buckets anything — but because only "UNKNOWN" is counted by
-    # GcPlan.unknown, which is what makes a sweep admit it read only part of the root
-    # and exit non-zero. The split buys gc's REPORTING honesty.
+    # The projection still reports the split it always did — "UNKNOWN" (state
+    # unreadable) never collapses into None (no branch / no PR). Nothing in gc acts on
+    # either any more: this whole function is dead, kept only so WS02's behaviour
+    # change and WS03's pure deletion stay separately reviewable.
     assert gc.pr_state(_record(path="/trees/x", pr_state="UNKNOWN")) == "UNKNOWN"
     assert gc.pr_state(_record(path="/trees/y", branch=None, pr_state=None)) is None
     assert gc.pr_state(_record(path="/trees/z", pr_state=None)) is None
@@ -362,7 +394,7 @@ def test_plan_fleet_composes_scan_and_classify(monkeypatch):
 
     assert [r.path for r in plan.partition.removable] == ["/t/idle"]
     assert [r.path for r in plan.partition.keep] == ["/t/active"]
-    assert plan.total == 2 and plan.unknown == 0
+    assert plan.total == 2 and plan.unexamined == 0
 
 
 def test_plan_fleet_keeps_a_tree_someone_is_working_in_whatever_its_kind(monkeypatch):
