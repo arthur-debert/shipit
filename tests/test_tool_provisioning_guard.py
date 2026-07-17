@@ -112,7 +112,6 @@ PROVISIONING: dict[str, tuple[Provisioned, ...]] = {
             note="every wf block's setup-pixi step; lockstep with Layer 0 PIXI_PIN",
         ),
     ),
-    "ps": (Provisioned("ps", OS_PROVIDED, note="session liveness probe, dev-side"),),
     "gcloud": (
         Provisioned(
             "gcloud",

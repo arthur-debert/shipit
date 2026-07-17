@@ -21,7 +21,6 @@ EXPECTED_ROW_FIELDS = {
     "ahead",
     "behind",
     "dirty",
-    "pr",
     "age_seconds",
 }
 
@@ -34,8 +33,6 @@ def _record(**over) -> TreeRecord:
         dirty=False,
         ahead=0,
         behind=0,
-        pr="#7 DRAFT",
-        pr_state="DRAFT",
         mtime=1000.0,
         unpushed_shas=(),
     )
@@ -73,9 +70,9 @@ def test_build_clamps_a_future_mtime_to_zero_age():
 def test_build_keeps_absent_facts_as_none():
     # The typed row carries honest nulls; placeholder spellings ("(detached)",
     # "-") are the text renderer's job, so the JSON surface stays raw.
-    result = fleet.build([_record(branch=None, base=None, pr=None)], now=1000.0)
+    result = fleet.build([_record(branch=None, base=None)], now=1000.0)
     row = result.trees[0]
-    assert row.branch is None and row.base is None and row.pr is None
+    assert row.branch is None and row.base is None
 
 
 def test_build_preserves_scan_order():
@@ -112,38 +109,36 @@ def test_format_fleet_renders_the_table():
             dirty=True,
             ahead=2,
             behind=1,
-            pr="#9 OPEN",
             mtime=500.0,
         ),
     ]
 
     out = format_fleet(fleet.build(records, now=1000.0))
 
-    # Header + both Trees render, with branch, base, dirty state, and PR label.
-    assert "BRANCH" in out and "BASE" in out and "PR" in out and "KIND" in out
+    # Header + both Trees render, with branch, base, and dirty state. No PR column:
+    # the `gh` read is gone with the reclaim signal it fed (ADR-0072).
+    assert "BRANCH" in out and "BASE" in out and "KIND" in out
+    assert "PR" not in out
     assert "issues/7/work" in out
     assert "HAR02/WS02" in out
     assert "clean" in out and "dirty" in out
-    assert "#7 DRAFT" in out and "#9 OPEN" in out
     # Divergence is annotated on the BASE cell.
     assert "origin/HAR02/umbrella (+2/-1)" in out
 
 
 def test_format_fleet_renders_placeholders():
-    out = format_fleet(
-        fleet.build([_record(branch=None, base=None, pr=None)], now=1000.0)
-    )
-    assert "(detached)" in out
+    out = format_fleet(fleet.build([_record(branch=None, base=None)], now=1000.0))
+    assert "(detached)" in out  # the branch placeholder
     lines = out.splitlines()
     assert len(lines) == 2  # header + one row
-    assert lines[1].split()[-1] == "-"  # the PR placeholder
+    assert " - " in lines[1] or lines[1].split()[3] == "-"  # the BASE placeholder
 
 
 def test_format_fleet_renders_the_kind_column():
     records = [
         _record(),
-        _record(path="/trees/acme/widget/review/tre03-ws03", branch="b", pr=None),
-        _record(path="/trees/acme/widget/ephemeral/sess-1", branch="b", pr=None),
+        _record(path="/trees/acme/widget/review/tre03-ws03", branch="b"),
+        _record(path="/trees/acme/widget/ephemeral/sess-1", branch="b"),
     ]
 
     out = format_fleet(fleet.build(records, now=1000.0))

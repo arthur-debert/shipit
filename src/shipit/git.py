@@ -516,17 +516,19 @@ def unpushed_shas(*, cwd: str) -> tuple[Sha, ...] | None:
     """The :class:`~shipit.identity.Sha`\\s of commits on ``HEAD`` that exist on NO
     remote — ``None`` if unreadable.
 
-    The upstream-independent "unpushed" signal ADR-0027's ephemeral gc ladder is
-    defined over: :func:`ahead_behind`'s ``ahead`` reads ``(0, 0)`` for a branch
-    with **no upstream**, so a fresh ``ephemeral/<id>`` branch carrying local-only
-    commits would look level — exactly the misread that loses work. ``rev-list HEAD
-    --not --remotes`` lists commits reachable from ``HEAD`` but from no remote ref,
-    so a missing upstream never by itself blocks reclaim (empty = everything on some
-    remote) while a genuinely local commit is always listed. The SHAs — not just a
-    count — are what lets the ephemeral floor exclude exactly the recorded
-    provisioning commit (#232) while any OTHER local-only commit still protects;
-    each is a validated :class:`~shipit.identity.Sha` value object (PROC03), so
-    the exclusion compares identities through the type, never raw strings.
+    The upstream-independent "unpushed" signal the reclaim floor
+    (:func:`shipit.tree.cleanup._has_local_only_work`, ADR-0072) is defined over:
+    :func:`ahead_behind`'s ``ahead`` reads ``(0, 0)`` for a branch with **no
+    upstream**, so a fresh ``ephemeral/<id>`` branch carrying local-only commits
+    would look level — exactly the misread that loses work. ``rev-list HEAD --not
+    --remotes`` lists commits reachable from ``HEAD`` but from no remote ref, so a
+    missing upstream never by itself blocks reclaim (empty = everything on some
+    remote) while a genuinely local commit is always listed. The floor keeps the
+    Tree whenever that list is non-empty (or unreadable) — it once carved out the
+    recorded provisioning commit (#232), but ADR-0072 retired that exclusion, so no
+    single commit is special any more. The commits still come back as validated
+    :class:`~shipit.identity.Sha` value objects (PROC03), from which the fleet
+    listing's unpushed count derives.
 
     ``None`` — not empty — when the list cannot be read (detached/unborn HEAD, a git
     failure, malformed output): the CALLER must treat "unknown" conservatively (keep),

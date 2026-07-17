@@ -114,11 +114,12 @@ def tree_kind(path: str | os.PathLike[str]) -> str:
     (:data:`_NESTED_WRITE_NAMESPACES`): an epic write Tree is
     ``…/epics/<epic>/<leaf>``, so the leaf's parent is the free-form epic code —
     and ``ephemeral``/``review`` are perfectly valid epic codes (agy review). A
-    parent-segment test alone would put an epic named ``ephemeral``'s write Trees
-    on the session-Tree gc ladder (removable after a mere hour idle) and hand them
-    ``SessionStart`` pidfiles; the grandparent check keeps every ``epics``/
-    ``issues`` Tree on the write ladder regardless of what its epic code or issue
-    id is named.
+    parent-segment test alone would MISLABEL an epic named ``ephemeral``'s write
+    Trees as ephemeral session Trees; the grandparent check keeps every ``epics``/
+    ``issues`` Tree labelled ``write`` regardless of what its epic code or issue id
+    is named. (Reclaim reads one rule for every kind since ADR-0072, so the stakes
+    are now a wrong ``tree list`` label rather than a wrong gc ladder; ``tree_kind``
+    itself retires in WS06.)
     """
     p = Path(path)
     if len(p.parts) >= 3 and p.parts[-3] in _NESTED_WRITE_NAMESPACES:

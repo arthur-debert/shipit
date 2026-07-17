@@ -38,8 +38,8 @@ The contract, in full:
   ``.rc != 0`` would wrongly match timeouts, launch failures, and detached
   spawns), never a parse of ``msg`` (glassbox PRD story 14). Success logs at DEBUG,
   failure at ERROR. A nonzero exit under ``check=False`` is the caller's
-  *normal* outcome (a liveness probe of a dead pid, ``git cat-file -e``), so
-  it records at DEBUG, not ERROR.
+  *normal* outcome (``git cat-file -e`` probing for an object, ``grep`` with no
+  match), so it records at DEBUG, not ERROR.
 - **Everything redacted.** Every attribute of an :class:`ExecError` is masked
   at construction (:mod:`shipit.redact`) — the error object surfaces to callers
   OUTSIDE the logging chain, so it can never carry a secret anywhere. That

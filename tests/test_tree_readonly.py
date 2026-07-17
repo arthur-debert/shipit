@@ -362,8 +362,6 @@ def _aged_leaf_record(tree_dir: Path, *, stale: float) -> TreeRecord:
         dirty=False,
         ahead=0,
         behind=0,
-        pr=None,
-        pr_state=None,
         mtime=stale,
         unpushed_shas=(),
         last_commit=stale,

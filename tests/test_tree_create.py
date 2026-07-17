@@ -22,7 +22,7 @@ from shipit.identity import repo_from_slug
 from shipit.install import units as iunits
 from shipit.install.apply import COMMIT_MESSAGE as INSTALL_COMMIT_MESSAGE
 from shipit.tree import create as create_mod
-from shipit.tree import layout, provision
+from shipit.tree import layout
 from shipit.tree.create import create, create_from_source
 from shipit.tree.layout import TreeSpec
 
@@ -463,13 +463,12 @@ def test_create_writes_no_provision_record(
     tmp_path: Path, remote: Path, reference: Path, monkeypatch
 ):
     # ADR-0033: provisioning never commits, so the #232 provision record's writer
-    # is retired — NO Tree born after the pin carries `.git/shipit-provision.json`,
-    # and the gc exclusion set reads empty.
+    # is retired — NO Tree born after the pin carries `.git/shipit-provision.json`.
+    # WS03 (ADR-0072) deleted the record's READER too, so nothing consults one either.
     _stub_provision(monkeypatch)
     tree = create(_spec(tmp_path), source_repo=str(reference), github_url=str(remote))
     dest = Path(tree.path)
-    assert not provision.record_path(dest).exists()
-    assert provision.read_provision_shas(dest) == frozenset()
+    assert not (dest / ".git" / "shipit-provision.json").exists()
 
 
 def test_create_rolls_back_partial_tree_on_failure(

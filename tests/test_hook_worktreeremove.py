@@ -1,13 +1,11 @@
 """``hook worktreeremove`` — the ephemeral fast-path teardown boundary (ADR-0027).
 
 The contract under test: on a clean session exit the hook removes the ephemeral
-session Tree AND its liveness pidfile, but ONLY behind the same never-lose-work
-floor the gc ladder enforces — a dirty Tree, one with commits on no remote, or one
-ahead of its upstream beyond the provisioning carve-out is never auto-removed; a
-non-ephemeral or out-of-root path is never touched; and the
-whole boundary fails OPEN (exit 0, nothing removed) on any error, because the gc
-ladder — not this hook, which does not even fire headless — is the load-bearing
-cleanup.
+session Tree, but ONLY behind the same never-lose-work floor the gc rule enforces
+(ADR-0072) — a dirty Tree or one with commits on no remote is never auto-removed; a
+non-ephemeral or out-of-root path is never touched; and the whole boundary fails OPEN
+(exit 0, nothing removed) on any error, because the gc rule — not this hook, which
+does not even fire headless — is the load-bearing cleanup.
 """
 
 from __future__ import annotations
@@ -22,25 +20,8 @@ from conftest import managed_cc_hook_command
 from shipit import git
 from shipit.execrun import ExecError
 from shipit.identity import Sha
-from shipit.session import liveness
-from shipit.tree import layout, provision
+from shipit.tree import layout
 from shipit.verbs.hook import worktreeremove
-
-SESSION_RECORD = liveness.LivenessRecord(
-    pid=100, session_id="sess-abc", create_time=1_750_000_000.0
-)
-
-
-def _plant_legacy_record(tree, shas: list[Sha]) -> None:
-    """Plant the pre-ADR-0033 provision record a drift-window birth once wrote.
-
-    The writer is retired (provisioning no longer commits); Trees born before
-    the pin still carry these on disk, which is exactly what the carve-out
-    tests below exercise.
-    """
-    provision.record_path(tree).write_text(
-        json.dumps({"commits": [str(sha) for sha in shas]}), encoding="utf-8"
-    )
 
 
 @pytest.fixture
@@ -54,16 +35,15 @@ def root(tmp_path, monkeypatch):
 
 @pytest.fixture
 def ephemeral_tree(root):
-    """A clean ephemeral session Tree (a .git-dir clone) with a pidfile."""
+    """A clean ephemeral session Tree (a .git-dir clone)."""
     tree = root / "acme" / "widget" / "ephemeral" / "sess-1"
     (tree / ".git").mkdir(parents=True)
-    liveness.write_pidfile(tree, SESSION_RECORD)
     return tree
 
 
 @pytest.fixture
 def clean_git(monkeypatch):
-    """A gh boundary reporting a clean, fully-pushed, upstream-level clone."""
+    """A git boundary reporting a clean, fully-pushed, upstream-level clone."""
     monkeypatch.setattr(git, "status_porcelain", lambda *, cwd: [])
     monkeypatch.setattr(git, "unpushed_shas", lambda *, cwd: ())
     monkeypatch.setattr(git, "ahead_behind", lambda *, cwd: (0, 0))
@@ -74,9 +54,9 @@ def _run(payload) -> int:
     return worktreeremove.run(stdin=io.StringIO(text))
 
 
-def test_clean_ephemeral_tree_and_pidfile_are_removed(ephemeral_tree, clean_git):
+def test_clean_ephemeral_tree_is_removed(ephemeral_tree, clean_git):
     assert _run({"cwd": str(ephemeral_tree)}) == 0
-    assert not ephemeral_tree.exists()  # pidfile lives in .git — gone with the Tree
+    assert not ephemeral_tree.exists()
 
 
 @pytest.mark.parametrize("field", ["path", "worktree_path", "cwd"])
@@ -91,9 +71,7 @@ def test_dirty_tree_is_never_auto_removed(ephemeral_tree, monkeypatch):
     monkeypatch.setattr(git, "status_porcelain", lambda *, cwd: [" M f.py"])
     monkeypatch.setattr(git, "unpushed_shas", lambda *, cwd: ())
     assert _run({"cwd": str(ephemeral_tree)}) == 0
-    assert ephemeral_tree.exists()
-    # The pidfile stays too: on a refusal the hook touches NOTHING.
-    assert liveness.read_pidfile(ephemeral_tree) == SESSION_RECORD
+    assert ephemeral_tree.exists()  # on a refusal the hook touches NOTHING
 
 
 def test_unpushed_tree_is_never_auto_removed(ephemeral_tree, monkeypatch):
@@ -108,76 +86,24 @@ def test_unpushed_tree_is_never_auto_removed(ephemeral_tree, monkeypatch):
 
 
 def test_unreadable_unpushed_list_blocks_removal(ephemeral_tree, monkeypatch):
-    # Unknown must never read as "nothing to lose" — even a recorded provisioning
-    # exclusion cannot rescue an unreadable local-only list.
+    # Unknown must never read as "nothing to lose": an unreadable local-only list keeps.
     monkeypatch.setattr(git, "status_porcelain", lambda *, cwd: [])
     monkeypatch.setattr(git, "unpushed_shas", lambda *, cwd: None)
-    _plant_legacy_record(ephemeral_tree, [Sha("a" * 40)])
     assert _run({"cwd": str(ephemeral_tree)}) == 0
     assert ephemeral_tree.exists()
 
 
-def test_recorded_provisioning_commit_does_not_block_removal(
-    ephemeral_tree, monkeypatch
+def test_ahead_of_upstream_alone_no_longer_blocks(
+    ephemeral_tree, clean_git, monkeypatch
 ):
-    # #232: the drift-window shape — the ONLY local-only commit is the managed-set
-    # reconcile provisioning recorded at birth. The fast path mirrors the gc
-    # ladder's carve-out and removes the clean Tree on session exit.
-    sha = Sha("a" * 40)
-    monkeypatch.setattr(git, "status_porcelain", lambda *, cwd: [])
-    monkeypatch.setattr(git, "unpushed_shas", lambda *, cwd: (sha,))
-    monkeypatch.setattr(git, "ahead_behind", lambda *, cwd: (0, 0))
-    _plant_legacy_record(ephemeral_tree, [sha])
-    assert _run({"cwd": str(ephemeral_tree)}) == 0
-    assert not ephemeral_tree.exists()
-
-
-def test_ahead_of_upstream_beyond_carveout_blocks(ephemeral_tree, monkeypatch):
-    # The gc floor's `ahead` side (codex review on #233): commits ahead of a
-    # configured upstream that the local-only list does not explain — work pushed
-    # to some OTHER branch, or a miscount — must block the fast path exactly as
-    # `_has_local_only_work` conservatively keeps.
-    monkeypatch.setattr(git, "status_porcelain", lambda *, cwd: [])
-    monkeypatch.setattr(git, "unpushed_shas", lambda *, cwd: ())
+    # ADR-0072/WS03: the fast path now mirrors gc's floor EXACTLY — dirty or unpushed
+    # (commits on no remote) only. A clean, fully-pushed Tree that merely sits ahead of
+    # its configured upstream (its commits pushed to some other branch, so recoverable)
+    # is reclaimed, just as gc would. The old `ahead`-count block — a companion to the
+    # retired provisioning carve-out — is gone.
     monkeypatch.setattr(git, "ahead_behind", lambda *, cwd: (2, 0))
     assert _run({"cwd": str(ephemeral_tree)}) == 0
-    assert ephemeral_tree.exists()
-
-
-def test_ahead_fully_explained_by_provisioning_commit_removes(
-    ephemeral_tree, monkeypatch
-):
-    # The recorded provisioning commit also sits ahead of the upstream it was cut
-    # from; an `ahead` reading the carve-out fully accounts for does not block.
-    sha = Sha("a" * 40)
-    monkeypatch.setattr(git, "status_porcelain", lambda *, cwd: [])
-    monkeypatch.setattr(git, "unpushed_shas", lambda *, cwd: (sha,))
-    monkeypatch.setattr(git, "ahead_behind", lambda *, cwd: (1, 0))
-    _plant_legacy_record(ephemeral_tree, [sha])
-    assert _run({"cwd": str(ephemeral_tree)}) == 0
     assert not ephemeral_tree.exists()
-
-
-def test_provisioning_plus_real_commit_still_blocks(ephemeral_tree, monkeypatch):
-    # The floor stays absolute for real work: any local-only commit BEYOND the
-    # recorded provisioning SHA refuses the fast path.
-    monkeypatch.setattr(git, "status_porcelain", lambda *, cwd: [])
-    monkeypatch.setattr(
-        git, "unpushed_shas", lambda *, cwd: (Sha("a" * 40), Sha("b" * 40))
-    )
-    _plant_legacy_record(ephemeral_tree, [Sha("a" * 40)])
-    assert _run({"cwd": str(ephemeral_tree)}) == 0
-    assert ephemeral_tree.exists()
-
-
-def test_mismatched_provision_record_still_blocks(ephemeral_tree, monkeypatch):
-    # A rebase/amend changed the SHA: identity is the SHA, never the message, so
-    # the mismatch conservatively refuses (falls back to the gc ladder).
-    monkeypatch.setattr(git, "status_porcelain", lambda *, cwd: [])
-    monkeypatch.setattr(git, "unpushed_shas", lambda *, cwd: (Sha("b" * 40),))
-    _plant_legacy_record(ephemeral_tree, [Sha("a" * 40)])
-    assert _run({"cwd": str(ephemeral_tree)}) == 0
-    assert ephemeral_tree.exists()
 
 
 def test_non_ephemeral_tree_is_never_touched(root, clean_git):

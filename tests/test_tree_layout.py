@@ -725,9 +725,9 @@ def test_tree_kind_never_matches_mid_path_segments():
 def test_tree_kind_epic_or_issue_named_after_a_kind_is_still_a_write_tree():
     # An epic write Tree is epics/<epic>/<leaf>, so the leaf's PARENT is the
     # free-form epic code — and `ephemeral`/`review` are valid epic codes (agy
-    # review). The nested-namespace grandparent check must keep such Trees on the
-    # write ladder: on the ephemeral ladder a clean, pushed one would be removable
-    # after an hour idle, and `sessionstart` would hand it a pidfile.
+    # review). The nested-namespace grandparent check must keep such Trees labelled
+    # `write`: a parent-segment test alone would mislabel them as ephemeral session
+    # Trees in `tree list` (reclaim is one rule for every kind since ADR-0072).
     assert (
         layout.tree_kind("/t/acme/widget/epics/ephemeral/WS01-aa") == layout.WRITE_KIND
     )
