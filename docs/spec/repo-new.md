@@ -154,13 +154,13 @@ from the `OWNER/REPO` slug using the user's preferred Git protocol—the one
 `gh config get git_protocol` reports, HTTPS or SSH—so the push is satisfied by
 whatever credential that protocol needs: an existing SSH key, or an HTTPS
 credential helper such as `gh auth setup-git` or another configured helper on a
-laptop, or a token-bearing credential on a runner. A push that fails because `gh` API
-authentication is present but no such Git credential is available is reported as
-a remote-publication failure at the push stage, with recovery guidance, exactly
-like any other push rejection. `--no-remote` requires neither `gh`, GitHub
-authentication, nor a Git credential. Reusing a remote never force-pushes,
-merges, rebases, or otherwise reconciles remote history; a normal push rejection
-is reported as a remote-publication failure.
+laptop, or a token-bearing credential on a runner. A push that fails because
+`gh` API authentication is present but no such Git credential is available is
+reported as a remote-publication failure at the push stage, with recovery
+guidance, exactly like any other push rejection. `--no-remote` requires neither
+`gh`, GitHub authentication, nor a Git credential. Reusing a remote never
+force-pushes, merges, rebases, or otherwise reconciles remote history; a normal
+push rejection is reported as a remote-publication failure.
 
 `<name>` uses canonical lowercase kebab-case: it begins with an ASCII lowercase
 letter and continues with lowercase alphanumeric segments separated by single
