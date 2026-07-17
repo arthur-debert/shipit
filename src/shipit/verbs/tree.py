@@ -457,7 +457,7 @@ def run_remove(
     help=(
         "Age boundary an UNMERGED Tree must exceed before it counts as abandoned, as "
         "a human duration (e.g. 14d, 36h, 90m). Defaults to 14d when omitted. A "
-        "merged Tree is reclaimed on its own short grace window, not this boundary."
+        "merged Tree is reclaimed on its own short idle window, not this boundary."
     ),
 )
 def gc_cmd(dry_run: bool, threshold: float | None) -> None:
@@ -465,8 +465,10 @@ def gc_cmd(dry_run: bool, threshold: float | None) -> None:
 
     Scans every Tree, classifies the fleet, then deletes ONLY the Trees whose PR is
     merged, working tree clean, and nothing unpushed — the work is on the remote, so
-    there is nothing left to lose (a short post-merge grace window covers an agent
-    still working in a just-merged Tree). Trees that merely look abandoned are LISTED
+    there is nothing left to lose (a short grace window holds a merged Tree until it
+    has been IDLE for 12h, standing in for the liveness signal a write Tree lacks, so
+    an agent still working in a just-merged Tree keeps it). Trees that merely look
+    abandoned are LISTED
     as stale (never deleted), and anything with live or local work is left untouched.
     Conservative by default.
 

@@ -13,7 +13,7 @@ import pytest
 from shipit.identity import Sha
 from shipit.tree.cleanup import (
     DEFAULT_MAX_AGE_SECONDS,
-    MERGED_GRACE_SECONDS,
+    MERGED_IDLE_GRACE_SECONDS,
     classify,
     parse_duration,
 )
@@ -21,17 +21,19 @@ from shipit.tree.registry import TreeRecord
 
 NOW = 1_000_000.0
 THRESHOLD = 100.0
-#: The write ladder's merged grace window, overridden small (and well under
+#: The write ladder's idle window for a merged Tree, overridden small (and well under
 #: ``THRESHOLD``) so both boundaries are table-testable independently — that
-#: separation is the point: age must NOT gate the merged case (#1009).
-MERGED_GRACE = 10.0
+#: separation is the point: age must NOT gate the merged case (#1009). Both windows
+#: read the same clock, ``now - mtime``, so every mtime below is an IDLE time.
+MERGED_IDLE_GRACE = 10.0
 #: An mtime comfortably older than ``THRESHOLD`` relative to ``NOW`` (Tree is aged).
 AGED_MTIME = NOW - (THRESHOLD + 50)
 #: An mtime within ``THRESHOLD`` of ``NOW`` (Tree is recent) but well PAST
-#: ``MERGED_GRACE``: the #1009 shape — a merged Tree the age gate used to veto.
+#: ``MERGED_IDLE_GRACE``: the #1009 shape — a merged Tree the age gate used to veto.
 RECENT_MTIME = NOW - (THRESHOLD - 50)
-#: An mtime inside ``MERGED_GRACE``: a Tree whose PR merged moments ago.
-WITHIN_MERGED_GRACE = NOW - (MERGED_GRACE - 5)
+#: An mtime inside ``MERGED_IDLE_GRACE``: a Tree written to moments ago, i.e. one an
+#: agent may still be working in (the window's clock is idleness, not the merge).
+WITHIN_MERGED_IDLE_GRACE = NOW - (MERGED_IDLE_GRACE - 5)
 
 
 #: Stand-in full SHAs for truth-table rows (git SHAs are 40 hex chars).
@@ -71,7 +73,7 @@ def _classify_one(record: TreeRecord, state: str | None) -> str:
         now=NOW,
         pr_states={record.path: state},
         max_age_seconds=THRESHOLD,
-        merged_grace_seconds=MERGED_GRACE,
+        merged_idle_grace_seconds=MERGED_IDLE_GRACE,
     )
     for name in ("removable", "stale", "keep"):
         if getattr(decision, name):
@@ -82,29 +84,29 @@ def _classify_one(record: TreeRecord, state: str | None) -> str:
 # (description, record-overrides, pr-state) -> expected bucket. Each row is one cell of
 # the PRD truth table.
 TABLE = [
-    ("merged + clean + no-unpushed + past grace", {}, "MERGED", "removable"),
-    # The #1009 regression: a merged, clean, fully-pushed Tree PAST the grace window
+    ("merged + clean + no-unpushed + idle past the window", {}, "MERGED", "removable"),
+    # The #1009 regression: a merged, clean, fully-pushed Tree idle PAST the window
     # but WELL WITHIN max_age_seconds is removable. The merge is what proves the loss
     # is safe (the work is on the remote), so age must not veto it — under the old
     # ladder's age-first gate this row was `keep`, and it parked 421 of a 503-Tree
     # fleet.
     (
-        "merged + past grace but not aged -> removable (age does not gate)",
+        "merged + idle past the window but not aged -> removable (age does not gate)",
         {"mtime": RECENT_MTIME},
         "MERGED",
         "removable",
     ),
-    # ...and the other direction: inside the grace window a merged Tree is still
-    # kept. A write Tree has no liveness signal, so this window is what covers an
-    # agent still working in a still-clean Tree just after its PR merged.
+    # ...and the other direction: a merged Tree written to inside the idle window is
+    # still kept. A write Tree has no liveness signal, so idleness is the proxy for
+    # "is an agent still working here?", and a recent write says someone may be.
     (
-        "merged inside the grace window is kept",
-        {"mtime": WITHIN_MERGED_GRACE},
+        "merged but written to inside the idle window is kept",
+        {"mtime": WITHIN_MERGED_IDLE_GRACE},
         "MERGED",
         "keep",
     ),
     # The never-lose-work floor is ABSOLUTE: it beats the merged rung, whose rows all
-    # sit past the grace window (AGED_MTIME) and would otherwise be removable.
+    # sit idle past the window (AGED_MTIME) and would otherwise be removable.
     ("dirty (else removable) is protected", {"dirty": True}, "MERGED", "keep"),
     ("unpushed (ahead>0) is protected", {"ahead": 2}, "MERGED", "keep"),
     # The upstream-INDEPENDENT floor (codex review): a branch with no tracking
@@ -167,12 +169,12 @@ def test_age_threshold_boundary_is_exclusive():
     assert _classify_one(past, None) == "stale"
 
 
-def test_merged_grace_boundary_is_exclusive():
-    # Exactly AT the grace window a merged Tree is still kept; one second past it is
+def test_merged_idle_grace_boundary_is_exclusive():
+    # Idle exactly AT the window a merged Tree is still kept; one second past it is
     # removable. "Past", not "at" — mirroring every other boundary in the ladder.
-    at = _record(mtime=NOW - MERGED_GRACE)
+    at = _record(mtime=NOW - MERGED_IDLE_GRACE)
     assert _classify_one(at, "MERGED") == "keep"
-    past = _record(mtime=NOW - MERGED_GRACE - 1)
+    past = _record(mtime=NOW - MERGED_IDLE_GRACE - 1)
     assert _classify_one(past, "MERGED") == "removable"
 
 
@@ -186,7 +188,7 @@ def test_age_threshold_never_gates_a_merged_tree():
         now=NOW,
         pr_states={record.path: "MERGED"},
         max_age_seconds=DEFAULT_MAX_AGE_SECONDS * 1_000,
-        merged_grace_seconds=MERGED_GRACE,
+        merged_idle_grace_seconds=MERGED_IDLE_GRACE,
     )
     assert [r.path for r in decision.removable] == [record.path]
 
@@ -196,7 +198,7 @@ def test_partition_is_disjoint_and_exhaustive():
         _record(path="/trees/removable"),  # merged + aged -> removable
         _record(path="/trees/keep-dirty", dirty=True),
         _record(path="/trees/keep-unpushed", ahead=1),
-        _record(path="/trees/keep-in-grace", mtime=WITHIN_MERGED_GRACE),
+        _record(path="/trees/keep-in-grace", mtime=WITHIN_MERGED_IDLE_GRACE),
         _record(path="/trees/keep-open"),
         _record(path="/trees/stale"),  # no PR, aged -> stale
     ]
@@ -213,7 +215,7 @@ def test_partition_is_disjoint_and_exhaustive():
         now=NOW,
         pr_states=pr_states,
         max_age_seconds=THRESHOLD,
-        merged_grace_seconds=MERGED_GRACE,
+        merged_idle_grace_seconds=MERGED_IDLE_GRACE,
     )
 
     assert [r.path for r in decision.removable] == ["/trees/removable"]
@@ -244,12 +246,12 @@ def test_default_threshold_is_two_weeks():
     assert len(classify([old], now=NOW, pr_states={"/trees/t": None}).stale) == 1
 
 
-def test_default_merged_grace_is_twelve_hours():
-    # The default grace window, with no override: a merged+clean Tree younger than
-    # 12h is kept, one an hour older is removable — while both sit FAR inside the
-    # 14-day age threshold that used to veto them (#1009).
-    young = _record(mtime=NOW - (MERGED_GRACE_SECONDS - 1))
-    old = _record(mtime=NOW - (MERGED_GRACE_SECONDS + 3_600))
+def test_default_merged_idle_grace_is_twelve_hours():
+    # The default idle window, with no override: a merged+clean Tree idle for under
+    # 12h is kept, one idle an hour longer is removable — while both sit FAR inside
+    # the 14-day age threshold that used to veto them (#1009).
+    young = _record(mtime=NOW - (MERGED_IDLE_GRACE_SECONDS - 1))
+    old = _record(mtime=NOW - (MERGED_IDLE_GRACE_SECONDS + 3_600))
     assert classify([young], now=NOW, pr_states={"/trees/t": "MERGED"}).removable == []
     assert (
         len(classify([old], now=NOW, pr_states={"/trees/t": "MERGED"}).removable) == 1
@@ -350,7 +352,7 @@ def test_write_tree_under_a_review_named_org_is_not_a_review_tree():
         now=NOW,
         pr_states={path: "MERGED"},
         max_age_seconds=THRESHOLD,
-        merged_grace_seconds=MERGED_GRACE,
+        merged_idle_grace_seconds=MERGED_IDLE_GRACE,
     )
     assert [r.path for r in decision.keep] == [path]
     assert not decision.removable
@@ -622,7 +624,7 @@ def test_provision_exclusion_never_reaches_the_write_ladder():
         now=NOW,
         pr_states={record.path: "MERGED"},
         max_age_seconds=THRESHOLD,
-        merged_grace_seconds=MERGED_GRACE,
+        merged_idle_grace_seconds=MERGED_IDLE_GRACE,
         provision_shas={record.path: frozenset({SHA_PROVISION})},
     )
     assert [r.path for r in decision.keep] == [record.path]
