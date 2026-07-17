@@ -958,8 +958,9 @@ def prs_by_head(repo: str) -> dict[str, HeadPr] | UnknownPr:
     unreadable state maps to keep, so ``gc`` silently swept nothing).
 
     Reads ``gh pr list --repo <slug> --state all --json
-    number,state,isDraft,baseRefName,headRefName`` and returns a TWO-way result that
-    preserves :func:`pr_for_head`'s three-way vocabulary at the CALLER's level:
+    number,state,isDraft,baseRefName,headRefName,isCrossRepository`` and returns a
+    TWO-way result that preserves :func:`pr_for_head`'s three-way vocabulary at the
+    CALLER's level:
 
     - a ``{head branch -> HeadPr}`` dict when the repo's PRs are read cleanly. The
       index is COMPLETE, which is what licenses the caller's key inference: a branch
@@ -977,19 +978,32 @@ def prs_by_head(repo: str) -> dict[str, HeadPr] | UnknownPr:
     reclaims on, so an open-only index would silently stop the fleet being reclaimed
     at all; the two reads must see the same PRs.
 
+    CROSS-REPOSITORY (fork) PRs are excluded, and ``isCrossRepository`` is requested
+    for exactly that: a repo-wide list carries PRs whose head branch lives in a FORK,
+    and head names are unique only WITHIN a repo. A fork's ``issues/1011/work`` and
+    this repo's are different branches with one name, so indexing the foreign row
+    would let a stranger's PR answer for a local Tree — and since ``setdefault``
+    keeps whichever row GitHub returned first, that is not even a rare tie-break. It
+    is worst for ``gc``: a MERGED/CLOSED fork PR is the rung ``gc`` reclaims on, so a
+    local Tree holding unfinished work would read as finished and be deleted. A Tree
+    pushes its branch to its own origin — the repo being listed — so a fork head can
+    never be a Tree's PR, and dropping those rows is what makes the index mean what
+    the caller reads it to mean: *the PRs of THIS repo's heads*.
+
     A SINGLE malformed row fails the WHOLE repo rather than being skipped. Skipping it
     would drop that head from the index, and a missing head reads as a provable "no
     PR" — so a shape-drift bug would become a confident false claim about one Tree.
-    What that costs is not a delete (no-PR and UNKNOWN land in the same non-deleting
-    bucket on every ladder — see :func:`shipit.tree.cleanup.classify`); it is that
-    ``gc`` would count the Tree as *read* and report a complete view of a fleet it had
-    not actually read — the exact silent-success failure of #1011. Failing the repo
-    keeps the never-lie invariant: this function only ever returns an index it can
-    vouch for entirely.
+    What that costs is not a delete (no-PR and UNKNOWN bucket identically on every
+    ladder — see :func:`shipit.tree.cleanup.classify`); it is that ``gc`` would count
+    the Tree as *read* and report a complete view of a fleet it had not actually read
+    — the exact silent-success failure of #1011. Failing the repo keeps the never-lie
+    invariant: this function only ever returns an index it can vouch for entirely.
+    (Excluding a fork row is not that hazard inverted: an absent fork head is the TRUE
+    answer for every branch here, not something we failed to read.)
 
-    Where several PRs share one head (a rebuilt branch), the FIRST wins: ``gh pr
-    list`` returns newest-first, so that is the highest-numbered PR — matching what
-    ``gh pr view <branch>`` resolves to.
+    Where several of THIS repo's PRs share one head (a rebuilt branch), the FIRST
+    wins: ``gh pr list`` returns newest-first, so that is the highest-numbered PR —
+    matching what ``gh pr view <branch>`` resolves to.
     """
     try:
         result = _run_probe(
@@ -1004,7 +1018,7 @@ def prs_by_head(repo: str) -> dict[str, HeadPr] | UnknownPr:
                 "--limit",
                 str(_PR_LIST_LIMIT),
                 "--json",
-                "number,state,isDraft,baseRefName,headRefName",
+                "number,state,isDraft,baseRefName,headRefName,isCrossRepository",
             ],
         )
     except ExecError:
@@ -1035,6 +1049,30 @@ def prs_by_head(repo: str) -> dict[str, HeadPr] | UnknownPr:
         head = row.get("headRefName")
         if not isinstance(head, str) or not head.strip():
             return UNKNOWN
+        foreign = row.get("isCrossRepository")
+        if not isinstance(foreign, bool):
+            # The fork discriminator is as load-bearing as the head itself: without it
+            # we cannot tell whose branch this row names, and guessing "same repo"
+            # is what would let a fork's PR answer for a Tree. Shape drift here fails
+            # the repo, like every other unusable field.
+            return UNKNOWN
+        if foreign:
+            # A cross-repository PR's head branch lives in the FORK, not here, so it
+            # can never be a Tree's PR: a Tree pushes its branch to its own origin,
+            # which is the repo being listed. Head names are only unique WITHIN a
+            # repo, though — a fork (or several) may carry `issues/1011/work` too, and
+            # the row order that decides `setdefault` is GitHub's, not ours. Indexing
+            # a foreign row would therefore let someone else's PR supply the state for
+            # a same-named local Tree — worst on a merged/closed fork PR, which is the
+            # rung gc RECLAIMS on, so a local Tree with unfinished work would read as
+            # finished and be deleted. Dropping the row is not the "skipping a bad
+            # row" hazard above: an absent fork head is the TRUE answer for every
+            # branch in this repo, not a gap in what we read.
+            #
+            # Dropped BEFORE the shape check below, because a row we will never index
+            # cannot drift the index: validating it could only fail this repo — and
+            # every local Tree in it — over a stranger's payload.
+            continue
         try:
             pr = _head_pr_from_json(row)
         except ValueError:

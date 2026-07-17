@@ -785,8 +785,13 @@ def test_no_pr_and_unknown_bucket_identically_on_every_ladder():
     Written down because the natural assumption — the one #1011's own brief made, and
     the one this PR's first draft encoded in its docstrings — is that "no PR" is a rung
     gc deletes on, so conflating it with UNKNOWN would destroy Trees. It isn't, and it
-    wouldn't. The delete rung is MERGED (and CLOSED, for a review Tree); no-PR and
-    UNKNOWN are both non-deleting everywhere.
+    wouldn't. The PR-state delete rung is MERGED (and CLOSED, for a review Tree); no-PR
+    and UNKNOWN bucket IDENTICALLY on every ladder: stale for an aged write Tree, keep
+    for a review Tree, and for an ephemeral Tree the decision is made independently of
+    the PR state, from local work, liveness and age. That last one can well be
+    `removable` — as this test's very old ephemeral record is, on BOTH states — which
+    is precisely the point: the bucket is the same either way, so no swap of one state
+    for the other moves a Tree toward or away from deletion anywhere.
 
     That does NOT make the distinction cosmetic — it relocates it. Only `"UNKNOWN"` is
     counted by `GcPlan.unknown`, which is what makes a sweep admit it saw part of the

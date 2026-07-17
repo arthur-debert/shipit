@@ -256,7 +256,12 @@ def test_head_pr_display_state_normalizes_draft():
 
 
 def _row(
-    number: int, head: str, state: str = "OPEN", *, is_draft: bool = False
+    number: int,
+    head: str,
+    state: str = "OPEN",
+    *,
+    is_draft: bool = False,
+    cross_repo: bool = False,
 ) -> dict:
     return {
         "number": number,
@@ -264,6 +269,7 @@ def _row(
         "isDraft": is_draft,
         "baseRefName": "main",
         "headRefName": head,
+        "isCrossRepository": cross_repo,
     }
 
 
@@ -319,8 +325,12 @@ def test_prs_by_head_asks_for_every_state_not_just_open(monkeypatch):
     assert argv[:3] == ["gh", "pr", "list"]
     assert "--state" in argv and argv[argv.index("--state") + 1] == "all"
     assert "--repo" in argv and argv[argv.index("--repo") + 1] == "acme/widget"
-    # headRefName is what makes the result indexable at all.
-    assert "headRefName" in argv[argv.index("--json") + 1]
+    # headRefName is what makes the result indexable at all, and isCrossRepository is
+    # what says whose head it names — without it a fork's branch is indistinguishable
+    # from a local one.
+    fields = argv[argv.index("--json") + 1]
+    assert "headRefName" in fields
+    assert "isCrossRepository" in fields
 
 
 def test_prs_by_head_empty_repo_is_a_real_answer_not_unknown(monkeypatch):
@@ -378,16 +388,44 @@ def test_prs_by_head_undetermined_view_is_unknown(monkeypatch, result):
             },
         ],  # blank head
         [_row(1, "b1"), "not-a-row"],
+        [
+            _row(1, "b1"),
+            {
+                "number": 2,
+                "state": "OPEN",
+                "isDraft": False,
+                "baseRefName": "main",
+                "headRefName": "b2",
+            },
+        ],  # no isCrossRepository: whose branch "b2" is, is unknown
+        [
+            _row(1, "b1"),
+            {
+                "number": 2,
+                "state": "OPEN",
+                "isDraft": False,
+                "baseRefName": "main",
+                "headRefName": "b2",
+                "isCrossRepository": "false",  # a string, not a bool
+            },
+        ],
     ],
-    ids=["malformed-number", "missing-head", "blank-head", "row-not-a-dict"],
+    ids=[
+        "malformed-number",
+        "missing-head",
+        "blank-head",
+        "row-not-a-dict",
+        "missing-cross-repo-flag",
+        "mistyped-cross-repo-flag",
+    ],
 )
 def test_prs_by_head_one_bad_row_fails_the_whole_repo(monkeypatch, rows):
     # A single unusable row must NOT be skipped: skipping drops that head from the
     # index, and a missing head reads as a provable "no PR" — so shape drift would
     # become a confident false claim about one Tree. Not a delete (no-PR and UNKNOWN
-    # bucket the same everywhere) but worse in kind: gc would count that Tree as READ
-    # and report a complete view it never had. Failing the whole repo keeps the
-    # never-lie invariant. Note the GOOD row is discarded too.
+    # bucket identically on every ladder) but worse in kind: gc would count that Tree
+    # as READ and report a complete view it never had. Failing the whole repo keeps
+    # the never-lie invariant. Note the GOOD row is discarded too.
     _capture_argv(monkeypatch, _ok(json.dumps(rows)))
     assert gh.prs_by_head("acme/widget") is gh.UNKNOWN
 
@@ -403,6 +441,76 @@ def test_prs_by_head_truncated_result_is_unknown(monkeypatch):
     # One under the bound is a complete, trustworthy index.
     _capture_argv(monkeypatch, _ok(json.dumps(rows[:-1])))
     assert isinstance(gh.prs_by_head("acme/widget"), dict)
+
+
+def test_prs_by_head_ignores_fork_prs_sharing_a_local_head_name(monkeypatch):
+    # A repo-wide list carries FORK PRs, whose head branch lives in the fork — and head
+    # names are unique only within a repo, so a fork's `issues/9/work` and ours are two
+    # branches with one name. The fork row is listed FIRST here (GitHub's order decides
+    # setdefault, not us), so an unfiltered index would hand the fork's PR to the local
+    # Tree. Worst case is exactly this one: the fork PR is MERGED — the rung gc
+    # reclaims on — while the local PR is an open draft, so a Tree with live work would
+    # read as finished and be deleted.
+    payload = json.dumps(
+        [
+            _row(900, "issues/9/work", "MERGED", cross_repo=True),
+            _row(9, "issues/9/work", "OPEN", is_draft=True),
+        ]
+    )
+    _capture_argv(monkeypatch, _ok(payload))
+
+    index = gh.prs_by_head("acme/widget")
+
+    assert index["issues/9/work"] == gh.HeadPr(
+        number=9, state="OPEN", is_draft=True, base_ref="main"
+    )
+
+
+def test_prs_by_head_fork_only_head_is_absent_not_indexed(monkeypatch):
+    # The other half: a fork head with NO local counterpart must not appear at all. An
+    # absent head is the index's "provably no PR" arm, and that is the TRUE answer for
+    # this repo — the branch simply is not ours. Dropping the row is not the
+    # skipping-a-bad-row hazard: nothing here went unread.
+    payload = json.dumps(
+        [
+            _row(900, "contributor/patch", "OPEN", cross_repo=True),
+            _row(9, "issues/9/work", "OPEN"),
+        ]
+    )
+    _capture_argv(monkeypatch, _ok(payload))
+
+    index = gh.prs_by_head("acme/widget")
+
+    assert "contributor/patch" not in index
+    assert set(index) == {"issues/9/work"}
+
+
+def test_prs_by_head_malformed_fork_row_does_not_fail_the_repo(monkeypatch):
+    # The one-bad-row-fails-the-repo rule guards the INDEX's integrity: a row we drop
+    # would leave a head reading as a provable "no PR". A fork row is never indexed at
+    # all, so its shape cannot drift the index — failing the repo over a stranger's
+    # payload would blank every local Tree here for nothing, which is the false-UNKNOWN
+    # this ordering exists to avoid. The fork discriminator itself must still be
+    # readable (covered above): without it we cannot tell the row IS a fork's.
+    payload = json.dumps(
+        [
+            {
+                "number": "not-an-int",  # would fail the repo on a local row
+                "state": "OPEN",
+                "isDraft": False,
+                "baseRefName": "main",
+                "headRefName": "contributor/patch",
+                "isCrossRepository": True,
+            },
+            _row(9, "issues/9/work", "OPEN"),
+        ]
+    )
+    _capture_argv(monkeypatch, _ok(payload))
+
+    index = gh.prs_by_head("acme/widget")
+
+    assert isinstance(index, dict)
+    assert set(index) == {"issues/9/work"}
 
 
 def test_prs_by_head_rebuilt_branch_resolves_to_the_newest_pr(monkeypatch):

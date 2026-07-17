@@ -372,8 +372,13 @@ def test_pr_state_projects_the_records_state_without_reading_gh(monkeypatch):
 
 
 def test_pr_state_unknown_stays_distinct_from_no_pr():
-    # The load-bearing split: "UNKNOWN" (state unreadable -> the ladder KEEPS) must
-    # never collapse into None (no branch / no PR -> a rung gc reclaims on).
+    # The load-bearing split: "UNKNOWN" (state unreadable) must never collapse into
+    # None (no branch / no PR). NOT because they bucket differently — they bucket
+    # identically on every ladder (see
+    # test_no_pr_and_unknown_bucket_identically_on_every_ladder) — but because only
+    # "UNKNOWN" is counted by GcPlan.unknown, which is what makes a sweep admit it read
+    # part of the root and exit non-zero. The split buys gc's REPORTING honesty, not
+    # its safety.
     assert gc.pr_state(_record(path="/trees/x", pr_state="UNKNOWN")) == "UNKNOWN"
     assert gc.pr_state(_record(path="/trees/y", branch=None, pr_state=None)) is None
     assert gc.pr_state(_record(path="/trees/z", pr_state=None)) is None

@@ -13,8 +13,9 @@ seam (it reads each clone through the :mod:`shipit.gh` boundary, so tests patch 
 one module), and :class:`TreeRecord` is the plain, frozen snapshot the ``list`` verb
 renders. ``scan`` does NOT mutate anything — it is a pure read of the fleet.
 
-The PR state is read ONE CALL PER REPO, not per Tree (:func:`_pr_index` →
-:func:`shipit.gh.prs_by_head`), before the per-clone fan-out. This is the module's
+The PR state is read ONE CALL PER REPO, not per Tree (:func:`_start_pr_batches` →
+:func:`shipit.gh.prs_by_head`, consulted per clone through :func:`_await_pr_index` and
+:func:`_pr_for_branch`), before the per-clone fan-out. This is the module's
 load-bearing performance shape, not an optimization detail: a Tree-sized fan-out of
 network calls both dominated ``tree list``'s runtime and exhausted GitHub's hourly
 GraphQL budget mid-``gc``, which — because an unreadable PR state means *keep* — made
@@ -44,9 +45,9 @@ logger = logging.getLogger("shipit.tree")
 #: local ``git`` subprocesses, not on the GIL — so threads (not processes) are the right
 #: tool, and the cap exists only to keep a large fleet from spawning hundreds of
 #: concurrent subprocesses (fd/process pressure). Because the tasks block on subprocesses
-#: rather than burn CPU, we do NOT scale the pool down to the core count: we keep a floor
-#: (:data:`_MIN_SCAN_WORKERS`) so even a 1-2 core box overlaps subprocess latency, then
-#: bound that by this max and the clone count.
+#: rather than burn CPU, we do NOT scale the pool down to the core count — a 1-2 core box
+#: should still overlap subprocess latency, so the width is this flat max bounded only by
+#: the clone count (:func:`_scan_workers`), with no core-derived term and no floor.
 #:
 #: Raised from 8 to 32 with the per-repo PR batch (issue #1011). The old value was set
 #: when each task also made a NETWORK round-trip (``gh pr view``, hundreds of ms); the
@@ -117,15 +118,17 @@ class TreeRecord:
       scan already paid.
 
       ``"UNKNOWN"`` stays distinct from ``None`` — but NOT because they bucket
-      differently. They do not: ``classify`` sends both to the same non-deleting
-      bucket on all three ladders (write → stale, review → keep, ephemeral → decided
-      on liveness/age without consulting the PR at all). The distinction is load-
-      bearing for gc's HONESTY rather than its safety: ``plan.unknown`` counts
-      ``"UNKNOWN"``, and that count is what makes a sweep announce it saw only part of
-      the root and exit non-zero. Report ``None`` where the truth was unreadable and
-      the count reads 0 — so gc claims a complete view of a fleet it could not read
-      and exits 0 having swept nothing, which IS the #1011 failure that let 526 Trees
-      accumulate. The lie is the bug; the delete never happens.
+      differently. They do not: ``classify`` buckets them IDENTICALLY on all three
+      ladders — an aged write Tree goes ``stale`` on either, a review Tree ``keep`` on
+      either, and an ephemeral Tree is decided on local work, liveness and age without
+      consulting the PR at all (so it may well be reclaimed — but on its age, at the
+      identical rung, for either state). The distinction is load-bearing for gc's
+      HONESTY rather than its safety: ``plan.unknown`` counts ``"UNKNOWN"``, and that
+      count is what makes a sweep announce it saw only part of the root and exit
+      non-zero. Report ``None`` where the truth was unreadable and the count reads 0 —
+      so gc claims a complete view of a fleet it could not read and exits 0 having
+      swept nothing, which IS the #1011 failure that let 526 Trees accumulate. What
+      swapping one for the other changes is the REPORT, never a bucket.
 
       **Deliberately has no default, unlike every other optional-looking field here.**
       There is no correct default, because the field means *what the scan learned* and
@@ -295,10 +298,10 @@ def _start_pr_batches(
 
     A clone whose repo is unresolvable (``None`` here), and every clone of a repo whose
     batch call fails, end up :data:`~shipit.gh.UNKNOWN` — the undetermined arm, never a
-    silent "no PR". That distinction does not change any ladder's bucket (both are
-    non-deleting everywhere); it is what keeps ``gc`` HONEST. ``plan.unknown`` counts
-    the UNKNOWNs, and that count is the whole basis of the incomplete-view warning and
-    the non-zero exit. Answering "no PR" for a repo we failed to read would zero it and
+    silent "no PR". That distinction does not change any ladder's bucket (the two
+    bucket identically on every one); it is what keeps ``gc`` HONEST. ``plan.unknown``
+    counts the UNKNOWNs, and that count is the whole basis of the incomplete-view
+    warning and the non-zero exit. Answering "no PR" for a repo we failed to read would zero it and
     let ``gc`` report a clean bill of health for Trees it never saw — #1011's silent
     success, rebuilt one repo at a time.
     """
