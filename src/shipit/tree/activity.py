@@ -20,7 +20,8 @@ every live Tree reads **< 1h** idle, every dead one **> 41h** (ADR-0072).
 
 **The prune set is load-bearing, not an optimization.** A naive walk of a Tree costs
 ~191.7ms (17,374 files); pruned, ~1.9ms (509 files) — ``.pixi`` alone is ~97% of the
-file count. An unpruned walk would cost more than the entire ``gh``-based apparatus
+file count (ADR-0072; re-measured here at ~425ms vs ~7ms on a 155-Tree fleet, the same
+37-59× gap). An unpruned walk would cost more than the entire ``gh``-based apparatus
 this signal deletes, which is why :data:`PRUNE_DIRS` is part of the decision and not
 a tuning knob.
 
@@ -78,8 +79,11 @@ def newest_mtime(path: str | Path) -> float | None:
     transient filesystem hiccup can never license a delete. The failure is logged at
     DEBUG rather than swallowed silently.
 
-    Cost: ~1.9ms per Tree with the prune set applied (~509 files), versus ~191.7ms
-    unpruned (~17,374 files).
+    Cost, measured across a live 155-Tree fleet: ~7ms per Tree warm / ~11ms cold with
+    the prune set applied, versus ~425ms unpruned — a 37-59× gap (ADR-0072's own
+    figures, 1.9ms vs 191.7ms, are the same finding on a different fleet). The ratio,
+    not the absolute, is the point: unpruned, the walk would cost more than the whole
+    ``gh``-based apparatus it replaces.
     """
     root = Path(path)
     newest: float | None = None
