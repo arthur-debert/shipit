@@ -157,6 +157,30 @@ def test_non_clone_dir_is_never_touched(root, clean_git):
     assert not_a_clone.exists()
 
 
+def test_nested_clone_under_a_tree_is_never_targeted(root, ephemeral_tree, clean_git):
+    # A clone NESTED inside a Tree (a submodule checkout, or an accidental repo inside a
+    # Tree) is NOT a Tree: only a DIRECT child of the root is (ADR-0074). Even though the
+    # nested path carries a `.git` dir, it is not `parent == root`, so it is refused — the
+    # wrong directory must never be handed up on a destructive path.
+    nested = ephemeral_tree / "submodule"
+    (nested / ".git").mkdir(parents=True)
+    assert _run({"cwd": str(nested)}) == 0
+    assert nested.exists()
+    assert ephemeral_tree.exists()  # the enclosing Tree is untouched too
+
+
+def test_non_conforming_direct_child_is_never_targeted(root, clean_git):
+    # A DIRECT child of the root whose name is NOT a valid flat leaf (ADR-0074 grammar)
+    # is not a Tree, even with a `.git` dir: the flat-leaf gate
+    # (`layout.parse_flat_leaf`) refuses it, so an arbitrary repo dropped under the root
+    # is left untouched.
+    stray = root / "just-some-repo"
+    (stray / ".git").mkdir(parents=True)
+    assert layout.parse_flat_leaf(stray.name) is None  # guards the premise
+    assert _run({"cwd": str(stray)}) == 0
+    assert stray.exists()
+
+
 def test_bad_payload_fails_open(root):
     assert _run("{not json") == 0
     assert _run(json.dumps(["not", "an", "object"])) == 0
