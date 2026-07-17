@@ -46,9 +46,13 @@
   source until its content is verified present in the target, and a directory
   that could not be fully drained is never replaced by the link: memory is
   irreplaceable, and a store left split is recoverable where a deleted memory is
-  not. Adoption is **serialized per store**, so two checkouts of one repo
+  not. Planting is **serialized per store**, so two checkouts of one repo
   migrating at the same time cannot both claim one destination and have the
-  second's copy land on the first's memory.
+  second's copy land on the first's memory — and two runs against the *same*
+  checkout cannot race either: the second re-reads the directory once it has the
+  lock and finds the first's link already there, rather than acting on what it
+  saw before waiting. A refusal touches nothing on either side, including the
+  store directory itself.
   `shipit install` plants the link on **every** run except `--dry-run`, including
   one where the managed set is already current: the link is not a managed file,
   so a clean plan says nothing about whether it exists — and an already-installed

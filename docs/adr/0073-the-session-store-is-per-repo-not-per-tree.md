@@ -207,6 +207,17 @@ adoption that loses a file to save a directory entry has defeated it.
   unlink — and not merely across the copy. It excludes shipit's adopters from
   each other, which is the only collision that can occur here: a live session
   appends UUID-named transcripts and never writes a path an adopter is moving.
+- **The lock covers the choice of rung, not just the adoption it leads to.** The
+  rule above — never act on a classification another adopter can invalidate —
+  applies to the *plant ladder* itself, one level above the matrix. Two planters
+  of one checkout both classify the slug dir as a real directory; the winner
+  adopts it and leaves the symlink; the loser is then admitted still holding
+  "directory" for what is now a link **to the store**, and adopting that walks
+  the store into itself, compares every entry with itself, and deletes it on the
+  identical-file rung. So the rung is re-decided from a fresh classification once
+  the lock is held, and the pre-lock one is a fast path with no authority. The
+  narrow reading — "lock the adoption" — leaves the ladder's own decision racing,
+  which is the same bug wearing the fix's clothes.
 - **The store outlives every Tree, by design.** ADR-0072 reclaims a Tree after
   48h idle; the store is not in the Tree and is never swept with it. This is the
   point: reclaiming a workspace must not destroy what was learned in it.

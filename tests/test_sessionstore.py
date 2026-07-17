@@ -45,6 +45,27 @@ def write(path: Path, text: str) -> Path:
     return path
 
 
+def _assert_no_store_side_effects(home: Path) -> None:
+    """Pin that a refusal left the STORE side untouched, not just the link side.
+
+    "Nothing changed" is a claim about the whole filesystem, and the refusal rungs are the
+    ones that make it in their log line. A refusal that still created the store dir or the
+    lock file has changed something — and asserting only that the refused path survived is
+    what let that pass unnoticed, since the link side is exactly the side a refusal was
+    never going to touch.
+
+    Asserts on the `stores/` tree rather than on `projects/`: the slug dir's parent is the
+    link side, which these tests create themselves.
+    """
+    assert not _store(home).exists(), "a refusal created the store dir"
+    assert not sessionstore.lock_path(REPO, home=home).exists(), (
+        "a refusal created the lock file"
+    )
+    assert not (home / ".claude" / "stores").exists(), (
+        "a refusal created the stores tree"
+    )
+
+
 # ---------------------------------------------------------------------------
 # slug_for — the pure function the whole design rests on
 # ---------------------------------------------------------------------------
@@ -207,6 +228,7 @@ def test_plant_refuses_foreign_symlink(home: Path, tmp_path: Path, caplog):
     assert result.outcome == sessionstore.REFUSED
     assert os.readlink(link) == str(elsewhere), "the foreign link was retargeted"
     assert "refusing to retarget" in caplog.text
+    _assert_no_store_side_effects(home)
 
 
 def test_plant_refuses_a_file_at_the_slug_path(home: Path, tmp_path: Path, caplog):
@@ -218,6 +240,7 @@ def test_plant_refuses_a_file_at_the_slug_path(home: Path, tmp_path: Path, caplo
 
     assert result.outcome == sessionstore.REFUSED
     assert link.read_text() == "not a store"
+    _assert_no_store_side_effects(home)
 
 
 def test_plant_adopts_a_real_directory(home: Path, tmp_path: Path):
@@ -388,6 +411,36 @@ def test_concurrent_adopters_dedupe_identical_content(
     assert (_store(home) / "memory" / "MEMORY.md").read_text() == (
         "one memory, copied to two checkouts"
     )
+
+
+def test_concurrent_planters_of_one_checkout_keep_the_store(home: Path, tmp_path: Path):
+    """The same-checkout race: the loser must not adopt the store INTO ITSELF.
+
+    Two planters of ONE checkout (two `shipit install` runs in the canonical checkout)
+    both classify the slug dir as a real directory before either takes the lock. The
+    winner adopts it and replaces it with the symlink; the loser is then admitted holding
+    a classification that is already stale, and calls `adopt(link, store)` on what is now
+    a symlink TO the store. `iterdir` follows it, so every store entry is compared with
+    itself, the identical-file rung fires, and `src.unlink()` deletes the store's only
+    copy. Revalidating under the lock is what makes the loser see the winner's symlink and
+    take the no-op rung instead.
+
+    No `slow_move` here: the stale window is classify-to-lock, which the barrier already
+    lands both threads inside.
+    """
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    write(
+        sessionstore.link_path(checkout, home=home) / "memory" / "MEMORY.md",
+        "the only copy",
+    )
+
+    errors = _plant_concurrently([checkout, checkout], home)
+
+    assert not errors, f"planting raised under concurrency: {errors}"
+    assert (_store(home) / "memory" / "MEMORY.md").read_text() == "the only copy"
+    link = sessionstore.link_path(checkout, home=home)
+    assert link.is_symlink() and os.readlink(link) == str(_store(home))
 
 
 # ---------------------------------------------------------------------------

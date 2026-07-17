@@ -30,14 +30,23 @@ store split in two forever. So: correct symlink → no-op; absent → create; re
 directory → :func:`adopt` its contents into the store, then replace it with the link;
 a symlink pointing elsewhere → refuse loudly and change nothing.
 
-**Adoption is serialized per store** (:func:`_store_lock`), because the store is the one
-thing every checkout of a repo SHARES: two checkouts planting at once are two adopters
-merging into the same target, and the matrix' classify → copy → verify → unlink sequence
-is only safe if no one else moves the target underneath it. Unserialized, two adopters
-can each classify the same destination as absent, and the second's copy overwrites the
-first's — after which both verify and delete their sources, and the first's content is
-gone. The lock is what makes "nothing is deleted until verified present in the target"
-true against a concurrent adopter rather than only against a single one.
+**Planting's effectful rungs are serialized per store** (:func:`_store_lock`), because
+the store is the one thing every checkout of a repo SHARES: two checkouts planting at
+once are two adopters merging into the same target, and the matrix' classify → copy →
+verify → unlink sequence is only safe if no one else moves the target underneath it.
+Unserialized, two adopters can each classify the same destination as absent, and the
+second's copy overwrites the first's — after which both verify and delete their sources,
+and the first's content is gone. The lock is what makes "nothing is deleted until
+verified present in the target" true against a concurrent adopter rather than only
+against a single one.
+
+**The lock is necessary but not sufficient: the decision it guards must be made under
+it.** A classification taken before the lock is stale by the time the lock is granted,
+and the ladder's rungs are not stable under a concurrent planter — two planters of the
+same checkout both see a real directory, and the one that waits is admitted holding a
+"directory" verdict for what is now a symlink to the store. Adopting that walks the store
+into itself and deletes it. So :func:`plant` re-runs :func:`_settle` once it holds the
+lock, and only then acts.
 
 Fail-open is the contract at the CALL sites, not here: this module raises nothing for
 an ordinary refusal (it reports one), and its callers swallow the environment-shaped
@@ -175,15 +184,16 @@ def lock_path(repo: Repo, *, home: Path | None = None) -> Path:
 
 @contextmanager
 def _store_lock(lock: Path) -> Iterator[None]:
-    """Hold an exclusive ``flock`` on ``lock`` for the whole adoption transaction.
+    """Hold an exclusive ``flock`` on ``lock`` for a whole plant transaction.
 
     The unit of exclusion is the STORE, and the critical section is the entire
-    transaction — classify, copy, verify, unlink the source, and replace the drained dir
-    with the link — not merely the copy. Locking only the copy would still let a second
-    adopter classify a destination as absent while the first is mid-verify, which is the
-    same race one step later: the guarantee adoption sells is that a source is deleted
-    only once its content is provably in the target, and that "provably" spans from
-    classification to unlink.
+    transaction — decide the rung, classify, copy, verify, unlink the source, and replace
+    the drained dir with the link — not merely the copy. Locking only the copy would still
+    let a second adopter classify a destination as absent while the first is mid-verify,
+    which is the same race one step later: the guarantee adoption sells is that a source is
+    deleted only once its content is provably in the target, and that "provably" spans from
+    classification to unlink. The *rung* decision is inside the section for the same
+    reason — see :func:`plant`.
 
     An advisory lock is enough because shipit's adopters are the only writers that ever
     collide here: a live session appends its own uuid-named transcripts to the store and
@@ -224,57 +234,49 @@ def plant(checkout: Path | str, repo: Repo, *, home: Path | None = None) -> Plan
     ADR's rule). Our own links are always written as ``str(store_dir(...))``, so a
     re-run compares byte-identical text and case 1 holds — that IS the idempotence.
 
-    Case 3 runs under the store's :func:`_store_lock`, so concurrent planters from two
-    checkouts of the same repo adopt one at a time; this is the entry point that supplies
-    the serialization :func:`adopt` requires.
+    Cases 2 and 3 — the two that write — run under the store's :func:`_store_lock`, and
+    **re-decide the ladder from a fresh classification once they hold it**. The
+    classification below the lock is a fast path only: between it and the lock, another
+    planter of the SAME checkout (two ``shipit install`` runs in the canonical checkout)
+    can adopt the dir and replace it with the link, which would leave the loser adopting
+    a symlink that now points AT the store — ``iterdir`` follows it, every entry compares
+    equal to itself, and the identical-file rung deletes the store's only copy. The
+    decision is therefore only trustworthy while the lock is held; that is why
+    :func:`_settle` is applied twice rather than once.
+
+    Cases 1 and 4 — no-op and refusal — are terminal without writing anything, and the
+    pre-lock :func:`_settle` is what keeps them that way: a refusal that created the store
+    dir, the ``projects/`` parent or the lock file would not be the "nothing changed" it
+    claims to be. (The re-check under the lock can still refuse *after* those mkdirs, but
+    only when the path changed type mid-race — by then this call had a real directory to
+    adopt, and the store dir it left behind is the empty one the winning planter created
+    anyway.)
 
     Raises ``OSError`` only for genuinely unexpected I/O; a *refusal* is a return value,
     not an exception. Callers are fail-open (a Tree is not worth losing to a store).
     """
     store = store_dir(repo, home=home)
     link = link_path(checkout, home=home)
-    kind = _classify(link)
 
-    if kind == _SYMLINK:
-        if os.readlink(link) == str(store):
-            logger.debug("session store already linked: %s -> %s", link, store)
-            return PlantResult(link, store, NOOP)
-        logger.warning(
-            "session store NOT linked: %s is a symlink to %s, not to %s; refusing to "
-            "retarget a link shipit does not own — nothing changed.",
-            link,
-            os.readlink(link),
-            store,
-        )
-        return PlantResult(link, store, REFUSED, [str(link)])
+    settled = _settle(link, store)
+    if settled is not None:
+        return settled
 
     store.mkdir(parents=True, exist_ok=True)
     link.parent.mkdir(parents=True, exist_ok=True)
 
-    if kind == _ABSENT:
-        link.symlink_to(store, target_is_directory=True)
-        logger.debug("session store linked: %s -> %s", link, store)
-        return PlantResult(link, store, LINKED)
-
-    if kind != _DIR:
-        # A plain file (or a socket/fifo) squatting on the slug path: a type conflict at
-        # the ladder's own root. The ADR's matrix refuses every type conflict rather than
-        # guess, and the same reasoning applies a level up.
-        logger.warning(
-            "session store NOT linked: %s exists and is a %s, not a directory; "
-            "refusing to replace it — nothing changed.",
-            link,
-            kind,
-        )
-        return PlantResult(link, store, REFUSED, [str(link)])
-
-    # The ONE branch that writes into the store's contents, hence the only one that has
-    # to exclude a concurrent adopter. The rungs above are safe unserialized: the link
-    # side is per-checkout (no two processes plant the same slug dir), `store.mkdir` is
-    # idempotent, and an adopter that adds files while another session's link is created
-    # loses nothing. So the lock is taken here, not around the whole ladder — a refusal
-    # above must stay free of any store-side side effect, including the lock file.
     with _store_lock(lock_path(repo, home=home)):
+        # Re-decide under the lock: the classification that got us here is now stale, and
+        # acting on a stale one is the same-checkout race that empties the store.
+        settled = _settle(link, store)
+        if settled is not None:
+            return settled
+
+        if _classify(link) == _ABSENT:
+            link.symlink_to(store, target_is_directory=True)
+            logger.debug("session store linked: %s -> %s", link, store)
+            return PlantResult(link, store, LINKED)
+
         refusals = adopt(link, store)
         remaining = sorted(p.name for p in link.iterdir())
         if remaining:
@@ -296,6 +298,45 @@ def plant(checkout: Path | str, repo: Repo, *, home: Path | None = None) -> Plan
         link.symlink_to(store, target_is_directory=True)
     logger.debug("session store adopted and linked: %s -> %s", link, store)
     return PlantResult(link, store, ADOPTED, refusals)
+
+
+def _settle(link: Path, store: Path) -> PlantResult | None:
+    """The ladder's terminal rungs: :data:`NOOP`, :data:`REFUSED`, or ``None`` for "act".
+
+    ``None`` means ``link`` is absent or a real directory — the two classifications that
+    call for a write, and the two :func:`plant` re-checks under the lock. Every rung here
+    is decided from ``lstat`` alone and **writes nothing**, which is what lets it serve
+    both as the pre-lock fast path and as the authoritative decision once the lock is
+    held, and what keeps a refusal free of side effects.
+    """
+    kind = _classify(link)
+
+    if kind == _SYMLINK:
+        if os.readlink(link) == str(store):
+            logger.debug("session store already linked: %s -> %s", link, store)
+            return PlantResult(link, store, NOOP)
+        logger.warning(
+            "session store NOT linked: %s is a symlink to %s, not to %s; refusing to "
+            "retarget a link shipit does not own — nothing changed.",
+            link,
+            os.readlink(link),
+            store,
+        )
+        return PlantResult(link, store, REFUSED, [str(link)])
+
+    if kind not in (_ABSENT, _DIR):
+        # A plain file (or a socket/fifo) squatting on the slug path: a type conflict at
+        # the ladder's own root. The ADR's matrix refuses every type conflict rather than
+        # guess, and the same reasoning applies a level up.
+        logger.warning(
+            "session store NOT linked: %s exists and is a %s, not a directory; "
+            "refusing to replace it — nothing changed.",
+            link,
+            kind,
+        )
+        return PlantResult(link, store, REFUSED, [str(link)])
+
+    return None
 
 
 def adopt(source: Path, target: Path) -> list[str]:
