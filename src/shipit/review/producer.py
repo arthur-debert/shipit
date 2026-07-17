@@ -937,8 +937,7 @@ def _dry_run(
 
 def _preflight(backend: Backend, *, dry_run: bool) -> None:
     """Verify the backend's CLI binary (the registry's ``binary`` alias) is on
-    PATH — and, for agy, that it supports the reviewer's ``--agent`` flag; raise
-    :class:`BackendUnavailable` otherwise.
+    PATH; raise :class:`BackendUnavailable` otherwise.
 
     Skipped in ``dry_run`` (a dry-run only prints the would-run argv; it must work
     without the CLI installed, mirroring the spawn dry-run posture). A missing CLI on a

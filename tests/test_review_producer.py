@@ -46,7 +46,6 @@ def _faked(monkeypatch):
     """Fake the Tree clone, the remote-url read, and the PATH preflight so a launch
     exercises ONLY the producer wiring. Returns a dict the test fills with the captured
     launch argv/cwd/env."""
-    from shipit.spawn.backends import antigravity as agy_backend
 
     monkeypatch.setattr(
         producer,
@@ -59,12 +58,7 @@ def _faked(monkeypatch):
     )
     monkeypatch.setattr(producer.git, "remote_url", lambda *, cwd: "https://x/y.git")
     monkeypatch.setattr(producer.shutil, "which", lambda binary: f"/usr/bin/{binary}")
-    # #989: the AGY reviewer preflight probes `agy --help` for `--agent`. These
-    # wiring tests must not depend on a real agy binary (absent in CI), so stub
-    # the capability probe present — the probe itself is covered by dedicated
-    # tests (test_agy_reviewer_preflight_*). Tests exercising the UNSUPPORTED
-    # path override this back to False.
-    monkeypatch.setattr(agy_backend, "supports_agent_flag", lambda **k: True)
+
     captured: dict = {}
 
     def launcher(cmd, *, cwd, env, timeout=None):

@@ -627,17 +627,11 @@ def test_provision_agent_defs_provisions_the_agy_reviewer_def(checkout):
     assert "name: reviewer" in agy_def.read_text(encoding="utf-8")
 
 
-def test_run_replay_provisions_the_agy_def_before_an_antigravity_launch(
-    checkout, launcher, tmp_path, monkeypatch
+def test_run_replay_uncalibrated_agy_does_not_provision_defs(
+    checkout, launcher, tmp_path
 ):
-    # #989: a SINGLE-PASS AGY replay over a bare clone launches `agy --agent
-    # reviewer`, which reads `.agents/agents/reviewer/agent.md`. run_replay must
-    # provision it first — the def is absent to start and present after — so the
-    # launch does not fail for want of the def. (The clone lacks it; there is no
-    # calibrator here — the provisioning is driven by the ANTIGRAVITY backend.)
-    from shipit.spawn.backends import antigravity as agy_backend
-
-    monkeypatch.setattr(agy_backend, "supports_agent_flag", lambda **k: True)
+    # #1033: an uncalibrated AGY replay launches without writing agent definitions.
+    # The native reviewer posture was reverted, so AGY no longer needs `.agents`.
     agy_def = checkout / ".agents" / "agents" / "reviewer" / "agent.md"
     assert not agy_def.exists()  # bare clone
 
@@ -649,20 +643,15 @@ def test_run_replay_provisions_the_agy_def_before_an_antigravity_launch(
         base_dir=tmp_path / "state",
     )
 
-    assert agy_def.is_file()  # provisioned before the launch
+    assert not agy_def.exists()  # NO provisioning occurred
     assert launcher["cmd"][0] == "agy"  # the launch actually ran
 
 
-def test_run_fanout_replay_provisions_the_agy_def_without_a_calibrator(
-    checkout, fanout_launcher, tmp_path, monkeypatch
+def test_run_fanout_replay_uncalibrated_agy_does_not_provision_defs(
+    checkout, fanout_launcher, tmp_path
 ):
-    # #989: an UNCALIBRATED fan-out AGY replay likewise launches `agy --agent
-    # reviewer` per dimension pass, so run_fanout_replay must provision the AGY
-    # def even with no judge on — the calibrator-only guard was a hole (codex
-    # finding). Bare clone → def present after → passes launched as `agy`.
-    from shipit.spawn.backends import antigravity as agy_backend
-
-    monkeypatch.setattr(agy_backend, "supports_agent_flag", lambda **k: True)
+    # #1033: an UNCALIBRATED fan-out AGY replay also launches without writing agent
+    # definitions.
     agy_def = checkout / ".agents" / "agents" / "reviewer" / "agent.md"
     assert not agy_def.exists()
 
@@ -675,35 +664,8 @@ def test_run_fanout_replay_provisions_the_agy_def_without_a_calibrator(
         base_dir=tmp_path / "state",
     )
 
-    assert agy_def.is_file()  # provisioned despite NO calibrator
+    assert not agy_def.exists()  # NO provisioning occurred
     assert any(entry["cmd"][0] == "agy" for entry in fanout_launcher["launches"])
-
-
-def test_run_replay_agy_provisioning_failure_is_a_clean_review_error(
-    checkout, launcher, tmp_path, monkeypatch
-):
-    # An AGY single-pass replay maps a filesystem provisioning failure to the
-    # replay path's ONE clean ReviewError before any model bills — same posture
-    # as the fan-out calibrator path, now reached by the ANTIGRAVITY backend.
-    from shipit.spawn.backends import antigravity as agy_backend
-
-    monkeypatch.setattr(agy_backend, "supports_agent_flag", lambda **k: True)
-
-    def boom(workdir):
-        raise OSError("read-only file system")
-
-    monkeypatch.setattr(replay, "provision_agent_defs", boom)
-    view = replay.resolve_range("HEAD~1..HEAD", workdir=str(checkout))
-    with pytest.raises(ReviewError, match="agent-defs") as excinfo:
-        replay.run_replay(
-            agent_backend.ANTIGRAVITY,
-            view,
-            launcher=launcher["launch"],
-            base_dir=tmp_path / "state",
-        )
-    # The ANTIGRAVITY primary reads the defs itself, so dropping `--calibrator-*`
-    # would NOT bypass the read-only checkout — the misleading hint is omitted.
-    assert "--calibrator-*" not in str(excinfo.value)
 
 
 def test_provision_agent_defs_nested_symlink_aborts_the_tree_fail_closed(

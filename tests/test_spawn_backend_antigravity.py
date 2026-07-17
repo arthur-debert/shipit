@@ -6,11 +6,7 @@ cwd-rooting quirk and ``--dangerously-skip-permissions``), the ``GEMINI_API_KEY`
 ``GOOGLE_API_KEY`` scrub, and the write-role prompt-prepend) plus the **reviewer**
 posture: ``read_only=True`` under the reviewer role drops
 ``--dangerously-skip-permissions`` (read-only rides the chmod'd Tree, ADR-0020
-§Decision 3) AND, since #989, selects AGY 1.1.2's native ``--agent reviewer`` def and
-passes the task directly. The ``--agent`` capability probe / upgrade preflight
-(:func:`supports_agent_flag` / :func:`require_agent_support`) is covered too — asserted
-through the adapter and the injectable seam, mirroring ``test_spawn_backend_claude.py``.
-No real ``agy`` binary is ever invoked.
+§Decision 3). No real ``agy`` binary is ever invoked.
 """
 
 from __future__ import annotations
@@ -66,7 +62,7 @@ def test_build_command_carries_bypass_permissions_for_a_write_run():
     assert "--dangerously-skip-permissions" in cmd
 
 
-def test_reviewer_build_command_uses_direct_task_and_no_agent():
+def test_reviewer_build_command_uses_prompt_prepend():
     # Reviewer posture (issue #1033): read_only + the reviewer role. We reverted the
     # `--agent reviewer` def since it goes agentic and fails. We now pass the review task
     # using prompt-prepend. It still OMITS --dangerously-skip-permissions (WS04a: agy runs the
@@ -106,10 +102,7 @@ def test_write_and_reviewer_argv_differ_by_posture():
     assert reviewer[-1] == "You are acting as the 'reviewer' role for this Run.\n\nt"
 
 
-def test_read_only_non_reviewer_role_keeps_prompt_prepend_and_no_agent():
-    # `--agent reviewer` is gated on the REVIEWER role, not merely read_only: a read-only
-    # run under any other role (e.g. an explorer) keeps the legacy prompt-prepend and
-    # emits NO --agent flag, so the native-agent posture stays scoped to the reviewer.
+def test_read_only_non_reviewer_role_keeps_prompt_prepend():
     cmd = AGY.build_command("look around", "explorer", cwd=TREE, read_only=True)
     assert "--agent" not in cmd
     assert (
@@ -129,56 +122,6 @@ def test_build_command_prepends_the_role_natively_for_a_write_run():
     )
     assert "shepherd" in print_text
     assert print_text.endswith("implement #7")
-
-
-def test_supports_agent_flag_probes_agy_help(monkeypatch):
-    # The capability probe (#989) greps `agy --help` for `--agent`, so the reviewer
-    # preflight is capability-direct, not a fragile version parse.
-    from shipit import execrun
-
-    calls = {}
-
-    def fake_run(argv, **kwargs):
-        calls["argv"] = argv
-        return execrun.ExecResult(
-            argv=tuple(argv),
-            rc=0,
-            stdout="  --agent <name>\n",
-            stderr="",
-            duration_ms=0,
-        )
-
-    monkeypatch.setattr(agy_backend.shutil, "which", lambda _b: "/usr/bin/agy")
-    monkeypatch.setattr(agy_backend.execrun, "run", fake_run)
-    assert agy_backend.supports_agent_flag() is True
-    assert calls["argv"] == ["agy", "--help"]
-
-
-def test_supports_agent_flag_false_when_binary_missing(monkeypatch):
-    monkeypatch.setattr(agy_backend.shutil, "which", lambda _b: None)
-    assert agy_backend.supports_agent_flag() is False
-
-
-def test_supports_agent_flag_false_when_help_exits_nonzero(monkeypatch):
-    # A NON-ZERO `agy --help` is not a trustworthy capability signal even if
-    # `--agent` appears (e.g. in an error banner): only a clean rc-0 help counts,
-    # so a failed probe reads as unsupported rather than a false positive that
-    # would pass preflight and then fail mid-run when `--agent` is actually used.
-    from shipit import execrun
-
-    monkeypatch.setattr(agy_backend.shutil, "which", lambda _b: "/usr/bin/agy")
-    monkeypatch.setattr(
-        agy_backend.execrun,
-        "run",
-        lambda *a, **k: execrun.ExecResult(
-            argv=("agy", "--help"),
-            rc=2,
-            stdout="",
-            stderr="error: unknown flag; usage mentions --agent\n",
-            duration_ms=0,
-        ),
-    )
-    assert agy_backend.supports_agent_flag() is False
 
 
 def test_build_command_never_emits_a_tools_flag():

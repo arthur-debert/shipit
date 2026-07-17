@@ -41,32 +41,16 @@ reviewer Run's read-only guarantee rides **solely** on the chmod'd shared read-o
 (ADR-0018), the load-bearing guard — the seam's ``read_only`` flag only drops the
 write Run's ``--dangerously-skip-permissions`` (best-effort defense-in-depth).
 
-**Native reviewer agent (AGY 1.1.2, issue #989).** The installed ``agy`` gained a
-documented ``--agent <name>`` flag that selects a custom agent def from the checkout's
-``.agents/agents/<name>/agent.md``. The **reviewer** posture (``read_only=True`` AND
-``role == reviewer``) now uses ``--agent reviewer`` — the slim, focused reviewer agent
-shipit generates and provisions (:func:`shipit.harness.prompts.regenerate` →
-``.agents/agents/reviewer/agent.md``, vendored by ``shipit install``) — and passes the
-review task **directly**, rather than prepending the legacy ``role_prompt`` sentence. The
-spike measured this native-reviewer posture ~20% faster than the prompt-prepend arm with
-no loss of seeded defects (ADR-0020 §agy). **Every write-role argv is unchanged**: a write
-Run has no native agent def and still conveys its role by prompt-prepend
-(:func:`role_prompt`). Because the reviewer posture is now flag-dependent, a real reviewer
-launch preflights the capability (:func:`require_agent_support`) and fails with a clean
-UPGRADE message if the installed ``agy`` predates ``--agent`` — never a confusing
-"unknown flag" from the CLI.
+**Reviewer agent posture (issue #1033).** The reviewer posture uses prompt-prepend to convey its role, exactly like a write Run (:func:`role_prompt`). A prior attempt to use agy's native `--agent reviewer` flag (issue #989) was reverted because it degraded the model's reliability (e.g. going agentic instead of returning JSON).
 """
 
 from __future__ import annotations
 
 import os
-import shutil
 from collections.abc import Mapping
 from pathlib import Path
 
-from ... import execrun
 from ...agent.backend import ANTIGRAVITY as _IDENTITY
-from ...harness.role import Role
 from .base import BackendAdapter
 
 #: Legacy review aliases → agy's verbatim model names — sourced from the ONE
@@ -98,41 +82,6 @@ DEFAULT_TIMEOUT = "600s"
 #: shadow agy's preferred Antigravity OAuth login, so both are removed so the login wins.
 SCRUBBED_AUTH_ENV = ("GEMINI_API_KEY", "GOOGLE_API_KEY")
 
-#: The agy native custom-agent name the reviewer posture selects with ``--agent``
-#: (issue #989) — the ``reviewer`` role's value, so it matches the generated def at
-#: ``.agents/agents/reviewer/agent.md`` and never drifts from a hand-typed string.
-REVIEWER_AGENT = Role.REVIEWER.value
-
-
-def supports_agent_flag(*, binary: str = "agy") -> bool:
-    """Whether the installed ``agy`` CLI accepts ``--agent`` (native custom-agent,
-    AGY >= 1.1.2, issue #989).
-
-    Probes ``agy --help`` and reports whether ``--agent`` appears in its usage —
-    a capability check, NOT a version parse (the flag's presence is the fact that
-    matters; version strings drift). Returns ``False`` when the binary is missing,
-    the probe cannot run, OR ``--help`` exits non-zero — a failed help invocation
-    is not a trustworthy capability signal (it may still print ``--agent`` in an
-    error banner), so only a CLEAN (rc 0) ``--help`` whose output mentions the
-    flag counts as support. The caller (:func:`require_agent_support`) turns a
-    ``False`` into an actionable upgrade error rather than crashing. Pure of side
-    effects beyond the read-only ``--help`` invocation.
-    """
-    if shutil.which(binary) is None:
-        return False
-    try:
-        result = execrun.run([binary, "--help"], check=False, timeout=30)
-    except execrun.ExecError:
-        return False
-    if not result.ok:
-        return False
-    return "--agent" in f"{result.stdout or ''}\n{result.stderr or ''}"
-
-
-def require_agent_support(*, binary: str = "agy") -> None:
-    """No longer required (was used for issue #989, reverted in #1033)."""
-    pass
-
 
 def resolve_model(model: str) -> str:
     """Map a model alias to agy's verbatim name (pass-through for an already-verbatim name).
@@ -144,12 +93,9 @@ def resolve_model(model: str) -> str:
 def role_prompt(task: str, role: str) -> str:
     """Convey ``role`` by **prepending** it to the ``--print`` task text.
 
-    The fallback role-conveyance for every posture EXCEPT the native reviewer
-    (issue #989): a **write** Run has no agent def, so its role rides in the
-    prompt itself. Prompt-prepend is the chosen mechanism for those (writing a
-    write-role agent-def into the Tree would pollute the PR). The reviewer posture
-    instead selects a managed ``--agent reviewer`` def and passes the task
-    directly — see :meth:`AntigravityAdapter.build_command`.
+    The role conveyance for every posture. A Run has no native agent def, so its role
+    rides in the prompt itself. Prompt-prepend is the chosen mechanism (writing a role
+    agent-def into the Tree would pollute the PR or cause issues).
     """
     return f"You are acting as the '{role}' role for this Run.\n\n{task}"
 
@@ -211,16 +157,7 @@ class AntigravityAdapter(BackendAdapter):
           shell commands (for example, the ``gh pr diff`` fetch a reviewer needs) without
           it, and read-only is enforced by the chmod'd Tree (ADR-0020 §Decision 3) —
           omitting the flag is best-effort defense-in-depth.
-        - ``--agent reviewer`` is added ONLY for the **reviewer** posture
-          (``read_only=True`` AND ``role == reviewer``, issue #989): AGY 1.1.2's native
-          custom-agent flag selects the slim reviewer def shipit generates and provisions
-          at ``.agents/agents/reviewer/agent.md``. In that posture the task text is passed
-          **directly** (no :func:`role_prompt` prepend) — the agent def carries the role,
-          the ``--print`` payload is the review task alone. Every OTHER posture (a write
-          Run, or a read-only Run under a non-reviewer role) keeps the prompt-prepend
-          conveyance and emits no ``--agent`` flag, so write-role argv is unchanged. The
-          flag's availability is preflighted at the launch seam
-          (:func:`require_agent_support`), so a too-old ``agy`` fails clean, not here.
+
         - ``--print "<text>"`` is the headless invocation.
 
         ``output_schema_path`` is accepted for the seam (TRE05-WS04b) but **ignored**:
@@ -242,7 +179,6 @@ class AntigravityAdapter(BackendAdapter):
         # (#989) via `--agent reviewer`. This was reverted in #1033 because Flash
         # or the custom-agent posture caused it to explore instead of returning JSON.
         # It now conveys its role by prompt-prepend like every other posture.
-        agent_flag = []
         prompt = role_prompt(task, role)
         permission = [] if read_only else ["--dangerously-skip-permissions"]
         return [
@@ -252,7 +188,6 @@ class AntigravityAdapter(BackendAdapter):
             str(cwd),
             f"--model={self.model}",
             f"--print-timeout={self.timeout}",
-            *agent_flag,
             *permission,
             "--print",
             prompt,
