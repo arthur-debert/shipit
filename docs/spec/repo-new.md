@@ -150,10 +150,11 @@ authenticated `gh` CLI for the GitHub API operations (Repo creation and lookup).
 Attachment and push run through ordinary Git rather than the `gh` API, so they
 additionally require a working Git credential for `origin`: an authenticated
 `gh` API session does not by itself authorize `git push`. `origin` is attached
-over HTTPS from the `OWNER/REPO` slug, so the push is satisfied by any credential
-that makes `git push https://github.com/OWNER/REPO` succeed—for example
-`gh auth setup-git` or another configured credential helper on a laptop, or a
-token-bearing credential on a runner. A push that fails because `gh` API
+from the `OWNER/REPO` slug using the user's preferred Git protocol—the one
+`gh config get git_protocol` reports, HTTPS or SSH—so the push is satisfied by
+whatever credential that protocol needs: an existing SSH key, or an HTTPS
+credential helper such as `gh auth setup-git` or another configured helper on a
+laptop, or a token-bearing credential on a runner. A push that fails because `gh` API
 authentication is present but no such Git credential is available is reported as
 a remote-publication failure at the push stage, with recovery guidance, exactly
 like any other push rejection. `--no-remote` requires neither `gh`, GitHub
@@ -609,9 +610,11 @@ depend on an interactive `pixi shell`.
   push that fails because `gh` API authentication is present but no Git credential
   for `origin` is available. In every case, assert the local Repo's `main` HEAD,
   committed contents, and working tree are unchanged and that no local or GitHub
-  rollback is attempted; successfully completed earlier bootstrap stages are
-  retained rather than reverted—an attachment or push failure leaves `origin`
-  attached—while the command exits zero and output identifies the failed stage
+  rollback is attempted; only successfully completed earlier bootstrap stages are
+  retained rather than reverted—a creation failure leaves no new local state, an
+  attachment failure retains any newly created GitHub Repo but does not require
+  `origin` to exist, and a push failure leaves the successfully attached `origin`
+  in place—while the command exits zero and output identifies the failed stage
   with actionable recovery commands that resume from it.
 - After a successful push, cover visible queued/running Actions runs, no runs yet
   visible, and a failed status query. Assert Shipit makes no wait/poll request and
