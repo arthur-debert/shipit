@@ -128,9 +128,18 @@ implementer: **any signal that cannot be determined reads as KEEP, never as
 timing out; `git log` failing to yield HEAD's commit stamp, which includes a
 repository with no commit at all (the read cannot tell the two apart, and does
 not need to: every Tree in that state is already kept by the floor or by an
-empty walk); the walk hitting an unreadable dir, a broken symlink, or a
-concurrent removal; a walk yielding no eligible files at all; a `stat` raising.
-Every one of those keeps the Tree and is reported, not swallowed.
+empty walk); the walk hitting an unreadable dir or a concurrent removal; a walk
+yielding no eligible files at all; an `lstat` raising. Every one of those keeps
+the Tree and is reported, not swallowed.
+
+**A broken symlink is NOT unknown** — an earlier draft of this list said it was,
+and that was wrong. The walk reads entries with `lstat`, so a dangling link is an
+ordinary readable dirent contributing **the link's own** mtime; only `stat`,
+which follows the link, raises on it. Reading the link rather than its target is
+deliberate twice over: a link pointing out of the Tree must not import foreign
+activity, and a link pointing at nothing must not blank a Tree's whole signal.
+Calling this case unknown would have kept every Tree containing a dangling
+symlink forever, on a signal that was never missing.
 
 This preserves a property today's code has deliberately and that a naive
 three-boolean rewrite would silently drop: `unpushed_shas` is `None` on failure
