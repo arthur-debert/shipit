@@ -1428,10 +1428,13 @@ def checkout(branch: str, *, cwd: str) -> None:
 def reset_hard(ref: str, *, cwd: str) -> None:
     """``git reset --hard <ref>`` — force HEAD, index, and working tree to ``ref``.
 
-    The read-only-Tree reuse counterpart of :func:`checkout`: when a shared review
-    clone is reused after the PR head advanced, a ``git fetch`` followed by a hard reset
-    to ``origin/<branch>`` re-pins the working tree to the CURRENT head, so a second
-    reviewer never reads the stale commit the first clone happened to land on.
+    The shepherd write-Tree's PR-head re-pin
+    (:func:`shipit.spawn.subagent._refresh_attached_tree`): when a clean, fully-pushed
+    attachment is reused after the PR head advanced, a ``git fetch`` followed by a hard
+    reset to ``origin/<branch>`` re-pins the working tree to the CURRENT head, so a
+    resumed round never builds on the stale commit the attachment happened to land on.
+    (Read-only review Trees are per-Run since ADR-0074 — there is no shared reviewer
+    clone to reuse and re-pin, so that path and its reset are gone.)
 
     Also the ``-release-rc`` live-fire cut's branch restore (legacy release#663
     contract, :mod:`shipit.verbs.release`): the bump commit travels on the TAG
@@ -1470,9 +1473,9 @@ def submodule_update_init(*, cwd: str) -> None:
     even though it is green in a normal checkout. This recursive init makes a Tree match
     what CI does (``actions/checkout`` with ``submodules: recursive``).
 
-    The ``sync --recursive`` FIRST is load-bearing on the reuse-refresh path (#486): when
-    a shared reviewer clone is re-pinned to an advanced PR head, that head may have moved
-    a submodule's URL in ``.gitmodules``. ``update --init`` only reads ``.git/config`` for
+    The ``sync --recursive`` FIRST is load-bearing on the shepherd attachment re-pin
+    path (#486): when a reused write-Tree attachment is re-pinned to an advanced PR head,
+    that head may have moved a submodule's URL in ``.gitmodules``. ``update --init`` only reads ``.git/config`` for
     an already-initialized submodule and would keep fetching the STALE URL (and fail);
     ``sync`` first copies the checked-out ``.gitmodules`` URLs into ``.git/config`` so the
     update fetches the right remote. On a fresh clone (or a URL that did not move) it is a

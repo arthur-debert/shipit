@@ -141,7 +141,7 @@ def checkout_strategy_name(checkout: CheckoutStrategy) -> str:
     if isinstance(checkout, ExistingPrWriteTree):
         return "existing-pr-write-tree"
     if isinstance(checkout, PerRunReadOnlyTree):
-        return "shared-read-only-tree"
+        return "per-run-read-only-tree"
     if isinstance(checkout, AmbientWorkingDir):
         return "ambient-working-dir"
     raise TypeError(f"unknown checkout strategy {checkout!r}")

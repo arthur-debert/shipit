@@ -383,9 +383,14 @@ def test_run_list_over_a_fixture_root_renders(tmp_path, monkeypatch, capsys):
 
 def test_list_json_emits_the_typed_rows(monkeypatch, capsys):
     # The full argv round trip for the new read-path surface: `tree list --json`
-    # serializes the typed rows' declared field set through the render seam.
+    # serializes the typed rows' declared field set through the render seam. Since
+    # ADR-0074 the row carries a `created` stamp (recovered from the flat leaf's
+    # `<timestamp>` slot), not the retired `kind`.
+    leaf = "widget-claude-20260717-081333-619cf51a-f501-44dc-992f-74df773204aa"
     monkeypatch.setattr(layout_mod, "central_root", lambda: "/trees")
-    monkeypatch.setattr(registry_mod, "scan", lambda root: [_record()])
+    monkeypatch.setattr(
+        registry_mod, "scan", lambda root: [_record(path=f"/trees/{leaf}")]
+    )
 
     rc = cli.main(["tree", "list", "--json"])
 
@@ -393,8 +398,9 @@ def test_list_json_emits_the_typed_rows(monkeypatch, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert set(payload) == {"trees"}
     row = payload["trees"][0]
-    assert row["path"] == "/trees/acme/widget/issues/7/work-aaaa"
-    assert row["kind"] == "write"
+    assert row["path"] == f"/trees/{leaf}"
+    assert row["created"] == "20260717-081333"
+    assert "kind" not in row
     assert row["branch"] == "issues/7/work"
     assert row["dirty"] is False
 

@@ -10,6 +10,32 @@ from shipit.tree.create import Tree
 from shipit.verbs import session
 from shipit.verbs.hook import worktreecreate
 
+#: Deterministic flat-leaf naming coordinates for the specs the launch paths mint
+#: (ADR-0074): the backend binary <agent>, the <timestamp> stamp, and the full-UUID
+#: <id>. `new_tree_naming` replaces the retired `new_agent_hash` — the naming half of
+#: the spec is now three fields (agent/created/tree_id), not one hash on the dir leaf.
+CREATED = "20260709-082101"
+TREE_ID = "019f5115-fb40-7db2-a82f-d2fc02a1da22"
+
+
+def _stub_naming(monkeypatch, module):
+    """Pin ``module.new_tree_naming`` to deterministic coordinates.
+
+    Preserves the caller's ``agent`` (the backend binary) and any explicit
+    ``tree_id`` (the coordinator arm passes the harness session UUID), so the stub
+    is faithful to each creation path's <id> provenance while the timestamp/id stay
+    fixed for assertion.
+    """
+    monkeypatch.setattr(
+        module,
+        "new_tree_naming",
+        lambda agent, *, tree_id=None: {
+            "agent": agent,
+            "created": CREATED,
+            "tree_id": tree_id or TREE_ID,
+        },
+    )
+
 
 @dataclass
 class LaunchCapture:
@@ -27,9 +53,10 @@ def test_run_codex_creates_ephemeral_tree_and_execs_codex(
     capture = LaunchCapture()
     source = tmp_path / "source"
     session_id = "codex-20260709-082101-4242"
-    tree_path = (
-        tmp_path / "trees" / "arthur-debert" / "shipit" / "ephemeral" / (session_id)
-    )
+    # ADR-0074: the Tree dir is the single flat leaf <repo>-<agent>-<timestamp>-<id>,
+    # one segment below the root — no `ephemeral/` kind segment. The ephemeral session
+    # id lives on the BRANCH now, not the dir.
+    tree_path = tmp_path / "trees" / f"shipit-codex-{CREATED}-{TREE_ID}"
 
     monkeypatch.setattr(session.git, "repo_root", lambda: str(source))
     monkeypatch.setattr(
@@ -37,7 +64,7 @@ def test_run_codex_creates_ephemeral_tree_and_execs_codex(
         "resolve_repo",
         lambda root: Repo("arthur-debert", "shipit"),
     )
-    monkeypatch.setattr(session, "new_agent_hash", lambda: "deadbeef")
+    _stub_naming(monkeypatch, session)
     monkeypatch.setattr(session.time, "time", lambda: 1783585261)
     monkeypatch.setattr(session.os, "getpid", lambda: 4242)
 
@@ -73,7 +100,11 @@ def test_run_codex_creates_ephemeral_tree_and_execs_codex(
     assert rc == 0
     assert capture.spec is not None
     assert capture.spec.repo == Repo("arthur-debert", "shipit")
-    assert capture.spec.agent_hash == "deadbeef"
+    # The naming half is now three flat-leaf fields: the backend binary <agent>, the
+    # <timestamp> stamp, and the full-UUID <id> — no `agent_hash`.
+    assert capture.spec.agent == session.bootstrap.CODEX.binary
+    assert capture.spec.created == CREATED
+    assert capture.spec.tree_id == TREE_ID
     assert capture.spec.ephemeral == session_id
     assert capture.source_repo == str(source)
     assert capture.chdir == str(tree_path)
@@ -108,7 +139,7 @@ def test_run_codex_activates_the_tree_pixi_env(monkeypatch, tmp_path):
         "resolve_repo",
         lambda root: Repo("arthur-debert", "shipit"),
     )
-    monkeypatch.setattr(session, "new_agent_hash", lambda: "deadbeef")
+    _stub_naming(monkeypatch, session)
     monkeypatch.setattr(session.time, "time", lambda: 1783585261)
     monkeypatch.setattr(session.os, "getpid", lambda: 4242)
 
@@ -165,7 +196,7 @@ def test_run_codex_resume_redacts_prompt_from_surfaces(
         "resolve_repo",
         lambda root: Repo("arthur-debert", "shipit"),
     )
-    monkeypatch.setattr(session, "new_agent_hash", lambda: "deadbeef")
+    _stub_naming(monkeypatch, session)
     monkeypatch.setattr(session.time, "time", lambda: 1783585261)
     monkeypatch.setattr(session.os, "getpid", lambda: 4242)
 
@@ -218,7 +249,7 @@ def test_run_codex_resume_can_launch_from_explicit_source_repo(monkeypatch, tmp_
     tree_path = tmp_path / "tree"
 
     monkeypatch.setattr(session.git, "repo_root", lambda: None)
-    monkeypatch.setattr(session, "new_agent_hash", lambda: "deadbeef")
+    _stub_naming(monkeypatch, session)
     monkeypatch.setattr(session.time, "time", lambda: 1783585261)
     monkeypatch.setattr(session.os, "getpid", lambda: 4242)
 
@@ -408,14 +439,15 @@ def test_resume_cli_last_rejects_a_native_id_as_an_explicit_target():
 def test_run_codex_spec_matches_the_coordinator_worktreecreate_spec(
     monkeypatch, tmp_path
 ):
-    # The parity pin (#631): `run_codex` and the Claude coordinator fork of the
-    # WorktreeCreate hook (`worktreecreate._create_tree(ephemeral=...)`) build
-    # the SAME ephemeral TreeSpec shape today by shared construction only — no
-    # type or helper links the two call sites. Drive both paths with identical
-    # identity/hash seams and assert the specs agree field-for-field (each
-    # mints its own session id), so a future one-sided field change — a slug,
-    # a session, a root added to one path — fails here instead of silently
-    # forking the session-Tree shape per host.
+    # The parity pin (#631, ADR-0074): `run_codex` and the Claude coordinator fork of
+    # the WorktreeCreate hook (`worktreecreate._create_tree(ephemeral=...)`) build the
+    # SAME ephemeral TreeSpec SHAPE by shared construction only — no type or helper
+    # links the two call sites. Under the flat grammar three fields legitimately differ
+    # per path: `agent` (the backend binary — `codex` vs `claude`), `tree_id` (the
+    # coordinator uses the harness session UUID from the payload; codex mints its own),
+    # and `ephemeral` (each mints its own session id). Drive both paths and assert every
+    # OTHER field agrees, so a future one-sided change — a slug, a session, a root, an
+    # issue added to one path — fails here instead of silently forking the shape per host.
     specs: dict[str, object] = {}
     source = tmp_path / "source"
     repo = repo_from_slug("arthur-debert/shipit")
@@ -433,7 +465,7 @@ def test_run_codex_spec_matches_the_coordinator_worktreecreate_spec(
 
     monkeypatch.setattr(session.git, "repo_root", lambda: str(source))
     monkeypatch.setattr(session.identity, "resolve_repo", lambda root: repo)
-    monkeypatch.setattr(session, "new_agent_hash", lambda: "deadbeef")
+    _stub_naming(monkeypatch, session)
     monkeypatch.setattr(session.time, "time", lambda: 1783585261)
     monkeypatch.setattr(session.os, "getpid", lambda: 4242)
     rc = session.run_codex(
@@ -450,20 +482,39 @@ def test_run_codex_spec_matches_the_coordinator_worktreecreate_spec(
     monkeypatch.setattr(
         worktreecreate.identity, "resolve_repo", lambda cwd=".", **kw: repo
     )
-    monkeypatch.setattr(worktreecreate, "new_agent_hash", lambda: "deadbeef")
+    _stub_naming(monkeypatch, worktreecreate)
     monkeypatch.setattr(worktreecreate, "create_from_source", creator("claude"))
-    # The spike-verified coordinator launch payload: no `prompt_id` — the
-    # ephemeral fork (ADR-0027), exactly what `agent-start claude` produces.
-    payload = json.dumps({"name": "sess-20260709-082101-4242", "cwd": str(source)})
+    # The spike-verified coordinator launch payload: no `prompt_id` — the ephemeral
+    # fork (ADR-0027). Under ADR-0074 it also carries the harness `session_id` (the
+    # full UUID that becomes the flat dir's <id> — the resume handle); `name` is the
+    # `--worktree` value that becomes the `ephemeral/<id>` BRANCH.
+    payload = json.dumps(
+        {
+            "name": "sess-20260709-082101-4242",
+            "session_id": "7f3c9d20-1a2b-4c3d-8e4f-56789abcdef0",
+            "cwd": str(source),
+        }
+    )
     out = io.StringIO()
     assert worktreecreate.run(stdin=io.StringIO(payload), stdout=out) == 0
 
     codex_spec, claude_spec = specs["codex"], specs["claude"]
-    # Both are the ephemeral shape, each carrying its own minted session id...
+    # Both are the ephemeral shape, each carrying its own minted branch session id...
     assert codex_spec.ephemeral == "codex-20260709-082101-4242"
     assert claude_spec.ephemeral == "sess-20260709-082101-4242"
-    # ...and EVERY other field is identical across the two hosts' paths.
-    assert replace(codex_spec, ephemeral=claude_spec.ephemeral) == claude_spec
+    # ...the coordinator arm names the dir after the HARNESS session UUID (the resume
+    # handle), while codex mints its own; the <agent> is the backend binary either way.
+    assert codex_spec.agent == session.bootstrap.CODEX.binary
+    assert claude_spec.agent == "claude"
+    assert claude_spec.tree_id == "7f3c9d20-1a2b-4c3d-8e4f-56789abcdef0"
+    # ...and EVERY OTHER field is identical across the two hosts' paths — normalize the
+    # three fields that legitimately differ per creation path, then compare the rest.
+    normalized = dict(
+        agent=claude_spec.agent,
+        tree_id=claude_spec.tree_id,
+        ephemeral=claude_spec.ephemeral,
+    )
+    assert replace(codex_spec, **normalized) == claude_spec
 
 
 def test_run_claude_resume_execs_native_resume_through_worktree(
@@ -473,7 +524,7 @@ def test_run_claude_resume_execs_native_resume_through_worktree(
     source = tmp_path / "source"
     repo = repo_from_slug("arthur-debert/shipit")
 
-    monkeypatch.setattr(session, "new_agent_hash", lambda: "deadbeef")
+    _stub_naming(monkeypatch, session)
     monkeypatch.setattr(session.time, "time", lambda: 1783585261)
     monkeypatch.setattr(session.os, "getpid", lambda: 4242)
 
@@ -571,7 +622,7 @@ def test_run_codex_reports_chdir_failure_separately(monkeypatch, tmp_path, capsy
         "resolve_repo",
         lambda root: Repo("arthur-debert", "shipit"),
     )
-    monkeypatch.setattr(session, "new_agent_hash", lambda: "deadbeef")
+    _stub_naming(monkeypatch, session)
     monkeypatch.setattr(session.time, "time", lambda: 1783585261)
     monkeypatch.setattr(session.os, "getpid", lambda: 4242)
 
@@ -611,7 +662,7 @@ def test_run_codex_reports_exec_failure_after_successful_chdir(
         "resolve_repo",
         lambda root: Repo("arthur-debert", "shipit"),
     )
-    monkeypatch.setattr(session, "new_agent_hash", lambda: "deadbeef")
+    _stub_naming(monkeypatch, session)
     monkeypatch.setattr(session.time, "time", lambda: 1783585261)
     monkeypatch.setattr(session.os, "getpid", lambda: 4242)
 

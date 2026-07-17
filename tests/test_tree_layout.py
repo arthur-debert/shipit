@@ -2,6 +2,14 @@
 
 Asserts external behavior (the resolved branch/dir/base for a spec), never "it
 called git": the planner is pure, so the plan IS the contract.
+
+Since ADR-0074 the DIR is one flat, self-describing leaf for EVERY shape —
+``<root>/<repo>-<agent>-<timestamp>-<id>`` — so the dir truth table collapses to
+"every shape resolves the SAME flat leaf"; only the BRANCH and BASE still differ
+per shape (that identity moved out of the path and into the branch). The old
+nested truth table (``epics``/``issues``/``branches``/``ephemeral``/``review``
+segments, a per-Tree ``agent_hash`` on the leaf, ``tree_kind`` dispatch, and
+``repo_dir``) is gone with the nested shape it described.
 """
 
 from __future__ import annotations
@@ -16,10 +24,22 @@ from shipit.tree import layout
 from shipit.tree.layout import TreeSpec, plan, sanitize_slug
 
 #: The canonical Repo identity every spec in this file namespaces under —
-#: built through the ONE slug parser, exactly as the feeders build it.
+#: built through the ONE slug parser, exactly as the feeders build it. Its NAME
+#: (``widget``) leads the flat dir leaf; the owner (``acme``) is NOT a path segment.
 REPO = repo_from_slug("acme/widget")
 
 ROOT = Path("/trees")
+
+#: The three minted flat-leaf coordinates (ADR-0074 / naming.lex §4): the backend
+#: BINARY name, the ``%Y%m%d-%H%M%S`` stamp, and a full UUID. The caller mints these
+#: (they are impure — clock + randomness / the harness session id), so ``plan`` stays
+#: a pure function of the spec.
+AGENT = "claude"
+CREATED = "20260717-081333"
+TREE_ID = "619cf51a-f501-44dc-992f-74df773204aa"
+
+#: The single flat leaf every shape resolves to: ``<repo>-<agent>-<timestamp>-<id>``.
+LEAF = f"widget-{AGENT}-{CREATED}-{TREE_ID}"
 
 
 def _git_accepts_branch(branch: str) -> bool:
@@ -38,10 +58,18 @@ def _git_accepts_branch(branch: str) -> bool:
     )
 
 
-def _issue_spec(**over) -> TreeSpec:
-    base = dict(repo=REPO, agent_hash="deadbeef", issue=123, root=ROOT)
+def _spec(**over) -> TreeSpec:
+    """A :class:`TreeSpec` carrying the flat-leaf coordinates plus whatever shape
+    fields ``over`` sets — the base every per-shape helper builds on."""
+    base = dict(repo=REPO, agent=AGENT, created=CREATED, tree_id=TREE_ID, root=ROOT)
     base.update(over)
     return TreeSpec(**base)
+
+
+def _issue_spec(**over) -> TreeSpec:
+    base = dict(issue=123)
+    base.update(over)
+    return _spec(**base)
 
 
 # --------------------------------------------------------------------------
@@ -50,8 +78,7 @@ def _issue_spec(**over) -> TreeSpec:
 
 
 def test_branch_is_issues_id_session_default_work():
-    # No --session → the default 'work' leaf. The branch is slash-namespaced and
-    # carries neither slug nor hash.
+    # No --session → the default 'work' leaf. The branch is slash-namespaced.
     assert plan(_issue_spec()).branch == "issues/123/work"
 
 
@@ -66,7 +93,8 @@ def test_branch_session_is_sanitized_like_a_slug():
 
 
 def test_branch_slug_does_not_reach_the_issue_branch():
-    # The slug rides the DIR leaf only; the canonical branch stays issues/<id>/<session>.
+    # The slug is accepted for call-site compatibility but no longer rides the dir
+    # (the flat leaf carries who/when); the canonical branch stays issues/<id>/<session>.
     p = plan(_issue_spec(slug="header-align"))
     assert p.branch == "issues/123/work"
 
@@ -80,11 +108,6 @@ def test_issue_branch_is_never_the_bare_issues_id_ref_collision_safety():
         assert branch == f"issues/123/{session}"
         assert branch.count("/") == 2
         assert branch != "issues/123"
-
-
-def test_branch_never_carries_the_agent_hash():
-    p = plan(_issue_spec(agent_hash="cafe1234", slug="x"))
-    assert "cafe1234" not in p.branch
 
 
 @pytest.mark.parametrize("bad_issue", [0, -1, -42])
@@ -104,31 +127,47 @@ def test_issue_rejects_empty_session(bad_session):
 
 
 # --------------------------------------------------------------------------
-# dir — issues/<id>/<session>[-<slug>]-<hash>, hash on the leaf (ADR-0026)
+# dir — the single flat leaf <repo>-<agent>-<timestamp>-<id> (ADR-0074)
 # --------------------------------------------------------------------------
 
 
-def test_dir_is_central_root_org_repo_issues_id_session_hash():
-    p = plan(_issue_spec())
-    assert p.dir == ROOT / "acme" / "widget" / "issues" / "123" / "work-deadbeef"
+def test_dir_is_the_flat_leaf_for_the_issue_shape():
+    assert plan(_issue_spec()).dir == ROOT / LEAF
 
 
-def test_dir_uses_a_non_default_session_leaf():
-    p = plan(_issue_spec(session="onboard"))
-    assert p.dir == ROOT / "acme" / "widget" / "issues" / "123" / "onboard-deadbeef"
+def test_dir_is_shape_independent_every_shape_resolves_the_same_leaf():
+    # ADR-0074: the dir carries who/when, not what — so the issue, epic, freeform, and
+    # ephemeral shapes all resolve the IDENTICAL flat leaf from the same coordinates.
+    # Only the branch/base differ (asserted per shape below).
+    issue = plan(_issue_spec()).dir
+    epic = plan(_epic_spec()).dir
+    freeform = plan(_freeform_spec()).dir
+    ephemeral = plan(_ephemeral_spec()).dir
+    assert issue == epic == freeform == ephemeral == ROOT / LEAF
 
 
-def test_dir_carries_the_agent_hash():
-    p = plan(_issue_spec(agent_hash="abc99999"))
-    assert p.dir.name == "work-abc99999"
+def test_dir_leaf_is_repo_first_then_agent_then_timestamp_then_id():
+    # The grammar the leaf pins: repo NAME first (the axis a human narrows on, so
+    # `ls | grep widget` groups), agent second (the backend binary), then the
+    # timestamp, then the full UUID — owner and kind segments gone.
+    name = plan(_issue_spec()).dir.name
+    assert name == f"widget-{AGENT}-{CREATED}-{TREE_ID}"
+    assert name.startswith("widget-claude-")
+    assert name.endswith(TREE_ID)
 
 
-def test_dir_leaf_carries_the_slug_after_the_session():
-    # Mirrors the epic shape: the slug rides the DIR leaf (session-slug-hash), never
-    # the branch.
+def test_dir_session_does_not_change_the_flat_leaf():
+    # The <session> plays its structural role in the BRANCH; the dir is the same flat
+    # leaf regardless (unlike the retired nested leaf, which encoded the session).
+    assert plan(_issue_spec(session="onboard")).dir == ROOT / LEAF
+
+
+def test_dir_slug_does_not_ride_the_flat_leaf():
+    # The slug is accepted for call-site compatibility but no longer appears in the
+    # dir (git records what; the dir records who/when).
     p = plan(_issue_spec(slug="some words"))
-    assert p.dir.name == "work-some-words-deadbeef"
-    assert p.branch == "issues/123/work"
+    assert p.dir == ROOT / LEAF
+    assert "some-words" not in p.dir.name
 
 
 # --------------------------------------------------------------------------
@@ -142,18 +181,15 @@ def test_base_is_origin_main_for_an_issue():
 
 def test_freeform_branch_can_override_base_for_pr_attachment():
     p = plan(
-        TreeSpec(
-            repo=REPO,
-            agent_hash="pr321",
+        _spec(
             branch="RPE01/WS04",
             base="origin/RPE01/WS04",
-            root=ROOT,
         )
     )
 
     assert p.branch == "RPE01/WS04"
     assert p.base == "origin/RPE01/WS04"
-    assert p.dir == ROOT / "acme" / "widget" / "branches" / "rpe01-ws04-pr321"
+    assert p.dir == ROOT / LEAF
 
 
 def test_freeform_branch_normalizes_base_override_for_pr_attachment():
@@ -179,26 +215,15 @@ def test_sanitize_all_separators_is_empty():
     assert sanitize_slug("  ///  ") == ""
 
 
-def test_plan_applies_slug_sanitization_to_the_dir_leaf():
-    p = plan(_issue_spec(slug="Fix The Thing"))
-    assert p.dir.name == "work-fix-the-thing-deadbeef"
-
-
 # --------------------------------------------------------------------------
-# epic / work-stream shape — branch E/WSnn, base origin/E/umbrella, hash on dir
+# epic / work-stream shape — branch E/WSnn, base origin/E/umbrella, flat dir
 # --------------------------------------------------------------------------
 
 
 def _epic_spec(**over) -> TreeSpec:
-    base = dict(
-        repo=REPO,
-        agent_hash="deadbeef",
-        epic="HAR02",
-        ws=2,
-        root=ROOT,
-    )
+    base = dict(epic="HAR02", ws=2)
     base.update(over)
-    return TreeSpec(**base)
+    return _spec(**base)
 
 
 @pytest.mark.parametrize(
@@ -412,35 +437,25 @@ def test_non_epic_shapes_keep_origin_main_base():
     assert plan(_freeform_spec()).base == "origin/main"
 
 
-def test_epic_dir_is_epics_kind_with_hash_on_leaf():
-    p = plan(_epic_spec())
-    assert p.dir == ROOT / "acme" / "widget" / "epics" / "HAR02" / "WS02-deadbeef"
+def test_epic_dir_is_the_flat_leaf():
+    # The epic/work-stream identity lives in the BRANCH (E/WSnn); the dir is the same
+    # flat leaf every shape resolves.
+    assert plan(_epic_spec()).dir == ROOT / LEAF
 
 
-def test_epic_dir_carries_slug_when_given_branch_does_not():
+def test_epic_slug_does_not_ride_the_flat_leaf():
     p = plan(_epic_spec(slug="Tiling Pass"))
-    assert (
-        p.dir
-        == ROOT / "acme" / "widget" / "epics" / "HAR02" / "WS02-tiling-pass-deadbeef"
-    )
-    # The slug rides the dir only; the canonical branch stays E/WSnn.
+    assert p.dir == ROOT / LEAF
+    assert "tiling-pass" not in p.dir.name
+    # The slug rides nothing now; the canonical branch stays E/WSnn.
     assert p.branch == "HAR02/WS02"
-
-
-def test_epic_branch_never_carries_the_agent_hash():
-    p = plan(_epic_spec(agent_hash="cafe1234", slug="anything"))
-    assert "cafe1234" not in p.branch
-
-
-def test_epic_dir_leaf_carries_the_agent_hash():
-    assert plan(_epic_spec(agent_hash="abc99999")).dir.name == "WS02-abc99999"
 
 
 def test_epic_requires_both_epic_and_ws():
     with pytest.raises(ValueError, match="both --epic and --ws"):
         plan(_epic_spec(ws=None))
     with pytest.raises(ValueError, match="both --epic and --ws"):
-        plan(TreeSpec(repo=repo_from_slug("o/r"), agent_hash="h", ws=3, root=ROOT))
+        plan(_spec(ws=3))
 
 
 # The epic code is used verbatim as BOTH a branch ref component and a path
@@ -450,7 +465,7 @@ def test_epic_requires_both_epic_and_ws():
 @pytest.mark.parametrize(
     "bad_epic",
     [
-        "",  # empty → '/WS02' and 'origin//umbrella', dir segment collapses
+        "",  # empty → '/WS02' and 'origin//umbrella'
         "   ",  # whitespace-only
         "HAR 02",  # embedded space
         "HAR/02",  # path/ref separator
@@ -473,14 +488,14 @@ def test_epic_rejects_non_positive_ws(bad_ws):
 
 
 # --------------------------------------------------------------------------
-# freeform shape — branch verbatim, base origin/main, sanitized dir leaf
+# freeform shape — branch verbatim, base origin/main, flat dir
 # --------------------------------------------------------------------------
 
 
 def _freeform_spec(**over) -> TreeSpec:
-    base = dict(repo=REPO, agent_hash="deadbeef", branch="spike/foo", root=ROOT)
+    base = dict(branch="spike/foo")
     base.update(over)
-    return TreeSpec(**base)
+    return _spec(**base)
 
 
 def test_freeform_branch_is_verbatim():
@@ -498,25 +513,22 @@ def test_freeform_explicit_blank_base_is_refused(base):
         plan(_freeform_spec(base=base))
 
 
-def test_freeform_dir_is_branches_kind_with_sanitized_leaf():
+def test_freeform_dir_is_the_flat_leaf():
+    # The freeform name lives in the BRANCH, not the path, so an arbitrary `spike/foo`
+    # never needs sanitizing into a dir leaf — the dir is the flat shape.
     p = plan(_freeform_spec(branch="spike/foo"))
-    assert p.dir == ROOT / "acme" / "widget" / "branches" / "spike-foo-deadbeef"
+    assert p.dir == ROOT / LEAF
 
 
-def test_freeform_dir_sanitizes_separators_and_casing():
+def test_freeform_dir_is_flat_regardless_of_branch_casing():
     p = plan(_freeform_spec(branch="Spike/Foo.Bar Baz"))
-    assert p.dir.name == "spike-foo-bar-baz-deadbeef"
-
-
-def test_freeform_branch_never_carries_the_agent_hash():
-    p = plan(_freeform_spec(agent_hash="cafe1234", branch="wip"))
-    assert "cafe1234" not in p.branch
+    assert p.dir == ROOT / LEAF
 
 
 @pytest.mark.parametrize(
     "bad_branch",
     [
-        "",  # empty → unusable branch and a bare '-<hash>' leaf
+        "",  # empty → unusable branch
         "   ",  # whitespace-only
         "///",  # all separators → sanitizes to ''
         " . / : ",  # only separator characters
@@ -529,20 +541,15 @@ def test_freeform_rejects_branch_that_sanitizes_to_empty(bad_branch):
 
 # --------------------------------------------------------------------------
 # ephemeral shape — the coordinator's session Tree (ADR-0027): branch
-# ephemeral/<id> at birth, dir <root>/<org>/<repo>/ephemeral/<id> (leaf = the id,
-# NO hash), base origin/main
+# ephemeral/<id> at birth, base origin/main, flat dir whose <id> is the harness
+# session UUID (supplied via tree_id, NOT the ephemeral branch id)
 # --------------------------------------------------------------------------
 
 
 def _ephemeral_spec(**over) -> TreeSpec:
-    base = dict(
-        repo=REPO,
-        agent_hash="deadbeef",
-        ephemeral="sess-20260702-121314-4242",
-        root=ROOT,
-    )
+    base = dict(ephemeral="sess-20260702-121314-4242")
     base.update(over)
-    return TreeSpec(**base)
+    return _spec(**base)
 
 
 def test_ephemeral_branch_is_ephemeral_id():
@@ -554,34 +561,37 @@ def test_ephemeral_base_is_origin_main():
     assert plan(_ephemeral_spec()).base == "origin/main"
 
 
-def test_ephemeral_dir_is_ephemeral_kind_with_id_leaf_and_no_hash():
-    # Ephemeral-by-path: the dir leaf IS the session id — the Tree's identity is
-    # the session, so the leaf carries NO agent hash (the launcher-minted id is
-    # per-launch unique; the id disambiguates, a hash would be noise).
+def test_ephemeral_dir_is_the_flat_leaf_not_the_branch_id():
+    # ADR-0074: the dir and branch NO LONGER share a leaf. The `ephemeral/<id>`
+    # identity is the BRANCH's; the dir's <id> is the harness session UUID (supplied
+    # via tree_id so the dir name IS the resume handle). The branch id never appears
+    # in the dir.
     p = plan(_ephemeral_spec())
-    assert p.dir == ROOT / "acme" / "widget" / "ephemeral" / "sess-20260702-121314-4242"
-    assert "deadbeef" not in p.dir.name
+    assert p.dir == ROOT / LEAF
+    assert "sess-20260702-121314-4242" not in p.dir.name
+    assert p.dir.name.endswith(TREE_ID)
 
 
-def test_ephemeral_dir_and_branch_mirror_at_birth():
-    # The id rides BOTH the dir leaf and the branch at birth (the branch then moves
-    # to the real work; the dir stays) — matched by construction.
+def test_ephemeral_dir_and_branch_no_longer_mirror():
+    # The birth-branch id names ONLY the branch now; the dir keeps the harness UUID.
     p = plan(_ephemeral_spec(ephemeral="My Session"))
-    assert p.branch == f"ephemeral/{p.dir.name}"
+    assert p.branch == "ephemeral/my-session"
+    assert p.dir == ROOT / LEAF
+    assert p.dir.name != p.branch.split("/", 1)[1]
 
 
-def test_ephemeral_id_is_sanitized_like_every_other_leaf():
-    # The id becomes a ref component AND the dir leaf, so it gets the same
-    # [a-z0-9-] allow-list normalization as sessions/slugs.
+def test_ephemeral_branch_id_is_sanitized_like_every_other_ref():
+    # The branch id becomes a ref component, so it gets the same [a-z0-9-] allow-list
+    # normalization as sessions/slugs. (It no longer doubles as the dir leaf.)
     p = plan(_ephemeral_spec(ephemeral="Sess 42/Foo.Bar"))
     assert p.branch == "ephemeral/sess-42-foo-bar"
-    assert p.dir.name == "sess-42-foo-bar"
+    assert p.dir == ROOT / LEAF
 
 
 @pytest.mark.parametrize("bad_id", ["", "   ", "///", " . / : ", "@{", "~"])
 def test_ephemeral_rejects_id_that_sanitizes_to_empty(bad_id):
-    # A degenerate id would yield a bare 'ephemeral/' ref and the kind dir as the
-    # leaf — rejected loud (the hook synthesizes a random id before calling in).
+    # A degenerate id would yield a bare 'ephemeral/' ref — rejected loud (the hook
+    # synthesizes a random id before calling in).
     with pytest.raises(ValueError, match="session id"):
         plan(_ephemeral_spec(ephemeral=bad_id))
 
@@ -617,28 +627,81 @@ def test_ephemeral_branch_is_always_a_valid_git_ref_or_rejected(session_id):
     assert _git_accepts_branch(branch), f"git rejected {branch!r}"
 
 
-def test_ephemeral_kind_constant_names_the_dir_segment():
-    # The cleanup gc rule (SES02 Layer C) keys off this segment; pin that the
-    # planner and the constant agree.
-    assert plan(_ephemeral_spec()).dir.parent.name == layout.EPHEMERAL_KIND
+def test_ephemeral_branch_prefix_constant_names_the_branch_segment():
+    # The birth-branch prefix is now a BRANCH concern only (the flat dir has no kind
+    # segment); pin that the planner and the constant agree.
+    branch = plan(_ephemeral_spec()).branch
+    assert branch.split("/", 1)[0] == layout.EPHEMERAL_BRANCH_PREFIX
 
 
 # --------------------------------------------------------------------------
-# the hash NEVER lands on the branch, for ANY shape
+# tree_leaf / tree_dir / created_from_leaf — the flat grammar helpers (ADR-0074)
 # --------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "spec",
-    [
-        _issue_spec(agent_hash="cafef00d", slug="x"),
-        _epic_spec(agent_hash="cafef00d", slug="x"),
-        _freeform_spec(agent_hash="cafef00d", branch="spike/foo"),
-        _ephemeral_spec(agent_hash="cafef00d"),
-    ],
-)
-def test_hash_never_appears_in_any_branch(spec):
-    assert spec.agent_hash not in plan(spec).branch
+def test_tree_leaf_builds_repo_agent_timestamp_id():
+    assert layout.tree_leaf(REPO, AGENT, CREATED, TREE_ID) == LEAF
+
+
+@pytest.mark.parametrize("agent", ["claude", "codex", "agy"])
+def test_tree_leaf_accepts_all_three_backend_binary_names(agent):
+    # ADR-0074: <agent> is the CLI BINARY name — claude / codex / agy, all three.
+    leaf = layout.tree_leaf(REPO, agent, CREATED, TREE_ID)
+    assert leaf == f"widget-{agent}-{CREATED}-{TREE_ID}"
+
+
+@pytest.mark.parametrize("bad_agent", ["", "Claude", "cla ude", "agy!", "co/dex", None])
+def test_tree_leaf_rejects_a_non_alphanumeric_agent(bad_agent):
+    with pytest.raises(ValueError, match="agent"):
+        layout.tree_leaf(REPO, bad_agent, CREATED, TREE_ID)
+
+
+@pytest.mark.parametrize("bad", ["", "   ", None])
+def test_tree_leaf_rejects_empty_created_or_id(bad):
+    with pytest.raises(ValueError):
+        layout.tree_leaf(REPO, AGENT, bad, TREE_ID)
+    with pytest.raises(ValueError):
+        layout.tree_leaf(REPO, AGENT, CREATED, bad)
+
+
+def test_tree_dir_is_root_over_the_flat_leaf():
+    assert layout.tree_dir(REPO, AGENT, CREATED, TREE_ID, ROOT) == ROOT / LEAF
+
+
+def test_tree_dir_uses_central_root_when_root_is_none(monkeypatch):
+    monkeypatch.setenv(layout.CENTRAL_ROOT_ENV, "/env/trees")
+    assert layout.tree_dir(REPO, AGENT, CREATED, TREE_ID) == Path("/env/trees") / LEAF
+
+
+def test_created_from_leaf_recovers_the_timestamp():
+    # `tree list`'s created column sources from the name: the <timestamp> group of the
+    # <timestamp>-<uuid> tail.
+    assert layout.created_from_leaf(LEAF) == CREATED
+
+
+def test_created_from_leaf_handles_a_hyphenated_repo_head():
+    # The leaf HEAD (<repo>-<agent>) may itself carry hyphens, so the stamp is matched
+    # by the anchored tail, not by splitting on '-'.
+    leaf = f"my-cool-repo-codex-{CREATED}-{TREE_ID}"
+    assert layout.created_from_leaf(leaf) == CREATED
+
+
+def test_created_from_leaf_is_none_for_an_old_nested_leaf():
+    # An OLD nested Tree's leaf (WS02 reclaims those by attrition) does not match the
+    # flat tail, so the column reads '-' rather than a fabricated date.
+    assert layout.created_from_leaf("WS02-deadbeef") is None
+    assert layout.created_from_leaf("sess-20260702-121314-4242") is None
+
+
+def test_tree_kind_and_repo_dir_are_gone():
+    # ADR-0074 removed the kind segment and the owner segment, so their parsers are
+    # gone too — no reader is left for either. Pin their removal so a stale caller
+    # fails loud rather than silently resurrecting the nested grammar.
+    assert not hasattr(layout, "tree_kind")
+    assert not hasattr(layout, "repo_dir")
+    assert not hasattr(layout, "REVIEW_KIND")
+    assert not hasattr(layout, "EPHEMERAL_KIND")
+    assert not hasattr(layout, "WRITE_KIND")
 
 
 # --------------------------------------------------------------------------
@@ -647,7 +710,7 @@ def test_hash_never_appears_in_any_branch(spec):
 
 
 def test_plan_rejects_no_shape():
-    spec = TreeSpec(repo=repo_from_slug("o/r"), agent_hash="h", root=ROOT)
+    spec = _spec()
     with pytest.raises(ValueError, match="exactly one shape"):
         plan(spec)
 
@@ -664,7 +727,7 @@ def test_plan_rejects_no_shape():
     ],
 )
 def test_plan_rejects_more_than_one_shape(over):
-    spec = TreeSpec(repo=repo_from_slug("o/r"), agent_hash="h", root=ROOT, **over)
+    spec = _spec(**over)
     with pytest.raises(ValueError, match="exactly one shape"):
         plan(spec)
 
@@ -695,50 +758,11 @@ def test_central_root_rejects_relative_override(monkeypatch):
 def test_plan_uses_central_root_when_spec_root_is_none(monkeypatch):
     monkeypatch.setenv(layout.CENTRAL_ROOT_ENV, "/env/trees")
     p = plan(_issue_spec(root=None))
-    assert (
-        p.dir
-        == Path("/env/trees") / "acme" / "widget" / "issues" / "123" / "work-deadbeef"
-    )
-
-
-# --- tree_kind: the path→reclaim-family mapping (ADR-0018/0027) -----------------
-
-
-def test_tree_kind_maps_the_leaf_parent_segment():
-    assert layout.tree_kind("/t/acme/widget/review/tre03-ws03") == layout.REVIEW_KIND
-    assert layout.tree_kind("/t/acme/widget/ephemeral/sess-1") == layout.EPHEMERAL_KIND
-    for write in (
-        "/t/acme/widget/epics/HAR02/WS02-deadbeef",
-        "/t/acme/widget/issues/123/work-deadbeef",
-        "/t/acme/widget/branches/feat-x-deadbeef",
-    ):
-        assert layout.tree_kind(write) == layout.WRITE_KIND
-
-
-def test_tree_kind_never_matches_mid_path_segments():
-    # Kind is the leaf's PARENT only: an org/repo named after a kind must not
-    # smuggle a write Tree onto another kind's reclaim ladder.
-    assert layout.tree_kind("/t/review/widget/branches/x-aa") == layout.WRITE_KIND
-    assert layout.tree_kind("/t/ephemeral/widget/branches/x-aa") == layout.WRITE_KIND
-
-
-def test_tree_kind_epic_or_issue_named_after_a_kind_is_still_a_write_tree():
-    # An epic write Tree is epics/<epic>/<leaf>, so the leaf's PARENT is the
-    # free-form epic code — and `ephemeral`/`review` are valid epic codes (agy
-    # review). The nested-namespace grandparent check must keep such Trees labelled
-    # `write`: a parent-segment test alone would mislabel them as ephemeral session
-    # Trees in `tree list` (reclaim is one rule for every kind since ADR-0072).
-    assert (
-        layout.tree_kind("/t/acme/widget/epics/ephemeral/WS01-aa") == layout.WRITE_KIND
-    )
-    assert layout.tree_kind("/t/acme/widget/epics/review/WS01-aa") == layout.WRITE_KIND
-    # The issues namespace has the same nested shape (issues/<id>/<leaf>); its ids
-    # are numeric today, but the guard is structural, not name-based.
-    assert layout.tree_kind("/t/acme/widget/issues/ephemeral/w-aa") == layout.WRITE_KIND
+    assert p.dir == Path("/env/trees") / LEAF
 
 
 # --------------------------------------------------------------------------
-# identity threading (COR02-WS02, #252): one Repo, one Tree namespace
+# identity threading (COR02-WS02, #252): one Repo, one flat leaf namespace
 # --------------------------------------------------------------------------
 
 
@@ -752,10 +776,10 @@ class _CaseyGit:
         return self._remote_url
 
 
-def test_case_divergent_sources_land_one_tree_path():
-    # The ADR-0024 disease this WS removes from the plumbing: a mixed-case ORIGIN
-    # remote and a mixed-case API slug are ONE repo on GitHub, so they must land
-    # the IDENTICAL Tree dir — the Repo identity normalizes, not each key site.
+def test_case_divergent_sources_land_one_repo_prefix():
+    # The ADR-0024 disease this WS keeps out of the plumbing: a mixed-case ORIGIN
+    # remote and a mixed-case API slug are ONE repo on GitHub, so the flat leaf's
+    # <repo> prefix is IDENTICAL — the Repo identity normalizes, not each key site.
     from shipit.identity import resolve_repo
 
     from_origin = resolve_repo(
@@ -764,15 +788,16 @@ def test_case_divergent_sources_land_one_tree_path():
     from_api_slug = repo_from_slug("ACME/Widget")
 
     def _plan_dir(repo):
-        return plan(TreeSpec(repo=repo, agent_hash="deadbeef", issue=7, root=ROOT)).dir
+        return plan(
+            TreeSpec(
+                repo=repo,
+                agent=AGENT,
+                created=CREATED,
+                tree_id=TREE_ID,
+                issue=7,
+                root=ROOT,
+            )
+        ).dir
 
     assert _plan_dir(from_origin) == _plan_dir(from_api_slug)
-    assert _plan_dir(from_origin) == ROOT / "acme" / "widget" / "issues" / "7" / (
-        "work-deadbeef"
-    )
-
-
-def test_repo_dir_namespaces_by_canonical_identity():
-    # repo_dir is the ONE place a Repo becomes Tree path segments — shared by the
-    # write planner and the read-only planner, always the lowercased identity.
-    assert layout.repo_dir(REPO, ROOT) == ROOT / "acme" / "widget"
+    assert _plan_dir(from_origin) == ROOT / LEAF

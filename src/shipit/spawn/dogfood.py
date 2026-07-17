@@ -3,7 +3,7 @@
 TRE03 builds shipit-owned subagent spawning (ADR-0017/0018/0019): ``shipit spawn
 subagent`` creates an isolated **Tree** (a dissociated clone), launches a headless
 ``claude`` Run rooted in it, and — for a write Run — has that Run open a draft PR
-from the Tree's branch; for a **reviewer** Run it provisions a shared READ-ONLY Tree
+from the Tree's branch; for a **reviewer** Run it provisions a per-Run READ-ONLY Tree
 and posts a review through the PR. Every WS is unit-tested with the ``claude`` spawn
 and the ``gh`` boundary FAKED (``tests/test_spawn_verb.py``,
 ``tests/test_tree_*.py``). Those faked tests prove the *shape* shipit produces; they
@@ -11,8 +11,9 @@ cannot prove the load-bearing facts that exist only against live tooling:
 
   - a real ``claude`` Run actually lands its work in the Tree (on the planned
     branch, NOT ``shipit/install``) and opens a **real draft PR** from it;
-  - a real reviewer Run gets a **genuinely shared, genuinely read-only** Tree and
-    actually **posts a review**;
+  - a real reviewer Run gets a **genuinely per-Run, genuinely read-only** Tree (a
+    second reviewer on the same head gets its OWN distinct Tree — ADR-0074 retired the
+    shared ``(repo, branch)`` clone) and actually **posts a review**;
   - a forced Tree-create failure **fails closed** (loud, no native-worktree
     fallback) against the real git/clone path;
   - the maintainer's three non-negotiable **isolation invariants** hold on every
