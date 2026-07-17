@@ -10,7 +10,12 @@ layer maps to funnel outcomes:
   * :func:`parse_review_output` — turn an agent's raw stdout into a review dict,
     or raise :class:`BackendError` (carrying the full raw for the #76 salvage and,
     when the agy timeout marker is present, flagging the timeout);
-  * :class:`BackendUnavailable` — the agent binary is not on PATH (preflight);
+  * :func:`diagnose_parse_failure` — say WHICH non-delivery this was (timed out /
+    silent / narrated-instead-of-answered / truncated), so the remediation matches
+    the actual fault instead of always blaming diff size (issue #1006);
+  * :class:`BackendUnavailable` — the agent binary is not on PATH, or the reviewer
+    is configured with a model the backend declares unusable for a review Run
+    (both preflight refusals; issue #1006);
   * :class:`BackendError` — the agent ran but produced no usable review;
   * :data:`_TIMEOUT_MARKER` — the agy ``--print`` timeout signature.
 """
@@ -35,10 +40,25 @@ _SNIPPET = 200
 #: can't parse. Detecting it lets the error say "timed out" explicitly.
 _TIMEOUT_MARKER = "timed out waiting for response"
 
+#: The remediation for a SIZE/LATENCY failure — a review that was cut off before it
+#: finished. Attached ONLY to a timeout or a started-then-truncated body, never to a
+#: response that never began emitting a verdict (issue #1006: this advice was given
+#: for a 4-file docs diff, where speed was never the problem, and sent the operator
+#: chasing diff size while the real fault was an unusable model).
+_SIZE_HINT = "try a faster model or a smaller diff"
+
 
 class BackendUnavailable(RuntimeError):
-    """The backend's agent binary is not reachable — message tells the user how
-    to remediate (install / start the agent). Raised by ``preflight``."""
+    """The backend cannot review as configured — a PREFLIGHT refusal, raised before
+    any Tree is provisioned or any model bills, with a message that names the fix.
+
+    Two causes share this surface because they share a remedy shape ("change
+    something, then re-run"): the agent binary is not reachable (install / start /
+    upgrade the agent), or the reviewer is configured with a model this backend
+    DECLARES unusable for a review Run (issue #1006 — edit the roster's ``model``).
+    The service maps it to a ``failed`` funnel outcome carrying the message, so a
+    misconfigured reviewer says exactly what is wrong instead of degrading into a
+    generic "no parseable JSON" after the fact."""
 
 
 class BackendError(RuntimeError):
@@ -77,19 +97,70 @@ class BackendError(RuntimeError):
         self.timed_out = timed_out
 
 
+def diagnose_parse_failure(raw: str, *, backend_name: str, timed_out: bool) -> str:
+    """The SPECIFIC reason an agent's stdout yielded no review — the failure's own
+    diagnosis, not one catch-all guess (issue #1006).
+
+    The four non-delivery modes are genuinely different faults with different fixes,
+    and conflating them is what made a dead reviewer read as a slow one for two days:
+
+      * **timed out** — the backend's own timeout marker is present: the response
+        was cut off mid-flight, so size/latency IS the lever (:data:`_SIZE_HINT`);
+      * **silent** — nothing on stdout at all: not a size problem; the run produced
+        no response whatsoever (a killed child, a failed login);
+      * **narrated** — prose with no JSON object ever started: the agent answered in
+        English instead of emitting the verdict. This is the #1006 signature (an
+        agent that goes agentic in ``--print`` narrates its tool-hunting and never
+        answers) and is emphatically NOT a size or latency fault — a faster model or
+        a smaller diff cannot fix a model that does not answer at all, so that advice
+        is deliberately WITHHELD here and the real levers (the reviewer's configured
+        model; whether the review task reached it) are named instead;
+      * **truncated / off-shape** — a JSON object started but does not parse: a
+        genuine cut-off-or-malformed body, where size/latency advice is honest.
+
+    Pure — a string in, a hint out; the caller owns the raising and logging.
+    """
+    if timed_out:
+        return (
+            f"{backend_name} timed out before returning a complete review — "
+            f"{_SIZE_HINT}"
+        )
+    if not raw.strip():
+        return (
+            f"{backend_name} returned NO output at all — no review was produced. "
+            "This is not a diff-size or latency problem: check that the agent is "
+            "logged in and that its process was not killed."
+        )
+    if "{" not in raw:
+        return (
+            f"{backend_name} NARRATED instead of reviewing: it returned prose and "
+            "never emitted the required JSON verdict (no JSON object was started). "
+            "This is NOT a size or latency problem — a faster model or a smaller "
+            "diff will not fix a model that does not answer at all. A model that "
+            "goes agentic in headless `--print` mode does exactly this: it "
+            "describes what it would do instead of answering. Check the reviewer's "
+            "configured model, and that the review task reached the agent."
+        )
+    return (
+        f"{backend_name} returned JSON that could not be parsed — the verdict was "
+        f"started but is truncated or off-shape; {_SIZE_HINT}"
+    )
+
+
 def parse_review_output(stdout: str, *, backend_name: str = "the agent") -> dict:
     """Parse an agent's stdout into a review dict, or raise :class:`BackendError`.
 
     Wraps :func:`shipit.review.schema.extract_json` (which still raises a
     bare ``ValueError`` on unparseable input) at the backend boundary, turning
     that into an actionable :class:`BackendError`: it includes a head/tail
-    snippet of the raw output for debugging and, when the agent's timeout marker
-    is present, says so explicitly so the user knows to use a faster model or a
-    smaller diff.
+    snippet of the raw output for debugging and a hint DIAGNOSED from the raw
+    itself (:func:`diagnose_parse_failure`) — timed out vs silent vs narrated-
+    instead-of-answered vs truncated — so the remediation fits the actual fault
+    and only a genuine cut-off is blamed on size/latency (issue #1006).
 
     ``backend_name`` names the calling backend (e.g. ``"codex"`` / ``"agy"``) so
-    the timeout hint blames the RIGHT backend — this function is shared by every
-    backend, so a hardcoded name would mislabel a different backend's timeout.
+    the hint blames the RIGHT backend — this function is shared by every backend,
+    so a hardcoded name would mislabel a different backend's failure.
     """
     # Local import: schema is a sibling, but keeping it here avoids any chance
     # of an import-order issue and matches the lazy style used elsewhere.
@@ -123,16 +194,9 @@ def parse_review_output(stdout: str, *, backend_name: str = "the agent") -> dict
             raw,
         )
         timed_out = _TIMEOUT_MARKER in raw.lower()
-        if timed_out:
-            hint = (
-                f"{backend_name} timed out before returning a complete review — "
-                "try a faster model or a smaller diff"
-            )
-        else:
-            hint = (
-                "the agent returned no parseable JSON (it may have timed out or "
-                "been truncated) — try a faster model or a smaller diff"
-            )
+        hint = diagnose_parse_failure(
+            raw, backend_name=backend_name, timed_out=timed_out
+        )
         # Attach the full raw so the service can SALVAGE it (#76); the message keeps
         # only the snippet (the PR-surface / terminal budget). The STRUCTURED
         # ``timed_out`` flag (not a string match) is what the service splits the

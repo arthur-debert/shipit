@@ -396,6 +396,9 @@ amendment updates the reviewer posture accordingly (write-role argv is UNCHANGED
   are untouched — a bare `pro` still resolves to the capable non-agentic `Gemini 3.1 Pro (High)` per
   §antigravity, so the "pin a non-agentic model" caution above still governs the write path and any
   reviewer left on the default.
+  > **SUPERSEDED by the issue #1006 amendment below**: the `agy → flash` half of this pin is
+  > reverted to `pro`. The rest of this bullet (codex on `gpt-5.6-sol`, the un-remapped `pro`
+  > alias, untouched write defaults) still stands.
 
 **Dogfood verification.** A no-post synthetic replay over a generated 5-file, +92/-11 range with
 five seeded defects measured the current agy harness on Gemini 3.5 Flash (High) at **40.408s**
@@ -407,3 +410,44 @@ multi-minute cause. The Review Lab cross-repo stress case (fixture core-440, pho
 440) could **not** be run afresh here: new external-model execution on local repository content was
 blocked by the platform data-export boundary, so this amendment claims **no fresh core-440 AGY
 score**; historical evaluation records and fixtures naming `gpt-5.5` or model `pro` are preserved.
+
+## Amendment (issue #1006) — the agy reviewer model reverts to `pro`, and model capability becomes mechanical
+
+The #989 amendment's `agy → flash` pin **shipped a dead reviewer**. On #998 (a 4-file docs diff)
+every `agy-local` run settled `failed`: Gemini Flash goes **agentic** in agy's `--print` mode, so
+instead of returning the verdict it narrated its hunt for a diff (grepping the workspace,
+introspecting the `pull_request_read` tool schema, poking `.git` for branch info) and never emitted
+JSON. The failure ran for two days, masked by codex + Copilot still passing — the engine correctly
+declined to let a *degraded* reviewer block Ready, so PRs flipped with one fewer real reviewer than
+the roster promised. **A reviewer that reliably fails is a gate that quietly isn't there.**
+
+- **The `agy` reviewer model reverts to `pro`** (`Gemini 3.1 Pro (High)`) — the model §antigravity
+  already documented as the capable, non-agentic choice. The spike's ~19.8% speed win is forfeited
+  **deliberately**: a reviewer that never returns a verdict is not faster, it is absent. codex stays
+  on `gpt-5.6-sol` (unaffected).
+- **Why the #989 spike missed this.** Its slim-reviewer arm was measured **with the diff supplied**
+  (see its own verification note). The live funnel path is self-fetch (ADR-0050: review scope is the
+  diff, context is the checkout) — the arm that was never measured. The self-fetch design
+  (TRE05-WS04b, `review/prompt.py`) is **not** at fault and is unchanged; the model choice was.
+  Re-running the spike against the LIVE self-fetch path is a prerequisite for any future fast-model
+  pin, and for the per-backend "cannot self-fetch" / front-loaded-diff option, which is explicitly
+  **not** adopted here.
+- **Capability is now DECLARED data, not a docstring.** §antigravity documented "pin a capable,
+  non-agentic model" — and nothing enforced it, which is exactly how the config set `flash` anyway.
+  Each `Backend` identity now carries **`review_unusable_models`** (verbatim id → reason), a closed
+  declared set on the ONE registry entry (ADR-0025), consulted through
+  `Backend.require_review_model`. The agy entry declares every Gemini Flash tier. The review
+  producer's preflight refuses a reviewer configured with one **before** the Tree is provisioned or
+  a model bills — a clean `BackendUnavailable` naming the model, the reason and the capable default,
+  at both the per-launch and the round-level (RVW03-WS03) preflight. The check runs on the
+  **resolved verbatim id**, so an alias cannot smuggle a known-bad model past it, and it is not
+  skipped for a dry-run (it is a config fact, not an environment probe). Flash remains resolvable
+  for a **write** Run — the refusal is reviewer-scoped.
+- **Parse-failure diagnosis no longer blames diff size for everything.** "No parseable JSON … try a
+  faster model or a smaller diff" was actively wrong for #998, whose diff was 4 docs files.
+  `diagnose_parse_failure` now separates the four non-deliveries — **timed out** (marker present;
+  size/latency IS the lever) · **silent** (no output) · **narrated** (prose, no JSON object ever
+  started — the #1006 signature; the size advice is explicitly disclaimed and the real levers named)
+  · **truncated/off-shape** (a verdict started but won't parse; the size advice stays honest). The
+  same diagnosis feeds the #826 one-shot re-prompt and the #76 salvage, so the PR check-run summary
+  says what actually went wrong.

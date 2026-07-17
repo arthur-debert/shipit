@@ -463,11 +463,17 @@ def run_fanout_review(
     # missing binary is ONE actionable BackendUnavailable naming the binary,
     # never "all N dimension passes failed" with N truncated per-pass details.
     # Both arms need it: the range replay launches the same backends, it just
-    # skips the Tree below.
+    # skips the Tree below. Each entry's configured MODEL rides along (#1006):
+    # a model the backend declares unusable for a review Run is refused here,
+    # once, before the Tree — same posture as the binary check. A per-dimension
+    # `invocation_overrides` model is a Lab-only override the round set cannot
+    # see; the per-launch `_preflight` refuses that one at its own pass.
     round_backends = [backend]
+    round_models: list[str | None] = [model]
     if calibrator is not None:
         round_backends.append(agent_backend.by_name(calibrator.backend))
-    producer.preflight_round(round_backends)
+        round_models.append(calibrator.model)
+    producer.preflight_round(round_backends, round_models)
 
     # The Tree seam: the live path provisions ONE shared read-only Tree on the
     # PR head; the offline replay reviews the checkout whose range was resolved

@@ -251,7 +251,7 @@ _Avoid_: silent overrides.
 The agent harness or CLI used to launch a Run, such as Claude, Codex, or Antigravity. It is orthogonal to Role and Model.
 
 **Model**:
-The LLM identity a Backend drives for a Run. Model choice is separate from backend launch mechanics.
+The LLM identity a Backend drives for a Run. Model choice is separate from backend launch mechanics. A Backend declares the Models that cannot serve a reviewer Run — one that narrates instead of returning a verdict in headless mode — and refuses them at preflight rather than failing on the PR.
 
 **Provider**:
 The vendor of a Model. It matters for model capability, auth, and billing, not repo or run identity.

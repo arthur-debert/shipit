@@ -130,7 +130,7 @@ def _seams(monkeypatch):
     monkeypatch.setattr(
         fanout.producer,
         "preflight_round",
-        lambda backends: capture["preflights"].append(list(backends)),
+        lambda backends, models=None: capture["preflights"].append(list(backends)),
     )
 
     monkeypatch.setattr(
@@ -401,7 +401,9 @@ def test_round_preflights_the_reviewer_backend_once_before_the_fanout(
     monkeypatch.setattr(
         fanout.producer,
         "preflight_round",
-        lambda backends: order.append("preflight") or real_preflight(backends),
+        lambda backends, models=None: (
+            order.append("preflight") or real_preflight(backends, models)
+        ),
     )
     monkeypatch.setattr(
         fanout.producer,
@@ -445,7 +447,7 @@ def test_missing_binary_fails_the_round_before_any_pass_launches(monkeypatch, _s
         lambda *a, **k: launched.append(a) or _pass_review([]),
     )
 
-    def missing(backends):
+    def missing(backends, models=None):
         raise BackendUnavailable("binary 'codex' not found — install/configure it")
 
     monkeypatch.setattr(fanout.producer, "preflight_round", missing)
@@ -1421,7 +1423,7 @@ def _range_seams(monkeypatch):
     monkeypatch.setattr(
         fanout.producer,
         "preflight_round",
-        lambda backends: capture["preflights"].append(list(backends)),
+        lambda backends, models=None: capture["preflights"].append(list(backends)),
     )
 
     monkeypatch.setattr(fanout.producer, "provision_review_tree", _boom)
