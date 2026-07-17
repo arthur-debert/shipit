@@ -421,6 +421,34 @@ def run_fanout_review(
         else f"pr#{target.number}"
     )
 
+    # Round-level preflight (RVW03-WS03): every backend the round is configured to
+    # launch is checked ONCE, before the Tree is provisioned, any pass launches, or
+    # the dry-run prints — a missing binary is ONE actionable BackendUnavailable
+    # naming the binary, never "all N dimension passes failed" with N truncated
+    # per-pass details. Both arms need it: the range replay launches the same
+    # backends, it just skips the Tree below.
+    #
+    # Each entry's configured MODEL rides along (#1006), and the set is EVERY
+    # effective pass model, not just the table's: a per-dimension
+    # `invocation_overrides` model is a real launch this round performs, so a Lab
+    # arm that overrides a pass onto a declared-unusable model is refused HERE,
+    # before the shared Tree — not swallowed by `_one_pass` as one degraded pass
+    # while another dimension carries the round to a green finish with the dead
+    # reviewer silently absent. The calibrator's model is checked the same way, in
+    # BOTH arms — `dry_run` skips only the environment probes, never this config
+    # fact, so a dry-run of an unusable reviewer or judge says so.
+    round_backends = [backend]
+    round_models: list[str | None] = [model]
+    for dim in dims:
+        override_model = (invocation_overrides or {}).get(dim.name, {}).get("model")
+        if override_model is not None and override_model != model:
+            round_backends.append(backend)
+            round_models.append(override_model)
+    if calibrator is not None:
+        round_backends.append(agent_backend.by_name(calibrator.backend))
+        round_models.append(calibrator.model)
+    producer.preflight_round(round_backends, round_models, dry_run=dry_run)
+
     if dry_run:
         for dim in dims:
             producer.run_tree_review(
@@ -457,23 +485,6 @@ def run_fanout_review(
             findings=(),
             runs=(),
         )
-
-    # Round-level preflight (RVW03-WS03): every configured backend binary is
-    # checked ONCE, before the Tree is provisioned or any pass launches — a
-    # missing binary is ONE actionable BackendUnavailable naming the binary,
-    # never "all N dimension passes failed" with N truncated per-pass details.
-    # Both arms need it: the range replay launches the same backends, it just
-    # skips the Tree below. Each entry's configured MODEL rides along (#1006):
-    # a model the backend declares unusable for a review Run is refused here,
-    # once, before the Tree — same posture as the binary check. A per-dimension
-    # `invocation_overrides` model is a Lab-only override the round set cannot
-    # see; the per-launch `_preflight` refuses that one at its own pass.
-    round_backends = [backend]
-    round_models: list[str | None] = [model]
-    if calibrator is not None:
-        round_backends.append(agent_backend.by_name(calibrator.backend))
-        round_models.append(calibrator.model)
-    producer.preflight_round(round_backends, round_models)
 
     # The Tree seam: the live path provisions ONE shared read-only Tree on the
     # PR head; the offline replay reviews the checkout whose range was resolved

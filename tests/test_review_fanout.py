@@ -118,20 +118,27 @@ def _seams(monkeypatch):
     """Fake the producer + calibrator seams; returns the capture dict tests
     read (per-dimension reviews or exceptions in `reviews`, the union handed
     to the calibrator in `union`, the calibration result in `result`, the
-    round preflight's backend sets in `preflights`)."""
+    round preflight's backend sets in `preflights`, and — positionally aligned
+    to those — its model sets in `preflight_models`)."""
     capture: dict = {
         "reviews": {},
         "union": None,
         "result": None,
         "trees": [],
         "preflights": [],
+        "preflight_models": [],
+        "launched": [],
+        # The REAL preflight, captured BEFORE the fake replaces it: a test that
+        # wants the genuine article cannot re-import it (the module attribute is
+        # the fake by then) and would silently re-patch the fake onto itself.
+        "real_preflight_round": fanout.producer.preflight_round,
     }
 
-    monkeypatch.setattr(
-        fanout.producer,
-        "preflight_round",
-        lambda backends, models=None: capture["preflights"].append(list(backends)),
-    )
+    def fake_preflight_round(backends, models=None, *, dry_run=False):
+        capture["preflights"].append(list(backends))
+        capture["preflight_models"].append(list(models) if models else [])
+
+    monkeypatch.setattr(fanout.producer, "preflight_round", fake_preflight_round)
 
     monkeypatch.setattr(
         fanout.producer,
@@ -169,6 +176,7 @@ def _seams(monkeypatch):
             key = "incremental"
         else:
             key = "single"
+        capture["launched"].append(key)
         outcome = capture["reviews"][key]
         assert kw["tree_path"] == "/tree"  # every pass shares the ONE Tree
         if isinstance(outcome, Exception):
@@ -401,8 +409,9 @@ def test_round_preflights_the_reviewer_backend_once_before_the_fanout(
     monkeypatch.setattr(
         fanout.producer,
         "preflight_round",
-        lambda backends, models=None: (
-            order.append("preflight") or real_preflight(backends, models)
+        lambda backends, models=None, *, dry_run=False: (
+            order.append("preflight")
+            or real_preflight(backends, models, dry_run=dry_run)
         ),
     )
     monkeypatch.setattr(
@@ -447,7 +456,7 @@ def test_missing_binary_fails_the_round_before_any_pass_launches(monkeypatch, _s
         lambda *a, **k: launched.append(a) or _pass_review([]),
     )
 
-    def missing(backends, models=None):
+    def missing(backends, models=None, *, dry_run=False):
         raise BackendUnavailable("binary 'codex' not found — install/configure it")
 
     monkeypatch.setattr(fanout.producer, "preflight_round", missing)
@@ -1160,6 +1169,81 @@ def test_invocation_overrides_without_explicit_dimensions_fail_loud(_seams):
         )
 
 
+def test_the_round_preflight_carries_every_effective_pass_model(_seams):
+    """The round set is EVERY model the round will actually launch — the table's,
+    each per-dimension override's, and the calibrator's (#1006). An override is a
+    real launch, so it is refused with the rest before the Tree, not deferred to a
+    per-pass degrade the round can survive."""
+    from shipit.agent import backend as agent_backend
+    from shipit.review.calibrator import CalibratorConfig
+
+    _seams["reviews"] = {
+        "correctness": _pass_review([_comment("bug", severity="major")]),
+        "test-quality": _pass_review([_comment("missing test", severity="minor")]),
+    }
+    _seams["result"] = CalibrationResult(overall_feedback="v", entries=())
+    fanout.run_fanout_review(
+        agent_backend.CODEX,
+        _ctx(),
+        model="pro",
+        dimensions=["correctness", "test-quality"],
+        invocation_overrides={"correctness": {"model": "flash"}},
+        calibrator=CalibratorConfig(backend="codex", model="gpt-5.5"),
+    )
+    assert _seams["preflight_models"] == [["pro", "flash", "gpt-5.5"]]
+
+
+def test_an_unusable_dimension_override_refuses_the_round_before_the_tree(
+    monkeypatch, _seams
+):
+    """The whole point of the round-level guard: a Lab arm that overrides ONE pass
+    onto a declared-unusable model must fail the round BEFORE the shared Tree is
+    provisioned — never provision, launch the other dimension, and let a green
+    round hide the dead reviewer (#1006)."""
+    from shipit.agent import backend as agent_backend
+    from shipit.review.backends import BackendUnavailable
+
+    # The REAL round preflight — this test is about what it refuses.
+    monkeypatch.setattr(
+        fanout.producer, "preflight_round", _seams["real_preflight_round"]
+    )
+    _seams["reviews"] = {
+        "correctness": _pass_review([_comment("bug", severity="major")]),
+        "test-quality": _pass_review([_comment("missing test", severity="minor")]),
+    }
+    with pytest.raises(BackendUnavailable, match="UNUSABLE for a review run"):
+        fanout.run_fanout_review(
+            agent_backend.ANTIGRAVITY,
+            _ctx(),
+            model="pro",
+            dimensions=["correctness", "test-quality"],
+            invocation_overrides={"correctness": {"model": "flash"}},
+        )
+    assert _seams["trees"] == []  # nothing provisioned
+    assert _seams["launched"] == []  # and no pass launched
+
+
+def test_a_dry_run_refuses_an_unusable_calibrator_model(monkeypatch, _seams):
+    """Model capability is a CONFIG fact, not an environment probe: a dry-run skips
+    the binary checks but must still refuse a judge that could never return a
+    verdict — printing a would-run argv that reads as fine is the lie (#1006)."""
+    from shipit.agent import backend as agent_backend
+    from shipit.review.backends import BackendUnavailable
+    from shipit.review.calibrator import CalibratorConfig
+
+    monkeypatch.setattr(
+        fanout.producer, "preflight_round", _seams["real_preflight_round"]
+    )
+    with pytest.raises(BackendUnavailable, match="UNUSABLE for a review run"):
+        fanout.run_fanout_review(
+            agent_backend.CODEX,
+            _ctx(),
+            model="gpt-5.5",
+            dry_run=True,
+            calibrator=CalibratorConfig(backend="antigravity", model="flash"),
+        )
+
+
 def test_by_name_is_the_prompt_slice_the_passes_launch_with():
     """The pass prompt embeds the dimension focus (the narrow-attention
     mechanism) — pinned against the real prompt builder, not the fake."""
@@ -1423,7 +1507,9 @@ def _range_seams(monkeypatch):
     monkeypatch.setattr(
         fanout.producer,
         "preflight_round",
-        lambda backends, models=None: capture["preflights"].append(list(backends)),
+        lambda backends, models=None, *, dry_run=False: capture["preflights"].append(
+            list(backends)
+        ),
     )
 
     monkeypatch.setattr(fanout.producer, "provision_review_tree", _boom)

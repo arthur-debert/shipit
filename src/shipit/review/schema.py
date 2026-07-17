@@ -499,6 +499,82 @@ def extract_json(text: str, *, want: Callable[[dict], bool] | None = None) -> di
     raise ValueError(f"Could not parse valid JSON from output:\n{text}")
 
 
+#: A required review-envelope key, as it appears in serialized JSON — the marker
+#: that a ``{`` was starting the VERDICT rather than carrying unrelated payload.
+#: Matched against a broken object's own prefix only (see
+#: :func:`_truncated_verdict_attempt`), never the whole stdout, so a key belonging
+#: to some other object can't vouch for this brace.
+_VERDICT_KEY_RE = re.compile(r'"(?:summary|comments)"\s*:')
+
+
+def _truncated_verdict_attempt(text: str) -> bool:
+    """Whether ``text`` holds a ``{`` that began the review envelope and never
+    finished — the CUT-OFF signature, told apart from every other brace.
+
+    Walks the same balanced scan as :func:`_scan_embedded_objects`, but keeps the
+    braces that scan discards: a ``{`` whose :meth:`~json.JSONDecoder.raw_decode`
+    FAILS started no complete object, and if its own valid prefix carries a
+    required envelope key (:data:`_VERDICT_KEY_RE`) the verdict was being written
+    when the output stopped. The key is searched only up to the decode-failure
+    position, so a later object's key can never vouch for this brace.
+
+    Deliberately NOT "is there a ``{`` in the output": brace-bearing prose, a
+    narrated command snippet, and an agent's tool-call JSON all carry braces
+    while delivering no verdict, and blaming a cut-off (i.e. diff size) for those
+    is the exact misdiagnosis issue #1006 removes.
+    """
+    decoder = json.JSONDecoder()
+    index = text.find("{")
+    while index != -1:
+        try:
+            _, end = decoder.raw_decode(text, index)
+        except json.JSONDecodeError as exc:
+            if _VERDICT_KEY_RE.search(text, index, max(exc.pos, index)):
+                return True
+            index = text.find("{", max(exc.pos, index + 1))
+            continue
+        except RecursionError:
+            # Mirrors the scan: step past the over-deep object in one O(N) pass.
+            # An unterminated one can hold nothing parseable after it.
+            end = _skip_balanced_object(text, index)
+            if end is None:
+                return False
+            index = text.find("{", end)
+            continue
+        index = text.find("{", end)
+    return False
+
+
+def classify_json_attempt(text: str) -> str:
+    """WHICH JSON-delivery fault a stdout that yielded no review shows —
+    ``"truncated"``, ``"off_shape"``, or ``"none"``.
+
+    The evidence behind :func:`shipit.review.backends.base.diagnose_parse_failure`'s
+    split, factored here because only the extractor knows what a verdict ATTEMPT
+    looks like (issue #1006):
+
+      * ``"truncated"`` — a ``{`` began the envelope and the output stopped
+        mid-body (:func:`_truncated_verdict_attempt`): a real cut-off, so
+        size/latency IS the lever;
+      * ``"off_shape"`` — no cut-off, but some COMPLETE JSON object is present
+        that the review parse rejected: a wrong envelope (#826) or an unrelated
+        tool/log blob. The body TERMINATED, so it was never a size problem;
+      * ``"none"`` — no JSON object was completed and none was started: the agent
+        answered in prose. Braces alone do not count.
+
+    Order matters: the cut-off test runs FIRST, because a run can narrate a
+    complete tool-call object AND then truncate its verdict — the unfinished
+    envelope is the fault that explains the missing review, and a complete
+    bystander object must not mask it.
+    """
+    raw = text or ""
+    if _truncated_verdict_attempt(raw):
+        return "truncated"
+    if _scan_embedded_objects(raw):
+        return "off_shape"
+    return "none"
+
+
 def _scan_embedded_objects(text: str) -> list[tuple[dict, int]]:
     """Every complete JSON OBJECT embedded in ``text``, as ``(object, source
     length)`` pairs — the balanced-scan fallback behind :func:`extract_json`.

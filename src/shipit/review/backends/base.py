@@ -101,25 +101,37 @@ def diagnose_parse_failure(raw: str, *, backend_name: str, timed_out: bool) -> s
     """The SPECIFIC reason an agent's stdout yielded no review — the failure's own
     diagnosis, not one catch-all guess (issue #1006).
 
-    The four non-delivery modes are genuinely different faults with different fixes,
+    The five non-delivery modes are genuinely different faults with different fixes,
     and conflating them is what made a dead reviewer read as a slow one for two days:
 
       * **timed out** — the backend's own timeout marker is present: the response
         was cut off mid-flight, so size/latency IS the lever (:data:`_SIZE_HINT`);
       * **silent** — nothing on stdout at all: not a size problem; the run produced
         no response whatsoever (a killed child, a failed login);
-      * **narrated** — prose with no JSON object ever started: the agent answered in
-        English instead of emitting the verdict. This is the #1006 signature (an
-        agent that goes agentic in ``--print`` narrates its tool-hunting and never
-        answers) and is emphatically NOT a size or latency fault — a faster model or
-        a smaller diff cannot fix a model that does not answer at all, so that advice
-        is deliberately WITHHELD here and the real levers (the reviewer's configured
-        model; whether the review task reached it) are named instead;
-      * **truncated / off-shape** — a JSON object started but does not parse: a
-        genuine cut-off-or-malformed body, where size/latency advice is honest.
+      * **narrated** — no verdict was ever begun and nothing parsed: the agent
+        answered in English instead of emitting the verdict. This is the #1006
+        signature (an agent that goes agentic in ``--print`` narrates its
+        tool-hunting and never answers) and is emphatically NOT a size or latency
+        fault — a faster model or a smaller diff cannot fix a model that does not
+        answer at all, so that advice is deliberately WITHHELD here and the real
+        levers (the reviewer's configured model; whether the review task reached
+        it) are named instead;
+      * **off-shape** — a COMPLETE JSON object was emitted but it is not the
+        ``{summary, comments}`` envelope: a wrong-shaped verdict (#826) or an
+        unrelated tool/log blob. The body terminated, so size/latency is NOT the
+        lever either — the fix is the reviewer's output contract;
+      * **truncated** — the envelope was begun and the output stopped mid-body: a
+        genuine cut-off, where size/latency advice is honest.
+
+    Which of the last three applies is decided by the extractor
+    (:func:`shipit.review.schema.classify_json_attempt`), which knows what a
+    verdict ATTEMPT looks like — NOT by the presence of a ``{``, since narration,
+    command snippets and tool JSON all carry braces while delivering no verdict.
 
     Pure — a string in, a hint out; the caller owns the raising and logging.
     """
+    from ..schema import classify_json_attempt
+
     if timed_out:
         return (
             f"{backend_name} timed out before returning a complete review — "
@@ -131,7 +143,8 @@ def diagnose_parse_failure(raw: str, *, backend_name: str, timed_out: bool) -> s
             "This is not a diff-size or latency problem: check that the agent is "
             "logged in and that its process was not killed."
         )
-    if "{" not in raw:
+    attempt = classify_json_attempt(raw)
+    if attempt == "none":
         return (
             f"{backend_name} NARRATED instead of reviewing: it returned prose and "
             "never emitted the required JSON verdict (no JSON object was started). "
@@ -141,9 +154,19 @@ def diagnose_parse_failure(raw: str, *, backend_name: str, timed_out: bool) -> s
             "describes what it would do instead of answering. Check the reviewer's "
             "configured model, and that the review task reached the agent."
         )
+    if attempt == "off_shape":
+        return (
+            f"{backend_name} returned COMPLETE JSON that is not a review: no "
+            "`{summary, comments}` envelope was found (a wrong-shaped verdict, or "
+            "only unrelated tool/log JSON). This is NOT a size or latency problem "
+            "— the output terminated, it just does not match the contract. Check "
+            "that the reviewer was given the review schema and that its response "
+            "is the verdict itself, not a report about one; "
+            "`shipit review validate` checks a verdict against the schema."
+        )
     return (
         f"{backend_name} returned JSON that could not be parsed — the verdict was "
-        f"started but is truncated or off-shape; {_SIZE_HINT}"
+        f"started but stops mid-body (truncated); {_SIZE_HINT}"
     )
 
 

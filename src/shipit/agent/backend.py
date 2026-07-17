@@ -204,9 +204,16 @@ class Backend:
         if reason is None:
             return
         resolved = self.resolve_model(model)
-        named = f"{model!r} ({resolved!r})" if model != resolved else f"{resolved!r}"
+        # `model` None means "the backend's default" — there is no configured value
+        # to echo, so name only what it resolved to; showing `None ('<default>')`
+        # would read as a configured model literally spelled None.
+        named = (
+            f"{model!r} ({resolved!r})"
+            if model is not None and model != resolved
+            else f"{resolved!r}"
+        )
         raise ValueError(
-            f"the {self.funnel_agent or self.name!r} reviewer is configured with "
+            f"the {self.funnel_agent or self.name} reviewer is configured with "
             f"model {named}, which is UNUSABLE for a review run: {reason} "
             f"Pick a capable model for this reviewer"
             + (

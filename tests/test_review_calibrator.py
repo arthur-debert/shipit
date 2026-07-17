@@ -441,6 +441,35 @@ def test_run_calibrator_missing_cli_is_backend_unavailable(monkeypatch):
         run_calibrator(CalibratorConfig(), _union(), pr_number=9, cwd="/tree")
 
 
+def test_run_calibrator_refuses_a_model_the_backend_declares_unusable(monkeypatch):
+    """The judge is a reviewer Run: a model that can never return a verdict is
+    refused at its OWN launch, not only via the fan-out's round preflight (#1006).
+    `run_calibrator` is public — a direct caller must not slip past it."""
+    launched: list = []
+    # The binary is PRESENT and the launcher would work — so a refusal here can
+    # only be the model guard, and it must fire before either is reached.
+    monkeypatch.setattr(calibrator.shutil, "which", lambda binary: "/usr/bin/agy")
+
+    def boom(*a, **kw):  # pragma: no cover — the guard must prevent this
+        launched.append(a)
+        raise AssertionError("the launcher must never be reached")
+
+    with pytest.raises(BackendUnavailable, match="UNUSABLE for a review run") as exc:
+        run_calibrator(
+            CalibratorConfig(backend="antigravity", model="flash"),
+            _union(),
+            pr_number=9,
+            cwd="/tree",
+            launcher=boom,
+        )
+    assert launched == []
+    # The message is the actionable config edit, not a mystery: the reviewer, the
+    # configured value AND what it resolved to, and the capable default to switch to.
+    assert "the agy reviewer is configured with model 'flash'" in str(exc.value)
+    assert "Gemini 3.5 Flash (High)" in str(exc.value)
+    assert "this backend's default is 'pro'" in str(exc.value)
+
+
 def test_run_calibrator_seam_timeout_is_a_timed_out_backend_error(monkeypatch):
     monkeypatch.setattr(calibrator.shutil, "which", lambda binary: "/usr/bin/claude")
 

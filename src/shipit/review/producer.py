@@ -997,7 +997,10 @@ def _preflight(backend: Backend, *, model: str | None = None, dry_run: bool) -> 
 
 
 def preflight_round(
-    backends: Sequence[Backend], models: Sequence[str | None] | None = None
+    backends: Sequence[Backend],
+    models: Sequence[str | None] | None = None,
+    *,
+    dry_run: bool = False,
 ) -> None:
     """Verify EVERY backend a round is configured to launch, ONCE, before any
     pass starts; raise ONE :class:`BackendUnavailable` naming each missing binary.
@@ -1024,6 +1027,13 @@ def preflight_round(
     ``models`` skips that check (the per-launch :func:`_preflight` still refuses).
     A length mismatch is a programming error raised loud, never a silently
     unchecked model.
+
+    ``dry_run`` mirrors :func:`_preflight`'s split: the environment probes (binary
+    on PATH, agy's ``--agent`` support) are SKIPPED, because a dry-run only prints
+    the would-run argv and must work without the CLIs installed; the ``models``
+    check is NOT, because model capability is a config fact, not an environment
+    one — a dry-run of a round whose reviewer could never return a verdict must
+    say so rather than print an argv that reads as fine.
     """
     if models is not None:
         if len(models) != len(backends):
@@ -1033,6 +1043,8 @@ def preflight_round(
             )
         for backend, model in zip(backends, models, strict=True):
             _require_review_model(backend, model)
+    if dry_run:
+        return
     missing: list[Backend] = []
     seen: set[str] = set()
     for backend in backends:

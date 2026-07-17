@@ -598,6 +598,17 @@ def run_calibrator(
     """
     sink = artifacts if artifacts is not None else RunArtifacts.disabled()
     identity = agent_backend.by_name(config.backend)
+    # The calibrator's OWN per-launch model guard (issue #1006). The judge is a
+    # reviewer Run — a model the backend declares unusable for one can no more
+    # return a verdict here than in a dimension pass. The round-level preflight
+    # covers the fan-out's calibrator, but this is a public launcher: a direct
+    # caller must not get past it either. FIRST, before the binary probe, the
+    # task build, or the launch — a config fact costs nothing to check and
+    # refusing it early is the whole "fail before a model bills" posture.
+    try:
+        identity.require_review_model(config.model)
+    except ValueError as exc:
+        raise BackendUnavailable(str(exc)) from exc
     if shutil.which(identity.binary) is None:
         raise BackendUnavailable(
             f"The calibrator backend {config.backend!r} requires the "

@@ -1072,16 +1072,80 @@ def test_narrated_output_is_diagnosed_as_narration_not_as_a_size_problem():
 
 
 def test_a_started_but_unparseable_verdict_is_diagnosed_as_truncated():
-    # A JSON object WAS started — a genuine cut-off/off-shape body, where the
+    # The envelope WAS begun and stops mid-body — a genuine cut-off, where the
     # size/latency advice is honest and stays.
     from shipit.review.backends import diagnose_parse_failure
 
     hint = diagnose_parse_failure(
         '{"summary": {"status": "COMM', backend_name="agy", timed_out=False
     )
-    assert "truncated or off-shape" in hint
+    assert "truncated" in hint
     assert "try a faster model or a smaller diff" in hint
     assert "NARRATED" not in hint
+
+
+def test_brace_bearing_narration_is_narration_not_a_truncated_verdict():
+    # The regression behind the old `"{" not in raw` test: agentic narration quotes
+    # command snippets and brace-bearing prose while delivering NO verdict. Blaming
+    # a cut-off (i.e. diff size) for it is the exact #1006 misdiagnosis — braces are
+    # not evidence that a verdict was ever started.
+    from shipit.review.backends import diagnose_parse_failure
+
+    for narration in (
+        "no json here, just {braces} and prose",  # tests/test_review_schema.py's case
+        "I will run `git diff --name-only` and inspect {workspace}/docs to review.",
+        "Let me check the schema {file: pull_request_read} before I answer.",
+    ):
+        hint = diagnose_parse_failure(narration, backend_name="agy", timed_out=False)
+        assert "NARRATED instead of reviewing" in hint, narration
+        assert "try a faster model or a smaller diff" not in hint, narration
+
+
+def test_narrated_tool_json_is_off_shape_not_a_truncated_verdict():
+    # An agent that goes agentic emits COMPLETE tool-call JSON while never
+    # answering. It parses, so it is not a cut-off — the size advice must not
+    # ride along.
+    from shipit.review.backends import diagnose_parse_failure
+
+    hint = diagnose_parse_failure(
+        'Reviewing now.\n{"tool": "pull_request_read", "args": {"pr": 998}}\nDone.',
+        backend_name="agy",
+        timed_out=False,
+    )
+    assert "COMPLETE JSON that is not a review" in hint
+    assert "NOT a size or latency problem" in hint
+    assert "try a faster model or a smaller diff" not in hint
+
+
+def test_a_wrong_shaped_verdict_is_off_shape_not_blamed_on_diff_size():
+    # The #826 signature: valid JSON, wrong envelope. The body TERMINATED, so this
+    # is an output-contract fault — never a diff-size one.
+    from shipit.review.backends import diagnose_parse_failure
+
+    hint = diagnose_parse_failure(
+        '{"findings": [{"file": "a.py", "text": "x"}]}',
+        backend_name="codex",
+        timed_out=False,
+    )
+    assert "COMPLETE JSON that is not a review" in hint
+    assert "shipit review validate" in hint  # the real lever
+    assert "try a faster model or a smaller diff" not in hint
+    assert "NARRATED" not in hint
+
+
+def test_a_truncated_verdict_beside_complete_tool_json_still_reads_as_truncated():
+    # A run can narrate a COMPLETE tool object and THEN truncate its verdict. The
+    # unfinished envelope is what explains the missing review; a complete bystander
+    # object must not mask it into the off-shape branch.
+    from shipit.review.backends import diagnose_parse_failure
+
+    hint = diagnose_parse_failure(
+        '{"tool": "read"}\n{"summary": {"status": "COMMENT"}, "comments": [{"fi',
+        backend_name="agy",
+        timed_out=False,
+    )
+    assert "truncated" in hint
+    assert "try a faster model or a smaller diff" in hint
 
 
 def test_a_timeout_keeps_the_size_hint_and_silence_gets_its_own_diagnosis():

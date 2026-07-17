@@ -443,11 +443,25 @@ the roster promised. **A reviewer that reliably fails is a gate that quietly isn
   **resolved verbatim id**, so an alias cannot smuggle a known-bad model past it, and it is not
   skipped for a dry-run (it is a config fact, not an environment probe). Flash remains resolvable
   for a **write** Run — the refusal is reviewer-scoped.
+
+  The guard covers **every model a round actually launches**, at both levels. The round set is the
+  table model, each per-dimension `invocation_overrides` model (a Lab arm's override is a real
+  launch — deferring it to the per-pass degrade would let one dead reviewer ride a green round
+  invisibly) and the calibrator's; `preflight_round`'s `dry_run` skips only the environment probes,
+  never this config fact. Every reviewer-Run launcher carries the same guard as its own backstop —
+  `run_tree_review` via `_preflight`, and `run_calibrator` at its head, since the judge is a
+  reviewer Run and a public launcher must refuse a dead model whether or not a fan-out called it.
 - **Parse-failure diagnosis no longer blames diff size for everything.** "No parseable JSON … try a
   faster model or a smaller diff" was actively wrong for #998, whose diff was 4 docs files.
-  `diagnose_parse_failure` now separates the four non-deliveries — **timed out** (marker present;
-  size/latency IS the lever) · **silent** (no output) · **narrated** (prose, no JSON object ever
-  started — the #1006 signature; the size advice is explicitly disclaimed and the real levers named)
-  · **truncated/off-shape** (a verdict started but won't parse; the size advice stays honest). The
-  same diagnosis feeds the #826 one-shot re-prompt and the #76 salvage, so the PR check-run summary
-  says what actually went wrong.
+  `diagnose_parse_failure` now separates the five non-deliveries — **timed out** (marker present;
+  size/latency IS the lever) · **silent** (no output) · **narrated** (no verdict begun and nothing
+  parsed — the #1006 signature; the size advice is explicitly disclaimed and the real levers named)
+  · **off-shape** (COMPLETE JSON that is not the `{summary, comments}` envelope — a wrong-shaped
+  verdict per #826, or an agent's tool/log blob; the body terminated, so size is not the lever
+  either and the fix is the output contract) · **truncated** (the envelope was begun and stops
+  mid-body; the size advice stays honest). Which of the last three applies is decided by the
+  extractor (`schema.classify_json_attempt`), which knows what a verdict ATTEMPT looks like — **not**
+  by the presence of a `{`: narration, command snippets and tool JSON all carry braces while
+  delivering no verdict, so a brace test would hand the size advice straight back to the case this
+  amendment exists to fix. The same diagnosis feeds the #826 one-shot re-prompt and the #76 salvage,
+  so the PR check-run summary says what actually went wrong.
