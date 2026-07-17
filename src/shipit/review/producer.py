@@ -937,20 +937,12 @@ def _dry_run(
 
 def _preflight(backend: Backend, *, dry_run: bool) -> None:
     """Verify the backend's CLI binary (the registry's ``binary`` alias) is on
-    PATH — and, for agy, that it supports the reviewer's ``--agent`` flag; raise
-    :class:`BackendUnavailable` otherwise.
+    PATH; raise :class:`BackendUnavailable` otherwise.
 
     Skipped in ``dry_run`` (a dry-run only prints the would-run argv; it must work
     without the CLI installed, mirroring the spawn dry-run posture). A missing CLI on a
     REAL run fails loud — these are LOCAL backends and a missing binary must never
     silently degrade.
-
-    For the ANTIGRAVITY backend the reviewer posture depends on AGY 1.1.2's native
-    ``--agent`` flag (issue #989), so a real launch additionally preflights that
-    capability (:func:`shipit.spawn.backends.antigravity.require_agent_support`)
-    and surfaces a clean UPGRADE message when the installed ``agy`` predates it —
-    the same :class:`BackendUnavailable` surface as a missing binary, so the
-    round-level preflight and the service map it uniformly.
     """
     if dry_run:
         return
@@ -960,13 +952,6 @@ def _preflight(backend: Backend, *, dry_run: bool) -> None:
             f"the '{backend.binary}' CLI on your PATH, but it was not found. "
             f"Install it (and log it in), then re-run."
         )
-    if backend is ANTIGRAVITY:
-        from ..spawn.backends.antigravity import require_agent_support
-
-        try:
-            require_agent_support(binary=backend.binary)
-        except RuntimeError as exc:
-            raise BackendUnavailable(str(exc)) from exc
 
 
 def preflight_round(backends: Sequence[Backend]) -> None:
@@ -979,12 +964,8 @@ def preflight_round(backends: Sequence[Backend]) -> None:
     error and NO pass processes launch — never as "all N dimension passes
     failed" with N truncated per-pass details. ``backends`` is the round's
     configured set (the reviewer's own backend plus, when the dormant judge is
-    on, the calibrator's); duplicate binaries are checked once. For an AGY
-    backend the round preflight ALSO validates the reviewer's ``--agent`` support
-    once here (issue #989), so an ``agy`` predating 1.1.2 surfaces ONE clean
-    UPGRADE :class:`BackendUnavailable` before Tree provisioning — never a
-    wrapped "all N passes failed" from each per-launch :func:`_preflight`. The
-    per-launch checks (:func:`_preflight`, the calibrator's own) stay as
+    on, the calibrator's); duplicate binaries are checked once.
+    The per-launch checks (:func:`_preflight`, the calibrator's own) stay as
     backstops for callers outside a fan-out round.
     """
     missing: list[Backend] = []
@@ -1004,17 +985,6 @@ def preflight_round(backends: Sequence[Backend]) -> None:
         raise BackendUnavailable(
             f"review preflight failed, no passes were launched: {details}"
         )
-    # Every configured binary is present; now verify AGY's reviewer capability
-    # once, before any Tree is provisioned (issue #989). The membership check
-    # above already guarantees the binary is on PATH, so a False here is an
-    # OUTDATED agy, not a missing one — raise the targeted upgrade message.
-    if any(backend is ANTIGRAVITY for backend in backends):
-        from ..spawn.backends.antigravity import require_agent_support
-
-        try:
-            require_agent_support(binary=ANTIGRAVITY.binary)
-        except RuntimeError as exc:
-            raise BackendUnavailable(str(exc)) from exc
 
 
 def _resolve_repo(ctx) -> Repo:
