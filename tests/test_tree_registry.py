@@ -159,6 +159,8 @@ def _patch_trivial_git(monkeypatch, *, branch_hook=None):
     monkeypatch.setattr(git, "upstream_ref", lambda *, cwd: "origin/main")
     monkeypatch.setattr(git, "status_porcelain", lambda *, cwd: [])
     monkeypatch.setattr(git, "ahead_behind", lambda *, cwd: (0, 0))
+    monkeypatch.setattr(git, "unpushed_shas", lambda *, cwd: ())
+    monkeypatch.setattr(git, "head_committed_at", lambda *, cwd: 1_000.0)
 
 
 def test_scan_output_order_is_deterministic_regardless_of_completion_order(

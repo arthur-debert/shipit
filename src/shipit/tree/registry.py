@@ -16,9 +16,9 @@ renders. ``scan`` does NOT mutate anything — it is a pure read of the fleet.
 **The scan makes ZERO network calls** (ADR-0072). Every signal its two consumers need —
 ``tree list``'s display fields and ``gc``'s reclaim rule — rides a local ``git`` read,
 so a fleet-wide sweep no longer pays a per-Tree (nor a per-repo) GitHub round-trip. The
-``gh`` PR read this module once made ONE CALL PER REPO (the ``PrIndex`` batch behind
-:func:`shipit.gh.prs_by_head`) fed a reclaim signal ADR-0072 deleted; it is gone with
-the ladder that consulted it — that per-repo fan-out was the >10-minute sweep of #1011.
+``gh`` PR read this module once made ONE CALL PER REPO (a batched ``PrIndex``) fed a
+reclaim signal ADR-0072 deleted; it is gone with the ladder that consulted it — and the
+batch adapter with it — that per-repo fan-out was the >10-minute sweep of #1011.
 The per-clone reads still fan out across a bounded pool so a large fleet overlaps their
 subprocess latency instead of paying for it serially.
 """

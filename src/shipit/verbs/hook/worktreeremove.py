@@ -31,18 +31,24 @@ too:
   reason. An UNREADABLE list blocks removal the same way — unknown must never
   read as "nothing to lose".
 
-This floor is now EXACTLY gc's own (:func:`shipit.tree.cleanup._has_local_only_work`):
-dirty or unpushed (or an unreadable unpushed list) keeps the Tree. The fast path used
-to be stricter — it carved out (#232) the SHA(s) the Tree's own provisioning committed
-at birth and additionally blocked on an upstream-``ahead`` count. ADR-0072's reclaim
-rule dropped the ephemeral ladder those readings served, and WS03 retired the
-provisioning-record reader (the former ``shipit.tree.provision``) and the ``ps``
-liveness pidfile with it, so both extra readings are gone here too. Dropping the
-carve-out only
-ever makes this MORE conservative (a Tree carrying an unpushed provisioning commit is
-now kept, not reclaimed), and the ``ahead`` block guarded work that — being pushed to
-some remote — the unpushed floor already treats as safe; either way the fast path can
-still only decline to reclaim a Tree gc would.
+This never-lose-work floor is now EXACTLY gc's own
+(:func:`shipit.tree.cleanup._has_local_only_work`): dirty or unpushed (or an unreadable
+unpushed list) keeps the Tree. The FLOOR is the only thing shared with gc, NOT the
+whole reclaim decision — the fast path still deliberately reclaims a clean ephemeral
+Tree IMMEDIATELY on a clean exit, whereas gc would keep that same Tree until its idle
+age crosses the 48h threshold. The two agree on what must never be lost, not on when a
+safe Tree is finally collected.
+
+The fast path used to apply a STRICTER floor — it carved out (#232) the SHA(s) the
+Tree's own provisioning committed at birth and additionally blocked on an
+upstream-``ahead`` count. ADR-0072's reclaim rule dropped the ephemeral ladder those
+readings served, and WS03 retired the provisioning-record reader (the former
+``shipit.tree.provision``) and the ``ps`` liveness pidfile with it, so both extra
+readings are gone here too. Dropping the carve-out only ever makes the floor MORE
+conservative (a Tree carrying an unpushed provisioning commit is now kept, not
+reclaimed), and the ``ahead`` block guarded work that — being pushed to some remote —
+the unpushed floor already treats as safe; so the fast path's floor now blocks removal
+in exactly the cases gc's floor would, never fewer.
 """
 
 from __future__ import annotations
@@ -151,9 +157,10 @@ def _removal_blocker(tree: Path) -> str | None:
     Once stricter than gc's floor — it carved out the provisioning-commit SHAs (#232)
     and blocked on an upstream-``ahead`` count — the fast path shed both when WS03
     retired the provisioning-record reader and the ephemeral ladder those readings
-    served (ADR-0072). What remains still only ever declines to reclaim a Tree gc
-    would: dropping the carve-out can only KEEP a Tree gc might remove, never the
-    reverse.
+    served (ADR-0072). What remains is exactly gc's never-lose-work floor: dropping the
+    carve-out can only KEEP a Tree gc's floor would also keep, never remove one it
+    protects. (This is only about the floor — the fast path still reclaims a clean Tree
+    on exit that gc would hold for its idle window; see the module docstring.)
     """
     cwd = str(tree)
     if git.status_porcelain(cwd=cwd):

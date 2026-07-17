@@ -3,10 +3,10 @@
 The ``tree list`` verb's promoted domain half: :func:`build` derives, PURELY,
 one frozen :class:`FleetTree` row per scanned
 :class:`~shipit.tree.registry.TreeRecord` — the raw snapshot plus the two
-facts the listing adds on top: the Tree's reclaim **kind**
-(:func:`~shipit.tree.layout.tree_kind` — write / review / ephemeral, each
-taking a different gc ladder, so the listing says which one applies rather
-than leaving it implied by the path) and its **age** against an injected
+facts the listing adds on top: the Tree's **kind**
+(:func:`~shipit.tree.layout.tree_kind` — write / review / ephemeral, surfaced
+as an at-a-glance fact rather than left implied by the path; reclaim itself is
+one uniform activity-based rule, ADR-0072) and its **age** against an injected
 ``now`` (no clock in here). The :class:`Fleet` wrapper is the ``--json``
 surface: ``to_dict()`` declares the field set the render seam serializes
 (ADR-0030), while the text table stays a pure verb-layer renderer over the
