@@ -17,6 +17,10 @@ deleted ONLY when its loss is provably safe, anything that merely looks abandone
 surfaced as *stale* (listed, never auto-removed), and everything carrying live or
 local work is *kept*.
 
+The three buckets below describe the **write** ladder — the ordinary work Tree. The two
+other kinds (review, ephemeral) are decided FIRST by their own ladders, documented after
+them; neither ever lands in *stale*, and neither reads PR state the way these do.
+
 - **removable** — every safe-to-delete condition holds: the PR is **merged** on the
   remote ∧ the working tree is **clean** ∧ there are **no unpushed commits**
   (neither ahead of an upstream nor on no remote at all — ``_has_local_only_work``)
@@ -27,8 +31,8 @@ local work is *kept*.
   this case (#1009): a merged Tree's safety is already provable, and the two-week
   threshold vetoing it parked a fortnight of finished work.
 - **stale** — the Tree looks abandoned (aged, clean, nothing unpushed) but its PR did
-  NOT merge and is no longer in flight (no PR, or a PR closed without merging). That
-  is ambiguous — maybe finished elsewhere, maybe dropped — so it is **listed, never
+  NOT merge and is no longer in flight (no PR, a PR closed without merging, or a state
+  that could not be read — UNKNOWN). That is ambiguous — maybe finished elsewhere, maybe dropped — so it is **listed, never
   auto-removed**; a human decides. Age is the ONLY abandonment signal for these
   unmerged shapes, so ``max_age_seconds`` still governs them.
 - **keep** — everything else: a dirty tree, unpushed commits, an in-flight (open/draft)
@@ -51,8 +55,11 @@ live idle session), so its reclaim turns on a **liveness signal** (the
 ``live_sessions`` input, fed from the pidfile ``session/liveness`` reads) plus
 liveness-INDEPENDENT backstops: a hard time cap so a stale pidfile can never strand
 a Tree forever, and a grace window so a just-launched session is not raced before
-its pidfile lands. Like a review Tree it is binary — removable or kept, never
-*stale*: a disposable per-launch clone is either provably safe to reclaim or kept.
+its pidfile lands. Reclaim here is liveness-based, **not PR-based** (ADR-0027): apart
+from the merged fast path, PR state is never consulted — an UNKNOWN (unreadable) state
+does NOT hold a session Tree, by design. Like a review Tree it is binary — removable or
+kept, never *stale*: a disposable per-launch clone is either provably safe to reclaim
+or kept.
 Its never-lose-work floor additionally excludes **exactly the provisioning
 commit(s)** recorded at the Tree's birth (:mod:`shipit.tree.provision`, the
 ``provision_shas`` input): a managed-set drift window makes provisioning commit the
@@ -190,10 +197,30 @@ def _is_unknown(state: str | None) -> bool:
     """``True`` when the PR state could not be read (``"UNKNOWN"`` in the vocabulary).
 
     The verb layer maps an unreadable :data:`~shipit.gh.UNKNOWN` snapshot to the state
-    string ``"UNKNOWN"``. It is neither merged nor in flight, so it falls to **stale**
-    like the other ambiguous cases — never ``removable``. Recognising it explicitly
-    keeps that safety legible (and the truth table honest) rather than relying on the
-    catch-all; ``gc`` separately *warns* whenever any UNKNOWN was seen.
+    string ``"UNKNOWN"``.
+
+    This predicate has exactly ONE caller — the **write** ladder (:func:`_bucket_for`),
+    where UNKNOWN is neither merged nor in flight and so falls to **stale** alongside
+    the other ambiguous shapes, never ``removable``. Recognising it there explicitly
+    keeps that safety legible rather than leaving it to the catch-all. The claim is
+    scoped to that ladder and does NOT generalise to the fleet — the other two kinds
+    reach their verdicts without ever calling this:
+
+    - **review** (:func:`_review_bucket`) — binary, never *stale*: it reclaims only on a
+      terminal (merged/closed) PR, so an UNKNOWN state simply fails that test → **keep**.
+    - **ephemeral** (:func:`_ephemeral_bucket`) — decides on **liveness and age, not PR
+      state** (ADR-0027), so a not-live, clean, fully pushed session Tree past its grace
+      window IS ``removable`` while its PR state is unreadable. That is by design; do NOT
+      "fix" it by adding an UNKNOWN rung there. PR state is only ever that ladder's fast
+      path to reclaim (rung 2, ``_is_merged``); its rung 1 — dirty or unpushed → keep —
+      is an absolute floor, so anything reaching the liveness/age rungs is clean and
+      holds no *unprotected* local work: any local-only commit still present there is
+      exactly a recorded provisioning commit that rung 1 deliberately excludes (#232),
+      never the session's own. The session's work is therefore safe on a remote, with
+      nothing left for PR state to protect. An UNKNOWN rung would instead strand every
+      session Tree whenever the ``gh`` budget is drained.
+
+    ``gc`` separately *warns* whenever any UNKNOWN was seen, on every kind.
     """
     return (state or "").upper() == "UNKNOWN"
 
@@ -363,8 +390,10 @@ def _bucket_for(
         return "keep"
     # UNKNOWN (state unreadable) lands here alongside no-PR / closed-without-merge:
     # all ambiguous, all conservatively STALE (listed, never auto-removed). UNKNOWN is
-    # called out explicitly so "never removable when we couldn't even read the PR" is a
-    # documented invariant, not an accident of the catch-all.
+    # called out explicitly so "on THIS ladder, never removable when we couldn't even
+    # read the PR" is a documented invariant, not an accident of the catch-all. The
+    # invariant is the write ladder's alone: review and ephemeral Trees never consult
+    # `_is_unknown` and reach their own verdicts (see its docstring).
     if _is_unknown(state):
         return "stale"
     return "stale"
@@ -429,6 +458,16 @@ def _ephemeral_bucket(
 
     Binary — ``removable`` or ``keep``, never ``stale``: a session Tree is a
     disposable per-launch clone, so it is either provably safe to reclaim or kept.
+    Reclaim is **liveness-based, not PR-based** (ADR-0027): ``state`` is read ONCE, as
+    the merged fast path at rung 2, and never again — rungs 3-5 are pure liveness and
+    age. So an UNKNOWN (unreadable) PR state does not appear on this ladder and cannot
+    block reclaim, deliberately: rung 1 is an absolute floor, so a Tree reaching rungs
+    3-5 is clean and holds no *unprotected* local work — any local-only commit still
+    present is exactly a recorded provisioning commit rung 1 excludes (#232, rung 1
+    below), never the session's own — and PR state has nothing left to protect. An
+    UNKNOWN rung here would strand every session Tree whenever the ``gh`` budget is
+    drained (cf. :func:`_is_unknown`, whose "never removable" holds on the write ladder
+    only).
     The five rungs, first match wins:
 
     1. **dirty or unpushed → keep** — the absolute floor; local work is never at
