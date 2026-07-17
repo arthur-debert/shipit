@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -255,6 +257,137 @@ def test_plant_keeps_the_dir_when_adoption_refuses(home: Path, tmp_path: Path, c
     assert not link.is_symlink()
     assert (link / "memory").read_text() == "a FILE where the store has a dir"
     assert "entr" in caplog.text and "remain" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Concurrency — two checkouts of one repo adopting into the one shared store
+# ---------------------------------------------------------------------------
+
+
+def test_lock_sits_beside_the_store_never_inside_it(home: Path):
+    """The lock is shipit's bookkeeping; the store's contents are the harness's.
+
+    Inside the store it would be one more entry Claude Code must ignore and one more
+    entry the NEXT adopter would try to merge.
+    """
+    lock = sessionstore.lock_path(REPO, home=home)
+
+    assert lock.parent == _store(home).parent
+    assert lock not in _store(home).parents
+
+
+def test_lock_name_appends_rather_than_replaces_a_suffix(home: Path):
+    """A dotted repo name is a NAME, not a stem plus an extension.
+
+    `with_suffix` would read `docs.github.io` as stem `docs.github` and collapse it and
+    `docs.github.com` onto one `docs.github.lock` — serializing two unrelated repos
+    against each other, and pointing the lock at a name neither repo owns.
+    """
+    io_repo = Repo(owner=Owner(login="acme"), name="docs.github.io")
+    com_repo = Repo(owner=Owner(login="acme"), name="docs.github.com")
+
+    assert sessionstore.lock_path(io_repo, home=home).name == "docs.github.io.lock"
+    assert sessionstore.lock_path(io_repo, home=home) != sessionstore.lock_path(
+        com_repo, home=home
+    )
+
+
+def _plant_concurrently(checkouts: list[Path], home: Path) -> list[Exception]:
+    """Plant every checkout at once, from one thread each; return what they raised."""
+    barrier = threading.Barrier(len(checkouts))
+    errors: list[Exception] = []
+
+    def run(checkout: Path) -> None:
+        barrier.wait()  # nobody starts until everybody is ready
+        try:
+            sessionstore.plant(checkout, REPO, home=home)
+        except Exception as exc:  # noqa: BLE001 — the test asserts on what escaped
+            errors.append(exc)
+
+    threads = [threading.Thread(target=run, args=(c,)) for c in checkouts]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+    assert not any(t.is_alive() for t in threads), "a planter deadlocked on the lock"
+    return errors
+
+
+@pytest.fixture
+def slow_move(monkeypatch):
+    """Widen the classify -> copy window that the adoption race lives in.
+
+    `_adopt_entry` classifies the destination and THEN calls `_move_file`; the race is
+    two adopters both classifying one destination as absent before either copies. A
+    sleep at the top of `_move_file` sits exactly in that window and makes the interleave
+    near-certain instead of a rare scheduling accident — with the per-store lock removed,
+    the test below fails reliably; with it, the sleep only slows the test down.
+    """
+    original = sessionstore._move_file
+
+    def delayed(src: Path, dst: Path) -> list[str]:
+        time.sleep(0.05)
+        return original(src, dst)
+
+    monkeypatch.setattr(sessionstore, "_move_file", delayed)
+
+
+def test_concurrent_adopters_never_lose_content(home: Path, tmp_path: Path, slow_move):
+    """The data-loss race the lock exists for: two checkouts, one store, one dest path.
+
+    Unserialized, both adopters classify `memory/MEMORY.md` as absent, both copy, and the
+    second's bytes land on the first's — after which each verifies and unlinks its own
+    source and one memory is gone for good. Serialized, the second adopter meets a store
+    the first has already finished with, so the collision resolves through the matrix'
+    keep-both rung and BOTH memories survive.
+    """
+    checkouts = [tmp_path / "tree-a", tmp_path / "tree-b"]
+    for checkout, text in zip(
+        checkouts, ("memory from A", "memory from B"), strict=True
+    ):
+        checkout.mkdir()
+        write(
+            sessionstore.link_path(checkout, home=home) / "memory" / "MEMORY.md", text
+        )
+
+    errors = _plant_concurrently(checkouts, home)
+
+    assert not errors, f"planting raised under concurrency: {errors}"
+    memories = sorted(
+        p.read_text() for p in (_store(home) / "memory").iterdir() if p.is_file()
+    )
+    assert memories == ["memory from A", "memory from B"]
+    for checkout in checkouts:
+        link = sessionstore.link_path(checkout, home=home)
+        assert link.is_symlink() and os.readlink(link) == str(_store(home))
+
+
+def test_concurrent_adopters_dedupe_identical_content(
+    home: Path, tmp_path: Path, slow_move
+):
+    """The same race, identical bytes: keep-both must not fire, and neither must a race.
+
+    Two checkouts carrying the SAME memory (the real migration shape — one store copied
+    to two places) must converge on ONE file, not on `MEMORY.adopted-1.md`. Serialization
+    is what makes the second adopter see the first's file and take the identical-drop
+    rung; the verify-then-unlink is safe only because nobody rewrites the target mid-check.
+    """
+    checkouts = [tmp_path / "tree-a", tmp_path / "tree-b"]
+    for checkout in checkouts:
+        checkout.mkdir()
+        write(
+            sessionstore.link_path(checkout, home=home) / "memory" / "MEMORY.md",
+            "one memory, copied to two checkouts",
+        )
+
+    errors = _plant_concurrently(checkouts, home)
+
+    assert not errors, f"planting raised under concurrency: {errors}"
+    memories = sorted(p.name for p in (_store(home) / "memory").iterdir())
+    assert memories == ["MEMORY.md"]
+    assert (_store(home) / "memory" / "MEMORY.md").read_text() == (
+        "one memory, copied to two checkouts"
+    )
 
 
 # ---------------------------------------------------------------------------

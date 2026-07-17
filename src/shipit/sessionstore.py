@@ -30,6 +30,15 @@ store split in two forever. So: correct symlink → no-op; absent → create; re
 directory → :func:`adopt` its contents into the store, then replace it with the link;
 a symlink pointing elsewhere → refuse loudly and change nothing.
 
+**Adoption is serialized per store** (:func:`_store_lock`), because the store is the one
+thing every checkout of a repo SHARES: two checkouts planting at once are two adopters
+merging into the same target, and the matrix' classify → copy → verify → unlink sequence
+is only safe if no one else moves the target underneath it. Unserialized, two adopters
+can each classify the same destination as absent, and the second's copy overwrites the
+first's — after which both verify and delete their sources, and the first's content is
+gone. The lock is what makes "nothing is deleted until verified present in the target"
+true against a concurrent adopter rather than only against a single one.
+
 Fail-open is the contract at the CALL sites, not here: this module raises nothing for
 an ordinary refusal (it reports one), and its callers swallow the environment-shaped
 failures — an unresolvable store path must never cost a Tree its creation.
@@ -43,6 +52,9 @@ import os
 import re
 import shutil
 import stat
+import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -82,7 +94,11 @@ REFUSED = "refused"
 class PlantResult:
     """What :func:`plant` did — the outcome plus every path it refused to touch.
 
-    ``refusals`` is non-empty only when a *type* conflict was met (see :func:`adopt`).
+    ``refusals`` is the paths refused, whichever rung refused them: a type conflict met
+    *inside* adoption (see :func:`adopt`) contributes the conflicting source path, and a
+    refusal at the ladder's own root — a foreign symlink or a non-directory squatting on
+    the slug path — contributes the link path itself.
+
     An ``outcome`` of :data:`REFUSED` means the link was not planted at all; refusals
     with an ``outcome`` of :data:`ADOPTED` are impossible by construction — a slug dir
     that could not be fully drained is never replaced by the link.
@@ -140,6 +156,56 @@ def link_path(checkout: Path | str, *, home: Path | None = None) -> Path:
     return base / ".claude" / "projects" / slug_for(checkout)
 
 
+def lock_path(repo: Repo, *, home: Path | None = None) -> Path:
+    """The adoption lock file for ``repo``'s store — a SIBLING of the store, never inside it.
+
+    Beside the store rather than in it because the store's contents are the harness's to
+    read: a lock file inside would be one more entry Claude Code has to ignore, and one
+    more entry a future adopter would try to merge. The lock is shipit's bookkeeping, so
+    it lives at shipit's level.
+
+    The suffix is APPENDED, never substituted (``with_suffix`` would replace one): repo
+    names carry dots — ``docs.github.io`` and ``docs.github.com`` are one repo name each,
+    not a stem and an extension — and substituting would collapse both onto a single
+    ``docs.github.lock``, quietly serializing two unrelated repos against each other.
+    """
+    store = store_dir(repo, home=home)
+    return store.parent / f"{store.name}.lock"
+
+
+@contextmanager
+def _store_lock(lock: Path) -> Iterator[None]:
+    """Hold an exclusive ``flock`` on ``lock`` for the whole adoption transaction.
+
+    The unit of exclusion is the STORE, and the critical section is the entire
+    transaction — classify, copy, verify, unlink the source, and replace the drained dir
+    with the link — not merely the copy. Locking only the copy would still let a second
+    adopter classify a destination as absent while the first is mid-verify, which is the
+    same race one step later: the guarantee adoption sells is that a source is deleted
+    only once its content is provably in the target, and that "provably" spans from
+    classification to unlink.
+
+    An advisory lock is enough because shipit's adopters are the only writers that ever
+    collide here: a live session appends its own uuid-named transcripts to the store and
+    never writes a path an adopter is moving. This does not serialize the *harness*, and
+    is not meant to.
+
+    Platform contract mirrors the eval store's locking seam
+    (:func:`shipit.harness.eval.store.lock_exclusive`, #893): ``fcntl`` is unix-only and
+    is imported HERE rather than at module level, since this module sits on the CLI's
+    import chain and a module-level import would crash the CLI on Windows at import
+    time. On Windows the lock is a documented NO-OP — the kernel drops the real lock when
+    the handle closes, and a Windows adopter is assumed to be the only one.
+    """
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock, "w") as fh:
+        if sys.platform != "win32":
+            import fcntl
+
+            fcntl.flock(fh, fcntl.LOCK_EX)
+        yield
+
+
 def plant(checkout: Path | str, repo: Repo, *, home: Path | None = None) -> PlantResult:
     """Point ``checkout``'s slug dir at ``repo``'s one session store; return what happened.
 
@@ -157,6 +223,10 @@ def plant(checkout: Path | str, repo: Repo, *, home: Path | None = None) -> Plan
     Sameness in case 1 is **link-text identity**, compared without dereferencing (the
     ADR's rule). Our own links are always written as ``str(store_dir(...))``, so a
     re-run compares byte-identical text and case 1 holds — that IS the idempotence.
+
+    Case 3 runs under the store's :func:`_store_lock`, so concurrent planters from two
+    checkouts of the same repo adopt one at a time; this is the entry point that supplies
+    the serialization :func:`adopt` requires.
 
     Raises ``OSError`` only for genuinely unexpected I/O; a *refusal* is a return value,
     not an exception. Callers are fail-open (a Tree is not worth losing to a store).
@@ -198,24 +268,32 @@ def plant(checkout: Path | str, repo: Repo, *, home: Path | None = None) -> Plan
         )
         return PlantResult(link, store, REFUSED, [str(link)])
 
-    refusals = adopt(link, store)
-    remaining = sorted(p.name for p in link.iterdir())
-    if remaining:
-        # Never rmdir a dir that still holds content — that is the data loss this whole
-        # WS exists to prevent. The store is left split, loudly, which is recoverable;
-        # a deleted memory is not.
-        logger.warning(
-            "session store NOT linked: adopted what it could from %s into %s, but %d "
-            "entr(y/ies) remain (%s); the slug dir is kept as-is — resolve by hand.",
-            link,
-            store,
-            len(remaining),
-            ", ".join(remaining),
-        )
-        return PlantResult(link, store, REFUSED, refusals)
+    # The ONE branch that writes into the store's contents, hence the only one that has
+    # to exclude a concurrent adopter. The rungs above are safe unserialized: the link
+    # side is per-checkout (no two processes plant the same slug dir), `store.mkdir` is
+    # idempotent, and an adopter that adds files while another session's link is created
+    # loses nothing. So the lock is taken here, not around the whole ladder — a refusal
+    # above must stay free of any store-side side effect, including the lock file.
+    with _store_lock(lock_path(repo, home=home)):
+        refusals = adopt(link, store)
+        remaining = sorted(p.name for p in link.iterdir())
+        if remaining:
+            # Never rmdir a dir that still holds content — that is the data loss this
+            # whole WS exists to prevent. The store is left split, loudly, which is
+            # recoverable; a deleted memory is not.
+            logger.warning(
+                "session store NOT linked: adopted what it could from %s into %s, but "
+                "%d entr(y/ies) remain (%s); the slug dir is kept as-is — resolve by "
+                "hand.",
+                link,
+                store,
+                len(remaining),
+                ", ".join(remaining),
+            )
+            return PlantResult(link, store, REFUSED, refusals)
 
-    link.rmdir()
-    link.symlink_to(store, target_is_directory=True)
+        link.rmdir()
+        link.symlink_to(store, target_is_directory=True)
     logger.debug("session store adopted and linked: %s -> %s", link, store)
     return PlantResult(link, store, ADOPTED, refusals)
 
@@ -266,6 +344,14 @@ def adopt(source: Path, target: Path) -> list[str]:
     target.** Every move copies, verifies, and only then unlinks; a source directory is
     removed only once it is empty. Memory is irreplaceable — an adoption that loses a
     file to save a directory entry has defeated the point.
+
+    **The caller serializes.** This function walks ``target`` and acts on what it finds,
+    so it is only safe while nothing else writes ``target``'s paths: two adopters running
+    at once can both classify one destination as absent, and the second's copy would land
+    on the first's file just before both verify and delete their sources. It does NOT
+    take the lock itself — it recurses, and re-entering an ``flock`` on a fresh descriptor
+    would deadlock against itself. :func:`plant` is the entry point that holds
+    :func:`_store_lock` across the whole transaction; a direct caller owes the same.
     """
     refusals: list[str] = []
     for entry in sorted(source.iterdir()):

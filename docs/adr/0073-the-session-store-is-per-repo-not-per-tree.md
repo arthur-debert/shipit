@@ -195,6 +195,18 @@ adoption that loses a file to save a directory entry has defeated it.
   regression in exchange for memory existing at all, and the mitigation — the
   index is a small, append-shaped list of one-line pointers, so a lost update
   costs one recoverable line — is judged acceptable rather than solved.
+- **Adoption is serialized per store; that acceptance does not extend to it.**
+  The lost-line risk above is accepted for *live sessions* because the unit lost
+  is one recoverable line. Two *adopters* racing is a different failure: both
+  classify a destination as absent, the second's copy lands on the first's file,
+  and each then verifies and deletes its own source — losing a whole memory, not
+  a line, with no copy left anywhere. The keep-both matrix cannot see that race,
+  because it decides from a classification the other adopter invalidates a
+  moment later. So every adoption runs under an exclusive `flock` on a lock file
+  beside the store, held across the whole transaction — classify, copy, verify,
+  unlink — and not merely across the copy. It excludes shipit's adopters from
+  each other, which is the only collision that can occur here: a live session
+  appends UUID-named transcripts and never writes a path an adopter is moving.
 - **The store outlives every Tree, by design.** ADR-0072 reclaims a Tree after
   48h idle; the store is not in the Tree and is never swept with it. This is the
   point: reclaiming a workspace must not destroy what was learned in it.

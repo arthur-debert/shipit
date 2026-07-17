@@ -7229,6 +7229,35 @@ def test_install_links_the_canonical_checkout_to_the_store(tmp_path, rec, monkey
     assert os.readlink(link) == str(home / ".claude" / "stores" / "acme" / "widget")
 
 
+def test_a_nothing_to_do_install_still_plants_the_store(tmp_path, rec, monkeypatch):
+    """The migration case: an ALREADY-MANAGED checkout, whose plan is nothing-to-do.
+
+    The link is not a managed unit, so a current managed set is no evidence the link
+    exists — and the checkouts that most need migrating are the ones already installed.
+    Returning on `nothing_to_do` before planting made the advertised install-based
+    migration fire only when unrelated managed-file drift happened to exist, i.e. by
+    coincidence.
+    """
+    from shipit import identity, sessionstore
+    from shipit.identity import Owner, Repo
+
+    home = _session_store_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        identity,
+        "resolve_repo",
+        lambda *a, **k: Repo(owner=Owner(login="acme"), name="widget"),
+    )
+    assert verb.run(str(tmp_path), local=True) == 0  # settle the managed set
+    link = sessionstore.link_path(tmp_path, home=home)
+    link.unlink()  # a checkout installed BEFORE the store seam existed
+
+    assert _plan(tmp_path).nothing_to_do, "test needs the no-op plan shape"
+    assert verb.run(str(tmp_path), local=True) == 0
+
+    assert link.is_symlink()
+    assert os.readlink(link) == str(home / ".claude" / "stores" / "acme" / "widget")
+
+
 def test_dry_run_plants_no_session_store(tmp_path, rec, monkeypatch):
     """`--dry-run` has NO side effects by contract — planting a symlink would be one."""
 
@@ -7297,6 +7326,12 @@ def _session_store_warnings(caplog):
     Scoped to the seam's own loggers on purpose: `caplog` collects the whole process, so
     an unscoped assertion would trip over `shipit.execrun`'s transport record for the
     very `git remote get-url` this seam is allowed to fail on.
+
+    The names are LOGGER names, not module paths — the install verb logs on
+    `shipit.install` (its whole family does, per the LOG02 axis convention), never on
+    `shipit.verbs.install`. Filtering on the module path would match no record ever
+    emitted and quietly pass these assertions whatever the seam warned about; both names
+    here are pinned by `test_sprayed_modules_have_a_shipit_logger`.
     """
     import logging as _logging
 
@@ -7304,5 +7339,5 @@ def _session_store_warnings(caplog):
         r
         for r in caplog.records
         if r.levelno >= _logging.WARNING
-        and r.name in ("shipit.verbs.install", "shipit.sessionstore")
+        and r.name in ("shipit.install", "shipit.sessionstore")
     ]

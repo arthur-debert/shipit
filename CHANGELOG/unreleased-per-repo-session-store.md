@@ -40,7 +40,13 @@
   source until its content is verified present in the target, and a directory
   that could not be fully drained is never replaced by the link: memory is
   irreplaceable, and a store left split is recoverable where a deleted memory is
-  not.
+  not. Adoption is **serialized per store**, so two checkouts of one repo
+  migrating at the same time cannot both claim one destination and have the
+  second's copy land on the first's memory.
+  `shipit install` plants the link on **every** run except `--dry-run`, including
+  one where the managed set is already current: the link is not a managed file,
+  so a clean plan says nothing about whether it exists — and an already-installed
+  checkout is exactly the one with a store to migrate.
   Both seams are **fail-open**: an unresolvable repo, an unwritable `~/.claude`,
   or no `~/.claude` at all (a CI runner, a container) costs a Tree or an install
   exactly nothing, and logs at DEBUG rather than warning on every single run —
