@@ -15,16 +15,18 @@ the hook is the one verb that witnesses a session beginning):
    call with no wrapper — ``shipit``/``python`` resolve without a ``pixi run``
    prefix.
 2. **Log-context export** (REL01 #349, ADR-0029) — when the session's ``cwd`` is
-   an ephemeral session Tree, append ``export SHIPIT_LOG_CTX_SESSION=<id>`` (and
-   the matching ``…_TREE=<path>``) to the same ``CLAUDE_ENV_FILE``. The ephemeral
-   Tree's dir leaf IS the per-launch session id (ADR-0027) — the exact value
-   ``tree/create.py`` binds at the Tree-birth seam — so every shipit command run
+   inside a Tree, append ``export SHIPIT_LOG_CTX_SESSION=<id>`` (and the matching
+   ``…_TREE=<path>``) to the same ``CLAUDE_ENV_FILE``. The id is resolved by the
+   shared reader (:func:`shipit.session.current.current_session_id`): a codex launch
+   already exports its ``codex-<…>`` id, while a coordinator claude session takes the
+   flat Tree leaf's trailing ``<id>`` — which IS the harness session UUID
+   (ADR-0074), the very value ``claude --resume`` wants. So every shipit command run
    *inside* the session (each one a fresh process) rebinds it at
-   ``logsetup.configure_logging`` via :func:`shipit.logcontext.bind_from_env`,
-   and the per-repo JSONL log becomes sliceable by session for the records that
-   matter most: the ones emitted during the session. NOT the Claude-internal
-   ``session_id`` UUID from the payload — that is a different identifier, recorded
-   on the ``session.started`` event for the transcript join.
+   ``logsetup.configure_logging`` via :func:`shipit.logcontext.bind_from_env`, and
+   the per-repo JSONL log becomes sliceable by session for the records that matter
+   most: the ones emitted during the session. For a claude coordinator this now
+   COINCIDES with the payload ``session_id`` (the flat dir ``<id>`` is that UUID,
+   ADR-0074) — the two identifiers that ADR-0027 kept apart have merged.
 3. **Source-clone warning** (REL01 #348) — when the session's ``cwd`` is a shipit
    *source clone* (has ``.shipit.toml``, is a git repo) rather than a Tree (any
    dir under :func:`shipit.tree.layout.central_root`), print a one-line warning
@@ -35,8 +37,7 @@ the hook is the one verb that witnesses a session beginning):
    header) — this is a nudge, never a block. The discriminator is the PATH, not
    the branch: session Trees are *ephemeral-by-path, work-by-branch* (ADR-0027),
    so their branch moves off ``ephemeral/*`` mid-session and would false-positive,
-   while every Tree kind (ephemeral, write, review) lives under the central root
-   by construction.
+   while every flat Tree lives under the central root by construction (ADR-0074).
 
 Session liveness is no longer recorded here: ADR-0072 replaced the pidfile-and-``ps``
 reclaim ladder with an activity-based rule (the filesystem already knows when a Tree
@@ -370,27 +371,36 @@ def _write_log_context(raw: str, env) -> None:
             "sessionstart: no %s in env — no log context exported", ENV_FILE_VAR
         )
         return
+    cwd = _payload_cwd(raw)
     try:
-        tree = _ephemeral_tree(_payload_cwd(raw))
+        tree = _containing_tree(cwd)
     except Exception:  # noqa: BLE001 — fail-open, DEBUG by design: same calibration
         # as the source-clone detection (a broken SHIPIT_TREES_ROOT would otherwise
         # WARN on every session start).
         logger.debug(
-            "sessionstart: ephemeral-Tree detection failed open — "
-            "no log context exported",
+            "sessionstart: Tree detection failed open — no log context exported",
             exc_info=True,
         )
         return
     if tree is None:
+        logger.debug("sessionstart: cwd is not inside a Tree — no log context exported")
+        return
+    # The session id: env-first (a codex launch already exports its `codex-<…>` id),
+    # else the flat Tree leaf's trailing `<id>` — the harness session UUID for a
+    # coordinator claude session (ADR-0074). Resolved through the SAME reader the
+    # `--session current` verbs use, so exporter and reader agree by construction.
+    session = session_current.current_session_id(env=env, cwd=cwd)
+    if session is None:
         logger.debug(
-            "sessionstart: cwd is not an ephemeral Tree — no log context exported"
+            "sessionstart: no resolvable session id for %s — no log context exported",
+            tree,
         )
         return
     try:
-        _append(Path(env_file), _log_context_exports(tree))
+        _append(Path(env_file), _log_context_exports(tree, session))
         logger.debug(
             "sessionstart: exported log context session=%s into %s",
-            tree.name,
+            session,
             env_file,
         )
     except Exception:  # noqa: BLE001 — fail-open: the export is additive; records
@@ -401,32 +411,31 @@ def _write_log_context(raw: str, env) -> None:
         )
 
 
-def _ephemeral_tree(cwd: Path) -> Path | None:
-    """The RESOLVED ephemeral session-Tree dir when ``cwd`` is one, else ``None``.
+def _containing_tree(cwd: Path) -> Path | None:
+    """The RESOLVED flat Tree dir containing ``cwd``, or ``None`` (ADR-0074).
 
-    Delegates to :func:`shipit.session.current.ephemeral_session_tree` — the ONE
-    path-is-the-signal detection (ADR-0018/0027), shared with the resolvers that
-    read the id back (``shipit logs --session current``, LOG04) — so the
-    exporter and every reader agree on what an ephemeral session Tree looks
-    like by construction. Kept as a local seam so this hook's fail-open
-    calibration (detection errors skip at DEBUG, per #348) stays wrapped around
-    one call site.
+    Delegates to :func:`shipit.session.current.containing_tree` — the ONE
+    path-is-the-signal detection, shared with the resolvers that read the id back
+    (``shipit logs --session current``, LOG04) — so the exporter and every reader
+    agree on what a Tree looks like by construction. Kept as a local seam so this
+    hook's fail-open calibration (detection errors skip at DEBUG, per #348) stays
+    wrapped around one call site.
     """
-    return session_current.ephemeral_session_tree(cwd)
+    return session_current.containing_tree(cwd)
 
 
-def _log_context_exports(tree: Path) -> str:
-    """The export lines for an ephemeral Tree: ``session`` (the leaf) + ``tree``.
+def _log_context_exports(tree: Path, session: str) -> str:
+    """The export lines for a session Tree: ``session`` (its ``<id>``) + ``tree``.
 
-    The leaf name IS the per-launch session id (ADR-0027) — the same value the
-    Tree-birth seam binds (``tree/create.py``), so in-session records join the
-    creation records on one key. The var names come from
-    :data:`shipit.logcontext.ENV_PREFIX` — the writer and the reader
-    (:func:`shipit.logcontext.bind_from_env`) can never disagree on naming —
-    and values are ``shlex``-quoted like every other line this hook sources.
+    ``session`` is the resolved per-launch session id (:func:`current_session_id`) —
+    the coordinator session Tree's flat leaf ``<id>`` IS the harness session UUID
+    (ADR-0074), so in-session records join the creation records on one key. The var
+    names come from :data:`shipit.logcontext.ENV_PREFIX` — the writer and the reader
+    (:func:`shipit.logcontext.bind_from_env`) can never disagree on naming — and
+    values are ``shlex``-quoted like every other line this hook sources.
     """
     return (
-        f"export {logcontext.ENV_PREFIX}SESSION={shlex.quote(tree.name)}\n"
+        f"export {logcontext.ENV_PREFIX}SESSION={shlex.quote(session)}\n"
         f"export {logcontext.ENV_PREFIX}TREE={shlex.quote(str(tree))}\n"
     )
 
@@ -448,8 +457,12 @@ def _emit_session_started(raw: str) -> None:
     """
     try:
         cwd = _payload_cwd(raw)
-        tree = _ephemeral_tree(cwd)
-        session = tree.name if tree is not None else None
+        tree = _containing_tree(cwd)
+        # The session id: env-first (codex exports its `codex-<…>` id), else the flat
+        # Tree leaf's trailing `<id>` — the harness session UUID for a coordinator
+        # claude session (ADR-0074). The env-aware reader keeps the codex `codex-`
+        # prefix intact, so the codex-thread capture below still recognizes it.
+        session = session_current.current_session_id(cwd=cwd)
         sid = _payload_session_id(raw)
         # Codex's SessionStart payload currently omits its native conversation
         # id, but the hook process receives the supported CODEX_THREAD_ID env
@@ -457,12 +470,19 @@ def _emit_session_started(raw: str) -> None:
         # ``shipit session codex`` launch can later be resumed by its shipit id.
         # Claude continues to use the payload's session_id; absent-not-null
         # keeps the record backend-neutral and avoids leaking other env state.
-        codex_thread = (
-            os.environ.get("CODEX_THREAD_ID")
-            if session is not None and session.startswith("codex-")
-            else None
+        # Codex is discriminated by its OWN env seam (CODEX_THREAD_ID), not by the
+        # session-id prefix — ADR-0074 retires prefix reverse-engineering, and a codex
+        # launch exports this thread id into the hook process's environment.
+        codex_thread = os.environ.get("CODEX_THREAD_ID")
+        # Record the BACKEND as a first-class field so resume reads it here instead of
+        # decoding the session-id prefix: the launcher owns the backend, this witness
+        # stamps it. Only stamped when a session id resolved (a non-session start
+        # records none).
+        backend = (
+            ("codex" if codex_thread else "claude") if session is not None else None
         )
         native_ids = {
+            **({"backend": backend} if backend else {}),
             **({"session_id": sid} if sid else {}),
             **({"codex_thread": codex_thread} if codex_thread else {}),
         }

@@ -10,7 +10,7 @@ Layered functions:
   * :func:`generate_review` — decide the round SCOPE (RVW02-WS06:
     :func:`shipit.review.rounds.plan_for_view`) then delegate to the round
     orchestrator (:func:`shipit.review.fanout.run_fanout_review`, RVW02-WS04 /
-    ADR-0045 / ADR-0052). ROUND 1 provisions ONE shared read-only Tree
+    ADR-0045 / ADR-0052). ROUND 1 provisions ONE per-Run read-only Tree
     (ADR-0018) on the PR head and runs the reviewer's configured shape: by
     DEFAULT one monolithic full-scope pass (ADR-0052); with an explicit
     per-reviewer ``dimensions`` config, the ADR-0045 **Dimension passes** in

@@ -41,7 +41,7 @@ skeleton (:func:`resolve_write_run_env`, consumed by
 :func:`shipit.spawn.launch.route_argv`). WS04 adds the sibling existing-PR
 write resolver for shepherd attachment (:func:`resolve_existing_pr_write_env`)
 with the same pixi routing contract but the shepherd checkout strategy;
-RPE01-WS06 adds the coordinator session Tree, reviewer shared read-only Tree,
+RPE01-WS06 adds the coordinator session Tree, reviewer per-Run read-only Tree,
 and explorer ambient WorkingDir boundaries.
 """
 
@@ -56,8 +56,8 @@ from .harness.roleprofile import (
     CheckoutStrategy,
     ExistingPrWriteTree,
     NewWriteTree,
+    PerRunReadOnlyTree,
     SessionTree,
-    SharedReadOnlyTree,
 )
 from .identity import Repo, Revision, Sha, WorkingDir
 from .pixienv import Activation, EnvIdentity
@@ -91,7 +91,7 @@ class TreeProvenance:
 
     ``branch`` is the branch the Tree is checked out on. ``base`` is the ref a
     Tree branch was cut from when such a ref exists (for write and session
-    Trees, e.g. ``origin/E/umbrella``). It is ``None`` for a shared read-only
+    Trees, e.g. ``origin/E/umbrella``). It is ``None`` for a per-Run read-only
     reviewer Tree: that checkout is pinned to an existing PR-head branch and
     does not cut a new branch from a base. There is deliberately NO path field:
     the composed :class:`~shipit.identity.WorkingDir` is the one checkout
@@ -140,7 +140,7 @@ def checkout_strategy_name(checkout: CheckoutStrategy) -> str:
         return "new-write-tree"
     if isinstance(checkout, ExistingPrWriteTree):
         return "existing-pr-write-tree"
-    if isinstance(checkout, SharedReadOnlyTree):
+    if isinstance(checkout, PerRunReadOnlyTree):
         return "shared-read-only-tree"
     if isinstance(checkout, AmbientWorkingDir):
         return "ambient-working-dir"
@@ -454,12 +454,12 @@ def resolve_readonly_review_env(
     branch: str,
     commit: Sha | None = None,
 ) -> WorkEnv:
-    """Resolve the Work Env for a reviewer shared read-only Tree.
+    """Resolve the Work Env for a reviewer per-Run read-only Tree.
 
     A reviewer Tree is branch-pinned and Shipit-provisioned, but deliberately
     unprovisioned for pixi (ADR-0018): no ``.treeinclude``, no pixi env, no
     write-run activation. The Work Env therefore records Tree provenance
-    (branch, with no cut-from base), a :class:`SharedReadOnlyTree` checkout
+    (branch, with no cut-from base), a :class:`PerRunReadOnlyTree` checkout
     strategy, absent ``activation``/``env_identity``, and
     :class:`ExecutionRouting.AMBIENT` so the existing reviewer launcher keeps
     using ambient read tools over the chmod'd checkout guard.
@@ -471,7 +471,7 @@ def resolve_readonly_review_env(
             revision=Revision(branch=branch, commit=commit),
         ),
         tree=TreeProvenance(branch=branch, base=None),
-        checkout=SharedReadOnlyTree(),
+        checkout=PerRunReadOnlyTree(),
         activation=None,
         env_identity=None,
         routing=ExecutionRouting.AMBIENT,

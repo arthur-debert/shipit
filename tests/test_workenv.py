@@ -20,8 +20,8 @@ from shipit.harness.roleprofile import (
     AmbientWorkingDir,
     ExistingPrWriteTree,
     NewWriteTree,
+    PerRunReadOnlyTree,
     SessionTree,
-    SharedReadOnlyTree,
 )
 from shipit.identity import Revision, Sha, WorkingDir, repo_from_slug
 from shipit.workenv import (
@@ -203,7 +203,7 @@ def test_reviewer_readonly_tree_records_provenance_without_pixi_activation():
         commit=_HEAD,
     )
 
-    assert isinstance(env.checkout, SharedReadOnlyTree)
+    assert isinstance(env.checkout, PerRunReadOnlyTree)
     assert env.checkout.tree_backed is True
     assert env.checkout.writable is False
     assert env.working_dir == WorkingDir(

@@ -53,7 +53,7 @@ import click
 
 from ... import git, identity, workenv
 from ...harness import worktree_adapter
-from ...tree.create import create_from_source, new_agent_hash
+from ...tree.create import create_from_source, new_tree_id, new_tree_naming
 from ...tree.layout import TreeSpec, sanitize_slug
 
 logger = logging.getLogger("shipit.hook")
@@ -93,12 +93,24 @@ def run(stdin: TextIO | None = None, stdout: TextIO | None = None) -> int:
         if not isinstance(payload, dict):
             raise ValueError(f"WorktreeCreate payload is not an object: {payload!r}")
         if worktree_adapter.is_coordinator_launch(payload):
-            # The coordinator's own `--worktree` launch → its ephemeral session
-            # Tree (ADR-0027): ephemeral/<id> off origin/main, dir leaf = the id.
-            path = _create_tree(ephemeral=_session_id(payload))
+            # The coordinator's own `--worktree` launch → its session Tree. The BRANCH
+            # is still `ephemeral/<name>` off origin/main (ADR-0027; branch grammar
+            # unchanged), but the FLAT dir `<id>` is the HARNESS session UUID the
+            # payload supplies (ADR-0074) — this is the case a human resumes, so the
+            # dir name IS the resume handle.
+            path = _create_tree(
+                ephemeral=_session_id(payload),
+                tree_id=_coordinator_tree_id(payload),
+            )
         else:
             # An in-CC helper spawn → the branch-deferred holding branch (ADR-0017).
-            path = _create_tree(branch=_resolve_branch(payload))
+            # The payload's `session_id` on THIS path is the PARENT's, so the hook
+            # MINTS a fresh UUID for the dir `<id>` rather than carrying it (ADR-0074):
+            # naming the wrong session is worse than naming none.
+            path = _create_tree(
+                branch=_resolve_branch(payload),
+                tree_id=new_tree_id(),
+            )
     except Exception as exc:  # noqa: BLE001 — fail-CLOSED: any error aborts the spawn.
         # The fail-CLOSED failure arm (hook canon, shipit.verbs.hook): the abort
         # is a propagating failure → ERROR with the exception attached and the
@@ -143,6 +155,21 @@ def _session_id(payload: dict[str, object]) -> str:
     """
     raw = str(payload.get("name") or "")
     return raw if sanitize_slug(raw) else secrets.token_hex(_ID_BYTES)
+
+
+def _coordinator_tree_id(payload: dict[str, object]) -> str:
+    """The coordinator session Tree dir's ``<id>``: the HARNESS session UUID (ADR-0074).
+
+    The WorktreeCreate payload's ``session_id`` names the very session about to adopt
+    this cwd (ADR-0027), so using it as the flat dir's ``<id>`` makes the directory
+    name the resume handle a human types into ``claude --resume`` — the one creation
+    path where the dir name IS the resume handle. A payload missing/empty
+    ``session_id`` (defensive — the contract always supplies one on the coordinator
+    arm) falls back to a freshly minted UUID rather than blocking the launch. Never a
+    pid: the id is a full UUID either way.
+    """
+    sid = str(payload.get("session_id") or "")
+    return sid if sid.strip() else new_tree_id()
 
 
 def _resolve_branch(payload: dict[str, object]) -> str:
@@ -249,16 +276,21 @@ def _spawn_branch(payload: dict[str, object]) -> str | None:
     return git.current_branch(cwd=cwd)
 
 
-def _create_tree(*, branch: str | None = None, ephemeral: str | None = None) -> str:
+def _create_tree(
+    *, tree_id: str, branch: str | None = None, ephemeral: str | None = None
+) -> str:
     """Provision the Tree for one shape from the ambient checkout; return its path.
 
     The two shapes this hook mints: a freeform-`branch` spec (the helper spawn's
     holding branch) or an `ephemeral` spec (the coordinator's session Tree — the
-    planner resolves the `ephemeral/<id>` dir/branch/base, ADR-0027). Resolves repo
-    identity at the git boundary — the canonical, case-normalized
-    :class:`shipit.identity.Repo`, derived locally from the origin remote
-    (ADR-0024) — hands the :class:`TreeSpec` to the orchestrator, and returns the
-    dissociated clone's path — provisioned like any Tree (`tree.create`, gated on
+    planner resolves the `ephemeral/<id>` branch/base, ADR-0027). The flat dir leaf
+    (ADR-0074) is ``<repo>-claude-<timestamp>-<tree_id>``: this hook fires only for
+    Claude Code, so ``<agent>`` is ``claude``; ``tree_id`` is the caller's per-arm
+    ``<id>`` (the harness session UUID for the coordinator, a freshly minted UUID for
+    the helper). Resolves repo identity at the git boundary — the canonical,
+    case-normalized :class:`shipit.identity.Repo`, derived locally from the origin
+    remote (ADR-0024) — hands the :class:`TreeSpec` to the orchestrator, and returns
+    the dissociated clone's path — provisioned like any Tree (`tree.create`, gated on
     which manifests exist). Raises on any failure — a missing checkout OR an
     unparseable origin remote (`ValueError`) — so :func:`run` fails closed; there
     is no native-worktree fallback.
@@ -268,7 +300,7 @@ def _create_tree(*, branch: str | None = None, ephemeral: str | None = None) -> 
         raise RuntimeError("not inside a git checkout — cannot provision a Tree")
     spec = TreeSpec(
         repo=identity.resolve_repo(root),
-        agent_hash=new_agent_hash(),
+        **new_tree_naming("claude", tree_id=tree_id),
         branch=branch,
         ephemeral=ephemeral,
     )

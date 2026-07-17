@@ -51,10 +51,10 @@ from __future__ import annotations
 import json
 import logging
 import os
-import secrets
 import shlex
 import shutil
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -133,10 +133,9 @@ NODE_LOCKFILES: dict[str, str] = {
 #: enough that a wedged step still dies at a known bound with a durable record.
 PROVISION_TIMEOUT: float = 30 * 60.0
 
-#: Bytes of randomness behind an agent hash → 8 hex chars. Enough to keep two
-#: concurrent Trees for the same issue from colliding on disk without bloating the
-#: dir name.
-_HASH_BYTES = 4
+#: The Tree dir leaf's ``<timestamp>`` format — ``%Y%m%d-%H%M%S`` UTC (ADR-0074 /
+#: naming.lex §4), so a lexical sort is chronological within a repo.
+_STAMP_FORMAT = "%Y%m%d-%H%M%S"
 
 
 @dataclass(frozen=True)
@@ -148,9 +147,45 @@ class Tree:
     base: str
 
 
-def new_agent_hash() -> str:
-    """A short random hex tag that disambiguates a Tree's directory (never its branch)."""
-    return secrets.token_hex(_HASH_BYTES)
+def new_tree_id() -> str:
+    """A fresh full UUID for a Tree dir leaf's ``<id>`` slot (ADR-0074).
+
+    Minted by whoever creates the Tree when no native session UUID exists yet — the
+    spawned-Run and native-helper creation paths. Never a pid (reused, so one token
+    eventually names two sessions) and never truncated (``claude --resume`` rejects a
+    prefix). The coordinator session Tree instead reuses the harness session UUID
+    from the WorktreeCreate payload, so its dir name IS the resume handle.
+    """
+    return str(uuid.uuid4())
+
+
+def new_tree_naming(agent: str, *, tree_id: str | None = None) -> dict[str, str]:
+    """The three minted flat-leaf coordinates for a :class:`~shipit.tree.layout.TreeSpec`.
+
+    Bundles the ``agent`` (the backend BINARY name — ``claude`` / ``codex`` / ``agy``),
+    a freshly stamped ``created`` (:func:`tree_created_stamp`), and a ``tree_id`` — a
+    fresh UUID (:func:`new_tree_id`) unless the caller supplies one. The coordinator
+    session Tree supplies the harness session UUID so its dir name IS the resume handle
+    (ADR-0074); every other creation path lets this mint one. Spread into the
+    constructor: ``TreeSpec(repo=…, **new_tree_naming(\"claude\"))``.
+    """
+    return {
+        "agent": agent,
+        "created": tree_created_stamp(),
+        "tree_id": tree_id or new_tree_id(),
+    }
+
+
+def tree_created_stamp(now: float | None = None) -> str:
+    """The Tree dir leaf's ``<timestamp>`` — ``%Y%m%d-%H%M%S`` UTC (ADR-0074).
+
+    Pure over an injected clock (``now`` seconds since the epoch, default
+    :func:`time.time`) so the grammar is asserted without freezing the real clock.
+    Records WHEN the Tree was created for ``tree list``'s created column; it is
+    deliberately NOT a reclaim signal (creation-age is not activity-age — ADR-0072).
+    """
+    seconds = time.time() if now is None else now
+    return time.strftime(_STAMP_FORMAT, time.gmtime(seconds))
 
 
 def create(spec: TreeSpec, *, source_repo: str, github_url: str) -> Tree:
