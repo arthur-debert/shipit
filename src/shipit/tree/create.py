@@ -29,6 +29,14 @@ summary (``{path, branch, base}``). The whole pipeline hides behind this one cal
    ``SCCACHE_BASEDIRS``, ``CARGO_INCREMENTAL=0``) is no longer injected here —
    it lives in pixi ``[activation.env]`` (COR01 / ADR-0022), so pixi sets it on
    every activation and it reaches the agent's own in-Tree ``cargo``.
+5. plant the session-store link (:func:`_plant_session_store`, ADR-0073): point
+   the Tree's ``~/.claude/projects/<cwd-slug>`` at the repo's ONE store, so the
+   session about to start in the Tree shares its memory and transcripts with
+   every other Tree of the repo instead of opening a fresh empty namespace. Last,
+   and deliberately: it needs the clone's ``origin`` (store identity is the
+   remote), and it must happen before ``create`` returns, since that is what
+   "before the session starts" means. Fail-open — unlike steps 1-4 it is
+   additive, so it never rolls the Tree back.
 
 Materialization stays atomic from the caller's view: if any step fails, the
 half-built leaf is removed before the error propagates. Every git call goes
@@ -50,7 +58,16 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from .. import config, events, execrun, git, logcontext, pixienv
+from .. import (
+    config,
+    events,
+    execrun,
+    git,
+    identity,
+    logcontext,
+    pixienv,
+    sessionstore,
+)
 from ..install.apply import HOOK_ACTIVATE_ARGV, LEFTHOOK_BINARY
 from ..install.units import LEFTHOOK_FILE, LINT_ENV
 from . import include
@@ -221,6 +238,8 @@ def create(spec: TreeSpec, *, source_repo: str, github_url: str) -> Tree:
             shutil.rmtree(dest, ignore_errors=True)
             raise
 
+        _plant_session_store(dest)
+
         duration_ms = _elapsed_ms(started)
         # The birth milestone IS the `tree.created` dev-cycle event (ADR-0032,
         # verb-witnessed): the same record as before, tagged — the scoped
@@ -237,6 +256,35 @@ def create(spec: TreeSpec, *, source_repo: str, github_url: str) -> Tree:
             extra={"duration_ms": duration_ms},
         )
         return Tree(path=str(dest), branch=tree_plan.branch, base=tree_plan.base)
+
+
+def _plant_session_store(dest: Path) -> None:
+    """Point the new Tree's harness slug dir at its repo's ONE session store (ADR-0073).
+
+    Runs at the END of a successful create — after the clone, so ``origin`` is readable
+    (store identity is the remote, never the path), and before ``create`` returns, hence
+    before any session starts in the Tree. That ordering is the whole trick: the harness
+    honours a symlink that is already there, so the session's transcript and memory land
+    in the shared store instead of a brand-new per-Tree namespace (:mod:`shipit.sessionstore`).
+
+    **Fail-open, at DEBUG** (the #348 calibration). A store is additive: without it the
+    Tree is exactly as usable as every Tree was before this existed, and the session
+    merely keeps its memory to itself — today's behaviour, not a degraded one. So an
+    unresolvable repo (no origin, unparseable URL), an unwritable ``~/.claude``, or a
+    missing HOME must cost the Tree nothing. DEBUG rather than the fail-open canon's
+    WARNING for the same reason #348 calibrated the source-clone check down: nothing
+    durable degrades, and an environment where this cannot work (no ``~/.claude`` at
+    all — a CI runner, a container) would otherwise WARN on every single Tree create.
+
+    A *refusal* is not a failure and is not swallowed here: :func:`shipit.sessionstore.plant`
+    already logged it at WARNING, because a slug dir shipit refused to touch IS durable
+    degraded state — the store stays split until a human resolves it.
+    """
+    try:
+        repo = identity.resolve_repo(str(dest))
+        sessionstore.plant(dest, repo)
+    except Exception:  # noqa: BLE001 — fail-open: never cost a Tree its creation
+        logger.debug("session store not planted for %s", dest, exc_info=True)
 
 
 def _elapsed_ms(started: float) -> int:

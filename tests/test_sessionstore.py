@@ -1,0 +1,532 @@
+"""The per-repo session store (ADR-0073): slug derivation, the plant ladder, adoption.
+
+**Every test runs against a tmp ``home``.** Nothing here may read, move, or refuse
+against the developer's real ``~/.claude`` — a test that did would BE the data-loss bug
+this module exists to prevent. :func:`store_dir` / :func:`link_path` / :func:`plant` all
+take a ``home`` override for exactly this reason, and the one test that pins the real
+default (:func:`test_home_defaults_to_real_home`) asserts on a *path value* and touches
+no filesystem.
+
+The adoption matrix is a data-loss boundary, so it is tested cell by cell rather than
+by a few happy paths: every (source, target) type pair the ADR defines has a test, and
+the REFUSE cells assert that BOTH sides survive untouched.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+from pathlib import Path
+
+import pytest
+
+from shipit import sessionstore
+from shipit.identity import Owner, Repo
+
+REPO = Repo(owner=Owner(login="arthur-debert"), name="shipit")
+
+
+@pytest.fixture
+def home(tmp_path: Path) -> Path:
+    """A throwaway ``~`` — the only home any test in this module is allowed to touch."""
+    return tmp_path / "home"
+
+
+def _store(home: Path) -> Path:
+    return sessionstore.store_dir(REPO, home=home)
+
+
+def write(path: Path, text: str) -> Path:
+    """Create ``path``'s parents and write ``text`` — the tests' one file-making helper."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    return path
+
+
+# ---------------------------------------------------------------------------
+# slug_for — the pure function the whole design rests on
+# ---------------------------------------------------------------------------
+
+
+def test_slug_replaces_separators_with_dashes():
+    """The base case: ``/`` becomes ``-``, leading slash included."""
+    assert sessionstore.slug_for("/Users/adebert/h/shipit") == "-Users-adebert-h-shipit"
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("has_underscore", "has-underscore"),
+        ("has.dot", "has-dot"),
+        ("plain-dash", "plain-dash"),
+        ("with space", "with-space"),
+        ("plus+at@sign", "plus-at-sign"),
+    ],
+)
+def test_slug_replaces_every_non_alphanumeric(name, expected):
+    """Not a separators-only denylist: EVERY non-alphanumeric maps to a dash.
+
+    Verified against Claude Code 2.1.212 by probing real sessions in directories with
+    each of these characters. A dash-preserving rule that missed ``_`` or ``.`` would
+    plant the link at a name no session ever reads — a bug that looks exactly like
+    doing nothing.
+
+    The probe path is deliberately one that exists on NO platform: ``resolve()`` leaves
+    a fully-nonexistent absolute path alone, so this pins the character rule and only
+    the character rule. (``/tmp`` would drag in the macOS ``/private`` symlink and make
+    the expectation OS-dependent — the resolve behaviour has its own test below.)
+    """
+    assert sessionstore.slug_for(f"/ws04probe/{name}") == f"-ws04probe-{expected}"
+
+
+def test_slug_does_not_collapse_runs():
+    """Per-character substitution: adjacent specials yield adjacent dashes.
+
+    Pinned against a real store dir (``-private-tmp-claude-501--Users-…``), whose double
+    dash is a ``/`` followed by a literal ``-`` in the path.
+    """
+    assert sessionstore.slug_for("/ws04probe/claude-501/-Users-x") == (
+        "-ws04probe-claude-501--Users-x"
+    )
+
+
+def test_slug_resolves_symlinks(tmp_path: Path):
+    """The harness slugs the cwd's REAL path, so the slug must resolve first.
+
+    The macOS ``/tmp`` → ``/private/tmp`` case is the one that bites: a session started
+    in ``/tmp/x`` writes to ``-private-tmp-x``.
+    """
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real)
+
+    assert sessionstore.slug_for(link) == sessionstore.slug_for(real)
+
+
+def test_slug_is_pure(tmp_path: Path):
+    """No I/O and no coordination: a path that does not exist still has a slug.
+
+    This is what lets `tree create` plant the link BEFORE the session that will use it.
+    """
+    assert sessionstore.slug_for(tmp_path / "nope") == sessionstore.slug_for(
+        tmp_path / "nope"
+    )
+
+
+# ---------------------------------------------------------------------------
+# store_dir / link_path — identity is the remote, location is outside projects/
+# ---------------------------------------------------------------------------
+
+
+def test_store_is_keyed_on_repo_not_path(home: Path):
+    """Two different checkouts of one repo resolve to the SAME store."""
+    assert _store(home) == home / ".claude" / "stores" / "arthur-debert" / "shipit"
+
+
+def test_store_lives_outside_projects(home: Path):
+    """shipit-owned state is never confused with the harness's own cwd-slug dirs."""
+    assert "projects" not in _store(home).parts
+
+
+def test_link_path_is_projects_slug(home: Path):
+    assert sessionstore.link_path("/Users/adebert/h/shipit", home=home) == (
+        home / ".claude" / "projects" / "-Users-adebert-h-shipit"
+    )
+
+
+@pytest.mark.real_session_store_home
+def test_home_defaults_to_real_home():
+    """The default is the real ``~`` — asserted as a VALUE; nothing is touched on disk.
+
+    Marked to opt out of the suite's autouse home guard, since the guard exists to make
+    exactly this default unreachable. Reads a path; creates nothing.
+    """
+    assert sessionstore.store_dir(REPO) == (
+        Path.home() / ".claude" / "stores" / "arthur-debert" / "shipit"
+    )
+
+
+def test_the_suite_guard_replaces_the_default_home():
+    """The autouse guard is load-bearing, so it gets a test: the default is NOT real ``~``.
+
+    Without it, every test that calls `tree create` or `shipit install` plants a symlink
+    in the developer's actual `~/.claude/projects/`. This asserts the protection is
+    actually wired, rather than trusting that it is.
+    """
+    assert Path.home() not in sessionstore.store_dir(REPO).parents
+
+
+# ---------------------------------------------------------------------------
+# plant — the four-case ladder
+# ---------------------------------------------------------------------------
+
+
+def test_plant_creates_link_when_absent(home: Path, tmp_path: Path):
+    """Case 2: absent → create the symlink (and the store it points at)."""
+    result = sessionstore.plant(tmp_path, REPO, home=home)
+
+    link = sessionstore.link_path(tmp_path, home=home)
+    assert result.outcome == sessionstore.LINKED
+    assert link.is_symlink()
+    assert os.readlink(link) == str(_store(home))
+    assert _store(home).is_dir()
+    assert result.refusals == []
+
+
+def test_plant_is_idempotent(home: Path, tmp_path: Path):
+    """Case 1: re-running over our own correct link is a free no-op.
+
+    Idempotence is a hard requirement — install re-runs and Tree re-creates must be
+    free — and it holds because we always write the link text the same way.
+    """
+    first = sessionstore.plant(tmp_path, REPO, home=home)
+    second = sessionstore.plant(tmp_path, REPO, home=home)
+
+    assert first.outcome == sessionstore.LINKED
+    assert second.outcome == sessionstore.NOOP
+    assert second.refusals == []
+
+
+def test_plant_refuses_foreign_symlink(home: Path, tmp_path: Path, caplog):
+    """Case 4: a link pointing elsewhere → refuse loudly, change NOTHING.
+
+    Something outside shipit owns that path and this does not get to guess.
+    """
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    link = sessionstore.link_path(tmp_path, home=home)
+    link.parent.mkdir(parents=True)
+    link.symlink_to(elsewhere)
+
+    with caplog.at_level(logging.WARNING):
+        result = sessionstore.plant(tmp_path, REPO, home=home)
+
+    assert result.outcome == sessionstore.REFUSED
+    assert os.readlink(link) == str(elsewhere), "the foreign link was retargeted"
+    assert "refusing to retarget" in caplog.text
+
+
+def test_plant_refuses_a_file_at_the_slug_path(home: Path, tmp_path: Path, caplog):
+    """A type conflict at the ladder's own root refuses, like every cell of the matrix."""
+    link = write(sessionstore.link_path(tmp_path, home=home), "not a store")
+
+    with caplog.at_level(logging.WARNING):
+        result = sessionstore.plant(tmp_path, REPO, home=home)
+
+    assert result.outcome == sessionstore.REFUSED
+    assert link.read_text() == "not a store"
+
+
+def test_plant_adopts_a_real_directory(home: Path, tmp_path: Path):
+    """Case 3, the hard and common one: a real slug dir with real content.
+
+    Clobbering destroys the memories; skipping leaves the store split forever. Adoption
+    moves the content in and THEN replaces the dir with the link.
+    """
+    link = sessionstore.link_path(tmp_path, home=home)
+    write(link / "memory" / "provisioning-doctrine.md", "durable")
+    write(link / "abc-123.jsonl", "transcript")
+
+    result = sessionstore.plant(tmp_path, REPO, home=home)
+
+    store = _store(home)
+    assert result.outcome == sessionstore.ADOPTED
+    assert result.refusals == []
+    assert link.is_symlink() and os.readlink(link) == str(store)
+    assert (store / "memory" / "provisioning-doctrine.md").read_text() == "durable"
+    assert (store / "abc-123.jsonl").read_text() == "transcript"
+
+
+def test_plant_keeps_the_dir_when_adoption_refuses(home: Path, tmp_path: Path, caplog):
+    """A slug dir that could not be fully drained is NEVER replaced by the link.
+
+    This is the contract's teeth: the store stays split (recoverable, and loud) rather
+    than a refused file being deleted with its directory (not recoverable).
+    """
+    link = sessionstore.link_path(tmp_path, home=home)
+    write(link / "memory", "a FILE where the store has a dir")
+    (_store(home) / "memory").mkdir(parents=True)
+
+    with caplog.at_level(logging.WARNING):
+        result = sessionstore.plant(tmp_path, REPO, home=home)
+
+    assert result.outcome == sessionstore.REFUSED
+    assert not link.is_symlink()
+    assert (link / "memory").read_text() == "a FILE where the store has a dir"
+    assert "entr" in caplog.text and "remain" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# adopt — the total (source x target) matrix, cell by cell
+# ---------------------------------------------------------------------------
+
+
+def test_adopt_file_into_absent(tmp_path: Path):
+    """file × absent → move in."""
+    source, target = tmp_path / "s", tmp_path / "t"
+    target.mkdir()
+    write(source / "note.md", "content")
+
+    assert sessionstore.adopt(source, target) == []
+    assert (target / "note.md").read_text() == "content"
+    assert not (source / "note.md").exists(), "the source copy was not removed"
+
+
+def test_adopt_file_identical_drops_duplicate(tmp_path: Path):
+    """file × file, byte-identical → drop the duplicate (content provably survives)."""
+    source, target = tmp_path / "s", tmp_path / "t"
+    write(source / "note.md", "same")
+    write(target / "note.md", "same")
+
+    assert sessionstore.adopt(source, target) == []
+    assert (target / "note.md").read_text() == "same"
+    assert not (source / "note.md").exists()
+
+
+def test_adopt_file_differs_keeps_both(tmp_path: Path):
+    """file × file, divergent → KEEP BOTH. Never overwrite, never drop, never merge.
+
+    The certain case: five memory filenames already exist in two stores with possibly
+    diverged content.
+    """
+    source, target = tmp_path / "s", tmp_path / "t"
+    write(source / "note.md", "from the ephemeral store")
+    write(target / "note.md", "from the frozen store")
+
+    assert sessionstore.adopt(source, target) == []
+    assert (target / "note.md").read_text() == "from the frozen store", (
+        "target clobbered"
+    )
+    assert (target / "note.adopted-1.md").read_text() == "from the ephemeral store"
+    assert not (source / "note.md").exists()
+
+
+def test_keep_both_preserves_the_extension(tmp_path: Path):
+    """An adopted memory stays a readable ``.md`` to whatever reads the store next."""
+    source, target = tmp_path / "s", tmp_path / "t"
+    write(source / "MEMORY.md", "a")
+    write(target / "MEMORY.md", "b")
+
+    sessionstore.adopt(source, target)
+
+    assert (target / "MEMORY.adopted-1.md").exists()
+
+
+def test_keep_both_never_collides(tmp_path: Path):
+    """Successive adoptions of divergent same-named files each get a free name."""
+    target = tmp_path / "t"
+    write(target / "note.md", "target")
+    for n, text in enumerate(["first", "second"], start=1):
+        source = tmp_path / f"s{n}"
+        write(source / "note.md", text)
+        sessionstore.adopt(source, target)
+
+    assert (target / "note.adopted-1.md").read_text() == "first"
+    assert (target / "note.adopted-2.md").read_text() == "second"
+
+
+def test_memory_md_is_not_special_cased(tmp_path: Path):
+    """``MEMORY.md`` collides like any other file; semantic merging is WS05, not this."""
+    source, target = tmp_path / "s", tmp_path / "t"
+    write(source / "MEMORY.md", "- a pointer\n")
+    write(target / "MEMORY.md", "- another pointer\n")
+
+    assert sessionstore.adopt(source, target) == []
+    assert (target / "MEMORY.md").read_text() == "- another pointer\n"
+    assert (target / "MEMORY.adopted-1.md").read_text() == "- a pointer\n"
+
+
+def test_adopt_dir_into_absent(tmp_path: Path):
+    """dir × absent → move in (recursively, so every leaf is verified)."""
+    source, target = tmp_path / "s", tmp_path / "t"
+    target.mkdir()
+    write(source / "memory" / "deep" / "note.md", "content")
+
+    assert sessionstore.adopt(source, target) == []
+    assert (target / "memory" / "deep" / "note.md").read_text() == "content"
+    assert not (source / "memory").exists()
+
+
+def test_adopt_dir_merges_recursively(tmp_path: Path):
+    """dir × dir → MERGE, never rename, never replace.
+
+    The first collision adoption meets and the common case: ``memory/`` on both sides.
+    A top-level move would rename the whole tree to ``memory.adopted-1`` and produce a
+    layout Claude will not read.
+    """
+    source, target = tmp_path / "s", tmp_path / "t"
+    write(source / "memory" / "from-source.md", "s")
+    write(target / "memory" / "from-target.md", "t")
+
+    assert sessionstore.adopt(source, target) == []
+    assert (target / "memory" / "from-source.md").read_text() == "s"
+    assert (target / "memory" / "from-target.md").read_text() == "t"
+    assert not (target / "memory.adopted-1").exists(), (
+        "the tree was renamed, not merged"
+    )
+    assert not (source / "memory").exists()
+
+
+def test_adopt_merges_deeply(tmp_path: Path):
+    """The unit of conflict is the RELATIVE PATH — the merge descends all the way."""
+    source, target = tmp_path / "s", tmp_path / "t"
+    write(source / "a" / "b" / "c" / "deep.md", "s")
+    write(target / "a" / "b" / "other.md", "t")
+
+    assert sessionstore.adopt(source, target) == []
+    assert (target / "a" / "b" / "c" / "deep.md").read_text() == "s"
+    assert (target / "a" / "b" / "other.md").read_text() == "t"
+
+
+def test_adopt_symlink_into_absent(tmp_path: Path):
+    """symlink × absent → move in AS A SYMLINK; never followed, never converted to a copy."""
+    source, target = tmp_path / "s", tmp_path / "t"
+    target.mkdir()
+    source.mkdir()
+    (source / "link").symlink_to("/some/where")
+
+    assert sessionstore.adopt(source, target) == []
+    assert (target / "link").is_symlink(), "the link became a copy"
+    assert os.readlink(target / "link") == "/some/where"
+    assert not (source / "link").is_symlink()
+
+
+def test_adopt_symlink_same_text_drops_duplicate(tmp_path: Path):
+    """symlink × symlink, same link text → the same link; drop the duplicate.
+
+    Compared WITHOUT dereferencing: two links with the same text are the same link even
+    if both dangle — which these do.
+    """
+    source, target = tmp_path / "s", tmp_path / "t"
+    source.mkdir()
+    target.mkdir()
+    (source / "link").symlink_to("/dangling/target")
+    (target / "link").symlink_to("/dangling/target")
+
+    assert sessionstore.adopt(source, target) == []
+    assert os.readlink(target / "link") == "/dangling/target"
+    assert not (source / "link").is_symlink()
+
+
+def test_adopt_symlink_differs_keeps_both(tmp_path: Path):
+    """symlink × symlink, divergent text → keep both."""
+    source, target = tmp_path / "s", tmp_path / "t"
+    source.mkdir()
+    target.mkdir()
+    (source / "link").symlink_to("/a")
+    (target / "link").symlink_to("/b")
+
+    assert sessionstore.adopt(source, target) == []
+    assert os.readlink(target / "link") == "/b"
+    assert os.readlink(target / "link.adopted-1") == "/a"
+
+
+def test_adopt_never_follows_a_symlink(tmp_path: Path):
+    """Following a link would move content the source does not own. It must not."""
+    outside = write(tmp_path / "outside" / "precious.md", "not the store's to move")
+    source, target = tmp_path / "s", tmp_path / "t"
+    source.mkdir()
+    target.mkdir()
+    (source / "link").symlink_to(outside)
+
+    assert sessionstore.adopt(source, target) == []
+    assert outside.read_text() == "not the store's to move", "content outside was moved"
+    assert (target / "link").is_symlink()
+
+
+@pytest.mark.parametrize(
+    ("src_kind", "dst_kind"),
+    [
+        ("file", "dir"),
+        ("file", "symlink"),
+        ("dir", "file"),
+        ("dir", "symlink"),
+        ("symlink", "file"),
+        ("symlink", "dir"),
+    ],
+)
+def test_adopt_refuses_every_type_conflict(tmp_path: Path, src_kind, dst_kind, caplog):
+    """Every REFUSE cell of the matrix: change nothing, say so, carry on.
+
+    A type conflict is not a collision to resolve — it means an assumption about the
+    layout is wrong, and dedupe/rename/overwrite would each destroy one of the two.
+    """
+    source, target = tmp_path / "s", tmp_path / "t"
+    source.mkdir()
+    target.mkdir()
+    _make(source / "x", src_kind, "source")
+    _make(target / "x", dst_kind, "target")
+
+    with caplog.at_level(logging.WARNING):
+        refusals = sessionstore.adopt(source, target)
+
+    assert refusals == [str(source / "x")]
+    assert "REFUSED" in caplog.text
+    _assert_intact(source / "x", src_kind, "source")
+    _assert_intact(target / "x", dst_kind, "target")
+
+
+def test_a_refusal_does_not_stop_the_rest(tmp_path: Path):
+    """ "Carry on with the rest": one bad path must not strand the other memories."""
+    source, target = tmp_path / "s", tmp_path / "t"
+    write(source / "conflict", "a file")
+    write(source / "fine.md", "adopt me")
+    (target / "conflict").mkdir(parents=True)
+
+    refusals = sessionstore.adopt(source, target)
+
+    assert refusals == [str(source / "conflict")]
+    assert (target / "fine.md").read_text() == "adopt me"
+    assert (source / "conflict").read_text() == "a file"
+
+
+def test_refused_content_is_never_deleted_with_its_dir(tmp_path: Path):
+    """Nothing is deleted from a source until its content is verified present in target.
+
+    The source dir holding a refused entry survives — an adoption that lost a file to
+    save a directory entry would have defeated the whole point.
+    """
+    source, target = tmp_path / "s", tmp_path / "t"
+    write(source / "memory" / "conflict", "irreplaceable")
+    write(source / "memory" / "ok.md", "moved")
+    (target / "memory" / "conflict").mkdir(parents=True)
+
+    refusals = sessionstore.adopt(source, target)
+
+    assert refusals == [str(source / "memory" / "conflict")]
+    assert (source / "memory").is_dir(), "the source dir was removed with content in it"
+    assert (source / "memory" / "conflict").read_text() == "irreplaceable"
+    assert (target / "memory" / "ok.md").read_text() == "moved"
+
+
+def test_adopt_is_generic(tmp_path: Path):
+    """No hardcoded paths, counts or repo names — an arbitrary tree adopts the same."""
+    source, target = tmp_path / "s", tmp_path / "t"
+    target.mkdir()
+    for n in range(7):
+        write(source / f"dir{n}" / f"file{n}.txt", f"content {n}")
+
+    assert sessionstore.adopt(source, target) == []
+    for n in range(7):
+        assert (target / f"dir{n}" / f"file{n}.txt").read_text() == f"content {n}"
+
+
+def _make(path: Path, kind: str, text: str) -> None:
+    """Materialize ``path`` as ``kind`` — the matrix tests' fixture builder."""
+    if kind == "file":
+        write(path, text)
+    elif kind == "dir":
+        write(path / "child.md", text)
+    elif kind == "symlink":
+        path.symlink_to(f"/{text}")
+
+
+def _assert_intact(path: Path, kind: str, text: str) -> None:
+    """Both sides of a REFUSE survive, unchanged and untyped-over."""
+    if kind == "file":
+        assert path.is_file() and path.read_text() == text
+    elif kind == "dir":
+        assert path.is_dir() and (path / "child.md").read_text() == text
+    elif kind == "symlink":
+        assert path.is_symlink() and os.readlink(path) == f"/{text}"

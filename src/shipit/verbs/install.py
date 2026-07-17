@@ -16,7 +16,10 @@ This module is ADR-0030 glue + renderers only:
   three mode flags are mutually exclusive.
 - **domain calls** — load the packaged desired state, gather → reconcile →
   Plan; dry-run stops there (rendered off the Plan, nothing touched);
-  otherwise apply(Plan, mode) → InstallResult.
+  otherwise apply(Plan, mode) → InstallResult, then plant the canonical
+  checkout's session-store link (:func:`_plant_session_store`, ADR-0073 — the
+  one effect that is NOT a managed unit: it writes outside the consumer, under
+  ``~/.claude``, and is fail-open rather than part of the Plan).
 - **render** — the pure ``format_*`` functions below own every terminal line
   (the per-unit report, the retired delete/keep report and its kept-file
   warning, the nothing-to-do wording, the mode outcome) and the draft PR's
@@ -35,7 +38,7 @@ from pathlib import Path
 
 import click
 
-from .. import config, events, gh, git
+from .. import config, events, gh, git, identity, sessionstore
 from ..channel import cascade_receive
 from ..install import artifactdeps
 from ..install.apply import (
@@ -251,6 +254,33 @@ def _consumer_root(path: str | None) -> tuple[Path, Path | None]:
     return root, requested
 
 
+def _plant_session_store(root: Path) -> None:
+    """Link the CANONICAL checkout's harness slug dir to the repo's session store (ADR-0073).
+
+    The other half of :func:`shipit.tree.create._plant_session_store`: every Tree links
+    itself at birth, and install links the plain checkout, so work done in a Tree and
+    work done in the canonical checkout share one store rather than splitting into two.
+
+    Runs only on the effectful path — after ``apply``, so a ``--dry-run`` (which returns
+    earlier, and has no side effects by contract) plants nothing.
+
+    The canonical checkout is the case the ADR calls hard and common: its slug dir
+    typically **already exists as a real directory with real content**, so this is the
+    call that actually exercises adoption. :func:`shipit.sessionstore.plant` is
+    content-preserving and idempotent, so re-running install is free.
+
+    **Fail-open at DEBUG** (#348 calibration), for the same reason as the Tree seam: the
+    store is additive, nothing durable degrades without it, and an environment with no
+    ``~/.claude`` at all must not WARN on every install. A *refusal* is already logged
+    loudly by ``plant`` itself — that one IS durable degraded state.
+    """
+    try:
+        repo = identity.resolve_repo(str(root))
+        sessionstore.plant(root, repo)
+    except Exception:  # noqa: BLE001 — fail-open: never cost an install its exit code
+        logger.debug("session store not planted for %s", root, exc_info=True)
+
+
 @cli_errors
 def run(
     path: str | None = None,
@@ -376,6 +406,7 @@ def run(
             extra={"step": getattr(exc, "step", step), "mode": mode},
         )
         raise
+    _plant_session_store(root_path)
     emit(result, format_result)
     warnings = format_result_warnings(result)
     if warnings:
