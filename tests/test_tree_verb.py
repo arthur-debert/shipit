@@ -11,7 +11,9 @@ error shell (``error: …`` + exit 1), and the two-tier exit contract.
 
 from __future__ import annotations
 
+import io
 import json
+import sys
 
 import pytest
 
@@ -732,7 +734,14 @@ def test_run_gc_renders_sweep_failures_on_stderr(monkeypatch, capsys):
     )
     monkeypatch.setattr(layout_mod, "central_root", lambda: "/trees")
     monkeypatch.setattr(registry_mod, "scan", lambda r: [])
-    monkeypatch.setattr(tree_verb.gc, "sweep", lambda plan: result)
+
+    def fake_sweep(plan, *, on_removed=None):
+        # The real sweep streams through the sink; this stand-in does the same, so
+        # the renderer under test sees the same stdout it would in production.
+        on_removed("/trees/good")
+        return result
+
+    monkeypatch.setattr(tree_verb.gc, "sweep", fake_sweep)
 
     rc = tree_verb.run_gc()
 
@@ -852,10 +861,13 @@ def test_gc_bad_threshold_is_a_usage_error(monkeypatch, capsys):
     assert "--threshold" in capsys.readouterr().err
 
 
-def test_run_gc_warns_on_incomplete_sweep(tmp_path, monkeypatch, capsys):
-    # When any Tree's PR state is UNKNOWN, gc prints the incomplete-sweep warning so
-    # the operator knows the sweep did not see the whole fleet. The UNKNOWN Tree is
-    # classified conservatively (stale -> never removed).
+def test_run_gc_incomplete_sweep_is_loud_and_exits_nonzero(
+    tmp_path, monkeypatch, capsys
+):
+    # When any Tree's PR state is UNKNOWN the sweep saw only part of the root, so it
+    # reports FAILURE (#1011): exit 1, and a summary that LEADS with the skip rather
+    # than burying it under a healthy-looking count. The UNKNOWN Tree is classified
+    # conservatively (stale -> never removed).
     root = tmp_path / "trees"
     merged = _make_tree_dir(root, "acme/widget/issues/1/work-merged")
     unknown = _make_tree_dir(root, "acme/widget/issues/2/work-unknown")
@@ -876,13 +888,20 @@ def test_run_gc_warns_on_incomplete_sweep(tmp_path, monkeypatch, capsys):
 
     rc = tree_verb.run_gc()
 
-    assert rc == 0
+    assert rc == 1  # a partly-seen root is not a successful sweep
     assert not merged.exists()  # the readable, merged Tree is reclaimed
     assert unknown.exists()  # the unreadable Tree is left untouched (conservative)
     captured = capsys.readouterr()
-    assert "swept 1 of 2; 1 skipped (state unknown)" in captured.err
-    # The summary still counts it as stale, not removed.
-    assert "removed 1, stale 1, kept 0" in captured.out
+    assert "swept 1 of 2; 1 skipped" in captured.err
+    # The operator is told the skipped Trees were not judged safe ...
+    assert "kept UNEXAMINED" in captured.err
+    # ... and what actually causes this, rather than being left with a mystery.
+    assert "gh api rate_limit" in captured.err
+    # The summary leads with the skip; the counts follow, still stale not removed.
+    assert (
+        "gc: INCOMPLETE — 1 of 2 skipped (PR state unknown); "
+        "removed 1, stale 1, kept 0" in captured.out
+    )
 
 
 def test_run_gc_dry_run_warns_on_unknown_and_deletes_nothing(
@@ -916,19 +935,91 @@ def test_run_gc_dry_run_warns_on_unknown_and_deletes_nothing(
 
     rc = tree_verb.run_gc(dry_run=True)
 
-    assert rc == 0
+    assert rc == 1  # the preview cannot answer "is the fleet clean?" either
     assert merged.exists() and unknown.exists()  # nothing deleted in dry-run
     captured = capsys.readouterr()
     # Preview lists the partition (the UNKNOWN Tree is conservatively STALE) ...
     assert f"REMOVABLE {merged}" in captured.out
     assert f"STALE     {unknown}" in captured.out
     assert "no Trees deleted" in captured.out
-    # ... and still warns that the fleet was only partially seen, phrased for a preview.
-    assert "would sweep 1 of 2; 1 skipped (state unknown)" in captured.err
+    # ... and leads its counts with the skip, in the preview's own tense.
+    assert "INCOMPLETE — 1 of 2 skipped (PR state unknown)" in captured.out
+    assert "would sweep 1 of 2; 1 skipped" in captured.err
+    assert "gh api rate_limit" in captured.err
+
+
+def test_run_gc_streams_removals_before_the_summary(tmp_path, monkeypatch, capsys):
+    # The verb supplies the sweep's sink, so REMOVED lines are on stdout as each
+    # Tree dies — ahead of the STALE list and the summary, which only the end of
+    # the sweep can produce.
+    root = tmp_path / "trees"
+    removable, stale, _keep_dirty, _keep_open = _gc_fleet(root, monkeypatch)
+
+    assert tree_verb.run_gc() == 0
+
+    lines = capsys.readouterr().out.splitlines()
+    assert lines.index(f"REMOVED {removable}") < lines.index(
+        f"STALE   {stale} (ambiguous — left for review, not removed)"
+    )
+    assert [line for line in lines if line.startswith("REMOVED")] == [
+        f"REMOVED {removable}"
+    ]  # streamed once — the renderer no longer reprints the removed set
+
+
+def test_run_gc_interrupted_sweep_still_printed_what_it_destroyed(
+    tmp_path, monkeypatch, capsys
+):
+    # THE regression at the verb seam (#1011): a sweep killed at minute 14 had
+    # deleted 175 Trees and printed nothing, because rendering waited for a
+    # GcResult that never came back. Whatever kills the sweep, the lines for the
+    # Trees already destroyed must be out.
+    monkeypatch.setattr(layout_mod, "central_root", lambda: "/trees")
+    monkeypatch.setattr(registry_mod, "scan", lambda r: [])
+
+    def killed_mid_sweep(plan, *, on_removed=None):
+        on_removed("/trees/acme/widget/issues/1/work-a")
+        on_removed("/trees/acme/widget/issues/2/work-b")
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(tree_verb.gc, "sweep", killed_mid_sweep)
+
+    with pytest.raises(KeyboardInterrupt):
+        tree_verb.run_gc()
+
+    out = capsys.readouterr().out
+    assert "REMOVED /trees/acme/widget/issues/1/work-a" in out
+    assert "REMOVED /trees/acme/widget/issues/2/work-b" in out
+
+
+def test_run_gc_flushes_each_removed_line(tmp_path, monkeypatch):
+    # Buffering is the failure mode: stdout to a pipe or a file is block-buffered,
+    # so an unflushed REMOVED line dies with the process that was killed — exactly
+    # the audit trail this exists to preserve. Assert the flush, not just the text.
+    class FlushCountingStdout(io.StringIO):
+        def __init__(self):
+            super().__init__()
+            self.flushed_text: list[str] = []
+
+        def flush(self):
+            self.flushed_text.append(self.getvalue())
+
+    root = tmp_path / "trees"
+    removable, _stale, _kd, _ko = _gc_fleet(root, monkeypatch)
+    stdout = FlushCountingStdout()
+    monkeypatch.setattr(sys, "stdout", stdout)
+
+    tree_verb.run_gc()
+
+    # The line was flushed while the sweep was still running: at the first flush,
+    # the summary (which only the finished sweep can print) is not written yet.
+    assert stdout.flushed_text
+    assert stdout.flushed_text[0] == f"REMOVED {removable}\n"
 
 
 def test_run_gc_no_warning_when_no_unknown(tmp_path, monkeypatch, capsys):
-    # A sweep where every PR state is readable prints NO incomplete-sweep warning.
+    # A sweep where every PR state is readable saw the whole root: exit 0, and no
+    # incomplete-view report anywhere. The loud path must stay rare enough to mean
+    # something.
     root = tmp_path / "trees"
     merged = _make_tree_dir(root, "acme/widget/issues/1/work-merged")
     records = [
@@ -946,5 +1037,6 @@ def test_run_gc_no_warning_when_no_unknown(tmp_path, monkeypatch, capsys):
 
     assert rc == 0
     captured = capsys.readouterr()
-    assert "skipped (state unknown)" not in captured.err
-    assert "skipped (state unknown)" not in captured.out
+    assert "INCOMPLETE" not in captured.out
+    assert "skipped" not in captured.err and "skipped" not in captured.out
+    assert "gc: removed 1, stale 0, kept 0" in captured.out  # the plain healthy form

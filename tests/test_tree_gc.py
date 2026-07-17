@@ -7,7 +7,10 @@ Typed tests for :mod:`shipit.tree.gc` — the promoted domain half of
   counts are asserted as values, no fleet on disk;
 - :func:`~shipit.tree.gc.sweep` is the effectful apply — driven against tmp
   clones (and an injected ``remove`` for the failure paths), asserting on the
-  typed :class:`~shipit.tree.gc.GcResult` instead of captured stdout;
+  typed :class:`~shipit.tree.gc.GcResult` instead of captured stdout, and on
+  the ``on_removed`` sink for the streamed audit trail (#1011), which is
+  captured as a list here: the domain prints nothing, so the sink is a value
+  like any other;
 - :func:`~shipit.tree.gc.plan_fleet` is the gather — its boundary reads
   (scan / PR state / liveness / provisioning record) are patched at their one
   seam each.
@@ -17,6 +20,8 @@ from __future__ import annotations
 
 import json
 import time as _time
+
+import pytest
 
 from shipit import gh
 from shipit.identity import Sha
@@ -220,6 +225,135 @@ def test_sweep_carries_the_plan_counts_through():
     assert result.total == 5
     assert result.unknown == 2
     assert result.swept == 3
+    assert result.incomplete is True
+
+
+# --- sweep: streaming the destroyed set (#1011) --------------------------------------
+
+
+def test_sweep_announces_each_path_as_it_comes_off_disk(tmp_path):
+    # The sink fires DURING the sweep, not after it: at the moment each path is
+    # announced, that Tree is already gone from disk and the later ones are not.
+    first = _clone(tmp_path, "issues/1/work-a")
+    second = _clone(tmp_path, "issues/2/work-b")
+    plan = _plan_of(
+        Cleanup(
+            removable=[_record(path=str(first)), _record(path=str(second))],
+            stale=[],
+            keep=[],
+        )
+    )
+    disk_at_announce: list[tuple[str, bool, bool]] = []
+
+    def sink(path: str) -> None:
+        disk_at_announce.append((path, first.exists(), second.exists()))
+
+    result = gc.sweep(plan, on_removed=sink)
+
+    assert disk_at_announce == [
+        (str(first), False, True),  # announced with the second Tree still standing
+        (str(second), False, False),
+    ]
+    assert result.removed == (str(first), str(second))  # the typed result is intact
+
+
+def test_interrupted_sweep_still_announced_what_it_destroyed(tmp_path):
+    # THE regression (#1011): a sweep killed mid-fleet (a timeout, the Ctrl-C a
+    # silent multi-minute delete invites) took its GcResult with it and left no
+    # record of the Trees it had already destroyed. The sink is that record, so
+    # it must survive the exception that eats the return value.
+    doomed = _clone(tmp_path, "issues/1/work-doomed")
+    interrupted_at = _clone(tmp_path, "issues/2/work-interrupted")
+    never_reached = _clone(tmp_path, "issues/3/work-never")
+    plan = _plan_of(
+        Cleanup(
+            removable=[
+                _record(path=str(doomed)),
+                _record(path=str(interrupted_at)),
+                _record(path=str(never_reached)),
+            ],
+            stale=[],
+            keep=[],
+        )
+    )
+    announced: list[str] = []
+    from shipit.tree.readonly import remove_tree
+
+    def killed_mid_sweep(path):
+        if path == str(interrupted_at):
+            raise KeyboardInterrupt
+        return remove_tree(path)
+
+    with pytest.raises(KeyboardInterrupt):
+        gc.sweep(plan, remove=killed_mid_sweep, on_removed=announced.append)
+
+    # No GcResult came back at all — and the destroyed Tree is still named.
+    assert announced == [str(doomed)]
+    assert not doomed.exists()
+    assert never_reached.exists()
+
+
+def test_sweep_announces_only_what_actually_came_off_disk(tmp_path):
+    # The sink mirrors `removed` exactly: a failed delete and an already-gone Tree
+    # are not announced, because the audit trail must not claim a Tree it did not
+    # destroy.
+    failed = _clone(tmp_path, "issues/1/work-failed")
+    gone = tmp_path / "issues/2/work-gone"  # never created on disk
+    good = _clone(tmp_path, "issues/3/work-good")
+    plan = _plan_of(
+        Cleanup(
+            removable=[
+                _record(path=str(failed)),
+                _record(path=str(gone)),
+                _record(path=str(good)),
+            ],
+            stale=[],
+            keep=[],
+        )
+    )
+    from shipit.tree.readonly import remove_tree
+
+    def flaky(path):
+        if path == str(failed):
+            raise OSError("read-only file")
+        return remove_tree(path)
+
+    announced: list[str] = []
+    result = gc.sweep(plan, remove=flaky, on_removed=announced.append)
+
+    assert announced == [str(good)] == list(result.removed)
+
+
+def test_sweep_without_a_sink_is_unchanged(tmp_path):
+    # `on_removed` is optional: the domain has no default sink to print through.
+    removable = _clone(tmp_path, "issues/1/work-merged")
+    plan = _plan_of(
+        Cleanup(removable=[_record(path=str(removable))], stale=[], keep=[])
+    )
+
+    result = gc.sweep(plan)
+
+    assert result.removed == (str(removable),)
+    assert not removable.exists()
+
+
+# --- the incomplete-view predicate ---------------------------------------------------
+
+
+def test_incomplete_is_the_unknown_count_on_both_plan_and_result():
+    # One predicate, shared by the two gc tails: any unreadable PR state means the
+    # fleet was only partly seen, whatever the removable count says.
+    partial = gc.plan(
+        [_record(path="/t/1"), _record(path="/t/2")],
+        now=AGED_NOW,
+        pr_states={"/t/1": "MERGED", "/t/2": "UNKNOWN"},
+    )
+    whole = gc.plan([_record(path="/t/1")], now=AGED_NOW, pr_states={"/t/1": "MERGED"})
+
+    assert partial.incomplete is True
+    assert partial.swept == 1
+    assert whole.incomplete is False
+    assert gc.sweep(_plan_of(whole.partition, total=1)).incomplete is False
 
 
 # --- pr_state: the gh boundary read --------------------------------------------------
