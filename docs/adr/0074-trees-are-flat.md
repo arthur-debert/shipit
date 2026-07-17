@@ -84,26 +84,39 @@ e.g. `~/workspace/trees/shipit-claude-20260717-081333-619cf51a-f501-44dc-992f-74
   never truncated. Its *source* differs by creation path, and that is a
   consequence of the lifecycle, not a compromise:
 
-  - **A session Tree carries the harness's own session UUID** — e.g.
-    `619cf51a-f501-44dc-992f-74df773204aa`. It is available because the
-    `WorktreeCreate` payload supplies `session_id` at the moment the hook mints
-    the Tree (ADR-0027). **This is the case a human resumes**, and here the
-    directory name IS the resume handle.
-  - **A spawned Run Tree carries a shipit-minted UUID.** It has no native
-    session id to carry: `shipit spawn subagent` orders its work
-    `… → Tree → launch` (`spawn/subagent.py`), so the Tree exists *before* the
-    backend does and no UUID has been generated yet. Codex reviewer Runs are
-    ephemeral and may never mint a durable one at all. These Runs are resumed
-    through shipit's own logs (`session/resume.py`, which already keys on shipit
-    session ids and treats `ResumeTarget.tree` as a recorded field, not a lookup
-    key) — never by a human reading a directory name.
+  The rule in one line: **the harness's session UUID is used exactly when the
+  Tree is being minted for the session that supplies it; every other Tree gets a
+  shipit-minted UUID.** There are three creation paths, and only the first
+  qualifies:
+
+  - **Coordinator session Tree** (`WorktreeCreate`, coordinator launch —
+    `prompt_id` absent) → **the harness's session UUID**, e.g.
+    `619cf51a-f501-44dc-992f-74df773204aa`. The payload supplies `session_id` at
+    the moment the hook mints the Tree (ADR-0027), and that id names *the very
+    session about to adopt this cwd*. **This is the case a human resumes**, and
+    here the directory name IS the resume handle. Today this path derives its
+    leaf from the payload `name` (`sess-<timestamp>-<pid>`) and must change.
+  - **Native in-CC helper Tree** (`WorktreeCreate`, `Agent(isolation:"worktree")`)
+    → **a shipit-minted UUID.** The payload's `session_id` here is the *parent's*,
+    not the helper's, so carrying it would name the wrong session — worse than
+    naming none. The helper's own id does not exist yet. Today this path uses
+    short values like `agent-ac36b2efb04c97d80`, which satisfies neither branch.
+    **The hook mints the UUID; it does not receive one.**
+  - **Spawned Run Tree** (`shipit spawn subagent`) → **a shipit-minted UUID.**
+    The verb orders its work `… → Tree → launch` (`spawn/subagent.py`), so the
+    Tree exists *before* the backend does and no native UUID has been generated.
+    Codex reviewer Runs are ephemeral and may never mint a durable one at all.
+
+  Both minted cases resume through shipit's own logs (`session/resume.py`, which
+  already keys on shipit session ids and treats `ResumeTarget.tree` as a recorded
+  field, not a lookup key) — never by a human reading a directory name.
 
   So the *grammar* is one shape with no exceptions; only the id's provenance
   varies, and the path never encodes which. This is not a fallback ladder — it
-  is "the creator supplies the id," and the two creators genuinely have
-  different identity available. Renaming a Tree once the native id is learned is
-  not an option: ADR-0027 rejected it (the running process holds its cwd inode;
-  anything resolving `$PWD` breaks), and this ADR does not reopen it.
+  is "the creator supplies the id," and the three creators genuinely differ in
+  what identity exists at mint time. Renaming a Tree once the native id is
+  learned is not an option: ADR-0027 rejected it (the running process holds its
+  cwd inode; anything resolving `$PWD` breaks), and this ADR does not reopen it.
 
   **Not the PID**, because PIDs are reused: the same token eventually names two
   unrelated sessions. That ambiguity is what forced the liveness probe's
@@ -175,6 +188,17 @@ e.g. `~/workspace/trees/shipit-claude-20260717-081333-619cf51a-f501-44dc-992f-74
   `parts[:4]` and becomes `parts[:1]`. Roughly six further files call
   `tree_kind()` mechanically; three more only ask `is_relative_to(central_root())`
   and are untouched.
+
+  **Plus the `WorktreeCreate` hook path, which is a creation path and not a
+  consumer.** `verbs/hook/worktreecreate.py` (and `harness/worktree_adapter.py`,
+  which forks it on `is_coordinator_launch`) mints **two** of the three Tree
+  kinds and today satisfies neither naming rule: it derives coordinator leaves
+  from the payload `name` (`sess-<timestamp>-<pid>` — a pid) and helper leaves
+  from short tokens like `agent-ac36b2efb04c97d80`. Changing `layout.py` alone
+  cannot make all Trees carry the declared shape, because this hook decides two
+  of them. It is in scope, with its callers and tests: the coordinator arm reads
+  `session_id` from the payload; the helper arm **mints** a UUID rather than
+  receiving one.
 
   **Dropping shared review Trees is NOT test churn**, and an earlier draft of
   this ADR wrongly counted it as such. Sharing is implemented behaviour across

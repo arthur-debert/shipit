@@ -91,17 +91,36 @@ generic and repo-agnostic:
 4. **A symlink pointing somewhere else** → refuse, loudly, and change nothing.
    Something outside shipit owns that path and this ADR does not get to guess.
 
-**Adoption defines its conflict semantics, or it is not a contract.** Moving
-content in means filename collisions are certain, not hypothetical — the
-measured stores already contain duplicate memory filenames across sessions
-(`provisioning-doctrine.md` and four others exist in two different session
-stores, with possibly diverged content). Therefore: a file that does not exist
-in the target moves in. A file that does exist and is **byte-identical** is
-dropped as a duplicate. A file that exists and **differs** is **kept, both
-sides, under a non-colliding name** — never overwritten, never silently dropped,
-never merged by machine. `MEMORY.md` is not special-cased by the algorithm: it
-collides like any other file, and the *semantic* merge of divergent memories is
-a judgement task, not a filesystem operation.
+**Adoption is a RECURSIVE merge over relative paths, not a move of top-level
+entries.** A slug dir is not a flat bag of files: it holds `memory/` (itself a
+directory), per-session `<uuid>/` directories, and `<uuid>.jsonl` transcripts. So
+the *first* collision adoption meets is **directory-versus-directory** —
+`memory/` on both sides — and "byte-identical or rename" says nothing about it.
+Moving a top-level entry would rename or clobber the whole `memory/` tree and
+produce a layout Claude will not read. The unit of conflict is therefore the
+**relative path**, resolved by walking both sides:
+
+- **dir vs dir** → **merge recursively.** Never rename, never replace; descend
+  and apply these same rules to the descendants.
+- **file vs nothing** → move it in.
+- **file vs file, byte-identical** → drop as a duplicate.
+- **file vs file, differing** → **keep both**, target's untouched, source's
+  beside it under a non-colliding name. Never overwrite, never silently drop,
+  never machine-merge.
+- **file vs dir (type conflict, either direction)** → **refuse the path, loudly,
+  and change nothing there.** This is not a collision to resolve; it means an
+  assumption is wrong, and guessing would destroy one of the two.
+- **symlinks** → adopted as symlinks, never followed. Following one moves
+  content the source does not own; a dangling link is data about the source, not
+  a file to copy.
+
+`MEMORY.md` gets no special case: it is a file, it collides like a file, and the
+*semantic* merge of divergent memories is a judgement task (WS05) rather than a
+filesystem operation.
+
+Collisions are certain, not hypothetical: five memory filenames already exist in
+two different session stores with possibly diverged content, and every ephemeral
+store has a `memory/` to merge.
 
 **Nothing is deleted from a source until its content is verified present in the
 target.** The whole point of this ADR is that memory is irreplaceable; an
