@@ -58,8 +58,19 @@ before parent name.
 
 ## Goals
 
-- **A live session's Tree is never reclaimed.** The #1018 gate; nothing else
-  ships until this holds, verified against a real live session.
+- **A Tree with recent activity is never reclaimed — where "recent" is 48h.**
+  The #1018 gate; nothing else ships until it holds, verified against a real
+  live session.
+
+  Stated precisely, because the imprecise version ("a live session's Tree is
+  never reclaimed") is a promise this design does not make and cannot verify.
+  Reclaim reads activity, not liveness, so what is guaranteed is: **a Tree
+  touched within 48h is kept, whether or not anything is running in it.** The
+  #1018 session — 9h elapsed, doing purely external `gcloud` work — is kept by a
+  48× margin. A live session that writes no file for two days is **not** kept,
+  and that is a deliberate acceptance (see Risks), not a gap. Do not implement
+  or verify against the absolute reading: it would require reinstating the
+  liveness veto this design deletes.
 - **Reclaim on measured activity, not inference.** One rule, all kinds.
 - **Memory and resume survive the Tree.** What a session learns outlives the
   workspace it learned it in.
@@ -93,9 +104,13 @@ where `idle` is `now - (newest file mtime)` over a walk that prunes `.git`,
 Three signals; no PR state, no pidfile, no `ps` probe, no kind dispatch.
 
 The threshold is not a guess. Across the live fleet, idle time separates with no
-overlap: **every live Tree measures under 1h; every dead Tree over 41h.** A 48h
-threshold sits in a chasm, and managing an ambiguous middle is what the entire
-ladder existed to do.
+overlap: **every live Tree measures under 1h; every dead Tree over 41h.** Any
+threshold in that open 1h–41h band separates the fleet perfectly — there is no
+ambiguous middle, and managing an ambiguous middle is what the ladder existed to
+do. 48h sits deliberately **above** the band rather than inside it: being above
+costs only that a Tree idle 41–48h waits for the next sweep, while the safety
+property holds with a **48× margin** over the busiest live Tree. The threshold
+is chosen against the *live* distribution, where the error is unrecoverable.
 
 **2. The session store is per-repo** (ADR-0073). `tree create` plants
 `~/.claude/projects/<tree-path-slug>` as a symlink to
@@ -109,10 +124,19 @@ symlink fixes memory and resume together. Codex needs no change —
 **3. Trees are flat** (ADR-0074). `<root>/<repo>-<agent>-<timestamp>-<id>`, one
 uniform shape, e.g. `shipit-claude-20260717-081333-619cf51a-f501-44dc-992f-74df773204aa`. Repo first so `ls`
 groups by the axis humans narrow on; agent and timestamp are already in the
-ephemeral leaf today, by accident, and get promoted to deliberate fields. `<id>`
-is the harness's session UUID in full, not the reused pid and not truncated —
-the Tree name is the resume handle, and `--resume` rejects a prefix (measured),
-so a short id would force an `ls` of the Session store before every resume.
+ephemeral leaf today, by accident, and get promoted to deliberate fields —
+`<agent>` covering all three supported backends (`claude`/`codex`/`agy`).
+
+`<id>` is a full UUID, never a reused pid and never truncated (`--resume`
+rejects a prefix — measured). Its source depends on who creates the Tree, which
+the lifecycle forces: a **session Tree** carries the harness's own session UUID,
+supplied by the `WorktreeCreate` payload at mint time — that is the case a human
+resumes, and there the dir name IS the resume handle. A **spawned Run Tree**
+carries a shipit-minted UUID, because `spawn subagent` orders its work
+`… -> Tree -> launch`: the Tree exists before the backend does, so no native id
+exists yet. Those Runs resume through shipit's logs, never by hand. One grammar,
+no exceptions; only the id's provenance varies, and the path never encodes
+which.
 
 ## Design Decisions
 

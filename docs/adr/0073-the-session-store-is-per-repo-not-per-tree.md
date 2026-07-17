@@ -73,10 +73,47 @@ ADR emulates.
 - **`shipit install` links the canonical checkout too**, so work done in the
   plain checkout and work done in a Tree share one store rather than splitting
   into two.
+
+**Adoption is a defined, idempotent algorithm — not "link it".** The canonical
+checkout's slug dir is the hard case and the common one: it **already exists as
+a real directory with real content** (`-Users-adebert-h-shipit/` holds 33
+memories and its transcripts). "Create a symlink" cannot express that, and the
+two obvious readings are both wrong — clobbering destroys the content, skipping
+leaves the store split in two forever. So the contract, for **any** slug dir,
+generic and repo-agnostic:
+
+1. **Already the correct symlink** → no-op. (Idempotence: re-running install, or
+   re-creating a Tree, must be free.)
+2. **Absent** → create the symlink.
+3. **A real directory** → **adopt**: move its contents into the store, then
+   replace it with the symlink. Adoption is content-preserving and never
+   destructive.
+4. **A symlink pointing somewhere else** → refuse, loudly, and change nothing.
+   Something outside shipit owns that path and this ADR does not get to guess.
+
+**Adoption defines its conflict semantics, or it is not a contract.** Moving
+content in means filename collisions are certain, not hypothetical — the
+measured stores already contain duplicate memory filenames across sessions
+(`provisioning-doctrine.md` and four others exist in two different session
+stores, with possibly diverged content). Therefore: a file that does not exist
+in the target moves in. A file that does exist and is **byte-identical** is
+dropped as a duplicate. A file that exists and **differs** is **kept, both
+sides, under a non-colliding name** — never overwritten, never silently dropped,
+never merged by machine. `MEMORY.md` is not special-cased by the algorithm: it
+collides like any other file, and the *semantic* merge of divergent memories is
+a judgement task, not a filesystem operation.
+
+**Nothing is deleted from a source until its content is verified present in the
+target.** The whole point of this ADR is that memory is irreplaceable; an
+adoption that loses a file to save a directory entry has defeated it.
+
 - **The existing stores merge in, once.** The 33 frozen files from
   `-Users-adebert-h-shipit/memory/` and the 44 stranded ones from the ephemeral
-  stores are consolidated into `~/.claude/stores/arthur-debert/shipit/memory/`
-  as a one-time migration, with `MEMORY.md` indexes merged.
+  stores are consolidated into `~/.claude/stores/arthur-debert/shipit/memory/`.
+  Those counts are **this machine's**, and they are context for the migration —
+  not a spec. The algorithm above is generic; the migration is one application
+  of it, plus the human judgement that a machine merge cannot supply (which
+  duplicates are genuinely the same, which memories this very epic falsifies).
 - **`coordinator.lex:15` is rewritten.** Memory stops being a scratchpad that
   must be hand-swept before session end. Promoting durable learnings into the
   repo remains right for *decisions* (ADRs) and *process* (role docs) — but

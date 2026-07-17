@@ -39,7 +39,8 @@
   being deleted. Every never-lose-work guarantee is untouched: a dirty tree,
   unpushed commits, an unreadable commit list, an in-flight PR, or an unreadable
   PR state all still keep, whatever the Tree's age or merge state.
-- **TREE03 planning docs land: the Tree gets rethought** (#1019). Running Trees
+- **TREE03 planning docs land: the Tree gets rethought** (#1020, epic #1019).
+  Running Trees
   for a while exposed three failures with one root cause — the system infers
   what it could measure, and encodes in paths what it then refuses to trust.
   `tree gc` deleted a **live** session's worktree (#1018); session memory has

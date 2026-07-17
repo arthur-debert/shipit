@@ -74,28 +74,49 @@ to 10 hours. Creation time is recorded nowhere except, as text, inside an
 e.g. `~/workspace/trees/shipit-claude-20260717-081333-619cf51a-f501-44dc-992f-74df773204aa`
 
 - **Repo first**, because it is the axis on which a human narrows, and a plain
-  `ls` then groups by it. **Agent second** (`claude` / `codex`).
+  `ls` then groups by it. **Agent second** — `claude` / `codex` / `agy`, the
+  three supported backends (`agent/backend.py`; note the `--backend` token is
+  `antigravity` while the CLI binary and funnel agent name are `agy` — the
+  **binary name** goes in the leaf, matching `claude` and `codex`).
   **Timestamp** in the existing `%Y%m%d-%H%M%S` form, so lexical sort is
   chronological within a repo.
-- **`<id>` is the harness's session UUID, in full** — e.g.
-  `619cf51a-f501-44dc-992f-74df773204aa`. **Not the PID**, and **not truncated.**
+- **`<id>` is a full UUID, minted by whoever creates the Tree.** Never a PID,
+  never truncated. Its *source* differs by creation path, and that is a
+  consequence of the lifecycle, not a compromise:
 
-  Not the PID because PIDs are reused: the same token eventually names two
+  - **A session Tree carries the harness's own session UUID** — e.g.
+    `619cf51a-f501-44dc-992f-74df773204aa`. It is available because the
+    `WorktreeCreate` payload supplies `session_id` at the moment the hook mints
+    the Tree (ADR-0027). **This is the case a human resumes**, and here the
+    directory name IS the resume handle.
+  - **A spawned Run Tree carries a shipit-minted UUID.** It has no native
+    session id to carry: `shipit spawn subagent` orders its work
+    `… → Tree → launch` (`spawn/subagent.py`), so the Tree exists *before* the
+    backend does and no UUID has been generated yet. Codex reviewer Runs are
+    ephemeral and may never mint a durable one at all. These Runs are resumed
+    through shipit's own logs (`session/resume.py`, which already keys on shipit
+    session ids and treats `ResumeTarget.tree` as a recorded field, not a lookup
+    key) — never by a human reading a directory name.
+
+  So the *grammar* is one shape with no exceptions; only the id's provenance
+  varies, and the path never encodes which. This is not a fallback ladder — it
+  is "the creator supplies the id," and the two creators genuinely have
+  different identity available. Renaming a Tree once the native id is learned is
+  not an option: ADR-0027 rejected it (the running process holds its cwd inode;
+  anything resolving `$PWD` breaks), and this ADR does not reopen it.
+
+  **Not the PID**, because PIDs are reused: the same token eventually names two
   unrelated sessions. That ambiguity is what forced the liveness probe's
   create-time tolerance; ADR-0072 deletes the probe, but the ambiguity in the
   *name* would outlive it.
 
-  Not truncated because **the Tree name is the resume handle**, and a prefix is
-  not one. Measured against Claude Code 2.1.212: `--resume` accepts a full UUID
-  or a session title and rejects an 8-hex prefix outright ("is not a UUID and
-  does not match any session title"). Session titles are derived from the Tree
-  dir basename plus an unpredictable 2-char suffix, so they need a lookup too.
-  Truncating to 8 hex — matching the existing hash8 leaf convention
-  (`create.py:122`) — would therefore force `ls`-ing the Session store to
-  recover the full id before every resume, i.e. it would buy back the very
-  tooling this shape exists to remove. The full UUID makes
-  `claude --resume <the-thing-after-the-timestamp>` work by reading the
-  directory name, which is the point.
+  **Not truncated**, because a prefix is not a resume handle. Measured against
+  Claude Code 2.1.212: `--resume` accepts a full UUID or a session title and
+  rejects an 8-hex prefix outright ("is not a UUID and does not match any
+  session title"). Session titles are derived from the Tree dir basename plus an
+  unpredictable 2-char suffix, so they need a lookup too. Truncating would force
+  `ls`-ing the Session store to recover the full id before every resume — buying
+  back the very tooling this shape exists to remove.
 
   The cost is a ~66-character leaf. That is real and accepted: repo-first
   prefixing means `ls | grep shipit` narrows on the head of the name, so the
@@ -146,13 +167,25 @@ e.g. `~/workspace/trees/shipit-claude-20260717-081333-619cf51a-f501-44dc-992f-74
 
 ## Consequences
 
-- **The blast radius is two files of real work.** `tree/layout.py` — `tree_kind`,
-  `repo_dir`, and `plan`'s four leaf builders collapse to one; this is the
-  chokepoint and it is well-factored. And `session/current.py:64-66`, the only
-  place outside `layout.py` that knows the nesting arithmetic — it hardcodes
+- **The blast radius is two files for the *naming* change, plus a real
+  behavioural change for dropping sharing.** The naming half: `tree/layout.py` —
+  `tree_kind`, `repo_dir`, and `plan`'s four leaf builders collapse to one; this
+  is the chokepoint and it is well-factored. And `session/current.py:64-66`, the
+  only place outside `layout.py` that knows the nesting arithmetic — it hardcodes
   `parts[:4]` and becomes `parts[:1]`. Roughly six further files call
   `tree_kind()` mechanically; three more only ask `is_relative_to(central_root())`
   and are untouched.
+
+  **Dropping shared review Trees is NOT test churn**, and an earlier draft of
+  this ADR wrongly counted it as such. Sharing is implemented behaviour across
+  three modules: `tree/readonly.py` (`readonly_plan`'s deterministic
+  branch-keyed dir via `_branch_hash`, `_reuse_or_refuse`'s reuse path,
+  `_refresh_readonly`'s refresh race, and atomic shared creation),
+  `harness/roleprofile.py` (the `SharedReadOnlyTree` checkout strategy), and
+  `spawn/subagent.py` (which dispatches on it at two sites). Removing sharing
+  deletes the reuse/refresh machinery and collapses that strategy to a per-Run
+  read-only Tree — a behavioural change with its own tests, not a rename. It is
+  the larger half of WS06 and must be scoped as such.
 - **`registry.scan` needs no change at all.** It walks for `.git` markers and
   never parses depth (`registry.py:207-220`), so a flat root works unchanged —
   quiet corroboration that the nesting was never load-bearing on the read path.

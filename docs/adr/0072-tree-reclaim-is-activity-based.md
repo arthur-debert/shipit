@@ -58,9 +58,17 @@ overlap:
 | every live Tree | **< 1h** |
 | every dead Tree | **> 41h** |
 
-A 48h threshold sits in a chasm. There is no ambiguous middle — and managing an
-ambiguous middle is what the entire 841-line, 15-input, 176-test apparatus
-exists to do.
+**Any threshold in the open band 1h–41h separates the fleet perfectly.** There is
+no ambiguous middle — and managing an ambiguous middle is what the entire
+841-line, 15-input, 176-test apparatus exists to do.
+
+48h is deliberately set **above** that band, not inside it. Being above it costs
+nothing that matters and buys margin on the only error that does: a Tree idle
+41–48h is dead but reclaimed on the *next* sweep rather than this one, while the
+safety property — never delete a live Tree — holds with a **48× margin** over
+the busiest observed live Tree. The threshold is chosen against the *live*
+distribution, where the consequence is unrecoverable, not against the dead one,
+where the consequence is a few hours of disk.
 
 ADR-0027 rejected age-alone for a reason that was correct at the time and is now
 obsolete: a session Tree "is often *clean* (a planning session that hasn't
@@ -87,6 +95,25 @@ KEEP  if  dirty  ||  unpushed  ||  idle < 48h
   `__pycache__`. This signal does not exist today and must be built.
 
 Three signals. **No PR state, no pidfile, no `ps` probe, no kind dispatch.**
+
+**UNKNOWN IS NOT FALSE — an unreadable signal KEEPS.** The rule above is written
+over three booleans, and a boolean has nowhere to put "I could not tell." That
+gap is a deletion licence, so it is closed here explicitly rather than left to an
+implementer: **any signal that cannot be determined reads as KEEP, never as
+`False`.** Concretely — `git status` or `git rev-list` failing, erroring, or
+timing out; the walk hitting an unreadable dir, a broken symlink, or a
+concurrent removal; a walk yielding no eligible files at all; a `stat` raising.
+Every one of those keeps the Tree and is reported, not swallowed.
+
+This preserves a property today's code has deliberately and that a naive
+three-boolean rewrite would silently drop: `unpushed_shas` is `None` on failure
+and reads as *has local work*, and a failed scan aborts rather than licensing
+deletion. The asymmetry is the whole point — a wrongly-kept Tree costs disk
+until the next sweep, a wrongly-deleted one costs work that no longer exists.
+**The bias must be re-derived from the consequence, not inherited by accident**,
+which is why it is a decision here and not a code comment. And it matters more
+now than before: this ADR is what unblocks an *automatic* sweep (#1017), so
+"unknown" stops being a human's judgement call and becomes a machine's default.
 
 - **Activity is measured, never inferred.** Liveness, PR state, and commit
   timestamps were all proxies for "is someone working here." The pruned walk
