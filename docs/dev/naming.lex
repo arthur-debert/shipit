@@ -81,20 +81,42 @@ mid-stream. Agents derive WS codes and all names from them.
     e.g.
     `~/workspace/trees/shipit-claude-20260717-081333-619cf51a-f501-44dc-992f-74df773204aa`.
     The `<root>` is the central root (`SHIPIT_TREES_ROOT`, default
-    `~/workspace/trees`); `<agent>` is the backend (`claude` / `codex`);
+    `~/workspace/trees`); `<agent>` is the backend — `claude`, `codex` or `agy`,
+    the three shipit supports, written as the CLI BINARY name (Antigravity's
+    `--backend` token is `antigravity`, but its binary and funnel agent name are
+    `agy`, and the binary is what matches `claude` and `codex`);
     `<timestamp>` is `%Y%m%d-%H%M%S`, so a lexical sort is chronological within a
     repo.
 
-    `<id>` is the harness's SESSION UUID, in FULL — never the pid, never
-    truncated. Not the pid because pids are reused, so one token eventually
-    names two unrelated sessions. Not truncated because the Tree name IS the
-    resume handle: `claude --resume` takes a full UUID or a session title and
+    `<id>` is a full UUID — never the pid, never truncated. Not the pid because
+    pids are reused, so one token eventually names two unrelated sessions. Not
+    truncated because `claude --resume` takes a full UUID or a session title and
     rejects a prefix, and titles carry an unpredictable derived suffix, so a
     short id would force an `ls` of the Session store before every resume — the
-    tooling this grammar exists to remove. Reading the dir name is enough to
-    resume the session that made it. The ~66-character leaf is the accepted
-    price; repo-first prefixing means `ls | grep shipit` narrows on the head, so
-    the long tail never obstructs the scan.
+    tooling this grammar exists to remove. The ~66-character leaf is the
+    accepted price; repo-first prefixing means `ls | grep shipit` narrows on the
+    head, so the long tail never obstructs the scan.
+
+    WHO mints the `<id>` depends on which of the three creation paths made the
+    Tree, because the harness's session UUID does not exist at mint time for two
+    of them (ADR-0074). The rule: the harness session UUID is used exactly when
+    the Tree is minted FOR the session that supplies it.
+
+    - A COORDINATOR session Tree (the `WorktreeCreate` hook, coordinator
+      launch) carries the harness's own session UUID, which the hook payload
+      supplies. This is the case a human resumes, and here reading the dir name
+      IS enough to resume the session that made it.
+    - A native in-CC HELPER Tree (`Agent(isolation:"worktree")`, same hook)
+      carries a UUID the hook MINTS. The payload's session id on that path is
+      the PARENT's — carrying it would name the wrong session, which is worse
+      than naming none.
+    - A spawned RUN Tree (`shipit spawn subagent`) carries a shipit-minted
+      UUID: the verb makes the Tree BEFORE it launches the backend, so no
+      native id exists yet.
+
+    Both minted cases resume through shipit's own logs, never by a human reading
+    a path. One grammar, no exceptions — only the id's provenance varies, and
+    the path never records which.
 
     Repo comes FIRST because it is the axis a human narrows on — `ls | grep
     shipit` is the tooling-free narrowing this grammar exists to give. There is

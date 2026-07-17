@@ -100,19 +100,36 @@ Moving a top-level entry would rename or clobber the whole `memory/` tree and
 produce a layout Claude will not read. The unit of conflict is therefore the
 **relative path**, resolved by walking both sides:
 
-- **dir vs dir** → **merge recursively.** Never rename, never replace; descend
-  and apply these same rules to the descendants.
-- **file vs nothing** → move it in.
-- **file vs file, byte-identical** → drop as a duplicate.
-- **file vs file, differing** → **keep both**, target's untouched, source's
-  beside it under a non-colliding name. Never overwrite, never silently drop,
-  never machine-merge.
-- **file vs dir (type conflict, either direction)** → **refuse the path, loudly,
-  and change nothing there.** This is not a collision to resolve; it means an
-  assumption is wrong, and guessing would destroy one of the two.
-- **symlinks** → adopted as symlinks, never followed. Following one moves
-  content the source does not own; a dangling link is data about the source, not
-  a file to copy.
+The matrix is **total** — every (source, target) pair has an outcome, because
+any pair left undefined is a pair an implementer will guess, and a wrong guess
+here overwrites data. Rows are the source entry; columns the target at the same
+relative path. Types are never dereferenced to classify: a symlink is a symlink,
+not the thing it points at.
+
+| source ↓ / target → | absent | file | dir | symlink |
+| --- | --- | --- | --- | --- |
+| **file** | move in | identical → drop; differs → **keep both** | **REFUSE** | **REFUSE** |
+| **dir** | move in | **REFUSE** | **merge recursively** | **REFUSE** |
+| **symlink** | move in, as a symlink | **REFUSE** | **REFUSE** | same link text → drop; differs → **keep both** |
+
+Reading the three outcomes:
+
+- **merge recursively** (dir/dir) — never rename, never replace; descend and
+  reapply the matrix to the descendants. This is the common case: both sides
+  carry `memory/`.
+- **keep both** — the target's entry is untouched; the source's lands beside it
+  under a non-colliding name. Never overwrite, never silently drop, never
+  machine-merge. Sameness is **byte-identity** for files and **link-text
+  identity** for symlinks (compared *without* dereferencing — a link is data
+  about the source, and two links with the same text are the same link even if
+  both dangle).
+- **REFUSE** — a *type* conflict at one path. Skip that path, say so loudly,
+  change nothing there, and carry on with the rest. This is not a collision to
+  resolve: it means an assumption about the layout is wrong, and any of
+  dedupe/rename/overwrite would destroy one of the two.
+
+Symlinks are **adopted, never followed**. Following one would move content the
+source does not own, and would silently convert a link into a copy.
 
 `MEMORY.md` gets no special case: it is a file, it collides like a file, and the
 *semantic* merge of divergent memories is a judgement task (WS05) rather than a

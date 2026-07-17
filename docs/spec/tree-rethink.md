@@ -128,15 +128,22 @@ ephemeral leaf today, by accident, and get promoted to deliberate fields —
 `<agent>` covering all three supported backends (`claude`/`codex`/`agy`).
 
 `<id>` is a full UUID, never a reused pid and never truncated (`--resume`
-rejects a prefix — measured). Its source depends on who creates the Tree, which
-the lifecycle forces: a **session Tree** carries the harness's own session UUID,
-supplied by the `WorktreeCreate` payload at mint time — that is the case a human
-resumes, and there the dir name IS the resume handle. A **spawned Run Tree**
-carries a shipit-minted UUID, because `spawn subagent` orders its work
-`… -> Tree -> launch`: the Tree exists before the backend does, so no native id
-exists yet. Those Runs resume through shipit's logs, never by hand. One grammar,
-no exceptions; only the id's provenance varies, and the path never encodes
-which.
+rejects a prefix — measured). Its source depends on who creates the Tree,
+because the harness's session UUID does not yet exist at mint time for two of
+the three creation paths. The rule: **the harness session UUID is used exactly
+when the Tree is minted for the session that supplies it.**
+
+- **Coordinator session Tree** (`WorktreeCreate`, coordinator launch) → the
+  harness's own session UUID, from the hook payload. The case a human resumes,
+  and there the dir name IS the resume handle.
+- **Native in-CC helper Tree** (`Agent(isolation:"worktree")`, same hook) → a
+  UUID the hook **mints**. The payload's session id there is the *parent's*;
+  carrying it would name the wrong session, worse than naming none.
+- **Spawned Run Tree** (`spawn subagent`) → a shipit-minted UUID: the verb
+  orders `… -> Tree -> launch`, so the Tree exists before the backend does.
+
+Both minted cases resume through shipit's logs, never by hand. One grammar, no
+exceptions; only the id's provenance varies, and the path never encodes which.
 
 ## Design Decisions
 
