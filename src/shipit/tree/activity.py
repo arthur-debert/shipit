@@ -27,18 +27,23 @@ a tuning knob.
 
 **Unreadable is not idle** (ADR-0072): every failure mode — an unreadable directory
 (``os.walk``'s errors are re-raised, not swallowed; see :func:`_reraise`), a file
-removed mid-walk, a ``stat`` that raises, a Tree with no eligible file at all —
+removed mid-walk, an ``lstat`` that raises, a Tree with no eligible file at all —
 returns ``None``, which every caller reads as KEEP. A boolean rule has nowhere to put
 "I could not tell", and that gap would be a deletion licence: a wrongly-kept Tree
 costs disk until the next sweep, a wrongly-deleted one costs work that no longer
 exists.
 
-A broken symlink is NOT among those failure modes, though ADR-0072 lists it as one.
-The ADR is enumerating cases where the answer cannot be established, and for this one
-it can: the walk reads links with ``lstat``, so a link whose target is gone still has
-its OWN mtime, which is the stamp we want and is exactly as readable as any file's.
-Blanking the whole Tree's signal over it would be strictly worse than the ADR's own
-intent — it is the unknown-is-KEEP rule applied to something that is not unknown.
+A broken symlink is NOT among those failure modes (ADR-0072 says so too, since round 5
+corrected it — an earlier draft of its list named the dangling link as unknown, and the
+code was right to ignore it). That list enumerates cases where the answer cannot be
+established, and for this one it can: the walk reads links with ``lstat``, so a link
+whose target is gone still has its OWN mtime, which is the stamp we want and is exactly
+as readable as any file's — only ``stat``, which follows the link, raises. Reading the
+link rather than its target is deliberate twice over: a link pointing out of the Tree
+must not import foreign activity, and a link pointing at nothing must not blank a Tree's
+whole signal. Blanking it would be the unknown-is-KEEP rule applied to something that is
+not unknown — keeping every Tree with a dangling link forever, on a signal that was
+never missing.
 """
 
 from __future__ import annotations
