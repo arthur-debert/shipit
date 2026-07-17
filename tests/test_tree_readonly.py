@@ -27,6 +27,7 @@ import pytest
 from shipit import git
 from shipit.execrun import ExecError
 from shipit.identity import repo_from_slug
+from shipit.tree import readonly
 from shipit.tree.activity import newest_mtime
 from shipit.tree.cleanup import classify
 from shipit.tree.readonly import (
@@ -405,6 +406,75 @@ def test_gc_cannot_reclaim_an_aged_leaf_while_its_acquisition_is_still_refreshin
     verdict = seen["verdict"]
     assert verdict.removable == []  # not deleted mid-acquisition...
     assert [r.path for r in verdict.keep] == [str(plan.dir)]  # ...it is already claimed
+
+
+def test_gc_cannot_reclaim_an_aged_leaf_while_its_acquisition_is_still_chmod_ing(
+    tmp_path, monkeypatch
+):
+    # The OTHER half of the same window (codex, #1029 review round 3). Round 2 moved the
+    # stamp ahead of the refresh, but left it behind `chmod_writable` — which is not a
+    # rounding error: it walks the whole tree and chmods every working path, the same
+    # order of work as the activity walk gc itself pays for. A gc scanning while that
+    # walk ran still saw an aged, clean, fully-pushed leaf and deleted it under the
+    # reviewer. Racing gc at the moment the walk STARTS pins the claim ahead of it.
+    plan = readonly_plan(repo=REPO, branch="feat/x", root=tmp_path / "trees")
+    _mock_git_boundary(monkeypatch, files={"README.md": "hi\n"})
+    create_readonly(plan, source_repo="/ref", github_url="url")
+
+    stale = time.time() - 10 * 86_400
+    for path in plan.dir.rglob("*"):
+        if path.is_file():
+            os.utime(path, (stale, stale))
+    os.utime(plan.dir, (stale, stale))
+    assert time.time() - newest_mtime(plan.dir) > 9 * 86_400  # aged, pre-acquisition
+
+    seen: dict[str, object] = {}
+    real_chmod_writable = readonly.chmod_writable
+
+    def chmod_writable_that_a_gc_run_races(tree_dir):
+        # gc scans at the boundary: the acquisition is under way and the guard walk has
+        # not yet returned. The claim must already be readable here.
+        seen["verdict"] = classify(
+            [_aged_leaf_record(plan.dir, stale=stale)], time.time()
+        )
+        return real_chmod_writable(tree_dir)
+
+    monkeypatch.setattr(readonly, "chmod_writable", chmod_writable_that_a_gc_run_races)
+
+    create_readonly(plan, source_repo="/ref", github_url="url")
+
+    verdict = seen["verdict"]
+    assert verdict.removable == []  # not deleted mid-chmod...
+    assert [r.path for r in verdict.keep] == [str(plan.dir)]  # ...it is already claimed
+
+
+def test_the_acquisition_stamp_survives_a_leaf_still_under_the_read_only_guard(
+    tmp_path, monkeypatch
+):
+    # The stamp now runs FIRST on the reuse path, i.e. against a leaf whose root dir is
+    # still read-only from the last acquisition's re-guard. It must establish its own
+    # writability rather than depend on a caller having cleared the bits — otherwise the
+    # claim silently fails (best-effort, swallowed at DEBUG) and every leaf falls back to
+    # being dated by its head. Asserted directly, with no chmod_writable in front of it.
+    plan = readonly_plan(repo=REPO, branch="feat/x", root=tmp_path / "trees")
+    _mock_git_boundary(monkeypatch, files={"README.md": "hi\n"})
+    create_readonly(plan, source_repo="/ref", github_url="url")
+
+    stale = time.time() - 10 * 86_400
+    stamp = plan.dir / ".shipit-acquired"
+    # A leaf cloned BEFORE the stamp existed: nothing to refresh in place. Dropping the
+    # file needs the root writable, so the guard is restored right after — the state
+    # under test is a read-only root with no stamp in it.
+    plan.dir.chmod(plan.dir.stat().st_mode | 0o222)
+    stamp.unlink()
+    plan.dir.chmod(plan.dir.stat().st_mode & ~0o222)
+    os.utime(plan.dir, (stale, stale))
+    assert not (plan.dir.stat().st_mode & 0o222)  # root still under the guard
+
+    _stamp_acquisition(plan.dir)
+
+    assert stamp.exists()  # created under the guard, not skipped
+    assert time.time() - stamp.stat().st_mtime < 60
 
 
 def test_the_acquisition_stamp_never_makes_a_review_tree_look_dirty(

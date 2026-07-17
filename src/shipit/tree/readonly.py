@@ -202,11 +202,12 @@ def create_readonly(plan: ReadOnlyPlan, *, source_repo: str, github_url: str) ->
         # over submodule-backed content must see the real files, not an empty gitlink.
         # Run BEFORE chmod_readonly so git can still write the submodule working trees.
         git.submodule_update_init(cwd=str(tmp))
-        # Stamp BEFORE the guard: chmod_readonly clears the write bits on the root dir
-        # too, and a new file cannot be created in it afterwards. A fresh clone's files
-        # are all newly written, so this stamp is redundant TODAY — it matters on the
-        # reuse path. It is written here anyway so the exclude line exists from the
-        # start, and every leaf carries the stamp regardless of which path made it.
+        # A fresh clone's files are all newly written, so this stamp is redundant TODAY —
+        # it matters on the reuse path. It is written here anyway so the exclude line
+        # exists from the start, and every leaf carries the stamp regardless of which
+        # path made it. Unlike the reuse path this needs no particular placement: the
+        # clone is still at its `tmp` name, so gc cannot yet see it under the leaf it
+        # will be renamed to, and there is no aged activity for a scan to misread.
         _stamp_acquisition(tmp)
         chmod_readonly(tmp)
     except BaseException:
@@ -295,23 +296,36 @@ def _refresh_readonly(dest: Path, branch: str) -> None:
     read-only guard before the error re-raises keeps the FS guard load-bearing even on the
     failure path (the caller still sees the original exception and rolls the leaf back).
 
-    The acquisition is stamped BEFORE the refresh, not after it (:func:`_stamp_acquisition`,
-    and :data:`_ACQUIRED_STAMP` for why the trace must exist at all). The refresh is the
-    slowest thing here — a ``fetch`` and a recursive submodule update, both over the
-    network — and until the stamp lands the leaf still reads at its OLD activity, i.e. as
-    idle as it was a moment ago. Stamping afterwards would leave a concurrent ``gc`` free
-    to measure this Tree as removable and delete it *while this reviewer is refreshing
-    it* — the precise mid-review deletion the stamp exists to prevent, merely narrowed to
-    the acquisition window (codex, #1029 review round 2). Claiming it first also subsumes
-    what the old ``finally`` placement was for: a reviewer whose ``reset`` hit a conflict
-    still holds this leaf, and a Tree deleted under a failing Run is the same #1018 bug as
-    one deleted under a healthy one — stamping before the ``try`` covers that failure path
-    without needing to re-stamp on the way out. Ordered after ``chmod_writable`` because
-    the stamp needs the root dir writable, and the git work leaves it alone: ``reset
-    --hard`` does not touch an excluded untracked file.
+    The acquisition is stamped FIRST — before the ``chmod`` and before the refresh
+    (:func:`_stamp_acquisition`, and :data:`_ACQUIRED_STAMP` for why the trace must exist
+    at all). Until the stamp lands the leaf still reads at its OLD activity, i.e. as idle
+    as it was a moment ago, so every slow step that runs before it is a window in which a
+    concurrent ``gc`` measures this Tree as removable and deletes it *while this reviewer
+    is acquiring it* — the precise mid-review deletion the stamp exists to prevent,
+    merely narrowed to the acquisition (codex, #1029 review rounds 2 and 3). BOTH slow
+    steps are inside that window, and they are slow for different reasons: the refresh is
+    network-bound (a ``fetch`` plus a recursive submodule update), while
+    :func:`chmod_writable` is a full-tree walk that ``chmod``s every working path — the
+    same order of work as the activity walk ``gc`` itself pays for, not a rounding error.
+    Stamping before both is what leaves nothing slow ahead of the claim.
+
+    Claiming first also subsumes what the old ``finally`` placement was for: a reviewer
+    whose ``reset`` hit a conflict still holds this leaf, and a Tree deleted under a
+    failing Run is the same #1018 bug as one deleted under a healthy one — stamping
+    before the ``try`` covers that failure path without needing to re-stamp on the way
+    out. Nothing downstream disturbs the claim: the ``chmod`` moves ctime, not mtime, and
+    ``reset --hard`` does not touch an excluded untracked file.
+
+    What this does NOT buy is atomicity, and it is worth being exact about the limit.
+    ``gc`` reads a Tree's signals and deletes on a later tick, so an acquisition that
+    begins after the read but before the delete is unprotected no matter how early it
+    stamps — a hint cannot close a check-then-act race, only a lock or a lease can, and
+    ADR-0072 fixed the rule at three measured signals precisely to keep a lease read out
+    of it. The stamp shrinks the window to the ``gc`` scan's own; ADR-0074 removes it
+    entirely by making review Trees per-Run, which is where the race actually dies.
     """
-    chmod_writable(dest)
     _stamp_acquisition(dest)
+    chmod_writable(dest)
     try:
         git.fetch(cwd=str(dest))
         git.checkout(branch, cwd=str(dest))
@@ -328,12 +342,26 @@ def _stamp_acquisition(dest: Path) -> None:
     """Record that a reviewer Run just took ``dest`` — the acquisition's FS trace.
 
     Excludes then touches :data:`_ACQUIRED_STAMP` (see there for why the trace has to
-    exist at all). Called on both acquisition paths — a fresh clone and a reuse — while
-    the Tree is still writable, i.e. BEFORE :func:`chmod_readonly` re-applies the guard,
-    and on the reuse path BEFORE the refresh it is claiming the leaf against
-    (:func:`_refresh_readonly`). Once written it stays written: the refresh's ``reset
-    --hard`` does not touch an excluded untracked file, so the claim is made once and
-    holds for the whole acquisition.
+    exist at all). Called on both acquisition paths — a fresh clone and a reuse — as the
+    FIRST thing either does, so the claim precedes every slow step that would otherwise
+    run against a leaf still reading as idle (:func:`_refresh_readonly`). Once written it
+    stays written: the refresh's ``reset --hard`` does not touch an excluded untracked
+    file, so the claim is made once and holds for the whole acquisition.
+
+    It establishes its own precondition rather than taking one. The stamp is a new file
+    at the Tree ROOT, so it needs the root dir writable — and on the reuse path the leaf
+    arrives still under the read-only guard. Restoring the root's write bit HERE (one
+    ``chmod`` on one dir, O(1)) is what lets the claim run first; requiring a writable
+    root instead would order this call behind :func:`chmod_writable`'s full-tree walk and
+    reopen the window that walk's duration spans. Only the root is touched — the guard
+    over the working files is left exactly as it was found, and each acquisition path
+    re-applies it wholesale afterwards (:func:`chmod_readonly`, or the ``finally`` in
+    :func:`_refresh_readonly`), so this never widens what a co-tenant can write.
+
+    Refreshing an EXISTING stamp would not need even that — ``os.utime`` on a file this
+    Run owns is permitted while the file is read-only — but a leaf cloned before the
+    stamp existed has no file to refresh, and creating one is the case that needs the
+    root. One path that always works beats two that split on the leaf's vintage.
 
     The exclude is written BEFORE the stamp, never after: between creating an untracked
     root file and hiding it, ``git status --porcelain`` reports the Tree ``dirty``, and
@@ -352,6 +380,10 @@ def _stamp_acquisition(dest: Path) -> None:
     who cannot read the PR at all.
     """
     try:
+        # The root's write bit, so the stamp below can be created under the guard. Not
+        # `chmod_writable`: that walks the whole tree, and the point of doing this here
+        # is to leave nothing slow ahead of the claim.
+        dest.chmod(dest.stat().st_mode | _WRITE_BITS)
         exclude = dest / _GIT_DIR / _GIT_EXCLUDE
         exclude.parent.mkdir(parents=True, exist_ok=True)
         entries = exclude.read_text().splitlines() if exclude.exists() else []
