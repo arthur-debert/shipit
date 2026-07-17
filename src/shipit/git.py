@@ -205,6 +205,38 @@ def head_commit(*, cwd: str) -> Sha | None:
         return None
 
 
+def head_committed_at(*, cwd: str) -> float | None:
+    """``HEAD``'s COMMITTER timestamp (epoch seconds), or ``None`` if unreadable.
+
+    The write-Tree gc ladder's activity signal (#1009): the clone root's mtime only
+    bumps when an entry is added or removed in THAT directory, so ordinary agent work
+    — editing a file under ``src/``, staging it, committing it — leaves it untouched
+    and does not observe activity at all. A commit timestamp does: it moves exactly
+    when the agent commits, which is the activity the gc ladder needs to see.
+
+    COMMITTER time (``%ct``), not AUTHOR time (``%at``): the two agree on an ordinary
+    commit, but only the committer stamp refreshes on amend, rebase or cherry-pick —
+    all of which are an agent working in the Tree right now. Author time would report
+    the original write and read as idle through a rebase.
+
+    ``None`` — not ``0`` — when it cannot be read (unborn HEAD, a git failure,
+    malformed output): the CALLER must treat "unknown" conservatively (keep), exactly
+    as :func:`unpushed_shas` requires. Collapsing unreadable to "ancient" would let a
+    git hiccup license a delete.
+    """
+    try:
+        result = _probe(["log", "-1", "--format=%ct", "HEAD"], cwd=cwd)
+    except ExecError:
+        return None
+    if not result.ok:
+        return None
+    raw = result.stdout.strip()
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
 def current_branch(*, cwd: str) -> str | None:
     """The current branch name, or ``None`` on a detached/unborn HEAD."""
     try:

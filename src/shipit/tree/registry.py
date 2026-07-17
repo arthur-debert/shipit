@@ -89,7 +89,18 @@ class TreeRecord:
       count is the derived :attr:`unpushed` property.
     - ``pr`` — a short PR-state label (``"#123 OPEN"``, ``"#123 MERGED"``,
       ``"#123 DRAFT"``…), or ``None`` when the branch has no PR.
-    - ``mtime`` — the directory's mtime (epoch seconds); the verb renders it as age.
+    - ``mtime`` — the clone ROOT directory's mtime (epoch seconds); the verb renders
+      it as age. Note what this does and does not observe: a directory's mtime bumps
+      only when an entry is added or removed in THAT directory, so it catches
+      root-level churn and checkout activity but NOT an edit or commit under ``src/``.
+      It is an activity signal only in combination with ``last_commit``.
+    - ``last_commit`` — ``HEAD``'s COMMITTER timestamp (epoch seconds), or ``None``
+      when it could not be read. The signal that actually observes an agent working
+      (:func:`shipit.git.head_committed_at`): it moves on every commit, amend and
+      rebase, none of which touch ``mtime``. The write gc ladder takes the NEWEST of
+      the two as the Tree's last activity, and reads ``None`` conservatively as
+      ACTIVE — an unreadable timestamp must never license a delete (``unpushed_shas``'
+      precedent).
     """
 
     path: str
@@ -101,6 +112,7 @@ class TreeRecord:
     pr: str | None
     mtime: float
     unpushed_shas: tuple[Sha, ...] | None = None
+    last_commit: float | None = None
 
     @property
     def unpushed(self) -> int | None:
@@ -179,6 +191,7 @@ def _read_record(path: Path) -> TreeRecord:
     unpushed_shas = git.unpushed_shas(cwd=cwd)
     pr = _pr_label(gh.pr_for_head(branch, cwd=cwd)) if branch else None
     mtime = path.stat().st_mtime
+    last_commit = git.head_committed_at(cwd=cwd)
     return TreeRecord(
         path=cwd,
         branch=branch,
@@ -189,6 +202,7 @@ def _read_record(path: Path) -> TreeRecord:
         pr=pr,
         mtime=mtime,
         unpushed_shas=unpushed_shas,
+        last_commit=last_commit,
     )
 
 

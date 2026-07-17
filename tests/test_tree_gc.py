@@ -50,6 +50,11 @@ def _record(**over) -> TreeRecord:
         unpushed_shas=(),
     )
     base.update(over)
+    # Likewise `last_commit`: the write ladder reads idle from the NEWEST of it and
+    # `mtime`, and the TreeRecord default of None (stamp unreadable) is conservatively
+    # ACTIVE. It follows `mtime` unless a row states it, so `mtime=<aged>` means "this
+    # Tree is idle" rather than "aged directory, unknown commit stamp".
+    base.setdefault("last_commit", base["mtime"])
     return TreeRecord(**base)
 
 

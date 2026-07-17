@@ -92,12 +92,15 @@ that's an accepted, mild cost (and a useful record of provenance).
     working tree is clean, and nothing is unpushed, so that I never lose unmerged or
     in-flight work to cleanup. The merge is what makes the loss provably safe (the work
     is on the remote), so it is decided BEFORE any age gate, held only until the Tree has
-    been **idle** for 12h. That window's clock is time since the Tree's last local write,
-    not time since the merge: it asks "is an agent still working in here?", and a write
-    Tree has no liveness signal (unlike an ephemeral session Tree, which has its pidfile),
-    so idleness is the proxy. An age threshold gates only the UNMERGED shapes, where age
-    is the sole abandonment signal (#1009: gating the merged case on it parked 421 of a
-    503-Tree fleet).
+    been **idle** for 12h. That window's clock is time since the Tree's last activity —
+    the newest of its directory mtime and its `HEAD` commit timestamp — not time since
+    the merge: it asks "is an agent still working in here?", and a write Tree has no
+    liveness signal (unlike an ephemeral session Tree, which has its pidfile). Both
+    signals are needed: a directory's mtime moves only when an entry is added or removed
+    in it, so editing and committing under `src/` never touches the clone root's mtime,
+    and the commit timestamp is what observes an agent at work. An age threshold gates
+    only the UNMERGED shapes, where age is the sole abandonment signal (#1009: gating the
+    merged case on it parked 421 of a 503-Tree fleet).
 17. As a **coordinator**, I want Trees whose state is ambiguous to be *listed as stale*
     rather than auto-deleted, so that cleanup is conservative by default.
 18. As an **explorer**, I want to run read-only investigation in the main checkout without
@@ -223,7 +226,11 @@ Tested modules:
 - **policy deny-rules** — `EnterWorktree` and `git worktree add` → deny with the redirect
   reason; ordinary `git status` / `gh pr create` → allow.
 - **`registry.scan`** — fixture directory layouts → expected `TreeRecord`s (branch, dirty,
-  ahead/behind), including a non-Tree dir being ignored.
+  ahead/behind), including a non-Tree dir being ignored. The `last_commit` activity signal
+  is the exception to the patch-the-boundary rule: its whole premise is an empirical claim
+  about the filesystem (that a clone root's mtime does NOT observe an agent editing and
+  committing under `src/`, and that a commit stamp does), and a test built on injected
+  values cannot check that claim — so it is exercised against real `git` in a temp clone.
 - **One integration smoke for `create`** — a real `git clone` into a tmp dir: asserts the
   result is an independent clone (no `alternates` after `--dissociate`), is on the planned
   branch, `origin` points at the remote, and `.treeinclude` files were copied. Kept to a

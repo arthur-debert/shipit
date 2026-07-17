@@ -59,6 +59,13 @@ def _record(path: str = "/trees/t", **over) -> TreeRecord:
         unpushed_shas=(),
     )
     base.update(over)
+    # The write ladder reads idle from the NEWEST of `mtime` and `last_commit`, so a
+    # row must pin BOTH to mean "idle". `last_commit` therefore FOLLOWS `mtime` unless
+    # the row states it: a row saying `mtime=AGED` means "this Tree is aged", not
+    # "aged directory, unreadable commit stamp" (the TreeRecord default of `None`,
+    # which is conservatively ACTIVE and would silently turn every row into `keep`).
+    # A row that pins them apart is deliberately exercising the two-signal read.
+    base.setdefault("last_commit", base["mtime"])
     return TreeRecord(**base)
 
 
@@ -102,6 +109,43 @@ TABLE = [
     (
         "merged but written to inside the idle window is kept",
         {"mtime": WITHIN_MERGED_IDLE_GRACE},
+        "MERGED",
+        "keep",
+    ),
+    # The activity signal that makes the window real rather than nominal (codex
+    # review). Root mtime bumps only on root-level churn, so an agent editing and
+    # committing under `src/` leaves it stale — this row is exactly codex's scenario:
+    # a Tree cut days ago, an agent working in it right now, its PR just merged, and
+    # for this instant clean + fully pushed (between a push and the next edit). The
+    # HEAD committer stamp is what sees the agent; without it gc would delete a live
+    # agent's cwd.
+    (
+        "merged + stale root mtime but a FRESH commit -> keep (an agent is working)",
+        {"mtime": AGED_MTIME, "last_commit": WITHIN_MERGED_IDLE_GRACE},
+        "MERGED",
+        "keep",
+    ),
+    # ...and the converse, so the row above is testing the signal and not just a
+    # blanket keep: both signals stale IS genuine idleness, and the Tree reclaims.
+    (
+        "merged + stale root mtime + stale commit -> removable (genuinely idle)",
+        {"mtime": AGED_MTIME, "last_commit": AGED_MTIME},
+        "MERGED",
+        "removable",
+    ),
+    # The mirror of the row above it: mtime fresh (root-level churn) while the last
+    # commit is old still reads as activity — idle is the NEWEST of the two.
+    (
+        "merged + fresh root mtime + stale commit -> keep",
+        {"mtime": WITHIN_MERGED_IDLE_GRACE, "last_commit": AGED_MTIME},
+        "MERGED",
+        "keep",
+    ),
+    # Unreadable commit stamp reads conservatively as ACTIVE, never as "ancient":
+    # `unpushed_shas`' precedent — a git hiccup must not license a delete.
+    (
+        "merged + UNREADABLE last commit -> keep (unknown is not idle)",
+        {"mtime": AGED_MTIME, "last_commit": None},
         "MERGED",
         "keep",
     ),

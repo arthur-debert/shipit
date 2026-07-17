@@ -18,12 +18,21 @@
   thing age was really buying — a write Tree has no liveness signal (unlike an
   ephemeral session Tree, which has its pidfile), so an agent may still be
   working in a still-clean Tree whose PR has merged. That window's clock is time
-  since the Tree's last local write, NOT time since the merge: what it needs to
-  know is whether anyone is still working in the Tree, and idleness is the
-  available proxy. Hours of idleness instead of weeks of age closes that hole
-  without parking the fleet. This brings the write ladder in line with the
-  ephemeral one (ADR-0027), which already checked the merge ahead of its liveness
-  and age rungs.
+  since the Tree's last ACTIVITY, NOT time since the merge: what it needs to know
+  is whether anyone is still working in the Tree. Hours of idleness instead of
+  weeks of age closes that hole without parking the fleet. This brings the write
+  ladder in line with the ephemeral one (ADR-0027), which already checked the
+  merge ahead of its liveness and age rungs.
+  Idleness is measured from the **newest of the Tree's directory mtime and its
+  `HEAD` commit timestamp**, and both are needed. A directory's mtime moves only
+  when an entry is added or removed in that directory, so the ordinary shape of
+  agent work — editing a file under `src/`, staging it, committing it — leaves
+  the clone root's mtime untouched and is invisible to it; the commit timestamp
+  is what observes an agent at work. Pushing does not change that stamp either,
+  so the one interval this window exists to cover — between a push and the next
+  edit, when a live agent's Tree momentarily reads clean and fully pushed — is
+  genuinely covered rather than nominally. An unreadable commit timestamp reads
+  as ACTIVE, never as ancient: a git hiccup must not license a delete.
   `--threshold` (14d by default) is unchanged and still governs the **unmerged**
   shapes — no PR, or a PR closed without merging — where age remains the only
   abandonment signal, and those still land in `stale` for a human rather than
