@@ -331,11 +331,14 @@ def run_fanout_review(
     ``review.pass.launched`` / ``review.pass.settled`` progress events with
     ``run_id``/``dimension``/``round_id`` extras. ``artifacts_base_dir``
     overrides the bundle family root (tests), mirroring the store's
-    ``base_dir``. ``review_tree_naming`` (#1039) hands the pre-minted flat-leaf
-    coordinates the spawn coordinator already reported straight through to
-    :func:`shipit.review.producer.provision_review_tree`, so the per-Run Tree the
-    live path clones lands at the SPAWNED payload's ``tree`` path; ``None`` (every
-    non-reviewer-spawn caller, and the offline replay) mints the Tree's leaf here.
+    ``base_dir``. ``review_tree_naming`` (#1039) applies ONLY to the LIVE PR
+    path, which provisions a per-Run read-only Tree: the reviewer-spawn
+    coordinator's pre-minted flat-leaf coordinates thread straight through to
+    :func:`shipit.review.producer.provision_review_tree`, so the Tree the live
+    path clones lands at the SPAWNED payload's ``tree`` path; ``None`` (every
+    non-reviewer-spawn caller) lets the producer mint that leaf itself. The
+    offline replay (a ``RangeView`` target) provisions NO Tree at all — it
+    reviews ``RangeView.workdir`` directly, so the naming is moot there.
 
     With ``dry_run=True``: prints each pass's would-run argv (one per
     dimension, or the one monolithic/incremental pass, no clone, no model

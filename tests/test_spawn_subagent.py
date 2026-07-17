@@ -1100,57 +1100,83 @@ def test_reviewer_delegates_to_the_captured_review_service(tmp_path):
     assert "review" not in result_tree.parts
 
 
-def test_reviewer_payload_tree_is_the_producers_actual_tree(tmp_path, monkeypatch):
+def test_reviewer_naming_threads_through_the_real_service_chain(tmp_path, monkeypatch):
     # #1039: the SPAWNED `tree` the coordinator reports must be the SAME per-Run
-    # read-only Tree the producer clones the reviewer into — not a speculative
-    # coordinate. The boundary mints the flat-leaf naming ONCE and threads it down
-    # via `review_tree_naming`, so `provision_review_tree` clones under that exact id
-    # instead of minting its own (which, since ADR-0074's per-Run UUIDs, would differ).
+    # read-only Tree the producer clones the reviewer into. The WHOLE fix is
+    # threading the boundary's pre-minted flat-leaf `review_tree_naming` down the
+    # detached-review chain, so the test must EXERCISE that chain — not a double
+    # that calls `provision_review_tree` directly (which would pass even if
+    # `run_detached_review` / `generate_review` / `run_fanout_review` dropped the
+    # naming). We run the REAL `run_detached_review` boundary and SPY the naming
+    # `provision_review_tree` actually receives at the far end of the chain: if any
+    # layer fails to pass `review_tree_naming=...`, provision sees `None` and the
+    # assertion below fails (mutation-checked).
+    from shipit.review import rounds, service
+    from shipit.spawn import subagent as subagent_mod
 
-    # The producer clones under the plan's dir — echo it back as the Tree path so the
-    # proof needs no real clone; fake the remote read the same way `provision_review_tree`
-    # would hit it.
-    monkeypatch.setattr(
-        producer,
-        "create_readonly",
-        lambda plan, *, source_repo, github_url: Tree(
-            path=str(plan.dir), branch=plan.branch, base=f"origin/{plan.branch}"
-        ),
+    class _StopAfterProvision(Exception):
+        """Sentinel: halt the chain the instant provision is reached, before the
+        (mocked-away) model launch — the naming is already captured by then."""
+
+    # A KNOWN flat-leaf naming minted at the boundary, so the assertion can pin the
+    # EXACT `{agent, created, tree_id}` dict the coordinator reports as the payload's
+    # tree id — and prove that same dict reaches `provision_review_tree` unchanged.
+    minted = {
+        "agent": "codex",
+        "created": "20260717-000000",
+        "tree_id": "3c8f9a1e-0000-4c0d-9b2a-000000001039",
+    }
+    monkeypatch.setattr(subagent_mod, "new_tree_naming", lambda binary: dict(minted))
+
+    # The heavy PR resolve the detached child runs first — echo a fixed view so the
+    # chain needs no fetch/diff. Its head_ref is the reviewer's PR head, the same
+    # branch the SPAWNED payload names.
+    ctx = review_view(
+        number=321,
+        repo="acme/widget",
+        head_sha="deadbeef" * 5,
+        base_ref="TRE03/umbrella",
+        base_sha="cafe" * 10,
+        diff="diff --git a/x b/x\n",
+        is_draft=False,
+        changed_files=["x"],
+        workdir="/checkout",
+        head_ref="TRE03/WS03",
     )
-    monkeypatch.setattr(producer.git, "remote_url", lambda *, cwd: "https://x/y.git")
+    monkeypatch.setattr(service, "resolve_pr", lambda number, *, repo: ctx)
+    # Round SCOPE is decided from git ancestry on the checkout — force the round-1
+    # default plan so `generate_review` touches no git for this hand-fed view.
+    monkeypatch.setattr(rounds, "planable", lambda ctx: False)
+    # The per-round binary preflight is pure PATH I/O (the sandbox has no codex).
+    monkeypatch.setattr(producer, "preflight_round", lambda backends: None)
 
-    provisioned: dict = {}
+    seen: dict = {}
 
-    def run_review(backend, target, *, run_id, review_tree_naming=None):
-        # Stand in for the review service's detached child: provision the reviewer's
-        # ACTUAL Tree with the coordinate the boundary handed down, exactly as the live
-        # run_detached_review → generate_review → provision_review_tree chain does.
-        ctx = review_view(
-            number=target.number,
-            repo=target.slug,
-            head_sha="deadbeef" * 5,
-            base_ref="TRE03/umbrella",
-            base_sha="cafe" * 10,
-            diff="diff --git a/x b/x\n",
-            is_draft=False,
-            changed_files=["x"],
-            workdir="/checkout",
-            head_ref="TRE03/WS03",  # the reviewer's PR head — same branch the payload names
-        )
-        provisioned["tree"] = producer.provision_review_tree(
-            ctx, backend, naming=review_tree_naming
-        )
-        return {"review": {}, "post": {}}
+    def spy_provision(ctx_arg, backend, *, naming=None):
+        # The seam under test: capture what `run_fanout_review` threaded down —
+        # THROUGH run_detached_review → generate_review → run_fanout_review — then
+        # short-circuit before any pass launches.
+        seen["naming"] = naming
+        seen["head_ref"] = ctx_arg.head_ref
+        raise _StopAfterProvision
+
+    monkeypatch.setattr(producer, "provision_review_tree", spy_provision)
 
     b, _ = bounds(tmp_path)
-    result = spawn_subagent(
-        spec(role="reviewer", ws=3, issue=None, backend="codex"),
-        replace(b, run_review=run_review),
-    )
+    # The default boundary set runs the REAL detached-review child; our spy stops it
+    # at provision, so the boundary normalizes the sentinel to a clean refusal.
+    with pytest.raises(SpawnError):
+        spawn_subagent(
+            spec(role="reviewer", ws=3, issue=None, backend="codex"),
+            replace(b, run_review=service.run_detached_review),
+        )
 
-    # The coordinate the boundary REPORTED is the exact path the producer PROVISIONED
-    # — no longer a speculative path with a different per-Run UUID (the pre-#1039 bug).
-    assert provisioned["tree"] == result.tree
+    # The naming the boundary minted reached `provision_review_tree` UNCHANGED, so
+    # the id the coordinator reports in the SPAWNED payload (minted["tree_id"]) IS
+    # the id the producer clones under — the pre-#1039 bug was a second, unrelated
+    # per-Run UUID minted inside the producer instead of this one.
+    assert seen["naming"] == minted
+    assert seen["head_ref"] == "TRE03/WS03"
 
 
 def test_issue_only_reviewer_pins_the_issue_head(tmp_path):
