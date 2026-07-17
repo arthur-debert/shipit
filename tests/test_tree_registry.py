@@ -10,7 +10,10 @@ per-clone state.
 
 from __future__ import annotations
 
+import os
+import subprocess
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -76,6 +79,7 @@ def fleet(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(
         git, "unpushed_shas", lambda *, cwd: state[cwd]["unpushed_shas"]
     )
+    monkeypatch.setattr(git, "head_committed_at", lambda *, cwd: 1_000.0)
     monkeypatch.setattr(
         gh, "pr_for_head", lambda branch, *, cwd=None: pr_by_branch.get(branch)
     )
@@ -289,3 +293,103 @@ def test_scan_workers_keeps_floor_on_low_core_box(monkeypatch):
     # An unknown core count behaves like the floor, not like a single worker.
     monkeypatch.setattr(registry.os, "cpu_count", lambda: None)
     assert registry._scan_workers(100) == registry._MIN_SCAN_WORKERS
+
+
+# --- the write ladder's activity signal, over REAL git (#1009, codex review) ---------
+#
+# The rest of this module patches the git boundary; these two do NOT. The whole point
+# of the `last_commit` signal is an empirical claim about the filesystem — that root
+# mtime does not observe an agent working, and that a commit timestamp does — and a
+# test built on injected values cannot check that claim. So these drive real `git`
+# against a real clone and read the record `scan` builds from it.
+
+
+def _git(args: list[str], *, cwd: Path) -> subprocess.CompletedProcess:
+    """Run a real ``git`` in ``cwd``, failing the test on a nonzero exit."""
+    return subprocess.run(
+        ["git", *args], cwd=str(cwd), check=True, capture_output=True, text=True
+    )
+
+
+def _real_clone(path: Path) -> None:
+    """A real git clone at ``path`` with one commit, whose work lives under ``src/``."""
+    path.mkdir(parents=True, exist_ok=True)
+    _git(["init", "-q", "."], cwd=path)
+    (path / "src").mkdir()
+    (path / "src" / "a.py").write_text("one\n")
+    _git(["add", "-A"], cwd=path)
+    _git(["commit", "-qm", "init"], cwd=path)
+
+
+@pytest.fixture
+def real_git(monkeypatch):
+    """Deterministic identity for the child `git commit`, and no `gh` call."""
+    for var, val in {
+        "GIT_AUTHOR_NAME": "Test Author",
+        "GIT_AUTHOR_EMAIL": "test@example.com",
+        "GIT_COMMITTER_NAME": "Test Author",
+        "GIT_COMMITTER_EMAIL": "test@example.com",
+    }.items():
+        monkeypatch.setenv(var, val)
+    monkeypatch.setattr(gh, "pr_for_head", lambda branch, *, cwd=None: None)
+
+
+def test_root_mtime_does_not_observe_work_but_last_commit_does(tmp_path, real_git):
+    # The finding this signal exists for, reproduced end-to-end: an agent edits and
+    # commits under `src/`, and the clone ROOT's mtime does not move — a directory's
+    # mtime bumps only when an entry is added or removed in THAT directory. Reading
+    # idleness from mtime alone would call this actively-worked Tree idle and let gc
+    # delete a live agent's cwd. The HEAD committer stamp is what sees the work.
+    clone = tmp_path / "trees" / "acme/widget/issues/1/work-aaaa"
+    _real_clone(clone)
+    # Backdate the root dir to simulate a Tree cut days ago: nothing has been added to
+    # or removed from the root since, which is the ordinary case for a working Tree.
+    stale = time.time() - 10 * 86_400
+    os.utime(clone, (stale, stale))
+    mtime_before = clone.stat().st_mtime
+
+    # Ordinary agent work: edit an existing file under `src/`, stage it, commit it.
+    (clone / "src" / "a.py").write_text("two\n")
+    _git(["add", "-A"], cwd=clone)
+    _git(["commit", "-qm", "work"], cwd=clone)
+
+    # The empirical claim, asserted rather than assumed: real work left mtime stale...
+    assert clone.stat().st_mtime == mtime_before
+    assert time.time() - clone.stat().st_mtime > 9 * 86_400
+
+    # ...while the record's `last_commit` reads FRESH, so the ladder sees the agent.
+    (record,) = registry.scan(tmp_path / "trees")
+    assert record.last_commit is not None
+    assert time.time() - record.last_commit < 60
+
+
+def test_last_commit_is_committer_time_so_a_rebase_refreshes_it(tmp_path, real_git):
+    # COMMITTER time (%ct), not AUTHOR time (%at): they agree on an ordinary commit,
+    # but only the committer stamp moves on amend/rebase — which is an agent working
+    # in the Tree right now. Author time would read as idle straight through a rebase.
+    clone = tmp_path / "trees" / "acme/widget/issues/2/work-bbbb"
+    _real_clone(clone)
+    # A commit whose AUTHOR time is ancient but which is being committed NOW — exactly
+    # what an amend or rebase of old work produces.
+    old = "2020-01-01T00:00:00"
+    (clone / "src" / "a.py").write_text("three\n")
+    _git(["add", "-A"], cwd=clone)
+    _git(["commit", "-qm", "replayed", "--date", old], cwd=clone)
+
+    (record,) = registry.scan(tmp_path / "trees")
+    author_at = float(_git(["log", "-1", "--format=%at"], cwd=clone).stdout.strip())
+    # The author stamp is years stale; the record tracks the committer stamp instead.
+    assert time.time() - author_at > 365 * 86_400
+    assert record.last_commit is not None
+    assert time.time() - record.last_commit < 60
+
+
+def test_unreadable_last_commit_reads_as_none(tmp_path, real_git):
+    # An unborn HEAD (a clone with no commits) cannot report a stamp. `None`, not 0:
+    # the ladder must read unknown conservatively as ACTIVE, never as "ancient".
+    clone = tmp_path / "trees" / "acme/widget/issues/3/work-cccc"
+    clone.mkdir(parents=True)
+    _git(["init", "-q", "."], cwd=clone)
+
+    (record,) = registry.scan(tmp_path / "trees")
+    assert record.last_commit is None

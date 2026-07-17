@@ -50,6 +50,11 @@ def _record(**over) -> TreeRecord:
         unpushed_shas=(),
     )
     base.update(over)
+    # Likewise `last_commit`: the write ladder reads idle from the NEWEST of it and
+    # `mtime`, and the TreeRecord default of None (stamp unreadable) is conservatively
+    # ACTIVE. It follows `mtime` unless a row states it, so `mtime=<aged>` means "this
+    # Tree is idle" rather than "aged directory, unknown commit stamp".
+    base.setdefault("last_commit", base["mtime"])
     return TreeRecord(**base)
 
 
@@ -98,18 +103,20 @@ def test_plan_counts_unknown_states_and_keeps_them_unremovable():
 
 
 def test_plan_threshold_overrides_the_age_boundary():
+    # `plan` threads max_age_seconds down to `classify`. Probed on an UNMERGED (no PR)
+    # Tree — the only shape the age boundary governs (#1009): a merged Tree is decided
+    # before the gate, on its own grace window, which `plan` does NOT thread (mirroring
+    # the ephemeral backstops).
     record = _record(mtime=0.0)
     aged_only_for_short_threshold = gc.plan(
         [record],
         now=3_600.0 * 2,
-        pr_states={record.path: "MERGED"},
+        pr_states={record.path: None},
         max_age_seconds=3_600.0,
     )
-    kept_by_default = gc.plan(
-        [record], now=3_600.0 * 2, pr_states={record.path: "MERGED"}
-    )
+    kept_by_default = gc.plan([record], now=3_600.0 * 2, pr_states={record.path: None})
 
-    assert [r.path for r in aged_only_for_short_threshold.partition.removable] == [
+    assert [r.path for r in aged_only_for_short_threshold.partition.stale] == [
         record.path
     ]
     assert [r.path for r in kept_by_default.partition.keep] == [record.path]

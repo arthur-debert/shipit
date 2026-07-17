@@ -20,14 +20,20 @@ local work is *kept*.
 - **removable** — every safe-to-delete condition holds: the PR is **merged** on the
   remote ∧ the working tree is **clean** ∧ there are **no unpushed commits**
   (neither ahead of an upstream nor on no remote at all — ``_has_local_only_work``)
-  ∧ the Tree is **aged** past the threshold. There is nothing left to lose, so
-  ``gc`` reclaims it.
+  ∧ the Tree has been **idle** — no root-level write and no commit
+  (:func:`_idle_seconds`) — longer than the short merged-idle grace window
+  (:data:`MERGED_IDLE_GRACE_SECONDS`). The work is on the remote; there is nothing
+  left to lose, so ``gc`` reclaims it. The abandonment age threshold does NOT gate
+  this case (#1009): a merged Tree's safety is already provable, and the two-week
+  threshold vetoing it parked a fortnight of finished work.
 - **stale** — the Tree looks abandoned (aged, clean, nothing unpushed) but its PR did
   NOT merge and is no longer in flight (no PR, or a PR closed without merging). That
   is ambiguous — maybe finished elsewhere, maybe dropped — so it is **listed, never
-  auto-removed**; a human decides.
+  auto-removed**; a human decides. Age is the ONLY abandonment signal for these
+  unmerged shapes, so ``max_age_seconds`` still governs them.
 - **keep** — everything else: a dirty tree, unpushed commits, an in-flight (open/draft)
-  PR, or a Tree too recent to be aged. Live or local work is always protected.
+  PR, a merged Tree still inside its idle grace window, or an UNMERGED Tree too recent
+  to be aged. Live or local work is always protected.
 
 A **shared read-only (reviewer) Tree** (ADR-0018; ``…/review/<branch>``) is a
 distinct reclaim case the precedence ladder handles FIRST. It carries no local work
@@ -69,11 +75,33 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("shipit.tree")
 
-#: Default age threshold (seconds): a Tree must be untouched for longer than this
-#: before it is even a candidate for removal. Two weeks is deliberately generous —
-#: ``gc`` is conservative, and a Tree's mtime bumps on any write, so an actively used
-#: Tree never ages. Overridable per call so the boundary is exhaustively table-tested.
+#: Default age threshold (seconds): an UNMERGED Tree must be IDLE (:func:`_idle_seconds`
+#: — no root-level write, no commit) for longer than this before it is even a candidate
+#: for reclaim. Two weeks is deliberately generous — ``gc`` is conservative, and an
+#: actively used Tree keeps refreshing that signal, so it never ages.
+#: Overridable per call so the boundary is exhaustively table-tested.
+#: It governs only the shapes where age is the SOLE abandonment signal (no PR / closed /
+#: UNKNOWN); a merged Tree is decided before it, on the IDLE window
+#: :data:`MERGED_IDLE_GRACE_SECONDS` (#1009).
 DEFAULT_MAX_AGE_SECONDS = 14 * 86_400
+
+#: The write ladder's **idle** window (seconds) for a MERGED Tree: clean, fully pushed
+#: and merged, it is removable once it has been IDLE for longer than this. The clock is
+#: time since the Tree's last ACTIVITY — the newest of its root mtime and ``HEAD``'s
+#: committer timestamp (:func:`_idle_seconds`) — NOT time since the PR merged: the
+#: question this window exists to answer is "is an agent still working in this Tree?",
+#: and time-since-merge does not answer it. A write Tree has NO liveness signal (unlike
+#: the ephemeral kind, which has its pidfile), so observed activity stands in for one.
+#: Hours, not weeks: once the merge is on the remote there is nothing left to lose, so
+#: the two-week age gate added no safety, only 421 parked Trees (#1009).
+#:
+#: The commit timestamp is what makes this window real rather than nominal (codex
+#: review): root mtime alone bumps only on root-level churn, so it does not observe an
+#: agent editing and committing under ``src/`` at all. Together the two cover the gap
+#: this window exists for — the interval between a push and the next edit, the one
+#: moment a live agent's Tree reads clean and fully pushed and so reaches this rung at
+#: all. Overridable per call so the boundary is exhaustively table-tested.
+MERGED_IDLE_GRACE_SECONDS = 12 * 3_600
 
 #: The ephemeral ladder's HARD time cap (seconds): past this age a clean, fully-
 #: pushed session Tree is removable EVEN IF its pidfile claims live (ADR-0027 rung
@@ -176,6 +204,7 @@ def classify(
     pr_states: Mapping[str, str | None],
     *,
     max_age_seconds: float = DEFAULT_MAX_AGE_SECONDS,
+    merged_idle_grace_seconds: float = MERGED_IDLE_GRACE_SECONDS,
     live_reviews: Mapping[str, bool] | None = None,
     live_sessions: Mapping[str, bool] | None = None,
     provision_shas: Mapping[str, frozenset[Sha]] | None = None,
@@ -196,9 +225,10 @@ def classify(
     Tree's ``path`` to the commit SHAs its provisioning recorded at birth
     (:mod:`shipit.tree.provision` — default: none, so nothing is excluded from the
     unpushed floor and every local-only commit protects). All are INPUTS, so this
-    function holds no clock and does no I/O. ``hard_cap_seconds`` /
-    ``grace_seconds`` override the ephemeral ladder's time backstops so its
-    boundaries are exhaustively table-tested.
+    function holds no clock and does no I/O. ``merged_idle_grace_seconds`` (the write
+    ladder's idle window for a merged Tree) and ``hard_cap_seconds`` / ``grace_seconds``
+    (the ephemeral ladder's time backstops) override those boundaries so each is
+    exhaustively table-tested.
 
     The rules, in precedence order (the first that matches wins):
 
@@ -219,10 +249,23 @@ def classify(
        ``ahead == 0`` while still holding local-only commits (e.g. extra commits
        after the remote branch was deleted on merge); ``ahead`` alone would age
        such a Tree into ``removable`` and lose them (codex review).
-    2. **not aged** (``now - mtime <= max_age_seconds``) → **keep** — too recent to
-       reclaim; a Tree's mtime bumps on every write, so a live Tree never ages.
-    3. aged, clean, nothing unpushed — decide on the PR:
-       - **merged** → **removable** (the one safe-to-delete case);
+    2. **merged PR** (clean, nothing unpushed) → **removable** once the Tree has been
+       **idle** longer than the merged-idle grace window, else **keep**. Idle is
+       :func:`_idle_seconds` — time since the NEWEST of the root mtime and ``HEAD``'s
+       committer stamp, the pair that actually observes an agent at work. Decided
+       BEFORE the abandonment age gate (#1009): the work is on the remote, so the merge
+       already proves the loss is safe and age adds nothing — gating this on
+       ``max_age_seconds`` parked a fortnight of finished work (421 of a 503-Tree
+       fleet). The window's clock is activity, not time since the merge: it asks "is an
+       agent still working here?", and a write Tree has no liveness signal to ask
+       directly. It covers the one gap the floor above leaves — an agent between a push
+       and its next edit, whose Tree momentarily reads clean and fully pushed. This
+       mirrors the ephemeral ladder's rung 2 (ADR-0027), which already decides
+       ``_is_merged`` ahead of its liveness/age rungs.
+    3. **not aged** (``idle <= max_age_seconds``, the same :func:`_idle_seconds`
+       clock) → **keep** — too recent to call abandoned. Reaching here the PR is
+       UNMERGED, which is the only shape age governs.
+    4. aged, clean, nothing unpushed, unmerged — decide on the PR:
        - **in flight** (open/draft) → **keep** (protect active review);
        - otherwise (no PR, closed-without-merge, or **UNKNOWN**) → **stale**
          (abandoned-but-ambiguous, listed for a human, NEVER auto-removed). An UNKNOWN
@@ -239,6 +282,7 @@ def classify(
             now=now,
             state=pr_states.get(record.path),
             max_age_seconds=max_age_seconds,
+            merged_idle_grace_seconds=merged_idle_grace_seconds,
             reviewer_live=reviews.get(record.path, False),
             session_live=sessions.get(record.path, False),
             provision=provisioned.get(record.path, frozenset()),
@@ -273,6 +317,7 @@ def _bucket_for(
     now: float,
     state: str | None,
     max_age_seconds: float,
+    merged_idle_grace_seconds: float,
     reviewer_live: bool,
     session_live: bool,
     provision: frozenset[Sha],
@@ -301,11 +346,19 @@ def _bucket_for(
         )
     if _has_local_only_work(record):
         return "keep"
-    aged = (now - record.mtime) > max_age_seconds
-    if not aged:
+    idle = _idle_seconds(record, now=now)
+    if idle is None:
+        # The activity signal is unreadable — conservatively ACTIVE. A git hiccup
+        # must never license a delete (`unpushed_shas`' precedent, codex review).
         return "keep"
     if _is_merged(state):
-        return "removable"
+        # Decided BEFORE the abandonment age gate (#1009): the merge already proves
+        # the loss is safe, so the only thing holding the Tree is the short idle
+        # window standing in for the liveness signal a write Tree does not have.
+        return "removable" if idle > merged_idle_grace_seconds else "keep"
+    # Unmerged from here down — the shapes where idleness IS the abandonment signal.
+    if idle <= max_age_seconds:
+        return "keep"
     if _is_in_flight(state):
         return "keep"
     # UNKNOWN (state unreadable) lands here alongside no-PR / closed-without-merge:
@@ -315,6 +368,33 @@ def _bucket_for(
     if _is_unknown(state):
         return "stale"
     return "stale"
+
+
+def _idle_seconds(record: TreeRecord, *, now: float) -> float | None:
+    """How long the write Tree has been IDLE — ``None`` when that is unreadable. Pure.
+
+    Idle is measured from the NEWEST of the Tree's two activity signals, because
+    neither alone observes an agent at work:
+
+    - ``mtime`` — the clone ROOT's mtime. A directory's mtime bumps only when an entry
+      is added or removed in THAT directory, so it sees root-level churn and checkout
+      activity but NOT the ordinary shape of agent work: editing a file under ``src/``,
+      staging it, and committing it all leave it untouched.
+    - ``last_commit`` — ``HEAD``'s committer timestamp, which moves exactly when the
+      agent commits (and on amend/rebase). This is what closes the gap the window
+      exists for: an agent editing without committing is ``dirty`` and never reaches
+      this rung; an agent that HAS committed has a fresh stamp here. Pushing does not
+      change it, so the post-push/pre-next-edit interval — the one moment a live
+      agent's Tree reads clean and fully pushed — is genuinely covered.
+
+    ``last_commit is None`` means the stamp could not be read, which is NOT evidence of
+    idleness: it returns ``None`` so the caller keeps the Tree (``unpushed_shas``'
+    unreadable-reads-conservative discipline). Both values arrive ON the record, so
+    this stays pure — no clock, no I/O (ADR-0030).
+    """
+    if record.last_commit is None:
+        return None
+    return now - max(record.mtime, record.last_commit)
 
 
 def _review_bucket(state: str | None, *, reviewer_live: bool) -> str:
