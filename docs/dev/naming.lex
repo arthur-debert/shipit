@@ -56,17 +56,80 @@ mid-stream. Agents derive WS codes and all names from them.
     A coordinator session Tree is born on `ephemeral/<id>` — e.g.
     `ephemeral/sess-20260702-121314-4242` — cut from `origin/main`, where `<id>`
     is the per-launch session id (the `claude --worktree <id>` value, minted by
-    `agent-start claude`). The slash groups every session branch under the `ephemeral/`
-    ref directory, mirroring the Tree dir `<root>/<org>/<repo>/ephemeral/<id>`.
+    `agent-start claude`). The slash groups every session branch under the
+    `ephemeral/` ref directory. It mirrors no Tree dir — Tree dirs are flat and
+    share no shape with any ref (§4, ADR-0074).
     Unlike every other form, this branch is NOT the work's name: a session Tree
-    is ephemeral-by-path, work-by-branch (ADR-0027). The dir leaf is the SESSION
-    — disposable, never renamed — while the branch mirrors it only at birth and
-    is expected to move to the real work (`EPIC/umbrella`, `docs/<slug>`,
-    `issues/<id>/<session>`, …) inside the fixed dir as the session discovers
-    what it is doing; `shipit tree list` reads the live branch, so nothing is
-    lost but the cosmetic dir-branch symmetry.
+    is ephemeral-by-path, work-by-branch (ADR-0027). The dir records the SESSION
+    — disposable, never renamed — while the branch is expected to move to the
+    real work (`EPIC/umbrella`, `docs/<slug>`, `issues/<id>/<session>`, …)
+    inside the fixed dir as the session discovers what it is doing;
+    `shipit tree list` reads the live branch, so the real branch is always shown.
 
     Grandfathered: epics already in-flight when this slash scheme landed keep
     their original hyphen form (bare `EPIC` epic branch, `EPIC-WSnn` workstreams)
     — e.g. `HAR02` / `HAR02-WS03`. The slash/umbrella form applies to epics
     created after; in-flight epics are NOT retroactively renamed (see ADR-0016).
+
+4. Tree directories
+
+    Tree dirs are FLAT and self-describing, one shape for every Tree
+    (ADR-0074):
+
+        <root>/<repo>-<agent>-<timestamp>-<id>
+
+    e.g.
+    `~/workspace/trees/shipit-claude-20260717-081333-619cf51a-f501-44dc-992f-74df773204aa`.
+    The `<root>` is the central root (`SHIPIT_TREES_ROOT`, default
+    `~/workspace/trees`); `<agent>` is the backend — `claude`, `codex` or `agy`,
+    the three shipit supports, written as the CLI BINARY name (Antigravity's
+    `--backend` token is `antigravity`, but its binary and funnel agent name are
+    `agy`, and the binary is what matches `claude` and `codex`);
+    `<timestamp>` is `%Y%m%d-%H%M%S`, so a lexical sort is chronological within a
+    repo.
+
+    `<id>` is a full UUID — never the pid, never truncated. Not the pid because
+    pids are reused, so one token eventually names two unrelated sessions. Not
+    truncated because `claude --resume` takes a full UUID or a session title and
+    rejects a prefix, and titles carry an unpredictable derived suffix, so a
+    short id would force an `ls` of the Session store before every resume — the
+    tooling this grammar exists to remove. The ~66-character leaf is the
+    accepted price; repo-first prefixing means `ls | grep shipit` narrows on the
+    head, so the long tail never obstructs the scan.
+
+    WHO mints the `<id>` depends on which of the three creation paths made the
+    Tree, because the harness's session UUID does not exist at mint time for two
+    of them (ADR-0074). The rule: the harness session UUID is used exactly when
+    the Tree is minted FOR the session that supplies it.
+
+    - A COORDINATOR session Tree (the `WorktreeCreate` hook, coordinator
+      launch) carries the harness's own session UUID, which the hook payload
+      supplies. This is the case a human resumes, and here reading the dir name
+      IS enough to resume the session that made it.
+    - A native in-CC HELPER Tree (`Agent(isolation:"worktree")`, same hook)
+      carries a UUID the hook MINTS. The payload's session id on that path is
+      the PARENT's — carrying it would name the wrong session, which is worse
+      than naming none.
+    - A spawned RUN Tree (`shipit spawn subagent`) carries a shipit-minted
+      UUID: the verb makes the Tree BEFORE it launches the backend, so no
+      native id exists yet.
+
+    Both minted cases resume through shipit's own logs, never by a human reading
+    a path. One grammar, no exceptions — only the id's provenance varies, and
+    the path never records which.
+
+    Repo comes FIRST because it is the axis a human narrows on — `ls | grep
+    shipit` is the tooling-free narrowing this grammar exists to give. There is
+    no owner segment (repo identity is resolved from the origin remote, never
+    parsed from the path) and no kind segment (reclaim treats every kind alike —
+    ADR-0072 — and read-only-ness is a create-time argument, observable from the
+    directory mode).
+
+    Dirs and refs share NO grammar, and this is deliberate. Refs are slashed for
+    a git ref-collision reason (§3) that has no filesystem analogue; the old
+    nested Tree dir mirrored the ref namespace for a constraint it never had.
+    The dir records WHO and WHEN; git records WHAT.
+
+    The name is for humans and `shipit tree list` — `gc` never reads it.
+    Creation-age is not activity-age, so reclaiming on the timestamp would
+    delete live sessions (ADR-0072); reclaim measures file activity instead.

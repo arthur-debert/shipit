@@ -154,20 +154,35 @@ dependencies.
     see [./workflows.lex]. Until then there is no changelog-fragment step in
     a PR and no release phase here.
 
-7. Session memory dies with the Tree — promote learnings before wrapping up
+7. Session memory outlives the Tree — promote durable learnings anyway
 
-    A coordinator session runs in an ephemeral session Tree (§1), and session
-    auto-memory is keyed to the working-directory PATH
-    (`~/.claude/projects/<path-slug>/memory/`). When the ephemeral tree is
-    gc'd, memories written there are orphaned: a future session runs in a
-    different tree, gets a different path slug, and never loads them.
-    Confirmed live in the ADP00 retro — the epic's own feedback memory was
-    unreachable to every successor session.
+    Session memory persists across sessions. It lives in the repo's Session
+    store — one per repo, keyed on the origin remote, shared by every Tree of
+    that repo and outliving all of them, linked into place when the Tree is
+    created (ADR-0073). Reclaiming a Tree (ADR-0072) does not touch it: the
+    whole point is that destroying a workspace must not destroy what was
+    learned in it.
 
-    Durable learnings must therefore be promoted INTO THE REPO before a
-    session ends. The coordinator role carries the end-of-epic /
-    end-of-session promotion clause: a process rule goes to the relevant role
-    .lex (then `pixi run regen-roles`) or docs/dev/; a decision to an ADR;
-    vocabulary to CONTEXT.md; an open investigation to a tracker issue.
-    Session memory is a scratchpad for the session that wrote it, never an
-    archive.
+    This was NOT always true, and the history is worth keeping. Auto-memory is
+    keyed to the working-directory PATH (`~/.claude/projects/<path-slug>/`),
+    and a Tree per session meant a new path per session — so every launch got a
+    fresh, empty namespace and nothing was ever read back. Confirmed live in
+    the ADP00 retro: the epic's own feedback memory was unreachable to every
+    successor session. By the time TREE03 measured it, 44 memory files were
+    stranded across 23 throwaway stores and the real store had been frozen
+    since Jul 6. ADR-0073 fixed the key, not the discipline.
+
+    Durable learnings are still promoted INTO THE REPO — but for the right
+    reason. The repo artifacts are how knowledge reaches everyone who reads
+    the repo: reviewers, future implementers, humans who never see a
+    transcript. A decision that lives only in memory is a decision the next
+    reviewer cannot see. So the coordinator role's promotion clause stands: a
+    process rule goes to the relevant role .lex (then `pixi run regen-roles`)
+    or docs/dev/; a decision to an ADR; vocabulary to CONTEXT.md; an open
+    investigation to a tracker issue.
+
+    What changed is the framing. Memory is a genuine archive for
+    session-scoped context — what was tried, what the human decided
+    mid-flight, where a thread left off — not a scratchpad to be drained
+    before the lights go out. Write it freely; promote the durable parts
+    regardless.

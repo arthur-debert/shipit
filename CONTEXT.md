@@ -189,7 +189,7 @@ The fixed shipit-owned structural profile for a Role: checkout strategy, enforce
 _Avoid_: "Role Policy"; policy is operation-specific.
 
 **Checkout strategy**:
-The structured checkout allocation and attachment shape selected by a Role Profile: session Tree, new write Tree, existing-PR write Tree, shared read-only Tree, or ambient WorkingDir. It is the implementation of the older Tree Profile summary, not a consumer-configurable value.
+The structured checkout allocation and attachment shape selected by a Role Profile: session Tree, new write Tree, existing-PR write Tree, read-only Tree, or ambient WorkingDir. It is the implementation of the older Tree Profile summary, not a consumer-configurable value.
 _Avoid_: using one flat "write" token when implementer and shepherd attachment differ.
 
 **Launch context**:
@@ -303,9 +303,21 @@ _Avoid_: "worktree", "workspace".
 **Session Tree**:
 The coordinator's own Tree, minted at launch and then switched to the branch the session discovers it needs. Its path is session-shaped; its branch carries the work identity.
 
+**Reclaim**:
+Removing a Tree that is no longer in use. A Tree is kept if it is dirty, has unpushed commits, or is under the Idle threshold; otherwise it is reclaimed. One rule for every Tree kind (ADR-0072).
+_Avoid_: "Sweep" (that is a review-lab term for a review pass over a range); "stale" as a bucket — reclaim is keep-or-remove, with no third state.
+
+**Idle**:
+How long since anything in a Tree was touched, measured as now minus the newest file mtime, over a walk that prunes `.git` and build/env dirs. Idle is the Tree's activity signal and the only clock reclaim reads.
+_Avoid_: root-directory mtime (it does not move when an agent edits under a subdirectory, and lags real activity by hours); the creation timestamp in the Tree name (creation-age is not activity-age); liveness probes (activity is measured, never inferred).
+
+**Session store**:
+The per-repo directory holding a repo's session transcripts and memory, shared by every Tree of that repo and outliving all of them. Keyed on the origin remote, and linked into place when a Tree is created (ADR-0073).
+_Avoid_: treating memory as per-session scratch that must be swept before a session ends; storing it inside a Tree, where reclaim would destroy it.
+
 **Read-only Tree**:
-A Tree mode for branch-pinned reviewers: shared per repo and branch, checked out read-only, and not provisioned with build tooling.
-_Avoid_: "explorer Tree"; explorers are ambient.
+A Tree mode for branch-pinned reviewers: per-Run, checked out read-only, and not provisioned with build tooling. Read-only is a mode, not a sharing arrangement — reviewers get their own Tree like every other Run.
+_Avoid_: "explorer Tree"; explorers are ambient. "Shared read-only Tree"; sharing per repo and branch was dropped with the flat layout (ADR-0074).
 
 **Review proposal**:
 A candidate code change a Reviewer Run may produce as supporting output. It is never applied by the reviewer; a shepherd decides whether to use it.
