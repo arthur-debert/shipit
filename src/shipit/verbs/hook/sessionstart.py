@@ -1,7 +1,7 @@
 """``shipit hook sessionstart`` — the coordinator-activation boundary (ADR-0027).
 
 THIN by design (mirrors ``hook pretooluse``); independent, additive steps per
-session start — three writes, the advisory emits (the source-clone nudge, the
+session start — two writes, the advisory emits (the source-clone nudge, the
 ADR-0033 pin-staleness line, the #444 missing-``test``-task line), and the
 ``session.started`` dev-cycle event (ADR-0032, :func:`_emit_session_started` —
 the hook is the one verb that witnesses a session beginning):
@@ -14,16 +14,7 @@ the hook is the one verb that witnesses a session beginning):
    Bash tool call. Result: the coordinator's environment is active for every Bash
    call with no wrapper — ``shipit``/``python`` resolve without a ``pixi run``
    prefix.
-2. **Liveness** (SES02) — record which session owns this Tree: walk the
-   hook's own ancestry to the session-host process — ``claude`` or ``codex``,
-   whichever backend's SessionStart entry fired this verb (the hook runs as its
-   descendant through the backend's managed hook command and any shell wrappers)
-   — and write the :mod:`shipit.session.liveness` pidfile — PID, payload
-   ``session_id``, and the PID's OS create-time, read NOW, at write time — into
-   the Tree's ``.git`` dir.
-   This is the signal the ephemeral-Tree gc ladder consults so an idle-but-live
-   session's Tree is never reclaimed out from under it.
-3. **Log-context export** (REL01 #349, ADR-0029) — when the session's ``cwd`` is
+2. **Log-context export** (REL01 #349, ADR-0029) — when the session's ``cwd`` is
    an ephemeral session Tree, append ``export SHIPIT_LOG_CTX_SESSION=<id>`` (and
    the matching ``…_TREE=<path>``) to the same ``CLAUDE_ENV_FILE``. The ephemeral
    Tree's dir leaf IS the per-launch session id (ADR-0027) — the exact value
@@ -32,9 +23,9 @@ the hook is the one verb that witnesses a session beginning):
    ``logsetup.configure_logging`` via :func:`shipit.logcontext.bind_from_env`,
    and the per-repo JSONL log becomes sliceable by session for the records that
    matter most: the ones emitted during the session. NOT the Claude-internal
-   ``session_id`` UUID from the payload — that is a different identifier (the
-   liveness pidfile records that one for the transcript join).
-4. **Source-clone warning** (REL01 #348) — when the session's ``cwd`` is a shipit
+   ``session_id`` UUID from the payload — that is a different identifier, recorded
+   on the ``session.started`` event for the transcript join.
+3. **Source-clone warning** (REL01 #348) — when the session's ``cwd`` is a shipit
    *source clone* (has ``.shipit.toml``, is a git repo) rather than a Tree (any
    dir under :func:`shipit.tree.layout.central_root`), print a one-line warning
    on stdout. A SessionStart hook's stdout is added to the session's context, so
@@ -47,17 +38,20 @@ the hook is the one verb that witnesses a session beginning):
    while every Tree kind (ephemeral, write, review) lives under the central root
    by construction.
 
+Session liveness is no longer recorded here: ADR-0072 replaced the pidfile-and-``ps``
+reclaim ladder with an activity-based rule (the filesystem already knows when a Tree
+was last touched), so the ``SessionStart`` pidfile lost its only consumer and retired
+with the former ``shipit.session.liveness`` module.
+
 **Fail-open is the contract** — the same posture as ``hook pretooluse``, the
-OPPOSITE of ``hook worktreecreate``. All three writes are ADDITIVE, never
-load-bearing: the managed hook commands keep running even without activation,
-the gc ladder's liveness-independent rungs (the dirty/unpushed floor, the grace
-window, the hard cap) carry teardown safety even with no pidfile, and a record
-missing its ``session`` key is merely less sliceable, never lost. ANY failure in
-any step (no ``CLAUDE_ENV_FILE``, bad payload, no toolchain, a pixi error, an
-unwritable file, no session-host ancestor, a cwd that is no ephemeral Tree) must
-therefore cost the session NOTHING: skip that write and exit 0 — and the steps
-fail open INDEPENDENTLY, so a broken activation never costs the session its
-liveness record or its log context, or vice versa. The source-clone warning is
+OPPOSITE of ``hook worktreecreate``. Both writes are ADDITIVE, never
+load-bearing: the managed hook commands keep running even without activation, and
+a record missing its ``session`` key is merely less sliceable, never lost. ANY
+failure in any step (no ``CLAUDE_ENV_FILE``, bad payload, no toolchain, a pixi
+error, an unwritable file, a cwd that is no ephemeral Tree) must therefore cost
+the session NOTHING: skip that write and exit 0 — and the steps fail open
+INDEPENDENTLY, so a broken activation never costs the session its log context, or
+vice versa. The source-clone warning is
 fail-open too, with one deliberate calibration exception
 (#348): a detection error skips at DEBUG, not the canon's WARNING — the check
 writes nothing durable, so there is no degraded state to flag, and a broken
@@ -93,7 +87,6 @@ from ... import config, events, execrun, gh, logcontext
 from ...harness import activation
 from ...pixienv import shell_hook
 from ...session import current as session_current
-from ...session import liveness
 from ...tree import layout
 
 logger = logging.getLogger("shipit.hook")
@@ -128,13 +121,13 @@ CONTRACT_TEST_TASK = "test"
 
 @click.command(name="sessionstart")
 def cmd() -> None:
-    """Write the repo's toolchain activation into ``CLAUDE_ENV_FILE`` + the pidfile.
+    """Write the repo's toolchain activation and log context into ``CLAUDE_ENV_FILE``.
 
     Reads the ``SessionStart`` payload as JSON on stdin. Always exits 0; each of
-    the steps (activation, log-context export, liveness pidfile, session event,
-    source-clone warning) fails OPEN independently on any error, and a repo with
-    no activatable toolchain / no session-host ancestor / a cwd that is not a source
-    clone or not an ephemeral Tree is a clean no-op for that check.
+    the steps (activation, log-context export, session event, source-clone
+    warning) fails OPEN independently on any error, and a repo with no activatable
+    toolchain / a cwd that is not a source clone or not an ephemeral Tree is a
+    clean no-op for that check.
     """
     raise SystemExit(run())
 
@@ -144,21 +137,17 @@ def run(
     stdout: TextIO | None = None,
     environ: dict[str, str] | None = None,
     runner=execrun.run,
-    probe: liveness.Probe | None = None,
-    self_pid: int | None = None,
     commits_ahead=None,
 ) -> int:
     """Parse stdin → the advisories (source-clone cwd, stale pin, missing
-    ``test`` task) → write activation → export the log context → write the
-    liveness pidfile → emit the ``session.started`` event. Returns 0 always.
+    ``test`` task) → write activation → export the log context → emit the
+    ``session.started`` event. Returns 0 always.
 
-    ``stdout``, ``environ``, ``runner``, ``probe``, ``self_pid``, and
-    ``commits_ahead`` are the injectable boundaries (defaults: the real
-    ``sys.stdout`` / ``os.environ`` / :func:`shipit.execrun.run` /
-    :func:`shipit.session.liveness.os_probe` / ``os.getpid()`` /
-    :func:`shipit.gh.commits_ahead`) so tests assert every step without a live
-    pixi, a real session-host process tree, or the network. Each check is wrapped fail-open on its own, so a
-    bad payload, a pixi failure, an unwritable env file, a probe error, or a
+    ``stdout``, ``environ``, ``runner``, and ``commits_ahead`` are the injectable
+    boundaries (defaults: the real ``sys.stdout`` / ``os.environ`` /
+    :func:`shipit.execrun.run` / :func:`shipit.gh.commits_ahead`) so tests assert
+    every step without a live pixi or the network. Each check is wrapped fail-open
+    on its own, so a bad payload, a pixi failure, an unwritable env file, or a
     detection error can never crash the session — and a failure in one check
     never suppresses the others. The log-context export runs AFTER activation so
     its lines land after the pixi exports in the shared env file — but it does
@@ -178,7 +167,6 @@ def run(
     _warn_missing_test_task(raw, out)
     _write_activation(raw, env, runner)
     _write_log_context(raw, env)
-    _write_liveness(raw, probe=probe, self_pid=self_pid)
     _emit_session_started(raw)
     return 0
 
@@ -329,7 +317,7 @@ def _write_activation(raw: str, env, runner) -> None:
     """The activation half: toolchain → captured env → append to CLAUDE_ENV_FILE.
 
     Fail-open in isolation: any error logs at WARNING (the swallow is a degraded
-    outcome) and writes nothing, without touching the liveness half.
+    outcome) and writes nothing, without touching the log-context half.
     """
     try:
         env_file = env.get(ENV_FILE_VAR)
@@ -486,64 +474,14 @@ def _emit_session_started(raw: str) -> None:
                 "session.started",
                 "session started in %s",
                 cwd,
-                # The Claude-internal id joins the record to the transcript
-                # (the liveness pidfile's companion); absent-not-null.
+                # The Claude-internal id joins the record to the transcript;
+                # absent-not-null.
                 extra=native_ids or None,
             )
     except Exception:  # noqa: BLE001 — fail-open, DEBUG by design: the emit is
         # advisory correlation, nothing durable degrades when it breaks.
         logger.debug(
             "sessionstart: session.started emission failed open", exc_info=True
-        )
-
-
-def _write_liveness(
-    raw: str, *, probe: liveness.Probe | None, self_pid: int | None
-) -> None:
-    """The liveness half: find the session-host ancestor, write the pidfile into the Tree.
-
-    The recorded PID is NOT this hook's own — the hook runs below the session
-    host through the backend's managed hook command and any shell wrappers — but
-    the nearest ancestor whose command line looks like a session host (Claude
-    Code or Codex, :func:`~shipit.session.liveness.find_session_process` — both
-    backends' SessionStart entries route here); its create-time is read from the
-    OS here, at write time, exactly as ADR-0027 specifies. Skipped
-    cleanly (DEBUG log, no pidfile) when the session's cwd is not a git clone
-    (nowhere durable to record), no session-host ancestor is found (launched
-    outside a session), or the ancestor's create-time is unreadable (a record
-    ``is_live`` could never verify would only ever read as dead). Fail-open in
-    isolation.
-    """
-    try:
-        tree = _payload_cwd(raw)
-        if not (tree / ".git").is_dir():
-            logger.debug("sessionstart: %s is not a clone — no pidfile written", tree)
-            return
-        info = liveness.find_session_process(
-            self_pid if self_pid is not None else os.getpid(),
-            probe if probe is not None else liveness.os_probe,
-        )
-        if info is None or info.create_time is None:
-            logger.debug(
-                "sessionstart: no session-host ancestor with a readable create-time "
-                "— no pidfile written"
-            )
-            return
-        record = liveness.LivenessRecord(
-            pid=info.pid,
-            session_id=_payload_session_id(raw),
-            create_time=info.create_time,
-        )
-        liveness.write_pidfile(tree, record)
-        logger.debug(
-            "sessionstart: recorded session pid %s in %s",
-            info.pid,
-            liveness.pidfile_path(tree),
-        )
-    except Exception:  # noqa: BLE001 — fail-open: liveness is additive; the gc ladder's
-        # liveness-independent rungs carry teardown safety without it.
-        logger.warning(
-            "sessionstart hook failed open (no pidfile written)", exc_info=True
         )
 
 
@@ -586,9 +524,9 @@ def _append(env_file: Path, text: str) -> None:
 def _payload_session_id(raw: str) -> str:
     """The payload's ``session_id``, or ``""`` when missing/malformed.
 
-    The id is recorded for a human joining a Tree back to its transcript — the
-    liveness decision never consults it (the OS cannot be asked for it), so a
-    missing id degrades to an empty string rather than blocking the pidfile.
+    The id is recorded on the ``session.started`` event for a human joining a
+    Tree back to its transcript — nothing decides on it, so a missing id degrades
+    to an empty string rather than blocking the emit.
     """
     try:
         payload = json.loads(raw)

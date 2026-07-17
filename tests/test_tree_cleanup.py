@@ -49,8 +49,6 @@ def _record(path: str = "/trees/t", **over) -> TreeRecord:
         dirty=False,
         ahead=0,
         behind=0,
-        pr=None,
-        pr_state=None,
         mtime=IDLE_MTIME,
         unpushed_shas=(),
         newest_mtime=IDLE_MTIME,
@@ -108,20 +106,8 @@ TABLE = [
     # "does this exist anywhere but here?" — and it says no local-only work here.
     ("ahead of upstream but on a remote -> removable", {"ahead": 2}, "removable"),
     # --- what the rule deliberately does NOT read (ADR-0072) ---
-    # PR state has no vote at all now: every state below is the same removable Tree.
-    ("open PR does not keep an idle, clean Tree", {"pr_state": "OPEN"}, "removable"),
-    ("draft PR does not keep an idle, clean Tree", {"pr_state": "DRAFT"}, "removable"),
-    (
-        "closed PR does not keep an idle, clean Tree",
-        {"pr_state": "CLOSED"},
-        "removable",
-    ),
-    ("no PR does not keep an idle, clean Tree", {"pr_state": None}, "removable"),
-    (
-        "UNKNOWN PR state does not keep an idle, clean Tree",
-        {"pr_state": "UNKNOWN"},
-        "removable",
-    ),
+    # PR state has no vote at all: the ``gh`` read and the ``pr``/``pr_state`` fields it
+    # fed are gone from the scan (WS03), so the rule structurally cannot consult one.
     # Root mtime was the old clock and lags real activity by up to 10h; it is a display
     # signal now, and must not sway the rule in EITHER direction. Both rows pin that.
     (
@@ -199,7 +185,6 @@ def test_a_tree_with_a_live_session_is_never_removable():
         branch="ephemeral/abc123",
         dirty=False,  # external gcloud work: nothing to commit
         unpushed_shas=(),  # nothing local-only either
-        pr_state=None,  # no PR was ever opened
         mtime=NOW - (THRESHOLD * 100),  # root mtime hours stale — the 10h lag
         newest_mtime=NOW - 1,  # ...but a file was written one second ago
     )

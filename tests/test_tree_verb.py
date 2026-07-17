@@ -304,8 +304,6 @@ def _record(**over) -> TreeRecord:
         dirty=False,
         ahead=0,
         behind=0,
-        pr="#7 DRAFT",
-        pr_state="DRAFT",
         mtime=1000.0,
         unpushed_shas=(),
     )
@@ -335,7 +333,6 @@ def test_run_list_renders_the_fleet_through_the_seam(monkeypatch, capsys):
             dirty=True,
             ahead=2,
             behind=1,
-            pr="#9 OPEN",
             mtime=500.0,
         ),
     ]
@@ -347,7 +344,8 @@ def test_run_list_renders_the_fleet_through_the_seam(monkeypatch, capsys):
     assert rc == 0
     out = capsys.readouterr().out
     # The scan reached the renderer: both Trees, table headers, the BASE annotation.
-    assert "BRANCH" in out and "BASE" in out and "PR" in out
+    # No PR column: the `gh` read is gone with the reclaim signal it fed (ADR-0072).
+    assert "BRANCH" in out and "BASE" in out and "PR" not in out
     assert "issues/7/work" in out and "HAR02/WS02" in out
     assert "origin/HAR02/umbrella (+2/-1)" in out
 
@@ -900,19 +898,17 @@ def test_run_gc_incomplete_sweep_is_loud_and_exits_nonzero(
 def test_run_gc_never_reports_a_tree_it_deleted_as_unexamined(
     tmp_path, monkeypatch, capsys
 ):
-    # The regression, end-to-end through the real verb (the unit test pins the count;
-    # this pins what an operator actually READS). An UNKNOWN PR state used to be
-    # counted as skipped while the very same run deleted the Tree, printing
-    # `INCOMPLETE - 1 of 2 skipped; removed 2, kept 0` and exiting 1 — a destructive
-    # command's audit trail contradicting the destruction. PR state decides nothing
-    # now, so it says nothing either.
+    # The invariant, end-to-end through the real verb (the unit test pins the count;
+    # this pins what an operator actually READS): every Tree the sweep DELETES is judged,
+    # so `unexamined` never counts one the same run removed — the audit trail can never
+    # contradict the destruction (`INCOMPLETE - 1 of 2 skipped; removed 2, kept 0`).
+    # Two idle, clean, fully-pushed Trees: both removable, the whole root judged.
     root = tmp_path / "trees"
     plain = _make_tree_dir(root, "acme/widget/issues/1/work-idle")
-    unknown = _make_tree_dir(root, "acme/widget/issues/2/work-unknown")
+    other = _make_tree_dir(root, "acme/widget/issues/2/work-idle2")
     records = [
-        _record(path=str(plain), branch="b1", mtime=0.0, pr_state="MERGED"),
-        # Idle, clean, fully pushed — and its PR read failed. It IS removable.
-        _record(path=str(unknown), branch="b2", mtime=0.0, pr_state="UNKNOWN"),
+        _record(path=str(plain), branch="b1", mtime=0.0),
+        _record(path=str(other), branch="b2", mtime=0.0),
     ]
     monkeypatch.setattr(layout_mod, "central_root", lambda: str(root))
     monkeypatch.setattr(registry_mod, "scan", lambda r: records)
@@ -921,7 +917,7 @@ def test_run_gc_never_reports_a_tree_it_deleted_as_unexamined(
 
     captured = capsys.readouterr()
     assert not plain.exists()
-    assert not unknown.exists()  # both were deleted ...
+    assert not other.exists()  # both were deleted ...
     assert "removed 2, kept 0" in captured.out  # ... and the report says exactly that
     assert "INCOMPLETE" not in captured.out
     assert "UNEXAMINED" not in captured.err
@@ -1065,19 +1061,18 @@ def test_run_gc_flushes_each_removed_line(tmp_path, monkeypatch):
 
 
 def test_run_gc_no_warning_when_no_unknown(tmp_path, monkeypatch, capsys):
-    # A sweep where every PR state is readable saw the whole root: exit 0, and no
+    # A sweep where every signal is readable saw the whole root: exit 0, and no
     # incomplete-view report anywhere. The loud path must stay rare enough to mean
     # something.
     root = tmp_path / "trees"
-    merged = _make_tree_dir(root, "acme/widget/issues/1/work-merged")
+    healthy = _make_tree_dir(root, "acme/widget/issues/1/work-healthy")
     records = [
         _record(
-            path=str(merged),
+            path=str(healthy),
             branch="b1",
             dirty=False,
             ahead=0,
             mtime=0.0,
-            pr_state="MERGED",
         ),
     ]
     monkeypatch.setattr(layout_mod, "central_root", lambda: str(root))

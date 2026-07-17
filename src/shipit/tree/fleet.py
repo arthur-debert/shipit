@@ -25,11 +25,11 @@ from .registry import TreeRecord
 class FleetTree:
     """One Tree's at-a-glance listing row, derived purely from its scan record.
 
-    ``branch`` stays ``None`` for a detached/unborn HEAD and ``base`` /
-    ``pr`` stay ``None`` when absent — the renderer owns the placeholder
-    spellings (``(detached)``, ``-``), so the JSON surface carries honest
-    nulls. ``age_seconds`` is the Tree's age at the listing's ``now``
-    (clamped at zero: a just-touched Tree never reads negative).
+    ``branch`` stays ``None`` for a detached/unborn HEAD and ``base`` stays
+    ``None`` when absent — the renderer owns the placeholder spellings
+    (``(detached)``, ``-``), so the JSON surface carries honest nulls.
+    ``age_seconds`` is the Tree's age at the listing's ``now`` (clamped at
+    zero: a just-touched Tree never reads negative).
     """
 
     path: str
@@ -39,7 +39,6 @@ class FleetTree:
     ahead: int
     behind: int
     dirty: bool
-    pr: str | None
     age_seconds: int
 
     def to_dict(self) -> dict:
@@ -51,7 +50,6 @@ class FleetTree:
             "ahead": self.ahead,
             "behind": self.behind,
             "dirty": self.dirty,
-            "pr": self.pr,
             "age_seconds": self.age_seconds,
         }
 
@@ -91,6 +89,5 @@ def _row(record: TreeRecord, *, now: float) -> FleetTree:
         ahead=record.ahead,
         behind=record.behind,
         dirty=record.dirty,
-        pr=record.pr,
         age_seconds=int(max(now - record.mtime, 0)),
     )

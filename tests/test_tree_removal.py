@@ -24,8 +24,6 @@ def _record(**over) -> TreeRecord:
         dirty=False,
         ahead=0,
         behind=0,
-        pr="#7 DRAFT",
-        pr_state="DRAFT",
         mtime=1000.0,
         unpushed_shas=(),
     )

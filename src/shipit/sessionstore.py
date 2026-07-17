@@ -18,8 +18,8 @@ checkout), so work in a Tree and work in the plain checkout share one store rath
 than splitting in two.
 
 **Identity is the origin remote, not the path** (:class:`shipit.identity.Repo`) —
-consistent with ``registry._repo_slug``, which already resolves repo identity from the
-remote precisely because the path shape "is not a reliable identity". The store lives
+consistent with :func:`shipit.identity.resolve_repo`, which resolves repo identity from
+the remote precisely because the path shape "is not a reliable identity". The store lives
 at ``~/.claude/stores/<owner>/<repo>/``, deliberately OUTSIDE ``projects/`` so
 shipit-owned state is never confused with the harness's own cwd-slug dirs.
 

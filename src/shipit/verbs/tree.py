@@ -271,9 +271,10 @@ def _emit_ready(result: Tree) -> None:
 def list_cmd(as_json: bool) -> None:
     """List every Tree under the central root with its at-a-glance state.
 
-    Renders the whole fleet — path, branch, base, age, dirty?, PR state — derived
-    purely by SCANNING the central root (no manifest); the state is whatever the
-    clones on disk say right now.
+    Renders the whole fleet — path, branch, base, age, dirty? — derived purely
+    by SCANNING the central root (no manifest); the state is whatever the clones
+    on disk say right now. No PR state: the ``gh`` read is gone with the reclaim
+    signal it fed (ADR-0072), and the scan makes zero network calls.
     """
     raise SystemExit(run_list(as_json=as_json))
 
@@ -300,15 +301,14 @@ def run_list(*, as_json: bool = False) -> int:
 #: A new column is one tuple here — the renderer widths every column to its content.
 _LIST_COLUMNS: tuple[tuple[str, Callable[[fleet.FleetTree], str]], ...] = (
     ("PATH", lambda row: row.path),
-    # The Tree's reclaim family — write / review / ephemeral — is first-class
-    # fleet state (ADR-0018/0027): each kind takes a different gc ladder, so
-    # the listing says which one applies rather than leaving it implied by path.
+    # The Tree's family — write / review / ephemeral — as a human-facing label
+    # (ADR-0018/0027). Reclaim no longer dispatches on it (ADR-0072: one rule for
+    # every kind), so this is display only; `tree_kind` itself retires in WS06.
     ("KIND", lambda row: row.kind),
     ("BRANCH", lambda row: row.branch or "(detached)"),
     ("BASE", lambda row: _format_base(row)),
     ("AGE", lambda row: _format_age(row.age_seconds)),
     ("DIRTY", lambda row: "dirty" if row.dirty else "clean"),
-    ("PR", lambda row: row.pr or "-"),
 )
 
 

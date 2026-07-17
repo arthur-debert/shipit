@@ -42,8 +42,6 @@ def _record(**over) -> TreeRecord:
         dirty=False,
         ahead=0,
         behind=0,
-        pr=None,
-        pr_state=None,
         mtime=0.0,
         unpushed_shas=(),
         newest_mtime=0.0,
@@ -70,25 +68,6 @@ def test_plan_partitions_the_fleet():
     assert {r.path for r in plan.partition.keep} == {"/t/2", "/t/3"}
     assert plan.total == 3
     assert plan.unexamined == 0
-
-
-def test_an_unknown_pr_state_is_not_reported_as_skipped_because_it_is_not_skipped():
-    # The regression that repointed the count. PR state stopped deciding anything
-    # (ADR-0072), so an UNKNOWN Tree is bucketed on its activity like every other —
-    # here, removable. Counting it as "unexamined" would have the report describe a
-    # Tree this very run DELETES: `INCOMPLETE - 1 of 2 skipped; removed 2, kept 0`.
-    # A destructive command's audit trail may not contradict the destruction.
-    plan = gc.plan(
-        [
-            _record(path="/t/1", pr_state="MERGED"),
-            _record(path="/t/2", pr_state="UNKNOWN"),
-        ],
-        now=AGED_NOW,
-    )
-
-    assert {r.path for r in plan.partition.removable} == {"/t/1", "/t/2"}
-    assert plan.unexamined == 0
-    assert plan.incomplete is False
 
 
 def test_unexamined_counts_the_signals_that_actually_suppress_a_removal():
@@ -359,30 +338,6 @@ def test_incomplete_is_the_unexamined_count_on_both_plan_and_result():
     assert gc.sweep(_plan_of(whole.partition, total=1)).incomplete is False
 
 
-# --- pr_state: the projection off the scanned record ---------------------------------
-
-
-def test_pr_state_projects_the_records_state_without_reading_gh(monkeypatch):
-    # #1011: pr_state makes NO call of its own — it reports the state the scan already
-    # read (one call per repo). Any gh access here would be the second per-Tree
-    # fan-out that exhausted the GraphQL budget mid-sweep, so make it fatal.
-    monkeypatch.delattr(gh, "pr_for_head")
-
-    # The vocabulary is the registry's: a draft open PR reads "DRAFT", not "OPEN".
-    assert gc.pr_state(_record(path="/trees/x", pr_state="DRAFT")) == "DRAFT"
-    assert gc.pr_state(_record(path="/trees/y", pr_state="MERGED")) == "MERGED"
-
-
-def test_pr_state_unknown_stays_distinct_from_no_pr():
-    # The projection still reports the split it always did — "UNKNOWN" (state
-    # unreadable) never collapses into None (no branch / no PR). Nothing in gc acts on
-    # either any more: this whole function is dead, kept only so WS02's behaviour
-    # change and WS03's pure deletion stay separately reviewable.
-    assert gc.pr_state(_record(path="/trees/x", pr_state="UNKNOWN")) == "UNKNOWN"
-    assert gc.pr_state(_record(path="/trees/y", branch=None, pr_state=None)) is None
-    assert gc.pr_state(_record(path="/trees/z", pr_state=None)) is None
-
-
 # --- plan_fleet: the effectful gather -------------------------------------------------
 
 
@@ -445,32 +400,39 @@ def test_plan_fleet_threshold_defaults_to_48h(monkeypatch):
     assert [r.path for r in plan.partition.keep] == ["/t/just-under"]
 
 
-# --- the dead gather helpers (no caller since ADR-0072; deleted in WS03) --------------
+# --- gc makes zero network calls (ADR-0072's headline; WS03) --------------------------
 
 
-def test_live_sessions_maps_only_ephemeral_trees():
-    records = [_record(), _record(path="/trees/acme/widget/review/x", branch="b")]
-    assert gc.live_sessions(records) == {}
+def _git(cwd, *args):
+    import subprocess
+
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
 
 
-def test_provision_shas_maps_only_ephemeral_trees(tmp_path):
-    write = _record()
-    ephemeral = _record(path=str(tmp_path / "ephemeral" / "sess-1"))
-    shas = gc.provision_shas([write, ephemeral])
-    # The write Tree is absent; the ephemeral one reads the (missing) record as
-    # the empty set — the safe direction.
-    assert shas == {ephemeral.path: frozenset()}
+def test_gc_makes_zero_network_calls(tmp_path, monkeypatch):
+    # ADR-0072's headline: the whole gc gather (`plan_fleet` -> `registry.scan` ->
+    # `classify`) reads only the local clone. The per-repo `gh` PR batch that once fed
+    # the reclaim ladder is deleted with it (#1011 was the >10-minute sweep it caused),
+    # so a fleet-wide sweep never touches GitHub. Sabotage EVERY public `gh` entrypoint
+    # into a fatal, then run the real gather (real `git` subprocesses) over a real
+    # clone: any surviving network read would raise here.
+    def _explode(*_a, **_k):
+        raise AssertionError("gc made a network (gh) call")
 
+    for name in dir(gh):
+        obj = getattr(gh, name)
+        if callable(obj) and not isinstance(obj, type) and not name.startswith("__"):
+            monkeypatch.setattr(gh, name, _explode, raising=False)
 
-def test_the_gather_no_longer_calls_the_dead_helpers(monkeypatch):
-    # The behaviour half of "liveness and provisioning are retired" (ADR-0072): the
-    # functions still exist (WS03 deletes them), but plan_fleet must not consult them —
-    # the liveness probe's false-negatives are exactly what deleted a live Tree (#1018).
-    def _fail(*args, **kwargs):
-        raise AssertionError("the gc gather must not read liveness or provisioning")
+    clone = tmp_path / "acme" / "widget" / "issues" / "7" / "work-aaaa"
+    clone.mkdir(parents=True)
+    _git(clone, "init", "-q")
+    _git(clone, "config", "user.email", "t@example.com")
+    _git(clone, "config", "user.name", "t")
+    (clone / "f.txt").write_text("x")
+    _git(clone, "add", ".")
+    _git(clone, "commit", "-qm", "init")
 
-    monkeypatch.setattr(gc, "live_sessions", _fail)
-    monkeypatch.setattr(gc, "provision_shas", _fail)
-    monkeypatch.setattr(registry, "scan", lambda root: [_record()])
+    plan = gc.plan_fleet(str(tmp_path))
 
-    gc.plan_fleet("/trees")
+    assert plan.total == 1

@@ -31,16 +31,13 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from ..session import liveness
-from . import layout, provision, registry
+from . import registry
 from .cleanup import IDLE_THRESHOLD_SECONDS, Cleanup, classify, is_unexamined
 from .readonly import remove_tree
 from .registry import TreeRecord
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-    from ..identity import Sha
 
 logger = logging.getLogger("shipit.tree")
 
@@ -253,76 +250,3 @@ def sweep(
         total=gc_plan.total,
         unexamined=gc_plan.unexamined,
     )
-
-
-def pr_state(record: TreeRecord) -> str | None:
-    """The PR's remote state for one Tree. **DEAD — no caller** (ADR-0072).
-
-    It lost the rule under ADR-0072 and its last consumer with it: the
-    incomplete-view count it used to feed now reads the signals that actually
-    suppress a removal (:func:`plan`), because "UNKNOWN" stopped meaning "kept" the
-    moment nothing consulted it. Deleted in WS03 along with the whole ``gh``
-    dependency and the ``PrIndex`` batching behind it — kept here only so this WS's
-    behaviour change and that WS's pure deletion stay separately reviewable.
-
-    The state the scan ALREADY read (:attr:`~shipit.tree.registry.TreeRecord.pr_state`),
-    not a fresh lookup — and not a re-parse of the rendered ``pr`` label either: the
-    registry mints both views from ONE PR snapshot. The vocabulary is the typed
-    snapshot's own (:attr:`~shipit.gh.HeadPr.display_state`, which normalizes a draft
-    open PR to ``"DRAFT"``), so the fleet had ONE state vocabulary. An unreadable state
-    maps to ``"UNKNOWN"`` — distinct from ``None`` (no branch / no PR).
-
-    This used to make its OWN ``gh.pr_for_head`` call per Tree, so a sweep paid the
-    fleet's PR cost twice — once inside ``scan``, once here, sequentially. That second
-    fan-out is what tipped a large sweep past GitHub's hourly GraphQL budget; since
-    exhaustion reads as ``UNKNOWN`` and ``UNKNOWN`` then meant keep, ``gc`` exited 0
-    having removed nothing while reporting success (issue #1011). The state now rides
-    the record, and this is a pure projection.
-    """
-    return record.pr_state
-
-
-def live_sessions(records: list[TreeRecord]) -> dict[str, bool]:
-    """Per-ephemeral-Tree session liveness. **DEAD — no caller** (ADR-0072).
-
-    Reclaim no longer consults liveness at all: it was a proxy for "is anyone
-    working here", and the activity walk measures that directly and more
-    truthfully (:func:`shipit.tree.cleanup.classify`). ``plan_fleet`` stopped
-    calling this, and it is deleted along with :mod:`shipit.session.liveness`
-    in WS03 — kept here only so this WS's behaviour change and that WS's pure
-    deletion stay separately reviewable. Do not wire it back in: the probe's
-    documented false-negatives are exactly what deleted a live session's Tree
-    (#1018).
-
-    For each *ephemeral* Tree, reads its pidfile and decides
-    :func:`~shipit.session.liveness.is_live` against the real OS probe; other
-    kinds are absent from the map.
-    """
-    live: dict[str, bool] = {}
-    for record in records:
-        if layout.tree_kind(record.path) != layout.EPHEMERAL_KIND:
-            continue
-        session = liveness.read_pidfile(record.path)
-        live[record.path] = session is not None and liveness.is_live(
-            session, liveness.os_probe
-        )
-    return live
-
-
-def provision_shas(records: list[TreeRecord]) -> dict[str, frozenset[Sha]]:
-    """Per-ephemeral-Tree provisioning-commit SHAs. **DEAD — no caller** (ADR-0072).
-
-    The unpushed floor no longer carves anything out (#232's exclusion is gone
-    with the ephemeral ladder), so nothing reads this. It was already inert in
-    production: the ``.git/shipit-provision.json`` it reads has had no writer
-    since ADR-0033 retired it. Deleted with :mod:`shipit.tree.provision` in
-    WS03; kept here so that deletion stays a pure-deletion PR.
-
-    For each *ephemeral* Tree, reads that record; a missing or unreadable one
-    reads as the EMPTY set.
-    """
-    return {
-        record.path: provision.read_provision_shas(record.path)
-        for record in records
-        if layout.tree_kind(record.path) == layout.EPHEMERAL_KIND
-    }
