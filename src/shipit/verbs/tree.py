@@ -31,7 +31,7 @@ import click
 
 from .. import execrun, git, identity
 from ..tree import cleanup, fleet, gc, layout, registry, removal
-from ..tree.create import Tree, create, new_agent_hash
+from ..tree.create import Tree, create, new_tree_naming
 from ..tree.layout import TreeSpec
 from ..tree.removal import GateAction, RemovalError
 from ._errors import cli_errors
@@ -174,7 +174,7 @@ def run_create(
 
     spec = TreeSpec(
         repo=repo_identity,
-        agent_hash=new_agent_hash(),
+        **new_tree_naming("claude"),
         issue=issue,
         session=session,
         epic=epic,
@@ -301,10 +301,11 @@ def run_list(*, as_json: bool = False) -> int:
 #: A new column is one tuple here — the renderer widths every column to its content.
 _LIST_COLUMNS: tuple[tuple[str, Callable[[fleet.FleetTree], str]], ...] = (
     ("PATH", lambda row: row.path),
-    # The Tree's family — write / review / ephemeral — as a human-facing label
-    # (ADR-0018/0027). Reclaim no longer dispatches on it (ADR-0072: one rule for
-    # every kind), so this is display only; `tree_kind` itself retires in WS06.
-    ("KIND", lambda row: row.kind),
+    # The Tree's creation time, recovered from the flat dir leaf's `<timestamp>`
+    # slot (ADR-0074) — the first real created column `tree list` has ever had. A
+    # pre-flat nested Tree (no flat leaf) reads `-`. Display only: `gc` never reads
+    # it, because creation-age is not activity-age (ADR-0072).
+    ("CREATED", lambda row: row.created or "-"),
     ("BRANCH", lambda row: row.branch or "(detached)"),
     ("BASE", lambda row: _format_base(row)),
     ("AGE", lambda row: _format_age(row.age_seconds)),

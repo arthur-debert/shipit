@@ -37,6 +37,11 @@ from shipit.verbs import tree as tree_verb
 
 _REPO = repo_from_slug("acme/widget")
 
+# The flat-leaf coordinates (ADR-0074): every Tree dir is <repo>-<agent>-<timestamp>-<id>.
+_AGENT = "claude"
+_CREATED = "20260717-081333"
+_TREE_ID = "619cf51a-f501-44dc-992f-74df773204aa"
+
 #: A pinned .shipit.toml body — provisioning fails closed on a pinless base
 #: (ADR-0033). The pin must be a valid full sha (the gate validates it as a Sha),
 #: not a sentinel; "5eed…" is a mnemonic all-hex sha.
@@ -120,7 +125,9 @@ def _mock_write_boundary(monkeypatch):
 def _spec(tmp_path: Path) -> TreeSpec:
     return TreeSpec(
         repo=_REPO,
-        agent_hash="abcd1234",
+        agent=_AGENT,
+        created=_CREATED,
+        tree_id=_TREE_ID,
         issue=7,
         root=tmp_path / "trees",
     )
@@ -190,7 +197,9 @@ def test_ephemeral_shape_binds_its_session_id(tmp_path, monkeypatch, jsonl_log):
     _mock_write_boundary(monkeypatch)
     spec = TreeSpec(
         repo=_REPO,
-        agent_hash="ignored",
+        agent=_AGENT,
+        created=_CREATED,
+        tree_id=_TREE_ID,
         ephemeral="sess-1234",
         root=tmp_path / "trees",
     )
@@ -353,7 +362,7 @@ def test_gc_sweep_failure_is_a_warning_with_the_exception_and_continues(
 def test_remove_verb_failure_is_an_error_with_the_exception(
     tmp_path, monkeypatch, caplog
 ):
-    leaf = tmp_path / "trees" / "acme" / "widget" / "issues" / "7" / "leaf"
+    leaf = tmp_path / "trees" / f"widget-{_AGENT}-{_CREATED}-{_TREE_ID}"
     (leaf / ".git").mkdir(parents=True)
     monkeypatch.setenv("SHIPIT_TREES_ROOT", str(tmp_path / "trees"))
     monkeypatch.setattr(
@@ -401,7 +410,7 @@ def test_create_verb_prepipeline_failure_is_an_error_with_the_exception(
 
 
 # --------------------------------------------------------------------------
-# Read-only (reviewer) Trees — creation and shared reuse are narrated
+# Read-only (reviewer) Trees — each per-Run creation is narrated (ADR-0074)
 # --------------------------------------------------------------------------
 
 
@@ -414,20 +423,34 @@ def _mock_readonly_boundary(monkeypatch):
     monkeypatch.setattr(git, "clone_dissociated", fake_clone)
     monkeypatch.setattr(git, "fetch", lambda **k: None)
     monkeypatch.setattr(git, "checkout", lambda *a, **k: None)
-    monkeypatch.setattr(git, "reset_hard", lambda *a, **k: None)
     monkeypatch.setattr(git, "submodule_update_init", lambda **k: None)
 
 
-def test_readonly_create_and_reuse_are_info_milestones_with_the_tree(
+def _readonly_plan(tmp_path, *, tree_id):
+    return readonly_plan(
+        repo=_REPO,
+        branch="feat/x",
+        agent=_AGENT,
+        created=_CREATED,
+        tree_id=tree_id,
+        root=tmp_path / "trees",
+    )
+
+
+def test_readonly_per_run_creations_are_info_milestones_with_the_tree(
     tmp_path, monkeypatch, caplog
 ):
+    # Reviewer Trees are PER-RUN now (ADR-0074): each reviewer gets its OWN flat Tree,
+    # so there is no shared reuse — two reviewers on the same head are two distinct
+    # births, each an INFO milestone carrying its Tree and its duration.
     _mock_readonly_boundary(monkeypatch)
-    plan = readonly_plan(repo=_REPO, branch="feat/x", root=tmp_path / "trees")
+    first = _readonly_plan(tmp_path, tree_id="11111111-1111-4111-8111-111111111111")
+    second = _readonly_plan(tmp_path, tree_id="22222222-2222-4222-8222-222222222222")
+    assert first.dir != second.dir  # per-Run: never the same leaf
 
     with caplog.at_level(logging.INFO, logger="shipit.tree"):
-        create_readonly(plan, source_repo="/ref", github_url="url")
-    fresh = [r for r in caplog.records if getattr(r, "tree", None) == str(plan.dir)]
-    # Fresh creation: an INFO milestone carrying the Tree and its duration.
+        create_readonly(first, source_repo="/ref", github_url="url")
+    fresh = [r for r in caplog.records if getattr(r, "tree", None) == str(first.dir)]
     assert any(
         r.levelno == logging.INFO and isinstance(getattr(r, "duration_ms", None), int)
         for r in fresh
@@ -435,13 +458,13 @@ def test_readonly_create_and_reuse_are_info_milestones_with_the_tree(
 
     caplog.clear()
     with caplog.at_level(logging.INFO, logger="shipit.tree"):
-        create_readonly(plan, source_repo="/ref", github_url="url")
-    # Shared reuse (the second reviewer): an INFO milestone carrying the Tree AND
-    # its refresh cost as the structured `duration_ms` field (not only in the
-    # message text), so reuse cost is queryable like the fresh-creation record.
+        create_readonly(second, source_repo="/ref", github_url="url")
+    # The second reviewer's OWN per-Run Tree is likewise a birth milestone carrying
+    # its Tree AND its cost as the structured `duration_ms` field (queryable, not only
+    # in the message text).
     assert any(
         r.levelno == logging.INFO
-        and getattr(r, "tree", None) == str(plan.dir)
+        and getattr(r, "tree", None) == str(second.dir)
         and isinstance(getattr(r, "duration_ms", None), int)
         for r in caplog.records
     )

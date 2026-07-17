@@ -17,9 +17,9 @@ What this module owns (and ONLY this):
     registry value objects themselves, never a retyped agent-name string — ONE
     definition of "launch codex/agy as a reviewer", shared with the spawn
     surface (the WS04a read-only posture);
-  * provision the shared read-only Tree on the PR head (reusing
-    :func:`shipit.tree.readonly.create_readonly` — a second reviewer on the same
-    ``(repo, branch)`` reuses the clone);
+  * provision the per-Run read-only Tree on the PR head
+    (:func:`shipit.tree.readonly.create_readonly` — a fresh flat Tree per reviewer
+    Run, ADR-0074; cross-reviewer sharing is retired);
   * build the Tree-fetch reviewer task (:func:`shipit.review.prompt.build_reviewer_task`)
     and, for codex, write the JSON schema temp file so codex enforces the output
     shape natively (``--output-schema`` — the robustness win ADR-0020 keeps);
@@ -42,8 +42,9 @@ feeds the no-post replay path (:mod:`shipit.review.replay`) instead of the funne
 
 The RVW02-WS04 dimension fan-out (:mod:`shipit.review.fanout`) drives
 :func:`run_tree_review` too — once per configured **Dimension pass**
-(``dimension=…``) against ONE shared Tree it provisions up front
-(:func:`provision_review_tree`, so N parallel passes never race N refreshes) —
+(``dimension=…``) against ONE per-Run Tree it provisions up front
+(:func:`provision_review_tree`, so the N parallel passes of one reviewer Run share
+its single clone) —
 and hashes each pass's exact prompt via :func:`pass_task_text` for the
 review-round record's per-run **Variant**. The offline fan-out replay
 (RVW03-WS01) drives :func:`run_range_review` the same way — once per pass with
@@ -84,6 +85,7 @@ from ..spawn.backends.antigravity import AntigravityAdapter
 from ..spawn.backends.base import BackendAdapter
 from ..spawn.backends.codex import CodexAdapter
 from ..tree.cleanup import parse_duration
+from ..tree.create import new_tree_naming
 from ..tree.readonly import create_readonly, readonly_plan
 from .artifacts import RunArtifacts
 from .backends import BackendError, BackendUnavailable, parse_review_output
@@ -353,28 +355,28 @@ def range_pass_task_text(
     )
 
 
-def provision_review_tree(ctx) -> str:
-    """Provision (or reuse) the shared read-only Tree on ``ctx``'s PR head and
-    return its path.
+def provision_review_tree(ctx, backend: Backend) -> str:
+    """Provision the per-Run read-only Tree on ``ctx``'s PR head and return its path.
 
     The one Tree resolution the review producers share: resolve the repo
-    identity + head branch, then :func:`shipit.tree.readonly.create_readonly`
-    (a second caller on the same ``(repo, branch)`` reuses the clone). The
+    identity + head branch, then :func:`shipit.tree.readonly.create_readonly` — a
+    fresh, per-Run flat Tree (ADR-0074) named after ``backend``'s binary. The
     RVW02-WS04 fan-out calls this ONCE before launching its parallel dimension
-    passes so the N passes share one provisioning instead of racing N
-    refreshes; :func:`run_tree_review` provisions through here too when no
-    ``tree_path`` was handed in. Raises ``RuntimeError`` when the head branch
-    is unknown (no Tree can be provisioned).
+    passes so the N passes of ONE reviewer Run share the one clone (this is
+    within-Run sharing, NOT the retired cross-reviewer sharing);
+    :func:`run_tree_review` provisions through here too when no ``tree_path`` was
+    handed in. Raises ``RuntimeError`` when the head branch is unknown (no Tree can
+    be provisioned).
     """
     repo = _resolve_repo(ctx)
     branch = (ctx.head_ref or "").strip()
     if not branch:
         raise RuntimeError(
             f"cannot review PR #{ctx.number}: its head branch (headRefName) is "
-            "unknown, so the shared read-only Tree cannot be provisioned."
+            "unknown, so the read-only Tree cannot be provisioned."
         )
     tree = create_readonly(
-        readonly_plan(repo=repo, branch=branch),
+        readonly_plan(repo=repo, branch=branch, **new_tree_naming(backend.binary)),
         source_repo=ctx.workdir,
         github_url=_github_url(ctx),
     )
@@ -399,7 +401,7 @@ def run_tree_review(
 ) -> CapturedReview:
     """Launch ``backend`` as a reviewer in a read-only Tree and CAPTURE its review.
 
-    Provisions the shared read-only Tree on ``ctx``'s PR head, launches the backend
+    Provisions the per-Run read-only Tree on ``ctx``'s PR head, launches the backend
     through its spawn read-only posture with a task that fetches the diff via
     ``gh pr diff`` and emits structured JSON, captures stdout, and parses it. Returns
     a :class:`CapturedReview` — the review dict plus the launch's measured token
@@ -481,7 +483,7 @@ def run_tree_review(
     if not branch:
         raise RuntimeError(
             f"cannot review PR #{ctx.number}: its head branch "
-            "(headRefName) is unknown, so the shared read-only Tree "
+            "(headRefName) is unknown, so the per-Run read-only Tree "
             "cannot be provisioned."
         )
 
@@ -493,7 +495,9 @@ def run_tree_review(
         if spec.native_schema:
             schema_path = _write_schema_tempfile()
 
-        cwd = tree_path if tree_path is not None else provision_review_tree(ctx)
+        cwd = (
+            tree_path if tree_path is not None else provision_review_tree(ctx, backend)
+        )
         head = getattr(ctx, "head_sha", None)
         commit = head if isinstance(head, Sha) else None
         review_env = workenv.resolve_readonly_review_env(
@@ -910,7 +914,7 @@ def _dry_run(
     review flows on to ``post_review(dry_run=True)``, which prints the would-post payload
     — so the whole dry-run is honest end to end and bills nothing.
     """
-    plan = readonly_plan(repo=repo, branch=branch)
+    plan = readonly_plan(repo=repo, branch=branch, **new_tree_naming(agent))
     placeholder = "<review-schema-tempfile>.json" if spec.native_schema else None
     cmd = adapter.build_command(
         task,

@@ -33,6 +33,21 @@ from shipit.tree.layout import TreeSpec
 _PIN = "5eed" * 10
 _PINNED_MANIFEST = f'[shipit]\nversion = "{_PIN}"\n\n[managed]\n'
 
+# The flat-leaf coordinates (ADR-0074 / naming.lex §4): every Tree dir is the single
+# self-describing leaf ``<repo>-<agent>-<timestamp>-<id>``, ONE segment below the root,
+# with no owner/kind/nesting. The repo is ``acme/widget`` → its NAME (``widget``) leads.
+# ``agent`` is the backend BINARY name; ``created`` the ``%Y%m%d-%H%M%S`` stamp; ``tree_id``
+# a full UUID. The caller mints these (they are impure), so ``plan`` stays pure of the spec.
+_AGENT = "claude"
+_CREATED = "20260717-081333"
+_TREE_ID = "619cf51a-f501-44dc-992f-74df773204aa"
+_LEAF = f"widget-{_AGENT}-{_CREATED}-{_TREE_ID}"
+
+
+def _dest(tmp_path: Path) -> Path:
+    """The flat Tree dir every shape in this file resolves to (``<root>/<leaf>``)."""
+    return tmp_path / "trees" / _LEAF
+
 
 def _hooks_ok() -> execrun.ExecResult:
     """A canned successful lefthook-activation ExecResult for the injected boundary."""
@@ -119,7 +134,9 @@ def reference(tmp_path: Path, remote: Path) -> Path:
 def _spec(tmp_path: Path) -> TreeSpec:
     return TreeSpec(
         repo=repo_from_slug("acme/widget"),
-        agent_hash="abcd1234",
+        agent=_AGENT,
+        created=_CREATED,
+        tree_id=_TREE_ID,
         issue=123,
         slug="smoke",
         root=tmp_path / "trees",
@@ -135,18 +152,9 @@ def test_create_produces_an_independent_dissociated_clone(
 
     dest = Path(tree.path)
 
-    # READY summary is the planned {path, branch, base}. The slug ("smoke") rides the
-    # DIR leaf after the default `work` session; the branch stays issues/<id>/<session>.
-    assert (
-        dest
-        == tmp_path
-        / "trees"
-        / "acme"
-        / "widget"
-        / "issues"
-        / "123"
-        / "work-smoke-abcd1234"
-    )
+    # READY summary is the planned {path, branch, base}. The dir is the single flat
+    # leaf (ADR-0074) — the slug no longer rides it; the branch stays issues/<id>/<session>.
+    assert dest == _dest(tmp_path)
     assert tree.branch == "issues/123/work"
     assert tree.base == "origin/main"
 
@@ -175,7 +183,9 @@ def test_create_freeform_tree_on_the_default_branch(
     _stub_provision(monkeypatch)
     spec = TreeSpec(
         repo=repo_from_slug("acme/widget"),
-        agent_hash="abcd1234",
+        agent=_AGENT,
+        created=_CREATED,
+        tree_id=_TREE_ID,
         branch="main",
         root=tmp_path / "trees",
     )
@@ -486,15 +496,7 @@ def test_create_rolls_back_partial_tree_on_failure(
     with pytest.raises(ExecError):
         create(spec, source_repo=str(reference), github_url=str(remote))
 
-    dest = (
-        tmp_path
-        / "trees"
-        / "acme"
-        / "widget"
-        / "issues"
-        / "123"
-        / "work-smoke-abcd1234"
-    )
+    dest = tmp_path / "trees" / _LEAF
     assert not dest.exists()
 
 
@@ -523,15 +525,7 @@ def test_create_fails_closed_and_rolls_back_on_a_pinless_source(
     with pytest.raises(ValueError, match="no \\[shipit\\].version pin"):
         create(spec, source_repo=str(reference), github_url=str(remote))
 
-    dest = (
-        tmp_path
-        / "trees"
-        / "acme"
-        / "widget"
-        / "issues"
-        / "123"
-        / "work-smoke-abcd1234"
-    )
+    dest = tmp_path / "trees" / _LEAF
     assert not dest.exists()
 
 
@@ -541,15 +535,7 @@ def test_create_refuses_a_preexisting_dest_without_clobbering_it(
     # A pre-existing dest (deterministic/colliding hash, or a rerun) must be refused
     # BEFORE any clone, and the rollback must NEVER delete that prior directory.
     spec = _spec(tmp_path)
-    dest = (
-        tmp_path
-        / "trees"
-        / "acme"
-        / "widget"
-        / "issues"
-        / "123"
-        / "work-smoke-abcd1234"
-    )
+    dest = tmp_path / "trees" / _LEAF
     dest.mkdir(parents=True)
     (dest / "precious.txt").write_text("do not delete")
 
@@ -726,15 +712,7 @@ def test_create_rolls_back_when_submodule_init_fails(
     with pytest.raises(ExecError):
         create(_spec(tmp_path), source_repo=str(reference), github_url=str(remote))
 
-    dest = (
-        tmp_path
-        / "trees"
-        / "acme"
-        / "widget"
-        / "issues"
-        / "123"
-        / "work-smoke-abcd1234"
-    )
+    dest = tmp_path / "trees" / _LEAF
     assert not dest.exists()
 
 
@@ -934,15 +912,7 @@ def test_create_rolls_back_when_the_node_manager_is_undecidable(
 
     with pytest.raises(ValueError, match="no recognized lockfile"):
         create(_spec(tmp_path), source_repo=str(source), github_url="url")
-    leaf = (
-        tmp_path
-        / "trees"
-        / "acme"
-        / "widget"
-        / "issues"
-        / "123"
-        / "work-smoke-abcd1234"
-    )
+    leaf = tmp_path / "trees" / _LEAF
     assert not leaf.exists()
 
 
@@ -1132,15 +1102,7 @@ def test_provision_hook_activation_failure_fails_the_create(
     with pytest.raises(ExecError):
         create(_spec(tmp_path), source_repo=str(source), github_url="url")
     # Atomicity: the half-built leaf was rolled back.
-    leaf = (
-        tmp_path
-        / "trees"
-        / "acme"
-        / "widget"
-        / "issues"
-        / "123"
-        / "work-smoke-abcd1234"
-    )
+    leaf = tmp_path / "trees" / _LEAF
     assert not leaf.exists()
 
 
@@ -1391,9 +1353,13 @@ def test_create_links_every_tree_of_a_repo_to_one_store(
     home = _home(monkeypatch, tmp_path)
 
     first = create(_spec(tmp_path), source_repo=str(reference), github_url=str(remote))
+    # A DIFFERENT tree_id → a distinct flat leaf, so the two Trees are separate dirs of
+    # the same repo (they must still resolve to ONE shared store).
     second_spec = TreeSpec(
         repo=repo_from_slug("acme/widget"),
-        agent_hash="beef5678",
+        agent=_AGENT,
+        created=_CREATED,
+        tree_id="beef5678-beef-4bee-8bee-beef5678beef",
         issue=456,
         slug="other",
         root=tmp_path / "trees",

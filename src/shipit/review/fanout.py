@@ -9,7 +9,7 @@ cost, with a between-buckets blind spot the unscoped pass caught. An explicit
 per-reviewer ``dimensions`` config (or a Lab ``shape = "fanout"`` cell) opts
 back into the ADR-0045 fan-out: parallel **Dimension passes**
 (:mod:`shipit.review.dimensions`) on the reviewer's own backend against ONE
-shared read-only Tree, results unioned. Either shape flows through the same
+per-Run read-only Tree, results unioned. Either shape flows through the same
 union/dedup/routing machinery below.
 
 By DEFAULT (RVW02-WS08) the union is posted through a MECHANICAL, deterministic
@@ -236,7 +236,7 @@ def run_fanout_review(
     (round ≥ 2), and return the routed :class:`FanoutOutcome`.
 
     ``target`` is EITHER a PR review view (the live path — provisions the
-    shared read-only Tree; a round-1 pass fetches ``gh pr diff``, a round-≥2
+    per-Run read-only Tree; a round-1 pass fetches ``gh pr diff``, a round-≥2
     ``incremental`` pass the fix-range ``git diff <base>..<head>`` instead — see
     ``incremental`` below) or a range-scoped
     :class:`~shipit.review.diff.RangeView` (the offline fan-out replay,
@@ -469,13 +469,13 @@ def run_fanout_review(
         round_backends.append(agent_backend.by_name(calibrator.backend))
     producer.preflight_round(round_backends)
 
-    # The Tree seam: the live path provisions ONE shared read-only Tree on the
+    # The Tree seam: the live path provisions ONE per-Run read-only Tree on the
     # PR head; the offline replay reviews the checkout whose range was resolved
     # — no Tree, no gh (the replay boundary already validated the endpoints).
     workdir = (
         range_view.workdir
         if range_view is not None
-        else producer.provision_review_tree(target)
+        else producer.provision_review_tree(target, backend)
     )
     label = label_from_env()
     # The round's observability identity (RVW03-WS02): ONE round id per fan-out

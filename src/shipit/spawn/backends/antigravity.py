@@ -37,7 +37,7 @@ Auth rides agy's Antigravity OAuth login (creds under ``~/.gemini/antigravity-cl
 writes a secret into the Tree (ADR-0020 §Decision 3 — auth hygiene).
 
 agy has **no** granular native tool allow-list / read-only sandbox for a reviewer, so a
-reviewer Run's read-only guarantee rides **solely** on the chmod'd shared read-only Tree
+reviewer Run's read-only guarantee rides **solely** on the chmod'd per-Run read-only Tree
 (ADR-0018), the load-bearing guard — the seam's ``read_only`` flag only drops the
 write Run's ``--dangerously-skip-permissions`` (best-effort defense-in-depth).
 

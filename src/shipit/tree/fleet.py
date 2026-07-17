@@ -3,11 +3,12 @@
 The ``tree list`` verb's promoted domain half: :func:`build` derives, PURELY,
 one frozen :class:`FleetTree` row per scanned
 :class:`~shipit.tree.registry.TreeRecord` — the raw snapshot plus the two
-facts the listing adds on top: the Tree's **kind**
-(:func:`~shipit.tree.layout.tree_kind` — write / review / ephemeral, surfaced
-as an at-a-glance fact rather than left implied by the path; reclaim itself is
-one uniform activity-based rule, ADR-0072) and its **age** against an injected
-``now`` (no clock in here). The :class:`Fleet` wrapper is the ``--json``
+facts the listing adds on top: the Tree's **created** timestamp — recovered from
+the flat dir leaf's ``<timestamp>`` slot (:func:`~shipit.tree.layout.created_from_leaf`),
+the first real creation column ``tree list`` has ever had (ADR-0074; ``None`` for an
+old nested Tree that predates the flat grammar) — and its **age** against an injected
+``now`` (no clock in here). ``created`` is a display fact only: ``gc`` never reads it
+(creation-age is not activity-age, ADR-0072). The :class:`Fleet` wrapper is the ``--json``
 surface: ``to_dict()`` declares the field set the render seam serializes
 (ADR-0030), while the text table stays a pure verb-layer renderer over the
 same rows — one derivation, two views that cannot disagree.
@@ -17,7 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .layout import tree_kind
+from .layout import created_from_leaf
 from .registry import TreeRecord
 
 
@@ -29,11 +30,12 @@ class FleetTree:
     ``None`` when absent — the renderer owns the placeholder spellings
     (``(detached)``, ``-``), so the JSON surface carries honest nulls.
     ``age_seconds`` is the Tree's age at the listing's ``now`` (clamped at
-    zero: a just-touched Tree never reads negative).
+    zero: a just-touched Tree never reads negative). ``created`` is the flat
+    leaf's ``%Y%m%d-%H%M%S`` stamp, or ``None`` for a pre-flat nested Tree.
     """
 
     path: str
-    kind: str
+    created: str | None
     branch: str | None
     base: str | None
     ahead: int
@@ -44,7 +46,7 @@ class FleetTree:
     def to_dict(self) -> dict:
         return {
             "path": self.path,
-            "kind": self.kind,
+            "created": self.created,
             "branch": self.branch,
             "base": self.base,
             "ahead": self.ahead,
@@ -80,10 +82,10 @@ def build(records: list[TreeRecord], *, now: float) -> Fleet:
 
 
 def _row(record: TreeRecord, *, now: float) -> FleetTree:
-    """One record's listing row: the snapshot plus kind and age."""
+    """One record's listing row: the snapshot plus created stamp and age."""
     return FleetTree(
         path=record.path,
-        kind=tree_kind(record.path),
+        created=created_from_leaf(record.path),
         branch=record.branch,
         base=record.base,
         ahead=record.ahead,

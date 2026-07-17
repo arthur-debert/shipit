@@ -8,5 +8,5 @@ coordinator to drive.
 The role is validated through the fixed Role Profile registry before any Tree is
 provisioned or backend launched. Implementers get new write Trees and a draft-PR
 result channel; shepherds attach to an existing PR write Tree; reviewers get a
-shared read-only Tree and a posted-review result channel. Detached explorer or
+per-Run read-only Tree and a posted-review result channel. Detached explorer or
 coordinator launches are refused at preflight.

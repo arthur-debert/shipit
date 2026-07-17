@@ -4,7 +4,7 @@ TRE03 builds shipit-owned subagent spawning ([ADR-0017](../adr/0017-shipit-owned
 [ADR-0018](../adr/0018-read-only-trees.md), [ADR-0019](../adr/0019-headless-claude-run-launch-contract.md)):
 `shipit spawn subagent` creates an isolated **Tree** (a dissociated clone), launches a
 headless `claude` Run rooted in it, and — for a write Run — has that Run open a draft
-PR from the Tree's branch; for a **reviewer** Run it provisions a shared read-only
+PR from the Tree's branch; for a **reviewer** Run it provisions a per-Run read-only
 Tree and posts a review through the PR.
 
 Every work stream is unit-tested with the `claude` spawn and the `gh` boundary
@@ -26,9 +26,10 @@ PASS/FAIL report:
 - **Write Run → real draft PR.** A write Run lands in its Tree **on the planned
   `EPIC/WSnn` branch** (never `shipit/install`), `pixi` runs in the Tree, and it opens
   a **real, OPEN, DRAFT PR** from the Tree's branch.
-- **Reviewer Run → shared read-only Tree + a real review.** A reviewer Run provisions
-  a **shared** read-only Tree (a second reviewer on the same `(repo, branch)` reuses
-  the clone) that is **genuinely non-writable**, and **posts a review** on the write
+- **Reviewer Run → per-Run read-only Tree + a real review.** A reviewer Run provisions
+  a **per-Run** read-only Tree (a second reviewer on the same head gets its OWN distinct
+  Tree — ADR-0074 retired the shared `(repo, branch)` clone) that is **genuinely
+  non-writable**, and **posts a review** on the write
   Run's PR.
 - **Fail-closed.** A forced Tree-create failure **fails closed** — loud diagnostic,
   nonzero exit, **no native-worktree fallback**.
@@ -125,12 +126,13 @@ CDX01 — has its own live runbook:
 
 The reviewer Run is **backend-parametrized**: `shipit spawn subagent --role reviewer
 --backend codex|antigravity` delegates the selected funnel backend to the captured
-review service. The service provisions the SAME shared read-only Tree (ADR-0018),
-launches with the ADR-0020 bounded posture, captures structured output, and posts
-through the backend's App identity. The generic self-posting `gh pr review` task is
-not part of this surface. The dogfood reviewer scenario passes `--backend codex`
-explicitly (Claude has no funnel identity) and confirms that a real App-authored
-review lands on the write Run's PR and the shared Tree is reused + non-writable.
+review service. The service provisions a per-Run read-only Tree (ADR-0018's read-only
+mode, per-Run since ADR-0074), launches with the ADR-0020 bounded posture, captures
+structured output, and posts through the backend's App identity. The generic
+self-posting `gh pr review` task is not part of this surface. The dogfood reviewer
+scenario passes `--backend codex` explicitly (Claude has no funnel identity) and
+confirms that a real App-authored review lands on the write Run's PR and the per-Run
+Tree is distinct + non-writable.
 
 ### The funnel **capture** reviewer (TRE05-WS04b) — the `review: <agent>-local` gate
 
@@ -139,8 +141,8 @@ readiness engine reads) shares the SAME launch posture but a DIFFERENT result ch
 the funnel **captures** the agent's structured stdout and posts it AS the bot App
 identity (`adr-<agent>-review[bot]`) onto the `review: <agent>-local` check-run — so
 REQUEST_CHANGES and the conclusion nuance are preserved. Since TRE05-WS04b the funnel
-producer is the Tree-fetch producer (`shipit.review.producer`): it provisions the
-shared read-only Tree on the PR head and the agent **fetches the scoped diff itself**
+producer is the Tree-fetch producer (`shipit.review.producer`): it provisions a
+per-Run read-only Tree on the PR head and the agent **fetches the scoped diff itself**
 with `gh pr diff` (the diff is no longer front-loaded into the prompt — ADR-0020
 §Reviewer-path reconciliation, REPLACE).
 

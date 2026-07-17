@@ -105,7 +105,7 @@ isolation, I/O kept thin at the edges):
   ``create.run_provision``. The write-Tree half of ADR-0018.
 - :mod:`shipit.tree.readonly` — the read-only-Tree half of ADR-0018: clone +
   ``git checkout`` only (no ``.treeinclude``, no provisioning), files ``chmod``'d
-  read-only, shared per ``(repo, branch)`` so co-tenant reviewers reuse one clone.
+  read-only and per-Run (ADR-0074): a reviewer clone dated by its own files.
 - :mod:`shipit.tree.registry` — manifest-less fleet scan behind ``list``:
   ``scan(root) -> [TreeRecord]`` reads each clone's state straight off disk.
 - :mod:`shipit.tree.activity` — the reclaim signal (ADR-0072):

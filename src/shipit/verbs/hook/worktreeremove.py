@@ -19,10 +19,16 @@ is a clean no-op and stays at DEBUG.
 Fast does not mean careless — the reclaim rule's never-lose-work floor holds here
 too:
 
-- Only an **ephemeral** Tree (``…/ephemeral/<id>``, by the leaf's parent segment)
-  **under the central root** is ever touched. Every other kind — a write Tree, a
-  shared review clone, an arbitrary path in the payload — is left to its own
-  reclaim rule; a hook fed a hostile or confused path deletes nothing.
+- Only a genuine **flat Tree leaf directly under the central root** is ever touched
+  (ADR-0074: a Tree is ONE flat, self-describing leaf directly below the root, with no
+  kind segment to key off — the flat leaf carries no ``ephemeral``/``write``/``review``
+  marker, and this event fires only for the worktree the session itself adopted at
+  ``WorktreeCreate``). The identity gate requires a **direct child** of the root whose
+  name conforms to the flat-leaf grammar (:func:`~shipit.tree.layout.parse_flat_leaf`),
+  so an arbitrary or hostile path — outside the root, a NESTED clone (a submodule or an
+  accidental repo inside a Tree), a non-conforming direct child, or not a git clone — is
+  left untouched, and the never-lose-work floor below is what keeps a Tree carrying work
+  safe regardless of which Tree the payload names.
 - A **dirty** Tree or one with **unpushed** commits (the upstream-independent
   list — commits on NO remote, so a fresh no-upstream ``ephemeral/<id>`` branch
   is judged by what it actually holds) is NEVER auto-removed, even on a clean
@@ -62,7 +68,7 @@ from typing import TextIO
 import click
 
 from ... import git
-from ...tree.layout import EPHEMERAL_KIND, central_root, tree_kind
+from ...tree.layout import central_root, parse_flat_leaf
 from ...tree.readonly import remove_tree
 
 logger = logging.getLogger("shipit.hook")
@@ -118,15 +124,23 @@ def run(stdin: TextIO | None = None) -> int:
 
 
 def _target_tree(payload: dict[str, object]) -> Path | None:
-    """The ephemeral Tree the payload names, or ``None`` when it names no such Tree.
+    """The Tree the payload names, or ``None`` when it names no reclaimable Tree.
 
     Tries each of :data:`_PATH_FIELDS` in order and returns the first value that
-    passes ALL the identity gates: an absolute-izable path whose leaf-parent
-    segment is the ``ephemeral`` kind, that lives UNDER the central root, and that
-    is a real clone (its ``.git`` is a directory). The gates are what make the
-    unpinned payload contract safe: whatever field the harness actually sends —
-    or a hostile value — either names a genuine ephemeral session Tree or the
-    hook does nothing.
+    passes ALL the identity gates: an absolute-izable path that is a **direct child**
+    of the central root (``candidate.parent == root``) whose name conforms to the flat
+    leaf grammar (:func:`~shipit.tree.layout.parse_flat_leaf` accepts it), and is a real
+    clone (its ``.git`` is a directory). A Tree is now ONE flat leaf directly under the
+    root (ADR-0074), so the direct-child + flat-leaf pair is what makes the payload
+    contract safe on a destructive path: a NESTED clone (a submodule checkout, or an
+    accidental repo inside a Tree) and a non-conforming direct child are BOTH ignored,
+    and the root itself — never a direct child of itself and never a flat leaf — can
+    never be handed up for removal even if it carries a ``.git``. ADR-0074 retired the
+    kind segment, so there is no ``ephemeral``-vs-other test to make here — the flat leaf
+    carries no kind, this event fires only for the worktree the session adopted, and the
+    never-lose-work floor (:func:`_removal_blocker`) is what keeps a Tree carrying work
+    safe. So whatever field the harness sends — or a hostile value — either names a
+    genuine flat Tree leaf under the root or the hook does nothing.
     """
     root = central_root().resolve()
     for field in _PATH_FIELDS:
@@ -134,9 +148,7 @@ def _target_tree(payload: dict[str, object]) -> Path | None:
         if not isinstance(value, str) or not value:
             continue
         candidate = Path(value).resolve()
-        if tree_kind(candidate) != EPHEMERAL_KIND:
-            continue
-        if not candidate.is_relative_to(root):
+        if candidate.parent != root or parse_flat_leaf(candidate.name) is None:
             continue
         if not (candidate / ".git").is_dir():
             continue

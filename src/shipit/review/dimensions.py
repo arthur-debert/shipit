@@ -2,7 +2,7 @@
 
 A **Dimension pass** is one scoped finder inside a local-agent reviewer's
 round-1 fan-out review run: a single pass whose prompt is narrowed to one
-dimension, run on that reviewer's Backend against the shared read-only Tree
+dimension, run on that reviewer's Backend against the per-Run read-only Tree
 (CONTEXT.md "Dimension pass"). Passes run in parallel; their union feeds the
 **Calibrator** (:mod:`shipit.review.calibrator`). Since ADR-0052 the fan-out
 itself is OPT-IN — the round-1 default is one monolithic full-scope pass, and

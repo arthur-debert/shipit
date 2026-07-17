@@ -361,12 +361,18 @@ def test_unwritable_env_file_fails_open(pixi_repo, tmp_path):
 # (REL01 #349, ADR-0029)
 # --------------------------------------------------------------------------
 
-SESSION_LEAF = "sess-20260703-41649"
+#: A flat coordinator session Tree leaf (ADR-0074): ``<repo>-<agent>-<timestamp>-<id>``,
+#: ONE segment below the central root, no owner/kind segment. Its trailing ``<id>`` is
+#: the harness session UUID — and current_session_id recovers exactly that UUID from the
+#: leaf, so it is the value the hook exports as the session id.
+SESSION_ID = "619cf51a-f501-44dc-992f-74df773204aa"
+SESSION_LEAF = f"repo-claude-20260703-041649-{SESSION_ID}"
 
 
 def _ephemeral_tree(root: Path, leaf: str = SESSION_LEAF) -> Path:
-    """An ephemeral session-Tree dir under ``root`` (the path IS the signal)."""
-    tree = root / "org" / "repo" / "ephemeral" / leaf
+    """A coordinator session Tree dir under ``root`` — the flat, self-describing leaf
+    (ADR-0074), ONE segment below the central root; the path IS the signal."""
+    tree = root / leaf
     tree.mkdir(parents=True)
     return tree
 
@@ -399,7 +405,7 @@ def test_ephemeral_tree_cwd_exports_session_log_context(tmp_path, monkeypatch):
     code = _run_log_context(tree, env_file)
     assert code == 0
     lines = env_file.read_text().splitlines()
-    assert f"export {logcontext.ENV_PREFIX}SESSION={SESSION_LEAF}" in lines
+    assert f"export {logcontext.ENV_PREFIX}SESSION={SESSION_ID}" in lines
     assert (
         f"export {logcontext.ENV_PREFIX}TREE={shlex.quote(str(tree.resolve()))}"
         in lines
@@ -423,7 +429,7 @@ def test_exported_session_id_round_trips_through_bind_from_env(tmp_path, monkeyp
     try:
         logcontext.bind_from_env(child_env)
         assert logcontext.bound() == {
-            "session": SESSION_LEAF,
+            "session": SESSION_ID,
             "tree": str(tree.resolve()),
         }
     finally:
@@ -443,12 +449,15 @@ def test_non_tree_cwd_exports_no_log_context(tmp_path, monkeypatch):
     assert not env_file.exists()
 
 
-def test_write_tree_cwd_exports_no_log_context(tmp_path, monkeypatch):
-    # Under the central root but the WRONG kind: only the ephemeral kind's leaf
-    # is a session id (a write Tree's leaf is branch-slug-hash), so the issue/
-    # epic/branches namespaces must never mint a bogus session key.
+def test_old_nested_tree_cwd_exports_no_log_context(tmp_path, monkeypatch):
+    # ADR-0074 has no kind segment, so the discriminator is no longer the leaf's
+    # kind but its trailing UUID. Old NESTED Trees coexist by attrition (their leaf
+    # carries no flat `<timestamp>-<uuid>` tail), so the flat-leaf session extractor
+    # yields nothing — a pre-flat Tree the sweep has not reclaimed never mints a bogus
+    # session key. (containing_tree truncates to the first segment below the root — here
+    # `owner` — which has no UUID tail.)
     root = tmp_path / "trees"
-    tree = root / "org" / "repo" / "issues" / "349" / "work-deadbeef"
+    tree = root / "owner" / "repo" / "issues" / "349" / "work-deadbeef"
     tree.mkdir(parents=True)
     monkeypatch.setenv(layout.CENTRAL_ROOT_ENV, str(root))
     env_file = tmp_path / "claude-env"
@@ -460,9 +469,9 @@ def test_write_tree_cwd_exports_no_log_context(tmp_path, monkeypatch):
 def test_nested_dir_inside_a_tree_exports_the_containing_session(tmp_path, monkeypatch):
     # A cwd DEEPER than the Tree root (a bare shell cd'd into src/, even one that
     # itself contains a decoy `ephemeral/not-a-session` segment) is still IN the
-    # session: resolution truncates to the Tree root (the first four segments
-    # below the central root), so the export names the CONTAINING session —
-    # SESSION_LEAF — and the decoy leaf name never wins.
+    # session: ADR-0074 resolution truncates to the Tree root (the FIRST segment
+    # below the central root — no depth arithmetic), so the export names the
+    # CONTAINING session (its trailing UUID) and the decoy leaf name never wins.
     root = tmp_path / "trees"
     tree = _ephemeral_tree(root)
     nested = tree / "src" / "ephemeral" / "not-a-session"
@@ -472,18 +481,21 @@ def test_nested_dir_inside_a_tree_exports_the_containing_session(tmp_path, monke
     code = _run_log_context(nested, env_file)
     assert code == 0
     lines = env_file.read_text().splitlines()
-    assert f"export {logcontext.ENV_PREFIX}SESSION={SESSION_LEAF}" in lines
+    assert f"export {logcontext.ENV_PREFIX}SESSION={SESSION_ID}" in lines
     assert (
         f"export {logcontext.ENV_PREFIX}TREE={shlex.quote(str(tree.resolve()))}"
         in lines
     )
 
 
-def test_shallow_ephemeral_dir_exports_no_log_context(tmp_path, monkeypatch):
-    # Same discriminator, other direction: <root>/ephemeral/<x> is too shallow
-    # for the minted shape (no org/repo segments) — no session key.
+def test_flat_position_dir_without_a_uuid_tail_exports_no_log_context(
+    tmp_path, monkeypatch
+):
+    # The discriminator is the trailing UUID, not depth: a dir sitting one segment
+    # below the root whose leaf is NOT the flat `<repo>-<agent>-<timestamp>-<id>`
+    # shape (no UUID tail) yields no session key — nothing to export.
     root = tmp_path / "trees"
-    shallow = root / "ephemeral" / "not-a-session"
+    shallow = root / "not-a-session"
     shallow.mkdir(parents=True)
     monkeypatch.setenv(layout.CENTRAL_ROOT_ENV, str(root))
     env_file = tmp_path / "claude-env"
@@ -509,7 +521,7 @@ def test_log_context_lands_alongside_the_activation_exports(tmp_path, monkeypatc
     assert code == 0
     content = env_file.read_text()
     assert "export CONDA_DEFAULT_ENV=shipit" in content
-    session_line = f"export {logcontext.ENV_PREFIX}SESSION={SESSION_LEAF}"
+    session_line = f"export {logcontext.ENV_PREFIX}SESSION={SESSION_ID}"
     assert session_line in content
     assert content.index("CONDA_DEFAULT_ENV") < content.index(session_line)
 
@@ -597,21 +609,23 @@ def test_source_clone_cwd_warns_on_stdout(tmp_path, monkeypatch, caplog):
 def test_ephemeral_tree_cwd_is_silent(tmp_path, monkeypatch):
     # A session Tree is a clone of the same repo — it carries BOTH markers — but
     # it lives under the central root, so it must never warn (the no-false-
-    # positives constraint). The branch is irrelevant: session Trees move off
-    # ephemeral/* mid-session (work-by-branch), which is exactly why the
-    # discriminator is the path.
+    # positives constraint). The flat leaf shape (ADR-0074) is irrelevant here: the
+    # discriminator is the path being UNDER the root, not the leaf.
     root = tmp_path / "trees"
-    tree = _clone_shape(root / "org" / "repo" / "ephemeral" / "sess-20260703-1")
+    tree = _clone_shape(root / SESSION_LEAF)
     monkeypatch.setenv(layout.CENTRAL_ROOT_ENV, str(root))
     code, out = _run_warning_check(tree)
     assert code == 0
     assert out == ""
 
 
-def test_branch_tree_cwd_is_silent(tmp_path, monkeypatch):
-    # Same for a per-Run write Tree (branches/ namespace): under the root → silent.
+def test_run_tree_cwd_is_silent(tmp_path, monkeypatch):
+    # Same for any other per-Run flat Tree (a different agent/id leaf): under the
+    # root → silent.
     root = tmp_path / "trees"
-    tree = _clone_shape(root / "org" / "repo" / "branches" / "spike-foo-deadbeef")
+    tree = _clone_shape(
+        root / "repo-codex-20260101-000000-11111111-2222-4333-8444-555555555555"
+    )
     monkeypatch.setenv(layout.CENTRAL_ROOT_ENV, str(root))
     code, out = _run_warning_check(tree)
     assert code == 0
@@ -707,7 +721,9 @@ def test_every_session_start_emits_session_started(tmp_path, monkeypatch, caplog
 
 def test_codex_session_start_persists_native_thread_id(tmp_path, monkeypatch, caplog):
     root = tmp_path / "trees"
-    tree = _ephemeral_tree(root, leaf="codex-20260711-121015-73781")
+    tree = _ephemeral_tree(
+        root, leaf="repo-codex-20260711-121015-73781aaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+    )
     monkeypatch.setenv(layout.CENTRAL_ROOT_ENV, str(root))
     monkeypatch.setenv("CODEX_THREAD_ID", "019f-fresh-thread")
 
@@ -741,7 +757,7 @@ def test_session_started_binds_the_ephemeral_session_scoped(tmp_path, monkeypatc
     monkeypatch.setattr(sessionstart.events, "emit", spy)
     code = _run_log_context(tree, tmp_path / "claude-env")
     assert code == 0
-    assert seen["session.started"]["session"] == SESSION_LEAF
+    assert seen["session.started"]["session"] == SESSION_ID
     assert seen["session.started"]["tree"] == str(tree.resolve())
     # Scoped: unwound after the emit — nothing leaks past the hook step.
     assert "session" not in logcontext.bound()
