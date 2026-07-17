@@ -43,6 +43,25 @@ the wf-publish workflow block and a laptop invocation:
   release (as prerelease); every external endpoint — crates, pypi, npm,
   brew — is skipped, making live-fire pipeline verification safe from a
   laptop.
+- Endpoint selector (`--endpoint <name>`, repeatable): publish ONLY the
+  named endpoints; every other declared endpoint is skipped with its own
+  stated selector reason, visible in the plan next to the RC-guard and
+  stable-only skips. It narrows DISTRIBUTION, never the Release: the
+  build/sign barrier still runs over the entire declared artifact set and
+  gh-release still carries every artifact's assets, so `gh-release` cannot
+  be deselected. A derived endpoint (conda, brew) still requires its base
+  in the plan; an unknown name, or one no artifact declares, is a hard
+  error — never a silent no-op that publishes nothing. It composes with
+  the guards by INTERSECTION: a `-release-rc` tag still skips every
+  external endpoint, so the selector cannot turn a rehearsal into a real
+  publish (seed with an ordinary prerelease tag). Per-invocation ONLY —
+  never a .shipit.toml field: a subset is one operator's deliberate act on
+  one run, and the next run is whole again.
+
+    shipit release publish 1.2.3-rc.1 ... --endpoint gh-release --endpoint conda
+
+  publishes the complete Release plus the channel `.conda`, recording
+  crates/npm as selector-skipped.
 - Two-stage ordering: `release` endpoints complete before `derived` ones
   (brew needs the final asset URLs/SHAs).
 - Idempotent-resumable: external endpoints cannot roll back, so publish
