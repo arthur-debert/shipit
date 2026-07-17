@@ -363,15 +363,15 @@ This **extends ADR-0019** (generalizes its claude-only contract) and **does not 
 Tree substrate (ADR-0014/0015/0018) or the readiness/review model (ADR-0005/0006) — the
 reviewer-path reconciliation above is flagged for an explicit decision, not silently changed.
 
-## Amendment (issue #989) — AGY 1.1.2 native reviewer agent + the dogfood review models
+## Amendment (issue #989, superseded by #1033) — AGY 1.1.2 native reviewer agent attempt
 
 The original §antigravity was recorded against **agy v1.0.14**, whose reviewer posture had
 **no** native agent-def flag, so the reviewer role rode a prompt-prepended sentence
-(`role_prompt`). The installed **agy is now 1.1.2**, which adds a documented **`--agent <name>`**
-flag selecting a custom agent def from the checkout's `.agents/agents/<name>/agent.md`. This
-amendment updates the reviewer posture accordingly (write-role argv is UNCHANGED):
+(`role_prompt`). The installed **agy is now 1.1.2**, which added a documented **`--agent <name>`**
+flag. An attempt was made in #989 to use this for the reviewer posture, but it was superseded
+by #1033 which reverted to prompt-prepend.
 
-- **Reviewer agent posture (issue #1033).** The reviewer posture uses prompt-prepend to convey its role, exactly like a write Run (:func:`role_prompt`). A prior attempt to use agy's native `--agent reviewer` flag (issue #989) was reverted because it degraded the model's reliability (e.g. going agentic instead of returning JSON).
+- **Reviewer agent posture (issue #1033).** The reviewer posture uses prompt-prepend to convey its role, exactly like a write Run (:func:`role_prompt`). The prior attempt to use agy's native `--agent reviewer` flag (issue #989) was reverted because it degraded the model's reliability (e.g. going agentic instead of returning JSON).
 - **`--new-project --add-dir` retained.** The measured startup/project overhead is only seconds;
   the dominant cost was the planner/tool loop, not Tree/project churn. `--project` reuse and
   `--sandbox` are deliberately NOT adopted here (agy exposes no stable public create/list workflow,

@@ -181,7 +181,7 @@ def _provision_replay_defs(
     Only the calibrator's dormant judge, ``claude --agent reviewer``
     (``.claude/agents``), requires this. A no-op when the judge is off.
     :func:`provision_agent_defs` writes only missing files. An :class:`OSError`
-    (read-only checkout, permissions, a non-directory ``.claude``/``.agents`` component)
+    (read-only checkout, permissions, a non-directory ``.claude`` component)
     is re-raised as a :class:`~shipit.review.diff.ReviewError` — the replay path's clean one-line
     refusal — BEFORE any model bills, never a raw traceback.
     """
@@ -509,20 +509,17 @@ def _provision_bundled_tree(root: Path, rel_dir: str, source) -> list[Path]:
 
 
 def provision_agent_defs(workdir: str) -> list[Path]:
-    """Provision the bundled role agent-defs into ``workdir`` — both the Claude
-    defs (``.claude/agents``) and the AGY reviewer def (``.agents/agents``, #989).
+    """Provision the bundled Claude role agent-defs (``.claude/agents``) into ``workdir``.
 
-    The RVW02-WS08 op gap (#680): a reviewer/calibrator backend launches ``claude
-    --agent reviewer`` (reads ``.claude/agents/reviewer.md``) or, on the agy arm,
-    ``agy --agent reviewer`` (reads ``.agents/agents/reviewer/agent.md``) from the
+    The RVW02-WS08 op gap (#680): a calibrator backend launches ``claude
+    --agent reviewer`` (reads ``.claude/agents/reviewer.md``) from the
     checkout it runs in — present in shipit-self and installed consumers, ABSENT
     in a bare experiment clone, where the launch fails. So a replay writes the
-    bundled defs (:func:`shipit.install.units.agents_root` /
-    :func:`~shipit.install.units.agy_agents_root` — the same sources ``shipit
-    install`` vendors) into the replay checkout first. Only MISSING files are
+    bundled defs (:func:`shipit.install.units.agents_root` — the same source
+    ``shipit install`` vendors) into the replay checkout first. Only MISSING files are
     written: an existing def (committed, installed, or deliberately edited as an
     experiment arm) is the checkout's own and is never clobbered. Returns every
-    path written across both trees (empty when everything was already present).
+    path written (empty when everything was already present).
 
     Untrusted-checkout guard (RVW03-WS01): replay runs over a checkout the
     operator may not control, so the writes stay strictly inside the checkout —
@@ -531,17 +528,12 @@ def provision_agent_defs(workdir: str) -> list[Path]:
     """
     from ..install.units import (
         AGENTS_DEF_DIR,
-        AGY_AGENTS_DEF_DIR,
         agents_root,
-        agy_agents_root,
     )
 
     root = Path(workdir).resolve()
     written: list[Path] = []
     written += _provision_bundled_tree(root, AGENTS_DEF_DIR, agents_root())
-    agy_source = agy_agents_root()
-    if agy_source.is_dir():
-        written += _provision_bundled_tree(root, AGY_AGENTS_DEF_DIR, agy_source)
     if written:
         logger.info(
             "replay: provisioned %d role agent-def(s) into %s",

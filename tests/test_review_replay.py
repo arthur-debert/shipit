@@ -526,6 +526,7 @@ def test_run_fanout_replay_calibrator_runs_offline_with_provisioned_agent_defs(
     )
     # The agent-defs the judge needs exist in the replay clone.
     assert (checkout / ".claude" / "agents" / "reviewer.md").is_file()
+    assert not (checkout / ".agents" / "agents" / "reviewer" / "agent.md").exists()
     [judge] = [
         entry for entry in fanout_launcher["launches"] if entry["cmd"][0] == "claude"
     ]
@@ -600,40 +601,9 @@ def test_provision_agent_defs_refuses_symlinked_component(checkout, tmp_path):
     assert not any(".claude" in path.parts for path in written)
 
 
-def test_provision_agent_defs_refuses_symlinked_agy_component(checkout, tmp_path):
-    # The AGY tree (`.agents/agents`, #989) carries the SAME untrusted-checkout
-    # guard: a symlinked `.agents` component aborts the AGY tree and writes nothing
-    # bundled through it, while the independent `.claude` tree still provisions.
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    (checkout / ".agents").symlink_to(outside, target_is_directory=True)
-
-    written = replay.provision_agent_defs(str(checkout))
-
-    assert list(outside.iterdir()) == []
-    assert not any(".agents" in path.parts for path in written)
-    # The `.claude` tree is unaffected and still lands its defs.
-    assert any(".claude" in path.parts for path in written)
-
-
-def test_provision_agent_defs_provisions_the_agy_reviewer_def(checkout):
-    # #989: the AGY native reviewer def is provisioned into `.agents/agents/reviewer/
-    # agent.md` (nested) so `agy --agent reviewer` finds it in a bare replay checkout.
-    written = replay.provision_agent_defs(str(checkout))
-
-    agy_def = checkout / ".agents" / "agents" / "reviewer" / "agent.md"
-    assert agy_def in written
-    assert agy_def.is_file()
-    assert "name: reviewer" in agy_def.read_text(encoding="utf-8")
-
-
-def test_run_replay_uncalibrated_agy_does_not_provision_defs(
-    checkout, launcher, tmp_path
-):
-    # #1033: an uncalibrated AGY replay launches without writing agent definitions.
-    # The native reviewer posture was reverted, so AGY no longer needs `.agents`.
-    agy_def = checkout / ".agents" / "agents" / "reviewer" / "agent.md"
-    assert not agy_def.exists()  # bare clone
+def test_run_replay_uncalibrated_does_not_provision_defs(checkout, launcher, tmp_path):
+    claude_def = checkout / ".claude" / "agents" / "reviewer.md"
+    assert not claude_def.exists()  # bare clone
 
     view = replay.resolve_range("HEAD~1..HEAD", workdir=str(checkout))
     replay.run_replay(
@@ -643,17 +613,14 @@ def test_run_replay_uncalibrated_agy_does_not_provision_defs(
         base_dir=tmp_path / "state",
     )
 
-    assert not agy_def.exists()  # NO provisioning occurred
-    assert launcher["cmd"][0] == "agy"  # the launch actually ran
+    assert not claude_def.exists()  # NO provisioning occurred
 
 
-def test_run_fanout_replay_uncalibrated_agy_does_not_provision_defs(
+def test_run_fanout_replay_uncalibrated_does_not_provision_defs(
     checkout, fanout_launcher, tmp_path
 ):
-    # #1033: an UNCALIBRATED fan-out AGY replay also launches without writing agent
-    # definitions.
-    agy_def = checkout / ".agents" / "agents" / "reviewer" / "agent.md"
-    assert not agy_def.exists()
+    claude_def = checkout / ".claude" / "agents" / "reviewer.md"
+    assert not claude_def.exists()
 
     view = replay.resolve_range("HEAD~1..HEAD", workdir=str(checkout))
     replay.run_fanout_replay(
@@ -664,33 +631,27 @@ def test_run_fanout_replay_uncalibrated_agy_does_not_provision_defs(
         base_dir=tmp_path / "state",
     )
 
-    assert not agy_def.exists()  # NO provisioning occurred
-    assert any(entry["cmd"][0] == "agy" for entry in fanout_launcher["launches"])
+    assert not claude_def.exists()  # NO provisioning occurred
 
 
 def test_provision_agent_defs_nested_symlink_aborts_the_tree_fail_closed(
     checkout, tmp_path
 ):
     # copilot finding: the INTERMEDIATE-dir symlink guard (a nested component a
-    # file needs, e.g. `reviewer/`) must FAIL CLOSED — abort the tree with
+    # file needs, e.g. `agents/`) must FAIL CLOSED — abort the tree with
     # nothing further written, matching the base-chain guard and the docstring —
-    # not skip-one-file-and-keep-going. Plant `.agents/agents/reviewer` (the
-    # nested parent of `reviewer/agent.md`) as a symlink out of the tree, with
-    # the parent `.agents/agents` a real dir so the base-chain guard passes and
-    # the nested guard is the one that must catch it.
+    # not skip-one-file-and-keep-going. Plant `.claude/agents` as a symlink
+    # out of the tree, with the parent `.claude` a real dir so the base-chain
+    # guard passes and the nested guard is the one that must catch it.
     outside = tmp_path / "outside"
     outside.mkdir()
-    (checkout / ".agents" / "agents").mkdir(parents=True)
-    (checkout / ".agents" / "agents" / "reviewer").symlink_to(
-        outside, target_is_directory=True
-    )
+    (checkout / ".claude").mkdir(parents=True)
+    (checkout / ".claude" / "agents").symlink_to(outside, target_is_directory=True)
 
     written = replay.provision_agent_defs(str(checkout))
 
     assert list(outside.iterdir()) == []  # nothing leaked through the symlink
-    assert not any(".agents" in path.parts for path in written)
-    # The independent `.claude` tree is unaffected and still lands its defs.
-    assert any(".claude" in path.parts for path in written)
+    assert not any(".claude" in path.parts for path in written)
     # Never clobbered on a second call.
     assert replay.provision_agent_defs(str(checkout)) == []
 

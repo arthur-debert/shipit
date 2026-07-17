@@ -93,9 +93,10 @@ def resolve_model(model: str) -> str:
 def role_prompt(task: str, role: str) -> str:
     """Convey ``role`` by **prepending** it to the ``--print`` task text.
 
-    The role conveyance for every posture. A Run has no native agent def, so its role
-    rides in the prompt itself. Prompt-prepend is the chosen mechanism (writing a role
-    agent-def into the Tree would pollute the PR or cause issues).
+    The role conveyance for every posture. While AGY supports native agent defs via
+    ``--agent``, we intentionally do not use them (see #1033), so the role rides in the prompt itself.
+    Prompt-prepend is the chosen mechanism (writing a role agent-def into the Tree would
+    pollute the PR or cause issues).
     """
     return f"You are acting as the '{role}' role for this Run.\n\n{task}"
 
