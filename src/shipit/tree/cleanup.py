@@ -213,10 +213,12 @@ def _is_unknown(state: str | None) -> bool:
       window IS ``removable`` while its PR state is unreadable. That is by design; do NOT
       "fix" it by adding an UNKNOWN rung there. PR state is only ever that ladder's fast
       path to reclaim (rung 2, ``_is_merged``); its rung 1 — dirty or unpushed → keep —
-      is an absolute floor, so anything reaching the liveness/age rungs is already clean
-      AND fully pushed, its work safe on a remote, with nothing left for PR state to
-      protect. An UNKNOWN rung would instead strand every session Tree whenever the
-      ``gh`` budget is drained.
+      is an absolute floor, so anything reaching the liveness/age rungs is clean and
+      holds no *unprotected* local work: any local-only commit still present there is
+      exactly a recorded provisioning commit that rung 1 deliberately excludes (#232),
+      never the session's own. The session's work is therefore safe on a remote, with
+      nothing left for PR state to protect. An UNKNOWN rung would instead strand every
+      session Tree whenever the ``gh`` budget is drained.
 
     ``gc`` separately *warns* whenever any UNKNOWN was seen, on every kind.
     """
@@ -460,7 +462,9 @@ def _ephemeral_bucket(
     the merged fast path at rung 2, and never again — rungs 3-5 are pure liveness and
     age. So an UNKNOWN (unreadable) PR state does not appear on this ladder and cannot
     block reclaim, deliberately: rung 1 is an absolute floor, so a Tree reaching rungs
-    3-5 is already clean AND fully pushed and PR state has nothing left to protect. An
+    3-5 is clean and holds no *unprotected* local work — any local-only commit still
+    present is exactly a recorded provisioning commit rung 1 excludes (#232, rung 1
+    below), never the session's own — and PR state has nothing left to protect. An
     UNKNOWN rung here would strand every session Tree whenever the ``gh`` budget is
     drained (cf. :func:`_is_unknown`, whose "never removable" holds on the write ladder
     only).
