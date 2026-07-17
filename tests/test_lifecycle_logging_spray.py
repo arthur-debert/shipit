@@ -161,12 +161,22 @@ def test_noop_reinstall_emits_no_mutation_milestone(tmp_path, rec, caplog):
     # Nothing MUTATED, so no mutation milestone narrates at INFO — mechanics
     # stay at DEBUG. The #434 dev-cycle events (install.started/completed) are
     # the run's flow narration, not a mutation milestone, so they are excluded.
+    #
+    # Scoped to the install family's own logger (the whole family narrates on
+    # `shipit.install`), because a mutation milestone is BY DEFINITION install's
+    # own record: `caplog` collects the whole process, and a no-op run in a
+    # non-git `tmp_path` also carries `shipit.exec`'s ERROR for the fail-open
+    # `git remote get-url` the session-store seam is allowed to fail on
+    # (TREE03-WS04) — a transport record from a probe, not a milestone, and
+    # absent in any real checkout, where resolving the remote succeeds.
     from shipit.events import EXTRA_KEY
 
     assert not [
         r
         for r in caplog.records
-        if r.levelno >= logging.INFO and getattr(r, EXTRA_KEY, None) is None
+        if r.levelno >= logging.INFO
+        and r.name == "shipit.install"
+        and getattr(r, EXTRA_KEY, None) is None
     ]
 
 

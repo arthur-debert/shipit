@@ -81,6 +81,10 @@ def test_sprayed_modules_have_a_shipit_logger():
         ("shipit.prstate.flip", "shipit.prstate"),
         ("shipit.prstate.dispatch", "shipit.prstate"),
         ("shipit.checks", "shipit.checks"),
+        # TREE03-WS04: the session-store axis. Pinned here because the seam's
+        # tests filter caplog BY this name — a rename would otherwise turn those
+        # assertions into vacuous ones that match no record and always pass.
+        ("shipit.sessionstore", "shipit.sessionstore"),
     ]:
         mod = importlib.import_module(modname)
         assert isinstance(mod.logger, logging.Logger)

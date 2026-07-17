@@ -90,3 +90,10 @@ path = "hatch_build.py"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+markers = [
+    # Opts a test OUT of the autouse session-store home guard (tests/conftest.py), which
+    # otherwise points `sessionstore`'s default `~` at a tmp dir so no test can plant a
+    # symlink in the developer's real `~/.claude`. Only for tests that assert on the
+    # real default as a PATH VALUE and touch no filesystem.
+    "real_session_store_home: read the real ~ as the session store default (ADR-0073)",
+]
