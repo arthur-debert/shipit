@@ -250,3 +250,168 @@ def test_head_pr_display_state_normalizes_draft():
     assert draft.display_state == "DRAFT"
     assert open_pr.display_state == "OPEN"
     assert merged.display_state == "MERGED"
+
+
+# --- prs_by_head: the batched, one-call-per-repo index (#1011) ------------------------
+
+
+def _row(
+    number: int, head: str, state: str = "OPEN", *, is_draft: bool = False
+) -> dict:
+    return {
+        "number": number,
+        "state": state,
+        "isDraft": is_draft,
+        "baseRefName": "main",
+        "headRefName": head,
+    }
+
+
+def _capture_argv(monkeypatch, result: ExecResult) -> list[list[str]]:
+    calls: list[list[str]] = []
+
+    def fake(args, *, cwd=None, timeout=None):
+        calls.append(args)
+        return result
+
+    monkeypatch.setattr(gh, "_run_probe", fake)
+    return calls
+
+
+def test_prs_by_head_indexes_every_state_by_head_branch(monkeypatch):
+    # ONE call for the whole repo, indexed by head. The states gc branches on all
+    # survive the batch, draftness included.
+    payload = json.dumps(
+        [
+            _row(9, "issues/9/work", "OPEN", is_draft=True),
+            _row(7, "issues/7/work", "MERGED"),
+            _row(5, "issues/5/work", "CLOSED"),
+        ]
+    )
+    calls = _capture_argv(monkeypatch, _ok(payload))
+
+    index = gh.prs_by_head("acme/widget")
+
+    assert index == {
+        "issues/9/work": gh.HeadPr(
+            number=9, state="OPEN", is_draft=True, base_ref="main"
+        ),
+        "issues/7/work": gh.HeadPr(
+            number=7, state="MERGED", is_draft=False, base_ref="main"
+        ),
+        "issues/5/work": gh.HeadPr(
+            number=5, state="CLOSED", is_draft=False, base_ref="main"
+        ),
+    }
+    assert index["issues/9/work"].display_state == "DRAFT"
+    assert len(calls) == 1  # one repo, one call — the whole point
+
+
+def test_prs_by_head_asks_for_every_state_not_just_open(monkeypatch):
+    # THE gc-breaking detail: `gh pr list` defaults to OPEN only, while pr_for_head
+    # matches MERGED/CLOSED heads too. An open-only index would make every merged
+    # Tree read as "no PR" — and merged-and-clean is the rung gc reclaims on.
+    calls = _capture_argv(monkeypatch, _ok("[]"))
+
+    gh.prs_by_head("acme/widget")
+
+    (argv,) = calls
+    assert argv[:3] == ["gh", "pr", "list"]
+    assert "--state" in argv and argv[argv.index("--state") + 1] == "all"
+    assert "--repo" in argv and argv[argv.index("--repo") + 1] == "acme/widget"
+    # headRefName is what makes the result indexable at all.
+    assert "headRefName" in argv[argv.index("--json") + 1]
+
+
+def test_prs_by_head_empty_repo_is_a_real_answer_not_unknown(monkeypatch):
+    # A repo with no PRs exits 0 with `[]`. That is a COMPLETE index (every branch
+    # provably has no PR), not an unreadable one — the None arm, not UNKNOWN.
+    _capture_argv(monkeypatch, _ok("[]"))
+    assert gh.prs_by_head("acme/widget") == {}
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        _fail("HTTP 403: API rate limit exceeded"),  # the budget exhaustion of #1011
+        _fail("gh: could not authenticate"),
+        _ok(""),  # empty output
+        _ok("not json"),
+        _ok('{"number": 1}'),  # a dict, not the expected list
+    ],
+    ids=["rate-limited", "auth-failure", "empty", "non-json", "not-a-list"],
+)
+def test_prs_by_head_undetermined_view_is_unknown(monkeypatch, result):
+    # Every failure mode leaves the repo's state UNDETERMINED. Unlike `gh pr view
+    # <branch>`, there is no provable-absence arm here: a repo with no PRs succeeds
+    # with `[]`, so a FAILURE can never mean "no PR" — it must be UNKNOWN, which the
+    # gc ladder keeps.
+    _capture_argv(monkeypatch, result)
+    assert gh.prs_by_head("acme/widget") is gh.UNKNOWN
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [
+        [
+            _row(1, "b1"),
+            {
+                "number": None,
+                "state": "OPEN",
+                "isDraft": False,
+                "baseRefName": "main",
+                "headRefName": "b2",
+            },
+        ],
+        [
+            _row(1, "b1"),
+            {"number": 2, "state": "OPEN", "isDraft": False, "baseRefName": "main"},
+        ],  # no headRefName
+        [
+            _row(1, "b1"),
+            {
+                "number": 2,
+                "state": "OPEN",
+                "isDraft": False,
+                "baseRefName": "main",
+                "headRefName": "  ",
+            },
+        ],  # blank head
+        [_row(1, "b1"), "not-a-row"],
+    ],
+    ids=["malformed-number", "missing-head", "blank-head", "row-not-a-dict"],
+)
+def test_prs_by_head_one_bad_row_fails_the_whole_repo(monkeypatch, rows):
+    # A single unusable row must NOT be skipped: skipping drops that head from the
+    # index, and a missing head reads as a provable "no PR" — turning shape drift
+    # into a silent lie about one Tree, on the exact rung gc deletes. Failing the
+    # whole repo keeps the never-lie invariant. Note the GOOD row is discarded too.
+    _capture_argv(monkeypatch, _ok(json.dumps(rows)))
+    assert gh.prs_by_head("acme/widget") is gh.UNKNOWN
+
+
+def test_prs_by_head_truncated_result_is_unknown(monkeypatch):
+    # `gh pr list` pages up to --limit. A result that HIT the bound means heads went
+    # unread, and an unread head is indistinguishable from an absent one — exactly
+    # the None/UNKNOWN conflation the split exists to prevent. Refuse the index.
+    rows = [_row(n, f"b{n}") for n in range(gh._PR_LIST_LIMIT)]
+    _capture_argv(monkeypatch, _ok(json.dumps(rows)))
+    assert gh.prs_by_head("acme/widget") is gh.UNKNOWN
+
+    # One under the bound is a complete, trustworthy index.
+    _capture_argv(monkeypatch, _ok(json.dumps(rows[:-1])))
+    assert isinstance(gh.prs_by_head("acme/widget"), dict)
+
+
+def test_prs_by_head_rebuilt_branch_resolves_to_the_newest_pr(monkeypatch):
+    # Several PRs can share one head (a rebuilt branch). `gh pr list` returns
+    # newest-first, and `gh pr view <branch>` resolves to that same newest PR — so
+    # first-wins keeps the batch agreeing with the per-branch read it replaces.
+    payload = json.dumps(
+        [_row(686, "codex/grill", "MERGED"), _row(677, "codex/grill", "MERGED")]
+    )
+    _capture_argv(monkeypatch, _ok(payload))
+
+    index = gh.prs_by_head("acme/widget")
+
+    assert index["codex/grill"].number == 686

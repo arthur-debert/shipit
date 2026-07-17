@@ -938,6 +938,106 @@ def pr_for_head(branch: str, *, cwd: str | None = None) -> HeadPr | None | Unkno
         return UNKNOWN
 
 
+#: How many PRs one :func:`prs_by_head` call will page through. ``gh pr list``
+#: paginates internally up to ``--limit``, so this is the whole-repo bound, not a
+#: page size — sized well above any plausible shipit-managed repo (the largest
+#: carries ~500 PRs across all states). A repo that ACTUALLY has this many PRs
+#: makes the index untrustworthy rather than merely partial, which is why hitting
+#: the bound is reported as :data:`UNKNOWN` (see :func:`prs_by_head`) instead of
+#: being quietly returned as a complete answer.
+_PR_LIST_LIMIT = 4000
+
+
+def prs_by_head(repo: str) -> dict[str, HeadPr] | UnknownPr:
+    """Every PR in ``repo`` indexed by head branch — ONE ``gh pr list`` for the repo.
+
+    The batched twin of :func:`pr_for_head`: where that answers "which PR is on THIS
+    head?" with a round-trip per head, this answers it for the whole repo at once, so
+    a fleet read costs one call per REPO rather than one per Tree (issue #1011 — the
+    per-Tree fan-out exhausted the hourly GraphQL budget mid-``gc``, and an
+    unreadable state maps to keep, so ``gc`` silently swept nothing).
+
+    Reads ``gh pr list --repo <slug> --state all --json
+    number,state,isDraft,baseRefName,headRefName`` and returns a TWO-way result that
+    preserves :func:`pr_for_head`'s three-way vocabulary at the CALLER's level:
+
+    - a ``{head branch -> HeadPr}`` dict when the repo's PRs are read cleanly. The
+      index is COMPLETE, which is what licenses the caller's key inference: a branch
+      ABSENT from a returned dict provably has no PR (the ``None`` arm), so an empty
+      dict is a real answer — the repo simply has no PRs.
+    - :data:`UNKNOWN` when the view is undetermined for the whole repo — any ``gh``
+      failure (auth/network/rate-limit), empty/malformed/non-JSON output, a row
+      :func:`_head_pr_from_json` rejects, or a result that hit
+      :data:`_PR_LIST_LIMIT`. The caller maps this onto :data:`UNKNOWN` for every
+      Tree in that repo.
+
+    ``--state all`` is load-bearing: ``gh pr list`` defaults to OPEN only, while
+    :func:`pr_for_head` matches MERGED/CLOSED heads too — an open-only index would
+    make every merged Tree read as "no PR", which is precisely the rung ``gc``
+    reclaims on, so the two reads must see the same PRs.
+
+    A SINGLE malformed row fails the WHOLE repo rather than being skipped. Skipping
+    it would drop that head from the index, and a missing head is read as a provable
+    "no PR" — turning a shape-drift bug into a silent, gc-visible lie about one
+    Tree. Failing the repo keeps the never-lie invariant: this function only ever
+    returns an index it can vouch for entirely.
+
+    Where several PRs share one head (a rebuilt branch), the FIRST wins: ``gh pr
+    list`` returns newest-first, so that is the highest-numbered PR — matching what
+    ``gh pr view <branch>`` resolves to.
+    """
+    try:
+        result = _run_probe(
+            [
+                "gh",
+                "pr",
+                "list",
+                "--repo",
+                repo,
+                "--state",
+                "all",
+                "--limit",
+                str(_PR_LIST_LIMIT),
+                "--json",
+                "number,state,isDraft,baseRefName,headRefName",
+            ],
+        )
+    except ExecError:
+        return UNKNOWN
+    if result.rc != 0:
+        # Unlike `gh pr view <branch>`, a repo-wide list has no "provable absence"
+        # failure — a repo with no PRs exits 0 with `[]`. So EVERY nonzero rc is an
+        # undetermined view; there is no NO_PR_MARKER arm to mirror here.
+        return UNKNOWN
+    out = result.stdout.strip()
+    if not out:
+        return UNKNOWN
+    try:
+        rows = json.loads(out)
+    except json.JSONDecodeError:
+        return UNKNOWN
+    if not isinstance(rows, list):
+        return UNKNOWN
+    if len(rows) >= _PR_LIST_LIMIT:
+        # Truncated at the bound: the heads beyond it are unread, and an unread head
+        # is indistinguishable from an absent one — exactly the conflation the
+        # None/UNKNOWN split exists to prevent. Refuse the whole index.
+        return UNKNOWN
+    index: dict[str, HeadPr] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            return UNKNOWN
+        head = row.get("headRefName")
+        if not isinstance(head, str) or not head.strip():
+            return UNKNOWN
+        try:
+            pr = _head_pr_from_json(row)
+        except ValueError:
+            return UNKNOWN
+        index.setdefault(head.strip(), pr)
+    return index
+
+
 def pr_for_number(number: int, *, repo: str | None = None) -> PrAttachment:
     """The existing PR attachment snapshot for ``number``.
 

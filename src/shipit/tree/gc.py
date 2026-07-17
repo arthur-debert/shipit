@@ -29,7 +29,6 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from .. import gh
 from ..session import liveness
 from . import layout, provision, registry
 from .cleanup import DEFAULT_MAX_AGE_SECONDS, Cleanup, classify
@@ -147,11 +146,14 @@ def plan_fleet(
 ) -> GcPlan:
     """Scan the central root and build the :class:`GcPlan` — the effectful gather.
 
-    The read-only half of gc: scan → per-Tree PR state / liveness /
-    provisioning reads (each through its existing boundary) → the pure
-    :func:`plan`. Nothing on disk is mutated; the returned plan is what a
-    ``--dry-run`` renders and what :func:`sweep` applies, so the preview can
-    NEVER drift from the action.
+    The read-only half of gc: scan → per-Tree PR state / liveness / provisioning
+    reads (each through its existing boundary) → the pure :func:`plan`. Nothing on
+    disk is mutated; the returned plan is what a ``--dry-run`` renders and what
+    :func:`sweep` applies, so the preview can NEVER drift from the action.
+
+    The PR state costs nothing here: :func:`pr_state` projects it off the record the
+    ``scan`` already carries (which read it one call per REPO — issue #1011), so this
+    gather's only remaining per-Tree work is the local liveness/provisioning reads.
     """
     records = registry.scan(root)
     pr_states = {record.path: pr_state(record) for record in records}
@@ -239,27 +241,25 @@ def sweep(
 
 def pr_state(record: TreeRecord) -> str | None:
     """The PR's remote state (``"MERGED"`` / ``"OPEN"`` / ``"CLOSED"`` /
-    ``"UNKNOWN"`` …) for one Tree.
+    ``"UNKNOWN"`` …) for one Tree — read straight off the scanned ``record``.
 
-    Reads through the same ``gh`` boundary the registry uses, from inside the
-    clone, so gc sees the authoritative merge state rather than re-parsing the
-    rendered label. The vocabulary is the typed snapshot's own
-    (:attr:`~shipit.gh.HeadPr.display_state`, which normalizes a draft open PR
-    to ``"DRAFT"``), so the fleet has ONE state vocabulary and
-    ``cleanup.classify``'s draft branch is reachable. An unreadable state
-    (``gh.pr_for_head`` returns :data:`~shipit.gh.UNKNOWN` — a gh failure or a
-    malformed payload the adapter's construction boundary rejected) maps to
-    ``"UNKNOWN"`` — distinct from ``None`` (no branch / no PR) — so gc can both
-    treat it conservatively and warn about it.
+    The state the scan ALREADY read (:attr:`~shipit.tree.registry.TreeRecord.pr_state`),
+    not a fresh lookup — and not a re-parse of the rendered ``pr`` label either: the
+    registry mints both views from ONE PR snapshot. The vocabulary is the typed
+    snapshot's own (:attr:`~shipit.gh.HeadPr.display_state`, which normalizes a draft
+    open PR to ``"DRAFT"``), so the fleet has ONE state vocabulary and
+    ``cleanup.classify``'s draft branch is reachable. An unreadable state maps to
+    ``"UNKNOWN"`` — distinct from ``None`` (no branch / no PR) — so gc can both treat
+    it conservatively and warn about it.
+
+    This used to make its OWN ``gh.pr_for_head`` call per Tree, so a sweep paid the
+    fleet's PR cost twice — once inside ``scan``, once here, sequentially. That second
+    fan-out is what tipped a large sweep past GitHub's hourly GraphQL budget; since
+    exhaustion reads as ``UNKNOWN`` and ``UNKNOWN`` means keep, ``gc`` then exited 0
+    having removed nothing while reporting success (issue #1011). The state now rides
+    the record, and this is a pure projection.
     """
-    if not record.branch:
-        return None
-    pr = gh.pr_for_head(record.branch, cwd=record.path)
-    if pr is gh.UNKNOWN:
-        return "UNKNOWN"
-    if pr is None:
-        return None
-    return pr.display_state
+    return record.pr_state
 
 
 def live_sessions(records: list[TreeRecord]) -> dict[str, bool]:

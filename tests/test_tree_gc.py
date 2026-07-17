@@ -356,48 +356,39 @@ def test_incomplete_is_the_unknown_count_on_both_plan_and_result():
     assert gc.sweep(_plan_of(whole.partition, total=1)).incomplete is False
 
 
-# --- pr_state: the gh boundary read --------------------------------------------------
+# --- pr_state: the projection off the scanned record ---------------------------------
 
 
-def test_pr_state_normalizes_draft(monkeypatch):
-    # A draft open PR reads as "DRAFT" (one fleet-wide vocabulary, mirroring the
-    # registry label), not the raw "OPEN" GitHub state.
-    monkeypatch.setattr(
-        gh,
-        "pr_for_head",
-        lambda branch, *, cwd=None: _head_pr(7, "OPEN", is_draft=True),
-    )
-    assert gc.pr_state(_record(path="/trees/x", branch="b1")) == "DRAFT"
+def test_pr_state_projects_the_records_state_without_reading_gh(monkeypatch):
+    # #1011: pr_state makes NO call of its own — it reports the state the scan already
+    # read (one call per repo). Any gh access here would be the second per-Tree
+    # fan-out that exhausted the GraphQL budget mid-sweep, so make it fatal.
+    monkeypatch.delattr(gh, "pr_for_head")
+
+    # The vocabulary is the registry's: a draft open PR reads "DRAFT", not "OPEN".
+    assert gc.pr_state(_record(path="/trees/x", pr_state="DRAFT")) == "DRAFT"
+    assert gc.pr_state(_record(path="/trees/y", pr_state="MERGED")) == "MERGED"
 
 
-def test_pr_state_unknown_when_gh_state_unreadable(monkeypatch):
-    # An unreadable PR state (gh.pr_for_head -> UNKNOWN) surfaces as the "UNKNOWN"
-    # string, distinct from None (no branch / no PR), so gc can both treat it
-    # conservatively and warn.
-    monkeypatch.setattr(gh, "pr_for_head", lambda branch, *, cwd=None: gh.UNKNOWN)
-    assert gc.pr_state(_record(path="/trees/x", branch="b1")) == "UNKNOWN"
-
-
-def test_pr_state_none_when_no_branch_or_no_pr(monkeypatch):
-    # No branch -> None without even hitting gh; a branch with no PR -> None too.
-    assert gc.pr_state(_record(path="/trees/x", branch=None)) is None
-    monkeypatch.setattr(gh, "pr_for_head", lambda branch, *, cwd=None: None)
-    assert gc.pr_state(_record(path="/trees/y", branch="b1")) is None
+def test_pr_state_unknown_stays_distinct_from_no_pr():
+    # The load-bearing split: "UNKNOWN" (state unreadable -> the ladder KEEPS) must
+    # never collapse into None (no branch / no PR -> a rung gc reclaims on).
+    assert gc.pr_state(_record(path="/trees/x", pr_state="UNKNOWN")) == "UNKNOWN"
+    assert gc.pr_state(_record(path="/trees/y", branch=None, pr_state=None)) is None
+    assert gc.pr_state(_record(path="/trees/z", pr_state=None)) is None
 
 
 # --- plan_fleet: the effectful gather -------------------------------------------------
 
 
 def test_plan_fleet_composes_scan_states_and_classify(monkeypatch):
+    # The states ride the records the scan returns (#1011) — the gather adds no PR
+    # reads of its own.
     records = [
-        _record(path="/t/merged", branch="b1"),
-        _record(path="/t/open", branch="b2"),
+        _record(path="/t/merged", branch="b1", pr_state="MERGED"),
+        _record(path="/t/open", branch="b2", pr_state="OPEN"),
     ]
-    pr_by_branch = {"b1": _head_pr(1, "MERGED"), "b2": _head_pr(2, "OPEN")}
     monkeypatch.setattr(registry, "scan", lambda root: records)
-    monkeypatch.setattr(
-        gh, "pr_for_head", lambda branch, *, cwd=None: pr_by_branch.get(branch)
-    )
 
     plan = gc.plan_fleet("/trees")
 
