@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from shipit import gh, git
+from shipit.execrun import ExecError
 from shipit.identity import Sha
 from shipit.tree import registry
 
@@ -35,6 +36,27 @@ def _make_plain_dir(root: Path, rel: str) -> Path:
     path = root / rel
     path.mkdir(parents=True)
     return path
+
+
+def _patch_repo(monkeypatch, prs, *, slug: str = "acme/widget", hook=None):
+    """Point every fake clone at ``slug`` and give that repo the ``prs`` PR index.
+
+    Patches the two boundary reads the batched scan makes per REPO (issue #1011):
+    ``git.remote_url`` (which :func:`shipit.identity.resolve_repo` parses into the
+    slug that groups clones) and ``gh.prs_by_head`` (the one-call-per-repo index).
+    ``prs`` is a ``{branch: HeadPr}`` dict or ``gh.UNKNOWN``. ``hook(slug)`` runs
+    inside the batch call when given, so a test can observe the calls.
+    """
+
+    def _prs_by_head(repo):
+        if hook is not None:
+            hook(repo)
+        return prs
+
+    monkeypatch.setattr(
+        git, "remote_url", lambda *, cwd, remote="origin": f"git@github.com:{slug}.git"
+    )
+    monkeypatch.setattr(gh, "prs_by_head", _prs_by_head)
 
 
 @pytest.fixture
@@ -80,9 +102,7 @@ def fleet(tmp_path: Path, monkeypatch):
         git, "unpushed_shas", lambda *, cwd: state[cwd]["unpushed_shas"]
     )
     monkeypatch.setattr(git, "head_committed_at", lambda *, cwd: 1_000.0)
-    monkeypatch.setattr(
-        gh, "pr_for_head", lambda branch, *, cwd=None: pr_by_branch.get(branch)
-    )
+    _patch_repo(monkeypatch, pr_by_branch)
     return root, a, b
 
 
@@ -140,17 +160,20 @@ def test_scan_branch_without_pr_has_none(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(git, "upstream_ref", lambda *, cwd: None)
     monkeypatch.setattr(git, "status_porcelain", lambda *, cwd: [])
     monkeypatch.setattr(git, "ahead_behind", lambda *, cwd: (0, 0))
-    monkeypatch.setattr(gh, "pr_for_head", lambda branch, *, cwd=None: None)
+    # The repo was read cleanly and this branch is simply absent from its index:
+    # a COMPLETE index makes absence provable, which is the "no PR" arm.
+    _patch_repo(monkeypatch, {})
 
     (record,) = registry.scan(root)
     assert record.path == str(clone)
     assert record.pr is None
+    assert record.pr_state is None
     assert record.base is None
     assert (record.ahead, record.behind) == (0, 0)
 
 
 def test_scan_unreadable_pr_renders_unknown_label(tmp_path: Path, monkeypatch):
-    # An unreadable PR state (gh.pr_for_head -> UNKNOWN) renders as a bare "UNKNOWN"
+    # An unreadable repo view (gh.prs_by_head -> UNKNOWN) renders as a bare "UNKNOWN"
     # label, distinct from the None a genuinely-PR-less Tree shows.
     root = tmp_path / "trees"
     clone = _make_clone(root, "acme/widget/issues/1/work-zzzz")
@@ -158,11 +181,12 @@ def test_scan_unreadable_pr_renders_unknown_label(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(git, "upstream_ref", lambda *, cwd: "origin/main")
     monkeypatch.setattr(git, "status_porcelain", lambda *, cwd: [])
     monkeypatch.setattr(git, "ahead_behind", lambda *, cwd: (0, 0))
-    monkeypatch.setattr(gh, "pr_for_head", lambda branch, *, cwd=None: gh.UNKNOWN)
+    _patch_repo(monkeypatch, gh.UNKNOWN)
 
     (record,) = registry.scan(root)
     assert record.path == str(clone)
     assert record.pr == "UNKNOWN"
+    assert record.pr_state == "UNKNOWN"
 
 
 def test_scan_missing_root_yields_empty(tmp_path: Path):
@@ -180,14 +204,14 @@ def test_scan_does_not_descend_into_a_clone(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(git, "upstream_ref", lambda *, cwd: "origin/main")
     monkeypatch.setattr(git, "status_porcelain", lambda *, cwd: [])
     monkeypatch.setattr(git, "ahead_behind", lambda *, cwd: (0, 0))
-    monkeypatch.setattr(gh, "pr_for_head", lambda branch, *, cwd=None: None)
+    _patch_repo(monkeypatch, {})
 
     records = registry.scan(root)
     assert [r.path for r in records] == [str(outer)]
 
 
 def _patch_trivial_gh(monkeypatch, *, branch_hook=None):
-    """Patch every gh read with cheap stubs; ``branch_hook(cwd)`` runs first if given."""
+    """Patch every boundary read with cheap stubs; ``branch_hook(cwd)`` runs first if given."""
 
     def _branch(*, cwd):
         if branch_hook is not None:
@@ -198,7 +222,7 @@ def _patch_trivial_gh(monkeypatch, *, branch_hook=None):
     monkeypatch.setattr(git, "upstream_ref", lambda *, cwd: "origin/main")
     monkeypatch.setattr(git, "status_porcelain", lambda *, cwd: [])
     monkeypatch.setattr(git, "ahead_behind", lambda *, cwd: (0, 0))
-    monkeypatch.setattr(gh, "pr_for_head", lambda branch, *, cwd=None: None)
+    _patch_repo(monkeypatch, {})
 
 
 def test_scan_output_order_is_deterministic_regardless_of_completion_order(
@@ -272,27 +296,27 @@ def test_scan_reads_clones_concurrently_via_bounded_pool(tmp_path: Path, monkeyp
     assert max_seen == n
 
 
-def test_scan_workers_is_bounded_and_at_least_one(monkeypatch):
+def test_scan_workers_is_bounded_and_at_least_one():
     """The worker count is capped (never an unbounded thread-per-clone) and never < 1."""
-    monkeypatch.setattr(registry.os, "cpu_count", lambda: 64)
-    # Capped by _MAX_SCAN_WORKERS even with many CPUs and many clones.
     assert registry._scan_workers(1000) == registry._MAX_SCAN_WORKERS
     # Never exceeds the number of clones, and never drops below one.
     assert registry._scan_workers(3) == 3
     assert registry._scan_workers(0) == 1
 
 
-def test_scan_workers_keeps_floor_on_low_core_box(monkeypatch):
-    """The fan-out does NOT collapse to the core count: the reads are I/O-bound, so a
-    1-core box must still overlap several subprocesses (up to the clone count)."""
-    monkeypatch.setattr(registry.os, "cpu_count", lambda: 1)
-    # Many clones on a 1-core box still get the I/O floor, not a single serial worker.
-    assert registry._scan_workers(100) == registry._MIN_SCAN_WORKERS
-    # Still bounded by the clone count below the floor.
-    assert registry._scan_workers(2) == 2
-    # An unknown core count behaves like the floor, not like a single worker.
-    monkeypatch.setattr(registry.os, "cpu_count", lambda: None)
-    assert registry._scan_workers(100) == registry._MIN_SCAN_WORKERS
+def test_scan_workers_ignores_the_core_count(monkeypatch):
+    """The fan-out is I/O-bound, so the core count must not enter into it at all.
+
+    The pool used to be sized ``clamp(cpu_count, 4, 8)``, which throttled the scan on
+    a small box for no reason: these tasks block on git subprocesses rather than burn
+    CPU, so cores are not the scarce resource (issue #1011). A 1-core box gets the same
+    fan-out a 64-core box does.
+    """
+    for cores in (1, 64, None):
+        monkeypatch.setattr(registry.os, "cpu_count", lambda cores=cores: cores)
+        assert registry._scan_workers(100) == registry._MAX_SCAN_WORKERS
+        # Still bounded by the clone count.
+        assert registry._scan_workers(2) == 2
 
 
 # --- the write ladder's activity signal, over REAL git (#1009, codex review) ---------
@@ -393,3 +417,222 @@ def test_unreadable_last_commit_reads_as_none(tmp_path, real_git):
 
     (record,) = registry.scan(tmp_path / "trees")
     assert record.last_commit is None
+
+
+# --- the batched, one-call-per-repo PR read (#1011) -----------------------------------
+
+
+def _patch_git_reads(monkeypatch, branch_by_path):
+    """Trivial git stubs; the branch is per-clone so a test can vary it."""
+    monkeypatch.setattr(git, "current_branch", lambda *, cwd: branch_by_path[cwd])
+    monkeypatch.setattr(git, "upstream_ref", lambda *, cwd: "origin/main")
+    monkeypatch.setattr(git, "status_porcelain", lambda *, cwd: [])
+    monkeypatch.setattr(git, "ahead_behind", lambda *, cwd: (0, 0))
+    monkeypatch.setattr(git, "unpushed_shas", lambda *, cwd: ())
+    monkeypatch.setattr(git, "head_committed_at", lambda *, cwd: 1_000.0)
+
+
+def test_scan_makes_one_pr_call_per_repo_not_per_tree(tmp_path, monkeypatch):
+    """THE fix (#1011): the PR read scales with the REPO count, not the Tree count.
+
+    Six Trees across two repos must cost two ``gh`` calls. The old shape made one per
+    Tree — ~512 on the observed fleet, which both dominated `list` and exhausted the
+    hourly GraphQL budget mid-`gc`.
+    """
+    root = tmp_path / "trees"
+    widget = [_make_clone(root, f"acme/widget/issues/{i}/work-a") for i in range(4)]
+    gadget = [_make_clone(root, f"acme/gadget/issues/{i}/work-b") for i in range(2)]
+    branches = {str(c): f"issues/{i}/work" for i, c in enumerate(widget + gadget)}
+    _patch_git_reads(monkeypatch, branches)
+
+    slug_of = {str(c): "acme/widget" for c in widget} | {
+        str(c): "acme/gadget" for c in gadget
+    }
+    monkeypatch.setattr(
+        git,
+        "remote_url",
+        lambda *, cwd, remote="origin": f"git@github.com:{slug_of[cwd]}.git",
+    )
+    calls = []
+    monkeypatch.setattr(gh, "prs_by_head", lambda repo: calls.append(repo) or {})
+    # A per-Tree read would go through pr_for_head; nothing may call it any more.
+    monkeypatch.delattr(gh, "pr_for_head")
+
+    records = registry.scan(root)
+
+    assert len(records) == 6
+    assert sorted(calls) == ["acme/gadget", "acme/widget"]  # two repos, two calls
+
+
+def test_scan_collapses_hash_named_roots_onto_their_real_repo(tmp_path, monkeypatch):
+    """A hash-named root (``<root>/2f86/shipit/…``) is grouped by its REMOTE, not its path.
+
+    Real fleets carry these, and their first segment is no GitHub owner at all. Parsing
+    the path would either drop them from the batch or build a bogus ``2f86/shipit`` slug;
+    reading the origin remote makes them ordinary — and collapses every hash root of one
+    repo onto a SINGLE call.
+    """
+    root = tmp_path / "trees"
+    clones = [
+        _make_clone(root, "2f86/shipit/issues/1/work-a"),
+        _make_clone(root, "5c08/shipit/issues/2/work-b"),
+        _make_clone(root, "arthur-debert/shipit/issues/3/work-c"),
+    ]
+    _patch_git_reads(monkeypatch, {str(c): "issues/1/work" for c in clones})
+    _patch_repo(
+        monkeypatch,
+        {
+            "issues/1/work": gh.HeadPr(
+                number=4, state="OPEN", is_draft=False, base_ref="main"
+            )
+        },
+        slug="arthur-debert/shipit",
+    )
+    calls = []
+    inner = gh.prs_by_head
+    monkeypatch.setattr(
+        gh, "prs_by_head", lambda repo: calls.append(repo) or inner(repo)
+    )
+
+    records = registry.scan(root)
+
+    # All three hash/owner roots are ONE repo -> one call, and none is dropped.
+    assert calls == ["arthur-debert/shipit"]
+    assert [r.pr for r in records] == ["#4 OPEN"] * 3
+
+
+def test_scan_failed_batch_makes_only_that_repos_trees_unknown(tmp_path, monkeypatch):
+    """A repo whose batch call fails yields UNKNOWN for ITS Trees — and only those.
+
+    The blast radius is one repo: a healthy sibling repo still reports real states, so a
+    single rate-limited repo cannot blind the whole fleet.
+    """
+    root = tmp_path / "trees"
+    broken = _make_clone(root, "acme/broken/issues/1/work-a")
+    healthy = _make_clone(root, "acme/healthy/issues/2/work-b")
+    _patch_git_reads(
+        monkeypatch, {str(broken): "issues/1/work", str(healthy): "issues/2/work"}
+    )
+    slug_of = {str(broken): "acme/broken", str(healthy): "acme/healthy"}
+    monkeypatch.setattr(
+        git,
+        "remote_url",
+        lambda *, cwd, remote="origin": f"git@github.com:{slug_of[cwd]}.git",
+    )
+    monkeypatch.setattr(
+        gh,
+        "prs_by_head",
+        lambda repo: (
+            gh.UNKNOWN
+            if repo == "acme/broken"
+            else {
+                "issues/2/work": gh.HeadPr(
+                    number=2, state="MERGED", is_draft=False, base_ref="main"
+                )
+            }
+        ),
+    )
+
+    by_path = {r.path: r for r in registry.scan(root)}
+
+    assert by_path[str(broken)].pr == "UNKNOWN"
+    assert by_path[str(broken)].pr_state == "UNKNOWN"
+    assert by_path[str(healthy)].pr == "#2 MERGED"
+    assert by_path[str(healthy)].pr_state == "MERGED"
+
+
+def test_scan_unresolvable_remote_is_unknown_never_no_pr(tmp_path, monkeypatch):
+    """A clone with no origin remote reads UNKNOWN — the honest arm.
+
+    Its repo cannot be resolved, so it joins no batch. It must NOT fall through to "no
+    PR", which would be a positive claim we cannot make. Not because the bucket would
+    change — it wouldn't; no-PR and UNKNOWN bucket identically on every ladder — but
+    because only UNKNOWN is counted by `plan.unknown`, and that count is what makes gc
+    admit it saw part of the root. Saying "no PR" here would hide this Tree inside a
+    confidently-complete sweep. (The old per-Tree read also returned UNKNOWN for this
+    clone — gh would have failed on it the same way.)
+    """
+    root = tmp_path / "trees"
+    clone = _make_clone(root, "acme/widget/issues/1/work-a")
+    _patch_git_reads(monkeypatch, {str(clone): "issues/1/work"})
+
+    def no_remote(*, cwd, remote="origin"):
+        raise ExecError(("git", "remote", "get-url", "origin"), rc=128)
+
+    monkeypatch.setattr(git, "remote_url", no_remote)
+    monkeypatch.setattr(gh, "prs_by_head", lambda repo: {})
+
+    (record,) = registry.scan(root)
+    assert record.pr == "UNKNOWN"
+    assert record.pr_state == "UNKNOWN"
+
+
+def test_scan_detached_head_has_no_pr_without_consulting_the_index(
+    tmp_path, monkeypatch
+):
+    # No branch -> no PR question to ask, even when its repo's index is UNKNOWN.
+    root = tmp_path / "trees"
+    clone = _make_clone(root, "acme/widget/issues/1/work-a")
+    _patch_git_reads(monkeypatch, {str(clone): None})
+    _patch_repo(monkeypatch, gh.UNKNOWN)
+
+    (record,) = registry.scan(root)
+    assert record.branch is None
+    assert record.pr is None and record.pr_state is None
+
+
+def test_scan_pr_label_and_state_are_two_views_of_one_read(tmp_path, monkeypatch):
+    # The label gc must never re-parse and the state it branches on come from ONE
+    # snapshot, so they cannot disagree (unpushed_shas/unpushed's precedent).
+    root = tmp_path / "trees"
+    clone = _make_clone(root, "acme/widget/issues/1/work-a")
+    _patch_git_reads(monkeypatch, {str(clone): "issues/1/work"})
+    _patch_repo(
+        monkeypatch,
+        {
+            "issues/1/work": gh.HeadPr(
+                number=8, state="OPEN", is_draft=True, base_ref="main"
+            )
+        },
+    )
+
+    (record,) = registry.scan(root)
+    assert record.pr == "#8 DRAFT"
+    assert record.pr_state == "DRAFT"
+
+
+def test_pr_state_is_a_required_field_so_a_forgetful_caller_cannot_fake_a_read():
+    """``pr_state`` has NO default, deliberately — there is no correct thing to default to.
+
+    The field means *what the scan learned about this PR*, and a constructor that never
+    read one has learned nothing: ``None`` would assert "provably no PR" and
+    ``"UNKNOWN"`` would assert "we tried and failed". Both claim knowledge the caller
+    does not have.
+
+    ``None`` would be the more dangerous of the two — not because it deletes anything
+    (no-PR and UNKNOWN bucket identically on every ladder) but because it is SILENT:
+    ``plan.unknown`` counts only ``"UNKNOWN"``, so a forgotten field would zero the
+    count and let gc report a complete view of a fleet it never read — #1011's
+    exit-0-on-success-it-didn't-have, reintroduced through a default argument.
+    Requiring the field makes that a TypeError at construction instead. (#1011)
+    """
+    complete = dict(
+        path="/t",
+        branch="b",
+        base="origin/main",
+        dirty=False,
+        ahead=0,
+        behind=0,
+        pr=None,
+        pr_state=None,
+        mtime=0.0,
+    )
+    assert registry.TreeRecord(**complete).pr_state is None  # explicit no-PR is fine
+
+    with pytest.raises(TypeError, match="pr_state"):
+        registry.TreeRecord(**{k: v for k, v in complete.items() if k != "pr_state"})
+
+    # The fields whose None genuinely means "unreadable" keep their fail-SAFE defaults:
+    # omitting them reads as keep, so they are not the same hazard.
+    record = registry.TreeRecord(**complete)
+    assert record.unpushed_shas is None and record.last_commit is None

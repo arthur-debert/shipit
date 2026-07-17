@@ -55,6 +55,7 @@ def _record(path: str = "/trees/t", **over) -> TreeRecord:
         ahead=0,
         behind=0,
         pr=None,
+        pr_state=None,
         mtime=AGED_MTIME,
         unpushed_shas=(),
     )
@@ -776,3 +777,48 @@ def test_parse_duration_round_trips_with_default_threshold():
     # The CLI default (14d) must parse back to exactly DEFAULT_MAX_AGE_SECONDS, so the
     # documented default and the keyword default can never silently diverge.
     assert parse_duration("14d") == float(DEFAULT_MAX_AGE_SECONDS)
+
+
+def test_no_pr_and_unknown_bucket_identically_on_every_ladder():
+    """`None` (no PR) and `"UNKNOWN"` reach the SAME bucket on all three ladders.
+
+    Written down because the natural assumption — the one #1011's own brief made, and
+    the one this PR's first draft encoded in its docstrings — is that "no PR" is a rung
+    gc deletes on, so conflating it with UNKNOWN would destroy Trees. It isn't, and it
+    wouldn't. The PR-state delete rung is MERGED (and CLOSED, for a review Tree); no-PR
+    and UNKNOWN bucket IDENTICALLY on every ladder: stale for an aged write Tree, keep
+    for a review Tree, and for an ephemeral Tree the decision is made independently of
+    the PR state, from local work, liveness and age. That last one can well be
+    `removable` — as this test's very old ephemeral record is, on BOTH states — which
+    is precisely the point: the bucket is the same either way, so no swap of one state
+    for the other moves a Tree toward or away from deletion anywhere.
+
+    That does NOT make the distinction cosmetic — it relocates it. Only `"UNKNOWN"` is
+    counted by `GcPlan.unknown`, which is what makes a sweep admit it saw part of the
+    root and exit non-zero. So conflating the two costs gc its HONESTY, not its safety:
+    it would report a complete view of a fleet it could not read, which is exactly the
+    silent success of #1011. This test exists so the next reader gets the real reason
+    from the code rather than re-deriving the plausible wrong one.
+    """
+    now = 10_000_000_000.0
+    ladders = {
+        "write": "/t/acme/w/issues/1/work-a",
+        "review": "/t/acme/w/review/some-branch",
+        "ephemeral": "/t/acme/w/ephemeral/sess-1",
+    }
+
+    def bucket(path: str, state: str | None) -> str:
+        cleanup = classify([_record(path=path)], now=now, pr_states={path: state})
+        if cleanup.removable:
+            return "removable"
+        return "stale" if cleanup.stale else "keep"
+
+    for kind, path in ladders.items():
+        assert bucket(path, None) == bucket(path, "UNKNOWN"), (
+            f"{kind} ladder distinguishes no-PR from UNKNOWN; the None/UNKNOWN split "
+            "is about gc's reporting honesty, not its delete decisions"
+        )
+
+    # And the rung that DOES delete is merged — the fact the split is often confused with.
+    assert bucket(ladders["write"], "MERGED") == "removable"
+    assert bucket(ladders["write"], None) == "stale"

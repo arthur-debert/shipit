@@ -304,6 +304,7 @@ def _record(**over) -> TreeRecord:
         ahead=0,
         behind=0,
         pr="#7 DRAFT",
+        pr_state="DRAFT",
         mtime=1000.0,
         unpushed_shas=(),
     )
@@ -652,8 +653,9 @@ def _gc_fleet(root, monkeypatch):
     """A four-Tree fixture for gc: one removable, one stale, one dirty-keep, one open-keep.
 
     Returns ``(removable, stale, keep_dirty, keep_open)`` paths after wiring
-    ``central_root``/``scan``/``pr_for_head`` so both ``run_gc()`` and its dry-run share
-    one fleet. The removable Tree (merged + clean + aged) is the only delete candidate.
+    ``central_root``/``scan`` so both ``run_gc()`` and its dry-run share one fleet. The
+    removable Tree (merged + clean + aged) is the only delete candidate. The PR states
+    ride the records, as they do off a real scan (#1011).
     """
     removable = _make_tree_dir(root, "acme/widget/issues/1/work-merged")
     stale = _make_tree_dir(root, "acme/widget/issues/2/work-orphan")
@@ -661,22 +663,41 @@ def _gc_fleet(root, monkeypatch):
     keep_open = _make_tree_dir(root, "acme/widget/issues/4/work-open")
     aged = 0.0  # mtime far in the past -> always aged vs time.time()
     records = [
-        _record(path=str(removable), branch="b1", dirty=False, ahead=0, mtime=aged),
-        _record(path=str(stale), branch="b2", dirty=False, ahead=0, mtime=aged),
-        _record(path=str(keep_dirty), branch="b3", dirty=True, ahead=0, mtime=aged),
-        _record(path=str(keep_open), branch="b4", dirty=False, ahead=0, mtime=aged),
+        _record(
+            path=str(removable),
+            branch="b1",
+            dirty=False,
+            ahead=0,
+            mtime=aged,
+            pr_state="MERGED",
+        ),
+        _record(
+            path=str(stale),
+            branch="b2",
+            dirty=False,
+            ahead=0,
+            mtime=aged,
+            pr_state=None,  # no PR
+        ),
+        _record(
+            path=str(keep_dirty),
+            branch="b3",
+            dirty=True,
+            ahead=0,
+            mtime=aged,
+            pr_state="MERGED",
+        ),
+        _record(
+            path=str(keep_open),
+            branch="b4",
+            dirty=False,
+            ahead=0,
+            mtime=aged,
+            pr_state="OPEN",
+        ),
     ]
-    pr_by_branch = {
-        "b1": _head_pr(1, "MERGED"),
-        "b2": None,
-        "b3": _head_pr(3, "MERGED"),
-        "b4": _head_pr(4, "OPEN"),
-    }
     monkeypatch.setattr(layout_mod, "central_root", lambda: str(root))
     monkeypatch.setattr(registry_mod, "scan", lambda r: records)
-    monkeypatch.setattr(
-        gh, "pr_for_head", lambda branch, *, cwd=None: pr_by_branch.get(branch)
-    )
     return removable, stale, keep_dirty, keep_open
 
 
@@ -873,18 +894,25 @@ def test_run_gc_incomplete_sweep_is_loud_and_exits_nonzero(
     unknown = _make_tree_dir(root, "acme/widget/issues/2/work-unknown")
     aged = 0.0
     records = [
-        _record(path=str(merged), branch="b1", dirty=False, ahead=0, mtime=aged),
-        _record(path=str(unknown), branch="b2", dirty=False, ahead=0, mtime=aged),
+        _record(
+            path=str(merged),
+            branch="b1",
+            dirty=False,
+            ahead=0,
+            mtime=aged,
+            pr_state="MERGED",
+        ),
+        _record(
+            path=str(unknown),
+            branch="b2",
+            dirty=False,
+            ahead=0,
+            mtime=aged,
+            pr_state="UNKNOWN",
+        ),
     ]
-    pr_by_branch = {
-        "b1": _head_pr(1, "MERGED"),
-        "b2": gh.UNKNOWN,
-    }
     monkeypatch.setattr(layout_mod, "central_root", lambda: str(root))
     monkeypatch.setattr(registry_mod, "scan", lambda r: records)
-    monkeypatch.setattr(
-        gh, "pr_for_head", lambda branch, *, cwd=None: pr_by_branch.get(branch)
-    )
 
     rc = tree_verb.run_gc()
 
@@ -904,6 +932,44 @@ def test_run_gc_incomplete_sweep_is_loud_and_exits_nonzero(
     )
 
 
+def test_run_gc_incomplete_view_leads_with_the_repo_shaped_cause(
+    tmp_path, monkeypatch, capsys
+):
+    # #1011: the PR state is now read once per REPO, so a sweep makes ~20 calls, not
+    # ~1000. A drained hourly quota is therefore no longer the likely cause of an
+    # UNKNOWN — one repo's `gh pr list` failing is — and one such failure blanks every
+    # Tree in that repo. So the repo-shaped cause LEADS and the rate limit is demoted
+    # to the fleet-wide case where it is still right. Pointing an operator at a quota
+    # that is fine costs them a 25-minute wait for nothing: a confident wrong
+    # diagnosis is worse than none.
+    root = tmp_path / "trees"
+    unknown = _make_tree_dir(root, "acme/widget/issues/1/work-unknown")
+    records = [
+        _record(
+            path=str(unknown),
+            branch="b1",
+            dirty=False,
+            ahead=0,
+            mtime=0.0,
+            pr_state="UNKNOWN",
+        ),
+    ]
+    monkeypatch.setattr(layout_mod, "central_root", lambda: str(root))
+    monkeypatch.setattr(registry_mod, "scan", lambda r: records)
+
+    rc = tree_verb.run_gc(dry_run=True)
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    per_repo = err.index("read once per repo")
+    rate_limit = err.index("gh api rate_limit")
+    # Both are offered, but the repo-shaped cause comes FIRST.
+    assert per_repo < rate_limit
+    # The budget line is explicitly conditional now, not stated as "the usual cause".
+    assert "if the skip covers most of the fleet" in err
+    assert "the usual cause is an exhausted gh API budget" not in err
+
+
 def test_run_gc_dry_run_warns_on_unknown_and_deletes_nothing(
     tmp_path, monkeypatch, capsys
 ):
@@ -915,18 +981,25 @@ def test_run_gc_dry_run_warns_on_unknown_and_deletes_nothing(
     unknown = _make_tree_dir(root, "acme/widget/issues/2/work-unknown")
     aged = 0.0
     records = [
-        _record(path=str(merged), branch="b1", dirty=False, ahead=0, mtime=aged),
-        _record(path=str(unknown), branch="b2", dirty=False, ahead=0, mtime=aged),
+        _record(
+            path=str(merged),
+            branch="b1",
+            dirty=False,
+            ahead=0,
+            mtime=aged,
+            pr_state="MERGED",
+        ),
+        _record(
+            path=str(unknown),
+            branch="b2",
+            dirty=False,
+            ahead=0,
+            mtime=aged,
+            pr_state="UNKNOWN",
+        ),
     ]
-    pr_by_branch = {
-        "b1": _head_pr(1, "MERGED"),
-        "b2": gh.UNKNOWN,
-    }
     monkeypatch.setattr(layout_mod, "central_root", lambda: str(root))
     monkeypatch.setattr(registry_mod, "scan", lambda r: records)
-    monkeypatch.setattr(
-        gh, "pr_for_head", lambda branch, *, cwd=None: pr_by_branch.get(branch)
-    )
 
     def boom(*args, **kwargs):
         raise AssertionError("dry-run must not sweep")
@@ -1023,15 +1096,17 @@ def test_run_gc_no_warning_when_no_unknown(tmp_path, monkeypatch, capsys):
     root = tmp_path / "trees"
     merged = _make_tree_dir(root, "acme/widget/issues/1/work-merged")
     records = [
-        _record(path=str(merged), branch="b1", dirty=False, ahead=0, mtime=0.0),
+        _record(
+            path=str(merged),
+            branch="b1",
+            dirty=False,
+            ahead=0,
+            mtime=0.0,
+            pr_state="MERGED",
+        ),
     ]
     monkeypatch.setattr(layout_mod, "central_root", lambda: str(root))
     monkeypatch.setattr(registry_mod, "scan", lambda r: records)
-    monkeypatch.setattr(
-        gh,
-        "pr_for_head",
-        lambda branch, *, cwd=None: _head_pr(1, "MERGED"),
-    )
 
     rc = tree_verb.run_gc()
 

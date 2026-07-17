@@ -584,13 +584,23 @@ def _lead(view: gc.GcPlan | gc.GcResult) -> str:
 def _render_incomplete_view(view: gc.GcPlan | gc.GcResult, *, verb: str) -> None:
     """Explain a partially-seen fleet on stderr, or print nothing if it was whole.
 
-    The summary's leading clause states THAT the view was incomplete; this
-    states what it means and what to do — that the skipped Trees were kept
-    unexamined rather than judged safe, and that the cause is almost always a
-    drained ``gh`` budget. Naming the budget is the point: "502 skipped (PR
-    state unknown)" reads as a fleet mystery, while the truth is a quota that
-    refills on the hour (#1011). ``verb`` is the mode's tense (``swept`` /
-    ``would sweep``), the only difference between the two gc tails' report.
+    The summary's leading clause states THAT the view was incomplete; this states
+    what it means and what to do — that the skipped Trees were kept unexamined
+    rather than judged safe, and what most likely caused it. Naming a cause is the
+    point: "502 skipped (PR state unknown)" reads as a fleet mystery, and an
+    operator with no lead will either ignore it or go hunting (#1011).
+
+    Which cause leads changed when the PR read was batched to one ``gh`` call per
+    REPO. Before that, a sweep made a call per Tree — ~1000 on a large fleet — so a
+    drained hourly GraphQL quota was overwhelmingly the likeliest explanation and
+    this told the operator to wait for the reset. A sweep now makes one call per
+    repo (a couple of dozen), which cannot plausibly exhaust a 5000-unit budget, so
+    the likeliest cause is instead that a single repo's ``gh pr list`` failed —
+    while the blast radius of one such failure GREW, since one call now answers for
+    every Tree in its repo. Leading with the drained budget would now send an
+    operator to wait out a reset that is not their problem, so it is demoted to the
+    fleet-wide case where it is still the right lead. ``verb`` is the mode's tense
+    (``swept`` / ``would sweep``), the only difference between the two gc tails.
     """
     if not view.incomplete:
         return
@@ -601,8 +611,15 @@ def _render_incomplete_view(view: gc.GcPlan | gc.GcResult, *, verb: str) -> None
         file=sys.stderr,
     )
     print(
-        "gc: the usual cause is an exhausted gh API budget — check `gh api rate_limit` "
-        "(the GraphQL quota refills hourly) and re-run once it has reset.",
+        "gc: the PR state is read once per repo, so one failed read blanks every Tree "
+        "in that repo — the skipped Trees above are the likeliest place to look. "
+        "Re-running usually clears a transient failure.",
+        file=sys.stderr,
+    )
+    print(
+        "gc: if the skip covers most of the fleet, suspect an exhausted gh API budget "
+        "instead — check `gh api rate_limit` (the GraphQL quota refills hourly) and "
+        "re-run once it has reset.",
         file=sys.stderr,
     )
 
