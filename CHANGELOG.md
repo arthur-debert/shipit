@@ -4,6 +4,92 @@
 
 ## Unreleased
 
+- The **`agy` local reviewer works again** (#1006). It has been pinned to Gemini
+  3.5 Flash since #990, and Flash goes *agentic* in `agy`'s headless `--print`
+  mode: instead of reviewing the diff it is handed, it narrates its hunt for one
+  and never emits a verdict. Every `agy-local` run therefore settled `failed`.
+  The reviewer was not slow or wrong — it was **absent**, and had been for days.
+  What made it invisible is worth recording, because nothing here misbehaved: a
+  required reviewer that fails is *degraded*, and the PR engine deliberately
+  declines to let a degraded reviewer block Ready — otherwise one broken
+  reviewer would wedge every PR in the repo. So PRs kept flowing, green, with
+  codex and Copilot passing, while the roster promised three required reviewers
+  and delivered two. Measured on this repo: `agy-local` failed on **every PR of
+  the TREE03 epic**, roughly ten review rounds, without ever once blocking one.
+  A check that fails loudly on every run reads, over time, as furniture.
+  `agy` returns to `pro` (Gemini 3.1 Pro (High)). The ~20% review-speed win that
+  #989's spike measured for Flash is given up **deliberately**: a reviewer that
+  never returns a verdict is not faster than one that does, it is not a reviewer.
+- `tree gc` now **reclaims a merged Tree without waiting out the age
+  threshold** (#1009). The write ladder gated on age BEFORE it looked at the PR,
+  so a Tree whose PR merged days ago — clean, nothing unpushed, the work safely
+  on the remote — was kept purely because its directory mtime was under the
+  two-week boundary. At a real merge rate that parks a fortnight of finished
+  work: measured over a 503-Tree fleet, **421 Trees were kept by the age gate
+  alone** while exactly one had a PR in flight, and the `kept: 500` the verb
+  reported read as "500 Trees in use" when it only ever meant "500 Trees are
+  recent". The gate was measuring throughput, not use.
+  A merged PR is now decided FIRST, held only until the Tree has been **idle for
+  12h**: the merge already proves the loss is safe, and the window covers the one
+  thing age was really buying — a write Tree has no liveness signal (unlike an
+  ephemeral session Tree, which has its pidfile), so an agent may still be
+  working in a still-clean Tree whose PR has merged. That window's clock is time
+  since the Tree's last ACTIVITY, NOT time since the merge: what it needs to know
+  is whether anyone is still working in the Tree. Hours of idleness instead of
+  weeks of age closes that hole without parking the fleet. This brings the write
+  ladder in line with the ephemeral one (ADR-0027), which already checked the
+  merge ahead of its liveness and age rungs.
+  Idleness is measured from the **newest of the Tree's directory mtime and its
+  `HEAD` commit timestamp**, and both are needed. A directory's mtime moves only
+  when an entry is added or removed in that directory, so the ordinary shape of
+  agent work — editing a file under `src/`, staging it, committing it — leaves
+  the clone root's mtime untouched and is invisible to it; the commit timestamp
+  is what observes an agent at work. Pushing does not change that stamp either,
+  so the one interval this window exists to cover — between a push and the next
+  edit, when a live agent's Tree momentarily reads clean and fully pushed — is
+  genuinely covered rather than nominally. An unreadable commit timestamp reads
+  as ACTIVE, never as ancient: a git hiccup must not license a delete.
+  `--threshold` (14d by default) is unchanged and still governs the **unmerged**
+  shapes — no PR, or a PR closed without merging — where age remains the only
+  abandonment signal, and those still land in `stale` for a human rather than
+  being deleted. Every never-lose-work guarantee is untouched: a dirty tree,
+  unpushed commits, an unreadable commit list, an in-flight PR, or an unreadable
+  PR state all still keep, whatever the Tree's age or merge state.
+- **TREE03 planning docs land: the Tree gets rethought** (#1020, epic #1019).
+  Running Trees
+  for a while exposed three failures with one root cause — the system infers
+  what it could measure, and encodes in paths what it then refuses to trust.
+  `tree gc` deleted a **live** session's worktree (#1018); session memory has
+  been silently discarded since Jul 6 (44 files stranded across 23 throwaway
+  stores); and the directory hierarchy is written on create and ignored on read.
+  Three ADRs record the decisions, and `docs/spec/tree-rethink.md` is the
+  authoritative Spec:
+
+  - **ADR-0072 — reclaim is activity-based.** One rule for every Tree kind:
+    `keep if dirty || unpushed || idle < 48h`, where idle is measured
+    newest-file mtime over a pruned walk. Supersedes ADR-0027's five-rung
+    ladder and the pidfile liveness beneath it. Across the live fleet, idle time
+    separates with no overlap — every live Tree under 1h, every dead Tree over
+    41h — so the threshold sits in a chasm, and the apparatus that existed to
+    manage an ambiguous middle (a `ps`/`jc` probe, a PR-state network read, four
+    tunable windows) is deleted rather than fixed.
+  - **ADR-0073 — the session store is per-repo, not per-Tree.** Transcripts and
+    memory are keyed on the session's cwd, and a Tree per session means a new
+    empty namespace every launch. One store per repo, linked into place at
+    tree-create, fixes memory and resume together.
+  - **ADR-0074 — Trees are flat.** `<root>/<repo>-<agent>-<timestamp>-<id>`,
+    one uniform shape. No ADR ever chose nesting: it was inherited from the
+    branch grammar, which is slashed for a git ref-collision reason that has no
+    filesystem analogue.
+
+  Docs reconciled with the new model: `docs/dev/naming.lex` gains a §4 for the
+  flat Tree-directory grammar, `CONTEXT.md` gains **Reclaim** / **Idle** /
+  **Session store** and drops read-only-Tree sharing, and both
+  `docs/dev/epics.lex` §7 and the coordinator role stop telling every session
+  that its memory is doomed — memory now persists, so learnings get promoted to
+  the repo because the repo is how knowledge reaches reviewers, not because
+  memory leaks.
+
 ## 1.2.3 - 2026-07-16
 
 - The managed bootstrap scripts (`bin/setup-dev-env.sh`, `agent-start`) now

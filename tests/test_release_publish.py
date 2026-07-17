@@ -517,6 +517,144 @@ def test_plan_brew_needs_gh_release_unskipped_not_merely_present(tmp_path):
     assert dispatched[0].skip == publish_mod.SKIP_STABLE_ONLY
 
 
+# --------------------------------------------------------------------------
+# --endpoint selector (ARF02-WS01 #1000, ADR-0070) — a plan-level filter
+# --------------------------------------------------------------------------
+
+
+def _seed_artifacts():
+    """The ADR-0070 motivating shape: one repo whose sibling artifacts declare
+    the channel endpoint (conda) alongside irreversible third-party registries
+    (crates, npm) — all fired today by the same event."""
+    return _artifacts(
+        {
+            "lexd": {"endpoints": ["gh-release", "crates", "conda"]},
+            "lex-wasm": {"endpoints": ["npm"]},
+        }
+    )
+
+
+def test_plan_absent_selector_fires_the_full_plan():
+    """`selector=None` — what an absent --endpoint parses to — is today's
+    behavior EXACTLY: nothing is selector-skipped (ADR-0070)."""
+    dispatched = publish_mod.plan(
+        _seed_artifacts(), prerelease=True, live_fire=False, selector=None
+    )
+    assert all(d.skip is None for d in dispatched)
+
+
+def test_plan_selector_seeds_the_channel_without_collateral():
+    """The ADR-0070 headline: a plain prerelease + `--endpoint gh-release
+    --endpoint conda` publishes the complete Release and the .conda, while the
+    live third-party registries record their OWN selector skip — the seed the
+    Artifact channel was previously unable to make without collateral."""
+    dispatched = publish_mod.plan(
+        _seed_artifacts(),
+        prerelease=True,
+        live_fire=False,
+        selector=["gh-release", "conda"],
+    )
+    verdicts = {d.adapter.name: d.skip for d in dispatched}
+    assert verdicts["gh-release"] is None
+    assert verdicts["conda"] is None
+    assert verdicts["crates"] == publish_mod.SKIP_SELECTOR
+    assert verdicts["npm"] == publish_mod.SKIP_SELECTOR
+    # The skip is DATA on the plan, so the preview states it before anything
+    # external happens — the distinct reason, not the RC guard's.
+    assert publish_mod.SKIP_SELECTOR != publish_mod.SKIP_RC_GUARD
+
+
+def test_plan_selector_cannot_deselect_gh_release():
+    """gh-release IS the Release, not a distribution channel: the selector
+    narrows distribution only, so deselecting it is refused rather than
+    producing the partial release ADR-0009 exists to prevent."""
+    with pytest.raises(ReleaseError, match="cannot deselect `gh-release`"):
+        publish_mod.plan(
+            _seed_artifacts(), prerelease=True, live_fire=False, selector=["conda"]
+        )
+
+
+def test_plan_selector_unknown_endpoint_is_loud_and_names_the_known_set():
+    """A misspelling must never be a silent no-op that publishes nothing
+    (ADR-0070): the closed registry validates the selector."""
+    with pytest.raises(ReleaseError, match="unknown endpoint") as err:
+        publish_mod.plan(
+            _seed_artifacts(),
+            prerelease=True,
+            live_fire=False,
+            selector=["gh-release", "conda-forge"],
+        )
+    assert "`conda-forge`" in str(err.value)
+    # Derived from the registry, not hard-coded: the point is that the known set
+    # is NAMED, not that it has a particular order — a new endpoint must not
+    # break this test.
+    assert ", ".join(publish_mod.names()) in str(err.value)
+
+
+def test_plan_selector_undeclared_endpoint_is_loud():
+    """The silent no-op in its most confusing form: a registry-VALID endpoint
+    no artifact declares would publish everything but what was asked for."""
+    with pytest.raises(ReleaseError, match="which no artifact in this repo declares"):
+        publish_mod.plan(
+            _seed_artifacts(),
+            prerelease=True,
+            live_fire=False,
+            selector=["gh-release", "pypi"],
+        )
+
+
+def test_plan_selector_derived_endpoint_without_its_base_is_refused():
+    """Selecting a derived endpoint whose base is absent from the plan is
+    REFUSED, not silently repaired — ADR-0009's release-before-derived
+    ordering holds under the selector (the conda→gh-release invariant)."""
+    artifacts = _artifacts({"lexd": {"endpoints": ["conda", "crates"]}})
+    with pytest.raises(ReleaseError, match="a conda endpoint publishes"):
+        publish_mod.plan(
+            artifacts, prerelease=True, live_fire=False, selector=["conda"]
+        )
+
+
+def test_plan_selector_intersects_with_the_rc_guard():
+    """The guards compose by INTERSECTION: a -release-rc cut still skips every
+    external endpoint including a SELECTED conda, so the selector can never
+    resurrect a live-fire rehearsal into a real publish (a seed uses an
+    ordinary prerelease tag). The guard's reason is the one stated."""
+    dispatched = publish_mod.plan(
+        _seed_artifacts(),
+        prerelease=True,
+        live_fire=True,
+        selector=["gh-release", "conda"],
+    )
+    verdicts = {d.adapter.name: d.skip for d in dispatched}
+    assert verdicts["conda"] == publish_mod.SKIP_RC_GUARD
+    assert verdicts["gh-release"] is None
+
+
+def test_plan_selector_intersects_with_the_stable_only_rule():
+    """A selected stable_only endpoint on a prerelease keeps its OWN reason:
+    the selector adds skips, it never removes one."""
+    artifacts = _artifacts({"lex": {"endpoints": ["gh-release", "brew", "crates"]}})
+    dispatched = publish_mod.plan(
+        artifacts, prerelease=True, live_fire=False, selector=["gh-release", "brew"]
+    )
+    verdicts = {d.adapter.name: d.skip for d in dispatched}
+    assert verdicts["brew"] == publish_mod.SKIP_STABLE_ONLY
+    assert verdicts["crates"] == publish_mod.SKIP_SELECTOR
+
+
+def test_plan_selector_keeps_the_two_stage_ordering():
+    """The selector is a FILTER, not a reordering: release-stage endpoints
+    still precede derived ones, skips included (story 35)."""
+    dispatched = publish_mod.plan(
+        _seed_artifacts(),
+        prerelease=True,
+        live_fire=False,
+        selector=["gh-release", "conda"],
+    )
+    order = [d.adapter.name for d in dispatched]
+    assert order == ["gh-release", "crates", "npm", "conda"]
+
+
 def test_missing_secrets_reports_planned_unskipped_dispatches_only():
     artifacts = _artifacts(
         {"lex": {"endpoints": ["gh-release", "crates", "npm", "brew"]}}
@@ -1613,6 +1751,101 @@ def test_publish_rc_guard_records_no_external_invocation(tmp_path, monkeypatch, 
     out = capsys.readouterr().out
     assert "live-fire -release-rc: GH release only" in out
     assert out.count("skipped: rc-guard") == 2  # crates + brew
+
+
+def test_publish_selector_skips_need_no_tokens_and_dispatch_nothing(
+    tmp_path, monkeypatch, capsys
+):
+    """The verb end-to-end under `--endpoint gh-release` (ADR-0027 REPO_TOML
+    declares gh-release/crates/brew): a STABLE cut publishes the Release and
+    nothing else — no cargo publish, no tap push, and (like the RC guard's
+    skips) the selector-skipped endpoints require NO tokens, since token
+    validation reads the unskipped set."""
+    _publish_repo(tmp_path, monkeypatch, assets=[f"lex-{MAC_ARM}.tar.gz"])
+    recorder = SeamRecorder()
+    ghio = FakeGh(exists=False)
+    gitio = FakeGit(root=tmp_path)
+
+    rc = release_verb.run_publish(
+        _spec("1.2.3"),
+        build_result="success",
+        bundle_result="success",
+        sign_result="skipped",
+        endpoint_selector=["gh-release"],
+        run_cmd=recorder,
+        probe=recorder,
+        ghio=ghio,
+        gitio=gitio,
+        env={},  # no tokens: crates/brew are selector-skipped
+    )
+
+    assert rc == 0
+    assert recorder.calls == []  # no cargo publish, no ruby -c
+    assert [c[0] for c in gitio.calls if c[0] != "root"] == []  # no tap push
+    out = capsys.readouterr().out
+    assert out.count("skipped: --endpoint selector") == 2  # crates + brew
+    assert "[gh-release]" in out  # the Release still fired
+
+
+def test_publish_selector_refusal_dispatches_nothing(tmp_path, monkeypatch, capsys):
+    """A bad selection is refused at PLAN time — before any endpoint runs, so
+    a typo'd seed touches nothing external (ADR-0070)."""
+    _publish_repo(tmp_path, monkeypatch, assets=[f"lex-{MAC_ARM}.tar.gz"])
+    recorder = SeamRecorder()
+    ghio = FakeGh(exists=False)
+    gitio = FakeGit(root=tmp_path)
+
+    rc = release_verb.run_publish(
+        _spec("1.2.3"),
+        build_result="success",
+        bundle_result="success",
+        sign_result="skipped",
+        endpoint_selector=["crates"],  # deselects gh-release — the Release
+        run_cmd=recorder,
+        probe=recorder,
+        ghio=ghio,
+        gitio=gitio,
+        env={"CARGO_REGISTRY_TOKEN": "t"},
+    )
+
+    assert rc == 1
+    assert "cannot deselect `gh-release`" in capsys.readouterr().err
+    assert recorder.calls == []
+    assert ghio.calls == []  # no release created
+
+
+def test_publish_cli_endpoint_is_repeatable_and_absent_means_the_full_plan(
+    monkeypatch,
+):
+    """The click boundary parses --endpoint to a VALUE (ADR-0030): repeated
+    flags become the ordered selection; an ABSENT flag is None — never an
+    empty selection that would publish nothing."""
+    from click.testing import CliRunner
+
+    seen: list = []
+
+    def fake_run_publish(spec, **kwargs):
+        seen.append(kwargs["endpoint_selector"])
+        return 0
+
+    monkeypatch.setattr(release_verb, "run_publish", fake_run_publish)
+    argv = [
+        "publish",
+        "1.2.3",
+        "--build-result",
+        "success",
+        "--bundle-result",
+        "success",
+        "--sign-result",
+        "skipped",
+    ]
+    runner = CliRunner()
+    runner.invoke(
+        release_verb.release,
+        argv + ["--endpoint", "gh-release", "--endpoint", "conda"],
+    )
+    runner.invoke(release_verb.release, argv)
+    assert seen == [["gh-release", "conda"], None]
 
 
 def test_publish_missing_tokens_fail_before_any_dispatch(tmp_path, monkeypatch, capsys):

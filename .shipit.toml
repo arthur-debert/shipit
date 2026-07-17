@@ -75,18 +75,25 @@ copilot = { rerun = true }
 #
 # agy is pinned to `pro` (→ Gemini 3.1 Pro (High)) — REVERTED from the `flash` the
 # #989 spike recommended, because that pin shipped a DEAD reviewer (issue #1006).
-# Gemini Flash goes agentic in agy's headless `--print` mode: on #998 (a 4-file
-# docs diff) it narrated its hunt for a diff and never emitted a verdict, so every
-# `agy-local` run settled `failed` for two days — masked by codex + Copilot still
-# passing, while the engine correctly declined to let a degraded reviewer block
-# Ready. The spike's ~20% speed win is forfeited DELIBERATELY: a reviewer that
-# never returns a verdict is not faster, it is absent. The hazard is no longer
-# config-only trust — `flash` is DECLARED unusable for a review run on the agy
-# backend identity (`Backend.review_unusable_models`), so re-pinning it here is
-# refused loudly at preflight instead of failing silently on the PR.
+# Gemini Flash goes agentic in agy's headless `--print` mode: it narrates its hunt
+# for a diff and never emits a verdict, so EVERY `agy-local` run settles `failed`.
+# Measured on this repo: `agy-local` failed on every PR of the TREE03 epic — ~10
+# review rounds across #1027/#1028/#1029 — while codex and Copilot kept passing,
+# so the roster promised three required reviewers and delivered two. The engine
+# behaved correctly throughout: it declines to let a degraded reviewer block
+# Ready, which is exactly what made the outage silent.
 #
-# This pins the per-reviewer `model` only; it does NOT remap agy's `pro` alias or
-# touch any write-agent default.
+# The spike's ~20% speed win is forfeited DELIBERATELY: a reviewer that never
+# returns a verdict is not faster, it is absent. This pins the per-reviewer
+# `model` only; it does NOT remap agy's `pro` alias or touch any write-agent
+# default.
+#
+# The pin is no longer the only thing standing between the roster and a dead
+# reviewer: #1032 reverted this line to stop the bleeding, and #1006 made the
+# hazard MECHANICAL — every Gemini Flash tier is DECLARED unusable for a review
+# run on the agy backend identity (`Backend.review_unusable_models`), so
+# re-pinning one here is refused loudly at preflight, naming the capable default,
+# instead of failing silently on the PR.
 codex = { window = 2700, model = "gpt-5.6-sol" }
 agy = { window = 2700, model = "pro" }
 

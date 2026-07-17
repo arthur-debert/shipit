@@ -1322,6 +1322,7 @@ def run_publish(
     assets: str | None = None,
     notes: str | None = None,
     testpypi: bool = False,
+    endpoint_selector: Sequence[str] | None = None,
     as_json: bool = False,
     gitio: Any = git,
     ghio: Any = gh,
@@ -1342,10 +1343,13 @@ def run_publish(
        stages. Omitted facts default to LIVE — the strict
        contract (a caller that states no plan never weakens the gate);
        liveness is never inferred from the result strings.
-    2. The plan (:func:`shipit.release.publish.plan`): the RC guard and
-       brew's stable-only rule decided centrally, ``release`` endpoints
-       ordered before ``derived`` ones (stories 33/35). WS02's preflight
-       will emit this same plan; until then publish derives it from the map.
+    2. The plan (:func:`shipit.release.publish.plan`): the RC guard, brew's
+       stable-only rule, and ``endpoint_selector`` (the per-invocation
+       ``--endpoint`` subset, ADR-0070) intersected centrally, ``release``
+       endpoints ordered before ``derived`` ones (stories 33/35). WS02's
+       preflight will emit this same plan; until then publish derives it from
+       the map. ``endpoint_selector`` is ``None`` when the flag is absent —
+       the full plan fires, unchanged.
     3. Token validation for every NON-SKIPPED dispatch — a missing token is
        one loud refusal BEFORE the first dispatch, never a silent adapter
        skip (stories 43–45); present tokens are registered with the central
@@ -1405,7 +1409,12 @@ def run_publish(
     notes_arg = Path(notes) if notes else Path(DEFAULT_NOTES_FILE)
     notes_path = notes_arg if notes_arg.is_absolute() else root / notes_arg
 
-    dispatches = publish_mod.plan(artifacts, prerelease=prerelease, live_fire=live_fire)
+    dispatches = publish_mod.plan(
+        artifacts,
+        prerelease=prerelease,
+        live_fire=live_fire,
+        selector=endpoint_selector,
+    )
 
     # Token validation BEFORE the first dispatch (stories 43-45): one loud
     # refusal naming every missing token, never a silent adapter skip. The
@@ -1853,6 +1862,17 @@ _RESULT_CHOICE = click.Choice(publish_mod.STAGE_RESULTS)
         "TESTPYPI_TOKEN instead of PYPI_TOKEN)."
     ),
 )
+@click.option(
+    "--endpoint",
+    "endpoints",
+    multiple=True,
+    help=(
+        "Publish ONLY this endpoint (repeatable); every other declared "
+        "endpoint is skipped with a stated selector reason. Per-invocation "
+        "only — never a .shipit.toml field. `gh-release` cannot be "
+        "deselected (it is the Release). Omitted: the full plan fires."
+    ),
+)
 @json_option
 def publish_cmd(
     version: version_mod.VersionSpec,
@@ -1864,6 +1884,7 @@ def publish_cmd(
     assets: str | None,
     notes: str | None,
     testpypi: bool,
+    endpoints: tuple[str, ...],
     as_json: bool,
 ) -> None:
     """Publish the staged Artifacts to their declared Distribution endpoints.
@@ -1878,11 +1899,13 @@ def publish_cmd(
     dispatches each declared endpoint through the closed adapter registry
     (gh-release, crates, pypi, npm, brew). A -release-rc VERSION publishes
     ONLY to the GH release (as prerelease) — every external endpoint is
-    skipped. `release` endpoints run before `derived` ones (brew renders
-    against the final asset URLs/SHAs). Every adapter treats
-    already-published as success, so a re-run after a partial publish
-    converges. VERSION is the concrete semver prepare cut — never a bump
-    word (publish must not re-resolve the version).
+    skipped. --endpoint (repeatable) narrows the run to the named endpoints —
+    everything else is selector-skipped, and it composes with the guards by
+    intersection (an rc cut still skips every external endpoint). `release`
+    endpoints run before `derived` ones (brew renders against the final asset
+    URLs/SHAs). Every adapter treats already-published as success, so a re-run
+    after a partial publish converges. VERSION is the concrete semver prepare
+    cut — never a bump word (publish must not re-resolve the version).
     """
     if version.semver is None:
         raise click.UsageError(
@@ -1901,6 +1924,10 @@ def publish_cmd(
             assets=assets,
             notes=notes,
             testpypi=testpypi,
+            # The boundary parses the flag to a VALUE (ADR-0030): an absent
+            # --endpoint is None (the full plan fires), never an empty
+            # selection that would publish nothing.
+            endpoint_selector=list(endpoints) or None,
             as_json=as_json,
         )
     )

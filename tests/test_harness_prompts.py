@@ -192,13 +192,25 @@ def test_no_shipped_surface_says_fresh_shepherd_per_round():
 
 
 def test_coordinator_prompt_carries_the_promotion_clause():
-    """Issue #458: session auto-memory is keyed to the ephemeral Tree's PATH, so
-    it dies with the tree. The coordinator's prompt must carry the end-of-epic /
-    end-of-session promotion clause — durable learnings land in the repo before
-    the session ends, never only in session memory."""
+    """Issue #458's RULE survives; its PREMISE did not. #458 pinned this clause
+    because session auto-memory was keyed to the ephemeral Tree's PATH and died
+    with the tree, so learnings had to be hand-swept into the repo before gc.
+    ADR-0073 made the store per-repo — one store keyed on the origin remote,
+    shared by every Tree and outliving all of them — so memory now persists.
+    The clause stays for the reason that was always the real one: the repo is
+    how knowledge reaches reviewers, future implementers, and humans who never
+    see a transcript. So the prompt must still carry the clause AND name that
+    reason — an unexplained ritual is what a future editor deletes as redundant
+    with a memory that now works."""
     prompt = render(load_role_defs()).role_prompts[Role.COORDINATOR]
     assert "Promoting durable learnings INTO THE REPO" in prompt
-    assert "scratchpad, never an archive" in prompt
+    # The superseded premise must never creep back: telling a session its memory
+    # is doomed suppresses the memory-writing ADR-0073 exists to enable.
+    assert "scratchpad, never an archive" not in prompt
+    # ...and the surviving reason must be NAMED, not left implicit — the clause
+    # has to justify itself now that "memory leaks" no longer does it for free.
+    assert "Session store" in prompt
+    assert "ADR-0073" in prompt
     # The clause must NAME each promotion target via its source -> destination
     # mapping, not merely mention the words: bare "ADR"/"CONTEXT.md" also appear
     # in the planning-docs bullet and the epic-topology text, so they'd pass even
@@ -220,15 +232,21 @@ def test_promotion_clause_is_coordinator_scoped():
         assert "Promoting durable learnings" not in rendered.role_prompts[role]
 
 
-def test_docs_state_the_memory_orphaning_constraint_once():
-    """The WHY lives in docs/dev (issue #458 acceptance): one subsection naming
-    the mechanism — path-keyed session auto-memory orphaned when the ephemeral
-    tree is gc'd — so a human knows why the promotion rule exists."""
+def test_docs_state_the_promotion_rationale_once():
+    """The WHY lives in docs/dev (issue #458 acceptance): one subsection, in
+    prose, so a human knows why the promotion rule exists. ADR-0073 rewrote that
+    WHY — the store is per-repo and outlives the Tree, so promotion is about how
+    the repo carries knowledge, not about memory leaking — but not the
+    requirement that it be stated, once, where a human will find it."""
     epics = (_ROOT / "docs" / "dev" / "epics.lex").read_text(encoding="utf-8")
     # "once", not merely "present": a duplicated subsection or mechanism string
     # is the regression this guards, so assert the count, not membership.
-    assert epics.count("Session memory dies with the Tree") == 1
-    assert epics.count("~/.claude/projects/<path-slug>/memory/") == 1  # the mechanism
+    assert epics.count("Session memory outlives the Tree") == 1
+    assert epics.count("~/.claude/projects/<path-slug>/") == 1  # the mechanism
+    # The superseded claim is the live regression now. §7 keeps the orphaning
+    # story as HISTORY (why the key was wrong, what it cost); it must never
+    # restate it as present fact — that is the premise ADR-0073 retired.
+    assert epics.count("Session memory dies with the Tree") == 0
 
 
 # --- brief templates (RVW02 WS04): the coordinator-filled task layer ---------

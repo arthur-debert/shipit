@@ -231,6 +231,9 @@ def test_create_binding_does_not_leak_past_return(tmp_path, monkeypatch, jsonl_l
 
 
 def _tree_record(path: str, *, mtime: float, dirty: bool = False) -> TreeRecord:
+    # `last_commit` tracks `mtime`: the write ladder reads idle from the NEWEST of the
+    # two, so a record meaning "aged" must pin both (the TreeRecord default of None —
+    # stamp unreadable — is conservatively ACTIVE and would keep every Tree).
     return TreeRecord(
         path=path,
         branch="issues/7/work",
@@ -239,8 +242,10 @@ def _tree_record(path: str, *, mtime: float, dirty: bool = False) -> TreeRecord:
         ahead=0,
         behind=0,
         pr=None,
+        pr_state=None,
         mtime=mtime,
         unpushed_shas=(),
+        last_commit=mtime,
     )
 
 
