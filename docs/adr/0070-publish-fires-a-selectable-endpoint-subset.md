@@ -7,11 +7,14 @@ adapter registry discriminate what runs: `external` (skipped by the
 Nothing else subsets a publish.
 
 That blocks a real need. Seeding the Artifact channel (ADR-0064) from
-`lex-fmt/lex` requires the derived `conda` endpoint to fire for `lexd-lsp`,
+`lex-fmt/lex` requires the derived `conda` endpoint to fire for a channel
+artifact — first `lexd-lsp` (the VSIX's staged language server), later `lexd`
+itself (the lint-gate tool whose stable publication gates ADR-0066's cutover) —
 while `crates` (declared on `lexd`) and `npm` (declared on `lex-wasm`) — sibling
 artifacts of the same repo, fired by the same event — must not: those are
 owner-gated live publishes to third-party registries, and they cannot be
-unpublished. Today only two shapes exist, and neither seeds the channel safely:
+unpublished. Both seeds hit the identical wall, which is why the mechanism is
+general rather than scoped to one artifact. Today only two shapes exist, and neither seeds the channel safely:
 a `-release-rc` skips *every* external endpoint including `conda`, and any other
 tag fires `conda` *together with* `crates` and `npm` (neither is `stable_only`).
 The channel is therefore unseedable without collateral, and `lex`'s own

@@ -1,10 +1,12 @@
 # `provision lexd` retires; the lint gate rides the Artifact channel
 
-> **Amended by ADR-0071.** The seed this cutover is gated on need not cover
-> every served subdir: the readiness gate is the served subdirs that are not
-> owner-paused, so `win-64` is not probed while shipit#895 holds. Windows
-> consumers fail closed after the cutover — the no-fallback decision below is
-> unchanged.
+> **Amended by ADR-0071.** The **stable `lexd` publication** this cutover is
+> gated on need not cover every served subdir: the readiness gate is the served
+> subdirs that are not owner-paused, so `win-64` is not probed while shipit#895
+> holds. (A prerelease seed populates the channel for pin-testing but does
+> **not** satisfy this gate — the cutover still requires a stable `lexd`.)
+> Windows consumers fail closed after the cutover — the no-fallback decision
+> below is unchanged.
 
 `lexd` is the one lint-gate tool not on conda-forge, so it could not ride
 `pixi.lock` like the other linters; `shipit provision lexd` fetched it bespoke
