@@ -149,7 +149,7 @@ def test_format_fleet_renders_placeholders():
     assert "(detached)" in out  # the branch placeholder
     lines = out.splitlines()
     assert len(lines) == 2  # header + one row
-    assert " - " in lines[1] or lines[1].split()[3] == "-"  # the BASE placeholder
+    assert lines[1].split()[3] == "-"  # the BASE placeholder (column index 3)
 
 
 def test_format_fleet_renders_the_created_column():
