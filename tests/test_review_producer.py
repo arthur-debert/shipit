@@ -272,19 +272,30 @@ def test_seam_timeout_message_reports_agys_headroom_deadline_not_the_bare_timeou
     assert "600s" in str(exc.value)
 
 
-def test_non_timeout_launch_execerror_propagates_as_a_plain_failure(_faked):
+def test_non_timeout_launch_execerror_propagates_as_a_plain_failure(_faked, tmp_path):
     # A NON-timeout transport failure (a missing binary that slipped past preflight,
     # a vanished cwd) must NOT be reclassed as a timeout — it propagates as the raw
     # ExecError for the service's generic `failed` mapping, never a BackendError.
     def launcher(cmd, *, cwd, env, timeout=None):
         raise execrun.ExecError(
-            cmd, rc=None, stderr="No such file", cause=execrun.CAUSE_MISSING_BINARY
+            cmd,
+            rc=None,
+            stdout="partial launch out",
+            stderr="No such file",
+            cause=execrun.CAUSE_MISSING_BINARY,
         )
 
+    bundle = _bundle(tmp_path)
     with pytest.raises(execrun.ExecError) as exc:
-        producer.run_tree_review(agent_backend.CODEX, _ctx(), launcher=launcher)
+        producer.run_tree_review(
+            agent_backend.CODEX, _ctx(), launcher=launcher, artifacts=bundle
+        )
     assert exc.value.cause == execrun.CAUSE_MISSING_BINARY
     assert not isinstance(exc.value, BackendError)
+    meta = json.loads((bundle.dir / "meta.json").read_text())
+    assert meta["outcome"] == "failed"
+    assert meta["stdout_bytes"] == len(b"partial launch out")
+    assert meta["stderr_bytes"] == len(b"No such file")
 
 
 def test_cli_version_probe_is_best_effort(monkeypatch):
@@ -994,6 +1005,8 @@ def test_seam_timeout_bundle_keeps_partial_streams_and_timed_out_meta(_faked, tm
     meta = json.loads((bundle.dir / "meta.json").read_text())
     assert meta["timed_out"] is True
     assert meta["exit_code"] is None
+    assert meta["stdout_bytes"] == len(b"partial body")
+    assert meta["stderr_bytes"] == len(b"killed at deadline")
     # The prompt was written BEFORE the launch, so a killed child leaves it.
     assert (bundle.dir / "prompt.txt").exists()
 

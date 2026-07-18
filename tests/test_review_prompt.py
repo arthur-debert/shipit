@@ -137,6 +137,8 @@ def test_supplied_incremental_task_preserves_mandatory_context_expansion():
     )
     assert _supplied_diff(task) == _DIFF
     assert "pull request #42 fix range" in task
+    assert "This is an INCREMENTAL review" in task
+    assert "not the whole PR again" in task
     assert "MANDATORY CONTEXT EXPANSION" in task
     assert "raw-hunk-only pass would miss it" in task
     assert "report ONLY findings the fix range's diff INTRODUCED or EXPOSED" in task

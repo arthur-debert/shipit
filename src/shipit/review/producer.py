@@ -942,6 +942,8 @@ def _attempt(
             duration_ms=int((time.monotonic() - start) * 1000),
             exit_code=None,
             timed_out=timed_out,
+            stdout_bytes=len((exc.stdout or "").encode("utf-8")),
+            stderr_bytes=len((exc.stderr or "").encode("utf-8")),
             outcome="timed_out" if timed_out else "failed",
             error=str(exc),
         )
