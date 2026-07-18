@@ -2293,6 +2293,14 @@ def test_render_conda_recipe_repackages_the_prebuilt_binary():
     # quote fix so a Windows-native or spaced staging path stays one scalar.
     assert '- path: "/stage/lexd-aarch64-apple-darwin.tar.gz"' in unix
     assert 'cp "lexd" "${PREFIX}/bin/lexd"' in unix
+    # Relocation is OFF: the endpoint repackages a PREBUILT, already-SIGNED
+    # binary linking only system libraries — there are no conda-prefix paths to
+    # relocate, the default relink needs a per-OS toolchain the single runner
+    # lacks (macOS install_name_tool on Linux, #1052), and rewriting the
+    # Mach-O would invalidate the sign stage's signature.
+    assert yaml.safe_load(unix)["build"]["dynamic_linking"] == {
+        "binary_relocation": False
+    }
     # windows layout: the .exe copied into Scripts (on the win conda PATH).
     src, install_dir, install_bin = publish_mod._conda_binary_layout("win-64", "lexd")
     assert (src, install_dir, install_bin) == ("lexd.exe", "Scripts", "lexd.exe")
