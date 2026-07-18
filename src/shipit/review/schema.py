@@ -499,12 +499,57 @@ def extract_json(text: str, *, want: Callable[[dict], bool] | None = None) -> di
     raise ValueError(f"Could not parse valid JSON from output:\n{text}")
 
 
-#: A required review-envelope key, as it appears in serialized JSON — the marker
-#: that a ``{`` was starting the VERDICT rather than carrying unrelated payload.
-#: Matched against a broken object's own prefix only (see
-#: :func:`_truncated_verdict_attempt`), never the whole stdout, so a key belonging
-#: to some other object can't vouch for this brace.
-_VERDICT_KEY_RE = re.compile(r'"(?:summary|comments)"\s*:')
+#: The required review-envelope keys — the marker that a ``{`` was starting the
+#: VERDICT rather than carrying unrelated payload. Checked by
+#: :func:`_has_top_level_envelope_key` as direct keys of the broken object
+#: itself, so neither a key belonging to some LATER object nor one NESTED inside
+#: this object's payload can vouch for this brace.
+_ENVELOPE_KEYS = frozenset({"summary", "comments"})
+
+
+def _has_top_level_envelope_key(text: str, start: int, end: int) -> bool:
+    """Whether the object opening at ``text[start]`` carries an envelope key
+    (:data:`_ENVELOPE_KEYS`) as one of its OWN keys within ``text[start:end]``.
+
+    The depth-aware replacement for a flat substring search: a truncated
+    tool-call object like ``{"tool": "x", "arguments": {"comments": …`` carries
+    ``"comments":`` in its prefix without ever being a verdict, and matching it
+    would route agentic tool JSON into the truncated-verdict diagnosis — the
+    exact misdiagnosis issue #1006 removes. So this walks the same
+    string-and-escape-honoring scan as :func:`_skip_balanced_object`, tracking
+    brace/bracket depth, and accepts a candidate string only when it opens at
+    depth 1 (a direct child of the object at ``start``) and its next
+    non-whitespace character inside the window is ``:`` (a key, not a value).
+    """
+    depth = 0
+    in_string = False
+    escaped = False
+    key_start = -1  # start of the string currently open at depth 1
+    i = start
+    while i < end:
+        ch = text[i]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+                if key_start != -1 and text[key_start:i] in _ENVELOPE_KEYS:
+                    j = i + 1
+                    while j < end and text[j] in " \t\r\n":
+                        j += 1
+                    if j < end and text[j] == ":":
+                        return True
+        elif ch == '"':
+            in_string = True
+            key_start = i + 1 if depth == 1 else -1
+        elif ch in "{[":
+            depth += 1
+        elif ch in "}]":
+            depth -= 1
+        i += 1
+    return False
 
 
 def _truncated_verdict_attempt(text: str) -> bool:
@@ -514,9 +559,12 @@ def _truncated_verdict_attempt(text: str) -> bool:
     Walks the same balanced scan as :func:`_scan_embedded_objects`, but keeps the
     braces that scan discards: a ``{`` whose :meth:`~json.JSONDecoder.raw_decode`
     FAILS started no complete object, and if its own valid prefix carries a
-    required envelope key (:data:`_VERDICT_KEY_RE`) the verdict was being written
-    when the output stopped. The key is searched only up to the decode-failure
-    position, so a later object's key can never vouch for this brace.
+    required envelope key as a DIRECT key of that object
+    (:func:`_has_top_level_envelope_key`) the verdict was being written when the
+    output stopped. The key is searched only up to the decode-failure position
+    and only at the object's own depth, so neither a later object's key nor one
+    nested inside an unrelated payload (a truncated tool call whose ``arguments``
+    happen to contain ``comments``) can vouch for this brace.
 
     Deliberately NOT "is there a ``{`` in the output": brace-bearing prose, a
     narrated command snippet, and an agent's tool-call JSON all carry braces
@@ -529,7 +577,7 @@ def _truncated_verdict_attempt(text: str) -> bool:
         try:
             _, end = decoder.raw_decode(text, index)
         except json.JSONDecodeError as exc:
-            if _VERDICT_KEY_RE.search(text, index, max(exc.pos, index)):
+            if _has_top_level_envelope_key(text, index, max(exc.pos, index)):
                 return True
             index = text.find("{", max(exc.pos, index + 1))
             continue

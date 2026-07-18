@@ -1133,6 +1133,35 @@ def test_a_wrong_shaped_verdict_is_off_shape_not_blamed_on_diff_size():
     assert "NARRATED" not in hint
 
 
+def test_truncated_tool_json_with_nested_envelope_keys_is_not_a_truncated_verdict():
+    # A truncated TOOL-CALL object can carry "comments"/"summary" nested inside
+    # its arguments payload. Those are not the envelope's own keys — the verdict
+    # was never started, so the size/latency advice must not ride along.
+    from shipit.review.backends import diagnose_parse_failure
+
+    for raw in (
+        '{"tool": "post_review", "arguments": {"comments": [{"file": "a.py",',
+        '{"tool": "x", "arguments": {"summary": {"status": "COMM',
+    ):
+        hint = diagnose_parse_failure(raw, backend_name="agy", timed_out=False)
+        assert "try a faster model or a smaller diff" not in hint, raw
+        assert "truncated" not in hint, raw
+
+
+def test_an_envelope_key_as_a_string_value_is_not_a_truncated_verdict():
+    # "summary" appearing as a VALUE at the top level is payload, not a key —
+    # only `"summary":`/`"comments":` as the object's own key marks the verdict.
+    from shipit.review.backends import diagnose_parse_failure
+
+    hint = diagnose_parse_failure(
+        '{"section": "summary", "body": "the summary of my findings is that',
+        backend_name="agy",
+        timed_out=False,
+    )
+    assert "try a faster model or a smaller diff" not in hint
+    assert "truncated" not in hint
+
+
 def test_a_truncated_verdict_beside_complete_tool_json_still_reads_as_truncated():
     # A run can narrate a COMPLETE tool object and THEN truncate its verdict. The
     # unfinished envelope is what explains the missing review; a complete bystander
