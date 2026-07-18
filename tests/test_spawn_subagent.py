@@ -1148,11 +1148,7 @@ def test_reviewer_naming_threads_through_the_real_service_chain(tmp_path, monkey
     # default plan so `generate_review` touches no git for this hand-fed view.
     monkeypatch.setattr(rounds, "planable", lambda ctx: False)
     # The per-round binary preflight is pure PATH I/O (the sandbox has no codex).
-    monkeypatch.setattr(
-        producer,
-        "preflight_round",
-        lambda backends, models=None, *, dry_run=False: None,
-    )
+    monkeypatch.setattr(producer, "preflight_round", lambda backends: None)
 
     seen: dict = {}
 

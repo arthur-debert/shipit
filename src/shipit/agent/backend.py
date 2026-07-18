@@ -5,18 +5,14 @@ The agent layer is modeled as **orthogonal axes sharing a single identity**
 :class:`Backend` value object per harness/CLI (``claude | codex | antigravity``),
 defining its canonical name plus **every alias** — the spawn ``--backend`` token,
 the review-funnel agent name, the funnel App login ``adr-<agent>-review[bot]``, the
-check-run ``<agent>-local``, the Doppler App-credential key names, the model-alias
-table, and the models a reviewer Run may NOT use — **once**, so the two axes both
-reference it instead of carrying duplicate tables:
+check-run ``<agent>-local``, the Doppler App-credential key names, and the
+model-alias table — **once**, so the two axes both reference it instead of carrying
+duplicate tables:
 
   * the **launch axis** (:mod:`shipit.spawn.backends`) reads ``model_aliases`` /
     ``default_model`` / ``binary`` off the identity;
   * the **PR-funnel axis** reads the Doppler keys (:mod:`shipit.review.ghauth`) and
-    the login / slug / check-run names (:mod:`shipit.prstate.reviewers`) off it, and
-    the review producer (:mod:`shipit.review.producer`) asks the identity whether a
-    configured model is usable for a reviewer Run at ALL (``review_unusable_models``
-    / :meth:`Backend.require_review_model`, issue #1006) — a declared, closed set on
-    the ONE registry entry, never model-name string checks spread across call sites.
+    the login / slug / check-run names (:mod:`shipit.prstate.reviewers`) off it.
 
 **Backend ⊥ Reviewer** and **Backend ⊥ Role**: a :class:`Backend` is shared
 *identity*, not behaviour — the launch adapter (how-to-launch) and the reviewer
@@ -73,22 +69,6 @@ class Backend:
     #: through :meth:`resolve_model` at use. ``None`` for a backend that requires an
     #: explicit model (``claude`` picks its own default).
     default_model: str | None = field(default=None, compare=False)
-    #: This backend's VERBATIM model ids that are UNUSABLE for a **reviewer** Run →
-    #: the operator-facing REASON why (issue #1006). A reviewer Run must return one
-    #: structured JSON verdict from a single headless ``--print`` invocation; a model
-    #: that instead goes *agentic* in that mode narrates and never answers, so the
-    #: run can only end as "no parseable JSON" — a required reviewer that silently
-    #: contributes nothing. Declaring the hazard HERE, on the identity every launch
-    #: axis already reads, is what makes it MECHANICAL: :meth:`require_review_model`
-    #: refuses the config at preflight instead of leaving the fact in a docstring
-    #: nothing enforces (which is exactly how ``agy`` shipped two days of dead
-    #: reviews on ``flash``). Keys are VERBATIM ids, never aliases — the check runs
-    #: on :meth:`resolve_model`'s output, so ``flash`` and its verbatim spelling are
-    #: refused by the SAME entry and a new alias onto a known-bad model cannot
-    #: sneak past. Empty for a backend with no known-unusable reviewer model.
-    review_unusable_models: Mapping[str, str] = field(
-        default_factory=lambda: MappingProxyType({}), compare=False
-    )
 
     @property
     def has_funnel_identity(self) -> bool:
@@ -162,68 +142,6 @@ class Backend:
             )
         return self.model_aliases.get(chosen, chosen)
 
-    def review_model_refusal(self, model: str | None = None) -> str | None:
-        """Why ``model`` is unusable for a **reviewer** Run on this backend, or ``None``.
-
-        The predicate half of :meth:`require_review_model` — resolves ``model``
-        through the ONE alias table and looks the verbatim id up in the declared
-        :pyattr:`review_unusable_models` set. Pure; no CLI probe (unlike a
-        version/flag capability, a model's ``--print`` behaviour is a documented
-        fact, not something the binary will tell us).
-
-        A backend that declares NO hazards short-circuits to ``None`` WITHOUT
-        resolving: with nothing to match, resolution is pointless — and it would
-        otherwise raise for a backend that has no default model to resolve
-        ``None`` against (``claude``), turning "this backend has no known-bad
-        reviewer models" into a spurious refusal.
-        """
-        if not self.review_unusable_models:
-            return None
-        return self.review_unusable_models.get(self.resolve_model(model))
-
-    def require_review_model(self, model: str | None = None) -> None:
-        """RAISE if ``model`` is unusable for a reviewer Run on this backend; else pass.
-
-        The mechanical enforcement of :pyattr:`review_unusable_models` (issue
-        #1006): a reviewer configured with a known-unusable model is refused
-        LOUDLY at preflight — before a Tree is provisioned or a model bills —
-        rather than discovered afterwards as an unparseable "no JSON" failure
-        that reads like a timeout and sends the operator chasing diff size. The
-        message names the backend, the configured value, its resolved id, the
-        reason, and the capable default to switch to, so the fix is the config
-        edit it actually is. Raises :class:`ValueError`; the review producer maps
-        it to a clean :class:`~shipit.review.backends.BackendUnavailable`.
-
-        A pure GUARD, not a resolver: it returns nothing, because resolving a model
-        FOR LAUNCH is the adapter's job (:meth:`resolve_model`) — a guard that also
-        resolved would invite a caller to use it as one, and would then have to fail
-        for a backend with no default model to resolve (``claude``) even though it
-        declares no hazards at all.
-        """
-        reason = self.review_model_refusal(model)
-        if reason is None:
-            return
-        resolved = self.resolve_model(model)
-        # `model` None means "the backend's default" — there is no configured value
-        # to echo, so name only what it resolved to; showing `None ('<default>')`
-        # would read as a configured model literally spelled None.
-        named = (
-            f"{model!r} ({resolved!r})"
-            if model is not None and model != resolved
-            else f"{resolved!r}"
-        )
-        raise ValueError(
-            f"the {self.funnel_agent or self.name} reviewer is configured with "
-            f"model {named}, which is UNUSABLE for a review run: {reason} "
-            f"Pick a capable model for this reviewer"
-            + (
-                f" (this backend's default is {self.default_model!r})"
-                if self.default_model is not None
-                else ""
-            )
-            + " — a reviewer that never returns a verdict is not faster, it is absent."
-        )
-
 
 #: The ``claude`` backend — the first-party harness. NOT a funnel App reviewer (it is
 #: never a codex/agy-style capture reviewer), so it carries no funnel aliases and no
@@ -249,9 +167,7 @@ CODEX = Backend(
 #: is ``agy`` — one backend, three surface names, all defined here). A funnel App
 #: reviewer (``adr-agy-review[bot]`` / ``agy-local``). The ``pro`` default MUST resolve
 #: to a capable, NON-agentic model (a bare ``pro`` silently resolves to Gemini Flash,
-#: which goes agentic in ``--print`` mode; ADR-0020 §Decision-per-backend) — and every
-#: Flash tier is DECLARED unusable for a reviewer Run in ``review_unusable_models``, so
-#: that hazard is now refused mechanically rather than documented and ignored (#1006).
+#: which goes agentic in ``--print`` mode; ADR-0020 §Decision-per-backend).
 ANTIGRAVITY = Backend(
     name="antigravity",
     binary="agy",
@@ -265,25 +181,6 @@ ANTIGRAVITY = Backend(
         }
     ),
     default_model="pro",
-    # Every Gemini Flash tier goes AGENTIC in agy's `--print` mode — it runs
-    # shell/tools and narrates instead of answering, so a reviewer pass ends with
-    # prose and no JSON verdict (issue #1006: pinning `flash` here shipped a
-    # required reviewer that failed EVERY run on #998 for two days, masked by the
-    # other two reviewers still passing). Only the Pro tier answers in `--print`.
-    review_unusable_models=MappingProxyType(
-        {
-            "Gemini 3.5 Flash (High)": (
-                "Gemini Flash goes agentic in agy's `--print` mode — it narrates "
-                "and runs tools instead of returning the review JSON, so the pass "
-                "can only end as 'no verdict' (issue #1006)."
-            ),
-            "Gemini 3.5 Flash (Low)": (
-                "Gemini Flash goes agentic in agy's `--print` mode — it narrates "
-                "and runs tools instead of returning the review JSON, so the pass "
-                "can only end as 'no verdict' (issue #1006)."
-            ),
-        }
-    ),
 )
 
 #: The closed backend registry, in canonical order (``claude`` first). Wiring a new

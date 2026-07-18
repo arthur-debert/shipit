@@ -29,12 +29,7 @@ decision would have missed (do NOT "simplify" them away):
 - **The model must be pinned to a capable, non-agentic name.** ``agy`` silently resolves a
   bare ``pro`` to Gemini Flash, which in ``--print`` mode goes **agentic** (runs
   shell/build instead of answering). :data:`MODEL_ALIASES` pins ``pro`` →
-  ``Gemini 3.1 Pro (High)``. This fact used to live ONLY in this docstring, and a
-  docstring does not stop a config: ``.shipit.toml`` pinned the reviewer to ``flash``
-  anyway and shipped two days of dead reviews (issue #1006). The hazard is now
-  MECHANICAL — every Flash tier is declared in the backend identity's
-  ``review_unusable_models`` (:mod:`shipit.agent.backend`) and a reviewer configured
-  with one is refused at the producer's preflight, before anything launches.
+  ``Gemini 3.1 Pro (High)``.
 
 Auth rides agy's Antigravity OAuth login (creds under ``~/.gemini/antigravity-cli`` +
 ``~/.antigravity``, inherited by the child). The adapter scrubs :data:`SCRUBBED_AUTH_ENV`
@@ -64,10 +59,8 @@ from .base import BackendAdapter
 #: The default ``pro`` MUST resolve to a capable, NON-agentic model: a bare ``pro``
 #: silently resolves to Gemini Flash, which in ``--print`` goes agentic (runs shell/build
 #: instead of answering) and never returns — so ``pro`` is pinned to
-#: ``Gemini 3.1 Pro (High)``, and the Flash aliases, while still resolvable for a write
-#: Run, are declared unusable for a REVIEWER Run on the same identity (issue #1006).
-#: Spaces/parens are safe: the invocation is a plain argv list (never
-#: shell-interpolated), so no quoting is needed.
+#: ``Gemini 3.1 Pro (High)``. Spaces/parens are safe: the invocation is a plain argv list
+#: (never shell-interpolated), so no quoting is needed.
 MODEL_ALIASES = _IDENTITY.model_aliases
 
 #: The default model alias — a sane, capable, non-agentic default for a write Run (from

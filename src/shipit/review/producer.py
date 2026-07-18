@@ -469,7 +469,7 @@ def run_tree_review(
             "exclusive — an incremental round is ONE full-scope fix-range pass, "
             "not a dimension pass"
         )
-    _preflight(backend, model=model, dry_run=dry_run)
+    _preflight(backend, dry_run=dry_run)
 
     instructions = load_instructions(instructions_path)
     if incremental_range is not None:
@@ -602,7 +602,7 @@ def run_range_review(
             f"unknown funnel review backend {backend.name!r} "
             f"(known: {', '.join(b.name for b in _SPECS)})"
         )
-    _preflight(backend, model=model, dry_run=False)
+    _preflight(backend, dry_run=False)
 
     instructions = load_instructions(instructions_path)
     task = build_range_reviewer_task(
@@ -950,43 +950,15 @@ def _dry_run(
     )
 
 
-def _require_review_model(backend: Backend, model: str | None) -> None:
-    """Refuse a model the backend DECLARES unusable for a reviewer Run (issue #1006).
+def _preflight(backend: Backend, *, dry_run: bool) -> None:
+    """Verify the backend's CLI binary (the registry's ``binary`` alias) is on
+    PATH; raise :class:`BackendUnavailable` otherwise.
 
-    The mechanical half of the capability: the registry identity answers whether
-    the configured model can return a verdict from a headless ``--print`` Run at
-    all (:meth:`shipit.agent.backend.Backend.require_review_model` over its
-    declared ``review_unusable_models``), and a refusal is re-raised as the same
-    :class:`BackendUnavailable` surface a missing binary uses — so the reviewer
-    dies at preflight with an actionable "this model cannot review, use <default>"
-    message that names the config edit, instead of launching an agent that can only
-    narrate and settling later as an unparseable "no JSON" failure.
-
-    The check is a pure CONFIG fact (no CLI probe), so unlike the binary/flag
-    preflight it is NOT skipped for a dry-run: a dry-run of a reviewer that could
-    never work must say so, not print a would-run argv that reads as fine.
-    ``model`` ``None`` means "the backend's own default", which the identity
-    resolves and checks the same way.
+    Skipped in ``dry_run`` (a dry-run only prints the would-run argv; it must work
+    without the CLI installed, mirroring the spawn dry-run posture). A missing CLI on a
+    REAL run fails loud — these are LOCAL backends and a missing binary must never
+    silently degrade.
     """
-    try:
-        backend.require_review_model(model)
-    except ValueError as exc:
-        raise BackendUnavailable(str(exc)) from exc
-
-
-def _preflight(backend: Backend, *, model: str | None = None, dry_run: bool) -> None:
-    """Verify the backend can actually review as configured — its CLI binary (the
-    registry's ``binary`` alias) is on PATH, and that ``model`` is not one the
-    backend declares unusable for a review Run; raise
-    :class:`BackendUnavailable` otherwise.
-
-    The binary probe is skipped in ``dry_run`` (a dry-run only prints the
-    would-run argv; it must work without the CLI installed, mirroring the spawn
-    dry-run posture); the ``model`` refusal (:func:`_require_review_model`) is NOT —
-    it is config, not environment. A missing CLI on a REAL run fails loud — these are
-    LOCAL backends and a missing binary must never silently degrade.
-    """
-    _require_review_model(backend, model)
     if dry_run:
         return
     if shutil.which(backend.binary) is None:
@@ -997,12 +969,7 @@ def _preflight(backend: Backend, *, model: str | None = None, dry_run: bool) -> 
         )
 
 
-def preflight_round(
-    backends: Sequence[Backend],
-    models: Sequence[str | None] | None = None,
-    *,
-    dry_run: bool = False,
-) -> None:
+def preflight_round(backends: Sequence[Backend]) -> None:
     """Verify EVERY backend a round is configured to launch, ONCE, before any
     pass starts; raise ONE :class:`BackendUnavailable` naming each missing binary.
 
@@ -1015,33 +982,7 @@ def preflight_round(
     on, the calibrator's); duplicate binaries are checked once.
     The per-launch checks (:func:`_preflight`, the calibrator's own) stay as
     backstops for callers outside a fan-out round.
-
-    ``models`` is the round's configured model per entry, POSITIONALLY aligned to
-    ``backends`` (``None`` for "the backend's default"); it is checked against each
-    backend's declared-unusable reviewer set FIRST (issue #1006), so a reviewer
-    that could never return a verdict is refused before the Tree — the same
-    round-level "fail once, launch nothing" posture the binary check has. Omitting
-    ``models`` skips that check (the per-launch :func:`_preflight` still refuses).
-    A length mismatch is a programming error raised loud, never a silently
-    unchecked model.
-
-    ``dry_run`` mirrors :func:`_preflight`'s split: the environment probe (binary
-    on PATH) is SKIPPED, because a dry-run only prints
-    the would-run argv and must work without the CLIs installed; the ``models``
-    check is NOT, because model capability is a config fact, not an environment
-    one — a dry-run of a round whose reviewer could never return a verdict must
-    say so rather than print an argv that reads as fine.
     """
-    if models is not None:
-        if len(models) != len(backends):
-            raise ValueError(
-                f"preflight_round: models ({len(models)}) must align positionally "
-                f"with backends ({len(backends)})"
-            )
-        for backend, model in zip(backends, models, strict=True):
-            _require_review_model(backend, model)
-    if dry_run:
-        return
     missing: list[Backend] = []
     seen: set[str] = set()
     for backend in backends:

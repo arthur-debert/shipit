@@ -499,128 +499,18 @@ def extract_json(text: str, *, want: Callable[[dict], bool] | None = None) -> di
     raise ValueError(f"Could not parse valid JSON from output:\n{text}")
 
 
-#: The required review-envelope keys — the marker that a ``{`` was starting the
-#: VERDICT rather than carrying unrelated payload. Checked by
-#: :func:`_has_top_level_envelope_key` as direct keys of the broken object
-#: itself, so neither a key belonging to some LATER object nor one NESTED inside
-#: this object's payload can vouch for this brace.
-_ENVELOPE_KEYS = frozenset({"summary", "comments"})
+def has_complete_json_object(text: str) -> bool:
+    """Whether ``text`` contains at least one COMPLETE embedded JSON object.
 
-
-def _has_top_level_envelope_key(text: str, start: int, end: int) -> bool:
-    """Whether the object opening at ``text[start]`` carries an envelope key
-    (:data:`_ENVELOPE_KEYS`) as one of its OWN keys within ``text[start:end]``.
-
-    The depth-aware replacement for a flat substring search: a truncated
-    tool-call object like ``{"tool": "x", "arguments": {"comments": …`` carries
-    ``"comments":`` in its prefix without ever being a verdict, and matching it
-    would route agentic tool JSON into the truncated-verdict diagnosis — the
-    exact misdiagnosis issue #1006 removes. So this walks the same
-    string-and-escape-honoring scan as :func:`_skip_balanced_object`, tracking
-    brace/bracket depth, and accepts a candidate string only when it opens at
-    depth 1 (a direct child of the object at ``start``) and its next
-    non-whitespace character inside the window is ``:`` (a key, not a value).
+    The extractor's own balanced scan (:func:`_scan_embedded_objects`) as a
+    predicate, for the parse-failure diagnosis in
+    :func:`shipit.review.backends.base.parse_review_output` (issue #1006): a
+    stdout that carries a complete object which the review parse still rejected
+    holds a wrong-envelope verdict (#826) or an unrelated tool/log blob — the
+    output terminated on its own, which a bare ``{`` (brace-bearing prose, a
+    narrated command snippet, a truncated object) does not prove.
     """
-    depth = 0
-    in_string = False
-    escaped = False
-    key_start = -1  # start of the string currently open at depth 1
-    i = start
-    while i < end:
-        ch = text[i]
-        if in_string:
-            if escaped:
-                escaped = False
-            elif ch == "\\":
-                escaped = True
-            elif ch == '"':
-                in_string = False
-                if key_start != -1 and text[key_start:i] in _ENVELOPE_KEYS:
-                    j = i + 1
-                    while j < end and text[j] in " \t\r\n":
-                        j += 1
-                    if j < end and text[j] == ":":
-                        return True
-        elif ch == '"':
-            in_string = True
-            key_start = i + 1 if depth == 1 else -1
-        elif ch in "{[":
-            depth += 1
-        elif ch in "}]":
-            depth -= 1
-        i += 1
-    return False
-
-
-def _truncated_verdict_attempt(text: str) -> bool:
-    """Whether ``text`` holds a ``{`` that began the review envelope and never
-    finished — the CUT-OFF signature, told apart from every other brace.
-
-    Walks the same balanced scan as :func:`_scan_embedded_objects`, but keeps the
-    braces that scan discards: a ``{`` whose :meth:`~json.JSONDecoder.raw_decode`
-    FAILS started no complete object, and if its own valid prefix carries a
-    required envelope key as a DIRECT key of that object
-    (:func:`_has_top_level_envelope_key`) the verdict was being written when the
-    output stopped. The key is searched only up to the decode-failure position
-    and only at the object's own depth, so neither a later object's key nor one
-    nested inside an unrelated payload (a truncated tool call whose ``arguments``
-    happen to contain ``comments``) can vouch for this brace.
-
-    Deliberately NOT "is there a ``{`` in the output": brace-bearing prose, a
-    narrated command snippet, and an agent's tool-call JSON all carry braces
-    while delivering no verdict, and blaming a cut-off (i.e. diff size) for those
-    is the exact misdiagnosis issue #1006 removes.
-    """
-    decoder = json.JSONDecoder()
-    index = text.find("{")
-    while index != -1:
-        try:
-            _, end = decoder.raw_decode(text, index)
-        except json.JSONDecodeError as exc:
-            if _has_top_level_envelope_key(text, index, max(exc.pos, index)):
-                return True
-            index = text.find("{", max(exc.pos, index + 1))
-            continue
-        except RecursionError:
-            # Mirrors the scan: step past the over-deep object in one O(N) pass.
-            # An unterminated one can hold nothing parseable after it.
-            end = _skip_balanced_object(text, index)
-            if end is None:
-                return False
-            index = text.find("{", end)
-            continue
-        index = text.find("{", end)
-    return False
-
-
-def classify_json_attempt(text: str) -> str:
-    """WHICH JSON-delivery fault a stdout that yielded no review shows —
-    ``"truncated"``, ``"off_shape"``, or ``"none"``.
-
-    The evidence behind :func:`shipit.review.backends.base.diagnose_parse_failure`'s
-    split, factored here because only the extractor knows what a verdict ATTEMPT
-    looks like (issue #1006):
-
-      * ``"truncated"`` — a ``{`` began the envelope and the output stopped
-        mid-body (:func:`_truncated_verdict_attempt`): a real cut-off, so
-        size/latency IS the lever;
-      * ``"off_shape"`` — no cut-off, but some COMPLETE JSON object is present
-        that the review parse rejected: a wrong envelope (#826) or an unrelated
-        tool/log blob. The body TERMINATED, so it was never a size problem;
-      * ``"none"`` — no JSON object was completed and none was started: the agent
-        answered in prose. Braces alone do not count.
-
-    Order matters: the cut-off test runs FIRST, because a run can narrate a
-    complete tool-call object AND then truncate its verdict — the unfinished
-    envelope is the fault that explains the missing review, and a complete
-    bystander object must not mask it.
-    """
-    raw = text or ""
-    if _truncated_verdict_attempt(raw):
-        return "truncated"
-    if _scan_embedded_objects(raw):
-        return "off_shape"
-    return "none"
+    return bool(_scan_embedded_objects(text or ""))
 
 
 def _scan_embedded_objects(text: str) -> list[tuple[dict, int]]:

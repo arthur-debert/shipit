@@ -18,7 +18,11 @@ from shipit import execrun
 from shipit.agent import backend as agent_backend
 from shipit.identity import repo_from_slug
 from shipit.review import producer
-from shipit.review.backends import BackendError, BackendUnavailable
+from shipit.review.backends import (
+    BackendError,
+    BackendUnavailable,
+    parse_review_output,
+)
 from shipit.review.diff import ReviewView, review_view
 from shipit.spawn.launch import LaunchResult
 from shipit.tree.create import Tree
@@ -313,11 +317,10 @@ def test_agy_reprompts_once_on_unparseable_output_then_parses_the_retry(_faked):
     # quoting the SPECIFIC parse failure so agy fixes the concrete problem.
     assert "gh pr diff 42" in retry
     assert "RETRY — your PREVIOUS response could NOT be parsed" in retry
-    # The actual failure hint is fed back — and since #1006 it is the SPECIFIC
-    # diagnosis (this response was prose with no JSON started = narration), not
-    # the old catch-all "no parseable JSON … try a faster model or a smaller diff".
-    assert "NARRATED instead of reviewing" in retry
-    assert "never emitted the required JSON verdict" in retry
+    # The actual failure hint fed back — since #1006 the diagnosis states what the
+    # output WAS (a non-verdict) instead of the old catch-all size/latency guess.
+    assert "no review verdict" in retry
+    assert "try a faster model or a smaller diff" not in retry
 
 
 def test_agy_retry_is_one_shot_two_failures_fall_through_to_salvage(_faked):
@@ -914,233 +917,97 @@ def test_range_review_fills_the_bundle_too(monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Issue #1006 — a reviewer configured with a known-unusable model is REFUSED at
-# preflight (loudly, before anything launches), and a no-verdict response is
-# diagnosed as narration, not as a size/latency problem.
+# Issue #1006 — parse-failure diagnosis is evidence-based and conservative.
+# Every case crosses `parse_review_output` (the diagnosis is an implementation
+# detail behind it): only an EXPLICIT timeout marker recommends a faster model
+# or a smaller diff; every other non-delivery states what the output was
+# without guessing a cause.
 # ---------------------------------------------------------------------------
 
 
-def test_preflight_refuses_a_model_the_backend_declares_unusable_for_review(
-    monkeypatch,
-):
-    # The #1006 regression: `.shipit.toml` pinned agy's reviewer to `flash`, which
-    # goes agentic in `--print` and never returns a verdict — and NOTHING stopped
-    # it, so the required reviewer failed every run for two days. It must now die
-    # at preflight with an actionable message, not on the PR as "no parseable JSON".
-    monkeypatch.setattr(producer.shutil, "which", lambda binary: f"/usr/bin/{binary}")
-    with pytest.raises(BackendUnavailable) as exc:
-        producer._preflight(agent_backend.ANTIGRAVITY, model="flash", dry_run=False)
-    message = str(exc.value)
-    assert "UNUSABLE for a review run" in message
-    assert "agentic" in message  # the reason
-    assert "'pro'" in message  # the capable model to switch to
-    assert "smaller diff" not in message  # NOT the misleading size advice
+_SIZE_HINT = "try a faster model or a smaller diff"
 
 
-def test_preflight_accepts_the_capable_model(monkeypatch):
-    monkeypatch.setattr(producer.shutil, "which", lambda binary: f"/usr/bin/{binary}")
-    producer._preflight(
-        agent_backend.ANTIGRAVITY, model="pro", dry_run=False
-    )  # no raise
+def test_an_explicit_timeout_keeps_the_size_hint_and_the_structured_flag():
+    # The backend's OWN marker is the one piece of evidence that the response was
+    # cut off mid-flight — size/latency IS the lever, and the advice stays.
+    raw = '{"summary": {"status": "COMM… timed out waiting for response'
+    with pytest.raises(BackendError) as exc:
+        parse_review_output(raw, backend_name="agy")
+    assert "timed out" in str(exc.value)
+    assert _SIZE_HINT in str(exc.value)
+    assert exc.value.timed_out is True
+    assert exc.value.raw == raw  # the #76 salvage still gets everything
 
 
-def test_an_unusable_model_is_refused_even_on_a_dry_run(monkeypatch):
-    # The model refusal is a CONFIG fact, not an environment probe: a dry-run of a
-    # reviewer that could never work must say so, not print a would-run argv that
-    # reads as fine. (The binary/flag probes stay dry-run-skipped: `which` returns
-    # None here and no missing-binary error is raised.)
-    monkeypatch.setattr(producer.shutil, "which", lambda binary: None)
-    with pytest.raises(BackendUnavailable, match="UNUSABLE for a review run"):
-        producer._preflight(agent_backend.ANTIGRAVITY, model="flash", dry_run=True)
+def test_empty_stdout_is_diagnosed_as_silent_with_no_size_hint():
+    # Nothing was delivered at all — a killed child or a failed login, never a
+    # diff-size problem. The raw (empty) is still preserved for the salvage path.
+    with pytest.raises(BackendError) as exc:
+        parse_review_output("   \n", backend_name="agy")
+    assert "no output at all" in str(exc.value)
+    assert _SIZE_HINT not in str(exc.value)
+    assert exc.value.timed_out is False
+    assert exc.value.raw == "   \n"
 
 
-def test_run_tree_review_refuses_an_unusable_model_before_launching(_faked):
-    # End to end at the launch seam: the refusal fires BEFORE the Tree is cloned
-    # and before the agent runs — nothing is launched and nothing bills.
-    launched: list = []
-
-    def launcher(cmd, *, cwd, env, timeout=None):
-        launched.append(cmd)
-        return LaunchResult(returncode=0, stdout=_VALID, stderr="")
-
-    with pytest.raises(BackendUnavailable, match="UNUSABLE for a review run"):
-        producer.run_tree_review(
-            agent_backend.ANTIGRAVITY, _ctx(), model="flash", launcher=launcher
-        )
-    assert launched == []  # no model run happened
-
-
-def test_preflight_round_refuses_an_unusable_model_before_the_tree(monkeypatch):
-    # Round level (#1006 + RVW03-WS03): the fan-out's configured model is checked
-    # ONCE, before the shared Tree is provisioned — one clean refusal, never
-    # "all N dimension passes failed".
-    monkeypatch.setattr(producer.shutil, "which", lambda binary: f"/usr/bin/{binary}")
-    with pytest.raises(BackendUnavailable, match="UNUSABLE for a review run"):
-        producer.preflight_round([agent_backend.ANTIGRAVITY], ["flash"])
-    # The capable model passes the same call.
-    producer.preflight_round([agent_backend.ANTIGRAVITY], ["pro"])
-    # Omitting `models` keeps the pre-#1006 binary-only contract.
-    producer.preflight_round([agent_backend.ANTIGRAVITY])
-
-
-def test_preflight_round_rejects_misaligned_models(monkeypatch):
-    monkeypatch.setattr(producer.shutil, "which", lambda binary: f"/usr/bin/{binary}")
-    with pytest.raises(ValueError, match="align positionally"):
-        producer.preflight_round(
-            [agent_backend.CODEX, agent_backend.ANTIGRAVITY], ["pro"]
-        )
-
-
-def test_narrated_output_is_diagnosed_as_narration_not_as_a_size_problem():
-    # The #998 signature: the agent hunted for a diff in prose and never emitted a
-    # verdict. The old message blamed size/latency ("try a faster model or a smaller
-    # diff") on a 4-file docs diff, sending the operator chasing the wrong thing.
-    from shipit.review.backends import diagnose_parse_failure
-
-    narration = (
-        "I will search for any changes, files, or docs in the workspace directory "
-        "to understand what needs to be reviewed. I will inspect the schema for "
-        "the pull_request_read tool."
-    )
-    hint = diagnose_parse_failure(narration, backend_name="agy", timed_out=False)
-    assert "NARRATED instead of reviewing" in hint
-    assert "never emitted the required JSON verdict" in hint
-    assert "configured model" in hint  # the REAL lever
-    # The misleading remediation is not given as advice — it is explicitly
-    # DISCLAIMED, so nobody re-reads this as "shrink the diff".
-    assert "NOT a size or latency problem" in hint
-    assert "a faster model or a smaller diff will not fix" in hint
-
-
-def test_a_started_but_unparseable_verdict_is_diagnosed_as_truncated():
-    # The envelope WAS begun and stops mid-body — a genuine cut-off, where the
-    # size/latency advice is honest and stays.
-    from shipit.review.backends import diagnose_parse_failure
-
-    hint = diagnose_parse_failure(
-        '{"summary": {"status": "COMM', backend_name="agy", timed_out=False
-    )
-    assert "truncated" in hint
-    assert "try a faster model or a smaller diff" in hint
-    assert "NARRATED" not in hint
-
-
-def test_brace_bearing_narration_is_narration_not_a_truncated_verdict():
-    # The regression behind the old `"{" not in raw` test: agentic narration quotes
-    # command snippets and brace-bearing prose while delivering NO verdict. Blaming
-    # a cut-off (i.e. diff size) for it is the exact #1006 misdiagnosis — braces are
-    # not evidence that a verdict was ever started.
-    from shipit.review.backends import diagnose_parse_failure
-
+def test_narration_with_ordinary_braces_is_a_non_verdict_not_a_size_problem():
+    # The #998 signature: the agent narrated its diff-hunting in prose and never
+    # answered. Braces in prose/command snippets are not evidence of anything —
+    # blaming a cut-off (i.e. diff size) here is the misdiagnosis #1006 removes.
     for narration in (
-        "no json here, just {braces} and prose",  # tests/test_review_schema.py's case
+        "I will search the workspace for a diff to review.",
+        "no json here, just {braces} and prose",
         "I will run `git diff --name-only` and inspect {workspace}/docs to review.",
-        "Let me check the schema {file: pull_request_read} before I answer.",
     ):
-        hint = diagnose_parse_failure(narration, backend_name="agy", timed_out=False)
-        assert "NARRATED instead of reviewing" in hint, narration
-        assert "try a faster model or a smaller diff" not in hint, narration
+        with pytest.raises(BackendError) as exc:
+            parse_review_output(narration, backend_name="agy")
+        assert "no review verdict" in str(exc.value), narration
+        assert _SIZE_HINT not in str(exc.value), narration
+        assert exc.value.timed_out is False
 
 
-def test_narrated_tool_json_is_off_shape_not_a_truncated_verdict():
-    # An agent that goes agentic emits COMPLETE tool-call JSON while never
-    # answering. It parses, so it is not a cut-off — the size advice must not
-    # ride along.
-    from shipit.review.backends import diagnose_parse_failure
-
-    hint = diagnose_parse_failure(
-        'Reviewing now.\n{"tool": "pull_request_read", "args": {"pr": 998}}\nDone.',
-        backend_name="agy",
-        timed_out=False,
-    )
-    assert "COMPLETE JSON that is not a review" in hint
-    assert "NOT a size or latency problem" in hint
-    assert "try a faster model or a smaller diff" not in hint
-
-
-def test_a_wrong_shaped_verdict_is_off_shape_not_blamed_on_diff_size():
-    # The #826 signature: valid JSON, wrong envelope. The body TERMINATED, so this
-    # is an output-contract fault — never a diff-size one.
-    from shipit.review.backends import diagnose_parse_failure
-
-    hint = diagnose_parse_failure(
-        '{"findings": [{"file": "a.py", "text": "x"}]}',
-        backend_name="codex",
-        timed_out=False,
-    )
-    assert "COMPLETE JSON that is not a review" in hint
-    assert "shipit review validate" in hint  # the real lever
-    assert "try a faster model or a smaller diff" not in hint
-    assert "NARRATED" not in hint
-
-
-def test_truncated_tool_json_with_nested_envelope_keys_is_not_a_truncated_verdict():
-    # A truncated TOOL-CALL object can carry "comments"/"summary" nested inside
-    # its arguments payload. Those are not the envelope's own keys — the verdict
-    # was never started, so the size/latency advice must not ride along.
-    from shipit.review.backends import diagnose_parse_failure
-
+def test_truncated_tool_json_with_nested_envelope_keys_is_a_plain_non_verdict():
+    # A truncated TOOL-CALL object can carry "comments"/"summary" nested in its
+    # arguments payload. Without an explicit timeout that proves nothing about a
+    # cut-off — the diagnosis stays a conservative non-verdict, no size advice.
     for raw in (
         '{"tool": "post_review", "arguments": {"comments": [{"file": "a.py",',
         '{"tool": "x", "arguments": {"summary": {"status": "COMM',
     ):
-        hint = diagnose_parse_failure(raw, backend_name="agy", timed_out=False)
-        assert "try a faster model or a smaller diff" not in hint, raw
-        assert "truncated" not in hint, raw
+        with pytest.raises(BackendError) as exc:
+            parse_review_output(raw, backend_name="agy")
+        assert "no review verdict" in str(exc.value), raw
+        assert _SIZE_HINT not in str(exc.value), raw
 
 
-def test_an_envelope_key_as_a_string_value_is_not_a_truncated_verdict():
-    # "summary" appearing as a VALUE at the top level is payload, not a key —
-    # only `"summary":`/`"comments":` as the object's own key marks the verdict.
-    from shipit.review.backends import diagnose_parse_failure
-
-    hint = diagnose_parse_failure(
-        '{"section": "summary", "body": "the summary of my findings is that',
-        backend_name="agy",
-        timed_out=False,
-    )
-    assert "try a faster model or a smaller diff" not in hint
-    assert "truncated" not in hint
-
-
-def test_a_truncated_verdict_beside_complete_tool_json_still_reads_as_truncated():
-    # A run can narrate a COMPLETE tool object and THEN truncate its verdict. The
-    # unfinished envelope is what explains the missing review; a complete bystander
-    # object must not mask it into the off-shape branch.
-    from shipit.review.backends import diagnose_parse_failure
-
-    hint = diagnose_parse_failure(
-        '{"tool": "read"}\n{"summary": {"status": "COMMENT"}, "comments": [{"fi',
-        backend_name="agy",
-        timed_out=False,
-    )
-    assert "truncated" in hint
-    assert "try a faster model or a smaller diff" in hint
-
-
-def test_a_timeout_keeps_the_size_hint_and_silence_gets_its_own_diagnosis():
-    from shipit.review.backends import diagnose_parse_failure
-
-    timed = diagnose_parse_failure("{ truncated…", backend_name="agy", timed_out=True)
-    assert "timed out" in timed
-    assert "try a faster model or a smaller diff" in timed  # honest here
-
-    silent = diagnose_parse_failure("   ", backend_name="agy", timed_out=False)
-    assert "NO output at all" in silent
-    assert "not a diff-size or latency problem" in silent
-    assert "try a faster model or a smaller diff" not in silent
-
-
-def test_parse_failure_on_narration_carries_the_diagnosis_and_the_raw(caplog):
-    # The BackendError the funnel surfaces (and the #76 salvage reads) carries the
-    # narration diagnosis — so the check-run summary on the PR says what actually
-    # went wrong instead of "no parseable JSON … try a faster model".
-    from shipit.review.backends import BackendError, parse_review_output
-
-    raw = "I will search the workspace for a diff to review."
+def test_complete_wrong_shape_json_is_an_output_contract_fault_not_size():
+    # The #826 signature: valid, COMPLETE JSON with the wrong envelope. The output
+    # terminated on its own, so the lever is the output contract — never diff size.
     with pytest.raises(BackendError) as exc:
-        parse_review_output(raw, backend_name="agy")
-    assert "NARRATED instead of reviewing" in str(exc.value)
-    assert "a faster model or a smaller diff will not fix" in str(exc.value)
-    assert exc.value.raw == raw  # the salvage still gets the prose
-    assert exc.value.timed_out is False  # narration is NOT a timeout
+        parse_review_output(
+            '{"findings": [{"file": "a.py", "text": "x"}]}', backend_name="codex"
+        )
+    assert "complete JSON that is not a review" in str(exc.value)
+    assert "shipit review validate" in str(exc.value)
+    assert _SIZE_HINT not in str(exc.value)
+
+
+def test_partial_review_shaped_json_without_a_timeout_stays_a_non_verdict():
+    # A prefix that LOOKS like the envelope being written is still not evidence of
+    # a cut-off (an agentic run can quote schema JSON and stop for its own
+    # reasons): without the explicit timeout marker the diagnosis is the
+    # conservative non-verdict, and the size advice is withheld.
+    with pytest.raises(BackendError) as exc:
+        parse_review_output('{"summary": {"status": "COMM', backend_name="agy")
+    assert "no review verdict" in str(exc.value)
+    assert _SIZE_HINT not in str(exc.value)
+    assert exc.value.timed_out is False
+
+
+def test_a_valid_embedded_review_still_parses_unchanged():
+    # The diagnosis is strictly failure-path: a review embedded in noisy stdout
+    # parses exactly as before.
+    noisy = f"agent chatter before\n{_VALID}\ntrailing chatter"
+    review = parse_review_output(noisy, backend_name="agy")
+    assert review["summary"]["status"] == "COMMENT"

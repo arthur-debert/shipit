@@ -88,12 +88,11 @@ copilot = { rerun = true }
 # `model` only; it does NOT remap agy's `pro` alias or touch any write-agent
 # default.
 #
-# The pin is no longer the only thing standing between the roster and a dead
-# reviewer: #1032 reverted this line to stop the bleeding, and #1006 made the
-# hazard MECHANICAL — every Gemini Flash tier is DECLARED unusable for a review
-# run on the agy backend identity (`Backend.review_unusable_models`), so
-# re-pinning one here is refused loudly at preflight, naming the capable default,
-# instead of failing silently on the PR.
+# This is the config revert ALONE, split out of #1008 to stop the bleeding now.
+# #1008 additionally makes the hazard MECHANICAL — declaring `flash` unusable for
+# a review run on the agy backend identity, so re-pinning it is refused loudly at
+# preflight rather than failing silently on the PR. That belongs there, not here:
+# it is a real change under review, and this line should not wait on it.
 codex = { window = 2700, model = "gpt-5.6-sol" }
 agy = { window = 2700, model = "pro" }
 
