@@ -268,9 +268,14 @@ logic is thin YAML) is stated in [./architecture.lex#3].
     caller with a `stage` choice input (`full | prepare | build | sign |
     publish`), one job per stage, each a single `uses:` line against the
     matching block gated `if: inputs.stage == '...'`, forwarding
-    `version`/`tag`/`run-id`/`unsigned` verbatim. The caller never wires
-    stage outputs — that is the consumer-owned wiring ADR-0040 forbids, and
-    exactly what WS06 proved unwireable.
+    `version`/`tag`/`run-id`/`unsigned`/`endpoints` verbatim (`endpoints`
+    is the ADR-0070 per-invocation selector, consumed by `full`/`publish`
+    alone: a comma- or space-separated name list wf-publish threads to
+    `shipit release publish` as one `--endpoint` per name; empty fires the
+    full post-guard set, a delimiter-only selector fails closed in the
+    block, and the VERB owns the validation). The caller
+    never wires stage outputs — that is the consumer-owned wiring ADR-0040
+    forbids, and exactly what WS06 proved unwireable.
 
     The caller's secret grants are UNIFORM across its stage jobs (#896):
     every stage job forwards the SAME plan-required secret set as `full`,
