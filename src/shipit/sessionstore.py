@@ -40,6 +40,16 @@ and the first's content is gone. The lock is what makes "nothing is deleted unti
 verified present in the target" true against a concurrent adopter rather than only
 against a single one.
 
+**The lock serializes shipit against shipit; the atomic publish serializes it against
+the harness.** The store is also written by LIVE Claude sessions (ADR-0073 — they rewrite
+``memory/MEMORY.md``), which hold no shipit lock, so a destination classified absent can
+APPEAR or change before an adopter copies onto it. The move rungs (:func:`_move_file`,
+:func:`_move_symlink`) therefore copy into a unique STAGING path, verify THAT, and publish
+with ``EEXIST`` no-clobber semantics (:func:`os.link` / :func:`os.symlink`): a destination
+that appeared is a keep-both collision, never an overwrite, and nothing this module did not
+itself create is ever unlinked. The lock alone could not give this — it does not extend to
+the harness.
+
 **The lock is necessary but not sufficient: the decision it guards must be made under
 it.** A classification taken before the lock is stale by the time the lock is granted,
 and the ladder's rungs are not stable under a concurrent planter — two planters of the
@@ -66,6 +76,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
+from uuid import uuid4
 
 from .identity import Repo
 
@@ -448,33 +459,81 @@ def _refuse(src: Path, dst: Path, src_kind: str, dst_kind: str) -> list[str]:
 
 
 def _move_file(src: Path, dst: Path) -> list[str]:
-    """Copy ``src`` to ``dst``, VERIFY the bytes landed, and only then unlink ``src``."""
-    shutil.copy2(src, dst)
-    if not filecmp.cmp(src, dst, shallow=False):
+    """Copy ``src`` to ``dst``, VERIFY the bytes, unlink ``src`` — publishing NO-CLOBBER.
+
+    ``dst`` was classified :data:`_ABSENT` by :func:`_adopt_entry`, but the store is written
+    by live Claude sessions that hold no lock (module docstring, ADR-0073), so it can APPEAR
+    or change before this runs. A plain ``copy2(src, dst)`` would overwrite that live file,
+    and the old verify-failure ``dst.unlink`` would delete it outright. Instead: copy into a
+    unique STAGING sibling, verify THAT, then hard-link it into place with :func:`os.link`,
+    whose ``EEXIST`` is the atomic no-clobber publish — a ``dst`` that appeared is resolved
+    by the matrix' keep-both rung (:func:`_free_name`), never an overwrite. On a copy that
+    does not verify, only the STAGING path this call created is removed; the destination —
+    which this module may not have made — is never touched.
+    """
+    staging = dst.with_name(f".{dst.name}.shipit-adopt-{uuid4().hex}")
+    shutil.copy2(src, staging)
+    if not filecmp.cmp(src, staging, shallow=False):
         # Never reached in practice; if it ever is, the source is what we keep.
-        dst.unlink(missing_ok=True)
+        staging.unlink(missing_ok=True)  # only the partial copy WE just made
         logger.warning(
-            "session store adoption REFUSED %s: the copy to %s did not verify; "
-            "the source is kept and the partial copy removed.",
+            "session store adoption REFUSED %s: the copy for %s did not verify; "
+            "the source is kept and the staging copy removed.",
             src,
             dst,
         )
         return [str(src)]
+    _publish_no_clobber(staging, dst)
     src.unlink()
     return []
 
 
+def _publish_no_clobber(staging: Path, dst: Path) -> None:
+    """Hard-link the verified ``staging`` copy to ``dst`` WITHOUT clobbering, then drop it.
+
+    :func:`os.link` raises ``FileExistsError`` if the destination exists — the O_EXCL
+    semantics the per-store lock cannot give against the lock-less harness. A ``dst`` (or a
+    freshly scanned ``_free_name``) a live session created since classification is met with
+    keep-both, never an overwrite; the loop covers the free name itself racing. The hard link
+    shares ``staging``'s inode and ``copy2``'s metadata, so unlinking staging afterwards
+    leaves the published file intact.
+    """
+    target = dst
+    while True:
+        try:
+            os.link(staging, target)
+            break
+        except FileExistsError:
+            target = _free_name(dst)
+    staging.unlink()
+
+
 def _move_symlink(src: Path, dst: Path) -> list[str]:
-    """Recreate ``src``'s link TEXT at ``dst`` (never following it), verify, unlink ``src``."""
+    """Recreate ``src``'s link TEXT at ``dst`` (never following it), verify, unlink ``src``.
+
+    Same no-clobber contract as :func:`_move_file` against the lock-less harness (module
+    docstring, ADR-0073): a ``dst`` classified absent can appear first. :func:`os.symlink` is
+    itself atomic and raises ``EEXIST`` if the destination exists, so the link is created
+    straight at ``dst`` and a collision routes to keep-both (:func:`_free_name`); the loop
+    covers the free name racing too. Only the link THIS call created is ever unlinked (on a
+    verify failure that in practice never fires) — a destination the store did not make is
+    left untouched.
+    """
     text = os.readlink(src)
-    dst.symlink_to(text)
-    if os.readlink(dst) != text:
-        dst.unlink(missing_ok=True)
+    target = dst
+    while True:
+        try:
+            target.symlink_to(text)
+            break
+        except FileExistsError:
+            target = _free_name(dst)
+    if os.readlink(target) != text:
+        target.unlink()  # this call created it; the verify failed
         logger.warning(
             "session store adoption REFUSED %s: the symlink recreated at %s did not "
             "verify; the source is kept.",
             src,
-            dst,
+            target,
         )
         return [str(src)]
     src.unlink()

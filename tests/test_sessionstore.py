@@ -733,6 +733,72 @@ def test_refused_content_is_never_deleted_with_its_dir(tmp_path: Path):
     assert (target / "memory" / "ok.md").read_text() == "moved"
 
 
+def test_adopt_file_never_clobbers_a_destination_that_appeared(
+    tmp_path: Path, monkeypatch
+):
+    """A live harness write into the store between classify and publish MUST survive.
+
+    The per-store lock serializes shipit adopters, but live Claude sessions write the same
+    store (ADR-0073) holding no lock. ``_adopt_entry`` classifies ``note.md`` absent and
+    calls ``_move_file``; the bug was that a session creating ``note.md`` in that window got
+    overwritten by ``copy2``, and on a verify mismatch outright ``unlink``ed. The fix stages
+    the copy and publishes with ``os.link``'s ``EEXIST`` no-clobber semantics, so an appeared
+    destination is a keep-both collision — BOTH memories survive and nothing is unlinked.
+
+    The race is modelled by wrapping ``_move_file`` (the seam present before AND after the
+    fix) to create ``dst`` just before it runs — i.e. after ``_adopt_entry`` classified it
+    absent. Without the fix this test fails: ``note.md`` ends up holding the ADOPTED bytes,
+    the live content gone and no ``note.adopted-1.md`` minted.
+    """
+    source, target = tmp_path / "s", tmp_path / "t"
+    target.mkdir()
+    write(source / "note.md", "adopted content")
+
+    original_move = sessionstore._move_file
+
+    def racing_move(src: Path, dst: Path) -> list[str]:
+        write(dst, "live session content")  # a live session created dst post-classify
+        return original_move(src, dst)
+
+    monkeypatch.setattr(sessionstore, "_move_file", racing_move)
+
+    assert sessionstore.adopt(source, target) == []
+    assert (target / "note.md").read_text() == "live session content", (
+        "the live destination was clobbered"
+    )
+    assert (target / "note.adopted-1.md").read_text() == "adopted content", (
+        "the adopted content was not kept beside the live file"
+    )
+    assert not (source / "note.md").exists(), "the adopted source was not drained"
+
+
+def test_adopt_symlink_never_clobbers_a_destination_that_appeared(
+    tmp_path: Path, monkeypatch
+):
+    """The symlink rung honours the same no-clobber contract as the file rung.
+
+    A live session creating a symlink at ``link`` after it was classified absent must not be
+    overwritten: ``os.symlink``'s own ``EEXIST`` routes the adopted link to keep-both.
+    """
+    source, target = tmp_path / "s", tmp_path / "t"
+    source.mkdir()
+    target.mkdir()
+    (source / "link").symlink_to("/adopted/target")
+
+    original_move = sessionstore._move_symlink
+
+    def racing_move(src: Path, dst: Path) -> list[str]:
+        dst.symlink_to("/live/target")  # a live session created dst post-classify
+        return original_move(src, dst)
+
+    monkeypatch.setattr(sessionstore, "_move_symlink", racing_move)
+
+    assert sessionstore.adopt(source, target) == []
+    assert os.readlink(target / "link") == "/live/target", "the live link was clobbered"
+    assert os.readlink(target / "link.adopted-1") == "/adopted/target"
+    assert not (source / "link").is_symlink(), "the adopted source was not drained"
+
+
 def test_adopt_is_generic(tmp_path: Path):
     """No hardcoded paths, counts or repo names — an arbitrary tree adopts the same."""
     source, target = tmp_path / "s", tmp_path / "t"
