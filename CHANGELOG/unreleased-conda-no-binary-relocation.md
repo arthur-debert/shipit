@@ -1,0 +1,12 @@
+- conda: the repackage recipe disables rattler-build's default binary
+  relocation (`build.dynamic_linking.binary_relocation: false`) — the 4th
+  producer-path fix from the ARF02 seed (#1052, follows #1049). rattler-build
+  relinks by default under conda-build's built-from-source assumption, but
+  this endpoint repackages a PREBUILT, already-SIGNED release binary that
+  links only system libraries: there are no conda-prefix paths to relocate,
+  the relink needs a per-OS toolchain the single cross-platform runner lacks
+  (the osx-arm64 build died on a Linux runner failing to find
+  `install_name_tool`), and rewriting the Mach-O would invalidate the sign
+  stage's signature. Validated locally (rattler-build 0.69.1) against all 3
+  served subdirs of the real `lex-fmt/lex v0.19.9-rc.1` `lexd-lsp` archives:
+  with the flag, all 3 build clean with no relink step.

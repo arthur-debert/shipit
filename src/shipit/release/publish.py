@@ -1608,7 +1608,15 @@ def render_conda_recipe(
     rather than breaking the recipe or silently re-pointing the source.
     ``build.number`` is 0 (the tag version is the sole ordering axis,
     ADR-0041 — a re-cut of the same version is a re-upload, not a new build
-    number). Validated live on a ``file://`` channel: build → pixi resolve →
+    number). ``build.dynamic_linking.binary_relocation`` is false: rattler-build
+    relinks binaries by default (conda-build's built-from-source assumption —
+    rewrite the build machine's library paths to conda's relocatable prefix),
+    but this endpoint repackages a PREBUILT, already-SIGNED release binary that
+    links only system libraries: there is nothing to relocate, the relink needs
+    a per-OS toolchain the single cross-platform runner lacks (macOS
+    ``install_name_tool`` on a Linux runner, #1052), and rewriting the Mach-O
+    would invalidate the sign stage's signature. Validated live on a
+    ``file://`` channel: build → pixi resolve →
     run → version bump → transparent re-resolve (the ADR-0064 spike loop).
     """
     return (
@@ -1621,6 +1629,10 @@ def render_conda_recipe(
         f"\n"
         f"build:\n"
         f"  number: 0\n"
+        f"  dynamic_linking:\n"
+        f"    # prebuilt+signed binary: no relink (needs a per-OS toolchain the\n"
+        f"    # single runner lacks, and rewriting would break the signature)\n"
+        f"    binary_relocation: false\n"
         f"  script:\n"
         f'    - mkdir -p "${{PREFIX}}/{install_dir}"\n'
         f'    - cp "{source_binary}" "${{PREFIX}}/{install_dir}/{install_binary}"\n'
