@@ -509,15 +509,18 @@ def _publish_no_clobber(staging: Path, dst: Path) -> None:
 
 
 def _move_symlink(src: Path, dst: Path) -> list[str]:
-    """Recreate ``src``'s link TEXT at ``dst`` (never following it), verify, unlink ``src``.
+    """Recreate ``src``'s link TEXT at ``dst`` (never following it), then unlink ``src``.
 
     Same no-clobber contract as :func:`_move_file` against the lock-less harness (module
     docstring, ADR-0073): a ``dst`` classified absent can appear first. :func:`os.symlink` is
-    itself atomic and raises ``EEXIST`` if the destination exists, so the link is created
-    straight at ``dst`` and a collision routes to keep-both (:func:`_free_name`); the loop
-    covers the free name racing too. Only the link THIS call created is ever unlinked (on a
-    verify failure that in practice never fires) — a destination the store did not make is
-    left untouched.
+    atomic — it either publishes exactly ``text`` at ``dst`` or raises ``EEXIST`` — so a
+    successful call IS its own verification: there is no partial state to check against.
+    Unlike :func:`_move_file`'s ``copy2``, there is no non-atomic staging step to guard, and
+    crucially NO read-back at the shared pathname: between our publish and any ``os.readlink``
+    the harness can swap in its own link, and unlinking ``target`` on that mismatch would
+    delete a link the store did not make — the exact no-clobber violation this contract
+    forbids. A collision on create routes to keep-both (:func:`_free_name`); the loop covers
+    the free name racing too.
     """
     text = os.readlink(src)
     target = dst
@@ -527,15 +530,6 @@ def _move_symlink(src: Path, dst: Path) -> list[str]:
             break
         except FileExistsError:
             target = _free_name(dst)
-    if os.readlink(target) != text:
-        target.unlink()  # this call created it; the verify failed
-        logger.warning(
-            "session store adoption REFUSED %s: the symlink recreated at %s did not "
-            "verify; the source is kept.",
-            src,
-            target,
-        )
-        return [str(src)]
     src.unlink()
     return []
 

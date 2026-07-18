@@ -799,6 +799,42 @@ def test_adopt_symlink_never_clobbers_a_destination_that_appeared(
     assert not (source / "link").is_symlink(), "the adopted source was not drained"
 
 
+def test_adopt_symlink_survives_a_post_publish_swap(tmp_path: Path, monkeypatch):
+    """A successful ``os.symlink`` is its own proof — no read-back may unlink the pathname.
+
+    ``os.symlink`` atomically publishes exactly the adopted text or raises, so success
+    needs no verification. The danger is the window AFTER that publish: if the lock-less
+    harness replaces ``target`` with its OWN link, a read-back verify would see a mismatch
+    and unlink ``target`` — deleting the harness's link, the no-clobber violation this
+    forbids. The round-1 test (:func:`test_adopt_symlink_never_clobbers_a_destination_that_appeared`)
+    only races BEFORE :func:`_move_symlink`, so it misses this post-publication window;
+    here the harness republishes its own link right after the store's ``symlink_to``
+    succeeds, and the harness link must survive untouched.
+    """
+    source, target = tmp_path / "s", tmp_path / "t"
+    source.mkdir()
+    target.mkdir()
+    (source / "link").symlink_to("/adopted/target")
+
+    real_symlink_to = Path.symlink_to
+
+    def swapping_symlink_to(self, link_target, *args, **kwargs):
+        real_symlink_to(self, link_target, *args, **kwargs)
+        if link_target == "/adopted/target":
+            # The harness wins the post-publish race and republishes its own link at the
+            # shared pathname — exactly the window a read-back verify would clobber.
+            os.unlink(self)
+            os.symlink("/harness/target", self)
+
+    monkeypatch.setattr(Path, "symlink_to", swapping_symlink_to)
+
+    assert sessionstore.adopt(source, target) == []
+    assert os.readlink(target / "link") == "/harness/target", (
+        "the harness link was clobbered"
+    )
+    assert not (source / "link").is_symlink(), "the adopted source was not drained"
+
+
 def test_adopt_is_generic(tmp_path: Path):
     """No hardcoded paths, counts or repo names — an arbitrary tree adopts the same."""
     source, target = tmp_path / "s", tmp_path / "t"
