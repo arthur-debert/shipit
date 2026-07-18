@@ -43,12 +43,16 @@ against a single one.
 **The lock serializes shipit against shipit; the atomic publish serializes it against
 the harness.** The store is also written by LIVE Claude sessions (ADR-0073 — they rewrite
 ``memory/MEMORY.md``), which hold no shipit lock, so a destination classified absent can
-APPEAR or change before an adopter copies onto it. The move rungs (:func:`_move_file`,
-:func:`_move_symlink`) therefore copy into a unique STAGING path, verify THAT, and publish
-with ``EEXIST`` no-clobber semantics (:func:`os.link` / :func:`os.symlink`): a destination
-that appeared is a keep-both collision, never an overwrite, and nothing this module did not
-itself create is ever unlinked. The lock alone could not give this — it does not extend to
-the harness.
+APPEAR or change before an adopter publishes onto it. The two move rungs meet this with one
+shared ``EEXIST`` no-clobber contract, by different means. A regular file (:func:`_move_file`)
+is copied into a unique STAGING sibling, that copy is verified, and only then is it published
+atomically with :func:`os.link` (no-clobber) — on failure only the staging path is ever
+unlinked, never the destination. A symlink (:func:`_move_symlink`) is published by a single
+atomic :func:`os.symlink` create whose success IS the verification (it writes exactly the link
+text or raises), so it needs no staging path and no read-back. In both, a destination that
+appeared is a keep-both collision (:func:`_free_name`), never an overwrite, and nothing this
+module did not itself create is ever unlinked. The lock alone could not give this — it does
+not extend to the harness.
 
 **The lock is necessary but not sufficient: the decision it guards must be made under
 it.** A classification taken before the lock is stale by the time the lock is granted,
@@ -393,9 +397,11 @@ def adopt(source: Path, target: Path) -> list[str]:
     filesystem operation.
 
     **Nothing is deleted from a source until its content is verified present in the
-    target.** Every move copies, verifies, and only then unlinks; a source directory is
-    removed only once it is empty. Memory is irreplaceable — an adoption that loses a
-    file to save a directory entry has defeated the point.
+    target.** A file is copied, the copy verified, and atomically published before the source
+    is unlinked; a symlink is republished by a single atomic create whose success is itself
+    the verification. A source directory is removed only once it is empty. Memory is
+    irreplaceable — an adoption that loses a file to save a directory entry has defeated the
+    point.
 
     **The caller serializes.** This function walks ``target`` and acts on what it finds,
     so it is only safe while nothing else writes ``target``'s paths: two adopters running
