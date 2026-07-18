@@ -52,7 +52,7 @@ def _faked(monkeypatch):
         "create_readonly",
         lambda plan, *, source_repo, github_url: Tree(
             # A per-Run reviewer Tree is one flat leaf (ADR-0074): <repo>-<agent>-<ts>-<id>.
-            path="/trees/shipit-codex-20260702-121314-abcd1234abcd",
+            path="/trees/shipit-codex-20260702-121314-abcd1234-abcd-1234-abcd-abcd1234abcd",
             branch=plan.branch,
             base=f"origin/{plan.branch}",
         ),
@@ -85,7 +85,9 @@ def test_codex_launches_in_the_tree_and_captures_the_review(_faked):
     assert cmd[:2] == ["codex", "exec"]
     assert "workspace-write" in cmd
     assert "--dangerously-bypass-approvals-and-sandbox" not in cmd
-    assert _faked["cwd"].endswith("shipit-codex-20260702-121314-abcd1234abcd")
+    assert _faked["cwd"].endswith(
+        "shipit-codex-20260702-121314-abcd1234-abcd-1234-abcd-abcd1234abcd"
+    )
     # codex gets the native schema flag (a real temp file path was written + passed).
     assert "--output-schema" in cmd
     # The task tells the agent to fetch the diff itself for THIS pr and not to post.
@@ -113,7 +115,9 @@ def test_tree_review_logs_readonly_work_env_evidence(_faked, caplog):
     assert record.reviewer == "codex"
     assert record.checkout_strategy == "per-run-read-only-tree"
     assert record.routing == "ambient"
-    assert record.working_dir.endswith("shipit-codex-20260702-121314-abcd1234abcd")
+    assert record.working_dir.endswith(
+        "shipit-codex-20260702-121314-abcd1234-abcd-1234-abcd-abcd1234abcd"
+    )
     assert record.working_dir_repo == "arthur-debert/shipit"
     assert record.working_dir_branch == "TRE05/WS04b"
     assert record.working_dir_commit == "deadbeef" * 5
@@ -135,7 +139,7 @@ def test_agy_maps_to_the_antigravity_adapter_with_prose_schema(_faked):
     assert cmd[0] == "agy"
     # agy is rooted via --add-dir <Tree> (it ignores process cwd) and carries the timeout.
     assert cmd[cmd.index("--add-dir") + 1].endswith(
-        "shipit-codex-20260702-121314-abcd1234abcd"
+        "shipit-codex-20260702-121314-abcd1234-abcd-1234-abcd-abcd1234abcd"
     )
     assert "--print-timeout=900s" in cmd
     # No native schema flag for agy; the schema rides the prompt prose instead.

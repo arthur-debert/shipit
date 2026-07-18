@@ -51,7 +51,7 @@ def _make_clone(root: Path, *, dissociated: bool = True) -> Path:
 
     One flat leaf (ADR-0074): <repo>-<agent>-<timestamp>-<id>, one segment below the
     central root — no owner/kind/epics path segment."""
-    tree = root / "widget-claude-20260717-081333-deadbeefdead"
+    tree = root / "widget-claude-20260717-081333-deadbeef-dead-beef-dead-deadbeefdead"
     (tree / ".git" / "objects" / "info").mkdir(parents=True)
     (tree / "file.txt").write_text("hi")
     if not dissociated:
@@ -82,7 +82,9 @@ def test_dissociated_clone_passes_for_a_real_dissociated_clone(tmp_path):
 
 def test_dissociated_clone_fails_when_git_is_a_file_worktree(tmp_path):
     """A native worktree's `.git` is a FILE (a gitfile pointer), not a dir → FAIL."""
-    tree = tmp_path / "widget-claude-20260717-081333-deadbeefdead"
+    tree = (
+        tmp_path / "widget-claude-20260717-081333-deadbeef-dead-beef-dead-deadbeefdead"
+    )
     tree.mkdir(parents=True)
     (tree / ".git").write_text("gitdir: /parent/.git/worktrees/x\n")
     report = dogfood.Report()
@@ -459,7 +461,9 @@ def test_verify_write_run_fails_on_non_draft_pr(tmp_path, monkeypatch):
 def _seam_a_reviewer_tree(monkeypatch, tmp_path, *, branch="TRE03/WS05"):
     # A per-Run reviewer Tree is one flat leaf (ADR-0074): <repo>-<agent>-<ts>-<id>,
     # one segment below the central root — no `review/` kind segment.
-    review_tree = tmp_path / "widget-claude-20260717-081333-abcd1234abcd"
+    review_tree = (
+        tmp_path / "widget-claude-20260717-081333-abcd1234-abcd-1234-abcd-abcd1234abcd"
+    )
     (review_tree / ".git" / "objects" / "info").mkdir(parents=True)
     (review_tree / "file.txt").write_text("code")
     # genuinely read-only working tree (dirs + files, .git left writable)
@@ -511,7 +515,10 @@ def test_verify_reviewer_run_passes_on_healthy_seams(tmp_path, monkeypatch):
         if calls["n"] == 2:
             # Per-Run (ADR-0074): the 2nd reviewer on the same head gets its OWN
             # distinct flat Tree — sharing is retired, so the paths must differ.
-            p["tree"] = str(tmp_path / "widget-claude-20260717-081334-ef567890ef56")
+            p["tree"] = str(
+                tmp_path
+                / "widget-claude-20260717-081334-ef567890-ef56-7890-ef56-ef567890ef56"
+            )
         return dogfood.SpawnInvocation(0, "SPAWNED\n" + __import__("json").dumps(p), "")
 
     monkeypatch.setattr(dogfood, "_run_spawn", run_spawn)
@@ -662,7 +669,9 @@ def test_verify_runs_all_three_scenarios(tmp_path, monkeypatch):
     """`verify` accumulates write + reviewer + fail-closed checks into one report."""
     write_tree = _make_clone(tmp_path, dissociated=True)
     # A per-Run reviewer Tree is one flat leaf (ADR-0074) — no `review/` kind segment.
-    review_tree = tmp_path / "widget-claude-20260717-081333-abcd1234abcd"
+    review_tree = (
+        tmp_path / "widget-claude-20260717-081333-abcd1234-abcd-1234-abcd-abcd1234abcd"
+    )
     (review_tree / ".git" / "objects" / "info").mkdir(parents=True)
     (review_tree / "f").write_text("x")
     readonly.chmod_readonly(str(review_tree))
@@ -688,7 +697,10 @@ def test_verify_runs_all_three_scenarios(tmp_path, monkeypatch):
             p = dict(review_payload)
             if reviewer_calls["n"] == 2:
                 # Per-Run: the 2nd reviewer gets its OWN distinct flat Tree.
-                p["tree"] = str(tmp_path / "widget-claude-20260717-081334-ef567890ef56")
+                p["tree"] = str(
+                    tmp_path
+                    / "widget-claude-20260717-081334-ef567890-ef56-7890-ef56-ef567890ef56"
+                )
             return dogfood.SpawnInvocation(
                 0, "SPAWNED\n" + __import__("json").dumps(p), ""
             )
