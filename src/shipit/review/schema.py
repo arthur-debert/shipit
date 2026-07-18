@@ -499,6 +499,20 @@ def extract_json(text: str, *, want: Callable[[dict], bool] | None = None) -> di
     raise ValueError(f"Could not parse valid JSON from output:\n{text}")
 
 
+def has_complete_json_object(text: str) -> bool:
+    """Whether ``text`` contains at least one COMPLETE embedded JSON object.
+
+    The extractor's own balanced scan (:func:`_scan_embedded_objects`) as a
+    predicate, for the parse-failure diagnosis in
+    :func:`shipit.review.backends.base.parse_review_output` (issue #1006): a
+    stdout that carries a complete object which the review parse still rejected
+    holds a wrong-envelope verdict (#826) or an unrelated tool/log blob — the
+    output terminated on its own, which a bare ``{`` (brace-bearing prose, a
+    narrated command snippet, a truncated object) does not prove.
+    """
+    return bool(_scan_embedded_objects(text or ""))
+
+
 def _scan_embedded_objects(text: str) -> list[tuple[dict, int]]:
     """Every complete JSON OBJECT embedded in ``text``, as ``(object, source
     length)`` pairs — the balanced-scan fallback behind :func:`extract_json`.

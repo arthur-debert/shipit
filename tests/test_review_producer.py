@@ -18,7 +18,11 @@ from shipit import execrun
 from shipit.agent import backend as agent_backend
 from shipit.identity import repo_from_slug
 from shipit.review import producer
-from shipit.review.backends import BackendError, BackendUnavailable
+from shipit.review.backends import (
+    BackendError,
+    BackendUnavailable,
+    parse_review_output,
+)
 from shipit.review.diff import ReviewView, review_view
 from shipit.spawn.launch import LaunchResult
 from shipit.tree.create import Tree
@@ -313,7 +317,10 @@ def test_agy_reprompts_once_on_unparseable_output_then_parses_the_retry(_faked):
     # quoting the SPECIFIC parse failure so agy fixes the concrete problem.
     assert "gh pr diff 42" in retry
     assert "RETRY — your PREVIOUS response could NOT be parsed" in retry
-    assert "no parseable JSON" in retry  # the actual failure hint fed back
+    # The actual failure hint fed back — since #1006 the diagnosis states what the
+    # output WAS (a non-verdict) instead of the old catch-all size/latency guess.
+    assert "no review verdict" in retry
+    assert "try a faster model or a smaller diff" not in retry
 
 
 def test_agy_retry_is_one_shot_two_failures_fall_through_to_salvage(_faked):
@@ -907,3 +914,100 @@ def test_range_review_fills_the_bundle_too(monkeypatch, tmp_path):
     meta = json.loads((bundle.dir / "meta.json").read_text())
     assert meta["exit_code"] == 0
     assert meta["timed_out"] is False
+
+
+# ---------------------------------------------------------------------------
+# Issue #1006 — parse-failure diagnosis is evidence-based and conservative.
+# Every case crosses `parse_review_output` (the diagnosis is an implementation
+# detail behind it): only an EXPLICIT timeout marker recommends a faster model
+# or a smaller diff; every other non-delivery states what the output was
+# without guessing a cause.
+# ---------------------------------------------------------------------------
+
+
+_SIZE_HINT = "try a faster model or a smaller diff"
+
+
+def test_an_explicit_timeout_keeps_the_size_hint_and_the_structured_flag():
+    # The backend's OWN marker is the one piece of evidence that the response was
+    # cut off mid-flight — size/latency IS the lever, and the advice stays.
+    raw = '{"summary": {"status": "COMM… timed out waiting for response'
+    with pytest.raises(BackendError) as exc:
+        parse_review_output(raw, backend_name="agy")
+    assert "timed out" in str(exc.value)
+    assert _SIZE_HINT in str(exc.value)
+    assert exc.value.timed_out is True
+    assert exc.value.raw == raw  # the #76 salvage still gets everything
+
+
+def test_empty_stdout_is_diagnosed_as_silent_with_no_size_hint():
+    # Nothing was delivered at all — a killed child or a failed login, never a
+    # diff-size problem. The raw (empty) is still preserved for the salvage path.
+    with pytest.raises(BackendError) as exc:
+        parse_review_output("   \n", backend_name="agy")
+    assert "no output at all" in str(exc.value)
+    assert _SIZE_HINT not in str(exc.value)
+    assert exc.value.timed_out is False
+    assert exc.value.raw == "   \n"
+
+
+def test_narration_with_ordinary_braces_is_a_non_verdict_not_a_size_problem():
+    # The #998 signature: the agent narrated its diff-hunting in prose and never
+    # answered. Braces in prose/command snippets are not evidence of anything —
+    # blaming a cut-off (i.e. diff size) here is the misdiagnosis #1006 removes.
+    for narration in (
+        "I will search the workspace for a diff to review.",
+        "no json here, just {braces} and prose",
+        "I will run `git diff --name-only` and inspect {workspace}/docs to review.",
+    ):
+        with pytest.raises(BackendError) as exc:
+            parse_review_output(narration, backend_name="agy")
+        assert "no review verdict" in str(exc.value), narration
+        assert _SIZE_HINT not in str(exc.value), narration
+        assert exc.value.timed_out is False
+
+
+def test_truncated_tool_json_with_nested_envelope_keys_is_a_plain_non_verdict():
+    # A truncated TOOL-CALL object can carry "comments"/"summary" nested in its
+    # arguments payload. Without an explicit timeout that proves nothing about a
+    # cut-off — the diagnosis stays a conservative non-verdict, no size advice.
+    for raw in (
+        '{"tool": "post_review", "arguments": {"comments": [{"file": "a.py",',
+        '{"tool": "x", "arguments": {"summary": {"status": "COMM',
+    ):
+        with pytest.raises(BackendError) as exc:
+            parse_review_output(raw, backend_name="agy")
+        assert "no review verdict" in str(exc.value), raw
+        assert _SIZE_HINT not in str(exc.value), raw
+
+
+def test_complete_wrong_shape_json_is_an_output_contract_fault_not_size():
+    # The #826 signature: valid, COMPLETE JSON with the wrong envelope. The output
+    # terminated on its own, so the lever is the output contract — never diff size.
+    with pytest.raises(BackendError) as exc:
+        parse_review_output(
+            '{"findings": [{"file": "a.py", "text": "x"}]}', backend_name="codex"
+        )
+    assert "complete JSON that is not a review" in str(exc.value)
+    assert "shipit review validate" in str(exc.value)
+    assert _SIZE_HINT not in str(exc.value)
+
+
+def test_partial_review_shaped_json_without_a_timeout_stays_a_non_verdict():
+    # A prefix that LOOKS like the envelope being written is still not evidence of
+    # a cut-off (an agentic run can quote schema JSON and stop for its own
+    # reasons): without the explicit timeout marker the diagnosis is the
+    # conservative non-verdict, and the size advice is withheld.
+    with pytest.raises(BackendError) as exc:
+        parse_review_output('{"summary": {"status": "COMM', backend_name="agy")
+    assert "no review verdict" in str(exc.value)
+    assert _SIZE_HINT not in str(exc.value)
+    assert exc.value.timed_out is False
+
+
+def test_a_valid_embedded_review_still_parses_unchanged():
+    # The diagnosis is strictly failure-path: a review embedded in noisy stdout
+    # parses exactly as before.
+    noisy = f"agent chatter before\n{_VALID}\ntrailing chatter"
+    review = parse_review_output(noisy, backend_name="agy")
+    assert review["summary"]["status"] == "COMMENT"

@@ -9,7 +9,11 @@ layer maps to funnel outcomes:
 
   * :func:`parse_review_output` — turn an agent's raw stdout into a review dict,
     or raise :class:`BackendError` (carrying the full raw for the #76 salvage and,
-    when the agy timeout marker is present, flagging the timeout);
+    when the agy timeout marker is present, flagging the timeout). Its failure
+    message diagnoses WHICH non-delivery the raw shows (timed out / silent /
+    wrong-envelope JSON / generic non-verdict), and only an explicit timeout is
+    blamed on size/latency (issue #1006) — the diagnosis is an implementation
+    detail of this function, not a public surface;
   * :class:`BackendUnavailable` — the agent binary is not on PATH (preflight);
   * :class:`BackendError` — the agent ran but produced no usable review;
   * :data:`_TIMEOUT_MARKER` — the agy ``--print`` timeout signature.
@@ -34,6 +38,13 @@ _SNIPPET = 200
 #: is then a TRUNCATED JSON object followed by the marker, which ``extract_json``
 #: can't parse. Detecting it lets the error say "timed out" explicitly.
 _TIMEOUT_MARKER = "timed out waiting for response"
+
+#: The remediation for a SIZE/LATENCY failure — a review that was cut off before it
+#: finished. Attached ONLY to an EXPLICIT timeout (the backend's own marker), never
+#: inferred from the output's shape (issue #1006: this advice was given for a 4-file
+#: docs diff, where speed was never the problem, and sent the operator chasing diff
+#: size while the real fault was a model that never answered at all).
+_SIZE_HINT = "try a faster model or a smaller diff"
 
 
 class BackendUnavailable(RuntimeError):
@@ -77,19 +88,78 @@ class BackendError(RuntimeError):
         self.timed_out = timed_out
 
 
+def _diagnose_parse_failure(raw: str, *, backend_name: str, timed_out: bool) -> str:
+    """The evidence-backed reason an agent's stdout yielded no review — private to
+    :func:`parse_review_output`; every caller and test crosses that boundary.
+
+    Four non-delivery modes, each claimed only on evidence the raw actually
+    carries (issue #1006 — the old catch-all blamed size/latency for everything,
+    which was actively wrong for a 4-file docs diff):
+
+      * **timed out** — the backend's OWN timeout marker is present: the response
+        was cut off mid-flight, so size/latency IS the lever (:data:`_SIZE_HINT`).
+        This is the ONLY mode that recommends a faster model or a smaller diff;
+      * **silent** — nothing on stdout at all: the run produced no response
+        whatsoever (a killed child, a failed login) — no size hint;
+      * **wrong envelope** — some COMPLETE JSON object was emitted, but none is
+        the ``{summary, comments}`` review envelope: a wrong-shaped verdict
+        (#826) or an unrelated tool/log blob. The output terminated on its own,
+        so the fix is the reviewer's output contract — no size hint;
+      * **non-verdict** — everything else: prose, narration, partial or otherwise
+        unparseable JSON. The raw cannot say WHY the verdict is missing (a model
+        that narrated, a cut-off, a wrong posture all end here), so the message
+        states the fact and points at the raw output instead of guessing a cause
+        — and deliberately carries no size hint, because recommending a smaller
+        diff on no evidence is the exact misdiagnosis #1006 removes.
+
+    The wrong-envelope split rides the extractor's own balanced scan
+    (:func:`shipit.review.schema.has_complete_json_object`) — never the presence
+    of a ``{``, since narration, command snippets and tool JSON all carry braces
+    while delivering no verdict.
+
+    Pure — a string in, a hint out; the caller owns the raising and logging.
+    """
+    from ..schema import has_complete_json_object
+
+    if timed_out:
+        return (
+            f"{backend_name} timed out before returning a complete review — "
+            f"{_SIZE_HINT}"
+        )
+    if not raw.strip():
+        return (
+            f"{backend_name} returned no output at all — no review was produced; "
+            "check that the agent is logged in and that its process was not killed"
+        )
+    if has_complete_json_object(raw):
+        return (
+            f"{backend_name} returned complete JSON that is not a review: no "
+            "`{summary, comments}` envelope was found (a wrong-shaped verdict, or "
+            "only unrelated tool/log JSON). Check that the response is the verdict "
+            "itself, not a report about one; `shipit review validate` checks a "
+            "verdict against the schema"
+        )
+    return (
+        f"{backend_name} returned no review verdict — the output is prose or "
+        "incomplete JSON with no `{summary, comments}` envelope; inspect the raw "
+        "output to see what the agent returned instead"
+    )
+
+
 def parse_review_output(stdout: str, *, backend_name: str = "the agent") -> dict:
     """Parse an agent's stdout into a review dict, or raise :class:`BackendError`.
 
     Wraps :func:`shipit.review.schema.extract_json` (which still raises a
     bare ``ValueError`` on unparseable input) at the backend boundary, turning
     that into an actionable :class:`BackendError`: it includes a head/tail
-    snippet of the raw output for debugging and, when the agent's timeout marker
-    is present, says so explicitly so the user knows to use a faster model or a
-    smaller diff.
+    snippet of the raw output for debugging and a hint diagnosed from the raw
+    itself (:func:`_diagnose_parse_failure`) — timed out vs silent vs
+    wrong-envelope JSON vs generic non-verdict — so only an EXPLICIT timeout is
+    blamed on size/latency (issue #1006), never the output's shape.
 
     ``backend_name`` names the calling backend (e.g. ``"codex"`` / ``"agy"``) so
-    the timeout hint blames the RIGHT backend — this function is shared by every
-    backend, so a hardcoded name would mislabel a different backend's timeout.
+    the hint blames the RIGHT backend — this function is shared by every backend,
+    so a hardcoded name would mislabel a different backend's failure.
     """
     # Local import: schema is a sibling, but keeping it here avoids any chance
     # of an import-order issue and matches the lazy style used elsewhere.
@@ -123,16 +193,9 @@ def parse_review_output(stdout: str, *, backend_name: str = "the agent") -> dict
             raw,
         )
         timed_out = _TIMEOUT_MARKER in raw.lower()
-        if timed_out:
-            hint = (
-                f"{backend_name} timed out before returning a complete review — "
-                "try a faster model or a smaller diff"
-            )
-        else:
-            hint = (
-                "the agent returned no parseable JSON (it may have timed out or "
-                "been truncated) — try a faster model or a smaller diff"
-            )
+        hint = _diagnose_parse_failure(
+            raw, backend_name=backend_name, timed_out=timed_out
+        )
         # Attach the full raw so the service can SALVAGE it (#76); the message keeps
         # only the snippet (the PR-surface / terminal budget). The STRUCTURED
         # ``timed_out`` flag (not a string match) is what the service splits the

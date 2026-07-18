@@ -386,6 +386,12 @@ by #1033 which reverted to prompt-prepend.
   are untouched — a bare `pro` still resolves to the capable non-agentic `Gemini 3.1 Pro (High)` per
   §antigravity, so the "pin a non-agentic model" caution above still governs the write path and any
   reviewer left on the default.
+  > **SUPERSEDED (issue #1006, PR #1032)**: the `agy → flash` half of this pin shipped a dead
+  > required reviewer — Flash went agentic in agy's `--print` mode on the live self-fetch path and
+  > narrated instead of returning JSON, failing every `agy-local` run for days while the other
+  > reviewers masked it. #1032 reverted the pin to `pro` (`Gemini 3.1 Pro (High)`). The rest of
+  > this bullet (codex on `gpt-5.6-sol`, the un-remapped `pro` alias, untouched write defaults)
+  > still stands.
 
 **Dogfood verification.** A no-post synthetic replay over a generated 5-file, +92/-11 range with
 five seeded defects measured the current agy harness on Gemini 3.5 Flash (High) at **40.408s**
@@ -397,3 +403,30 @@ multi-minute cause. The Review Lab cross-repo stress case (fixture core-440, pho
 440) could **not** be run afresh here: new external-model execution on local repository content was
 blocked by the platform data-export boundary, so this amendment claims **no fresh core-440 AGY
 score**; historical evaluation records and fixtures naming `gpt-5.5` or model `pro` are preserved.
+
+## Amendment (issue #1006) — parse-failure diagnosis is evidence-based; no static model blacklist
+
+The #989 `agy → flash` pin shipped a dead required reviewer (see the superseded note above);
+**#1032** landed the emergency config revert to `pro`, and **#1033/#1035** reverted the native
+`--agent reviewer` posture back to prompt-prepended `--print`. What remained wrong after both was
+the **diagnosis**: every parse failure — including a model that narrated prose and never answered
+on a 4-file docs diff — was reported as "no parseable JSON … try a faster model or a smaller
+diff", sending the operator chasing diff size when size was never the fault.
+
+- **`parse_review_output` now diagnoses from evidence the raw output actually carries.** Only the
+  backend's own explicit timeout marker proves a mid-flight cut-off, so only that mode carries the
+  size/latency advice. Empty stdout is reported as a silent non-delivery (a killed child, a failed
+  login). A COMPLETE JSON object with the wrong `{summary, comments}` envelope (#826) is an
+  output-contract fault — the response terminated on its own. Everything else — prose, narration,
+  partial or otherwise unparseable JSON — is a conservative "no review verdict" that states what
+  the output was and points at the raw, without guessing a cause: a brace, or a review-shaped
+  prefix, is not evidence of truncation (narration, command snippets and tool JSON all carry
+  braces while delivering no verdict). The diagnosis is an implementation detail behind
+  `parse_review_output`; the raw salvage (#76) and the structured `timed_out` flag are unchanged.
+- **No static "unusable model" declaration.** A per-backend reviewer-model blacklist was
+  considered and rejected: durable review logs show model behaviour is not a stable capability
+  fact (`flash` both narrated-and-failed and succeeded with findings across runs; `pro` has also
+  failed with empty output), and `Backend` is shared identity, not reviewer-role policy. AGY
+  reviewer health needs runtime provenance and cross-run escalation — tracking the resolved model,
+  launch posture and delivery outcome per run — which is follow-up work, not a config constant.
+  This amendment claims better *diagnostics*, not that AGY reliability is fixed.
