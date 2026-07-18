@@ -22,41 +22,136 @@
   `agy` returns to `pro` (Gemini 3.1 Pro (High)). The ~20% review-speed win that
   #989's spike measured for Flash is given up **deliberately**: a reviewer that
   never returns a verdict is not faster than one that does, it is not a reviewer.
-- `tree gc` now **reclaims a merged Tree without waiting out the age
-  threshold** (#1009). The write ladder gated on age BEFORE it looked at the PR,
-  so a Tree whose PR merged days ago — clean, nothing unpushed, the work safely
-  on the remote — was kept purely because its directory mtime was under the
-  two-week boundary. At a real merge rate that parks a fortnight of finished
-  work: measured over a 503-Tree fleet, **421 Trees were kept by the age gate
-  alone** while exactly one had a PR in flight, and the `kept: 500` the verb
-  reported read as "500 Trees in use" when it only ever meant "500 Trees are
-  recent". The gate was measuring throughput, not use.
-  A merged PR is now decided FIRST, held only until the Tree has been **idle for
-  12h**: the merge already proves the loss is safe, and the window covers the one
-  thing age was really buying — a write Tree has no liveness signal (unlike an
-  ephemeral session Tree, which has its pidfile), so an agent may still be
-  working in a still-clean Tree whose PR has merged. That window's clock is time
-  since the Tree's last ACTIVITY, NOT time since the merge: what it needs to know
-  is whether anyone is still working in the Tree. Hours of idleness instead of
-  weeks of age closes that hole without parking the fleet. This brings the write
-  ladder in line with the ephemeral one (ADR-0027), which already checked the
-  merge ahead of its liveness and age rungs.
-  Idleness is measured from the **newest of the Tree's directory mtime and its
-  `HEAD` commit timestamp**, and both are needed. A directory's mtime moves only
-  when an entry is added or removed in that directory, so the ordinary shape of
-  agent work — editing a file under `src/`, staging it, committing it — leaves
-  the clone root's mtime untouched and is invisible to it; the commit timestamp
-  is what observes an agent at work. Pushing does not change that stamp either,
-  so the one interval this window exists to cover — between a push and the next
-  edit, when a live agent's Tree momentarily reads clean and fully pushed — is
-  genuinely covered rather than nominally. An unreadable commit timestamp reads
-  as ACTIVE, never as ancient: a git hiccup must not license a delete.
-  `--threshold` (14d by default) is unchanged and still governs the **unmerged**
-  shapes — no PR, or a PR closed without merging — where age remains the only
-  abandonment signal, and those still land in `stale` for a human rather than
-  being deleted. Every never-lose-work guarantee is untouched: a dirty tree,
-  unpushed commits, an unreadable commit list, an in-flight PR, or an unreadable
-  PR state all still keep, whatever the Tree's age or merge state.
+- Every repo now has **one Claude Code session store, shared by all its Trees**
+  (#1023). Claude Code keys session transcripts *and* auto-memory on
+  `~/.claude/projects/<slug>/`, where the slug is the session's working
+  directory — so a Tree per session (ADR-0027) handed every launch a brand-new
+  empty namespace. Memory was never broken; it was re-partitioned every session
+  and never read back, and resume could not find a transcript from any directory
+  but the one that wrote it. The cost was measurable: 44 memory files stranded
+  across 23 throwaway stores, and the real store frozen since the day session
+  Trees took over.
+  There is no configuration knob for that path — the derivation is hardcoded in
+  the harness — but the store is a plain path and a **symlink is honoured**. So
+  `tree create` now plants `~/.claude/projects/<slug>` as a symlink to the repo's
+  store *before the session starts*, and `shipit install` links the canonical
+  checkout the same way, so work in a Tree and work in the plain checkout share
+  one store rather than splitting in two. One symlink fixes memory and resume
+  together. The store is keyed on the **origin remote**, not the path —
+  consistent with how Tree scanning already resolves repo identity, precisely
+  because a path "is not a reliable identity" — and lives at
+  `~/.claude/stores/<owner>/<repo>/`, outside `projects/` so shipit-owned state
+  is never confused with the harness's own directories. The store is not in the
+  Tree and is never swept with one: reclaiming a workspace no longer destroys
+  what was learned in it.
+  Planting is a defined, idempotent algorithm rather than "link it", because the
+  canonical checkout's directory is the hard case and the common one: it already
+  exists, with real memories in it. Clobbering would destroy them and skipping
+  would leave the store split in two forever, so: an already-correct symlink is a
+  no-op (re-running install is free), an absent one is created, a **real
+  directory is adopted** — its contents merged into the store, then replaced by
+  the link — and a symlink pointing somewhere else is **refused loudly, changing
+  nothing**, since something outside shipit owns that path.
+  Adoption is a recursive merge over relative paths, not a move of top-level
+  entries: a slug directory holds `memory/` on both sides, so the first collision
+  is directory-versus-directory, and moving the top-level entry would rename the
+  whole tree into a layout Claude will not read. Every (source, target) type pair
+  has a defined outcome — identical files are dropped as duplicates, **divergent
+  files keep both** under a non-colliding name (never overwritten, never silently
+  dropped, never machine-merged), directories merge, and a *type* conflict at any
+  path is refused with both sides left untouched while the rest of the merge
+  carries on. Symlinks are adopted, never followed. Nothing is deleted from a
+  source until its content is verified present in the target, and a directory
+  that could not be fully drained is never replaced by the link: memory is
+  irreplaceable, and a store left split is recoverable where a deleted memory is
+  not. Planting is **serialized per store**, so two checkouts of one repo
+  migrating at the same time cannot both claim one destination and have the
+  second's copy land on the first's memory — and two runs against the *same*
+  checkout cannot race either: the second re-reads the directory once it has the
+  lock and finds the first's link already there, rather than acting on what it
+  saw before waiting. A refusal touches nothing on either side, including the
+  store directory itself.
+  `shipit install` plants the link on **every** run except `--dry-run`, including
+  one where the managed set is already current: the link is not a managed file,
+  so a clean plan says nothing about whether it exists — and an already-installed
+  checkout is exactly the one with a store to migrate.
+  Both seams are **fail-open**: an unresolvable repo, an unwritable `~/.claude`,
+  or no `~/.claude` at all (a CI runner, a container) costs a Tree or an install
+  exactly nothing, and logs at DEBUG rather than warning on every single run —
+  the store is additive, and without it a session merely keeps its memory to
+  itself, which is the behaviour every session had before this existed.
+- spawn: the reviewer SPAWNED payload's `tree` now reports the reviewer's ACTUAL
+  per-Run read-only Tree, not a speculative coordinate (#1039). ADR-0074 made
+  review Trees per-Run with a minted UUID, so the flat-leaf naming
+  `_launch_reviewer` reported and the UUID `review/producer.provision_review_tree`
+  minted independently could no longer agree by computation — `payload["tree"]`
+  named a plausible path the reviewer never ran in. The spawn boundary now mints
+  the flat-leaf naming ONCE and threads it down through the review service
+  (`run_detached_review` → `generate_review` → `run_fanout_review` →
+  `provision_review_tree`) via a new optional `review_tree_naming` /
+  `naming` parameter (default `None` = "mint your own", so the review adapters'
+  own re-review path and every other caller are unchanged), so the producer clones
+  the reviewer under that exact id. Two reviewers on the same head still mint
+  distinct namings upstream, so their per-Run Trees — and payloads — still differ.
+- `tree gc` now **reclaims a Tree on measured activity rather than proxies for
+  it**, closing a bug that deleted a live session's worktree (#1018). One rule
+  decides every Tree kind — review, ephemeral, and write alike:
+
+  ```text
+  KEEP  if  dirty  ||  unpushed  ||  idle < 48h
+  ```
+
+  The three ladders this replaces read fifteen inputs between them — a pidfile,
+  a `ps` probe, the PR's state, the Tree's kind, and four separate time windows
+  — to answer one question none of them measured: *is anyone working here?* The
+  ephemeral ladder answered it from the clone root's mtime, which does not move
+  when an agent edits under `src/` (measured lag: up to **10 hours**), and its
+  last rung read age alone — so a single liveness false-negative deleted a clean,
+  live Tree. `idle` is now measured directly, as the newest of any file's mtime
+  under a pruned walk and `HEAD`'s commit stamp, so both an agent editing files
+  and an agent committing deletions are seen.
+  **Unknown is never idle.** A `git status` or `git rev-list` that fails, a walk
+  that hits an unreadable directory or finds no eligible file, a `stat` that
+  raises — each one KEEPS the Tree and is reported. A wrongly-kept Tree costs
+  disk until the next sweep; a wrongly-deleted one costs work that no longer
+  exists. That asymmetry is the whole design, and it matters more now that the
+  sweep is on its way to running unattended (#1017).
+  **48h is deliberately above the observed band, not inside it.** Across a live
+  fleet, idle time separates with no overlap: every live Tree measured under 1h,
+  every dead one over 41h. A Tree idle 41–48h simply waits for the next sweep,
+  while the margin over the busiest live Tree stays 48×.
+  The walk that measures this **prunes** `.git`, `.pixi`, `node_modules`,
+  `target`, `.venv`, `dist`, `build`, and `__pycache__` — `.pixi` alone is ~97%
+  of a Tree's file count, and unpruned the walk would cost more than everything
+  it replaces. Measured across a live 155-Tree fleet: **6.8s end to end**, at
+  ~7ms per Tree versus ~425ms unpruned.
+  Acquiring a shared read-only review Tree now records activity, because a
+  reviewer only ever *reads*: refreshing an already-current Tree rewrites no
+  file, so an aged shared Tree handed to a reviewer could be reclaimed out from
+  under the review that was using it.
+  `--threshold` now sets the idle boundary. The `stale` bucket is gone: with one
+  rule there is no ambiguous middle for a human to adjudicate.
+- **`tree gc` now makes ZERO network calls, and the dead reclaim machinery is
+  gone** (#1022). ADR-0072 replaced the liveness-and-PR-state reclaim ladder with
+  one activity-based rule (`KEEP if dirty || unpushed || idle < 48h`); the earlier
+  work left that rule reachable but the machinery it superseded still on disk. This
+  removes it, with no change to the reclaim rule itself:
+  - `session/liveness.py` (the pidfile, the `ps`/`jc` fork, the create-time
+    tolerance, the argv host allow-list) and `tree/provision.py` (the pre-pin
+    provisioning-commit record reader) retire, along with their tests. The
+    `SessionStart` hook no longer writes a pidfile and the `WorktreeRemove`
+    fast-path teardown no longer reads one or carves out provisioning commits — its
+    never-lose-work floor is now exactly gc's own (dirty or unpushed).
+  - **The entire `gh` network dependency leaves the Tree scan.** The per-repo
+    `PrIndex` batch that fed a signal reclaim no longer reads is deleted, so
+    `tree gc` (and `tree list`, which shares the scan) reads only the local
+    filesystem and `git`. On the largest fleet ever observed this was the
+    difference between a >10-minute sweep and a ~22-second one; the cost was the PR
+    read, and it is gone. A test asserts the gather makes no `gh` call.
+  - `tree list` drops its **PR** column with the `gh` read; `TreeRecord` no longer
+    carries `pr`/`pr_state`. The stale bucket, the per-kind gc dispatch, and the
+    unreachable `live_reviews` review-Tree rung are gone with the ladder.
+  - Net change is a deletion of roughly 2,000 lines across source and tests.
 - **TREE03 planning docs land: the Tree gets rethought** (#1020, epic #1019).
   Running Trees
   for a while exposed three failures with one root cause — the system infers
@@ -91,6 +186,29 @@
   that its memory is doomed — memory now persists, so learnings get promoted to
   the repo because the repo is how knowledge reaches reviewers, not because
   memory leaks.
+- tree: Trees are now **flat and self-describing** — one directory per Tree named
+  `<repo>-<agent>-<timestamp>-<id>` under the central root, replacing the five
+  nested `<owner>/<repo>/<kind>/[<code>/]<leaf>` shapes at two depths (ADR-0074,
+  #1025). Repo leads the name so `ls | grep <repo>` is the tooling-free narrowing
+  the hierarchy promised; `<agent>` is the backend binary (`claude`/`codex`/`agy`),
+  minted once from the backend registry rather than smuggled in as a session-id
+  prefix; `<timestamp>` (`%Y%m%d-%H%M%S`) gives `tree list` its first real
+  **created** column; and `<id>` is a full UUID — never a pid, never truncated. Its
+  provenance follows the creator: a coordinator session Tree carries the harness
+  session UUID from the `WorktreeCreate` payload (so the dir name IS the
+  `claude --resume` handle), while every spawned-Run and native-helper Tree mints
+  its own. The `<kind>` and `<owner>` segments and `tree_kind()` are gone (reclaim
+  is one uniform activity-based rule since ADR-0072, and repo identity comes from
+  the origin remote); `session/current.py` now resolves a Tree from cwd with no
+  depth arithmetic; and `resume.py` reads the backend from a recorded field instead
+  of reverse-engineering it from the id prefix.
+- tree: **review Trees are per-Run**, not shared. ADR-0018's read-only *mode*
+  stands — a reviewer still gets a chmod'd read-only clone — but the deterministic
+  `(repo, branch)` sharing is dropped along with its reuse/refresh/acquisition-stamp
+  machinery: each reviewer Run gets its own flat Tree, dated by its own files like
+  every other Tree (#1025). Old nested Trees are not migrated — they are reclaimed
+  by attrition and coexist with the flat shape (`registry.scan` walks for `.git`
+  markers and never parsed depth). Branch names are unchanged.
 
 ## 1.2.3 - 2026-07-16
 

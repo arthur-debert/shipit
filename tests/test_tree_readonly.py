@@ -1,16 +1,24 @@
-"""Tests for ``tree.readonly`` — the shared, read-only (reviewer) Tree (ADR-0018).
+"""Tests for ``tree.readonly`` — the per-Run, read-only (reviewer) Tree (ADR-0074).
 
-Three things to pin, mirroring ``test_tree_create.py`` / ``test_tree_layout.py``:
+Since ADR-0074 a reviewer clone is PER-RUN, not shared: ADR-0018's read-only
+*mode* stands (the working tree is still ``chmod``'d read-only), but the *sharing*
+is gone. So the whole reuse/refresh/acquisition-stamp machinery — a deterministic
+``(repo, branch)`` leaf, ``_reuse_or_refuse``, ``_refresh_readonly``,
+``_stamp_acquisition``, ``chmod_writable`` — is retired with the sharing it existed
+for. What remains:
 
-- the PURE planner (``readonly_plan``) resolves a deterministic, hash-free leaf so a
-  Tree is shared per ``(repo, branch)`` and rejects a branch that sanitizes to nothing;
-- provisioning is the read-only VARIANT — clone + checkout only, NO ``.treeinclude``
-  copy, NO pixi/provisioning, and the working files left ``chmod``'d read-only — and a
-  second reviewer on the same head REUSES the clone instead of re-cloning;
-- ``chmod_readonly`` strips the write bits from working files but never from ``.git``.
+- the PURE planner (``readonly_plan``) resolves the single flat leaf
+  ``<repo>-<agent>-<timestamp>-<id>`` (unique per Run, its <id> a fresh UUID) and
+  rejects an empty branch;
+- provisioning is the read-only VARIANT — clone + checkout + submodule init only,
+  NO ``.treeinclude`` copy, NO pixi/provisioning — with the working files left
+  ``chmod``'d read-only, and a pre-existing leaf REFUSED (a per-Run id never
+  legitimately collides);
+- ``chmod_readonly`` strips the write bits from working files but never from ``.git``,
+  and ``remove_tree`` reclaims a read-only checkout.
 
-The reuse + "no provisioning" assertions mock the git boundary (no real clone); one
-real-git smoke proves the checkout + read-only chmod end to end.
+The "no provisioning" assertions mock the git boundary (no real clone); two real-git
+smokes prove the checkout + read-only chmod (and the #372 commit-graph donor) end to end.
 """
 
 from __future__ import annotations
@@ -28,60 +36,76 @@ from shipit.execrun import ExecError
 from shipit.identity import repo_from_slug
 from shipit.tree.readonly import (
     chmod_readonly,
-    chmod_writable,
     create_readonly,
     readonly_plan,
     remove_tree,
 )
 
-#: The canonical Repo identity the plans in this file namespace under.
+#: The canonical Repo identity the plans in this file namespace under — its NAME
+#: (``widget``) leads the flat leaf.
 REPO = repo_from_slug("acme/widget")
+
+#: The flat-leaf coordinates a per-Run reviewer Tree carries (ADR-0074): the backend
+#: binary name, the timestamp stamp, and this Run's own fresh UUID.
+AGENT = "codex"
+CREATED = "20260717-081333"
+TREE_ID = "619cf51a-f501-44dc-992f-74df773204aa"
+
+
+def _plan(**over):
+    """A per-Run read-only plan with the flat-leaf coordinates, ``over`` winning."""
+    base = dict(
+        repo=REPO,
+        branch="feat/x",
+        agent=AGENT,
+        created=CREATED,
+        tree_id=TREE_ID,
+    )
+    base.update(over)
+    return readonly_plan(**base)
 
 
 # --- the pure planner --------------------------------------------------------
 
 
-def test_readonly_plan_is_shared_per_repo_branch_with_no_hash(tmp_path):
-    # The leaf is deterministic from (org, repo, branch) — no agent hash — so two
-    # reviewers on the same head resolve to the IDENTICAL dir (the sharing key).
+def test_readonly_plan_resolves_the_flat_per_run_leaf(tmp_path):
+    # ADR-0074: the dir is the single flat shape every Tree uses —
+    # <root>/<repo>-<agent>-<timestamp>-<id> — with no `review` segment and no shared
+    # branch-keyed leaf.
     root = tmp_path / "trees"
-    one = readonly_plan(repo=REPO, branch="TRE03/WS03", root=root)
-    two = readonly_plan(repo=REPO, branch="TRE03/WS03", root=root)
-
-    assert one == two
-    # `review` kind segment + a leaf of the sanitized branch (slashes → '-', lowercased)
-    # plus a stable branch-name hash disambiguator — but NO per-Run agent hash.
-    assert one.dir.parent == root / "acme" / "widget" / "review"
-    assert one.dir.name.startswith("tre03-ws03-")
+    p = _plan(root=root)
+    assert p.dir == root / f"widget-{AGENT}-{CREATED}-{TREE_ID}"
     # The branch is kept VERBATIM for the checkout (the real remote branch name).
-    assert one.branch == "TRE03/WS03"
+    assert p.branch == "feat/x"
 
 
-def test_readonly_plan_distinct_branches_get_distinct_dirs(tmp_path):
+def test_readonly_plan_is_per_run_not_shared(tmp_path):
+    # Two reviewer Runs on the SAME (repo, branch) resolve to DISTINCT dirs now: each
+    # carries its own fresh UUID, so there is no co-tenant to race (sharing is gone).
     root = tmp_path / "trees"
-    a = readonly_plan(repo=REPO, branch="TRE03/WS03", root=root)
-    b = readonly_plan(repo=REPO, branch="TRE03/WS04", root=root)
-    assert a.dir != b.dir
+    one = _plan(root=root, tree_id="11111111-1111-4111-8111-111111111111")
+    two = _plan(root=root, tree_id="22222222-2222-4222-8222-222222222222")
+    assert one.dir != two.dir
+    assert one.branch == two.branch == "feat/x"
 
 
-def test_readonly_plan_slug_colliding_branches_get_distinct_dirs(tmp_path):
-    # Sanitization is lossy: `feat/a-b` and `feat/a/b` both slug to `feat-a-b`. The
-    # branch-name hash disambiguator must keep them in DISTINCT shared slots so one PR's
-    # reviewer never reuses another PR's checkout — while the real branch (kept verbatim
-    # for checkout) is preserved on each.
+def test_readonly_plan_branch_does_not_shape_the_leaf(tmp_path):
+    # The dir leaf no longer derives from the branch (branch sanitization went with the
+    # sharing that needed it), so slug-colliding branches on the same Run id land the
+    # SAME leaf — the id is the disambiguator now, not the branch.
     root = tmp_path / "trees"
-    a = readonly_plan(repo=REPO, branch="feat/a-b", root=root)
-    b = readonly_plan(repo=REPO, branch="feat/a/b", root=root)
-
-    assert a.dir.parent == b.dir.parent  # same review/ kind dir
-    assert a.dir != b.dir  # ...but different leaves (the hash differs)
+    a = _plan(root=root, branch="feat/a-b")
+    b = _plan(root=root, branch="feat/a/b")
+    assert a.dir == b.dir  # same coordinates → same leaf
     assert a.branch == "feat/a-b" and b.branch == "feat/a/b"  # verbatim for checkout
 
 
-@pytest.mark.parametrize("branch", ["", "   ", "///", "."])
-def test_readonly_plan_rejects_empty_sanitized_branch(tmp_path, branch):
-    with pytest.raises(ValueError, match="alphanumeric"):
-        readonly_plan(repo=REPO, branch=branch, root=tmp_path)
+@pytest.mark.parametrize("branch", ["", "   "])
+def test_readonly_plan_rejects_empty_branch(tmp_path, branch):
+    # A reviewer checks out an EXISTING head, so an empty branch is an unusable checkout
+    # target — refused (the dir leaf no longer needs the branch, so this is the only guard).
+    with pytest.raises(ValueError, match="non-empty remote branch"):
+        _plan(root=tmp_path, branch=branch)
 
 
 # --- chmod_readonly ----------------------------------------------------------
@@ -159,36 +183,22 @@ def test_remove_tree_is_a_noop_on_a_missing_path(tmp_path):
     assert remove_tree(tmp_path / "does-not-exist") is False  # must not raise
 
 
-def test_chmod_writable_restores_what_chmod_readonly_cleared(tmp_path):
-    tree = tmp_path / "tree"
-    (tree / "pkg").mkdir(parents=True)
-    f = tree / "pkg" / "mod.py"
-    f.write_text("x = 1\n")
-    chmod_readonly(tree)
-
-    chmod_writable(tree)
-
-    assert f.stat().st_mode & stat.S_IWUSR  # file writable again
-    assert (tree / "pkg").stat().st_mode & stat.S_IWUSR  # dir writable again
-    assert tree.stat().st_mode & stat.S_IWUSR  # root writable again
-
-
 # --- provisioning: the read-only variant (mocked git boundary) ---------------
 
 
 def _mock_git_boundary(monkeypatch, *, files):
     """Patch the git boundary so a "clone" just makes the dest + the given files.
 
-    Returns the call-count dict so a test can assert the clone ran exactly once
-    (and is REUSED, not repeated, on a second create).
+    Returns the call-count dict so a test can assert clone/fetch/checkout/submodule
+    each ran exactly once (a per-Run create is one shot — no reuse, no reset).
     """
-    counts = {"clone": 0, "fetch": 0, "checkout": 0, "reset": 0, "submodule": 0}
+    counts = {"clone": 0, "fetch": 0, "checkout": 0, "submodule": 0}
 
     def fake_clone(url, dest, *, reference):
         counts["clone"] += 1
         d = Path(dest)
         d.mkdir(parents=True)
-        (d / ".git").mkdir()  # mark it a real clone (reuse keys off this)
+        (d / ".git").mkdir()  # mark it a real clone
         for name, body in files.items():
             (d / name).write_text(body)
 
@@ -203,11 +213,6 @@ def _mock_git_boundary(monkeypatch, *, files):
     )
     monkeypatch.setattr(
         git,
-        "reset_hard",
-        lambda *a, **k: counts.__setitem__("reset", counts["reset"] + 1),
-    )
-    monkeypatch.setattr(
-        git,
         "submodule_update_init",
         lambda **k: counts.__setitem__("submodule", counts["submodule"] + 1),
     )
@@ -217,7 +222,7 @@ def _mock_git_boundary(monkeypatch, *, files):
 def test_create_readonly_clones_checks_out_and_chmods_no_provisioning(
     tmp_path, monkeypatch
 ):
-    plan = readonly_plan(repo=REPO, branch="feat/x", root=tmp_path / "trees")
+    plan = _plan(root=tmp_path / "trees")
     counts = _mock_git_boundary(monkeypatch, files={"README.md": "hi\n"})
 
     # A reviewer Tree must NEVER provision: if provisioning were wired, this guard
@@ -236,18 +241,11 @@ def test_create_readonly_clones_checks_out_and_chmods_no_provisioning(
     assert tree.branch == "feat/x"
     assert tree.base == "origin/feat/x"
     # clone + fetch + plain checkout of the EXISTING branch, then submodule init, each
-    # exactly once (#485); a FRESH create does no reset (that is the reuse-refresh path
-    # only).
-    assert counts == {
-        "clone": 1,
-        "fetch": 1,
-        "checkout": 1,
-        "reset": 0,
-        "submodule": 1,
-    }
+    # exactly once (#485). A per-Run create is one shot: no reuse, no reset.
+    assert counts == {"clone": 1, "fetch": 1, "checkout": 1, "submodule": 1}
     # The working file is left read-only (the ADR-0018 guardrail).
     assert not ((plan.dir / "README.md").stat().st_mode & 0o222)
-    # The temp clone path was renamed into the shared leaf — no leftover sibling.
+    # The temp clone path was renamed into the leaf — no leftover sibling.
     assert not plan.dir.with_name(f"{plan.dir.name}.tmp-{os.getpid()}").exists()
 
 
@@ -260,87 +258,16 @@ def test_create_readonly_skips_treeinclude(tmp_path, monkeypatch):
     (source / ".env").write_text("TOKEN=1")
     _mock_git_boundary(monkeypatch, files={"README.md": "hi\n"})
 
-    plan = readonly_plan(repo=REPO, branch="feat/x", root=tmp_path / "trees")
+    plan = _plan(root=tmp_path / "trees")
     create_readonly(plan, source_repo=str(source), github_url="url")
 
     assert not (plan.dir / ".env").exists()  # .treeinclude was NOT applied
 
 
-def test_create_readonly_second_reviewer_reuses_the_clone(tmp_path, monkeypatch):
-    # Acceptance #157: a second reviewer on the same (repo, branch) REUSES the shared
-    # clone — it does not re-clone.
-    plan = readonly_plan(repo=REPO, branch="feat/x", root=tmp_path / "trees")
-    counts = _mock_git_boundary(monkeypatch, files={"README.md": "hi\n"})
-
-    first = create_readonly(plan, source_repo="/ref", github_url="url")
-    second = create_readonly(plan, source_repo="/ref", github_url="url")
-
-    assert first.path == second.path
-    assert counts["clone"] == 1  # the second reviewer did NOT re-clone
-
-
-def test_create_readonly_reuse_refreshes_to_current_head_and_re_guards(
-    tmp_path, monkeypatch
-):
-    # On reuse the shared clone must be REFRESHED to the current remote head (the PR may
-    # have advanced) and the read-only guard re-applied — never served stale. The refresh
-    # is fetch + checkout + reset --hard origin/<branch>.
-    plan = readonly_plan(repo=REPO, branch="feat/x", root=tmp_path / "trees")
-    counts = _mock_git_boundary(monkeypatch, files={"README.md": "hi\n"})
-
-    create_readonly(plan, source_repo="/ref", github_url="url")  # first reviewer
-    work = plan.dir / "README.md"
-    # Simulate a co-tenant having relaxed perms; the re-guard must restore read-only.
-    work.chmod(0o644)
-
-    create_readonly(plan, source_repo="/ref", github_url="url")  # second reviewer
-
-    assert counts["clone"] == 1  # still the one shared clone
-    assert counts["reset"] == 1  # ...but reset --hard to the current head on reuse
-    # Submodules re-pinned on BOTH the fresh create and the reuse-refresh (#485), so a
-    # co-tenant never reads stale submodule content after the head advanced.
-    assert counts["submodule"] == 2
-    assert not (work.stat().st_mode & 0o222)  # read-only guard re-applied
-
-
-def test_create_readonly_reuse_re_guards_even_when_refresh_fails(tmp_path, monkeypatch):
-    # #486: the reuse-refresh makes the shared clone WRITABLE to re-pin it, then a
-    # submodule fetch can fail loud (auth/network). The read-only guard must be restored
-    # anyway (try/finally) — otherwise the shared slot is left writable for every
-    # co-tenant reviewer, breaking the ADR-0018 FS guarantee — and the error must still
-    # propagate so the caller rolls back.
-    plan = readonly_plan(repo=REPO, branch="feat/x", root=tmp_path / "trees")
-    _mock_git_boundary(monkeypatch, files={"README.md": "hi\n"})
-
-    create_readonly(
-        plan, source_repo="/ref", github_url="url"
-    )  # first reviewer, guarded
-    work = plan.dir / "README.md"
-    assert not (work.stat().st_mode & 0o222)  # guarded after the fresh create
-
-    # The reuse-refresh's submodule step fails loud (e.g. a submodule fetch wall).
-    monkeypatch.setattr(
-        git,
-        "submodule_update_init",
-        lambda **k: (_ for _ in ()).throw(
-            ExecError(
-                ["git", "submodule", "update", "--init", "--recursive"],
-                rc=1,
-                stderr="fatal: clone of submodule failed",
-            )
-        ),
-    )
-
-    with pytest.raises(ExecError):
-        create_readonly(plan, source_repo="/ref", github_url="url")  # second reviewer
-    # The guard was restored despite the failure — the slot is NOT left writable.
-    assert not (work.stat().st_mode & 0o222)
-
-
 def test_create_readonly_rolls_back_partial_tree_on_failure(tmp_path, monkeypatch):
-    # If a post-clone step fails, the half-built leaf must not survive — otherwise the
-    # next reviewer would "reuse" a broken clone.
-    plan = readonly_plan(repo=REPO, branch="feat/x", root=tmp_path / "trees")
+    # If a post-clone step fails, the half-built leaf must not survive — otherwise a
+    # stray broken clone would litter the root.
+    plan = _plan(root=tmp_path / "trees")
     _mock_git_boundary(monkeypatch, files={"README.md": "hi\n"})
     monkeypatch.setattr(
         git,
@@ -353,24 +280,63 @@ def test_create_readonly_rolls_back_partial_tree_on_failure(tmp_path, monkeypatc
     assert not plan.dir.exists()
 
 
-def test_create_readonly_refuses_non_clone_in_the_shared_slot(tmp_path, monkeypatch):
-    # A pre-existing leaf that is NOT a clone (no .git) is refused, not cloned into or
-    # deleted — it would be a stray dir squatting the shared review slot.
-    plan = readonly_plan(repo=REPO, branch="feat/x", root=tmp_path / "trees")
+def test_create_readonly_refuses_a_pre_existing_leaf(tmp_path, monkeypatch):
+    # A per-Run leaf carries a fresh UUID, so a pre-existing dest means a REUSED id —
+    # a programming error. It is refused up front (never cloned into or deleted), so a
+    # failed create can never clobber a directory already on disk.
+    plan = _plan(root=tmp_path / "trees")
     plan.dir.mkdir(parents=True)
-    (plan.dir / "stray.txt").write_text("not a clone")
+    (plan.dir / "stray.txt").write_text("not mine")
 
     def boom(*a, **k):
-        raise AssertionError("must not clone into an occupied non-clone slot")
+        raise AssertionError("must not clone into an occupied leaf")
 
     monkeypatch.setattr(git, "clone_dissociated", boom)
 
-    with pytest.raises(FileExistsError, match="not a clone"):
+    with pytest.raises(FileExistsError, match="already exists"):
         create_readonly(plan, source_repo="/ref", github_url="url")
-    assert (plan.dir / "stray.txt").read_text() == "not a clone"  # untouched
+    assert (plan.dir / "stray.txt").read_text() == "not mine"  # untouched
 
 
-# --- one real-git smoke: checkout of an existing branch + read-only ----------
+def test_create_readonly_tags_tree_created(tmp_path, monkeypatch, caplog):
+    """A per-Run read-only Tree is a Tree birth — the `tree.created` dev-cycle event
+    (LOG04-WS02 / ADR-0032)."""
+    from shipit import events
+
+    plan = _plan(root=tmp_path / "trees")
+    _mock_git_boundary(monkeypatch, files={"README.md": "hi\n"})
+
+    with caplog.at_level(logging.INFO, logger="shipit.tree"):
+        create_readonly(plan, source_repo="/ref", github_url="url")
+    assert [
+        getattr(r, events.EXTRA_KEY)
+        for r in caplog.records
+        if getattr(r, events.EXTRA_KEY, None)
+    ] == ["tree.created"]
+
+
+# --- identity threading ------------------------------------------------------
+
+
+def test_case_divergent_sources_share_one_repo_prefix(tmp_path):
+    # Reviewer Trees are per-Run now, so two Runs never share a dir — but the flat
+    # leaf's <repo> prefix must still normalize: a mixed-case API slug and the
+    # canonical identity resolve the IDENTICAL leaf when the other coordinates match
+    # (the ADR-0024 disease stays out of the plumbing).
+    a = readonly_plan(
+        repo=repo_from_slug("AcMe/WiDgEt"),
+        branch="feat/x",
+        agent=AGENT,
+        created=CREATED,
+        tree_id=TREE_ID,
+        root=tmp_path,
+    )
+    b = _plan(root=tmp_path)
+    assert a.dir == b.dir
+    assert a.dir.name.startswith("widget-")
+
+
+# --- real-git smokes ---------------------------------------------------------
 
 
 def _git(args, cwd):
@@ -412,7 +378,7 @@ def test_create_readonly_real_git_checks_out_existing_branch_read_only(tmp_path)
     reference = tmp_path / "ref"
     _git(["clone", str(remote), str(reference)], tmp_path)
 
-    plan = readonly_plan(repo=REPO, branch="feat/x", root=tmp_path / "trees")
+    plan = _plan(root=tmp_path / "trees")
     tree = create_readonly(plan, source_repo=str(reference), github_url=str(remote))
     dest = Path(tree.path)
 
@@ -460,7 +426,7 @@ def test_create_readonly_real_git_survives_a_commit_graph_bearing_reference(
     _git(["commit-graph", "write", "--reachable", "--split"], reference)
     assert (reference / ".git" / "objects" / "info" / "commit-graphs").exists()
 
-    plan = readonly_plan(repo=REPO, branch="feat/x", root=tmp_path / "trees")
+    plan = _plan(root=tmp_path / "trees")
     # file:// forces the real pack transport — a plain path URL hardlinks
     # objects and never reproduces the clone-time-checkout death.
     with caplog.at_level(logging.WARNING, logger="shipit.git"):
@@ -479,42 +445,3 @@ def test_create_readonly_real_git_survives_a_commit_graph_bearing_reference(
         for r in caplog.records
         if r.name == "shipit.git" and r.levelno >= logging.WARNING
     ]
-
-
-def test_case_divergent_sources_share_one_review_tree(tmp_path):
-    # Reviewer sharing is keyed per (repo, branch): a mixed-case API slug and the
-    # canonical identity must resolve the SAME shared leaf, or two reviewers on
-    # one PR head would silently clone twice (the ADR-0024 disease).
-    a = readonly_plan(
-        repo=repo_from_slug("AcMe/WiDgEt"), branch="feat/x", root=tmp_path
-    )
-    b = readonly_plan(repo=REPO, branch="feat/x", root=tmp_path)
-    assert a.dir == b.dir
-    assert a.dir.parent == tmp_path / "acme" / "widget" / "review"
-
-
-def test_create_readonly_fresh_clone_tags_tree_created_reuse_does_not(
-    tmp_path, monkeypatch, caplog
-):
-    """A FRESH shared read-only Tree is a Tree birth — the `tree.created`
-    dev-cycle event (LOG04-WS02 / ADR-0032); the second reviewer's REUSE
-    created nothing and tags nothing."""
-    import logging
-
-    from shipit import events
-
-    plan = readonly_plan(repo=REPO, branch="feat/x", root=tmp_path / "trees")
-    _mock_git_boundary(monkeypatch, files={"README.md": "hi\n"})
-
-    with caplog.at_level(logging.INFO, logger="shipit.tree"):
-        create_readonly(plan, source_repo="/ref", github_url="url")
-    assert [
-        getattr(r, events.EXTRA_KEY)
-        for r in caplog.records
-        if getattr(r, events.EXTRA_KEY, None)
-    ] == ["tree.created"]
-
-    caplog.clear()
-    with caplog.at_level(logging.INFO, logger="shipit.tree"):
-        create_readonly(plan, source_repo="/ref", github_url="url")
-    assert not [r for r in caplog.records if getattr(r, events.EXTRA_KEY, None)]

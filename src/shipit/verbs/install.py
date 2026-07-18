@@ -16,7 +16,13 @@ This module is ADR-0030 glue + renderers only:
   three mode flags are mutually exclusive.
 - **domain calls** — load the packaged desired state, gather → reconcile →
   Plan; dry-run stops there (rendered off the Plan, nothing touched);
-  otherwise apply(Plan, mode) → InstallResult.
+  otherwise apply(Plan, mode) → InstallResult. Every non-dry-run path then
+  plants the canonical checkout's session-store link
+  (:func:`_plant_session_store`, ADR-0073 — the one effect that is NOT a
+  managed unit: it writes outside the consumer, under ``~/.claude``, and is
+  fail-open rather than part of the Plan). *Every* includes the nothing-to-do
+  return: the link is outside the Plan, so a current managed set is no evidence
+  the link exists.
 - **render** — the pure ``format_*`` functions below own every terminal line
   (the per-unit report, the retired delete/keep report and its kept-file
   warning, the nothing-to-do wording, the mode outcome) and the draft PR's
@@ -35,7 +41,7 @@ from pathlib import Path
 
 import click
 
-from .. import config, events, gh, git
+from .. import config, events, gh, git, identity, sessionstore
 from ..channel import cascade_receive
 from ..install import artifactdeps
 from ..install.apply import (
@@ -251,6 +257,36 @@ def _consumer_root(path: str | None) -> tuple[Path, Path | None]:
     return root, requested
 
 
+def _plant_session_store(root: Path) -> None:
+    """Link the CANONICAL checkout's harness slug dir to the repo's session store (ADR-0073).
+
+    The other half of :func:`shipit.tree.create._plant_session_store`: every Tree links
+    itself at birth, and install links the plain checkout, so work done in a Tree and
+    work done in the canonical checkout share one store rather than splitting into two.
+
+    Runs on EVERY non-dry-run path — after ``apply``, and equally on the nothing-to-do
+    return. The link is not a managed unit and so is not in the Plan: a current managed
+    set implies nothing about whether the slug dir is linked, and the already-managed
+    checkout — whose plan is nothing-to-do — is exactly the migration case this seam
+    exists for. Only ``--dry-run`` plants nothing, which is its no-side-effects contract.
+
+    The canonical checkout is the case the ADR calls hard and common: its slug dir
+    typically **already exists as a real directory with real content**, so this is the
+    call that actually exercises adoption. :func:`shipit.sessionstore.plant` is
+    content-preserving and idempotent, so re-running install is free.
+
+    **Fail-open at DEBUG** (#348 calibration), for the same reason as the Tree seam: the
+    store is additive, nothing durable degrades without it, and an environment with no
+    ``~/.claude`` at all must not WARN on every install. A *refusal* is already logged
+    loudly by ``plant`` itself — that one IS durable degraded state.
+    """
+    try:
+        repo = identity.resolve_repo(str(root))
+        sessionstore.plant(root, repo)
+    except Exception:  # noqa: BLE001 — fail-open: never cost an install its exit code
+        logger.debug("session store not planted for %s", root, exc_info=True)
+
+
 @cli_errors
 def run(
     path: str | None = None,
@@ -339,6 +375,15 @@ def run(
         if plan.nothing_to_do or dry_run:
             # Dry-run has NO side effects (no writes, no deletes, no git, no PR);
             # a nothing-to-do plan is a clean no-op either way.
+            if not dry_run:
+                # ...but a no-op MANAGED SET is not a no-op STORE: the link lives
+                # outside the Plan, so "every managed file is current" says nothing
+                # about whether the slug dir is linked. Planting here is what makes
+                # the advertised install-based migration reachable — the common
+                # migration case IS an already-managed checkout, whose plan is
+                # nothing-to-do, and gating the link on unrelated managed-file drift
+                # would mean the store gets adopted only by coincidence.
+                _plant_session_store(root_path)
             events.emit(
                 logger,
                 "install.completed",
@@ -376,6 +421,7 @@ def run(
             extra={"step": getattr(exc, "step", step), "mode": mode},
         )
         raise
+    _plant_session_store(root_path)
     emit(result, format_result)
     warnings = format_result_warnings(result)
     if warnings:

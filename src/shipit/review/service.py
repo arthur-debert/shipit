@@ -10,7 +10,7 @@ Layered functions:
   * :func:`generate_review` — decide the round SCOPE (RVW02-WS06:
     :func:`shipit.review.rounds.plan_for_view`) then delegate to the round
     orchestrator (:func:`shipit.review.fanout.run_fanout_review`, RVW02-WS04 /
-    ADR-0045 / ADR-0052). ROUND 1 provisions ONE shared read-only Tree
+    ADR-0045 / ADR-0052). ROUND 1 provisions ONE per-Run read-only Tree
     (ADR-0018) on the PR head and runs the reviewer's configured shape: by
     DEFAULT one monolithic full-scope pass (ADR-0052); with an explicit
     per-reviewer ``dimensions`` config, the ADR-0045 **Dimension passes** in
@@ -77,6 +77,7 @@ def generate_review(
     calibrator: CalibratorConfig | None = None,
     nit_cap: int | None = None,
     dry_run: bool = False,
+    review_tree_naming: Mapping[str, str] | None = None,
 ) -> dict:
     """Run ``backend``'s review over ``ctx`` (full round 1, or an incremental
     fix-range round ≥ 2) and return the routed review.
@@ -122,7 +123,11 @@ def generate_review(
     agent timeout (a
     ``<N>s`` duration string), enforced at the launch seam as a process
     deadline for every backend (#404). ``dry_run`` prints each pass's would-run
-    Tree-launch argv and bills nothing.
+    Tree-launch argv and bills nothing. ``review_tree_naming`` (#1039) threads the
+    reviewer-spawn coordinator's pre-minted flat-leaf coordinates down to
+    :func:`shipit.review.producer.provision_review_tree` so the per-Run Tree lands
+    at the SPAWNED payload's reported ``tree`` path; ``None`` (every other caller)
+    lets the producer mint its own leaf, exactly as before.
 
     Every successfully generated review is ALSO teed to the local
     **review-round record** store at this seam (RVW02-WS03) — verb-witnessed at
@@ -180,6 +185,7 @@ def generate_review(
         nit_cap=nit_cap,
         incremental=plan.incremental,
         dry_run=dry_run,
+        review_tree_naming=review_tree_naming,
     )
     review = outcome.review
     duration_ms = int((time.monotonic() - start) * 1000)
@@ -319,6 +325,7 @@ def _generate_post_and_close(
     event: str | None = None,
     as_app: bool = True,
     dry_run: bool = False,
+    review_tree_naming: Mapping[str, str] | None = None,
 ) -> dict:
     """Generate the review for ``ctx``, post it, and CLOSE ``run_id`` to terminal.
 
@@ -340,6 +347,7 @@ def _generate_post_and_close(
             calibrator=calibrator,
             nit_cap=nit_cap,
             dry_run=dry_run,
+            review_tree_naming=review_tree_naming,
         )
         result = post.post_review(
             review,
@@ -627,6 +635,7 @@ def run_detached_review(
     calibrator: CalibratorConfig | None = None,
     nit_cap: int | None = None,
     as_app: bool = True,
+    review_tree_naming: Mapping[str, str] | None = None,
 ) -> dict:
     """The detached CHILD body: resolve fully, generate, post, close ``run_id``.
 
@@ -663,6 +672,12 @@ def run_detached_review(
     the run ``in_progress`` with its ``started_at``, resolved by OBS04's wait window
     ageing that timestamp. WS03 does NOT implement that window — it only relies on it
     as the backstop (PRD "Failure & Timeout").
+
+    ``review_tree_naming`` (#1039) is the reviewer-spawn coordinator's pre-minted
+    flat-leaf ``{agent, created, tree_id}``, threaded down to
+    :func:`shipit.review.producer.provision_review_tree` so the per-Run read-only
+    Tree lands at the path the SPAWNED payload already reported. ``None`` (the
+    reviewer adapters' own re-review path) lets the producer mint its own leaf.
     """
     agent = backend.funnel_agent
     # The repo rides in on the PrId (ADR-0030): the child entry point minted it
@@ -741,6 +756,7 @@ def run_detached_review(
             calibrator=calibrator,
             nit_cap=nit_cap,
             as_app=as_app,
+            review_tree_naming=review_tree_naming,
         )
     except Exception:
         # The helper already closed the funnel run to its own terminal state

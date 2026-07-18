@@ -64,7 +64,7 @@ from pathlib import Path
 
 from . import config, events, execrun, identity, pixienv, workenv
 from .changelog import CHANGELOG_DIR
-from .tree.create import Tree, create_from_source, new_agent_hash
+from .tree.create import Tree, create_from_source, new_tree_id, new_tree_naming
 from .tree.layout import TreeSpec
 
 logger = logging.getLogger("shipit.fleet")
@@ -532,11 +532,11 @@ def _create_tree(entry: PortfolioEntry, *, source_root: Path) -> Tree:
             "cuts each Tree off the portfolio's local checkout layout "
             "(--source-root)"
         )
-    agent_hash = new_agent_hash()
+    sweep_token = new_tree_id()
     spec = TreeSpec(
         repo=identity.repo_from_slug(entry.repo),
-        agent_hash=agent_hash,
-        branch=f"fleet-sweep-{agent_hash}",
+        **new_tree_naming("claude"),
+        branch=f"fleet-sweep-{sweep_token}",
     )
     return create_from_source(spec, source_repo=source)
 

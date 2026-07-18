@@ -1,9 +1,18 @@
-"""Truth-table tests for ``tree.cleanup.classify`` — the pure removable/stale/keep partition.
+"""Truth-table tests for ``tree.cleanup.classify`` — the pure removable/keep partition.
 
-These assert EXTERNAL behavior (PRD Testing Decisions): given a snapshot of records,
-the current time, and a per-Tree PR-state map, ``classify`` drops each Tree in the right
-bucket. ``classify`` is pure — ``now`` and ``pr_states`` are inputs, there is no clock or
-I/O — so the whole table is driven directly, including the age-threshold boundary.
+These assert EXTERNAL behavior (PRD Testing Decisions): given a snapshot of records and
+the current time, ``classify`` drops each Tree in the right bucket. ``classify`` is pure
+— ``now`` is an input, there is no clock or I/O — so the whole table is driven directly,
+including the threshold boundary.
+
+ONE rule, every kind (ADR-0072)::
+
+    KEEP  if  dirty  ||  unpushed  ||  idle < 48h
+
+so the table is small on purpose: the three ladders these tests used to cover (write /
+review / ephemeral, 15 decision inputs between them) are gone, and with them the PR
+state, the liveness probe and the kind dispatch. What remains is three signals, their
+two unreadable arms, and one boundary.
 """
 
 from __future__ import annotations
@@ -11,42 +20,28 @@ from __future__ import annotations
 import pytest
 
 from shipit.identity import Sha
-from shipit.tree.cleanup import (
-    DEFAULT_MAX_AGE_SECONDS,
-    MERGED_IDLE_GRACE_SECONDS,
-    classify,
-    parse_duration,
-)
+from shipit.tree.cleanup import IDLE_THRESHOLD_SECONDS, classify, parse_duration
 from shipit.tree.registry import TreeRecord
 
 NOW = 1_000_000.0
+#: The idle threshold, overridden small so the boundary is table-testable.
 THRESHOLD = 100.0
-#: The write ladder's idle window for a merged Tree, overridden small (and well under
-#: ``THRESHOLD``) so both boundaries are table-testable independently — that
-#: separation is the point: age must NOT gate the merged case (#1009). Both windows
-#: read the same clock, ``now - mtime``, so every mtime below is an IDLE time.
-MERGED_IDLE_GRACE = 10.0
-#: An mtime comfortably older than ``THRESHOLD`` relative to ``NOW`` (Tree is aged).
-AGED_MTIME = NOW - (THRESHOLD + 50)
-#: An mtime within ``THRESHOLD`` of ``NOW`` (Tree is recent) but well PAST
-#: ``MERGED_IDLE_GRACE``: the #1009 shape — a merged Tree the age gate used to veto.
-RECENT_MTIME = NOW - (THRESHOLD - 50)
-#: An mtime inside ``MERGED_IDLE_GRACE``: a Tree written to moments ago, i.e. one an
-#: agent may still be working in (the window's clock is idleness, not the merge).
-WITHIN_MERGED_IDLE_GRACE = NOW - (MERGED_IDLE_GRACE - 5)
-
+#: A newest-file mtime comfortably PAST the threshold: nobody has written here.
+IDLE_MTIME = NOW - (THRESHOLD + 50)
+#: A newest-file mtime inside the threshold: someone wrote a file recently.
+ACTIVE_MTIME = NOW - (THRESHOLD - 50)
 
 #: Stand-in full SHAs for truth-table rows (git SHAs are 40 hex chars).
-SHA_PROVISION = Sha("a" * 40)
 SHA_WORK = Sha("b" * 40)
 SHA_OTHER = Sha("c" * 40)
 
 
 def _record(path: str = "/trees/t", **over) -> TreeRecord:
-    # `unpushed_shas=()` (every commit reachable from SOME remote) is the baseline
-    # the non-floor rows need: the write ladder's floor is `_has_local_only_work`,
-    # which reads the TreeRecord default (`unpushed_shas=None`, list unreadable)
-    # conservatively as has-work.
+    # The baseline is the ONLY removable shape: clean, every commit on some remote
+    # (`unpushed_shas=()`), and idle past the threshold — with every signal READABLE,
+    # which is part of the shape and not a detail. All three unreadable defaults on
+    # TreeRecord (`unpushed_shas=None`, `newest_mtime=None`, `last_commit=None`) read
+    # as KEEP, so a row must pin them to mean anything else.
     base = dict(
         path=path,
         branch="issues/7/work",
@@ -54,771 +49,264 @@ def _record(path: str = "/trees/t", **over) -> TreeRecord:
         dirty=False,
         ahead=0,
         behind=0,
-        pr=None,
-        pr_state=None,
-        mtime=AGED_MTIME,
+        mtime=IDLE_MTIME,
         unpushed_shas=(),
+        newest_mtime=IDLE_MTIME,
     )
     base.update(over)
-    # The write ladder reads idle from the NEWEST of `mtime` and `last_commit`, so a
-    # row must pin BOTH to mean "idle". `last_commit` therefore FOLLOWS `mtime` unless
-    # the row states it: a row saying `mtime=AGED` means "this Tree is aged", not
-    # "aged directory, unreadable commit stamp" (the TreeRecord default of `None`,
-    # which is conservatively ACTIVE and would silently turn every row into `keep`).
-    # A row that pins them apart is deliberately exercising the two-signal read.
-    base.setdefault("last_commit", base["mtime"])
+    # Idle is the newest of the walk and the commit stamp, and BOTH must be readable for
+    # it to be answered at all. So a row that moves the activity signal means to move the
+    # whole of it: last_commit tracks the walk unless the row names it, which keeps `max`
+    # a no-op and lets each row below say exactly one thing. Rows probing the stamp — or
+    # either unreadable arm — pass both halves explicitly.
+    if "last_commit" not in over:
+        base["last_commit"] = base["newest_mtime"]
     return TreeRecord(**base)
 
 
-def _classify_one(record: TreeRecord, state: str | None) -> str:
-    """Run ``classify`` on a single record and return the bucket name it landed in.
-
-    Both time boundaries are passed explicitly, so no row silently depends on a
-    production default (14d / 12h) that no table row could reach.
-    """
-    decision = classify(
-        [record],
-        now=NOW,
-        pr_states={record.path: state},
-        max_age_seconds=THRESHOLD,
-        merged_idle_grace_seconds=MERGED_IDLE_GRACE,
-    )
-    for name in ("removable", "stale", "keep"):
+def _classify_one(record: TreeRecord) -> str:
+    """Run ``classify`` on a single record and return the bucket name it landed in."""
+    decision = classify([record], NOW, idle_threshold_seconds=THRESHOLD)
+    for name in ("removable", "keep"):
         if getattr(decision, name):
             return name
     raise AssertionError("record landed in no bucket")
 
 
-# (description, record-overrides, pr-state) -> expected bucket. Each row is one cell of
-# the PRD truth table.
+# (description, record-overrides) -> expected bucket. Each row is one cell of the rule.
 TABLE = [
-    ("merged + clean + no-unpushed + idle past the window", {}, "MERGED", "removable"),
-    # The #1009 regression: a merged, clean, fully-pushed Tree idle PAST the window
-    # but WELL WITHIN max_age_seconds is removable. The merge is what proves the loss
-    # is safe (the work is on the remote), so age must not veto it — under the old
-    # ladder's age-first gate this row was `keep`, and it parked 421 of a 503-Tree
-    # fleet.
+    ("clean + fully pushed + idle past the threshold", {}, "removable"),
+    # --- the activity signal ---
     (
-        "merged + idle past the window but not aged -> removable (age does not gate)",
-        {"mtime": RECENT_MTIME},
-        "MERGED",
-        "removable",
-    ),
-    # ...and the other direction: a merged Tree written to inside the idle window is
-    # still kept. A write Tree has no liveness signal, so idleness is the proxy for
-    # "is an agent still working here?", and a recent write says someone may be.
-    (
-        "merged but written to inside the idle window is kept",
-        {"mtime": WITHIN_MERGED_IDLE_GRACE},
-        "MERGED",
+        "a file was written inside the threshold -> keep",
+        {"newest_mtime": ACTIVE_MTIME},
         "keep",
     ),
-    # The activity signal that makes the window real rather than nominal (codex
-    # review). Root mtime bumps only on root-level churn, so an agent editing and
-    # committing under `src/` leaves it stale — this row is exactly codex's scenario:
-    # a Tree cut days ago, an agent working in it right now, its PR just merged, and
-    # for this instant clean + fully pushed (between a push and the next edit). The
-    # HEAD committer stamp is what sees the agent; without it gc would delete a live
-    # agent's cwd.
+    # Unknown is NOT false (ADR-0072): a walk that failed, or found no eligible file,
+    # reads as ACTIVE. A filesystem hiccup must never license a delete.
     (
-        "merged + stale root mtime but a FRESH commit -> keep (an agent is working)",
-        {"mtime": AGED_MTIME, "last_commit": WITHIN_MERGED_IDLE_GRACE},
-        "MERGED",
+        "UNREADABLE activity signal -> keep (unknown is not idle)",
+        {"newest_mtime": None, "last_commit": IDLE_MTIME},
         "keep",
     ),
-    # ...and the converse, so the row above is testing the signal and not just a
-    # blanket keep: both signals stale IS genuine idleness, and the Tree reclaims.
+    # --- the never-lose-work floor, on a Tree that is otherwise removable ---
+    ("dirty (else removable) is protected", {"dirty": True}, "keep"),
     (
-        "merged + stale root mtime + stale commit -> removable (genuinely idle)",
-        {"mtime": AGED_MTIME, "last_commit": AGED_MTIME},
-        "MERGED",
-        "removable",
-    ),
-    # The mirror of the row above it: mtime fresh (root-level churn) while the last
-    # commit is old still reads as activity — idle is the NEWEST of the two.
-    (
-        "merged + fresh root mtime + stale commit -> keep",
-        {"mtime": WITHIN_MERGED_IDLE_GRACE, "last_commit": AGED_MTIME},
-        "MERGED",
-        "keep",
-    ),
-    # Unreadable commit stamp reads conservatively as ACTIVE, never as "ancient":
-    # `unpushed_shas`' precedent — a git hiccup must not license a delete.
-    (
-        "merged + UNREADABLE last commit -> keep (unknown is not idle)",
-        {"mtime": AGED_MTIME, "last_commit": None},
-        "MERGED",
-        "keep",
-    ),
-    # The never-lose-work floor is ABSOLUTE: it beats the merged rung, whose rows all
-    # sit idle past the window (AGED_MTIME) and would otherwise be removable.
-    ("dirty (else removable) is protected", {"dirty": True}, "MERGED", "keep"),
-    ("unpushed (ahead>0) is protected", {"ahead": 2}, "MERGED", "keep"),
-    # The upstream-INDEPENDENT floor (codex review): a branch with no tracking
-    # upstream reads ahead==0 while still holding commits on no remote at all —
-    # e.g. extra commits made after the remote branch was deleted on merge. The
-    # `unpushed` list alone must protect it, and an UNREADABLE list must read
-    # as has-work (a git hiccup must never point at data loss).
-    (
-        "unpushed (on no remote, ahead==0) is protected",
-        {"unpushed_shas": (SHA_WORK, SHA_OTHER, SHA_PROVISION)},
-        "MERGED",
+        "unpushed (commits on no remote) is protected",
+        {"unpushed_shas": (SHA_WORK, SHA_OTHER)},
         "keep",
     ),
     (
         "UNREADABLE unpushed list is protected",
         {"unpushed_shas": None},
-        "MERGED",
         "keep",
     ),
-    # The UNMERGED shapes are untouched by the grace window — age remains their sole
-    # abandonment signal, and an in-flight PR always keeps (aged or not).
-    ("open/unmerged PR is in flight", {}, "OPEN", "keep"),
-    ("draft PR is in flight", {}, "DRAFT", "keep"),
-    ("recent + no PR (not aged) is kept", {"mtime": RECENT_MTIME}, None, "keep"),
-    ("aged + clean + no PR is stale", {}, None, "stale"),
-    ("aged + clean + closed-unmerged PR is stale", {}, "CLOSED", "stale"),
-    # UNKNOWN (unreadable PR state) is conservatively stale — NEVER removable — even
-    # when the Tree is otherwise a removable shape (aged + clean + no unpushed).
-    ("aged + clean + UNKNOWN PR is stale (never removable)", {}, "UNKNOWN", "stale"),
+    # `ahead` is NOT the floor's signal: a commit ahead of its upstream but present on
+    # some remote is recoverable. `unpushed_shas` asks the question that matters —
+    # "does this exist anywhere but here?" — and it says no local-only work here.
+    ("ahead of upstream but on a remote -> removable", {"ahead": 2}, "removable"),
+    # --- what the rule deliberately does NOT read (ADR-0072) ---
+    # PR state has no vote at all: the ``gh`` read and the ``pr``/``pr_state`` fields it
+    # fed are gone from the scan (WS03), so the rule structurally cannot consult one.
+    # Root mtime was the old clock and lags real activity by up to 10h; it is a display
+    # signal now, and must not sway the rule in EITHER direction. Both rows pin that.
+    (
+        "stale root mtime does not remove an ACTIVE Tree",
+        {"mtime": IDLE_MTIME, "newest_mtime": ACTIVE_MTIME},
+        "keep",
+    ),
+    (
+        "fresh root mtime does not keep an IDLE Tree",
+        {"mtime": ACTIVE_MTIME, "newest_mtime": IDLE_MTIME},
+        "removable",
+    ),
+    # The commit stamp is the one signal maxed IN, and only ever to keep. It cannot
+    # decide alone (it is blind to a session that never commits) but it sees the one
+    # thing the walk structurally cannot: a commit that only DELETES files.
+    (
+        "fresh last_commit keeps an idle-LOOKING Tree",
+        {"last_commit": ACTIVE_MTIME},
+        "keep",
+    ),
+    (
+        "stale last_commit does not remove an ACTIVE Tree",
+        {"last_commit": IDLE_MTIME, "newest_mtime": ACTIVE_MTIME},
+        "keep",
+    ),
+    # ...and it is only ever maxed in when it can be READ. Idle is the newest of the two,
+    # so an unknown half is a hole and not a lesser answer: the walk cannot see the
+    # deletion-only commit the stamp was added for, so deferring to it here would license
+    # exactly the delete the row above exists to prevent (codex, #1029 review round 2).
+    (
+        "UNREADABLE last_commit -> keep (it blanks idle, it does not defer to the walk)",
+        {"last_commit": None, "newest_mtime": IDLE_MTIME},
+        "keep",
+    ),
+    (
+        "UNREADABLE last_commit -> keep, even with an active walk",
+        {"last_commit": None, "newest_mtime": ACTIVE_MTIME},
+        "keep",
+    ),
+    (
+        "BOTH activity halves unreadable -> keep",
+        {"last_commit": None, "newest_mtime": None},
+        "keep",
+    ),
 ]
 
 
-@pytest.mark.parametrize(
-    "desc, over, state, expected", TABLE, ids=[row[0] for row in TABLE]
-)
-def test_classify_truth_table(desc, over, state, expected):
-    assert _classify_one(_record(**over), state) == expected
+@pytest.mark.parametrize("desc, over, expected", TABLE, ids=[row[0] for row in TABLE])
+def test_classify_truth_table(desc, over, expected):
+    assert _classify_one(_record(**over)) == expected
 
 
-def test_stale_is_never_removable():
-    # The ambiguous-but-abandoned cases (no PR / closed) and the unreadable case
-    # (UNKNOWN) must never be auto-removed.
-    for state in (None, "CLOSED", "UNKNOWN"):
-        decision = classify(
-            [_record()],
-            now=NOW,
-            pr_states={"/trees/t": state},
-            max_age_seconds=THRESHOLD,
-        )
-        assert decision.removable == []
-        assert len(decision.stale) == 1
+# --- the #1018 gate ----------------------------------------------------------------
+#
+# These are the regression tests the whole work stream exists for. Each one FAILS
+# against the old ladder.
 
 
-def test_age_threshold_boundary_is_exclusive():
-    # The age threshold governs the UNMERGED shapes only (a no-PR Tree here): exactly
-    # AT it the Tree is NOT yet aged -> kept; one second past -> aged -> stale.
-    at = _record(mtime=NOW - THRESHOLD)
-    assert _classify_one(at, None) == "keep"
-    past = _record(mtime=NOW - THRESHOLD - 1)
-    assert _classify_one(past, None) == "stale"
+def test_a_tree_with_a_live_session_is_never_removable():
+    """#1018, reproduced exactly: gc deleted a LIVE Claude session's worktree.
 
+    The session had been running ~9 hours doing external `gcloud`/`gsutil` work, so:
+    its git tree was CLEAN (nothing to commit), it had NO PR, its root mtime was hours
+    stale (a directory's mtime does not move when an agent works under `src/`), and its
+    pidfile probe read a false negative. Under the old ephemeral ladder rungs 1, 2 and
+    4 could not fire, rung 3 needed `live == True` and did not get it, and rung 5 read
+    age ONLY — from root mtime, against a 1h grace window — so a live session's cwd was
+    deleted out from under it.
 
-def test_merged_idle_grace_boundary_is_exclusive():
-    # Idle exactly AT the window a merged Tree is still kept; one second past it is
-    # removable. "Past", not "at" — mirroring every other boundary in the ladder.
-    at = _record(mtime=NOW - MERGED_IDLE_GRACE)
-    assert _classify_one(at, "MERGED") == "keep"
-    past = _record(mtime=NOW - MERGED_IDLE_GRACE - 1)
-    assert _classify_one(past, "MERGED") == "removable"
-
-
-def test_age_threshold_never_gates_a_merged_tree():
-    # The #1009 invariant, stated directly: with an ABSURDLY long age threshold — one
-    # no Tree could ever cross — a merged, clean, pushed Tree past its grace window is
-    # still removable. The merge alone decides; age has no vote.
-    record = _record(mtime=RECENT_MTIME)
-    decision = classify(
-        [record],
-        now=NOW,
-        pr_states={record.path: "MERGED"},
-        max_age_seconds=DEFAULT_MAX_AGE_SECONDS * 1_000,
-        merged_idle_grace_seconds=MERGED_IDLE_GRACE,
+    The one thing that WAS true of that Tree: a file in it had just been written. That
+    is the signal the rule now reads, and it is why this Tree is kept.
+    """
+    live_session = _record(
+        path="/trees/acme/widget/ephemeral/abc123",
+        branch="ephemeral/abc123",
+        dirty=False,  # external gcloud work: nothing to commit
+        unpushed_shas=(),  # nothing local-only either
+        mtime=NOW - (THRESHOLD * 100),  # root mtime hours stale — the 10h lag
+        newest_mtime=NOW - 1,  # ...but a file was written one second ago
     )
-    assert [r.path for r in decision.removable] == [record.path]
+    decision = classify([live_session], NOW, idle_threshold_seconds=THRESHOLD)
+    assert decision.removable == []
+    assert [r.path for r in decision.keep] == [live_session.path]
+
+
+def test_activity_under_a_subdirectory_keeps_the_tree():
+    """The 10h-lag bug, pinned at the rule: root mtime stale, a subdir file fresh.
+
+    An agent editing under `src/` leaves the clone ROOT's mtime untouched — that is
+    what fed the old ladder and what made it delete a live Tree. `newest_mtime` sees
+    the write wherever it lands, so the Tree is kept despite an ancient root mtime.
+    (That the walk actually FINDS a subdir file is pinned in test_tree_activity.py;
+    here the record states the two signals disagree, and the rule follows the one that
+    measures.)
+    """
+    record = _record(mtime=NOW - (THRESHOLD * 1_000), newest_mtime=NOW - 5)
+    assert _classify_one(record) == "keep"
+
+
+def test_a_clean_tree_with_unpushed_commits_is_kept():
+    """The retained floor, and the one non-obvious keep (ADR-0072).
+
+    A clean Tree whose commits were never pushed looks exactly as idle as an abandoned
+    one — it IS idle. Without this floor it is deleted at 48h and those commits die
+    with `.git`: unrecoverable, and invisible until someone goes looking for them.
+    """
+    record = _record(dirty=False, unpushed_shas=(SHA_WORK,), newest_mtime=IDLE_MTIME)
+    assert _classify_one(record) == "keep"
+
+
+# --- the boundary and the defaults --------------------------------------------------
+
+
+def test_idle_threshold_boundary_is_exclusive():
+    # Idle exactly AT the threshold the Tree is still kept; one second past it is
+    # removable. "Past", not "at" — the keep direction owns the boundary.
+    assert _classify_one(_record(newest_mtime=NOW - THRESHOLD)) == "keep"
+    assert _classify_one(_record(newest_mtime=NOW - THRESHOLD - 1)) == "removable"
+
+
+def test_default_threshold_is_48_hours():
+    # The default, with no override: a Tree idle just under 48h is kept, one idle just
+    # over is removable. This is the ONE constant — it replaced the 14d/12h/4d/1h set.
+    assert IDLE_THRESHOLD_SECONDS == 48 * 3_600
+    young = _record(newest_mtime=NOW - (IDLE_THRESHOLD_SECONDS - 1))
+    old = _record(newest_mtime=NOW - (IDLE_THRESHOLD_SECONDS + 1))
+    assert classify([young], NOW).removable == []
+    assert len(classify([old], NOW).removable) == 1
+
+
+def test_the_rule_does_not_dispatch_on_kind():
+    # Review, ephemeral and write Trees reclaim IDENTICALLY (ADR-0072): the same
+    # signals, the same verdict. Kind is a name, not a decision input.
+    paths = [
+        "/trees/acme/widget/review/tre03-ws03",
+        "/trees/acme/widget/ephemeral/abc123",
+        "/trees/acme/widget/branches/feat-x-deadbeef",
+    ]
+    idle = [_record(path=p) for p in paths]
+    active = [_record(path=p, newest_mtime=ACTIVE_MTIME) for p in paths]
+    assert {
+        r.path for r in classify(idle, NOW, idle_threshold_seconds=THRESHOLD).removable
+    } == set(paths)
+    assert {
+        r.path for r in classify(active, NOW, idle_threshold_seconds=THRESHOLD).keep
+    } == set(paths)
 
 
 def test_partition_is_disjoint_and_exhaustive():
     records = [
-        _record(path="/trees/removable"),  # merged + aged -> removable
+        _record(path="/trees/removable"),
         _record(path="/trees/keep-dirty", dirty=True),
-        _record(path="/trees/keep-unpushed", ahead=1),
-        _record(path="/trees/keep-in-grace", mtime=WITHIN_MERGED_IDLE_GRACE),
-        _record(path="/trees/keep-open"),
-        _record(path="/trees/stale"),  # no PR, aged -> stale
+        _record(path="/trees/keep-unpushed", unpushed_shas=(SHA_WORK,)),
+        _record(path="/trees/keep-active", newest_mtime=ACTIVE_MTIME),
+        _record(path="/trees/keep-unreadable", newest_mtime=None),
     ]
-    pr_states = {
-        "/trees/removable": "MERGED",
-        "/trees/keep-dirty": "MERGED",
-        "/trees/keep-unpushed": "MERGED",
-        "/trees/keep-in-grace": "MERGED",
-        "/trees/keep-open": "OPEN",
-        "/trees/stale": None,
-    }
-    decision = classify(
-        records,
-        now=NOW,
-        pr_states=pr_states,
-        max_age_seconds=THRESHOLD,
-        merged_idle_grace_seconds=MERGED_IDLE_GRACE,
-    )
+    decision = classify(records, NOW, idle_threshold_seconds=THRESHOLD)
 
     assert [r.path for r in decision.removable] == ["/trees/removable"]
-    assert [r.path for r in decision.stale] == ["/trees/stale"]
     assert {r.path for r in decision.keep} == {
         "/trees/keep-dirty",
         "/trees/keep-unpushed",
-        "/trees/keep-in-grace",
-        "/trees/keep-open",
+        "/trees/keep-active",
+        "/trees/keep-unreadable",
     }
     # Every input lands in exactly one bucket (disjoint + exhaustive).
-    total = len(decision.removable) + len(decision.stale) + len(decision.keep)
-    assert total == len(records)
+    assert len(decision.removable) + len(decision.keep) == len(records)
 
 
-def test_missing_pr_state_is_treated_as_no_pr():
-    # A record absent from pr_states (e.g. no branch) defaults to None -> stale when aged.
-    decision = classify([_record()], now=NOW, pr_states={}, max_age_seconds=THRESHOLD)
-    assert len(decision.stale) == 1
+def test_empty_fleet_is_two_empty_buckets():
+    decision = classify([], NOW)
+    assert decision.removable == []
+    assert decision.keep == []
 
 
-def test_default_threshold_is_two_weeks():
-    # The default age threshold, exercised on the shape it governs: an UNMERGED
-    # (no-PR) Tree younger than it is kept; older is stale (never removable).
-    young = _record(mtime=NOW - (DEFAULT_MAX_AGE_SECONDS - 1))
-    old = _record(mtime=NOW - (DEFAULT_MAX_AGE_SECONDS + 1))
-    assert classify([young], now=NOW, pr_states={"/trees/t": None}).stale == []
-    assert len(classify([old], now=NOW, pr_states={"/trees/t": None}).stale) == 1
-
-
-def test_default_merged_idle_grace_is_twelve_hours():
-    # The default idle window, with no override: a merged+clean Tree idle for under
-    # 12h is kept, one idle an hour longer is removable — while both sit FAR inside
-    # the 14-day age threshold that used to veto them (#1009).
-    young = _record(mtime=NOW - (MERGED_IDLE_GRACE_SECONDS - 1))
-    old = _record(mtime=NOW - (MERGED_IDLE_GRACE_SECONDS + 3_600))
-    assert classify([young], now=NOW, pr_states={"/trees/t": "MERGED"}).removable == []
-    assert (
-        len(classify([old], now=NOW, pr_states={"/trees/t": "MERGED"}).removable) == 1
-    )
-
-
-# --- shared read-only (reviewer) Tree reclaim (ADR-0018) -----------------------
-
-#: A review Tree's path carries the `review` kind segment (the classify marker).
-REVIEW_PATH = "/trees/acme/widget/review/tre03-ws03"
-
-
-def _review_record(**over) -> TreeRecord:
-    """A review-Tree record: read-only (clean, level) and aged by default."""
-    return _record(path=REVIEW_PATH, branch="TRE03/WS03", **over)
-
-
-def _classify_review(state, *, live: bool) -> str:
-    decision = classify(
-        [_review_record()],
-        now=NOW,
-        pr_states={REVIEW_PATH: state},
-        max_age_seconds=THRESHOLD,
-        live_reviews={REVIEW_PATH: live},
-    )
-    for name in ("removable", "stale", "keep"):
-        if getattr(decision, name):
-            return name
-    raise AssertionError("record landed in no bucket")
-
-
-# (description, pr-state, reviewer-live) -> expected bucket. The review reclaim rule:
-# removable iff (merged OR closed) AND no reviewer is live; else keep; never stale.
-REVIEW_TABLE = [
-    ("merged + no live reviewer -> removable", "MERGED", False, "removable"),
-    ("closed + no live reviewer -> removable", "CLOSED", False, "removable"),
-    ("merged but a reviewer is live -> keep", "MERGED", True, "keep"),
-    ("closed but a reviewer is live -> keep", "CLOSED", True, "keep"),
-    ("open PR (in flight) -> keep", "OPEN", False, "keep"),
-    ("draft PR (in flight) -> keep", "DRAFT", False, "keep"),
-    ("UNKNOWN state -> keep (never guess)", "UNKNOWN", False, "keep"),
-    ("no PR -> keep", None, False, "keep"),
-]
+# --- parse_duration (backs `gc --threshold`) ----------------------------------------
 
 
 @pytest.mark.parametrize(
-    "desc, state, live, expected", REVIEW_TABLE, ids=[r[0] for r in REVIEW_TABLE]
+    "text, expected",
+    [
+        ("48h", 48 * 3_600),
+        ("14d", 14 * 86_400),
+        ("90m", 5_400),
+        ("45s", 45),
+        ("  36H  ", 36 * 3_600),
+    ],
 )
-def test_review_tree_reclaim_truth_table(desc, state, live, expected):
-    assert _classify_review(state, live=live) == expected
+def test_parse_duration_accepts_each_unit(text, expected):
+    assert parse_duration(text) == float(expected)
 
 
-def test_review_tree_is_never_stale():
-    # A review Tree is a cheap shared clone: it is either removable or kept, never the
-    # "needs-a-human" stale bucket (unlike a write Tree with no/closed PR).
-    for state in (None, "CLOSED", "UNKNOWN"):
-        decision = classify(
-            [_review_record()],
-            now=NOW,
-            pr_states={REVIEW_PATH: state},
-            max_age_seconds=THRESHOLD,
-        )
-        assert decision.stale == []
-
-
-def test_review_tree_ignores_age_for_reclaim():
-    # The review rule is checked BEFORE the age ladder, so a merged review Tree is
-    # removable even when freshly touched — age does not protect a shared clone whose
-    # PR is done (and no reviewer is live).
-    recent = _review_record(mtime=RECENT_MTIME)
-    decision = classify(
-        [recent], now=NOW, pr_states={REVIEW_PATH: "MERGED"}, max_age_seconds=THRESHOLD
-    )
-    assert [r.path for r in decision.removable] == [REVIEW_PATH]
-
-
-def test_review_tree_defaults_to_no_live_reviewer():
-    # Omitting live_reviews entirely (the gc default) treats every review Tree as
-    # having no live reviewer, so a merged one is reclaimable.
-    decision = classify(
-        [_review_record()],
-        now=NOW,
-        pr_states={REVIEW_PATH: "MERGED"},
-        max_age_seconds=THRESHOLD,
-    )
-    assert len(decision.removable) == 1
-
-
-def test_write_tree_under_a_review_named_org_is_not_a_review_tree():
-    # `_is_review_tree` keys off the leaf's PARENT segment, not "review anywhere in the
-    # path": a write Tree whose org/repo happens to be named "review" must still take the
-    # write ladder. Here a dirty + merged write Tree must be KEPT (dirty protects it); if
-    # it were misclassified as a review Tree the merge would make it removable.
-    path = "/trees/review/widget/branches/feat-x-deadbeef"
-    record = _record(path=path, dirty=True)
-    decision = classify(
-        [record],
-        now=NOW,
-        pr_states={path: "MERGED"},
-        max_age_seconds=THRESHOLD,
-        merged_idle_grace_seconds=MERGED_IDLE_GRACE,
-    )
-    assert [r.path for r in decision.keep] == [path]
-    assert not decision.removable
-
-
-# --- ephemeral session Tree reclaim: the five-rung ladder (ADR-0027) -----------
-
-#: An ephemeral Tree's path carries the `ephemeral` kind segment (the classify marker).
-EPHEMERAL_PATH = "/trees/acme/widget/ephemeral/sess-20260702-1234"
-
-#: Ladder time backstops, overridden small so every boundary is table-testable.
-HARD_CAP = 1_000.0
-GRACE = 100.0
-
-#: Ages relative to NOW for each band of the ladder.
-WITHIN_GRACE = NOW - (GRACE - 10)
-PAST_GRACE = NOW - (GRACE + 10)  # past grace, still under the hard cap
-PAST_HARD_CAP = NOW - (HARD_CAP + 10)
-
-
-def _ephemeral_record(**over) -> TreeRecord:
-    """An ephemeral-Tree record: clean, fully pushed, NO upstream (the birth shape).
-
-    ``base=None`` + ``ahead=0`` is exactly the fresh ``ephemeral/<id>`` branch the
-    upstream-independent ``unpushed`` list exists for; ``unpushed_shas=()`` means
-    every commit is on some remote.
-    """
-    base = dict(
-        path=EPHEMERAL_PATH,
-        branch="ephemeral/sess-20260702-1234",
-        base=None,
-        ahead=0,
-        unpushed_shas=(),
-        mtime=PAST_GRACE,
-    )
-    base.update(over)
-    return _record(**base)
-
-
-def _classify_ephemeral(
-    record: TreeRecord,
-    state: str | None,
-    *,
-    live: bool,
-    provision: frozenset[Sha] | None = None,
-) -> str:
-    decision = classify(
-        [record],
-        now=NOW,
-        pr_states={record.path: state},
-        max_age_seconds=THRESHOLD,
-        live_sessions={record.path: live},
-        provision_shas=None if provision is None else {record.path: provision},
-        hard_cap_seconds=HARD_CAP,
-        grace_seconds=GRACE,
-    )
-    for name in ("removable", "stale", "keep"):
-        if getattr(decision, name):
-            return name
-    raise AssertionError("record landed in no bucket")
-
-
-# (description, record-overrides, pr-state, live) -> expected bucket. One row per
-# rung of the ADR-0027 ladder plus the boundary cases each rung's wording pins.
-EPHEMERAL_TABLE = [
-    # Rung 1 — dirty or unpushed -> KEEP, the absolute floor: beats merged, live,
-    # and even the hard cap.
-    ("dirty beats everything -> keep", {"dirty": True}, "MERGED", True, "keep"),
-    (
-        "dirty past the hard cap is still kept",
-        {"dirty": True, "mtime": PAST_HARD_CAP},
-        None,
-        False,
-        "keep",
-    ),
-    (
-        "unpushed commits (no upstream at all) -> keep",
-        {"unpushed_shas": (SHA_WORK, SHA_OTHER)},
-        None,
-        False,
-        "keep",
-    ),
-    (
-        "unpushed past the hard cap is still kept",
-        {"unpushed_shas": (SHA_WORK,), "mtime": PAST_HARD_CAP},
-        None,
-        False,
-        "keep",
-    ),
-    (
-        "ahead of an upstream -> keep",
-        {"base": "origin/main", "ahead": 1},
-        None,
-        False,
-        "keep",
-    ),
-    (
-        "UNREADABLE unpushed list is conservatively kept",
-        {"unpushed_shas": None},
-        None,
-        False,
-        "keep",
-    ),
-    # Rung 2 — merged PR -> REMOVABLE (the branch moved to real work and merged);
-    # provable-done beats liveness and the grace window.
-    ("merged -> removable", {}, "MERGED", False, "removable"),
-    (
-        "merged wins over a live session",
-        {"mtime": WITHIN_GRACE},
-        "MERGED",
-        True,
-        "removable",
-    ),
-    # Rung 3 — live and younger than the hard cap -> KEEP (an idle live session
-    # keeps its workspace, however far past the grace window).
-    ("live under the hard cap -> keep", {}, None, True, "keep"),
-    ("live keeps an open-PR Tree too", {}, "OPEN", True, "keep"),
-    # Rung 4 — past the hard cap, clean + pushed -> REMOVABLE even if the pidfile
-    # claims live: the stale-pidfile escape hatch.
-    (
-        "hard cap overrides liveness",
-        {"mtime": PAST_HARD_CAP},
-        None,
-        True,
-        "removable",
-    ),
-    # Rung 5 — not live, clean, pushed -> REMOVABLE past the grace window...
-    ("dead past grace -> removable", {}, None, False, "removable"),
-    (
-        "dead + UNKNOWN PR state past grace -> removable",
-        {},
-        "UNKNOWN",
-        False,
-        "removable",
-    ),
-    # ...and KEPT within it (a just-launched session is not raced before its
-    # pidfile lands).
-    ("dead within grace -> keep", {"mtime": WITHIN_GRACE}, None, False, "keep"),
-]
-
-
-@pytest.mark.parametrize(
-    "desc, over, state, live, expected",
-    EPHEMERAL_TABLE,
-    ids=[row[0] for row in EPHEMERAL_TABLE],
-)
-def test_ephemeral_ladder_truth_table(desc, over, state, live, expected):
-    assert _classify_ephemeral(_ephemeral_record(**over), state, live=live) == expected
-
-
-# --- the rung-1 provisioning-commit carve-out (#232) ----------------------------
-#
-# A managed-set drift window makes provisioning commit the reconcile at Tree birth:
-# one local-only commit on every fresh ephemeral Tree, which the absolute floor
-# would otherwise KEEP forever (even the hard cap requires "pushed"). The recorded
-# SHA — and exactly it — is excluded; every mismatch stays conservative.
-#
-# The validation-observed drift shape: upstream `origin/main`, the provisioning
-# commit both ahead-of-upstream (ahead=1) and on no remote.
-_DRIFT_SHAPE = {
-    "base": "origin/main",
-    "ahead": 1,
-    "unpushed_shas": (SHA_PROVISION,),
-}
-
-# (description, record-overrides, live, provision-exclusion-set) -> expected bucket.
-PROVISION_TABLE = [
-    # The recorded provisioning commit is NOT work: the Tree falls THROUGH rung 1
-    # to the liveness rungs — kept while live, reclaimed once the session is gone.
-    (
-        "provisioning-commit-only, dead past grace -> removable",
-        _DRIFT_SHAPE,
-        False,
-        frozenset({SHA_PROVISION}),
-        "removable",
-    ),
-    (
-        "provisioning-commit-only, live -> keep via rung 3 (not the floor)",
-        _DRIFT_SHAPE,
-        True,
-        frozenset({SHA_PROVISION}),
-        "keep",
-    ),
-    (
-        "provisioning-commit-only, past the hard cap -> removable even if live",
-        {**_DRIFT_SHAPE, "mtime": PAST_HARD_CAP},
-        True,
-        frozenset({SHA_PROVISION}),
-        "removable",
-    ),
-    # The floor stays ABSOLUTE for real work: any other local-only commit keeps,
-    # exclusion or not.
-    (
-        "provisioning + one real commit -> keep",
-        {
-            "base": "origin/main",
-            "ahead": 2,
-            "unpushed_shas": (SHA_PROVISION, SHA_WORK),
-        },
-        False,
-        frozenset({SHA_PROVISION}),
-        "keep",
-    ),
-    # Missing metadata (no record was written / unreadable -> empty exclusion set):
-    # the provisioning commit reads as work -> KEEP, the pre-#232 behavior.
-    (
-        "metadata missing -> keep",
-        _DRIFT_SHAPE,
-        False,
-        frozenset(),
-        "keep",
-    ),
-    # SHA mismatch (a rebase/amend changed the commit id): identity is the SHA,
-    # never the message, so the mismatch falls back to KEEP — the safe direction.
-    (
-        "recorded SHA does not match the local commit (rebase) -> keep",
-        {**_DRIFT_SHAPE, "unpushed_shas": (SHA_OTHER,)},
-        False,
-        frozenset({SHA_PROVISION}),
-        "keep",
-    ),
-    # An UNREADABLE local-only list keeps even with a recorded exclusion: unknown
-    # must never read as "nothing to lose".
-    (
-        "unreadable unpushed list -> keep despite a recorded exclusion",
-        {"base": "origin/main", "ahead": 1, "unpushed_shas": None},
-        False,
-        frozenset({SHA_PROVISION}),
-        "keep",
-    ),
-    # Dirty still beats everything — the exclusion narrows only the unpushed read.
-    (
-        "dirty -> keep despite a recorded exclusion",
-        {**_DRIFT_SHAPE, "dirty": True},
-        False,
-        frozenset({SHA_PROVISION}),
-        "keep",
-    ),
-    # `ahead` beyond what the exclusion explains is conservatively still work
-    # (commits pushed to some other branch, or a miscount): keep.
-    (
-        "ahead beyond the excluded provisioning commit -> keep",
-        {**_DRIFT_SHAPE, "ahead": 2},
-        False,
-        frozenset({SHA_PROVISION}),
-        "keep",
-    ),
-]
-
-
-@pytest.mark.parametrize(
-    "desc, over, live, provision, expected",
-    PROVISION_TABLE,
-    ids=[row[0] for row in PROVISION_TABLE],
-)
-def test_ephemeral_provision_commit_carveout(desc, over, live, provision, expected):
-    record = _ephemeral_record(**over)
-    assert _classify_ephemeral(record, None, live=live, provision=provision) == expected
-
-
-def test_provision_exclusion_never_reaches_the_write_ladder():
-    # The carve-out is EPHEMERAL-ONLY: a write Tree whose path appears in
-    # provision_shas still keeps on its local-only commit (the write floor takes
-    # no exclusion), aged and merged or not. The record sits PAST the merged grace
-    # window, so only the floor can be what keeps it.
-    record = _record(unpushed_shas=(SHA_PROVISION,))
-    decision = classify(
-        [record],
-        now=NOW,
-        pr_states={record.path: "MERGED"},
-        max_age_seconds=THRESHOLD,
-        merged_idle_grace_seconds=MERGED_IDLE_GRACE,
-        provision_shas={record.path: frozenset({SHA_PROVISION})},
-    )
-    assert [r.path for r in decision.keep] == [record.path]
-
-
-def test_ephemeral_tree_is_never_stale():
-    # No PR is the ephemeral NORM (the standard ladder would strand it in stale
-    # forever) — the ladder resolves every shape to removable or keep.
-    for state in (None, "CLOSED", "UNKNOWN", "OPEN"):
-        for live in (False, True):
-            decision = classify(
-                [_ephemeral_record()],
-                now=NOW,
-                pr_states={EPHEMERAL_PATH: state},
-                max_age_seconds=THRESHOLD,
-                live_sessions={EPHEMERAL_PATH: live},
-                hard_cap_seconds=HARD_CAP,
-                grace_seconds=GRACE,
-            )
-            assert decision.stale == []
-
-
-def test_ephemeral_defaults_to_not_live():
-    # Omitting live_sessions entirely treats every session as gone: a clean, pushed
-    # Tree past the grace window is reclaimable (the pidfile-less default).
-    decision = classify(
-        [_ephemeral_record()],
-        now=NOW,
-        pr_states={EPHEMERAL_PATH: None},
-        max_age_seconds=THRESHOLD,
-        hard_cap_seconds=HARD_CAP,
-        grace_seconds=GRACE,
-    )
-    assert [r.path for r in decision.removable] == [EPHEMERAL_PATH]
-
-
-def test_ephemeral_grace_and_hard_cap_boundaries_are_exclusive():
-    # Exactly AT the grace window a dead Tree is still kept; exactly AT the hard
-    # cap a live Tree is still kept — both boundaries are "past", not "at".
-    at_grace = _ephemeral_record(mtime=NOW - GRACE)
-    assert _classify_ephemeral(at_grace, None, live=False) == "keep"
-    at_cap = _ephemeral_record(mtime=NOW - HARD_CAP)
-    assert _classify_ephemeral(at_cap, None, live=True) == "keep"
-    past_cap = _ephemeral_record(mtime=NOW - HARD_CAP - 1)
-    assert _classify_ephemeral(past_cap, None, live=True) == "removable"
-
-
-def test_write_tree_under_an_ephemeral_named_org_takes_the_write_ladder():
-    # Kind is the LEAF'S PARENT segment, never "ephemeral anywhere in the path": a
-    # write Tree under an org named `ephemeral` must take the write ladder — here
-    # aged + clean + no PR lands in STALE (a bucket the ephemeral ladder never uses).
-    path = "/trees/ephemeral/widget/branches/feat-x-deadbeef"
-    record = _record(path=path)
-    decision = classify(
-        [record], now=NOW, pr_states={path: None}, max_age_seconds=THRESHOLD
-    )
-    assert [r.path for r in decision.stale] == [path]
-
-
-# --- parse_duration: the pure --threshold helper -------------------------------
-
-# (input, expected seconds) — one row per accepted shape. Each unit and a couple of
-# magnitudes, plus surrounding whitespace and a mixed-case suffix, must all parse.
-_DURATION_OK = [
-    ("14d", 14 * 86_400),
-    ("36h", 36 * 3_600),
-    ("90m", 90 * 60),
-    ("45s", 45),
-    ("1d", 86_400),
-    ("  7d  ", 7 * 86_400),  # surrounding whitespace is stripped
-    ("12H", 12 * 3_600),  # the unit is case-insensitive
-]
-
-
-@pytest.mark.parametrize(
-    "text, seconds", _DURATION_OK, ids=[row[0].strip() for row in _DURATION_OK]
-)
-def test_parse_duration_accepts_human_durations(text, seconds):
-    result = parse_duration(text)
-    assert result == float(seconds)
-    assert isinstance(result, float)  # the type classify's max_age_seconds expects
-
-
-# Each rejected shape is a clean ValueError, never a silent default.
-_DURATION_BAD = [
-    "",  # empty
-    "   ",  # blank
-    "14",  # no unit
-    "14w",  # unknown unit
-    "d",  # no magnitude
-    "1.5d",  # non-integer magnitude
-    "-5d",  # negative
-    "0d",  # non-positive
-    "abc",  # not a duration at all
-]
-
-
-@pytest.mark.parametrize("text", _DURATION_BAD)
-def test_parse_duration_rejects_bad_input(text):
+@pytest.mark.parametrize("text", ["", "   ", "14", "14w", "d", "-1d", "1.5d", "0h"])
+def test_parse_duration_rejects_malformed_input(text):
     with pytest.raises(ValueError):
         parse_duration(text)
 
 
-def test_parse_duration_round_trips_with_default_threshold():
-    # The CLI default (14d) must parse back to exactly DEFAULT_MAX_AGE_SECONDS, so the
-    # documented default and the keyword default can never silently diverge.
-    assert parse_duration("14d") == float(DEFAULT_MAX_AGE_SECONDS)
-
-
-def test_no_pr_and_unknown_bucket_identically_on_every_ladder():
-    """`None` (no PR) and `"UNKNOWN"` reach the SAME bucket on all three ladders.
-
-    Written down because the natural assumption — the one #1011's own brief made, and
-    the one this PR's first draft encoded in its docstrings — is that "no PR" is a rung
-    gc deletes on, so conflating it with UNKNOWN would destroy Trees. It isn't, and it
-    wouldn't. The PR-state delete rung is MERGED (and CLOSED, for a review Tree); no-PR
-    and UNKNOWN bucket IDENTICALLY on every ladder: stale for an aged write Tree, keep
-    for a review Tree, and for an ephemeral Tree the decision is made independently of
-    the PR state, from local work, liveness and age. That last one can well be
-    `removable` — as this test's very old ephemeral record is, on BOTH states — which
-    is precisely the point: the bucket is the same either way, so no swap of one state
-    for the other moves a Tree toward or away from deletion anywhere.
-
-    That does NOT make the distinction cosmetic — it relocates it. Only `"UNKNOWN"` is
-    counted by `GcPlan.unknown`, which is what makes a sweep admit it saw part of the
-    root and exit non-zero. So conflating the two costs gc its HONESTY, not its safety:
-    it would report a complete view of a fleet it could not read, which is exactly the
-    silent success of #1011. This test exists so the next reader gets the real reason
-    from the code rather than re-deriving the plausible wrong one.
-    """
-    now = 10_000_000_000.0
-    ladders = {
-        "write": "/t/acme/w/issues/1/work-a",
-        "review": "/t/acme/w/review/some-branch",
-        "ephemeral": "/t/acme/w/ephemeral/sess-1",
-    }
-
-    def bucket(path: str, state: str | None) -> str:
-        cleanup = classify([_record(path=path)], now=now, pr_states={path: state})
-        if cleanup.removable:
-            return "removable"
-        return "stale" if cleanup.stale else "keep"
-
-    for kind, path in ladders.items():
-        assert bucket(path, None) == bucket(path, "UNKNOWN"), (
-            f"{kind} ladder distinguishes no-PR from UNKNOWN; the None/UNKNOWN split "
-            "is about gc's reporting honesty, not its delete decisions"
-        )
-
-    # And the rung that DOES delete is merged — the fact the split is often confused with.
-    assert bucket(ladders["write"], "MERGED") == "removable"
-    assert bucket(ladders["write"], None) == "stale"
+def test_parse_duration_round_trips_the_default_threshold():
+    # The printed age (`48h`) round-trips back through `--threshold` to the same
+    # boundary the constant sets.
+    assert parse_duration("48h") == IDLE_THRESHOLD_SECONDS

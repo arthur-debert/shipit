@@ -1,7 +1,7 @@
 """Unit tests for `shipit.review.producer` — the Tree-fetch review producer.
 
 The producer replaces the retired front-loaded backends (ADR-0020 §Reviewer-path
-reconciliation — REPLACE): it provisions a shared read-only Tree on the PR head,
+reconciliation — REPLACE): it provisions a per-Run read-only Tree on the PR head,
 launches codex / agy through their spawn read-only posture with a task that fetches
 the diff itself, and CAPTURES the structured stdout. These tests pin the seam inputs
 (agent → adapter mapping, the launch argv, the capture/parse, dry-run, preflight) with
@@ -51,7 +51,8 @@ def _faked(monkeypatch):
         producer,
         "create_readonly",
         lambda plan, *, source_repo, github_url: Tree(
-            path="/trees/arthur-debert/shipit/review/tre05-ws04b-abcd1234",
+            # A per-Run reviewer Tree is one flat leaf (ADR-0074): <repo>-<agent>-<ts>-<id>.
+            path="/trees/shipit-codex-20260702-121314-abcd1234-abcd-1234-abcd-abcd1234abcd",
             branch=plan.branch,
             base=f"origin/{plan.branch}",
         ),
@@ -84,7 +85,9 @@ def test_codex_launches_in_the_tree_and_captures_the_review(_faked):
     assert cmd[:2] == ["codex", "exec"]
     assert "workspace-write" in cmd
     assert "--dangerously-bypass-approvals-and-sandbox" not in cmd
-    assert _faked["cwd"].endswith("tre05-ws04b-abcd1234")
+    assert _faked["cwd"].endswith(
+        "shipit-codex-20260702-121314-abcd1234-abcd-1234-abcd-abcd1234abcd"
+    )
     # codex gets the native schema flag (a real temp file path was written + passed).
     assert "--output-schema" in cmd
     # The task tells the agent to fetch the diff itself for THIS pr and not to post.
@@ -110,9 +113,11 @@ def test_tree_review_logs_readonly_work_env_evidence(_faked, caplog):
     assert record.role == "reviewer"
     assert record.pr == 42
     assert record.reviewer == "codex"
-    assert record.checkout_strategy == "shared-read-only-tree"
+    assert record.checkout_strategy == "per-run-read-only-tree"
     assert record.routing == "ambient"
-    assert record.working_dir.endswith("tre05-ws04b-abcd1234")
+    assert record.working_dir.endswith(
+        "shipit-codex-20260702-121314-abcd1234-abcd-1234-abcd-abcd1234abcd"
+    )
     assert record.working_dir_repo == "arthur-debert/shipit"
     assert record.working_dir_branch == "TRE05/WS04b"
     assert record.working_dir_commit == "deadbeef" * 5
@@ -133,7 +138,9 @@ def test_agy_maps_to_the_antigravity_adapter_with_prose_schema(_faked):
     cmd = _faked["cmd"]
     assert cmd[0] == "agy"
     # agy is rooted via --add-dir <Tree> (it ignores process cwd) and carries the timeout.
-    assert cmd[cmd.index("--add-dir") + 1].endswith("tre05-ws04b-abcd1234")
+    assert cmd[cmd.index("--add-dir") + 1].endswith(
+        "shipit-codex-20260702-121314-abcd1234-abcd-1234-abcd-abcd1234abcd"
+    )
     assert "--print-timeout=900s" in cmd
     # No native schema flag for agy; the schema rides the prompt prose instead.
     assert "--output-schema" not in cmd
@@ -688,7 +695,7 @@ def test_provision_review_tree_requires_a_head_branch(monkeypatch):
         head_ref="",
     )
     with _pytest.raises(RuntimeError, match="head branch"):
-        producer.provision_review_tree(ctx)
+        producer.provision_review_tree(ctx, agent_backend.CODEX)
 
 
 def test_codex_usage_is_captured_from_the_stderr_tokens_line(_faked):

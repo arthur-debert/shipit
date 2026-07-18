@@ -13,14 +13,14 @@ base override supplied by callers that have probed a remote head, and the coordi
 adding a shape is adding a field plus a branch in :func:`plan`, not reshaping
 callers.
 
-The three load-bearing invariants the tests pin (from the PRD):
+The load-bearing invariants the tests pin (from the PRD and ADR-0074):
 
-- the **agent hash lands on the dir, never on the branch** — two sessions sharing
-  one branch is fine, two Trees in one dir is not; the hash disambiguates the dir
-  while the branch stays a stable, meaningful namespace. Two shapes carry no hash
-  at all: a ``review`` Tree is *shared* per ``(repo, branch)`` (ADR-0018), and an
-  ``ephemeral`` session Tree's dir leaf IS the per-launch session id (ADR-0027) —
-  in both, the leaf itself is the disambiguator, so a hash would be noise;
+- the **dir is ONE flat, self-describing leaf** — ``<repo>-<agent>-<timestamp>-<id>``
+  (:func:`tree_leaf`), the SAME shape for every Tree, with no owner and no kind
+  segment. The leaf records who/when (repo name, backend binary, ``%Y%m%d-%H%M%S``
+  stamp, full-UUID id) while the branch/base carry what the Tree is *for*; the id
+  disambiguates two Trees that share one branch. Tree identity is resolved from the
+  origin remote, never parsed back out of the path;
 - the **git branch form is slash-namespaced** (naming.lex §3): a work stream is
   ``EPIC/WSnn`` cut from ``origin/EPIC/umbrella``, siblings under ``refs/heads/EPIC/``
   — the umbrella name dodges the bare-``EPIC`` ref/dir collision. The plain-language
@@ -36,6 +36,7 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from ..identity import Repo
@@ -63,72 +64,195 @@ CENTRAL_ROOT_ENV = "SHIPIT_TREES_ROOT"
 #: (PRD Solution; ADR-0014).
 DEFAULT_CENTRAL_ROOT = "~/workspace/trees"
 
-#: The dir-namespace segment that marks a **shared read-only (reviewer) Tree**
-#: (ADR-0018): ``<root>/<org>/<repo>/review/<branch>``. Unlike the per-Run write
-#: kinds (``epics`` / ``issues`` / ``branches``), a ``review`` Tree's leaf carries
-#: NO agent hash — it is shared per ``(repo, branch)`` (git's branch is its source
-#: of truth) — and the segment is the marker :func:`shipit.tree.cleanup.classify`
-#: keys its reclaim rule off. Defined here so the read-only planner
-#: (:mod:`shipit.tree.readonly`) and ``cleanup`` name it from one place.
-REVIEW_KIND = "review"
+#: The birth-branch prefix for the coordinator's **ephemeral session Tree**
+#: (ADR-0027): the branch starts as ``ephemeral/<id>`` and then MOVES to the real
+#: work (``EPIC/umbrella``, ``docs/<slug>``, …) as the session discovers what it is
+#: doing — the flat dir (:func:`tree_leaf`) stays put and records who/when. Only the
+#: BRANCH carries this prefix now; the flat Tree dir has no kind segment (ADR-0074).
+EPHEMERAL_BRANCH_PREFIX = "ephemeral"
 
-#: The dir-namespace segment for the coordinator's **ephemeral session Tree**
-#: (ADR-0027): ``<root>/<org>/<repo>/ephemeral/<id>``. The session Tree is
-#: *ephemeral-by-path, work-by-branch*: the dir leaf is the per-launch session id
-#: (the ``claude --worktree <id>`` value — the Tree's identity IS the session, so
-#: the leaf carries NO agent hash and is never renamed), while the branch starts as
-#: the mirroring ``ephemeral/<id>`` and then MOVES to the real work
-#: (``EPIC/umbrella``, ``docs/<slug>``, …) as the session discovers what it is
-#: doing — the dir stays. Defined here so the planner and the ``cleanup`` gc rule
-#: for the ephemeral kind (SES02 Layer C) name the segment from one place.
-EPHEMERAL_KIND = "ephemeral"
+#: The Tree dir leaf's ``<agent>`` slot must be a lowercase alphanumeric backend
+#: BINARY name — ``claude`` / ``codex`` / ``agy``, the three backends shipit
+#: supports (ADR-0074; naming.lex §4). Antigravity's ``--backend`` token is
+#: ``antigravity``, but its binary and funnel agent name are ``agy``, and the binary
+#: is what matches ``claude`` and ``codex`` — so the binary name is what lands in the
+#: leaf. Minted from the backend identity (:mod:`shipit.agent.backend`) at each
+#: creation path, never smuggled in as a session-id prefix.
+_AGENT_TOKEN = re.compile(r"[a-z0-9]+")
 
-#: The kind label for every per-Run write Tree (``epics`` / ``issues`` /
-#: ``branches`` namespaces): the default a path that is neither a shared review
-#: clone nor an ephemeral session Tree falls to in :func:`tree_kind`.
-WRITE_KIND = "write"
+#: The ``<timestamp>-<id>`` tail of a flat Tree leaf: a ``%Y%m%d-%H%M%S`` stamp
+#: (``\d{8}-\d{6}``) followed by a full UUID, anchored to the END of the name. The
+#: leaf's HEAD (``<repo>-<agent>``) may itself carry hyphens, so ``tree list``'s
+#: created column recovers the stamp by matching this tail, not by splitting on ``-``.
+#: An OLD nested Tree's leaf (WS02 reclaims those by attrition) does not match, so it
+#: reads ``-`` in the column rather than a wrong date.
+_CREATED_TAIL = re.compile(
+    r"(?P<created>\d{8}-\d{6})-"
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
 
-#: The write-Tree dir namespaces whose leaf sits one level DEEPER than the kind
-#: segment (``epics/<epic>/<leaf>``, ``issues/<id>/<leaf>``): the segments
-#: :func:`tree_kind` must check at grandparent depth, because the leaf's PARENT
-#: there is a free-form epic code / issue id that could legitimately be named
-#: ``review`` or ``ephemeral`` (``branches/<leaf>`` needs no entry — its parent
-#: is the literal ``branches``, which collides with no kind segment).
-_NESTED_WRITE_NAMESPACES = frozenset({"epics", "issues"})
+#: The strptime format a flat leaf's ``<timestamp>`` must parse under — ``%Y%m%d-%H%M%S``
+#: UTC (ADR-0074 / naming.lex §4). Shared by :func:`is_created_stamp` and the minting
+#: side (:func:`shipit.tree.create.tree_created_stamp`) so validator and generator agree.
+_CREATED_FORMAT = "%Y%m%d-%H%M%S"
+
+#: A flat leaf's ``<timestamp>`` SHAPE (``\d{8}-\d{6}``). Shape is necessary but not
+#: sufficient — :func:`is_created_stamp` additionally proves it is a real calendar time
+#: (``strptime``), so an in-shape but impossible stamp (month 13, hour 25) is rejected.
+_CREATED_STAMP_SHAPE = re.compile(r"\d{8}-\d{6}")
+
+#: A flat leaf's ``<id>``: a full 8-4-4-4-12 hex UUID (ADR-0074 / naming.lex §4). Never a
+#: pid (reused — one token eventually names two sessions) and never truncated
+#: (``claude --resume`` rejects a prefix).
+_FULL_UUID = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+    re.IGNORECASE,
+)
+
+#: The WHOLE flat leaf ``<repo>-<agent>-<timestamp>-<id>``, anchored end to end (used
+#: by :func:`parse_flat_leaf`). ``<repo>`` may itself carry hyphens, so it is matched
+#: non-greedily up to the ``<agent>`` (a lowercase alphanumeric backend binary) that
+#: immediately precedes the ``<timestamp>-<id>`` tail; only the hex ``<id>`` is
+#: case-insensitive, so ``<agent>`` stays lowercase by its own character class.
+_FLAT_LEAF = re.compile(
+    r"(?P<repo>.+?)-"
+    r"(?P<agent>[a-z0-9]+)-"
+    r"(?P<created>\d{8}-\d{6})-"
+    r"(?P<tree_id>[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}"
+    r"-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
+)
 
 
-def tree_kind(path: str | os.PathLike[str]) -> str:
-    """Which reclaim family ``path`` belongs to: ``review``/``ephemeral``/``write``.
+def is_full_uuid(value: object) -> bool:
+    """Whether ``value`` is a full 8-4-4-4-12 hex UUID — a flat leaf's ``<id>`` (ADR-0074).
 
-    There is no manifest — the path IS the signal (ADR-0018/0027), and the kind is
-    pinned to exactly the LEAF's parent segment, never "anywhere in the path": a
-    substring test would misclassify a write Tree whose org, repo, or central root
-    happens to contain a ``review``/``ephemeral`` segment, bypassing the safety
-    ladder that matches its true kind. Both the ``cleanup`` classifier (which
-    dispatches its per-kind ladders on this) and the ``list`` verb (which renders
-    the kind as a first-class column) name the mapping from this one place. Any
-    path that is neither special kind is a per-Run **write** Tree
-    (:data:`WRITE_KIND`) — the ``epics``/``issues``/``branches`` namespaces.
-
-    The nested write namespaces are checked FIRST, at grandparent depth
-    (:data:`_NESTED_WRITE_NAMESPACES`): an epic write Tree is
-    ``…/epics/<epic>/<leaf>``, so the leaf's parent is the free-form epic code —
-    and ``ephemeral``/``review`` are perfectly valid epic codes (agy review). A
-    parent-segment test alone would put an epic named ``ephemeral``'s write Trees
-    on the session-Tree gc ladder (removable after a mere hour idle) and hand them
-    ``SessionStart`` pidfiles; the grandparent check keeps every ``epics``/
-    ``issues`` Tree on the write ladder regardless of what its epic code or issue
-    id is named.
+    The single predicate every flat-leaf boundary shares for "is this a real Tree id?":
+    :func:`tree_leaf` (guarding the dir it builds), the ``WorktreeCreate`` coordinator
+    arm (guarding the harness ``session_id`` it adopts as ``<id>`` —
+    :func:`shipit.verbs.hook.worktreecreate._coordinator_tree_id`), and
+    :func:`parse_flat_leaf` (recognizing a conforming leaf). A pid or a truncated prefix
+    is rejected: reuse and ``claude --resume`` both need the FULL UUID. Non-``str`` is
+    ``False``, never a raise.
     """
-    p = Path(path)
-    if len(p.parts) >= 3 and p.parts[-3] in _NESTED_WRITE_NAMESPACES:
-        return WRITE_KIND
-    parent = p.parent.name
-    if parent == REVIEW_KIND:
-        return REVIEW_KIND
-    if parent == EPHEMERAL_KIND:
-        return EPHEMERAL_KIND
-    return WRITE_KIND
+    return isinstance(value, str) and _FULL_UUID.fullmatch(value) is not None
+
+
+def is_created_stamp(value: object) -> bool:
+    """Whether ``value`` is a strict ``%Y%m%d-%H%M%S`` UTC stamp — a flat leaf's ``<timestamp>``.
+
+    Both SHAPE (``\\d{8}-\\d{6}``) and real-calendar-time (``strptime`` under
+    :data:`_CREATED_FORMAT`), so an in-shape but impossible stamp (month 13, hour 25) is
+    rejected too. The companion of :func:`is_full_uuid` for the ``<timestamp>`` slot,
+    shared by the same boundaries. Non-``str`` is ``False``, never a raise.
+    """
+    if not isinstance(value, str) or not _CREATED_STAMP_SHAPE.fullmatch(value):
+        return False
+    try:
+        datetime.strptime(value, _CREATED_FORMAT)
+    except ValueError:
+        return False
+    return True
+
+
+@dataclass(frozen=True)
+class FlatLeaf:
+    """The four coordinates recovered from a flat Tree dir leaf (ADR-0074 / naming.lex §4).
+
+    The parse is for SHAPE recognition, not identity: repo identity is still resolved
+    from the origin remote, never trusted from a path (see :class:`TreeSpec`). ``repo``
+    and ``agent`` are exposed for completeness; the load-bearing consumer reads
+    ``tree_id`` (the session/resume handle) once :func:`parse_flat_leaf` has confirmed
+    the leaf conforms.
+    """
+
+    repo: str
+    agent: str
+    created: str
+    tree_id: str
+
+
+def parse_flat_leaf(name: object) -> FlatLeaf | None:
+    """Parse a dir ``name`` as a flat Tree leaf, or ``None`` when it does not conform.
+
+    The single recognizer of "is this directory a flat Tree?" (ADR-0074): a name is a
+    flat leaf IFF it is exactly ``<repo>-<agent>-<timestamp>-<id>`` with ``<agent>`` a
+    lowercase alphanumeric backend binary name, ``<timestamp>`` a real
+    ``%Y%m%d-%H%M%S`` stamp (:func:`is_created_stamp`), and ``<id>`` a full UUID. Used by
+    :mod:`shipit.session.current` to tell a flat Tree from an OLD nested Tree (which
+    coexists by attrition) or an arbitrary non-Tree directory under the central root, so
+    neither is mis-read as a Tree. Returns the parsed coordinates for the caller that
+    wants the ``tree_id``; ``None`` otherwise. Never raises.
+    """
+    if not isinstance(name, str):
+        return None
+    match = _FLAT_LEAF.fullmatch(name)
+    if match is None:
+        return None
+    created = match.group("created")
+    if not is_created_stamp(created):
+        return None
+    return FlatLeaf(
+        repo=match.group("repo"),
+        agent=match.group("agent"),
+        created=created,
+        tree_id=match.group("tree_id"),
+    )
+
+
+def created_from_leaf(name: str) -> str | None:
+    """The ``%Y%m%d-%H%M%S`` creation stamp encoded in a flat Tree leaf, or ``None``.
+
+    Sources ``tree list``'s **created** column from the dir name (ADR-0074 / naming.lex
+    §4): the flat leaf is ``<repo>-<agent>-<timestamp>-<id>``, so the stamp is the
+    ``<timestamp>`` group of the ``<timestamp>-<uuid>`` tail (:data:`_CREATED_TAIL`).
+    Returns ``None`` for any name that is not a flat leaf — an old nested Tree still
+    coexisting under the root (WS02 reclaims those on its own schedule), so the column
+    shows ``-`` rather than a fabricated date. This is a DISPLAY fact only; ``gc`` never
+    reads it, because creation-age is not activity-age (ADR-0072).
+    """
+    match = _CREATED_TAIL.search(name)
+    return match.group("created") if match else None
+
+
+def tree_leaf(repo: Repo, agent: str, created: str, tree_id: str) -> str:
+    """The FLAT, self-describing Tree dir leaf: ``<repo>-<agent>-<timestamp>-<id>``.
+
+    ADR-0074 / naming.lex §4 — ONE shape for every Tree, no owner segment and no
+    kind segment. ``repo`` contributes its NAME only (``shipit``); repo identity is
+    resolved from the origin remote when needed (``_repo_slug``), never parsed back
+    out of a path. ``agent`` is the backend BINARY name (``claude`` / ``codex`` /
+    ``agy``); ``created`` is the ``%Y%m%d-%H%M%S`` UTC stamp, so a lexical sort is
+    chronological within a repo; ``tree_id`` is a full UUID — never a pid (reused, so
+    one token eventually names two sessions), never truncated (``claude --resume``
+    rejects a prefix). Its PROVENANCE varies by creation path (the coordinator
+    session Tree gets the harness session UUID so the dir name IS the resume handle;
+    every other path mints its own), but the leaf never records which.
+
+    Repo comes FIRST because it is the axis a human narrows on — ``ls | grep shipit``
+    is the tooling-free narrowing this grammar exists to give. Every slot is validated
+    at this ONE construction boundary: ``agent`` a lowercase alphanumeric backend binary
+    token, ``created`` a strict ``%Y%m%d-%H%M%S`` stamp (:func:`is_created_stamp`), and
+    ``tree_id`` a full UUID (:func:`is_full_uuid`, never a pid or a truncated prefix) —
+    so a malformed leaf never reaches the filesystem and :func:`created_from_leaf` /
+    :func:`parse_flat_leaf` can always recover the tail. Raises :class:`ValueError`.
+    """
+    if not isinstance(agent, str) or not _AGENT_TOKEN.fullmatch(agent):
+        raise ValueError(
+            "tree.layout.tree_leaf: agent must be a lowercase alphanumeric backend "
+            f"binary name (claude/codex/agy, naming.lex §4); got {agent!r}."
+        )
+    if not is_created_stamp(created):
+        raise ValueError(
+            "tree.layout.tree_leaf: created must be a strict %Y%m%d-%H%M%S UTC stamp "
+            f"(ADR-0074 / naming.lex §4); got {created!r}."
+        )
+    if not is_full_uuid(tree_id):
+        raise ValueError(
+            "tree.layout.tree_leaf: tree_id must be a full UUID (never a pid or a "
+            f"truncated prefix; ADR-0074 / naming.lex §4); got {tree_id!r}."
+        )
+    return f"{repo.name}-{agent}-{created}-{tree_id}"
 
 
 #: A slug/ref component keeps ONLY lowercase ASCII alphanumerics; EVERY run of any
@@ -326,7 +450,8 @@ def ephemeral_branch(session_id: str) -> str:
     work-by-branch*, so the branch is expected to move to the real work
     (``EPIC/umbrella``, ``docs/<slug>``, …) mid-session while the dir keeps the id.
     The slash form keeps every session branch grouped under the ``ephemeral/`` ref
-    directory, mirroring the dir kind segment (:data:`EPHEMERAL_KIND`).
+    directory (:data:`EPHEMERAL_BRANCH_PREFIX`); the flat Tree dir no longer mirrors
+    it (ADR-0074).
 
     The id is normalized by :func:`sanitize_slug` — it becomes both a ref component
     and the dir leaf, so it gets the same ``[a-z0-9-]`` allow-list every other
@@ -352,21 +477,25 @@ def ephemeral_branch(session_id: str) -> str:
             f"leaf); got {session_id!r}, which sanitizes to an empty name — a bare "
             "'ephemeral/' ref and a leaf-less dir."
         )
-    return f"ephemeral/{normalized}"
+    return f"{EPHEMERAL_BRANCH_PREFIX}/{normalized}"
 
 
 @dataclass(frozen=True)
 class TreeSpec:
     """A request to materialize a Tree — exactly one of the four shapes is set.
 
-    ``repo`` is the :class:`shipit.identity.Repo` value object that namespaces the
-    dir under the central root (``<root>/<owner>/<name>/…``). It arrives already
+    ``repo`` is the :class:`shipit.identity.Repo` value object whose NAME leads the
+    flat dir leaf (``<repo>-<agent>-<timestamp>-<id>``, ADR-0074). It arrives already
     canonical — lowercased owner/name from :func:`shipit.identity.resolve_repo` or
     :func:`shipit.identity.repo_from_slug` — so case-varying origins or API slugs
-    can never split one repo's Trees across divergent paths (ADR-0024).
-    ``agent_hash`` disambiguates the dir for two Trees on one branch (it never
-    reaches the branch; the ephemeral shape ignores it — its leaf is the session
-    id itself).
+    can never split one repo's Trees across divergent spellings (ADR-0024).
+    ``agent`` / ``created`` / ``tree_id`` are the other three leaf coordinates
+    (:func:`tree_leaf`): the backend binary name, the ``%Y%m%d-%H%M%S`` creation
+    stamp, and the full UUID. They are IMPURE to mint (clock + randomness / the
+    harness session id), so the caller supplies them and :func:`plan` stays a pure
+    function of the spec. Unlike the retired ``agent_hash`` they name the DIR for
+    EVERY shape identically — the branch/base still differ per shape, but the dir no
+    longer encodes kind or nesting.
     ``root`` overrides the central root for tests; ``None`` resolves
     :func:`central_root`. ``slug`` is the optional human label applied per shape.
     ``session`` names the standalone-issue branch's leaf — ``issues/<id>/<session>``,
@@ -390,7 +519,9 @@ class TreeSpec:
     """
 
     repo: Repo
-    agent_hash: str
+    agent: str
+    created: str
+    tree_id: str
     issue: int | None = None
     epic: str | None = None
     ws: int | None = None
@@ -411,22 +542,30 @@ class TreePlan:
     base: str
 
 
-def repo_dir(repo: Repo, root: Path | None = None) -> Path:
-    """The per-repo namespace every Tree of ``repo`` lives under: ``<root>/<owner>/<name>``.
+def tree_dir(
+    repo: Repo, agent: str, created: str, tree_id: str, root: Path | None = None
+) -> Path:
+    """The absolute FLAT Tree dir: ``<root>/<repo>-<agent>-<timestamp>-<id>`` (ADR-0074).
 
-    The ONE place a :class:`shipit.identity.Repo` becomes Tree path segments, shared
-    by the four write shapes and the read-only (reviewer) planner — so the identity's
-    canonical (lowercased) owner/name is what lands on disk everywhere, and one repo
-    can never scatter across case-divergent directories (ADR-0024). ``root`` overrides
-    the central root for tests; ``None`` resolves :func:`central_root`.
+    The ONE place a Tree's four leaf coordinates become an absolute path, shared by
+    the write planner (:func:`plan`) and the read-only (reviewer) planner
+    (:mod:`shipit.tree.readonly`) — so every creation path lands in the single flat
+    shape with no owner or kind segment. ``root`` overrides the central root for
+    tests; ``None`` resolves :func:`central_root`. Delegates the leaf validation to
+    :func:`tree_leaf` (raises :class:`ValueError` on a malformed agent/stamp/id).
     """
     base_root = root if root is not None else central_root()
-    return Path(base_root) / repo.owner.login / repo.name
+    return Path(base_root) / tree_leaf(repo, agent, created, tree_id)
 
 
-def _repo_dir(spec: TreeSpec) -> Path:
-    """``spec``'s per-repo namespace dir — :func:`repo_dir` over its repo + root."""
-    return repo_dir(spec.repo, spec.root)
+def _tree_dir(spec: TreeSpec) -> Path:
+    """``spec``'s absolute flat Tree dir — :func:`tree_dir` over its leaf coordinates.
+
+    Shape-INDEPENDENT: every :func:`plan` shape resolves the SAME dir from the spec's
+    ``repo``/``agent``/``created``/``tree_id`` (ADR-0074). Only the branch and base
+    still differ per shape.
+    """
+    return tree_dir(spec.repo, spec.agent, spec.created, spec.tree_id, spec.root)
 
 
 def plan(spec: TreeSpec) -> TreePlan:
@@ -486,10 +625,11 @@ def _plan_epic_ws(spec: TreeSpec) -> TreePlan:
       token (:data:`_EPIC_CODE`).
     - **base**: ``origin/E/umbrella`` — a work stream is cut from its epic's
       umbrella branch, the sibling of every ``E/WSnn`` under ``refs/heads/E/``.
-    - **dir**: ``<root>/<org>/<repo>/epics/<E>/WSnn[-<slug>]-<agent-hash>`` — the
-      branch path under the ``epics`` kind, with the hash on the leaf. An optional
-      sanitized slug rides on the DIR only (never the canonical branch), so a Tree
-      reads as ``WS02-tiling-deadbeef`` on disk while the branch stays ``E/WS02``.
+    - **dir**: the FLAT ``<root>/<repo>-<agent>-<timestamp>-<id>`` leaf (ADR-0074) —
+      the same shape every shape resolves; the ``E/WSnn`` work-stream identity lives
+      in the BRANCH now, not the path. ``spec.slug`` is accepted for call-site
+      compatibility but no longer rides the dir (the flat leaf carries who/when, git
+      records what).
 
     Both user-controlled inputs are validated at this invariant boundary so a
     malformed ref or a path-traversing segment never reaches git or the filesystem:
@@ -500,16 +640,8 @@ def _plan_epic_ws(spec: TreeSpec) -> TreePlan:
     """
     assert spec.epic is not None and spec.ws is not None  # guaranteed by plan()
     branch = work_stream_branch(spec.epic, spec.ws)  # validates epic + ws
-    ws_code = f"WS{spec.ws:02d}"
     base = epic_umbrella_base(spec.epic)
-    slug = sanitize_slug(spec.slug)
-    leaf = (
-        f"{ws_code}-{slug}-{spec.agent_hash}"
-        if slug
-        else f"{ws_code}-{spec.agent_hash}"
-    )
-    directory = _repo_dir(spec) / "epics" / spec.epic / leaf
-    return TreePlan(dir=directory, branch=branch, base=base)
+    return TreePlan(dir=_tree_dir(spec), branch=branch, base=base)
 
 
 def _plan_freeform(spec: TreeSpec) -> TreePlan:
@@ -524,14 +656,13 @@ def _plan_freeform(spec: TreeSpec) -> TreePlan:
       CLI ``--branch NAME`` uses ``origin/NAME`` when that remote head already exists,
       and shepherd PR attachment uses ``origin/<head>`` so an existing-PR write Tree
       starts from the PR head instead of from main.
-    - **dir**: ``<root>/<org>/<repo>/branches/<sanitized-branch>-<agent-hash>`` —
-      the freeform name is sanitized into one safe leaf (slashes and other
-      separators collapse to ``-``) so an arbitrary branch like ``spike/foo`` maps
-      to a flat, predictable dir; the hash keeps duplicate Trees apart.
+    - **dir**: the FLAT ``<root>/<repo>-<agent>-<timestamp>-<id>`` leaf (ADR-0074) —
+      the same shape every shape resolves; the freeform name lives in the BRANCH, not
+      the path, so an arbitrary ``spike/foo`` never needs sanitizing into a dir leaf.
 
     A branch that sanitizes to nothing (empty, whitespace-only, or all separators
-    like ``///``) is rejected with :class:`ValueError`: it would yield an unusable
-    empty git branch and a bare ``-<hash>`` dir leaf.
+    like ``///``) is still rejected with :class:`ValueError`: it would yield an
+    unusable empty git branch.
     """
     branch = spec.branch
     assert branch is not None  # guarded by plan(); narrows the type for callers
@@ -539,39 +670,34 @@ def _plan_freeform(spec: TreeSpec) -> TreePlan:
     if not sanitized:
         raise ValueError(
             "tree.layout.plan: freeform --branch must contain at least one "
-            "alphanumeric character (it becomes both the branch ref and the dir "
-            f"leaf); got {branch!r}, which sanitizes to an empty name — a leaf of "
-            "just '-<hash>' and an unusable empty branch."
+            f"alphanumeric character (it becomes the branch ref); got {branch!r}, "
+            "which sanitizes to an empty name — an unusable empty branch."
         )
     if spec.base is not None and not spec.base.strip():
         raise ValueError(
             "tree.layout.plan: freeform base override must not be empty; "
             "omit it to use origin/main"
         )
-    leaf = f"{sanitized}-{spec.agent_hash}"
-    directory = _repo_dir(spec) / "branches" / leaf
     base = spec.base.strip() if spec.base is not None else "origin/main"
-    return TreePlan(dir=directory, branch=branch, base=base)
+    return TreePlan(dir=_tree_dir(spec), branch=branch, base=base)
 
 
 def _plan_issue(spec: TreeSpec) -> TreePlan:
     """Resolve the ``--issue N [--session S] [--slug S]`` (standalone-issue) shape.
 
-    Mirrors the epic shape (:func:`_plan_epic_ws`): the ``<session>`` (default ``work``)
-    plays the structural role ``WSnn`` does, so branch and dir share it, an optional slug
-    rides the DIR leaf only, and the hash lands on the leaf, never the branch.
+    The ``<session>`` (default ``work``) still plays the structural role ``WSnn`` does
+    in the BRANCH; the dir is the flat, shape-independent leaf.
 
     - **branch**: ``issues/<id>/<session>`` — slash-namespaced (:func:`issue_branch`),
       NEVER the bare ``issues/<id>`` (which would occupy ``refs/heads/issues/<id>`` as a
       ref FILE and block a sibling session); the session suffix keeps ``issues/<id>/`` a
       ref directory so ``issues/<id>/onboard`` can coexist with ``issues/<id>/work``. The
-      branch carries neither slug nor hash.
+      branch carries no slug.
     - **base**: ``origin/main`` — a standalone issue is cut from the default branch (a
       work stream's epic-branch base is the epic shape's concern).
-    - **dir**: ``<root>/<org>/<repo>/issues/<id>/<session>[-<slug>]-<agent-hash>`` — the
-      branch path under the ``issues`` kind, hash on the leaf. An optional sanitized slug
-      rides the DIR only (never the canonical branch), so a Tree reads as
-      ``work-header-align-deadbeef`` on disk while the branch stays ``issues/<id>/work``.
+    - **dir**: the FLAT ``<root>/<repo>-<agent>-<timestamp>-<id>`` leaf (ADR-0074) —
+      the same shape every shape resolves; the ``issues/<id>/<session>`` identity lives
+      in the BRANCH, not the path.
 
     Both ``issue`` (positive integer) and ``session`` (non-empty after sanitization) are
     validated at this invariant boundary by :func:`issue_branch`, so a malformed ref
@@ -579,18 +705,7 @@ def _plan_issue(spec: TreeSpec) -> TreePlan:
     """
     assert spec.issue is not None  # guaranteed by plan()
     branch = issue_branch(spec.issue, spec.session)  # validates issue + session
-    # Take the normalized session from the branch's last segment rather than
-    # re-sanitizing spec.session: the dir leaf then matches the branch BY CONSTRUCTION
-    # and cannot drift from issue_branch's normalization if the rules ever change.
-    session = branch.rsplit("/", 1)[-1]
-    slug = sanitize_slug(spec.slug)
-    leaf = (
-        f"{session}-{slug}-{spec.agent_hash}"
-        if slug
-        else f"{session}-{spec.agent_hash}"
-    )
-    directory = _repo_dir(spec) / "issues" / str(spec.issue) / leaf
-    return TreePlan(dir=directory, branch=branch, base="origin/main")
+    return TreePlan(dir=_tree_dir(spec), branch=branch, base="origin/main")
 
 
 def _plan_ephemeral(spec: TreeSpec) -> TreePlan:
@@ -604,20 +719,15 @@ def _plan_ephemeral(spec: TreeSpec) -> TreePlan:
     - **base**: ``origin/main`` — at launch the work is unknown (the session may be
       planning/triage before any epic or issue exists), so there is nothing to bind
       the Tree to but the default branch.
-    - **dir**: ``<root>/<org>/<repo>/ephemeral/<id>`` (:data:`EPHEMERAL_KIND`) —
-      the leaf is the normalized session id itself, taken from the branch's last
-      segment so dir and branch match at birth BY CONSTRUCTION. It carries **no
-      agent hash and no slug**: the dir's identity IS the session (one per launch,
-      never renamed), the launcher mints a per-launch-unique id
-      (``sess-<utc-stamp>-<pid>``), and a hand-picked duplicate ``--worktree``
-      value fails loud in ``create()``'s pre-existing-dir refusal rather than
-      silently landing two sessions in one dir.
+    - **dir**: the FLAT ``<root>/<repo>-<agent>-<timestamp>-<id>`` leaf (ADR-0074).
+      The dir and branch NO LONGER share a leaf: the ``ephemeral/<id>`` identity is
+      the BRANCH's, while the dir's ``<id>`` is the harness session UUID (the
+      coordinator arm supplies it via ``tree_id`` so the dir name IS the resume
+      handle — ADR-0074). ``spec.ephemeral`` therefore only names the branch here.
 
-    The id is validated + normalized by :func:`ephemeral_branch` (same allow-list
-    as every other leaf); a degenerate id raises :class:`ValueError`.
+    The branch id is validated + normalized by :func:`ephemeral_branch` (same
+    allow-list as every other ref); a degenerate id raises :class:`ValueError`.
     """
     assert spec.ephemeral is not None  # guaranteed by plan()
     branch = ephemeral_branch(spec.ephemeral)  # validates + normalizes the id
-    leaf = branch.rsplit("/", 1)[-1]
-    directory = _repo_dir(spec) / EPHEMERAL_KIND / leaf
-    return TreePlan(dir=directory, branch=branch, base="origin/main")
+    return TreePlan(dir=_tree_dir(spec), branch=branch, base="origin/main")

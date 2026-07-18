@@ -21,7 +21,6 @@ from ..logread.records import parse_record
 
 CODEX_BACKEND = "codex"
 CLAUDE_BACKEND = "claude"
-_SESSION_PREFIXES = {CODEX_BACKEND: "codex-", CLAUDE_BACKEND: "sess-"}
 
 
 class ResumeError(RuntimeError):
@@ -217,51 +216,61 @@ def _read_jsonl(path: Path) -> Iterator[dict[str, Any]]:
 def _sessions(
     records: Iterable[dict[str, Any]], *, repo: Repo | None = None
 ) -> list[ResumeTarget]:
-    by_session: dict[str, ResumeTarget] = {}
+    """Fold a repo's JSONL records into one resumable :class:`ResumeTarget` per session.
+
+    The BACKEND is read from the record's ``backend`` field — stamped by the
+    ``session.started`` witness (:mod:`shipit.verbs.hook.sessionstart`) — NOT
+    reverse-engineered from the session-id prefix (ADR-0074 retired the prefix
+    table). A session whose records never carry ``backend`` (a pre-flat log) or
+    never carry a native id is not resumable and is dropped. Fields accumulate across
+    a session's records (any one of them may carry the backend, native id, tree, or
+    repo), and the native id is derived from the backend once known — codex resumes by
+    its thread (falling back to its session id), every other backend by its session
+    id.
+    """
+    # Insertion order IS the recency order: pop-and-reinsert moves a re-seen session to the
+    # end, so a dict is both the field accumulator and the newest-last ordering — O(1) per
+    # record. ``--last`` then follows the session's newest record even when its earlier fields
+    # came from a rotated file before another session was seen.
+    fields: dict[str, dict[str, str]] = {}
     for record in records:
         session_id = record.get("session")
         if not isinstance(session_id, str) or not session_id:
             continue
-        backend = _backend_for_session(session_id)
+        entry = fields.pop(session_id, {})
+        for key in ("backend", "session_id", "codex_thread", "tree", "repo"):
+            value = _str_field(record, key)
+            if value:
+                entry[key] = value
+        fields[session_id] = entry
+
+    targets: list[ResumeTarget] = []
+    for session_id, entry in fields.items():
+        backend = entry.get("backend")
         if backend is None:
             continue
-        record_repo = repo or _repo_from_record(record)
+        record_repo = repo or _repo_from_slug_field(entry.get("repo"))
         if record_repo is None:
             continue
-        previous = by_session.get(session_id)
-        native = _native_id(record, backend) or (
-            previous.native_session_id if previous is not None else ""
+        if backend == CODEX_BACKEND:
+            native = entry.get("codex_thread") or entry.get("session_id")
+        else:
+            native = entry.get("session_id")
+        if not native:
+            continue
+        targets.append(
+            ResumeTarget(
+                repo=record_repo,
+                backend=backend,
+                shipit_session_id=session_id,
+                native_session_id=native,
+                tree=entry.get("tree"),
+            )
         )
-        tree = _str_field(record, "tree") or (previous.tree if previous else None)
-        # Dict assignment preserves a key's original position. Reinsert so
-        # ``--last`` follows the session's newest record even when its earlier
-        # fields came from a rotated file before another session was seen.
-        by_session.pop(session_id, None)
-        by_session[session_id] = ResumeTarget(
-            repo=record_repo,
-            backend=backend,
-            shipit_session_id=session_id,
-            native_session_id=native,
-            tree=tree,
-        )
-    return [target for target in by_session.values() if target.native_session_id]
+    return targets
 
 
-def _backend_for_session(session_id: str) -> str | None:
-    for backend, prefix in _SESSION_PREFIXES.items():
-        if session_id.startswith(prefix):
-            return backend
-    return None
-
-
-def _native_id(record: dict[str, Any], backend: str) -> str | None:
-    if backend == CODEX_BACKEND:
-        return _str_field(record, "codex_thread") or _str_field(record, "session_id")
-    return _str_field(record, "session_id")
-
-
-def _repo_from_record(record: dict[str, Any]) -> Repo | None:
-    raw = _str_field(record, "repo")
+def _repo_from_slug_field(raw: str | None) -> Repo | None:
     if raw is None:
         return None
     try:

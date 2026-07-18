@@ -15,8 +15,9 @@ summary (``{path, branch, base}``). The whole pipeline hides behind this one cal
    ``git submodule sync --recursive`` then ``update --init --recursive``
    (:func:`shipit.git.submodule_update_init`, #485/#486) — a dissociated clone leaves
    submodules as empty gitlinks, so a Tree of a submodule-using consumer must populate
-   them to match CI's ``submodules: recursive`` (the ``sync`` first keeps a reused
-   reviewer clone's submodule URLs in step with an advanced head).
+   them to match CI's ``submodules: recursive`` (the ``sync`` first is defensive —
+   it copies the checked-out ``.gitmodules`` URLs into ``.git/config`` before the
+   update; on a fresh clone it is a harmless no-op).
 3. apply ``.treeinclude`` — copy the gitignored-but-needed files (``.env``,
    Doppler config, models) from the source checkout into the new Tree
    (:mod:`shipit.tree.include`).
@@ -29,6 +30,14 @@ summary (``{path, branch, base}``). The whole pipeline hides behind this one cal
    ``SCCACHE_BASEDIRS``, ``CARGO_INCREMENTAL=0``) is no longer injected here —
    it lives in pixi ``[activation.env]`` (COR01 / ADR-0022), so pixi sets it on
    every activation and it reaches the agent's own in-Tree ``cargo``.
+5. plant the session-store link (:func:`_plant_session_store`, ADR-0073): point
+   the Tree's ``~/.claude/projects/<cwd-slug>`` at the repo's ONE store, so the
+   session about to start in the Tree shares its memory and transcripts with
+   every other Tree of the repo instead of opening a fresh empty namespace. Last,
+   and deliberately: it needs the clone's ``origin`` (store identity is the
+   remote), and it must happen before ``create`` returns, since that is what
+   "before the session starts" means. Fail-open — unlike steps 1-4 it is
+   additive, so it never rolls the Tree back.
 
 Materialization stays atomic from the caller's view: if any step fails, the
 half-built leaf is removed before the error propagates. Every git call goes
@@ -43,14 +52,23 @@ from __future__ import annotations
 import json
 import logging
 import os
-import secrets
 import shlex
 import shutil
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from .. import config, events, execrun, git, logcontext, pixienv
+from .. import (
+    config,
+    events,
+    execrun,
+    git,
+    identity,
+    logcontext,
+    pixienv,
+    sessionstore,
+)
 from ..install.apply import HOOK_ACTIVATE_ARGV, LEFTHOOK_BINARY
 from ..install.units import LEFTHOOK_FILE, LINT_ENV
 from . import include
@@ -116,10 +134,9 @@ NODE_LOCKFILES: dict[str, str] = {
 #: enough that a wedged step still dies at a known bound with a durable record.
 PROVISION_TIMEOUT: float = 30 * 60.0
 
-#: Bytes of randomness behind an agent hash → 8 hex chars. Enough to keep two
-#: concurrent Trees for the same issue from colliding on disk without bloating the
-#: dir name.
-_HASH_BYTES = 4
+#: The Tree dir leaf's ``<timestamp>`` format — ``%Y%m%d-%H%M%S`` UTC (ADR-0074 /
+#: naming.lex §4), so a lexical sort is chronological within a repo.
+_STAMP_FORMAT = "%Y%m%d-%H%M%S"
 
 
 @dataclass(frozen=True)
@@ -131,9 +148,45 @@ class Tree:
     base: str
 
 
-def new_agent_hash() -> str:
-    """A short random hex tag that disambiguates a Tree's directory (never its branch)."""
-    return secrets.token_hex(_HASH_BYTES)
+def new_tree_id() -> str:
+    """A fresh full UUID for a Tree dir leaf's ``<id>`` slot (ADR-0074).
+
+    Minted by whoever creates the Tree when no native session UUID exists yet — the
+    spawned-Run and native-helper creation paths. Never a pid (reused, so one token
+    eventually names two sessions) and never truncated (``claude --resume`` rejects a
+    prefix). The coordinator session Tree instead reuses the harness session UUID
+    from the WorktreeCreate payload, so its dir name IS the resume handle.
+    """
+    return str(uuid.uuid4())
+
+
+def new_tree_naming(agent: str, *, tree_id: str | None = None) -> dict[str, str]:
+    """The three minted flat-leaf coordinates for a :class:`~shipit.tree.layout.TreeSpec`.
+
+    Bundles the ``agent`` (the backend BINARY name — ``claude`` / ``codex`` / ``agy``),
+    a freshly stamped ``created`` (:func:`tree_created_stamp`), and a ``tree_id`` — a
+    fresh UUID (:func:`new_tree_id`) unless the caller supplies one. The coordinator
+    session Tree supplies the harness session UUID so its dir name IS the resume handle
+    (ADR-0074); every other creation path lets this mint one. Spread into the
+    constructor: ``TreeSpec(repo=…, **new_tree_naming(\"claude\"))``.
+    """
+    return {
+        "agent": agent,
+        "created": tree_created_stamp(),
+        "tree_id": tree_id or new_tree_id(),
+    }
+
+
+def tree_created_stamp(now: float | None = None) -> str:
+    """The Tree dir leaf's ``<timestamp>`` — ``%Y%m%d-%H%M%S`` UTC (ADR-0074).
+
+    Pure over an injected clock (``now`` seconds since the epoch, default
+    :func:`time.time`) so the grammar is asserted without freezing the real clock.
+    Records WHEN the Tree was created for ``tree list``'s created column; it is
+    deliberately NOT a reclaim signal (creation-age is not activity-age — ADR-0072).
+    """
+    seconds = time.time() if now is None else now
+    return time.strftime(_STAMP_FORMAT, time.gmtime(seconds))
 
 
 def create(spec: TreeSpec, *, source_repo: str, github_url: str) -> Tree:
@@ -221,6 +274,8 @@ def create(spec: TreeSpec, *, source_repo: str, github_url: str) -> Tree:
             shutil.rmtree(dest, ignore_errors=True)
             raise
 
+        _plant_session_store(dest)
+
         duration_ms = _elapsed_ms(started)
         # The birth milestone IS the `tree.created` dev-cycle event (ADR-0032,
         # verb-witnessed): the same record as before, tagged — the scoped
@@ -237,6 +292,35 @@ def create(spec: TreeSpec, *, source_repo: str, github_url: str) -> Tree:
             extra={"duration_ms": duration_ms},
         )
         return Tree(path=str(dest), branch=tree_plan.branch, base=tree_plan.base)
+
+
+def _plant_session_store(dest: Path) -> None:
+    """Point the new Tree's harness slug dir at its repo's ONE session store (ADR-0073).
+
+    Runs at the END of a successful create — after the clone, so ``origin`` is readable
+    (store identity is the remote, never the path), and before ``create`` returns, hence
+    before any session starts in the Tree. That ordering is the whole trick: the harness
+    honours a symlink that is already there, so the session's transcript and memory land
+    in the shared store instead of a brand-new per-Tree namespace (:mod:`shipit.sessionstore`).
+
+    **Fail-open, at DEBUG** (the #348 calibration). A store is additive: without it the
+    Tree is exactly as usable as every Tree was before this existed, and the session
+    merely keeps its memory to itself — today's behaviour, not a degraded one. So an
+    unresolvable repo (no origin, unparseable URL), an unwritable ``~/.claude``, or a
+    missing HOME must cost the Tree nothing. DEBUG rather than the fail-open canon's
+    WARNING for the same reason #348 calibrated the source-clone check down: nothing
+    durable degrades, and an environment where this cannot work (no ``~/.claude`` at
+    all — a CI runner, a container) would otherwise WARN on every single Tree create.
+
+    A *refusal* is not a failure and is not swallowed here: :func:`shipit.sessionstore.plant`
+    already logged it at WARNING, because a slug dir shipit refused to touch IS durable
+    degraded state — the store stays split until a human resolves it.
+    """
+    try:
+        repo = identity.resolve_repo(str(dest))
+        sessionstore.plant(dest, repo)
+    except Exception:  # noqa: BLE001 — fail-open: never cost a Tree its creation
+        logger.debug("session store not planted for %s", dest, exc_info=True)
 
 
 def _elapsed_ms(started: float) -> int:

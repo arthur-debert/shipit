@@ -567,7 +567,7 @@ def run_calibrator(
     :func:`shipit.spawn.launch.launch` under the ``config.timeout`` process
     deadline) with the read-only reviewer posture — the judge verifies evidence
     against the real checkout but can neither edit nor post. ``cwd`` is the
-    shared read-only Tree on the live path, the replay checkout on the offline
+    per-Run read-only Tree on the live path, the replay checkout on the offline
     one; exactly one of ``pr_number`` / ``commit_range`` selects the judge's
     ground-truth diff source (:func:`build_calibrator_task`, RVW03-WS01 — the
     range form matches the passes' own ``git diff`` so an offline replay's judge

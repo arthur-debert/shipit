@@ -29,14 +29,14 @@ The pipeline rides the Role Profile registry (RPE01-WS01/WS03):
   tail (new write Tree + branch + draft-PR handshake),
   :class:`~shipit.harness.roleprofile.ExistingPrWriteTree` takes the shepherd
   tail (writable Tree attached to an existing PR; no replacement PR), a
-  :class:`~shipit.harness.roleprofile.SharedReadOnlyTree` profile takes the
+  :class:`~shipit.harness.roleprofile.PerRunReadOnlyTree` profile takes the
   reviewer tail, and a checkout shape with no detached tail (a later WS's
   profile arriving before its lifecycle) refuses loud rather than falling
   into the write path.
 - **One reviewer result contract** (RPE01-WS03, spec §"Role launch and result
   contracts are explicit"): the reviewer tail DELEGATES to the product review
   pipeline — the review service resolves the PR, launches the funnel backend
-  in the shared read-only Tree under its bounded read-only posture, CAPTURES
+  in the per-Run read-only Tree under its bounded read-only posture, CAPTURES
   the structured review, and posts it via the service's App-identity path.
   The historical generic self-posting reviewer task (the agent posting its
   own ``gh pr review``) is retired, so one Role cannot mean two reporting
@@ -85,15 +85,12 @@ from ..agent import backend as agent_backend
 from ..harness import roleprofile
 from ..pr import PrId
 from ..review import service as review_service
-from ..tree.create import Tree, create, new_agent_hash
+from ..tree.create import Tree, create, new_tree_naming
 from ..tree.layout import (
     TreeSpec,
     epic_umbrella_base,
     issue_branch,
     work_stream_branch,
-)
-from ..tree.layout import (
-    plan as plan_tree,
 )
 from ..tree.readonly import readonly_plan
 from . import backends, launch
@@ -134,8 +131,8 @@ class SubagentSpec:
     Two axes decide the Tree. **Role** selects the profile's CHECKOUT STRATEGY
     from the Role Profile registry (RPE01-WS03): a ``NewWriteTree`` profile
     (implementer) gets a per-Run write Tree; an ``ExistingPrWriteTree`` profile
-    (shepherd) attaches to a writable existing PR head; a ``SharedReadOnlyTree``
-    profile (reviewer, ADR-0018) gets the shared read-only Tree on the existing
+    (shepherd) attaches to a writable existing PR head; a ``PerRunReadOnlyTree``
+    profile (reviewer, ADR-0018) gets the per-Run read-only Tree on the existing
     PR head. **Shape** picks branch/base: ``epic``+``ws`` (branch ``E/WSnn`` cut
     from ``origin/E/umbrella``), a standalone ``issue`` (branch
     ``issues/<id>/<session>`` cut from ``origin/main``), or a shepherd ``pr``
@@ -216,9 +213,6 @@ class Boundaries:
     pr_for_head: Callable[..., gh.HeadPr | gh.UnknownPr | None] = gh.pr_for_head
     pr_for_number: Callable[..., gh.PrAttachment] = gh.pr_for_number
     status_porcelain: Callable[..., list[str]] = git.status_porcelain
-    refresh_attached_tree: Callable[..., None] = lambda path, branch: (
-        _refresh_attached_tree(path, branch)
-    )
     runner: launch.Runner | None = None
     run_review: Callable[..., dict] = review_service.run_detached_review
 
@@ -355,7 +349,7 @@ def spawn_subagent(spec: SubagentSpec, bounds: Boundaries | None = None) -> Spaw
     # review service; the existing-PR write tail attaches shepherd to the current PR;
     # the new-write tail preserves the implementer's Tree/PR handshake unchanged.
     checkout = profile.checkout
-    if isinstance(checkout, roleprofile.SharedReadOnlyTree):
+    if isinstance(checkout, roleprofile.PerRunReadOnlyTree):
         try:
             review_branch = (
                 work_stream_branch(spec.epic, spec.ws)
@@ -515,7 +509,7 @@ def validate(
             f"--issue must be a positive integer (got {spec.issue})", role=spec.role
         )
     if (
-        isinstance(profile.checkout, roleprofile.SharedReadOnlyTree)
+        isinstance(profile.checkout, roleprofile.PerRunReadOnlyTree)
         and not spec.has_epic_shape
         and spec.issue is None
     ):
@@ -531,7 +525,7 @@ def validate(
             "a reviewer needs a branch to review — give --epic E --ws N or --issue N.",
             role=spec.role,
         )
-    if isinstance(profile.checkout, roleprofile.SharedReadOnlyTree):
+    if isinstance(profile.checkout, roleprofile.PerRunReadOnlyTree):
         review_backend = agent_backend.by_name(adapter.name)
         if not review_backend.has_funnel_identity:
             supported = ", ".join(
@@ -623,7 +617,7 @@ def plan_write_spec(
             )
         return TreeSpec(
             repo=repo_identity,
-            agent_hash=new_agent_hash(),
+            **new_tree_naming(agent_backend.by_name(spec.backend).binary),
             epic=spec.epic,
             ws=spec.ws,
         )
@@ -633,7 +627,7 @@ def plan_write_spec(
         raise _refusal(str(exc), exc=exc) from exc
     return TreeSpec(
         repo=repo_identity,
-        agent_hash=new_agent_hash(),
+        **new_tree_naming(agent_backend.by_name(spec.backend).binary),
         issue=spec.issue,
         session=spec.session,
     )
@@ -881,13 +875,13 @@ def _launch_write(
     # SPAWN SEAM for the domain-key context (ADR-0029/0032): the Tree's identity
     # binds here — the coordinator's records from this point carry `tree` (its
     # path, the same identity the SPAWNED payload reports) — alongside `agent`,
-    # the spawn id (the Tree dir's disambiguating hash doubles as the Run's
-    # identity, so `shipit logs --agent <id>` and the Tree leaf name agree).
+    # the spawn id (the Tree dir's `<id>` UUID doubles as the Run's identity, so
+    # `shipit logs --agent <id>` and the flat Tree leaf's tail agree — ADR-0074).
     # `env_export` at the launch threads every bound key (tree/agent here; repo
     # from the CLI entry; epic/ws/role from the spawn args) into the Run's
     # environment, so each `shipit` command the Run executes inside the Tree
     # rebinds them at its own logging setup and its records correlate back here.
-    logcontext.bind(tree=tree.path, agent=spec.agent_hash)
+    logcontext.bind(tree=tree.path, agent=spec.tree_id)
     # Tree-assignment milestone (ADR-0029): the Run has a home. Tree birth is the
     # slowest, most failure-prone leg of a spawn (clone + provision), so the
     # duration is the meaningful one; the `tree` domain key bound above rides this
@@ -1008,53 +1002,6 @@ def _launch_write(
     return result
 
 
-def _refresh_attached_tree(path: str, branch: str) -> None:
-    """Refresh a clean, fully-pushed shepherd Tree to the remote PR head.
-
-    A reused attachment may contain work from an interrupted prior round. Refuse
-    rather than letting checkout/reset hide uncommitted changes or discard the
-    branch pointer that makes local-only commits recoverable.
-    """
-    dirty = git.status_porcelain(cwd=path)
-    if dirty:
-        raise ValueError(
-            f"refused to refresh shepherd attachment {path}: "
-            f"{len(dirty)} uncommitted path(s) would be overwritten"
-        )
-    git.fetch(cwd=path)
-    git.checkout(branch, cwd=path)
-    unpushed = git.unpushed_shas(cwd=path)
-    if unpushed is None:
-        raise ValueError(
-            f"refused to refresh shepherd attachment {path}: could not determine "
-            "whether the attached branch has local-only commits"
-        )
-    if unpushed:
-        raise ValueError(
-            f"refused to refresh shepherd attachment {path}: "
-            f"{len(unpushed)} local-only commit(s) would be discarded"
-        )
-    git.reset_hard(f"origin/{branch}", cwd=path)
-    git.submodule_update_init(cwd=path)
-
-
-def _create_or_reuse_attached_tree(
-    spec: TreeSpec,
-    *,
-    source_repo: str,
-    github_url: str,
-    head_branch: str,
-    bounds: Boundaries,
-) -> Tree:
-    """Materialize or refresh the stable writable Tree attached to one PR."""
-    try:
-        return bounds.create_tree(spec, source_repo=source_repo, github_url=github_url)
-    except FileExistsError:
-        planned = plan_tree(spec)
-        bounds.refresh_attached_tree(str(planned.dir), head_branch)
-        return Tree(path=str(planned.dir), branch=planned.branch, base=planned.base)
-
-
 def _resolve_pr_attachment(
     *,
     repo: identity.Repo,
@@ -1149,10 +1096,14 @@ def _launch_existing_pr_write(
     """Shepherd tail: attach to an existing PR head and push fixes in place.
 
     The shepherd lifecycle is writable, but it is NOT the implementer's
-    new-branch/draft-PR result channel. It resolves a PR by number, creates or
-    refreshes a stable per-PR Tree from ``origin/<head>``, verifies that the head
-    branch still maps to the same open PR, launches the shepherd task, and returns
-    the existing PR linkage without running the draft-PR handshake.
+    new-branch/draft-PR result channel. It resolves a PR by number, creates a fresh
+    PER-RUN write Tree from ``origin/<head>`` (ADR-0074: flat naming mints a unique
+    ``<id>`` per spawn, so — like review Trees — each shepherd round gets its own
+    clone; there is no derivable per-PR path to reuse, and resume rebuilds from the
+    durable per-repo logs, not from a persisted Tree), verifies that the head branch
+    still maps to the same open PR, launches the shepherd task, and returns the
+    existing PR linkage without running the draft-PR handshake. Cross-round identity
+    rides the log context (``agent=pr<N>``), not a shared directory.
     """
     assert pr_number is not None  # validate() enforces this before dispatch.
     attach = _resolve_pr_attachment(repo=repo, pr_number=pr_number, bounds=bounds)
@@ -1160,7 +1111,7 @@ def _launch_existing_pr_write(
     base = f"origin/{branch}"
     tree_spec = TreeSpec(
         repo=repo,
-        agent_hash=f"pr{attach.number}",
+        **new_tree_naming(agent_backend.by_name(backend).binary),
         branch=branch,
         base=base,
     )
@@ -1173,14 +1124,12 @@ def _launch_existing_pr_write(
         extra={"phase": "pr_attachment", "role": role, "backend": backend},
     )
     try:
-        tree = _create_or_reuse_attached_tree(
-            tree_spec,
-            source_repo=source_repo,
-            github_url=github_url,
-            head_branch=branch,
-            bounds=bounds,
+        tree = bounds.create_tree(
+            tree_spec, source_repo=source_repo, github_url=github_url
         )
     except (ValueError, execrun.ExecError, OSError) as exc:
+        # FileExistsError ⊂ OSError: with a fresh per-Run UUID a collision is a real
+        # error (not a reuse signal), so it fails closed like any other create failure.
         raise _refusal(
             f"existing-PR tree attachment failed: {exc}",
             exc=exc,
@@ -1272,13 +1221,15 @@ def _launch_reviewer(
     """Reviewer tail: resolve the PR, then delegate capture + post to the service.
 
     The product review service owns the ONE reviewer result contract: it resolves
-    the PR view, provisions/reuses ADR-0018's shared read-only Tree, launches the
-    funnel backend with its bounded defense-in-depth posture, captures structured
-    output, and posts through the backend's App identity. This spawn boundary only
-    proves that ``branch`` has an OPEN PR and hands its typed identity to that
-    service. The retired generic child task never asks an agent to self-post.
+    the PR view, provisions the per-Run read-only Tree (ADR-0074 — cross-reviewer
+    sharing retired) under the flat-leaf naming THIS boundary mints and threads down
+    (``review_tree_naming``, #1039), launches the funnel backend with its bounded
+    defense-in-depth posture, captures structured output, and posts through the
+    backend's App identity. This spawn boundary proves that ``branch`` has an OPEN PR,
+    names the reviewer Tree's coordinates, and hands its typed identity to that
+    service — so the ``tree`` it reports is the reviewer's ACTUAL Tree. The retired
+    generic child task never asks an agent to self-post.
     """
-    plan = readonly_plan(repo=repo, branch=branch)
     events.emit(
         logger,
         "agent.phase",
@@ -1310,11 +1261,18 @@ def _launch_reviewer(
             pr=pr.number,
         )
 
-    # The service provisions exactly this deterministic shared Tree plan. Bind its
-    # identity before delegation so the capture/post records retain the spawn story.
-    tree_path = str(plan.dir)
+    # The reviewer Tree is per-Run (ADR-0074): the review service provisions its OWN
+    # flat clone internally. This boundary does not create a Tree, so it names the
+    # reviewer Tree's coordinates ONCE — a single flat-leaf naming used for the SPAWNED
+    # record, the log-context bind, AND (threaded down via run_review's
+    # ``review_tree_naming``, #1039) the id the review producer clones under. So the
+    # ``tree`` this boundary reports is the SAME path the reviewer actually runs in,
+    # not a speculative coordinate (the id below is that one shared UUID, never a
+    # second unrelated one).
+    naming = new_tree_naming(agent_backend.by_name(adapter.name).binary)
+    tree_path = str(readonly_plan(repo=repo, branch=branch, **naming).dir)
     logcontext.bind(
-        tree=tree_path, agent=new_agent_hash(), pr=pr.number, repo=repo.slug
+        tree=tree_path, agent=naming["tree_id"], pr=pr.number, repo=repo.slug
     )
     logger.info(
         "spawn subagent: delegating reviewer run on %s to the captured review service",
@@ -1343,6 +1301,7 @@ def _launch_reviewer(
             review_backend,
             PrId(repo=repo, number=pr.number),
             run_id=None,
+            review_tree_naming=naming,
         )
     except Exception as exc:  # noqa: BLE001 - normalize the product boundary
         raise _refusal(

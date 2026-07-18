@@ -24,7 +24,6 @@ import structlog
 from shipit import logcontext
 from shipit.harness import activation
 from shipit.pixienv import Activation, parse_activation
-from shipit.session import liveness
 from shipit.tree import layout
 from shipit.verbs.hook import sessionstart
 
@@ -358,110 +357,22 @@ def test_unwritable_env_file_fails_open(pixi_repo, tmp_path):
 
 
 # --------------------------------------------------------------------------
-# Liveness pidfile — the second additive write (SES02, ADR-0027)
-# --------------------------------------------------------------------------
-
-CREATED = 1_750_000_000.0
-
-#: A realistic hook ancestry: shipit(300) <- pixi(200) <- claude(100). The claude
-#: process is node-named — only the command line betrays it (the ADR's misread
-#: guard: NEVER match the OS process name).
-ANCESTRY = {
-    300: liveness.ProcessInfo(
-        pid=300, ppid=200, create_time=CREATED + 9, argv="python -m shipit hook"
-    ),
-    200: liveness.ProcessInfo(
-        pid=200, ppid=100, create_time=CREATED + 8, argv="pixi run shipit hook"
-    ),
-    100: liveness.ProcessInfo(
-        pid=100,
-        ppid=1,
-        create_time=CREATED,
-        argv="node /x/@anthropic-ai/claude-code/cli.js -w sess-1",
-    ),
-}
-
-
-@pytest.fixture
-def clone(tmp_path):
-    """A session-Tree shape: a dir whose .git is a directory."""
-    (tmp_path / ".git").mkdir()
-    return tmp_path
-
-
-def _run_liveness(payload, *, probe=ANCESTRY.get, self_pid=300, env=None):
-    return sessionstart.run(
-        stdin=io.StringIO(json.dumps(payload)),
-        environ=env if env is not None else {},
-        probe=probe,
-        self_pid=self_pid,
-    )
-
-
-def test_pidfile_records_the_claude_ancestor(clone):
-    # The recorded PID is the claude ANCESTOR's (100), never the hook's own
-    # (300); create-time is the ancestor's OS create-time read at write time.
-    code = _run_liveness({"session_id": "sess-abc", "cwd": str(clone)})
-    assert code == 0
-    record = liveness.read_pidfile(clone)
-    assert record == liveness.LivenessRecord(
-        pid=100, session_id="sess-abc", create_time=CREATED
-    )
-
-
-def test_pidfile_lands_inside_dot_git_never_the_working_tree(clone):
-    # In the working tree the pidfile would dirty the Tree forever and the gc
-    # floor would never reclaim it.
-    _run_liveness({"session_id": "s", "cwd": str(clone)})
-    assert liveness.pidfile_path(clone).exists()
-    assert list(p.name for p in clone.iterdir()) == [".git"]
-
-
-def test_no_claude_ancestor_writes_no_pidfile(clone):
-    # Launched outside any Claude session: the chain tops out with no claude.
-    chain = {
-        300: liveness.ProcessInfo(
-            pid=300, ppid=1, create_time=CREATED, argv="/bin/zsh -l"
-        ),
-    }
-    code = _run_liveness({"cwd": str(clone)}, probe=chain.get)
-    assert code == 0
-    assert liveness.read_pidfile(clone) is None
-
-
-def test_non_clone_cwd_writes_no_pidfile(tmp_path):
-    code = _run_liveness({"session_id": "s", "cwd": str(tmp_path)})
-    assert code == 0
-    assert not (tmp_path / ".git").exists()
-
-
-def test_missing_session_id_degrades_to_empty(clone):
-    _run_liveness({"cwd": str(clone)})
-    record = liveness.read_pidfile(clone)
-    assert record is not None
-    assert record.session_id == ""
-
-
-def test_probe_explosion_fails_open(clone):
-    def boom(pid):
-        raise RuntimeError("ps went away")
-
-    code = _run_liveness({"cwd": str(clone)}, probe=boom)
-    assert code == 0
-    assert liveness.read_pidfile(clone) is None
-
-
-# --------------------------------------------------------------------------
 # Log-context export — session/tree keys for every in-session command
 # (REL01 #349, ADR-0029)
 # --------------------------------------------------------------------------
 
-SESSION_LEAF = "sess-20260703-41649"
+#: A flat coordinator session Tree leaf (ADR-0074): ``<repo>-<agent>-<timestamp>-<id>``,
+#: ONE segment below the central root, no owner/kind segment. Its trailing ``<id>`` is
+#: the harness session UUID — and current_session_id recovers exactly that UUID from the
+#: leaf, so it is the value the hook exports as the session id.
+SESSION_ID = "619cf51a-f501-44dc-992f-74df773204aa"
+SESSION_LEAF = f"repo-claude-20260703-041649-{SESSION_ID}"
 
 
 def _ephemeral_tree(root: Path, leaf: str = SESSION_LEAF) -> Path:
-    """An ephemeral session-Tree dir under ``root`` (the path IS the signal)."""
-    tree = root / "org" / "repo" / "ephemeral" / leaf
+    """A coordinator session Tree dir under ``root`` — the flat, self-describing leaf
+    (ADR-0074), ONE segment below the central root; the path IS the signal."""
+    tree = root / leaf
     tree.mkdir(parents=True)
     return tree
 
@@ -469,7 +380,7 @@ def _ephemeral_tree(root: Path, leaf: str = SESSION_LEAF) -> Path:
 def _run_log_context(cwd: Path, env_file: Path) -> int:
     """Run the hook with the log-context check isolated from live boundaries:
     a runner that must not be reached unless a toolchain exists (none does in
-    these bare dirs), and an empty ancestry so liveness no-ops."""
+    these bare dirs)."""
 
     def exploding_runner(cmd, **kwargs):  # pragma: no cover — must not be reached
         raise AssertionError("no toolchain — pixi must not run")
@@ -478,8 +389,6 @@ def _run_log_context(cwd: Path, env_file: Path) -> int:
         stdin=io.StringIO(json.dumps({"cwd": str(cwd)})),
         environ={"CLAUDE_ENV_FILE": str(env_file)},
         runner=exploding_runner,
-        probe={}.get,
-        self_pid=1,
     )
 
 
@@ -496,7 +405,7 @@ def test_ephemeral_tree_cwd_exports_session_log_context(tmp_path, monkeypatch):
     code = _run_log_context(tree, env_file)
     assert code == 0
     lines = env_file.read_text().splitlines()
-    assert f"export {logcontext.ENV_PREFIX}SESSION={SESSION_LEAF}" in lines
+    assert f"export {logcontext.ENV_PREFIX}SESSION={SESSION_ID}" in lines
     assert (
         f"export {logcontext.ENV_PREFIX}TREE={shlex.quote(str(tree.resolve()))}"
         in lines
@@ -520,7 +429,7 @@ def test_exported_session_id_round_trips_through_bind_from_env(tmp_path, monkeyp
     try:
         logcontext.bind_from_env(child_env)
         assert logcontext.bound() == {
-            "session": SESSION_LEAF,
+            "session": SESSION_ID,
             "tree": str(tree.resolve()),
         }
     finally:
@@ -540,12 +449,15 @@ def test_non_tree_cwd_exports_no_log_context(tmp_path, monkeypatch):
     assert not env_file.exists()
 
 
-def test_write_tree_cwd_exports_no_log_context(tmp_path, monkeypatch):
-    # Under the central root but the WRONG kind: only the ephemeral kind's leaf
-    # is a session id (a write Tree's leaf is branch-slug-hash), so the issue/
-    # epic/branches namespaces must never mint a bogus session key.
+def test_old_nested_tree_cwd_exports_no_log_context(tmp_path, monkeypatch):
+    # ADR-0074 has no kind segment, so the discriminator is no longer the leaf's
+    # kind but its trailing UUID. Old NESTED Trees coexist by attrition (their leaf
+    # carries no flat `<timestamp>-<uuid>` tail), so the flat-leaf session extractor
+    # yields nothing — a pre-flat Tree the sweep has not reclaimed never mints a bogus
+    # session key. (containing_tree truncates to the first segment below the root — here
+    # `owner` — which has no UUID tail.)
     root = tmp_path / "trees"
-    tree = root / "org" / "repo" / "issues" / "349" / "work-deadbeef"
+    tree = root / "owner" / "repo" / "issues" / "349" / "work-deadbeef"
     tree.mkdir(parents=True)
     monkeypatch.setenv(layout.CENTRAL_ROOT_ENV, str(root))
     env_file = tmp_path / "claude-env"
@@ -557,9 +469,9 @@ def test_write_tree_cwd_exports_no_log_context(tmp_path, monkeypatch):
 def test_nested_dir_inside_a_tree_exports_the_containing_session(tmp_path, monkeypatch):
     # A cwd DEEPER than the Tree root (a bare shell cd'd into src/, even one that
     # itself contains a decoy `ephemeral/not-a-session` segment) is still IN the
-    # session: resolution truncates to the Tree root (the first four segments
-    # below the central root), so the export names the CONTAINING session —
-    # SESSION_LEAF — and the decoy leaf name never wins.
+    # session: ADR-0074 resolution truncates to the Tree root (the FIRST segment
+    # below the central root — no depth arithmetic), so the export names the
+    # CONTAINING session (its trailing UUID) and the decoy leaf name never wins.
     root = tmp_path / "trees"
     tree = _ephemeral_tree(root)
     nested = tree / "src" / "ephemeral" / "not-a-session"
@@ -569,18 +481,21 @@ def test_nested_dir_inside_a_tree_exports_the_containing_session(tmp_path, monke
     code = _run_log_context(nested, env_file)
     assert code == 0
     lines = env_file.read_text().splitlines()
-    assert f"export {logcontext.ENV_PREFIX}SESSION={SESSION_LEAF}" in lines
+    assert f"export {logcontext.ENV_PREFIX}SESSION={SESSION_ID}" in lines
     assert (
         f"export {logcontext.ENV_PREFIX}TREE={shlex.quote(str(tree.resolve()))}"
         in lines
     )
 
 
-def test_shallow_ephemeral_dir_exports_no_log_context(tmp_path, monkeypatch):
-    # Same discriminator, other direction: <root>/ephemeral/<x> is too shallow
-    # for the minted shape (no org/repo segments) — no session key.
+def test_flat_position_dir_without_a_uuid_tail_exports_no_log_context(
+    tmp_path, monkeypatch
+):
+    # The discriminator is the trailing UUID, not depth: a dir sitting one segment
+    # below the root whose leaf is NOT the flat `<repo>-<agent>-<timestamp>-<id>`
+    # shape (no UUID tail) yields no session key — nothing to export.
     root = tmp_path / "trees"
-    shallow = root / "ephemeral" / "not-a-session"
+    shallow = root / "not-a-session"
     shallow.mkdir(parents=True)
     monkeypatch.setenv(layout.CENTRAL_ROOT_ENV, str(root))
     env_file = tmp_path / "claude-env"
@@ -602,13 +517,11 @@ def test_log_context_lands_alongside_the_activation_exports(tmp_path, monkeypatc
         stdin=io.StringIO(json.dumps({"cwd": str(tree)})),
         environ={"CLAUDE_ENV_FILE": str(env_file)},
         runner=_fake_runner({}),
-        probe={}.get,
-        self_pid=1,
     )
     assert code == 0
     content = env_file.read_text()
     assert "export CONDA_DEFAULT_ENV=shipit" in content
-    session_line = f"export {logcontext.ENV_PREFIX}SESSION={SESSION_LEAF}"
+    session_line = f"export {logcontext.ENV_PREFIX}SESSION={SESSION_ID}"
     assert session_line in content
     assert content.index("CONDA_DEFAULT_ENV") < content.index(session_line)
 
@@ -665,14 +578,12 @@ def _clone_shape(path: Path) -> Path:
 
 def _run_warning_check(cwd: Path) -> tuple[int, str]:
     """Run the hook with the warning check isolated: no env file (activation
-    no-ops before pixi), an empty ancestry (liveness no-ops before the pidfile)."""
+    no-ops before pixi)."""
     out = io.StringIO()
     code = sessionstart.run(
         stdin=io.StringIO(json.dumps({"cwd": str(cwd)})),
         stdout=out,
         environ={},
-        probe={}.get,
-        self_pid=1,
     )
     return code, out.getvalue()
 
@@ -698,21 +609,23 @@ def test_source_clone_cwd_warns_on_stdout(tmp_path, monkeypatch, caplog):
 def test_ephemeral_tree_cwd_is_silent(tmp_path, monkeypatch):
     # A session Tree is a clone of the same repo — it carries BOTH markers — but
     # it lives under the central root, so it must never warn (the no-false-
-    # positives constraint). The branch is irrelevant: session Trees move off
-    # ephemeral/* mid-session (work-by-branch), which is exactly why the
-    # discriminator is the path.
+    # positives constraint). The flat leaf shape (ADR-0074) is irrelevant here: the
+    # discriminator is the path being UNDER the root, not the leaf.
     root = tmp_path / "trees"
-    tree = _clone_shape(root / "org" / "repo" / "ephemeral" / "sess-20260703-1")
+    tree = _clone_shape(root / SESSION_LEAF)
     monkeypatch.setenv(layout.CENTRAL_ROOT_ENV, str(root))
     code, out = _run_warning_check(tree)
     assert code == 0
     assert out == ""
 
 
-def test_branch_tree_cwd_is_silent(tmp_path, monkeypatch):
-    # Same for a per-Run write Tree (branches/ namespace): under the root → silent.
+def test_run_tree_cwd_is_silent(tmp_path, monkeypatch):
+    # Same for any other per-Run flat Tree (a different agent/id leaf): under the
+    # root → silent.
     root = tmp_path / "trees"
-    tree = _clone_shape(root / "org" / "repo" / "branches" / "spike-foo-deadbeef")
+    tree = _clone_shape(
+        root / "repo-codex-20260101-000000-11111111-2222-4333-8444-555555555555"
+    )
     monkeypatch.setenv(layout.CENTRAL_ROOT_ENV, str(root))
     code, out = _run_warning_check(tree)
     assert code == 0
@@ -767,33 +680,12 @@ def test_warning_never_suppresses_the_writes(tmp_path, monkeypatch, pixi_repo):
         stdout=out,
         environ={"CLAUDE_ENV_FILE": str(env_file)},
         runner=_fake_runner({}),
-        probe={}.get,
-        self_pid=1,
     )
     assert code == 0
     # The source-clone warning is present (the #444 test-task advisory may
     # ride alongside it — this fixture's manifest defines no `test` task).
     assert sessionstart.SOURCE_CLONE_WARNING + "\n" in out.getvalue()
     assert "export CONDA_DEFAULT_ENV=shipit" in env_file.read_text()
-
-
-def test_liveness_write_survives_a_broken_activation(clone, tmp_path):
-    # The two writes fail open INDEPENDENTLY: an unwritable env file must not
-    # cost the session its liveness record.
-    env_file = tmp_path / "no-such-dir" / "claude-env"
-
-    def broken_runner(cmd, **kwargs):
-        raise RuntimeError("pixi exploded")
-
-    code = sessionstart.run(
-        stdin=io.StringIO(json.dumps({"session_id": "s", "cwd": str(clone)})),
-        environ={"CLAUDE_ENV_FILE": str(env_file)},
-        runner=broken_runner,
-        probe=ANCESTRY.get,
-        self_pid=300,
-    )
-    assert code == 0
-    assert liveness.read_pidfile(clone) is not None
 
 
 # --------------------------------------------------------------------------
@@ -829,7 +721,9 @@ def test_every_session_start_emits_session_started(tmp_path, monkeypatch, caplog
 
 def test_codex_session_start_persists_native_thread_id(tmp_path, monkeypatch, caplog):
     root = tmp_path / "trees"
-    tree = _ephemeral_tree(root, leaf="codex-20260711-121015-73781")
+    tree = _ephemeral_tree(
+        root, leaf="repo-codex-20260711-121015-73781aaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+    )
     monkeypatch.setenv(layout.CENTRAL_ROOT_ENV, str(root))
     monkeypatch.setenv("CODEX_THREAD_ID", "019f-fresh-thread")
 
@@ -863,7 +757,7 @@ def test_session_started_binds_the_ephemeral_session_scoped(tmp_path, monkeypatc
     monkeypatch.setattr(sessionstart.events, "emit", spy)
     code = _run_log_context(tree, tmp_path / "claude-env")
     assert code == 0
-    assert seen["session.started"]["session"] == SESSION_LEAF
+    assert seen["session.started"]["session"] == SESSION_ID
     assert seen["session.started"]["tree"] == str(tree.resolve())
     # Scoped: unwound after the emit — nothing leaks past the hook step.
     assert "session" not in logcontext.bound()

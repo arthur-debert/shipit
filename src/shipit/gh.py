@@ -25,7 +25,7 @@ The READ surface returns the existing core value objects (PROC03, ADR-0028):
 a repo read returns a :class:`shipit.identity.Repo`, a PR-core read returns a
 :class:`shipit.pr.PR` (with its :class:`shipit.identity.Sha`-typed head) built
 through the ONE :func:`shipit.pr.core_from_node` boundary — never an
-adapter-shaped parallel snapshot type. The fleet reads' PR-lifecycle
+adapter-shaped parallel snapshot type. Spawn's PR-lifecycle
 projection is this adapter's own small frozen value (:class:`HeadPr`, minted
 by :func:`pr_for_head`) — scan-shaped, not a parallel PR. Existing-PR attachment
 uses the sibling :class:`PrAttachment`, minted by :func:`pr_for_number`, because
@@ -77,10 +77,10 @@ class UnknownPr:
     :func:`pr_for_head` returns this singleton when ``gh`` failed for a reason OTHER
     than "the branch has no PR" (auth/network/rate-limit), or returned empty/malformed
     output — i.e. whenever the PR state is genuinely *undetermined*, as opposed to
-    provably absent (``None``). Keeping the two apart is the whole point of TRE02-WS03:
-    a Tree whose PR state is UNKNOWN must never be reclaimed by ``gc`` AND its presence
-    must be surfaced (the incomplete-sweep warning) rather than silently collapsed to
-    "no PR". A singleton so callers test it with ``pr is gh.UNKNOWN``.
+    provably absent (``None``). Keeping the two apart matters at spawn's PR-attachment
+    read: a head whose PR state is UNKNOWN must be treated conservatively rather than
+    silently collapsed to "no PR" (which would let spawn misread an existing PR as
+    absent). A singleton so callers test it with ``pr is gh.UNKNOWN``.
     """
 
     __slots__ = ()
@@ -98,10 +98,10 @@ class HeadPr:
     """The PR on one head, as the fleet reads consume it — :func:`pr_for_head`'s
     typed hit.
 
-    A scan-shaped projection owned by this adapter, NOT a parallel
+    A thin projection owned by this adapter, NOT a parallel
     :class:`shipit.pr.PR` (which models a PR's identity + core for the engine
-    paths): ``tree list`` / ``tree gc`` / ``spawn`` need exactly the lifecycle
-    fields they branch on — the PR ``number``, its ``state``
+    paths): ``spawn`` needs exactly the lifecycle fields it branches on — the PR
+    ``number``, its ``state``
     (``OPEN``/``MERGED``/``CLOSED``, upper-cased at construction), whether it is
     a draft, and the base it targets. Frozen and thin (ADR-0021); minted only by
     :func:`_head_pr_from_json`, where the shape validation lives, so no caller
@@ -115,11 +115,10 @@ class HeadPr:
 
     @property
     def display_state(self) -> str:
-        """The fleet's ONE state vocabulary: an open draft reads as ``DRAFT``
+        """Spawn's ONE state vocabulary: an open draft reads as ``DRAFT``
         (the turn-signal the dev cycle hinges on), otherwise the GitHub state
-        verbatim (``OPEN`` / ``MERGED`` / ``CLOSED``). Both fleet renderers
-        (``tree list``'s label, ``gc``'s classifier input) read this property,
-        so the draft normalization is written down exactly once.
+        verbatim (``OPEN`` / ``MERGED`` / ``CLOSED``), so the draft
+        normalization is written down exactly once.
         """
         if self.state == "OPEN" and self.is_draft:
             return "DRAFT"
@@ -892,7 +891,8 @@ def pr_for_head(branch: str, *, cwd: str | None = None) -> HeadPr | None | Unkno
     :data:`UNKNOWN`.
 
     Reads ``gh pr view <branch> --json number,state,isDraft,baseRefName`` from inside
-    the Tree (``cwd``) and returns a THREE-way result, never crashing the fleet scan:
+    the Tree (``cwd``) and returns a THREE-way result, never crashing spawn's
+    PR-attachment read:
 
     - the typed :class:`HeadPr` snapshot when a PR is read cleanly;
     - ``None`` when the branch *provably* has no PR — ``gh`` exits non-zero with its
@@ -902,9 +902,8 @@ def pr_for_head(branch: str, *, cwd: str | None = None) -> HeadPr | None | Unkno
       payload :func:`_head_pr_from_json` rejects (missing/mistyped fields).
 
     The ``None`` vs :data:`UNKNOWN` split is load-bearing: an unreadable state must
-    NOT masquerade as "no PR" (which would let a conservative caller treat it like an
-    abandoned Tree). Callers surface UNKNOWN (``gc``'s incomplete-sweep warning) and
-    keep treating it conservatively, but they can now tell the two apart.
+    NOT masquerade as "no PR" (which would let spawn misread an existing PR as absent).
+    Spawn keeps treating UNKNOWN conservatively, but it can now tell the two apart.
     """
     try:
         result = _run_probe(
@@ -931,154 +930,11 @@ def pr_for_head(branch: str, *, cwd: str | None = None) -> HeadPr | None | Unkno
     except ValueError:
         # A dict that decoded cleanly but is missing/mistyped its load-bearing
         # fields (e.g. ``{}`` or ``{"number": null, "state": null}``) is NOT a
-        # usable PR snapshot — returning it would have rendered as ``#None None``
-        # in ``tree list``. The construction boundary rejected it loudly; for
-        # this never-crash scan read that means an undetermined state, the same
-        # as malformed/non-JSON output above.
+        # usable PR snapshot — returning it would leak a half-built PR to spawn.
+        # The construction boundary rejected it loudly; for this never-crash read
+        # that means an undetermined state, the same as malformed/non-JSON output
+        # above.
         return UNKNOWN
-
-
-#: How many PRs one :func:`prs_by_head` call will page through. ``gh pr list``
-#: paginates internally up to ``--limit``, so this is the whole-repo bound, not a
-#: page size — sized well above any plausible shipit-managed repo (the largest
-#: carries ~500 PRs across all states). A repo that ACTUALLY has this many PRs
-#: makes the index untrustworthy rather than merely partial, which is why hitting
-#: the bound is reported as :data:`UNKNOWN` (see :func:`prs_by_head`) instead of
-#: being quietly returned as a complete answer.
-_PR_LIST_LIMIT = 4000
-
-
-def prs_by_head(repo: str) -> dict[str, HeadPr] | UnknownPr:
-    """Every PR in ``repo`` indexed by head branch — ONE ``gh pr list`` for the repo.
-
-    The batched twin of :func:`pr_for_head`: where that answers "which PR is on THIS
-    head?" with a round-trip per head, this answers it for the whole repo at once, so
-    a fleet read costs one call per REPO rather than one per Tree (issue #1011 — the
-    per-Tree fan-out exhausted the hourly GraphQL budget mid-``gc``, and an
-    unreadable state maps to keep, so ``gc`` silently swept nothing).
-
-    Reads ``gh pr list --repo <slug> --state all --json
-    number,state,isDraft,baseRefName,headRefName,isCrossRepository`` and returns a
-    TWO-way result that preserves :func:`pr_for_head`'s three-way vocabulary at the
-    CALLER's level:
-
-    - a ``{head branch -> HeadPr}`` dict when the repo's PRs are read cleanly. The
-      index is COMPLETE, which is what licenses the caller's key inference: a branch
-      ABSENT from a returned dict provably has no PR (the ``None`` arm), so an empty
-      dict is a real answer — the repo simply has no PRs.
-    - :data:`UNKNOWN` when the view is undetermined for the whole repo — any ``gh``
-      failure (auth/network/rate-limit), empty/malformed/non-JSON output, a row
-      :func:`_head_pr_from_json` rejects, or a result that hit
-      :data:`_PR_LIST_LIMIT`. The caller maps this onto :data:`UNKNOWN` for every
-      Tree in that repo.
-
-    ``--state all`` is load-bearing: ``gh pr list`` defaults to OPEN only, while
-    :func:`pr_for_head` matches MERGED/CLOSED heads too — an open-only index would
-    make every merged Tree read as "no PR". MERGED is precisely the rung ``gc``
-    reclaims on, so an open-only index would silently stop the fleet being reclaimed
-    at all; the two reads must see the same PRs.
-
-    CROSS-REPOSITORY (fork) PRs are excluded, and ``isCrossRepository`` is requested
-    for exactly that: a repo-wide list carries PRs whose head branch lives in a FORK,
-    and head names are unique only WITHIN a repo. A fork's ``issues/1011/work`` and
-    this repo's are different branches with one name, so indexing the foreign row
-    would let a stranger's PR answer for a local Tree — and since ``setdefault``
-    keeps whichever row GitHub returned first, that is not even a rare tie-break. It
-    is worst for ``gc``: a MERGED/CLOSED fork PR is the rung ``gc`` reclaims on, so a
-    local Tree holding unfinished work would read as finished and be deleted. A Tree
-    pushes its branch to its own origin — the repo being listed — so a fork head can
-    never be a Tree's PR, and dropping those rows is what makes the index mean what
-    the caller reads it to mean: *the PRs of THIS repo's heads*.
-
-    A SINGLE malformed row fails the WHOLE repo rather than being skipped. Skipping it
-    would drop that head from the index, and a missing head reads as a provable "no
-    PR" — so a shape-drift bug would become a confident false claim about one Tree.
-    What that costs is not a delete (no-PR and UNKNOWN bucket identically on every
-    ladder — see :func:`shipit.tree.cleanup.classify`); it is that ``gc`` would count
-    the Tree as *read* and report a complete view of a fleet it had not actually read
-    — the exact silent-success failure of #1011. Failing the repo keeps the never-lie
-    invariant: this function only ever returns an index it can vouch for entirely.
-    (Excluding a fork row is not that hazard inverted: an absent fork head is the TRUE
-    answer for every branch here, not something we failed to read.)
-
-    Where several of THIS repo's PRs share one head (a rebuilt branch), the FIRST
-    wins: ``gh pr list`` returns newest-first, so that is the highest-numbered PR —
-    matching what ``gh pr view <branch>`` resolves to.
-    """
-    try:
-        result = _run_probe(
-            [
-                "gh",
-                "pr",
-                "list",
-                "--repo",
-                repo,
-                "--state",
-                "all",
-                "--limit",
-                str(_PR_LIST_LIMIT),
-                "--json",
-                "number,state,isDraft,baseRefName,headRefName,isCrossRepository",
-            ],
-        )
-    except ExecError:
-        return UNKNOWN
-    if result.rc != 0:
-        # Unlike `gh pr view <branch>`, a repo-wide list has no "provable absence"
-        # failure — a repo with no PRs exits 0 with `[]`. So EVERY nonzero rc is an
-        # undetermined view; there is no NO_PR_MARKER arm to mirror here.
-        return UNKNOWN
-    out = result.stdout.strip()
-    if not out:
-        return UNKNOWN
-    try:
-        rows = json.loads(out)
-    except json.JSONDecodeError:
-        return UNKNOWN
-    if not isinstance(rows, list):
-        return UNKNOWN
-    if len(rows) >= _PR_LIST_LIMIT:
-        # Truncated at the bound: the heads beyond it are unread, and an unread head
-        # is indistinguishable from an absent one — exactly the conflation the
-        # None/UNKNOWN split exists to prevent. Refuse the whole index.
-        return UNKNOWN
-    index: dict[str, HeadPr] = {}
-    for row in rows:
-        if not isinstance(row, dict):
-            return UNKNOWN
-        head = row.get("headRefName")
-        if not isinstance(head, str) or not head.strip():
-            return UNKNOWN
-        foreign = row.get("isCrossRepository")
-        if not isinstance(foreign, bool):
-            # The fork discriminator is as load-bearing as the head itself: without it
-            # we cannot tell whose branch this row names, and guessing "same repo"
-            # is what would let a fork's PR answer for a Tree. Shape drift here fails
-            # the repo, like every other unusable field.
-            return UNKNOWN
-        if foreign:
-            # A cross-repository PR's head branch lives in the FORK, not here, so it
-            # can never be a Tree's PR: a Tree pushes its branch to its own origin,
-            # which is the repo being listed. Head names are only unique WITHIN a
-            # repo, though — a fork (or several) may carry `issues/1011/work` too, and
-            # the row order that decides `setdefault` is GitHub's, not ours. Indexing
-            # a foreign row would therefore let someone else's PR supply the state for
-            # a same-named local Tree — worst on a merged/closed fork PR, which is the
-            # rung gc RECLAIMS on, so a local Tree with unfinished work would read as
-            # finished and be deleted. Dropping the row is not the "skipping a bad
-            # row" hazard above: an absent fork head is the TRUE answer for every
-            # branch in this repo, not a gap in what we read.
-            #
-            # Dropped BEFORE the shape check below, because a row we will never index
-            # cannot drift the index: validating it could only fail this repo — and
-            # every local Tree in it — over a stranger's payload.
-            continue
-        try:
-            pr = _head_pr_from_json(row)
-        except ValueError:
-            return UNKNOWN
-        index.setdefault(head.strip(), pr)
-    return index
 
 
 def pr_for_number(number: int, *, repo: str | None = None) -> PrAttachment:

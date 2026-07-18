@@ -9,6 +9,7 @@ The clone-strategy details are otherwise covered by the pure ``layout`` unit tes
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -21,7 +22,7 @@ from shipit.identity import repo_from_slug
 from shipit.install import units as iunits
 from shipit.install.apply import COMMIT_MESSAGE as INSTALL_COMMIT_MESSAGE
 from shipit.tree import create as create_mod
-from shipit.tree import layout, provision
+from shipit.tree import layout
 from shipit.tree.create import create, create_from_source
 from shipit.tree.layout import TreeSpec
 
@@ -31,6 +32,21 @@ from shipit.tree.layout import TreeSpec
 # all-hex sha.
 _PIN = "5eed" * 10
 _PINNED_MANIFEST = f'[shipit]\nversion = "{_PIN}"\n\n[managed]\n'
+
+# The flat-leaf coordinates (ADR-0074 / naming.lex §4): every Tree dir is the single
+# self-describing leaf ``<repo>-<agent>-<timestamp>-<id>``, ONE segment below the root,
+# with no owner/kind/nesting. The repo is ``acme/widget`` → its NAME (``widget``) leads.
+# ``agent`` is the backend BINARY name; ``created`` the ``%Y%m%d-%H%M%S`` stamp; ``tree_id``
+# a full UUID. The caller mints these (they are impure), so ``plan`` stays pure of the spec.
+_AGENT = "claude"
+_CREATED = "20260717-081333"
+_TREE_ID = "619cf51a-f501-44dc-992f-74df773204aa"
+_LEAF = f"widget-{_AGENT}-{_CREATED}-{_TREE_ID}"
+
+
+def _dest(tmp_path: Path) -> Path:
+    """The flat Tree dir every shape in this file resolves to (``<root>/<leaf>``)."""
+    return tmp_path / "trees" / _LEAF
 
 
 def _hooks_ok() -> execrun.ExecResult:
@@ -118,7 +134,9 @@ def reference(tmp_path: Path, remote: Path) -> Path:
 def _spec(tmp_path: Path) -> TreeSpec:
     return TreeSpec(
         repo=repo_from_slug("acme/widget"),
-        agent_hash="abcd1234",
+        agent=_AGENT,
+        created=_CREATED,
+        tree_id=_TREE_ID,
         issue=123,
         slug="smoke",
         root=tmp_path / "trees",
@@ -134,18 +152,9 @@ def test_create_produces_an_independent_dissociated_clone(
 
     dest = Path(tree.path)
 
-    # READY summary is the planned {path, branch, base}. The slug ("smoke") rides the
-    # DIR leaf after the default `work` session; the branch stays issues/<id>/<session>.
-    assert (
-        dest
-        == tmp_path
-        / "trees"
-        / "acme"
-        / "widget"
-        / "issues"
-        / "123"
-        / "work-smoke-abcd1234"
-    )
+    # READY summary is the planned {path, branch, base}. The dir is the single flat
+    # leaf (ADR-0074) — the slug no longer rides it; the branch stays issues/<id>/<session>.
+    assert dest == _dest(tmp_path)
     assert tree.branch == "issues/123/work"
     assert tree.base == "origin/main"
 
@@ -174,7 +183,9 @@ def test_create_freeform_tree_on_the_default_branch(
     _stub_provision(monkeypatch)
     spec = TreeSpec(
         repo=repo_from_slug("acme/widget"),
-        agent_hash="abcd1234",
+        agent=_AGENT,
+        created=_CREATED,
+        tree_id=_TREE_ID,
         branch="main",
         root=tmp_path / "trees",
     )
@@ -462,13 +473,12 @@ def test_create_writes_no_provision_record(
     tmp_path: Path, remote: Path, reference: Path, monkeypatch
 ):
     # ADR-0033: provisioning never commits, so the #232 provision record's writer
-    # is retired — NO Tree born after the pin carries `.git/shipit-provision.json`,
-    # and the gc exclusion set reads empty.
+    # is retired — NO Tree born after the pin carries `.git/shipit-provision.json`.
+    # WS03 (ADR-0072) deleted the record's READER too, so nothing consults one either.
     _stub_provision(monkeypatch)
     tree = create(_spec(tmp_path), source_repo=str(reference), github_url=str(remote))
     dest = Path(tree.path)
-    assert not provision.record_path(dest).exists()
-    assert provision.read_provision_shas(dest) == frozenset()
+    assert not (dest / ".git" / "shipit-provision.json").exists()
 
 
 def test_create_rolls_back_partial_tree_on_failure(
@@ -486,15 +496,7 @@ def test_create_rolls_back_partial_tree_on_failure(
     with pytest.raises(ExecError):
         create(spec, source_repo=str(reference), github_url=str(remote))
 
-    dest = (
-        tmp_path
-        / "trees"
-        / "acme"
-        / "widget"
-        / "issues"
-        / "123"
-        / "work-smoke-abcd1234"
-    )
+    dest = tmp_path / "trees" / _LEAF
     assert not dest.exists()
 
 
@@ -523,15 +525,7 @@ def test_create_fails_closed_and_rolls_back_on_a_pinless_source(
     with pytest.raises(ValueError, match="no \\[shipit\\].version pin"):
         create(spec, source_repo=str(reference), github_url=str(remote))
 
-    dest = (
-        tmp_path
-        / "trees"
-        / "acme"
-        / "widget"
-        / "issues"
-        / "123"
-        / "work-smoke-abcd1234"
-    )
+    dest = tmp_path / "trees" / _LEAF
     assert not dest.exists()
 
 
@@ -541,15 +535,7 @@ def test_create_refuses_a_preexisting_dest_without_clobbering_it(
     # A pre-existing dest (deterministic/colliding hash, or a rerun) must be refused
     # BEFORE any clone, and the rollback must NEVER delete that prior directory.
     spec = _spec(tmp_path)
-    dest = (
-        tmp_path
-        / "trees"
-        / "acme"
-        / "widget"
-        / "issues"
-        / "123"
-        / "work-smoke-abcd1234"
-    )
+    dest = tmp_path / "trees" / _LEAF
     dest.mkdir(parents=True)
     (dest / "precious.txt").write_text("do not delete")
 
@@ -726,15 +712,7 @@ def test_create_rolls_back_when_submodule_init_fails(
     with pytest.raises(ExecError):
         create(_spec(tmp_path), source_repo=str(reference), github_url=str(remote))
 
-    dest = (
-        tmp_path
-        / "trees"
-        / "acme"
-        / "widget"
-        / "issues"
-        / "123"
-        / "work-smoke-abcd1234"
-    )
+    dest = tmp_path / "trees" / _LEAF
     assert not dest.exists()
 
 
@@ -934,15 +912,7 @@ def test_create_rolls_back_when_the_node_manager_is_undecidable(
 
     with pytest.raises(ValueError, match="no recognized lockfile"):
         create(_spec(tmp_path), source_repo=str(source), github_url="url")
-    leaf = (
-        tmp_path
-        / "trees"
-        / "acme"
-        / "widget"
-        / "issues"
-        / "123"
-        / "work-smoke-abcd1234"
-    )
+    leaf = tmp_path / "trees" / _LEAF
     assert not leaf.exists()
 
 
@@ -1132,15 +1102,7 @@ def test_provision_hook_activation_failure_fails_the_create(
     with pytest.raises(ExecError):
         create(_spec(tmp_path), source_repo=str(source), github_url="url")
     # Atomicity: the half-built leaf was rolled back.
-    leaf = (
-        tmp_path
-        / "trees"
-        / "acme"
-        / "widget"
-        / "issues"
-        / "123"
-        / "work-smoke-abcd1234"
-    )
+    leaf = tmp_path / "trees" / _LEAF
     assert not leaf.exists()
 
 
@@ -1337,3 +1299,101 @@ def test_create_warns_when_pixi_cache_on_other_filesystem(
         create(_spec(tmp_path), source_repo=str(source), github_url="url")
 
     assert any("#119" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# The session-store seam (ADR-0073, #1023)
+# ---------------------------------------------------------------------------
+
+
+def _home(monkeypatch, tmp_path: Path) -> Path:
+    """Point the session store's default `~` at a tmp dir and return it.
+
+    The suite's autouse guard already does this; re-pointing it HERE gives the test a
+    home it knows the path of, so it can assert on what was planted.
+    """
+    from shipit import sessionstore
+
+    home = tmp_path / "fake-home"
+    monkeypatch.setattr(sessionstore, "_default_home", lambda: home)
+    return home
+
+
+def test_create_plants_the_session_store_link(
+    tmp_path: Path, remote: Path, reference: Path, monkeypatch
+):
+    """A new Tree's slug dir is a symlink to its repo's ONE store, before any session.
+
+    The whole point of ADR-0073: the harness honours a symlink that is already there, so
+    the session's transcript and memory land in the shared store instead of a brand-new
+    per-Tree namespace. `create` returning is what "before the session starts" means.
+    """
+    from shipit import sessionstore
+
+    _stub_provision(monkeypatch)
+    home = _home(monkeypatch, tmp_path)
+
+    tree = create(_spec(tmp_path), source_repo=str(reference), github_url=str(remote))
+
+    link = sessionstore.link_path(Path(tree.path), home=home)
+    assert link.is_symlink()
+    # Keyed on the ORIGIN REMOTE, never the path: the fixture remote's URL is a local
+    # path whose last two segments parse as the owner/name.
+    assert Path(os.readlink(link)).parts[-3:-2] == ("stores",)
+    assert Path(os.readlink(link)).is_dir()
+
+
+def test_create_links_every_tree_of_a_repo_to_one_store(
+    tmp_path: Path, remote: Path, reference: Path, monkeypatch
+):
+    """Two Trees of one repo share a store — that IS the fix (memory + resume)."""
+    from shipit import sessionstore
+
+    _stub_provision(monkeypatch)
+    home = _home(monkeypatch, tmp_path)
+
+    first = create(_spec(tmp_path), source_repo=str(reference), github_url=str(remote))
+    # A DIFFERENT tree_id → a distinct flat leaf, so the two Trees are separate dirs of
+    # the same repo (they must still resolve to ONE shared store).
+    second_spec = TreeSpec(
+        repo=repo_from_slug("acme/widget"),
+        agent=_AGENT,
+        created=_CREATED,
+        tree_id="beef5678-beef-4bee-8bee-beef5678beef",
+        issue=456,
+        slug="other",
+        root=tmp_path / "trees",
+    )
+    second = create(second_spec, source_repo=str(reference), github_url=str(remote))
+
+    assert os.readlink(
+        sessionstore.link_path(Path(first.path), home=home)
+    ) == os.readlink(sessionstore.link_path(Path(second.path), home=home))
+
+
+def test_create_survives_an_unplantable_session_store(
+    tmp_path: Path, remote: Path, reference: Path, monkeypatch, caplog
+):
+    """Fail-open at DEBUG (#348): a store is additive; a Tree is never worth losing to it.
+
+    Without a store the session merely keeps its memory to itself — today's behaviour,
+    not a degraded one — so an unwritable `~/.claude` (a CI runner, a container) must
+    cost the Tree nothing AND must not WARN on every single create.
+    """
+    from shipit import sessionstore
+
+    _stub_provision(monkeypatch)
+
+    def boom(*a, **k):
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(sessionstore, "plant", boom)
+
+    with caplog.at_level(logging.DEBUG):
+        tree = create(
+            _spec(tmp_path), source_repo=str(reference), github_url=str(remote)
+        )
+
+    assert Path(tree.path).is_dir(), "the Tree was lost to a session-store failure"
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("session store not planted" in r.message for r in caplog.records)

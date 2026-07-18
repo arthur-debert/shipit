@@ -18,7 +18,7 @@
 Shipit has five fixed Roles: coordinator, implementer, shepherd, explorer, and
 reviewer. Role prose is already authored once in Lex and generated into
 role-scoped prompt surfaces. Trees already have distinct session, writable, and
-shared read-only forms. Spawned write Runs execute in their Tree's pixi
+per-Run read-only forms. Spawned write Runs execute in their Tree's pixi
 environment, coordinator sessions borrow pixi activation, reviewer Runs use an
 unprovisioned read-only Tree with ambient tools, and fleet and CI execution have
 their own established routing.
@@ -120,7 +120,7 @@ flat `session | write | read-only | ambient` list. It distinguishes:
 - a session Tree created for a coordinator;
 - a new writable Tree and branch created for an implementer;
 - a writable Tree attached to an existing PR for a shepherd;
-- a shared read-only Tree pinned to an existing PR head for a reviewer; and
+- a per-Run read-only Tree pinned to an existing PR head for a reviewer; and
 - an ambient WorkingDir with no Tree for an explorer.
 
 The **Work Env resolver** returns the execution context for known boundaries. A
@@ -150,7 +150,7 @@ consistent without replacing their executors.
 5. As a shepherd, I want a writable environment attached to the existing PR
    head and preserved across review rounds, so that I address the same PR rather
    than open a replacement PR.
-6. As a reviewer, I want a shared read-only Tree pinned to the reviewed head, so
+6. As a reviewer, I want a per-Run read-only Tree pinned to the reviewed head, so
    that review context is correct and the reviewed checkout remains immutable.
 7. As a reviewer service, I want reviewer output captured and posted through one
    product result path, so that generic self-posting and service-posting review
@@ -220,7 +220,7 @@ Each profile declares its supported launch contexts and result channel:
   result is one verified draft PR;
 - shepherd: launch or resume against an existing PR in its persistent write
   environment; result is commits and resolved review threads on that PR;
-- reviewer: bounded launch against a shared read-only Tree; result is captured
+- reviewer: bounded launch against a per-Run read-only Tree; result is captured
   structured review output posted by the review service; and
 - explorer: native ambient investigation; result is a report to the coordinator,
   with detached Tree-backed spawn rejected.
@@ -339,7 +339,7 @@ not read-only behavior alone, determines whether a Tree is needed.
 - Losing the hook's unknown-worker safety while making public spawn fail closed.
   These boundaries intentionally have different error behavior.
 - Accidentally provisioning a reviewer pixi environment. Reviewers currently use
-  ambient read tools because their shared Tree is unprovisioned and read-only.
+  ambient read tools because their per-Run Tree is unprovisioned and read-only.
 - Conflating Work Env with pixi environment or inventing a nonexistent pixi run
   identity.
 - Expanding shepherd attachment into a second PR engine. The existing engine and
@@ -406,7 +406,7 @@ integration tests use fakes at effectful edges; no live agent backend is require
 - Implementer resolves to a new write Tree and draft-PR handshake.
 - Shepherd resolves to an existing-PR write attachment and resumable identity,
   never a new draft-PR handshake.
-- Reviewer resolves to a shared read-only Tree and captured review result path.
+- Reviewer resolves to a per-Run read-only Tree and captured review result path.
 - Explorer resolves to ambient WorkingDir and detached spawn is rejected before
   Tree creation.
 - Unknown public role input fails before provisioning or backend launch.
@@ -414,7 +414,7 @@ integration tests use fakes at effectful edges; no live agent backend is require
 
 ### Work Env value and resolution
 
-- Cover session Tree, new write Tree, existing-PR write Tree, shared read-only
+- Cover session Tree, new write Tree, existing-PR write Tree, per-Run read-only
   Tree, ambient WorkingDir, Main checkout, CI Lane job, and fleet-sweep cell.
 - Assert Tree provenance and WorkingDir identity compose rather than duplicate one
   another.

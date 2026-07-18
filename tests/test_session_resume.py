@@ -23,14 +23,14 @@ def test_resolve_shipit_codex_session_to_native_thread(tmp_path: Path):
         {
             "repo": "arthur-debert/shipit",
             "session": "codex-20260711-121015-73781",
-            "tree": "/trees/shipit/ephemeral/codex-20260711-121015-73781",
+            "tree": "/trees/shipit-codex-20260711-121015-019f5115-fb40-7db2-a82f-d2fc02a1da22",
             "backend": "codex",
         },
         {
             "repo": "arthur-debert/shipit",
             "event": "session.started",
             "session": "codex-20260711-121015-73781",
-            "tree": "/trees/shipit/ephemeral/codex-20260711-121015-73781",
+            "tree": "/trees/shipit-codex-20260711-121015-019f5115-fb40-7db2-a82f-d2fc02a1da22",
             "codex_thread": "019f-thread",
         },
     )
@@ -42,7 +42,7 @@ def test_resolve_shipit_codex_session_to_native_thread(tmp_path: Path):
         backend="codex",
         shipit_session_id="codex-20260711-121015-73781",
         native_session_id="019f-thread",
-        tree="/trees/shipit/ephemeral/codex-20260711-121015-73781",
+        tree="/trees/shipit-codex-20260711-121015-019f5115-fb40-7db2-a82f-d2fc02a1da22",
     )
 
 
@@ -54,8 +54,12 @@ def test_resolve_fresh_codex_session_from_sessionstart_record(tmp_path: Path):
             "repo": "arthur-debert/shipit",
             "event": "session.started",
             "session": "codex-20260711-121015-73781",
-            "tree": "/trees/shipit/ephemeral/codex-20260711-121015-73781",
+            "tree": "/trees/shipit-codex-20260711-121015-019f5115-fb40-7db2-a82f-d2fc02a1da22",
             "codex_thread": "019f-fresh-thread",
+            # ADR-0074: the backend is READ from session.started's `backend` stamp,
+            # never reverse-engineered from the session-id prefix (the prefix table
+            # is retired). A record without it is not resumable.
+            "backend": "codex",
         },
     )
 
@@ -73,8 +77,10 @@ def test_resolve_shipit_claude_session_from_sessionstart_record(tmp_path: Path):
             "repo": "arthur-debert/shipit",
             "event": "session.started",
             "session": "sess-20260711-140000-12345",
-            "tree": "/trees/shipit/ephemeral/sess-20260711-140000-12345",
+            "tree": "/trees/shipit-claude-20260711-140000-7f3c9d20-1a2b-4c3d-8e4f-56789abcdef0",
             "session_id": "claude-native",
+            # The claude backend is likewise read from the stamp, not the `sess-` prefix.
+            "backend": "claude",
         },
     )
 
@@ -93,11 +99,13 @@ def test_resolve_last_requires_repo_and_picks_latest_complete_session(tmp_path: 
             "repo": "arthur-debert/shipit",
             "session": "sess-1",
             "session_id": "old-native",
+            "backend": "claude",
         },
         {
             "repo": "arthur-debert/shipit",
             "session": "codex-2",
             "codex_thread": "new-native",
+            "backend": "codex",
         },
     )
 
@@ -111,12 +119,22 @@ def test_resolve_native_id_fails_closed_when_ambiguous_across_repos(tmp_path: Pa
     _log(
         tmp_path,
         "arthur-debert/shipit",
-        {"repo": "arthur-debert/shipit", "session": "sess-1", "session_id": "same"},
+        {
+            "repo": "arthur-debert/shipit",
+            "session": "sess-1",
+            "session_id": "same",
+            "backend": "claude",
+        },
     )
     _log(
         tmp_path,
         "acme/widget",
-        {"repo": "acme/widget", "session": "sess-2", "session_id": "same"},
+        {
+            "repo": "acme/widget",
+            "session": "sess-2",
+            "session_id": "same",
+            "backend": "claude",
+        },
     )
 
     with pytest.raises(resume.ResumeError, match="ambiguous"):
@@ -127,12 +145,22 @@ def test_resolve_native_id_can_be_scoped_by_repo(tmp_path: Path):
     _log(
         tmp_path,
         "arthur-debert/shipit",
-        {"repo": "arthur-debert/shipit", "session": "sess-1", "session_id": "same"},
+        {
+            "repo": "arthur-debert/shipit",
+            "session": "sess-1",
+            "session_id": "same",
+            "backend": "claude",
+        },
     )
     _log(
         tmp_path,
         "acme/widget",
-        {"repo": "acme/widget", "session": "sess-2", "session_id": "same"},
+        {
+            "repo": "acme/widget",
+            "session": "sess-2",
+            "session_id": "same",
+            "backend": "claude",
+        },
     )
 
     target = resume.resolve("same", repo=REPO, base_dir=tmp_path)
@@ -165,6 +193,9 @@ def test_resolve_merges_session_across_rotated_log_boundary(tmp_path: Path):
                 "repo": REPO.slug,
                 "session": "codex-rotated",
                 "codex_thread": "019f-rotated",
+                # Fields accumulate across a session's records, so the backend stamp
+                # in the rotated file carries into the fold with the active file's tree.
+                "backend": "codex",
             }
         )
         + "\n"
@@ -190,14 +221,26 @@ def test_resolve_last_uses_the_session_with_the_newest_record(tmp_path: Path):
     active = tmp_path / REPO.owner.login / REPO.name / resume.logsetup.LOG_FILENAME
     active.parent.mkdir(parents=True)
     active.with_name(f"{active.name}.1").write_text(
-        json.dumps({"repo": REPO.slug, "session": "codex-a", "codex_thread": "a"})
+        json.dumps(
+            {
+                "repo": REPO.slug,
+                "session": "codex-a",
+                "codex_thread": "a",
+                "backend": "codex",
+            }
+        )
         + "\n"
     )
     active.write_text(
         "\n".join(
             json.dumps(record)
             for record in (
-                {"repo": REPO.slug, "session": "codex-b", "codex_thread": "b"},
+                {
+                    "repo": REPO.slug,
+                    "session": "codex-b",
+                    "codex_thread": "b",
+                    "backend": "codex",
+                },
                 {"repo": REPO.slug, "session": "codex-a", "tree": "/newest"},
             )
         )
