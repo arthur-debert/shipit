@@ -51,7 +51,7 @@ knowledge behind both halves — the provisioned-env sentinel and the wrapped ar
 lives in the pixi adapter
 (:func:`shipit.pixienv.has_default_env` / :func:`shipit.pixienv.run_argv`,
 ADR-0028); this module keeps only the launch-side ROUTING DECISION and its
-narration. The reviewer service resolves its shared read-only Tree separately and
+narration. The reviewer service resolves its per-Run read-only Tree separately and
 launches with ambient tools; it does not pass through this writable-Run seam.
 :func:`scrub_tree_env` mirrors the provisioning scrub
 (:func:`shipit.tree.create.provision_env`) — both rely SOLELY on the adapter's shared

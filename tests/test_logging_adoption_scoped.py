@@ -55,12 +55,10 @@ def test_sprayed_modules_have_a_shipit_logger():
         # the sprayed records moved with them (the verb is print-free glue).
         ("shipit.ghsetup", "shipit.ghsetup"),
         ("shipit.lint", "shipit.lint"),
-        ("shipit.session.liveness", "shipit.session"),
         # LOG02-WS01..WS03: the tree / spawn / review+prstate sprays.
         ("shipit.tree.create", "shipit.tree"),
         ("shipit.tree.cleanup", "shipit.tree"),
         ("shipit.tree.registry", "shipit.tree"),
-        ("shipit.tree.provision", "shipit.tree"),
         ("shipit.tree.readonly", "shipit.tree"),
         ("shipit.verbs.tree", "shipit.tree"),
         ("shipit.spawn.launch", "shipit.spawn"),
@@ -81,6 +79,10 @@ def test_sprayed_modules_have_a_shipit_logger():
         ("shipit.prstate.flip", "shipit.prstate"),
         ("shipit.prstate.dispatch", "shipit.prstate"),
         ("shipit.checks", "shipit.checks"),
+        # TREE03-WS04: the session-store axis. Pinned here because the seam's
+        # tests filter caplog BY this name — a rename would otherwise turn those
+        # assertions into vacuous ones that match no record and always pass.
+        ("shipit.sessionstore", "shipit.sessionstore"),
     ]:
         mod = importlib.import_module(modname)
         assert isinstance(mod.logger, logging.Logger)

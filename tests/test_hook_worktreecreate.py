@@ -35,11 +35,10 @@ def fake_repo(monkeypatch):
     def fake_create(spec, *, source_repo):
         captured["spec"] = spec
         captured["source_repo"] = source_repo
-        return Tree(
-            path=f"/trees/acme/widget/branches/{spec.agent_hash}",
-            branch=spec.branch,
-            base="origin/main",
-        )
+        # The FLAT, self-describing leaf (ADR-0074): <repo>-<agent>-<timestamp>-<id>,
+        # one segment under the root, no owner/kind segment.
+        leaf = f"{spec.repo.name}-{spec.agent}-{spec.created}-{spec.tree_id}"
+        return Tree(path=f"/trees/{leaf}", branch=spec.branch, base="origin/main")
 
     monkeypatch.setattr(worktreecreate.git, "repo_root", lambda: "/repo")
     monkeypatch.setattr(
@@ -89,7 +88,11 @@ def test_spawn_lands_in_a_tree_on_epic_branch(monkeypatch, fake_repo):
     assert spec.branch == "TRE03/agent-abc123"  # branch-deferred holding branch
     assert spec.repo == repo_from_slug("acme/widget")
     assert fake_repo["source_repo"] == "/repo"
-    assert out.strip() == f"/trees/acme/widget/branches/{spec.agent_hash}"
+    # The printed path is the flat leaf: <repo>-<agent>-<timestamp>-<id>, agent=claude.
+    assert spec.agent == "claude"
+    assert (
+        out.strip() == f"/trees/{spec.repo.name}-claude-{spec.created}-{spec.tree_id}"
+    )
 
 
 def test_epic_inferred_from_cwd_branch(monkeypatch, fake_repo):
@@ -383,3 +386,89 @@ def test_empty_prompt_id_takes_the_coordinator_fork(fake_repo):
     code, _ = _run(json.dumps({"name": "sess-y", "prompt_id": None}))
     assert code == 0
     assert fake_repo["spec"].ephemeral == "sess-y"
+
+
+# --------------------------------------------------------------------------
+# ADR-0074 <id> provenance — the flat dir leaf's <id> per creation path, no pid
+# --------------------------------------------------------------------------
+
+#: A full UUID (8-4-4-4-12 hex) — the ONLY shape ADR-0074 allows for a leaf's <id>.
+_UUID_RE = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+
+
+def test_coordinator_tree_id_is_the_harness_session_uuid_never_a_pid(fake_repo):
+    # ADR-0074: the coordinator session Tree's dir <id> IS the harness session UUID
+    # from the payload, so the dir name is the resume handle a human types into
+    # `claude --resume`. The `--worktree` launch NAME may be a pid-shaped token, but
+    # that never reaches the dir — the trailing <id> is the full session UUID, no pid.
+    session_uuid = "c6010bf9-1234-4abc-8def-0123456789ab"
+    payload = json.dumps(
+        {
+            "session_id": session_uuid,
+            "cwd": "/coordinator/checkout",
+            "hook_event_name": "WorktreeCreate",
+            "name": "sess-20260702-121314-4242",  # a pid-shaped launch name...
+        }
+    )
+    code, out = _run(payload)
+    assert code == 0
+    spec = fake_repo["spec"]
+    assert spec.agent == "claude"
+    assert spec.tree_id == session_uuid  # ...but the dir <id> is the session UUID
+    assert out.strip().endswith(session_uuid)  # the leaf ends in the full UUID
+    assert "4242" not in out  # the launch name's pid never reaches the dir
+
+
+@pytest.mark.parametrize(
+    "bad_sid", ["d1", "c6010bf9", "", "not-a-uuid", "../escape", "c6010bf9-1234"]
+)
+def test_coordinator_non_uuid_session_id_is_refused_and_a_uuid_minted(
+    bad_sid, fake_repo
+):
+    # Finding B (ADR-0074): a coordinator `session_id` that is NOT a full UUID — a pid, a
+    # truncated prefix, empty, or a path-bearing value — must never become the flat dir
+    # <id>: it would mint an unresolvable session Tree (or one whose leaf escapes the
+    # central root). The hook mints a fresh full UUID instead of trusting the raw value,
+    # so the leaf is always a real, resolvable, full-UUID <id>.
+    payload = json.dumps(
+        {
+            "session_id": bad_sid,
+            "cwd": "/coordinator/checkout",
+            "hook_event_name": "WorktreeCreate",
+            "name": "sess-1",
+        }
+    )
+    code, out = _run(payload)
+    assert code == 0
+    spec = fake_repo["spec"]
+    assert spec.tree_id != bad_sid  # the raw value is refused
+    assert re.fullmatch(_UUID_RE, spec.tree_id)  # a freshly minted full UUID
+    assert out.strip().endswith(spec.tree_id)
+
+
+def test_helper_tree_id_is_minted_not_the_parents_session_id(monkeypatch, fake_repo):
+    # ADR-0074: on the helper arm the payload's session_id is the PARENT's, so the
+    # hook MINTS a fresh UUID for the dir <id> rather than carrying it — naming the
+    # wrong session is worse than naming none.
+    monkeypatch.setenv(worktree_adapter.EPIC_MARKER_ENV, "TRE03")
+    parent_sid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+    payload = _helper({"name": "agent-abc123", "session_id": parent_sid})
+    code, _ = _run(payload)
+    assert code == 0
+    spec = fake_repo["spec"]
+    assert spec.agent == "claude"
+    assert spec.tree_id != parent_sid  # minted, NOT the parent's session id
+    assert re.fullmatch(_UUID_RE, spec.tree_id)  # ...and a real full UUID, never a pid
+
+
+def test_every_creation_arm_stamps_a_timestamp_and_claude_agent(monkeypatch, fake_repo):
+    # Both hook arms mint the flat leaf's coordinates: agent = the backend binary
+    # (claude — this hook fires only for Claude Code) and a %Y%m%d-%H%M%S created stamp.
+    monkeypatch.setenv(worktree_adapter.EPIC_MARKER_ENV, "TRE03")
+    _run(_helper({"name": "agent-abc123"}))  # helper arm
+    helper = fake_repo["spec"]
+    _run(json.dumps({"session_id": "d1", "name": "sess-x"}))  # coordinator arm
+    coordinator = fake_repo["spec"]
+    for spec in (helper, coordinator):
+        assert spec.agent == "claude"
+        assert re.fullmatch(r"\d{8}-\d{6}", spec.created)

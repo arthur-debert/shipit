@@ -24,11 +24,11 @@ from shipit.harness.roleprofile import (
     ExistingPrWriteTree,
     LaunchContext,
     NewWriteTree,
+    PerRunReadOnlyTree,
     ResultChannel,
     RoleProfile,
     RoleValidationError,
     SessionTree,
-    SharedReadOnlyTree,
     parse_role,
     profile_for,
     validate_spawn,
@@ -87,7 +87,7 @@ def test_checkout_strategies_separate_the_five_shapes():
         Role.COORDINATOR: SessionTree,
         Role.IMPLEMENTER: NewWriteTree,
         Role.SHEPHERD: ExistingPrWriteTree,
-        Role.REVIEWER: SharedReadOnlyTree,
+        Role.REVIEWER: PerRunReadOnlyTree,
         Role.EXPLORER: AmbientWorkingDir,
     }
     for role, shape in expected.items():
@@ -120,7 +120,7 @@ def test_checkout_strategy_inverse_lookup_is_registry_derived():
         Role.SHEPHERD,
     )
     assert roleprofile.roles_with_checkout_strategy(NewWriteTree) == (Role.IMPLEMENTER,)
-    assert roleprofile.roles_with_checkout_strategy(SharedReadOnlyTree) == (
+    assert roleprofile.roles_with_checkout_strategy(PerRunReadOnlyTree) == (
         Role.REVIEWER,
     )
 

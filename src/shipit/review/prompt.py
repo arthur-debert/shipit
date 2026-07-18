@@ -147,7 +147,7 @@ def build_reviewer_task(
     """Compose the Tree-fetch reviewer task from ``instructions`` and ``pr_number``.
 
     The body — identical for every backend except the schema presentation — tells
-    the agent, running in a shared read-only checkout of the PR head, to:
+    the agent, running in a per-Run read-only checkout of the PR head, to:
 
     1. fetch the PR's scoped diff itself with ``gh pr diff <pr_number>`` (which uses
        the PR's REAL base and head — it must NOT assume the base is ``main``, since a

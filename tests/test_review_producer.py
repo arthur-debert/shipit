@@ -1,7 +1,7 @@
 """Unit tests for `shipit.review.producer` — the Tree-fetch review producer.
 
 The producer replaces the retired front-loaded backends (ADR-0020 §Reviewer-path
-reconciliation — REPLACE): it provisions a shared read-only Tree on the PR head,
+reconciliation — REPLACE): it provisions a per-Run read-only Tree on the PR head,
 launches codex / agy through their spawn read-only posture with a task that fetches
 the diff itself, and CAPTURES the structured stdout. These tests pin the seam inputs
 (agent → adapter mapping, the launch argv, the capture/parse, dry-run, preflight) with
@@ -46,25 +46,20 @@ def _faked(monkeypatch):
     """Fake the Tree clone, the remote-url read, and the PATH preflight so a launch
     exercises ONLY the producer wiring. Returns a dict the test fills with the captured
     launch argv/cwd/env."""
-    from shipit.spawn.backends import antigravity as agy_backend
 
     monkeypatch.setattr(
         producer,
         "create_readonly",
         lambda plan, *, source_repo, github_url: Tree(
-            path="/trees/arthur-debert/shipit/review/tre05-ws04b-abcd1234",
+            # A per-Run reviewer Tree is one flat leaf (ADR-0074): <repo>-<agent>-<ts>-<id>.
+            path="/trees/shipit-codex-20260702-121314-abcd1234-abcd-1234-abcd-abcd1234abcd",
             branch=plan.branch,
             base=f"origin/{plan.branch}",
         ),
     )
     monkeypatch.setattr(producer.git, "remote_url", lambda *, cwd: "https://x/y.git")
     monkeypatch.setattr(producer.shutil, "which", lambda binary: f"/usr/bin/{binary}")
-    # #989: the AGY reviewer preflight probes `agy --help` for `--agent`. These
-    # wiring tests must not depend on a real agy binary (absent in CI), so stub
-    # the capability probe present — the probe itself is covered by dedicated
-    # tests (test_agy_reviewer_preflight_*). Tests exercising the UNSUPPORTED
-    # path override this back to False.
-    monkeypatch.setattr(agy_backend, "supports_agent_flag", lambda **k: True)
+
     captured: dict = {}
 
     def launcher(cmd, *, cwd, env, timeout=None):
@@ -90,7 +85,9 @@ def test_codex_launches_in_the_tree_and_captures_the_review(_faked):
     assert cmd[:2] == ["codex", "exec"]
     assert "workspace-write" in cmd
     assert "--dangerously-bypass-approvals-and-sandbox" not in cmd
-    assert _faked["cwd"].endswith("tre05-ws04b-abcd1234")
+    assert _faked["cwd"].endswith(
+        "shipit-codex-20260702-121314-abcd1234-abcd-1234-abcd-abcd1234abcd"
+    )
     # codex gets the native schema flag (a real temp file path was written + passed).
     assert "--output-schema" in cmd
     # The task tells the agent to fetch the diff itself for THIS pr and not to post.
@@ -116,9 +113,11 @@ def test_tree_review_logs_readonly_work_env_evidence(_faked, caplog):
     assert record.role == "reviewer"
     assert record.pr == 42
     assert record.reviewer == "codex"
-    assert record.checkout_strategy == "shared-read-only-tree"
+    assert record.checkout_strategy == "per-run-read-only-tree"
     assert record.routing == "ambient"
-    assert record.working_dir.endswith("tre05-ws04b-abcd1234")
+    assert record.working_dir.endswith(
+        "shipit-codex-20260702-121314-abcd1234-abcd-1234-abcd-abcd1234abcd"
+    )
     assert record.working_dir_repo == "arthur-debert/shipit"
     assert record.working_dir_branch == "TRE05/WS04b"
     assert record.working_dir_commit == "deadbeef" * 5
@@ -139,7 +138,9 @@ def test_agy_maps_to_the_antigravity_adapter_with_prose_schema(_faked):
     cmd = _faked["cmd"]
     assert cmd[0] == "agy"
     # agy is rooted via --add-dir <Tree> (it ignores process cwd) and carries the timeout.
-    assert cmd[cmd.index("--add-dir") + 1].endswith("tre05-ws04b-abcd1234")
+    assert cmd[cmd.index("--add-dir") + 1].endswith(
+        "shipit-codex-20260702-121314-abcd1234-abcd-1234-abcd-abcd1234abcd"
+    )
     assert "--print-timeout=900s" in cmd
     # No native schema flag for agy; the schema rides the prompt prose instead.
     assert "--output-schema" not in cmd
@@ -408,57 +409,6 @@ def test_missing_cli_fails_loud(monkeypatch):
         producer.run_tree_review(
             agent_backend.CODEX, _ctx(), launcher=lambda *a, **k: None
         )
-
-
-def test_agy_reviewer_preflight_requires_the_agent_flag(monkeypatch):
-    # #989: a real agy reviewer launch preflights `--agent` support and surfaces a
-    # clean UPGRADE BackendUnavailable when the installed agy predates it — never a
-    # confusing "unknown option" from the CLI mid-launch.
-    from shipit.spawn.backends import antigravity as agy_backend
-
-    monkeypatch.setattr(producer.shutil, "which", lambda binary: f"/usr/bin/{binary}")
-    monkeypatch.setattr(agy_backend, "supports_agent_flag", lambda **k: False)
-    with pytest.raises(BackendUnavailable, match="--agent"):
-        producer.run_tree_review(
-            agent_backend.ANTIGRAVITY, _ctx(), launcher=lambda *a, **k: None
-        )
-
-
-def test_agy_reviewer_preflight_passes_when_agent_flag_is_supported(monkeypatch):
-    # With a modern agy the `--agent` preflight is satisfied, so preflight does not
-    # raise (the launch proceeds past it). We stub the launch to return promptly.
-    from shipit.spawn.backends import antigravity as agy_backend
-
-    monkeypatch.setattr(producer.shutil, "which", lambda binary: f"/usr/bin/{binary}")
-    monkeypatch.setattr(agy_backend, "supports_agent_flag", lambda **k: True)
-    # No BackendUnavailable from the capability check: _preflight returns cleanly.
-    producer._preflight(agent_backend.ANTIGRAVITY, dry_run=False)
-
-
-def test_preflight_round_passes_when_every_binary_is_on_path(monkeypatch):
-    monkeypatch.setattr(producer.shutil, "which", lambda binary: f"/usr/bin/{binary}")
-    producer.preflight_round([agent_backend.CODEX, agent_backend.CLAUDE])  # no raise
-
-
-def test_preflight_round_raises_one_upgrade_error_for_outdated_agy(monkeypatch):
-    # #989: the round preflight validates AGY's `--agent` support ONCE, before any
-    # Tree is provisioned, so an outdated agy surfaces a single clean UPGRADE
-    # BackendUnavailable — never N wrapped "all passes failed" from per-launch
-    # _preflight. The binary is present (on PATH); the flag is what's missing.
-    from shipit.spawn.backends import antigravity as agy_backend
-
-    monkeypatch.setattr(producer.shutil, "which", lambda binary: f"/usr/bin/{binary}")
-    monkeypatch.setattr(agy_backend, "supports_agent_flag", lambda **k: False)
-    with pytest.raises(BackendUnavailable, match="--agent"):
-        producer.preflight_round([agent_backend.ANTIGRAVITY, agent_backend.ANTIGRAVITY])
-
-
-def test_preflight_round_passes_for_agy_when_agent_flag_is_supported(monkeypatch):
-    from shipit.spawn.backends import antigravity as agy_backend
-
-    monkeypatch.setattr(producer.shutil, "which", lambda binary: f"/usr/bin/{binary}")
-    monkeypatch.setattr(agy_backend, "supports_agent_flag", lambda **k: True)
-    producer.preflight_round([agent_backend.ANTIGRAVITY])  # no raise
 
 
 def test_preflight_round_names_each_missing_binary_in_one_error(monkeypatch):
@@ -749,7 +699,7 @@ def test_provision_review_tree_requires_a_head_branch(monkeypatch):
         head_ref="",
     )
     with _pytest.raises(RuntimeError, match="head branch"):
-        producer.provision_review_tree(ctx)
+        producer.provision_review_tree(ctx, agent_backend.CODEX)
 
 
 def test_codex_usage_is_captured_from_the_stderr_tokens_line(_faked):
@@ -977,10 +927,7 @@ def test_preflight_refuses_a_model_the_backend_declares_unusable_for_review(
     # goes agentic in `--print` and never returns a verdict — and NOTHING stopped
     # it, so the required reviewer failed every run for two days. It must now die
     # at preflight with an actionable message, not on the PR as "no parseable JSON".
-    from shipit.spawn.backends import antigravity as agy_backend
-
     monkeypatch.setattr(producer.shutil, "which", lambda binary: f"/usr/bin/{binary}")
-    monkeypatch.setattr(agy_backend, "supports_agent_flag", lambda **k: True)
     with pytest.raises(BackendUnavailable) as exc:
         producer._preflight(agent_backend.ANTIGRAVITY, model="flash", dry_run=False)
     message = str(exc.value)
@@ -991,10 +938,7 @@ def test_preflight_refuses_a_model_the_backend_declares_unusable_for_review(
 
 
 def test_preflight_accepts_the_capable_model(monkeypatch):
-    from shipit.spawn.backends import antigravity as agy_backend
-
     monkeypatch.setattr(producer.shutil, "which", lambda binary: f"/usr/bin/{binary}")
-    monkeypatch.setattr(agy_backend, "supports_agent_flag", lambda **k: True)
     producer._preflight(
         agent_backend.ANTIGRAVITY, model="pro", dry_run=False
     )  # no raise
@@ -1030,10 +974,7 @@ def test_preflight_round_refuses_an_unusable_model_before_the_tree(monkeypatch):
     # Round level (#1006 + RVW03-WS03): the fan-out's configured model is checked
     # ONCE, before the shared Tree is provisioned — one clean refusal, never
     # "all N dimension passes failed".
-    from shipit.spawn.backends import antigravity as agy_backend
-
     monkeypatch.setattr(producer.shutil, "which", lambda binary: f"/usr/bin/{binary}")
-    monkeypatch.setattr(agy_backend, "supports_agent_flag", lambda **k: True)
     with pytest.raises(BackendUnavailable, match="UNUSABLE for a review run"):
         producer.preflight_round([agent_backend.ANTIGRAVITY], ["flash"])
     # The capable model passes the same call.

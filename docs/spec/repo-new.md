@@ -2,11 +2,12 @@
 
 ## Context
 
-shipit can adopt an existing repository through `shipit install`, reconcile its
-managed files, provision detected toolchains through pixi, and expose generic
-Tool verbs such as `shipit test` and `shipit build`. It does not currently create
-a new repository and prove that the repository is usable before its first
-commit.
+shipit can create a complete local repository through `shipit repo new`, adopt
+an existing repository through `shipit install`, reconcile its managed files,
+provision detected toolchains through pixi, and expose generic Tool verbs such
+as `shipit test` and `shipit build`. Repository creation currently stops at the
+local boundary: it does not deliberately choose whether to leave the Repo local,
+attach an existing GitHub Repo, or create and push a new private GitHub Repo.
 
 The existing domain model constrains this feature:
 
@@ -23,6 +24,9 @@ The existing domain model constrains this feature:
 - CI workflows are routing surfaces over declarations and generic Tool behavior,
   rather than places to reimplement stack logic
   ([ADR-0040](../adr/0040-workflow-blocks-invariants-in-blocks.md)).
+- External commands cross one Exec seam and GitHub operations belong to the
+  existing `gh` Tool adapter, which uses the authenticated `gh` CLI
+  ([ADR-0028](../adr/0028-one-exec-seam-tool-adapters.md)).
 
 This Spec defines the requirements and accepted design shape of repository
 creation. Durable architectural rationale is recorded in
@@ -45,6 +49,19 @@ baseline. The feature is complete when the generated directory behaves like any
 other working shipit Repo; creation must not invent parallel behavior for those
 commands.
 
+The completed creator also exposes an accidental remote dependency. For example,
+`shipit repo new --stack rust --no-remote hekka` can create and commit the Repo
+successfully while its managed `post-commit` path emits `No such remote 'origin'`.
+The hook is running before any remote exists, but a missing optional remote is
+rendered like a creation failure.
+
+Most new Repos should then be pushed so their generated CI can run, but Shipit
+does not currently offer an explicit, safe remote policy as part of creation.
+Users must arrange GitHub creation or reuse, attach `origin`, push `main`, and
+discover the first Actions runs themselves. Local correctness and remote
+publication also need distinct outcomes: a GitHub failure after local creation
+must not invalidate or roll back the usable local Repo.
+
 ## Goals
 
 - Provide one command that creates a new local Repo with a complete,
@@ -61,11 +78,25 @@ commands.
   whose derived names are invalid, before modifying existing content.
 - Consider creation successful only after the generated Repo passes its lint,
   test, and build Checks.
+- Require every creation request to choose exactly one remote mode: remain local,
+  reuse an existing GitHub Repo, or create a new private GitHub Repo.
+- Keep local creation as the authoritative success boundary, completed before
+  any remote operation and preserved regardless of later remote failure.
+- Push `main` to `origin` for both remote modes without force-pushing or
+  reconciling existing remote history.
+- After a successful push, show the initial commit's visible GitHub Actions runs
+  without waiting for them or making their discovery part of success.
+- Make a missing `origin` a quiet, expected state for the managed post-commit
+  path so a deliberately local Repo produces no remote lookup error.
 
 ## Non-Goals
 
-- Creating a GitHub Repo, configuring a remote, pushing, or running
-  `shipit gh-setup`.
+- Waiting for the initial GitHub Actions runs to start or finish, or interpreting
+  their eventual verdict as part of repository creation.
+- Running `shipit gh-setup`, configuring branch protection, or otherwise
+  applying post-creation GitHub policy.
+- Creating public GitHub Repos or supporting a repository host other than
+  GitHub.
 - Configuring publishing, distribution endpoints, release secrets, or a release
   schedule.
 - Supporting stacks other than Rust in the first release.
@@ -88,7 +119,9 @@ commands.
 The public command is:
 
 ```text
-shipit repo new --stack rust <name> [parent]
+shipit repo new --stack rust \
+  (--no-remote | --remote-reuse OWNER/REPO | --remote-create OWNER/REPO) \
+  <name> [parent]
 ```
 
 `parent` defaults to the current directory. The destination is always
@@ -101,6 +134,33 @@ entry, including a hidden one, are refused. `--stack` is repeatable so the
 creation request can later compose several toolchains, but at least one
 selection is mandatory. V1 accepts only one effective profile, `rust`;
 omission, unknown values, and duplicate selections are usage errors.
+
+Exactly one remote mode is also mandatory. `--no-remote` completes the local
+Repo and performs no GitHub or remote operation. `--remote-reuse OWNER/REPO`
+attaches the named existing GitHub Repo as `origin` and makes a normal
+upstream-setting `git push -u origin main`. `--remote-create OWNER/REPO` creates
+the named GitHub Repo as private, attaches it as `origin`, and pushes local
+`main` with the same upstream-setting behavior.
+The GitHub slug is explicit and authoritative: it must have the full
+`OWNER/REPO` shape but its repository name may differ from the local project
+name. Omission or combination of remote modes is a usage error.
+
+Remote modes use shipit's existing `gh` Tool adapter and require an installed,
+authenticated `gh` CLI for the GitHub API operations (Repo creation and lookup).
+Attachment and push run through ordinary Git rather than the `gh` API, so they
+additionally require a working Git credential for `origin`: an authenticated
+`gh` API session does not by itself authorize `git push`. `origin` is attached
+from the `OWNER/REPO` slug using the user's preferred Git protocol—the one
+`gh config get git_protocol` reports, HTTPS or SSH—so the push is satisfied by
+whatever credential that protocol needs: an existing SSH key, or an HTTPS
+credential helper such as `gh auth setup-git` or another configured helper on a
+laptop, or a token-bearing credential on a runner. A push that fails because
+`gh` API authentication is present but no such Git credential is available is
+reported as a remote-publication failure at the push stage, with recovery
+guidance, exactly like any other push rejection. `--no-remote` requires neither
+`gh`, GitHub authentication, nor a Git credential. Reusing a remote never
+force-pushes, merges, rebases, or otherwise reconciles remote history; a normal
+push rejection is reported as a remote-publication failure.
 
 `<name>` uses canonical lowercase kebab-case: it begins with an ASCII lowercase
 letter and continues with lowercase alphanumeric segments separated by single
@@ -193,11 +253,26 @@ parent, keeping staging and destination on one filesystem. It installs managed
 state, generates the lockfile, runs the canonical lint, test, and build Checks,
 and creates the `Initial commit` there. Only after every step succeeds does one
 atomic rename publish the temporary Repo at the requested destination. Any
-failed Check or Git operation returns non-zero, must not claim successful
-creation, removes its temporary sibling on a handled failure, and leaves the
-requested destination in its preflight state: absent remains absent and an
-existing empty directory remains empty. A cleanup failure is reported but never
-permits publication.
+failed Check or local Git operation during this staged phase returns non-zero,
+must not claim successful local creation, removes its temporary sibling on a
+handled failure, and leaves the requested destination in its preflight state:
+absent remains absent and an existing empty directory remains empty. A cleanup
+failure is reported but never permits local publication.
+
+Only after that atomic local publication succeeds does Shipit apply the selected
+remote mode. Remote creation, attachment, push, and Actions discovery are never
+part of the temporary staging transaction and never roll back or damage the
+completed local Repo. Shipit also never deletes a GitHub Repo it created when a
+later remote step fails. A remote failure produces a prominent warning naming
+the failed stage and giving recovery commands, but the overall command exits
+zero because local creation succeeded.
+
+After a successful push, Shipit makes one best-effort query for Actions runs
+associated with the initial commit and lists the runs currently visible,
+including queued or running state. It does not wait or poll. GitHub may not have
+registered a run yet, so no visible runs is informational; an unavailable or
+failed query is a warning. Neither changes the successful push or command
+outcome.
 
 Certification runs from a clean child shell whose working directory is the
 staged Repo and whose inherited pixi project-selection state cannot point back
@@ -272,8 +347,8 @@ depend on an interactive `pixi shell`.
 26. As a maintainer, I want a minimal README and an MIT license attributed to my
     resolved Git author name, so that the initial Repo is documented and licensed
     without placeholders or interactive choices.
-27. As a maintainer, I want creation to remain local, so that choosing a GitHub
-    owner, visibility, and remote policy can be a separate future operation.
+27. As a maintainer, I want every creation request to choose exactly one remote
+    mode, so that automation never silently guesses whether or where to publish.
 28. As a future stack author, I want project-specific source generation separate
     from the universal managed baseline, so that a new stack composes with
     shipit instead of copying it.
@@ -286,15 +361,40 @@ depend on an interactive `pixi shell`.
 31. As a future maintainer, I want diff-based creation into a non-empty path
     treated as a separate capability, so that v1's safety contract remains
     simple and unambiguous.
+32. As a maintainer, I want `--no-remote` to complete without requiring `gh` or
+    querying `origin`, so that a deliberately local Repo is a first-class result.
+33. As a maintainer, I want to reuse an explicit `OWNER/REPO` as `origin` and
+    push `main` normally, so that existing remote history is never overwritten
+    or silently reconciled.
+34. As a maintainer, I want to create an explicit private `OWNER/REPO` as
+    `origin` and push `main`, so that generated CI can begin without separate
+    GitHub setup steps.
+35. As a maintainer, I want the remote slug to be independent of the local
+    project name, so that GitHub naming does not constrain the local package.
+36. As a maintainer, I want a GitHub or push failure to preserve local success,
+    exit zero, and show recovery commands, so that I can finish publication
+    without recreating the project.
+37. As a maintainer, I want visible Actions runs listed after a push without
+    waiting, so that I know CI is still progressing and retain control of the
+    shell.
+38. As a maintainer, I want an absent or not-yet-visible Actions run to be
+    informational, so that GitHub registration latency does not turn a
+    successful push into a false failure.
+39. As a shipit operator, I want a no-origin post-commit event to stay quiet, so
+    that optional remote state is not rendered as a local creation error.
 
 ## Design Decisions
 
 - `repo` is a new top-level command group and `new` is its creation verb. The CLI
-  module remains a thin parser and renderer over the repository-creation module.
+  module remains a thin parser and renderer over the repository-creation and
+  post-creation remote-publication modules.
 - The repository-creation module is deep: its small interface accepts the name,
   parent, and selected stacks and returns a typed creation plan/result. Callers
   do not coordinate validation, rendering, Git, install, verification, or commit
   steps themselves.
+- Post-creation remote publication is a separate deep boundary over a completed
+  local Repo and an explicit remote policy. It returns a typed publication and
+  Actions-discovery result without changing the local creation result.
 - The public test seam and the module interface are aligned. Tests may inspect a
   plan without effects and exercise completed creation through the same module;
   effectful command tests observe outcomes rather than internal helper calls.
@@ -351,6 +451,28 @@ depend on an interactive `pixi shell`.
   carries no Rust-specific commands.
 - Creation initializes the local Repo on `main` and creates a root commit named
   `Initial commit` only after canonical verification passes.
+- Exactly one of `--no-remote`, `--remote-reuse OWNER/REPO`, or
+  `--remote-create OWNER/REPO` is required. The explicit slug is validated as a
+  full GitHub owner/repository pair and is not derived from the local project
+  name.
+- `--remote-reuse` attaches the existing GitHub Repo as `origin` and performs a
+  normal upstream-setting push of `main`; it never force-pushes or reconciles
+  remote history. `--remote-create` creates a private GitHub Repo, attaches it as
+  `origin`, and performs the same push. `--no-remote` performs neither operation.
+- Remote publication begins only after local atomic publication. Its failures
+  never roll back the local Repo or a GitHub Repo, and are rendered as warnings
+  with recovery commands while the creation command exits zero.
+- A successful push is followed by one best-effort listing of Actions runs for
+  the initial commit. Shipit neither waits for runs nor treats absence, query
+  failure, or a later run verdict as repository-creation failure.
+- GitHub API operations continue through the existing `gh` Tool adapter and its
+  authenticated `gh` CLI, while attachment and push run through ordinary Git and
+  additionally require a working Git credential for `origin`. Both are a
+  dependency only of the two post-creation remote modes, not of local creation or
+  `--no-remote`.
+- Managed post-commit behavior treats a missing `origin` as an expected optional
+  state and emits no user-facing error, preserving the validity of local-only
+  Repos beyond this command.
 - The initial commit uses the user's normally resolved Git author identity,
   signing configuration, and installed hooks. Creation does not synthesize an
   author, disable signing, or bypass hooks; any resulting Git failure prevents
@@ -392,9 +514,6 @@ depend on an interactive `pixi shell`.
 - **Treat the path argument as an exact destination.** Rejected because an
   explicit project name plus an ambiguous path makes automation harder to read;
   `parent/name` has one interpretation.
-- **Create the GitHub Repo as part of v1.** Rejected to keep local project
-  correctness separate from owner, visibility, authentication, and remote
-  policy.
 - **Generate many example tests.** Rejected because one black-box hello-world
   test proves the intended wiring with less placeholder code to delete.
 
@@ -418,15 +537,32 @@ depend on an interactive `pixi shell`.
   universal seed and one Rust contribution.
 - Live environment verification is more expensive than fixture-only tests, but
   fixture-only confidence cannot prove a fresh machine is provisioned correctly.
+- A local-success/remote-warning exit contract can surprise automation. Output
+  and typed results must distinguish local completion, remote publication, and
+  Actions discovery without implying that exit zero certifies all three.
+- Existing GitHub Repos may contain history, branch rules, or naming conventions
+  incompatible with the local root commit. Reuse must leave resolution to the
+  user rather than expanding into force, merge, rebase, or branch-policy logic.
+- GitHub Actions run registration is asynchronous. One best-effort read must not
+  grow into polling, CI orchestration, or an unreliable assertion that no
+  visible run means no workflow will run.
+- Remote creation can succeed before attachment or push fails. Automatic
+  deletion would risk destroying external state, so recovery must make this
+  partial outcome explicit instead of attempting rollback.
 
 ## Cross-Cutting Concerns
 
-- **Secrets and privacy:** creation writes no credentials, creates no remote, and
-  sends no project content to GitHub. Local environment files are ignored.
+- **Secrets and privacy:** creation never writes GitHub credentials. Remote modes
+  rely on the user's authenticated `gh` session and existing Git credential for
+  `origin`; `--remote-create` always creates
+  a private Repo before pushing project content. Local environment files are
+  ignored.
 - **Git identity:** creation relies on normal user Git configuration and never
   writes identity or signing overrides into the generated Repo.
-- **Observability:** failure output identifies the creation stage and underlying
-  Check or Git failure. Success reports the destination and initial commit.
+- **Observability:** local failure output identifies the creation stage and
+  underlying Check or Git failure. Local success reports the destination and
+  initial commit. Remote output separately reports creation/reuse, attachment,
+  push, recovery after failure, and any Actions runs currently visible.
 - **Reproducibility:** the generated pixi manifest and lockfile are tracked; CI
   and local commands use the Repo's pinned shipit launcher and locked
   environment.
@@ -434,12 +570,16 @@ depend on an interactive `pixi shell`.
   Adding `repo new` is additive; its consumer-owned build task and Rust test
   dependency do not alter the managed catalog reconciled into existing Repos.
   Internal reuse refactors are compatible only when regression tests preserve
-  the behavior and output of every existing command they touch.
+  the behavior and output of every existing command they touch. Requiring an
+  explicit remote mode is an intentional CLI contract change for `repo new`;
+  existing local behavior remains available as `--no-remote`.
 - **CI:** the caller is generic and uses the existing Lane/Tool model. The new
   Repo follows the existing pattern with required lint and test lanes only.
   Build support is available through the canonical build entry point and later
   artifact/release flows; creation verifies it, but no default PR build lane or
-  Cargo command is added to workflow YAML.
+  Cargo command is added to workflow YAML. Remote modes push the initial commit
+  and report the resulting Actions runs when visible, but do not wait for CI or
+  judge its result.
 - **Performance:** creation may perform a cold pixi solve and Rust compilation.
   Correctness and reproducibility take precedence over optimizing the first run;
   subsequent runs should use ordinary pixi and Cargo caches.
@@ -458,6 +598,27 @@ depend on an interactive `pixi shell`.
   workspace and consumer-owned configuration, managed install results, Git
   `main` branch, one root commit named `Initial commit`, and a clean working
   tree.
+- Assert the CLI requires exactly one remote mode, rejects omission and every
+  combination, accepts a full `OWNER/REPO`, rejects malformed slugs, and permits
+  the remote repository name to differ from the local project name.
+- Test post-creation remote publication through its typed interface. For
+  `--no-remote`, assert no `gh` lookup or remote mutation occurs. For reuse,
+  assert `origin` is attached and `main` receives a normal upstream-setting push
+  with no force or history-reconciliation path. For creation, assert the GitHub
+  Repo is private, becomes `origin`, and receives the same push.
+- Exercise failure at GitHub creation, remote attachment, and push, including a
+  push that fails because `gh` API authentication is present but no Git credential
+  for `origin` is available. In every case, assert the local Repo's `main` HEAD,
+  committed contents, and working tree are unchanged and that no local or GitHub
+  rollback is attempted; only successfully completed earlier bootstrap stages are
+  retained rather than reverted—a creation failure leaves no new local state, an
+  attachment failure retains any newly created GitHub Repo but does not require
+  `origin` to exist, and a push failure leaves the successfully attached `origin`
+  in place—while the command exits zero and output identifies the failed stage
+  with actionable recovery commands that resume from it.
+- After a successful push, cover visible queued/running Actions runs, no runs yet
+  visible, and a failed status query. Assert Shipit makes no wait/poll request and
+  that status discovery never changes the successful command outcome.
 - Assert the generated Artifact selects the CLI package and that no publishing,
   Bundle, signing, or endpoint configuration is present.
 - Assert Rust and `cargo-nextest` resolve from the generated pixi environment and
@@ -476,10 +637,14 @@ depend on an interactive `pixi shell`.
 - Exercise failure paths for install, each Check, lockfile generation, and Git
   commit. Every failure returns non-zero, emits no success result, and leaves the
   requested destination absent or preserves its original empty directory.
-  Exercise content created concurrently before publication and verify that
+  Exercise content created concurrently before local publication and verify that
   shipit refuses to replace it.
 - Exercise missing author identity and failing signing configuration through the
-  normal commit seam; neither case may bypass Git policy or publish the Repo.
+  normal commit seam; neither case may bypass Git policy or locally publish the
+  Repo.
+- Make a real commit in a generated Repo with no `origin` and assert the managed
+  post-commit path is quiet. This regression must cross the installed hook seam,
+  not merely mock the identity lookup that produced the original error.
 - Assert the README names the project and its canonical commands, the MIT text
   carries the creation year and Git author name, and Rust metadata declares the
   same license. No badge, remote URL, or alternate-license prompt is generated.
@@ -496,14 +661,25 @@ depend on an interactive `pixi shell`.
   dependency expected by the existing Repo contract.
 - Integrate Git initialization, canonical verification, and the initial commit;
   finish with a fresh-environment acceptance pass.
+- Add explicit post-creation remote policy, private GitHub creation/reuse,
+  ordinary initial push, and best-effort Actions discovery through the existing
+  GitHub and Git boundaries.
+- Correct the shared no-origin post-commit path and verify it through a real
+  generated-Repo commit.
 
 These are decomposition hints only. `/to-tickets` will choose the actual epic
 and Work Stream topology from the settled Spec and ADRs.
 
 ## Out Of Scope
 
-- GitHub owner selection, repository visibility, remote creation, push, and
-  branch-protection setup.
+- Interactive GitHub owner selection or inferred remote slugs; the full slug is
+  always supplied explicitly.
+- Public or otherwise configurable GitHub visibility; created Repos are private.
+- Force-pushing, merging, rebasing, importing, or otherwise reconciling an
+  existing remote's history.
+- Waiting for Actions, interpreting workflow results, rerunning CI, or making CI
+  green.
+- Branch protection and other `shipit gh-setup` policy.
 - Release artifact publication or endpoint configuration.
 - User-selectable licenses, CI providers, repository hosting providers, or
   application frameworks.
@@ -520,3 +696,11 @@ requirements and observable shape before selecting hard-to-reverse
 implementation details. ADR-0055 through ADR-0063 explain the chosen
 architecture without turning this Spec into an implementation transcript. If a
 later ADR changes an observable requirement, the Spec must be amended explicitly.
+
+The Repo New Remote Bootstrap amendment extends the original local-only contract.
+[ADR-0059](../adr/0059-repo-creation-publishes-by-atomic-rename.md) now limits
+atomic publication to the completed local Repo, and
+[ADR-0075](../adr/0075-repo-remote-bootstrap-is-post-creation-and-best-effort.md)
+records why the required remote bootstrap follows local success, never rolls
+back local or external state, and warns with recovery while exiting zero on
+remote failure.

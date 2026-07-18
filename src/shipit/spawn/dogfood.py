@@ -3,7 +3,7 @@
 TRE03 builds shipit-owned subagent spawning (ADR-0017/0018/0019): ``shipit spawn
 subagent`` creates an isolated **Tree** (a dissociated clone), launches a headless
 ``claude`` Run rooted in it, and — for a write Run — has that Run open a draft PR
-from the Tree's branch; for a **reviewer** Run it provisions a shared READ-ONLY Tree
+from the Tree's branch; for a **reviewer** Run it provisions a per-Run READ-ONLY Tree
 and posts a review through the PR. Every WS is unit-tested with the ``claude`` spawn
 and the ``gh`` boundary FAKED (``tests/test_spawn_verb.py``,
 ``tests/test_tree_*.py``). Those faked tests prove the *shape* shipit produces; they
@@ -11,8 +11,9 @@ cannot prove the load-bearing facts that exist only against live tooling:
 
   - a real ``claude`` Run actually lands its work in the Tree (on the planned
     branch, NOT ``shipit/install``) and opens a **real draft PR** from it;
-  - a real reviewer Run gets a **genuinely shared, genuinely read-only** Tree and
-    actually **posts a review**;
+  - a real reviewer Run gets a **genuinely per-Run, genuinely read-only** Tree (a
+    second reviewer on the same head gets its OWN distinct Tree — ADR-0074 retired the
+    shared ``(repo, branch)`` clone) and actually **posts a review**;
   - a forced Tree-create failure **fails closed** (loud, no native-worktree
     fallback) against the real git/clone path;
   - the maintainer's three non-negotiable **isolation invariants** hold on every
@@ -543,16 +544,17 @@ def verify_write_run(report: Report, cfg: DogfoodConfig) -> dict | None:
 def verify_reviewer_run(
     report: Report, cfg: DogfoodConfig, write_payload: dict | None
 ) -> None:
-    """Spawn a real REVIEWER Run and assert the read-only / shared / review facts.
+    """Spawn a real REVIEWER Run and assert the read-only / per-Run / review facts.
 
     Drives ``shipit spawn subagent --role reviewer --backend codex`` (no
     ``--issue``), then asserts:
     the spawn exited 0 and emitted a SPAWNED summary with NO PR linkage (a reviewer
     reports through the PR); the isolation invariants hold; the Tree is genuinely
-    read-only; a SECOND reviewer spawn REUSES the same Tree (shared per
-    ``(repo, branch)``, ADR-0018); and a NEW review actually landed on the write Run's
-    PR — counted as a delta against the reviews present BEFORE this spawn, so a
-    pre-existing review can never make the check pass on its own.
+    read-only; a SECOND reviewer spawn gets its OWN, DISTINCT per-Run Tree (ADR-0074
+    retired the shared ``(repo, branch)`` clone — each reviewer Run is per-Run); and a
+    NEW review actually landed on the write Run's PR — counted as a delta against the
+    reviews present BEFORE this spawn, so a pre-existing review can never make the
+    check pass on its own.
     """
     branch = f"{cfg.epic}/WS{cfg.ws:02d}"
     argv = [
@@ -613,14 +615,15 @@ def verify_reviewer_run(
     )
     assert_readonly_worktree(report, tree_path, label="reviewer Tree")
 
-    # Shared per (repo, branch): a second reviewer on the same head REUSES the clone.
+    # Per-Run (ADR-0074): a second reviewer on the same head gets its OWN distinct
+    # Tree — sharing is retired, so the two paths must differ.
     second = _run_spawn(argv, cwd=cfg.scratch)
     second_payload = parse_spawned(second.stdout) if second.returncode == 0 else None
     report.record(
-        "read-only Tree is shared per (repo,branch) (2nd reviewer reuses the clone)",
+        "read-only Tree is per-Run (2nd reviewer gets its own distinct Tree)",
         second_payload is not None
-        and second_payload.get("tree") == tree_path
-        and tree_path is not None,
+        and tree_path is not None
+        and second_payload.get("tree") not in (None, tree_path),
         f"first={tree_path!r} second={second_payload.get('tree') if second_payload else None!r}",
     )
 
@@ -774,7 +777,7 @@ def main(argv: list[str] | None = None) -> int:
         prog="shipit-spawn-dogfood",
         description=(
             "OPT-IN live end-to-end verification of `shipit spawn subagent` "
-            "(write Run -> draft PR, reviewer Run -> shared read-only Tree + review, "
+            "(write Run -> draft PR, reviewer Run -> per-Run read-only Tree + review, "
             "fail-closed, + the isolation invariants) against a SCRATCH checkout. "
             "Spawns real claude Runs and opens real PRs — run it deliberately."
         ),

@@ -13,7 +13,7 @@ The checkout strategy is a STRUCTURED closed value, not the historical flat
 attachment, lifetime, and mutation): one shape per role — the coordinator's
 ephemeral session Tree (ADR-0027), the implementer's new write Tree + branch,
 the shepherd's write attachment to an EXISTING PR (ADR-0035), the reviewer's
-shared read-only Tree pinned to a PR head (ADR-0018), and the explorer's
+per-Run read-only Tree pinned to a PR head (ADR-0018 / ADR-0074), and the explorer's
 ambient WorkingDir with no Tree at all. Enforcement posture is
 capability-shaped (per operation and resource), never a single mutation
 boolean — a reviewer posts its review (GitHub mutation) while its checkout
@@ -130,12 +130,13 @@ class ExistingPrWriteTree:
 
 
 @dataclass(frozen=True)
-class SharedReadOnlyTree:
-    """The reviewer's checkout: the shared read-only Tree pinned to a PR head.
+class PerRunReadOnlyTree:
+    """The reviewer's checkout: a per-Run read-only Tree pinned to a PR head.
 
-    Shared per ``(repo, branch)`` (ADR-0018), checked out read-only and left
-    unprovisioned — branch pinning, not read-only behavior alone, is why a
-    Tree exists at all.
+    Per-Run now (ADR-0074): a reviewer still gets a ``chmod``'d read-only clone
+    (ADR-0018's read-only *mode* stands), but each reviewer Run gets its OWN flat
+    Tree rather than sharing one deterministic ``(repo, branch)`` leaf — branch
+    pinning, not read-only behavior alone, is why a Tree exists at all.
     """
 
     tree_backed: ClassVar[bool] = True
@@ -163,7 +164,7 @@ CheckoutStrategy = (
     SessionTree
     | NewWriteTree
     | ExistingPrWriteTree
-    | SharedReadOnlyTree
+    | PerRunReadOnlyTree
     | AmbientWorkingDir
 )
 
@@ -306,7 +307,7 @@ PROFILES: Mapping[Role, RoleProfile] = MappingProxyType(
         ),
         Role.REVIEWER: RoleProfile(
             role=Role.REVIEWER,
-            checkout=SharedReadOnlyTree(),
+            checkout=PerRunReadOnlyTree(),
             enforcement=EnforcementPosture(
                 # The one posture that PROVES capability shape: the reviewed
                 # checkout is immutable while the review itself is posted

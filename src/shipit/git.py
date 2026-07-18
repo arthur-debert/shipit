@@ -223,6 +223,14 @@ def head_committed_at(*, cwd: str) -> float | None:
     malformed output): the CALLER must treat "unknown" conservatively (keep), exactly
     as :func:`unpushed_shas` requires. Collapsing unreadable to "ancient" would let a
     git hiccup license a delete.
+
+    Those cases are ONE ``None`` on purpose, not for lack of trying: an unborn HEAD and
+    a broken repo are indistinguishable here — ``git log -1 HEAD`` exits 128 with a
+    ``fatal`` for both — so the caller cannot be handed a distinction git does not
+    offer without a second probe per call. It does not need one: reclaim's only
+    consumer keeps a Tree on this ``None`` either way, and every unborn Tree it could
+    reach is already kept by an earlier arm (see
+    :func:`shipit.tree.cleanup._idle_seconds`).
     """
     try:
         result = _probe(["log", "-1", "--format=%ct", "HEAD"], cwd=cwd)
@@ -508,17 +516,19 @@ def unpushed_shas(*, cwd: str) -> tuple[Sha, ...] | None:
     """The :class:`~shipit.identity.Sha`\\s of commits on ``HEAD`` that exist on NO
     remote — ``None`` if unreadable.
 
-    The upstream-independent "unpushed" signal ADR-0027's ephemeral gc ladder is
-    defined over: :func:`ahead_behind`'s ``ahead`` reads ``(0, 0)`` for a branch
-    with **no upstream**, so a fresh ``ephemeral/<id>`` branch carrying local-only
-    commits would look level — exactly the misread that loses work. ``rev-list HEAD
-    --not --remotes`` lists commits reachable from ``HEAD`` but from no remote ref,
-    so a missing upstream never by itself blocks reclaim (empty = everything on some
-    remote) while a genuinely local commit is always listed. The SHAs — not just a
-    count — are what lets the ephemeral floor exclude exactly the recorded
-    provisioning commit (#232) while any OTHER local-only commit still protects;
-    each is a validated :class:`~shipit.identity.Sha` value object (PROC03), so
-    the exclusion compares identities through the type, never raw strings.
+    The upstream-independent "unpushed" signal the reclaim floor
+    (:func:`shipit.tree.cleanup._has_local_only_work`, ADR-0072) is defined over:
+    :func:`ahead_behind`'s ``ahead`` reads ``(0, 0)`` for a branch with **no
+    upstream**, so a fresh ``ephemeral/<id>`` branch carrying local-only commits
+    would look level — exactly the misread that loses work. ``rev-list HEAD --not
+    --remotes`` lists commits reachable from ``HEAD`` but from no remote ref, so a
+    missing upstream never by itself blocks reclaim (empty = everything on some
+    remote) while a genuinely local commit is always listed. The floor keeps the
+    Tree whenever that list is non-empty (or unreadable) — it once carved out the
+    recorded provisioning commit (#232), but ADR-0072 retired that exclusion, so no
+    single commit is special any more. The commits still come back as validated
+    :class:`~shipit.identity.Sha` value objects (PROC03), from which the fleet
+    listing's unpushed count derives.
 
     ``None`` — not empty — when the list cannot be read (detached/unborn HEAD, a git
     failure, malformed output): the CALLER must treat "unknown" conservatively (keep),
@@ -1418,12 +1428,7 @@ def checkout(branch: str, *, cwd: str) -> None:
 def reset_hard(ref: str, *, cwd: str) -> None:
     """``git reset --hard <ref>`` — force HEAD, index, and working tree to ``ref``.
 
-    The read-only-Tree reuse counterpart of :func:`checkout`: when a shared review
-    clone is reused after the PR head advanced, a ``git fetch`` followed by a hard reset
-    to ``origin/<branch>`` re-pins the working tree to the CURRENT head, so a second
-    reviewer never reads the stale commit the first clone happened to land on.
-
-    Also the ``-release-rc`` live-fire cut's branch restore (legacy release#663
+    The ``-release-rc`` live-fire cut's branch restore (legacy release#663
     contract, :mod:`shipit.verbs.release`): the bump commit travels on the TAG
     ONLY, so after tagging, prepare resets the branch back to the pre-bump
     commit — the commit stays reachable from the tag, the branch's version
@@ -1460,13 +1465,14 @@ def submodule_update_init(*, cwd: str) -> None:
     even though it is green in a normal checkout. This recursive init makes a Tree match
     what CI does (``actions/checkout`` with ``submodules: recursive``).
 
-    The ``sync --recursive`` FIRST is load-bearing on the reuse-refresh path (#486): when
-    a shared reviewer clone is re-pinned to an advanced PR head, that head may have moved
-    a submodule's URL in ``.gitmodules``. ``update --init`` only reads ``.git/config`` for
-    an already-initialized submodule and would keep fetching the STALE URL (and fail);
-    ``sync`` first copies the checked-out ``.gitmodules`` URLs into ``.git/config`` so the
-    update fetches the right remote. On a fresh clone (or a URL that did not move) it is a
-    harmless no-op.
+    The ``sync --recursive`` FIRST is defensive (#486): on any checkout whose
+    ``.gitmodules`` has moved a submodule's URL relative to ``.git/config``,
+    ``update --init`` only reads ``.git/config`` for an already-initialized submodule and
+    would keep fetching the STALE URL (and fail); ``sync`` first copies the checked-out
+    ``.gitmodules`` URLs into ``.git/config`` so the update fetches the right remote. On a
+    fresh clone — the surviving Tree-creation call site, now that write/reviewer Trees are
+    per-Run and never re-pinned (ADR-0074) — or a URL that did not move, it is a harmless
+    no-op.
 
     A repo with NO submodules is a clean no-op (exit 0) for both commands, so this is
     unconditional across Tree provisioning — no manifest gate is needed. It FAILS LOUD

@@ -4,15 +4,13 @@ Convention-level assertions ONLY (PRD glassbox, Testing Decisions): the key
 lifecycle events exist at the conventional level and carry their required flat
 fields — matched by FIELD PRESENCE, never per-message string assertions, so
 wording can evolve without breaking the pin. Covered surfaces: install/reconcile
-actions, gh-setup mutations, the lint orchestration summary, the session
-liveness probes + pidfile lifecycle, and the verify-apps liveness verdict
-(LOG03-WS03).
+actions, gh-setup mutations, the lint orchestration summary, and the verify-apps
+liveness verdict (LOG03-WS03).
 """
 
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 
 import pytest
 
@@ -21,7 +19,6 @@ from shipit.agent import backend as agent_backend
 from shipit.config import SecretSource
 from shipit.install import apply as install_apply
 from shipit.review import ghauth
-from shipit.session import liveness
 from shipit.verbs import install, lint, verify_apps
 
 
@@ -161,12 +158,22 @@ def test_noop_reinstall_emits_no_mutation_milestone(tmp_path, rec, caplog):
     # Nothing MUTATED, so no mutation milestone narrates at INFO — mechanics
     # stay at DEBUG. The #434 dev-cycle events (install.started/completed) are
     # the run's flow narration, not a mutation milestone, so they are excluded.
+    #
+    # Scoped to the install family's own logger (the whole family narrates on
+    # `shipit.install`), because a mutation milestone is BY DEFINITION install's
+    # own record: `caplog` collects the whole process, and a no-op run in a
+    # non-git `tmp_path` also carries `shipit.exec`'s ERROR for the fail-open
+    # `git remote get-url` the session-store seam is allowed to fail on
+    # (TREE03-WS04) — a transport record from a probe, not a milestone, and
+    # absent in any real checkout, where resolving the remote succeeds.
     from shipit.events import EXTRA_KEY
 
     assert not [
         r
         for r in caplog.records
-        if r.levelno >= logging.INFO and getattr(r, EXTRA_KEY, None) is None
+        if r.levelno >= logging.INFO
+        and r.name == "shipit.install"
+        and getattr(r, EXTRA_KEY, None) is None
     ]
 
 
@@ -322,37 +329,6 @@ def test_lint_launch_failure_is_an_error_with_the_exception(tmp_path, caplog):
 
 
 # --------------------------------------------------------------------------
-# session liveness — pidfile lifecycle at INFO, probe verdicts at DEBUG
-# --------------------------------------------------------------------------
-
-
-def _tree(tmp_path) -> Path:
-    (tmp_path / ".git").mkdir()
-    return tmp_path
-
-
-def test_pidfile_write_and_remove_are_info_milestones(tmp_path, caplog):
-    tree = _tree(tmp_path)
-    record = liveness.LivenessRecord(pid=41, session_id="s-1", create_time=123.0)
-    with caplog.at_level(logging.DEBUG, logger="shipit.session"):
-        liveness.write_pidfile(tree, record)
-    written = _with_fields(caplog.records, logging.INFO, "tree", "session", "pid")
-    assert written and written[0].pid == 41
-
-    caplog.clear()
-    with caplog.at_level(logging.DEBUG, logger="shipit.session"):
-        liveness.remove_pidfile(tree)
-    removed = _with_fields(caplog.records, logging.INFO, "tree")
-    assert removed
-
-    # Removing an already-absent pidfile mutates nothing — and records nothing.
-    caplog.clear()
-    with caplog.at_level(logging.DEBUG, logger="shipit.session"):
-        liveness.remove_pidfile(tree)
-    assert not caplog.records
-
-
-# --------------------------------------------------------------------------
 # verify-apps — the App-liveness verdict (the report a rollout reads)
 # --------------------------------------------------------------------------
 
@@ -443,17 +419,3 @@ def test_verify_apps_printed_report_is_unchanged_by_the_spray(capsys, caplog):
         for a in verify_apps.known_agents()
     ]
     assert capsys.readouterr().out == verify_apps.format_report("o/r", results) + "\n"
-
-
-def test_liveness_probe_verdict_is_recorded_at_debug(caplog):
-    record = liveness.LivenessRecord(pid=41, session_id="s-1", create_time=123.0)
-    with caplog.at_level(logging.DEBUG, logger="shipit.session"):
-        assert liveness.is_live(record, lambda pid: None) is False
-        alive = liveness.ProcessInfo(pid=41, ppid=1, create_time=123.0, argv="claude")
-        assert liveness.is_live(record, lambda pid: alive) is True
-    verdicts = _with_fields(
-        caplog.records, logging.DEBUG, "pid", "session", "live", "rung"
-    )
-    assert [v.live for v in verdicts] == [False, True]
-    assert verdicts[0].rung == "pid not alive"
-    assert verdicts[1].rung == "pid and create-time match"

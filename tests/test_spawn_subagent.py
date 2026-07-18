@@ -20,15 +20,16 @@ from pathlib import Path
 
 import pytest
 
-from shipit import events, execrun, gh, git, logcontext
+from shipit import events, execrun, gh, logcontext
 from shipit.execrun import ExecError
 from shipit.identity import repo_from_slug
+from shipit.review import producer
+from shipit.review.diff import review_view
 from shipit.spawn import launch
 from shipit.spawn.subagent import (
     Boundaries,
     SpawnError,
     SubagentSpec,
-    _refresh_attached_tree,
     audit_handshake,
     spawn_subagent,
 )
@@ -63,7 +64,6 @@ def bounds(
     umbrella: bool = True,
     org_repo: str = "acme/widget",
     status_lines: list[str] | None = None,
-    create_exists: bool = False,
 ) -> tuple[Boundaries, dict]:
     """Fake every effectful edge as a recording callable; return (bounds, calls).
 
@@ -84,8 +84,6 @@ def bounds(
         calls["spec"] = tree_spec
         calls["source_repo"] = source_repo
         calls["github_url"] = github_url
-        if create_exists:
-            raise FileExistsError("attached tree already exists")
         tree_dir.mkdir(parents=True, exist_ok=True)
         tp = layout.plan(tree_spec)
         return Tree(path=str(tree_dir), branch=tp.branch, base=tp.base)
@@ -116,15 +114,12 @@ def bounds(
         calls["status_cwd"] = cwd
         return list(status_lines or [])
 
-    def run_review(backend, target, *, run_id):
+    def run_review(backend, target, *, run_id, review_tree_naming=None):
         calls["review_backend"] = backend
         calls["review_target"] = target
         calls["review_run_id"] = run_id
+        calls["review_tree_naming"] = review_tree_naming
         return {"review": {}, "post": {}}
-
-    def refresh_attached_tree(path, branch):
-        calls["refresh_path"] = path
-        calls["refresh_branch"] = branch
 
     return (
         Boundaries(
@@ -136,7 +131,6 @@ def bounds(
             pr_for_head=pr_for_head,
             pr_for_number=pr_for_number,
             status_porcelain=status_porcelain,
-            refresh_attached_tree=refresh_attached_tree,
             runner=runner,
             run_review=run_review,
         ),
@@ -255,7 +249,13 @@ def test_shepherd_spawn_attaches_to_existing_pr_head_without_new_pr(tmp_path):
     tree_spec = calls["spec"]
     assert tree_spec.branch == "TRE03/WS04"
     assert tree_spec.base == "origin/TRE03/WS04"
-    assert tree_spec.agent_hash == "pr321"  # stable identity across rounds
+    # ADR-0074: the spec's naming half is now three flat-leaf fields — the backend
+    # binary <agent>, a <timestamp>, and a full-UUID <id> — not a per-PR `agent_hash`.
+    # Shepherd Trees are per-Run (like review Trees): each round mints a fresh <id>, so
+    # the cross-round identity rides the log context (`agent=pr321`), asserted by
+    # test_shepherd_round_mints_a_fresh_per_run_tree.
+    assert tree_spec.agent == "claude"
+    assert tree_spec.tree_id and "-" in tree_spec.tree_id  # a full UUID, never a pid
     assert tree_spec.issue is None and tree_spec.epic is None and tree_spec.ws is None
     assert calls["pr_branch"] == "TRE03/WS04"
     assert calls["pr_cwd"] == str(tmp_path / "tree")
@@ -277,9 +277,12 @@ def test_shepherd_spawn_attaches_to_existing_pr_head_without_new_pr(tmp_path):
     }
 
 
-def test_shepherd_resume_reuses_stable_tree_and_refreshes_current_head(
-    tmp_path, monkeypatch
-):
+def test_shepherd_round_mints_a_fresh_per_run_tree(tmp_path, monkeypatch):
+    # ADR-0074: shepherd Trees are PER-RUN, like review Trees. Flat naming mints a fresh
+    # UUID <id> per spawn, so there is no derivable per-PR path to reuse across rounds —
+    # each round provisions its own clone via create_tree (never a FileExistsError-driven
+    # reuse/refresh), and resume rebuilds from the durable per-repo logs, not a persisted
+    # Tree. Two rounds on the SAME PR mint DISTINCT tree_ids.
     monkeypatch.setenv("SHIPIT_TREES_ROOT", str(tmp_path / "trees"))
     attached = gh.PrAttachment(
         number=321,
@@ -290,53 +293,33 @@ def test_shepherd_resume_reuses_stable_tree_and_refreshes_current_head(
         is_cross_repository=False,
         maintainer_can_modify=False,
     )
-    b, calls = bounds(
-        tmp_path,
-        attached_pr=attached,
-        pr=gh.HeadPr(
-            number=321,
-            state="OPEN",
-            is_draft=True,
-            base_ref="TRE03/umbrella",
-        ),
-        create_exists=True,
-    )
 
-    result = spawn_subagent(shepherd_spec(), b)
+    def run_round():
+        b, calls = bounds(
+            tmp_path,
+            attached_pr=attached,
+            pr=gh.HeadPr(
+                number=321,
+                state="OPEN",
+                is_draft=True,
+                base_ref="TRE03/umbrella",
+            ),
+        )
+        result = spawn_subagent(shepherd_spec(), b)
+        return calls, result
 
-    planned = layout.plan(calls["spec"])
-    assert calls["refresh_path"] == str(planned.dir)
-    assert calls["refresh_branch"] == "TRE03/WS04"
-    assert result.tree == str(planned.dir)
-    assert result.branch == "TRE03/WS04"
+    first_calls, first = run_round()
+    second_calls, _second = run_round()
 
-
-def test_shepherd_refresh_refuses_uncommitted_work_before_mutating(monkeypatch):
-    monkeypatch.setattr(git, "status_porcelain", lambda *, cwd: [" M work.py"])
-    monkeypatch.setattr(
-        git,
-        "fetch",
-        lambda **kwargs: pytest.fail("dirty attachment must not be fetched"),
-    )
-
-    with pytest.raises(ValueError, match="1 uncommitted path"):
-        _refresh_attached_tree("/tree", "TRE03/WS04")
-
-
-@pytest.mark.parametrize("unpushed", [None, ("a" * 40,)])
-def test_shepherd_refresh_refuses_unknown_or_local_only_commits(monkeypatch, unpushed):
-    monkeypatch.setattr(git, "status_porcelain", lambda *, cwd: [])
-    monkeypatch.setattr(git, "fetch", lambda *, cwd: None)
-    monkeypatch.setattr(git, "checkout", lambda branch, *, cwd: None)
-    monkeypatch.setattr(git, "unpushed_shas", lambda *, cwd: unpushed)
-    monkeypatch.setattr(
-        git,
-        "reset_hard",
-        lambda *args, **kwargs: pytest.fail("unsafe attachment must not be reset"),
-    )
-
-    with pytest.raises(ValueError, match="could not determine|local-only commit"):
-        _refresh_attached_tree("/tree", "TRE03/WS04")
+    # Each round creates a Tree directly — no refresh/reuse seam exists any more.
+    assert first_calls["spec"].branch == "TRE03/WS04"
+    assert first_calls["spec"].base == "origin/TRE03/WS04"
+    assert first.branch == "TRE03/WS04"
+    # Per-Run: the two rounds mint DISTINCT full-UUID <id>s for the same PR.
+    first_id = first_calls["spec"].tree_id
+    second_id = second_calls["spec"].tree_id
+    assert first_id != second_id
+    assert "-" in first_id and "-" in second_id  # full UUIDs, never pids
 
 
 def test_shepherd_wrong_head_pr_is_refused_before_launch(tmp_path):
@@ -1109,8 +1092,95 @@ def test_reviewer_delegates_to_the_captured_review_service(tmp_path):
     assert result.role == "reviewer" and result.backend == "codex"
     assert result.pr is None
     result_tree = Path(result.tree)
-    assert result_tree.parent.name == "review"
-    assert result_tree.name.startswith("tre03-ws03-")
+    # ADR-0074: the reviewer Tree is the single flat leaf one segment below the central
+    # root — no `review/` kind segment. Its <repo>-<agent> head names the repo (widget)
+    # and the codex backend binary; the branch identity lives on the branch, not the path.
+    assert result_tree.parent == layout.central_root()
+    assert result_tree.name.startswith("widget-codex-")
+    assert "review" not in result_tree.parts
+
+
+def test_reviewer_naming_threads_through_the_real_service_chain(tmp_path, monkeypatch):
+    # #1039: the SPAWNED `tree` the coordinator reports must be the SAME per-Run
+    # read-only Tree the producer clones the reviewer into. The WHOLE fix is
+    # threading the boundary's pre-minted flat-leaf `review_tree_naming` down the
+    # detached-review chain, so the test must EXERCISE that chain — not a double
+    # that calls `provision_review_tree` directly (which would pass even if
+    # `run_detached_review` / `generate_review` / `run_fanout_review` dropped the
+    # naming). We run the REAL `run_detached_review` boundary and SPY the naming
+    # `provision_review_tree` actually receives at the far end of the chain: if any
+    # layer fails to pass `review_tree_naming=...`, provision sees `None` and the
+    # assertion below fails (mutation-checked).
+    from shipit.review import rounds, service
+    from shipit.spawn import subagent as subagent_mod
+
+    class _StopAfterProvision(Exception):
+        """Sentinel: halt the chain the instant provision is reached, before the
+        (mocked-away) model launch — the naming is already captured by then."""
+
+    # A KNOWN flat-leaf naming minted at the boundary, so the assertion can pin the
+    # EXACT `{agent, created, tree_id}` dict the coordinator reports as the payload's
+    # tree id — and prove that same dict reaches `provision_review_tree` unchanged.
+    minted = {
+        "agent": "codex",
+        "created": "20260717-000000",
+        "tree_id": "3c8f9a1e-0000-4c0d-9b2a-000000001039",
+    }
+    monkeypatch.setattr(subagent_mod, "new_tree_naming", lambda binary: dict(minted))
+
+    # The heavy PR resolve the detached child runs first — echo a fixed view so the
+    # chain needs no fetch/diff. Its head_ref is the reviewer's PR head, the same
+    # branch the SPAWNED payload names.
+    ctx = review_view(
+        number=321,
+        repo="acme/widget",
+        head_sha="deadbeef" * 5,
+        base_ref="TRE03/umbrella",
+        base_sha="cafe" * 10,
+        diff="diff --git a/x b/x\n",
+        is_draft=False,
+        changed_files=["x"],
+        workdir="/checkout",
+        head_ref="TRE03/WS03",
+    )
+    monkeypatch.setattr(service, "resolve_pr", lambda number, *, repo: ctx)
+    # Round SCOPE is decided from git ancestry on the checkout — force the round-1
+    # default plan so `generate_review` touches no git for this hand-fed view.
+    monkeypatch.setattr(rounds, "planable", lambda ctx: False)
+    # The per-round binary preflight is pure PATH I/O (the sandbox has no codex).
+    monkeypatch.setattr(
+        producer,
+        "preflight_round",
+        lambda backends, models=None, *, dry_run=False: None,
+    )
+
+    seen: dict = {}
+
+    def spy_provision(ctx_arg, backend, *, naming=None):
+        # The seam under test: capture what `run_fanout_review` threaded down —
+        # THROUGH run_detached_review → generate_review → run_fanout_review — then
+        # short-circuit before any pass launches.
+        seen["naming"] = naming
+        seen["head_ref"] = ctx_arg.head_ref
+        raise _StopAfterProvision
+
+    monkeypatch.setattr(producer, "provision_review_tree", spy_provision)
+
+    b, _ = bounds(tmp_path)
+    # The default boundary set runs the REAL detached-review child; our spy stops it
+    # at provision, so the boundary normalizes the sentinel to a clean refusal.
+    with pytest.raises(SpawnError):
+        spawn_subagent(
+            spec(role="reviewer", ws=3, issue=None, backend="codex"),
+            replace(b, run_review=service.run_detached_review),
+        )
+
+    # The naming the boundary minted reached `provision_review_tree` UNCHANGED, so
+    # the id the coordinator reports in the SPAWNED payload (minted["tree_id"]) IS
+    # the id the producer clones under — the pre-#1039 bug was a second, unrelated
+    # per-Run UUID minted inside the producer instead of this one.
+    assert seen["naming"] == minted
+    assert seen["head_ref"] == "TRE03/WS03"
 
 
 def test_issue_only_reviewer_pins_the_issue_head(tmp_path):
@@ -1225,9 +1295,9 @@ def test_epic_spawn_exports_the_current_spawn_identity(tmp_path):
     assert env["SHIPIT_LOG_CTX_WS"] == "1"
     assert env["SHIPIT_LOG_CTX_ROLE"] == "implementer"
     assert env["SHIPIT_LOG_CTX_REPO"] == "acme/widget"
-    # The agent spawn id IS the Tree dir's disambiguating hash, so the log key
-    # and the Tree leaf name agree.
-    assert env["SHIPIT_LOG_CTX_AGENT"] == calls["spec"].agent_hash
+    # The agent spawn id IS the Tree dir's <id> (the full UUID, ADR-0074), so the log
+    # key and the Tree leaf's trailing id agree.
+    assert env["SHIPIT_LOG_CTX_AGENT"] == calls["spec"].tree_id
     # The Tree identity rides the seam too (LOG01-WS03).
     assert env["SHIPIT_LOG_CTX_TREE"] == str(tmp_path / "tree")
     # And the parent's own records carry the same identity from the seam on.
@@ -1236,7 +1306,7 @@ def test_epic_spawn_exports_the_current_spawn_identity(tmp_path):
     assert bound["role"] == "implementer"
     assert bound["repo"] == "acme/widget"
     assert bound["tree"] == str(tmp_path / "tree")
-    assert bound["agent"] == calls["spec"].agent_hash
+    assert bound["agent"] == calls["spec"].tree_id
 
 
 def test_issue_spawn_exports_no_epic_ws_keys(tmp_path):
@@ -1250,7 +1320,7 @@ def test_issue_spawn_exports_no_epic_ws_keys(tmp_path):
     assert "SHIPIT_LOG_CTX_EPIC" not in env
     assert "SHIPIT_LOG_CTX_WS" not in env
     assert env["SHIPIT_LOG_CTX_ROLE"] == "implementer"
-    assert env["SHIPIT_LOG_CTX_AGENT"] == calls["spec"].agent_hash
+    assert env["SHIPIT_LOG_CTX_AGENT"] == calls["spec"].tree_id
 
 
 def test_issue_spawn_does_not_inherit_a_prior_spawns_epic_identity(tmp_path):
@@ -1268,14 +1338,15 @@ def test_issue_spawn_does_not_inherit_a_prior_spawns_epic_identity(tmp_path):
     env = calls["env"]
     assert "SHIPIT_LOG_CTX_EPIC" not in env
     assert "SHIPIT_LOG_CTX_WS" not in env
-    assert env["SHIPIT_LOG_CTX_AGENT"] == calls["spec"].agent_hash  # THIS spawn's
+    assert env["SHIPIT_LOG_CTX_AGENT"] == calls["spec"].tree_id  # THIS spawn's
     bound = logcontext.bound()
     assert "epic" not in bound and "ws" not in bound
 
 
 def test_reviewer_spawn_exports_identity_with_a_minted_agent_id(tmp_path):
-    # The reviewer's Tree is SHARED per (repo, branch) — no per-Run hash of its
-    # own — so the seam mints a fresh agent id for the Run's identity.
+    # The reviewer's Tree is PER-RUN now (ADR-0074) and the review service provisions
+    # its own flat clone internally, so this spawn boundary mints a FRESH agent id
+    # (a full UUID) for the Run's identity rather than reading it off a shared leaf.
     b, calls = bounds(tmp_path)
 
     spawn_subagent(spec(role="reviewer", ws=3, issue=None, backend="codex"), b)
@@ -1289,4 +1360,8 @@ def test_reviewer_spawn_exports_identity_with_a_minted_agent_id(tmp_path):
     assert bound["agent"]
     assert bound["pr"] == 321
     assert bound["repo"] == "acme/widget"
-    assert Path(bound["tree"]).parent.name == "review"
+    # The bound Tree is the flat per-Run reviewer leaf, one segment below the central
+    # root (no `review/` segment) — <repo>-<agent>-<timestamp>-<id>.
+    tree = Path(bound["tree"])
+    assert tree.parent == layout.central_root()
+    assert tree.name.startswith("widget-codex-")

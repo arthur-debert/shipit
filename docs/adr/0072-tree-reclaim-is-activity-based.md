@@ -90,9 +90,33 @@ KEEP  if  dirty  ||  unpushed  ||  idle < 48h
   unchanged.
 - **`unpushed`** — local commits present on no remote (`git rev-list HEAD --not
   --remotes`). Retained deliberately; see Consequences.
-- **`idle`** — `now - (newest file mtime)`, over a **pruned** walk that skips
-  `.git`, `.pixi`, `node_modules`, `target`, `.venv`, `dist`, `build`,
-  `__pycache__`. This signal does not exist today and must be built.
+- **`idle`** — `now - max(newest file mtime, HEAD's commit stamp)`, where the
+  mtime comes from a **pruned** walk that skips `.git`, `.pixi`, `node_modules`,
+  `target`, `.venv`, `dist`, `build`, `__pycache__`. The walk does not exist
+  today and must be built.
+
+  **Why the commit stamp is in there**, given that this ADR rejects it as a
+  proxy two bullets down: because a file walk is structurally blind to work
+  that removes files. Delete a tracked file, commit, push — the Tree is clean,
+  fully pushed, and *every surviving file still carries its old stamp*. The
+  removed entry bumped only its parent directory, and the commit landed in
+  pruned `.git`. Measured on nothing but the walk, a Tree that was worked in
+  seconds ago reads as idle and is deleted. That is #1018's exact shape,
+  rediscovered (codex, #1029 review round 1).
+
+  This is **not** the commit stamp deciding anything, which is the distinction
+  the proxy bullet is drawing. `max` can only push `idle` *down* — it can only
+  ever KEEP — so the stamp is a floor under the measurement, never a licence to
+  remove. Each signal covers the other's blind spot: the walk sees uncommitted
+  work the stamp cannot, the stamp sees deletions the walk cannot. Neither is
+  trusted alone, and **either being UNKNOWN reads as KEEP** — never as "fall
+  back to the other."
+
+  Note what this restores: `max(root_mtime, last_commit)` is the patch the
+  **write** ladder always carried and the ephemeral ladder never got — the
+  omission this ADR's own Context names as half of #1018's root cause. Dropping
+  it while keeping the hazard would have re-opened the bug this ADR exists to
+  close.
 
 Three signals. **No PR state, no pidfile, no `ps` probe, no kind dispatch.**
 
@@ -101,9 +125,21 @@ over three booleans, and a boolean has nowhere to put "I could not tell." That
 gap is a deletion licence, so it is closed here explicitly rather than left to an
 implementer: **any signal that cannot be determined reads as KEEP, never as
 `False`.** Concretely — `git status` or `git rev-list` failing, erroring, or
-timing out; the walk hitting an unreadable dir, a broken symlink, or a
-concurrent removal; a walk yielding no eligible files at all; a `stat` raising.
-Every one of those keeps the Tree and is reported, not swallowed.
+timing out; `git log` failing to yield HEAD's commit stamp, which includes a
+repository with no commit at all (the read cannot tell the two apart, and does
+not need to: every Tree in that state is already kept by the floor or by an
+empty walk); the walk hitting an unreadable dir or a concurrent removal; a walk
+yielding no eligible files at all; an `lstat` raising. Every one of those keeps
+the Tree and is reported, not swallowed.
+
+**A broken symlink is NOT unknown** — an earlier draft of this list said it was,
+and that was wrong. The walk reads entries with `lstat`, so a dangling link is an
+ordinary readable dirent contributing **the link's own** mtime; only `stat`,
+which follows the link, raises on it. Reading the link rather than its target is
+deliberate twice over: a link pointing out of the Tree must not import foreign
+activity, and a link pointing at nothing must not blank a Tree's whole signal.
+Calling this case unknown would have kept every Tree containing a dangling
+symlink forever, on a signal that was never missing.
 
 This preserves a property today's code has deliberately and that a naive
 three-boolean rewrite would silently drop: `unpushed_shas` is `None` on failure
@@ -115,11 +151,19 @@ which is why it is a decision here and not a code comment. And it matters more
 now than before: this ADR is what unblocks an *automatic* sweep (#1017), so
 "unknown" stops being a human's judgement call and becomes a machine's default.
 
-- **Activity is measured, never inferred.** Liveness, PR state, and commit
-  timestamps were all proxies for "is someone working here." The pruned walk
-  answers it directly, and more truthfully than any of them: it observes an
-  agent editing under `src/`, which root mtime cannot, and it observes a session
-  that has committed nothing and opened no PR, which the PR read cannot.
+- **Activity is measured, never inferred.** Liveness and PR state were proxies
+  for "is someone working here" — they answered a *different* question and hoped
+  it correlated. The pruned walk answers it directly, and more truthfully than
+  either: it observes an agent editing under `src/`, which root mtime cannot,
+  and it observes a session that has committed nothing and opened no PR, which
+  the PR read cannot.
+
+  The commit stamp is the one former proxy that survives, and it survives
+  **demoted**: not as an answer to "is someone working here," but as direct
+  evidence of one specific event — a commit — that the walk structurally cannot
+  see when that commit only removes files. It is a floor under the measurement
+  (`max`, keep-only), never an input to the decision. The test that separates a
+  proxy from a floor: a proxy can license a removal, and this cannot.
 - **The threshold is one constant.** 48h replaces `DEFAULT_MAX_AGE_SECONDS`
   (14d), `MERGED_IDLE_GRACE_SECONDS` (12h), `EPHEMERAL_HARD_CAP_SECONDS` (4d),
   and `EPHEMERAL_GRACE_SECONDS` (1h). The grace window is unnecessary: a

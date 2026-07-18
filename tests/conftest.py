@@ -289,3 +289,33 @@ def _reset_shipit_logging():
     logsetup._clear_own_handlers(logger)
     yield
     logsetup._clear_own_handlers(logger)
+
+
+@pytest.fixture(autouse=True)
+def _guard_session_store_home(monkeypatch, tmp_path_factory, request):
+    """Point the session store's default ``~`` at a tmp dir for EVERY test (ADR-0073).
+
+    `shipit.sessionstore` plants a symlink at `~/.claude/projects/<cwd-slug>` pointing
+    at the repo's store. Its entry points all take a `home` override, but its *callers*
+    (`tree create`, `shipit install`) pass nothing — so any test that exercises a caller
+    resolves the real `~` and plants real symlinks in the developer's actual
+    `~/.claude/projects/`, keyed on whatever the test's fixture remote parsed to.
+
+    That is not a hypothetical. Before this guard, one run of `tests/test_tree_create.py`
+    left seven live symlinks in the real `~/.claude/projects/` and created a real
+    `~/.claude/stores/<pytest-tmpdir-name>/remote/`. A suite that adopts, moves, or
+    refuses against a developer's real store is itself the data-loss bug ADR-0073 exists
+    to prevent — so the guard is autouse and suite-wide rather than opt-in per test: the
+    tests that need protecting are exactly the ones whose authors never think about
+    session stores.
+
+    Tests that want a store of their own still pass `home=` explicitly; this only
+    replaces the *default*. The one test that pins the real default marks itself
+    `@pytest.mark.real_session_store_home` — it reads a path value and touches nothing.
+    """
+    if "real_session_store_home" in request.keywords:
+        return
+    from shipit import sessionstore
+
+    guarded = tmp_path_factory.mktemp("guarded-home")
+    monkeypatch.setattr(sessionstore, "_default_home", lambda: guarded)

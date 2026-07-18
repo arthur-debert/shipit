@@ -14,12 +14,13 @@ from __future__ import annotations
 import io
 import json
 import sys
+import time as _time
 
 import pytest
 
 from shipit import cli, execrun, gh, git
 from shipit.execrun import ExecError
-from shipit.identity import repo_from_slug
+from shipit.identity import Sha, repo_from_slug
 from shipit.tree import layout as layout_mod
 from shipit.tree import registry as registry_mod
 from shipit.tree.create import Tree
@@ -294,7 +295,7 @@ def _head_pr(number: int, state: str, *, is_draft: bool = False) -> gh.HeadPr:
 
 def _record(**over) -> TreeRecord:
     # `unpushed_shas=()` (every commit on some remote), NOT the TreeRecord default
-    # of None (list unreadable): classify's write/ephemeral ladders read None
+    # of None (list unreadable): the gc rule's never-lose-work floor reads None
     # conservatively as has-local-work and would KEEP every record.
     base = dict(
         path="/trees/acme/widget/issues/7/work-aaaa",
@@ -303,17 +304,19 @@ def _record(**over) -> TreeRecord:
         dirty=False,
         ahead=0,
         behind=0,
-        pr="#7 DRAFT",
-        pr_state="DRAFT",
         mtime=1000.0,
         unpushed_shas=(),
     )
     base.update(over)
-    # Likewise `last_commit`: the write ladder reads idle from the NEWEST of it and
-    # `mtime`, and the TreeRecord default of None (stamp unreadable) is conservatively
-    # ACTIVE. It follows `mtime` unless a row states it, so `mtime=<aged>` means "this
-    # Tree is idle" rather than "aged directory, unknown commit stamp".
-    base.setdefault("last_commit", base["mtime"])
+    # Likewise `newest_mtime`, the activity signal the rule reads (ADR-0072): the
+    # TreeRecord default of None (walk unreadable) is conservatively ACTIVE and would
+    # keep every Tree. It follows `mtime` unless a row states it, so `mtime=<aged>`
+    # means "nobody has touched this Tree" rather than "aged dir, unknown activity".
+    base.setdefault("newest_mtime", base["mtime"])
+    # And `last_commit`, idle's other half: it is maxed into the walk and either one
+    # unreadable blanks idle entirely, so the TreeRecord default of None would likewise
+    # keep every Tree. It tracks the walk unless a row states it.
+    base.setdefault("last_commit", base["newest_mtime"])
     return TreeRecord(**base)
 
 
@@ -330,7 +333,6 @@ def test_run_list_renders_the_fleet_through_the_seam(monkeypatch, capsys):
             dirty=True,
             ahead=2,
             behind=1,
-            pr="#9 OPEN",
             mtime=500.0,
         ),
     ]
@@ -342,7 +344,8 @@ def test_run_list_renders_the_fleet_through_the_seam(monkeypatch, capsys):
     assert rc == 0
     out = capsys.readouterr().out
     # The scan reached the renderer: both Trees, table headers, the BASE annotation.
-    assert "BRANCH" in out and "BASE" in out and "PR" in out
+    # No PR column: the `gh` read is gone with the reclaim signal it fed (ADR-0072).
+    assert "BRANCH" in out and "BASE" in out and "PR" not in out
     assert "issues/7/work" in out and "HAR02/WS02" in out
     assert "origin/HAR02/umbrella (+2/-1)" in out
 
@@ -380,9 +383,14 @@ def test_run_list_over_a_fixture_root_renders(tmp_path, monkeypatch, capsys):
 
 def test_list_json_emits_the_typed_rows(monkeypatch, capsys):
     # The full argv round trip for the new read-path surface: `tree list --json`
-    # serializes the typed rows' declared field set through the render seam.
+    # serializes the typed rows' declared field set through the render seam. Since
+    # ADR-0074 the row carries a `created` stamp (recovered from the flat leaf's
+    # `<timestamp>` slot), not the retired `kind`.
+    leaf = "widget-claude-20260717-081333-619cf51a-f501-44dc-992f-74df773204aa"
     monkeypatch.setattr(layout_mod, "central_root", lambda: "/trees")
-    monkeypatch.setattr(registry_mod, "scan", lambda root: [_record()])
+    monkeypatch.setattr(
+        registry_mod, "scan", lambda root: [_record(path=f"/trees/{leaf}")]
+    )
 
     rc = cli.main(["tree", "list", "--json"])
 
@@ -390,8 +398,9 @@ def test_list_json_emits_the_typed_rows(monkeypatch, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert set(payload) == {"trees"}
     row = payload["trees"][0]
-    assert row["path"] == "/trees/acme/widget/issues/7/work-aaaa"
-    assert row["kind"] == "write"
+    assert row["path"] == f"/trees/{leaf}"
+    assert row["created"] == "20260717-081333"
+    assert "kind" not in row
     assert row["branch"] == "issues/7/work"
     assert row["dirty"] is False
 
@@ -650,55 +659,32 @@ def test_stdin_is_tty_reflects_real_stream(monkeypatch):
 
 
 def _gc_fleet(root, monkeypatch):
-    """A four-Tree fixture for gc: one removable, one stale, one dirty-keep, one open-keep.
+    """A four-Tree fixture for gc: one removable, three kept — one per keep arm.
 
-    Returns ``(removable, stale, keep_dirty, keep_open)`` paths after wiring
+    Returns ``(removable, keep_dirty, keep_unpushed, keep_active)`` paths after wiring
     ``central_root``/``scan`` so both ``run_gc()`` and its dry-run share one fleet. The
-    removable Tree (merged + clean + aged) is the only delete candidate. The PR states
-    ride the records, as they do off a real scan (#1011).
+    removable Tree (clean + fully pushed + idle) is the only delete candidate; the
+    other three cover the rule's three keeps (ADR-0072).
     """
-    removable = _make_tree_dir(root, "acme/widget/issues/1/work-merged")
-    stale = _make_tree_dir(root, "acme/widget/issues/2/work-orphan")
-    keep_dirty = _make_tree_dir(root, "acme/widget/issues/3/work-dirty")
-    keep_open = _make_tree_dir(root, "acme/widget/issues/4/work-open")
-    aged = 0.0  # mtime far in the past -> always aged vs time.time()
+    removable = _make_tree_dir(root, "acme/widget/issues/1/work-idle")
+    keep_dirty = _make_tree_dir(root, "acme/widget/issues/2/work-dirty")
+    keep_unpushed = _make_tree_dir(root, "acme/widget/issues/3/work-unpushed")
+    keep_active = _make_tree_dir(root, "acme/widget/issues/4/work-active")
+    idle = 0.0  # newest file mtime far in the past -> always idle vs time.time()
     records = [
+        _record(path=str(removable), branch="b1", mtime=idle),
+        _record(path=str(keep_dirty), branch="b2", dirty=True, mtime=idle),
         _record(
-            path=str(removable),
-            branch="b1",
-            dirty=False,
-            ahead=0,
-            mtime=aged,
-            pr_state="MERGED",
-        ),
-        _record(
-            path=str(stale),
-            branch="b2",
-            dirty=False,
-            ahead=0,
-            mtime=aged,
-            pr_state=None,  # no PR
-        ),
-        _record(
-            path=str(keep_dirty),
+            path=str(keep_unpushed),
             branch="b3",
-            dirty=True,
-            ahead=0,
-            mtime=aged,
-            pr_state="MERGED",
+            unpushed_shas=(Sha("a" * 40),),
+            mtime=idle,
         ),
-        _record(
-            path=str(keep_open),
-            branch="b4",
-            dirty=False,
-            ahead=0,
-            mtime=aged,
-            pr_state="OPEN",
-        ),
+        _record(path=str(keep_active), branch="b4", mtime=_time.time()),
     ]
     monkeypatch.setattr(layout_mod, "central_root", lambda: str(root))
     monkeypatch.setattr(registry_mod, "scan", lambda r: records)
-    return removable, stale, keep_dirty, keep_open
+    return removable, keep_dirty, keep_unpushed, keep_active
 
 
 def _paths_after(out: str, marker: str) -> set[str]:
@@ -711,24 +697,21 @@ def _paths_after(out: str, marker: str) -> set[str]:
     return paths
 
 
-def test_run_gc_removes_only_removable_lists_stale_keeps_rest(
-    tmp_path, monkeypatch, capsys
-):
+def test_run_gc_removes_only_removable_keeps_rest(tmp_path, monkeypatch, capsys):
     # The full wiring round trip: plan_fleet -> sweep -> the rendered summary.
     root = tmp_path / "trees"
-    removable, stale, keep_dirty, keep_open = _gc_fleet(root, monkeypatch)
+    removable, keep_dirty, keep_unpushed, keep_active = _gc_fleet(root, monkeypatch)
 
     rc = tree_verb.run_gc()
 
     assert rc == 0
     assert not removable.exists()  # only the removable Tree is deleted
-    assert stale.exists()  # ambiguous -> listed, never removed
     assert keep_dirty.exists()  # local work protected
-    assert keep_open.exists()  # in-flight PR protected
+    assert keep_unpushed.exists()  # unpushed commits protected
+    assert keep_active.exists()  # someone is working here
     out = capsys.readouterr().out
     assert f"REMOVED {removable}" in out
-    assert f"STALE   {stale}" in out
-    assert "removed 1, stale 1, kept 2" in out
+    assert "removed 1, kept 3" in out
 
 
 def test_run_gc_empty_root_is_not_an_error(tmp_path, monkeypatch, capsys):
@@ -739,7 +722,7 @@ def test_run_gc_empty_root_is_not_an_error(tmp_path, monkeypatch, capsys):
     rc = tree_verb.run_gc()
 
     assert rc == 0
-    assert "removed 0, stale 0, kept 0" in capsys.readouterr().out
+    assert "removed 0, kept 0" in capsys.readouterr().out
 
 
 def test_run_gc_renders_sweep_failures_on_stderr(monkeypatch, capsys):
@@ -748,10 +731,9 @@ def test_run_gc_renders_sweep_failures_on_stderr(monkeypatch, capsys):
     result = tree_verb.gc.GcResult(
         removed=("/trees/good",),
         failed=(tree_verb.gc.GcFailure(path="/trees/bad", error="read-only file"),),
-        stale=(),
         kept=0,
         total=2,
-        unknown=0,
+        unexamined=0,
     )
     monkeypatch.setattr(layout_mod, "central_root", lambda: "/trees")
     monkeypatch.setattr(registry_mod, "scan", lambda r: [])
@@ -770,7 +752,7 @@ def test_run_gc_renders_sweep_failures_on_stderr(monkeypatch, capsys):
     captured = capsys.readouterr()
     assert "REMOVED /trees/good" in captured.out
     assert "FAILED  /trees/bad: read-only file" in captured.err
-    assert "removed 1, stale 0, kept 0" in captured.out
+    assert "removed 1, kept 0" in captured.out
 
 
 def test_run_gc_dry_run_lists_classifications_and_deletes_nothing(
@@ -779,7 +761,7 @@ def test_run_gc_dry_run_lists_classifications_and_deletes_nothing(
     # --dry-run prints every Tree's bucket and must not touch disk: sweeping is
     # fatal here.
     root = tmp_path / "trees"
-    removable, stale, keep_dirty, keep_open = _gc_fleet(root, monkeypatch)
+    removable, keep_dirty, keep_unpushed, keep_active = _gc_fleet(root, monkeypatch)
 
     def boom(*args, **kwargs):
         raise AssertionError("dry-run must not sweep")
@@ -790,16 +772,16 @@ def test_run_gc_dry_run_lists_classifications_and_deletes_nothing(
 
     assert rc == 0
     # Nothing was deleted.
-    assert removable.exists() and stale.exists()
-    assert keep_dirty.exists() and keep_open.exists()
+    assert removable.exists() and keep_dirty.exists()
+    assert keep_unpushed.exists() and keep_active.exists()
     out = capsys.readouterr().out
     # Each Tree is listed under its classification, and the summary says zero deleted.
     assert f"REMOVABLE {removable}" in out
-    assert f"STALE     {stale}" in out
     assert f"KEEP      {keep_dirty}" in out
-    assert f"KEEP      {keep_open}" in out
+    assert f"KEEP      {keep_unpushed}" in out
+    assert f"KEEP      {keep_active}" in out
     assert "no Trees deleted" in out
-    assert "removable 1, stale 1, keep 2" in out
+    assert "removable 1, keep 3" in out
 
 
 def test_run_gc_dry_run_decisions_match_the_real_sweep(tmp_path, monkeypatch, capsys):
@@ -824,37 +806,37 @@ def _capture_plan_fleet(monkeypatch) -> dict:
     """Spy on gc.plan_fleet: record its kwargs, return an empty plan."""
     seen: dict = {}
 
-    def fake_plan_fleet(root, *, max_age_seconds):
-        seen["max_age_seconds"] = max_age_seconds
+    def fake_plan_fleet(root, *, idle_threshold_seconds):
+        seen["idle_threshold_seconds"] = idle_threshold_seconds
         return tree_verb.gc.GcPlan(
-            partition=tree_verb.cleanup.Cleanup(removable=[], stale=[], keep=[]),
+            partition=tree_verb.cleanup.Cleanup(removable=[], keep=[]),
             total=0,
-            unknown=0,
+            unexamined=0,
         )
 
     monkeypatch.setattr(tree_verb.gc, "plan_fleet", fake_plan_fleet)
     return seen
 
 
-def test_run_gc_threshold_overrides_the_age_boundary(monkeypatch, capsys):
+def test_run_gc_threshold_overrides_the_idle_boundary(monkeypatch, capsys):
     monkeypatch.setattr(layout_mod, "central_root", lambda: "/trees")
     seen = _capture_plan_fleet(monkeypatch)
 
-    rc = tree_verb.run_gc(max_age_seconds=36 * 3600.0)
+    rc = tree_verb.run_gc(idle_threshold_seconds=36 * 3600.0)
 
     assert rc == 0
-    assert seen["max_age_seconds"] == 36 * 3600
+    assert seen["idle_threshold_seconds"] == 36 * 3600
 
 
-def test_run_gc_default_threshold_is_two_weeks(monkeypatch, capsys):
-    # Omitting --threshold passes the 14-day default through to the plan unchanged.
+def test_run_gc_default_threshold_is_48_hours(monkeypatch, capsys):
+    # Omitting --threshold passes the 48h default through to the plan unchanged.
     monkeypatch.setattr(layout_mod, "central_root", lambda: "/trees")
     seen = _capture_plan_fleet(monkeypatch)
 
     rc = tree_verb.run_gc()
 
     assert rc == 0
-    assert seen["max_age_seconds"] == tree_verb.cleanup.DEFAULT_MAX_AGE_SECONDS
+    assert seen["idle_threshold_seconds"] == tree_verb.cleanup.IDLE_THRESHOLD_SECONDS
 
 
 def test_gc_threshold_parses_at_click(monkeypatch, capsys):
@@ -865,7 +847,7 @@ def test_gc_threshold_parses_at_click(monkeypatch, capsys):
     rc = cli.main(["tree", "gc", "--threshold", "36h"])
 
     assert rc == 0
-    assert seen["max_age_seconds"] == 36 * 3600
+    assert seen["idle_threshold_seconds"] == 36 * 3600
 
 
 def test_gc_bad_threshold_is_a_usage_error(monkeypatch, capsys):
@@ -885,74 +867,83 @@ def test_gc_bad_threshold_is_a_usage_error(monkeypatch, capsys):
 def test_run_gc_incomplete_sweep_is_loud_and_exits_nonzero(
     tmp_path, monkeypatch, capsys
 ):
-    # When any Tree's PR state is UNKNOWN the sweep saw only part of the root, so it
-    # reports FAILURE (#1011): exit 1, and a summary that LEADS with the skip rather
-    # than burying it under a healthy-looking count. The UNKNOWN Tree is classified
-    # conservatively (stale -> never removed).
+    # When a Tree is kept because a signal could not be READ, the run judged only part
+    # of the root, so it reports FAILURE (#1012): exit 1, and a summary that LEADS with
+    # the gap rather than burying it under a healthy-looking count.
     root = tmp_path / "trees"
-    merged = _make_tree_dir(root, "acme/widget/issues/1/work-merged")
-    unknown = _make_tree_dir(root, "acme/widget/issues/2/work-unknown")
-    aged = 0.0
+    judged = _make_tree_dir(root, "acme/widget/issues/1/work-idle")
+    blind = _make_tree_dir(root, "acme/widget/issues/2/work-unreadable")
     records = [
-        _record(
-            path=str(merged),
-            branch="b1",
-            dirty=False,
-            ahead=0,
-            mtime=aged,
-            pr_state="MERGED",
-        ),
-        _record(
-            path=str(unknown),
-            branch="b2",
-            dirty=False,
-            ahead=0,
-            mtime=aged,
-            pr_state="UNKNOWN",
-        ),
+        _record(path=str(judged), branch="b1", mtime=0.0),
+        # The activity walk failed: unreadable, so kept WITHOUT a verdict.
+        _record(path=str(blind), branch="b2", mtime=0.0, newest_mtime=None),
     ]
     monkeypatch.setattr(layout_mod, "central_root", lambda: str(root))
     monkeypatch.setattr(registry_mod, "scan", lambda r: records)
 
     rc = tree_verb.run_gc()
 
-    assert rc == 1  # a partly-seen root is not a successful sweep
-    assert not merged.exists()  # the readable, merged Tree is reclaimed
-    assert unknown.exists()  # the unreadable Tree is left untouched (conservative)
+    assert rc == 1  # a partly-judged root is not a successful sweep
+    assert not judged.exists()  # the idle Tree is reclaimed
+    assert blind.exists()  # the unreadable one is kept, unexamined
     captured = capsys.readouterr()
-    assert "swept 1 of 2; 1 skipped" in captured.err
-    # The operator is told the skipped Trees were not judged safe ...
-    assert "kept UNEXAMINED" in captured.err
-    # ... and what actually causes this, rather than being left with a mystery.
-    assert "gh api rate_limit" in captured.err
-    # The summary leads with the skip; the counts follow, still stale not removed.
+    assert "judged 1 of 2; 1 kept UNEXAMINED" in captured.err
+    # The operator is told those Trees were not judged safe ...
+    assert "not judged safe" in captured.err
+    # ... and is pointed at the machine the failure is actually on. The old text sent
+    # them to `gh api rate_limit` — a network budget that no longer gates anything.
+    assert "gh api rate_limit" not in captured.err
+    assert "local" in captured.err
+    # The summary leads with the gap; the counts follow.
     assert (
-        "gc: INCOMPLETE — 1 of 2 skipped (PR state unknown); "
-        "removed 1, stale 1, kept 0" in captured.out
+        "gc: INCOMPLETE — 1 of 2 unexamined (a signal could not be read); "
+        "removed 1, kept 1" in captured.out
     )
 
 
-def test_run_gc_incomplete_view_leads_with_the_repo_shaped_cause(
+def test_run_gc_never_reports_a_tree_it_deleted_as_unexamined(
     tmp_path, monkeypatch, capsys
 ):
-    # #1011: the PR state is now read once per REPO, so a sweep makes ~20 calls, not
-    # ~1000. A drained hourly quota is therefore no longer the likely cause of an
-    # UNKNOWN — one repo's `gh pr list` failing is — and one such failure blanks every
-    # Tree in that repo. So the repo-shaped cause LEADS and the rate limit is demoted
-    # to the fleet-wide case where it is still right. Pointing an operator at a quota
-    # that is fine costs them a 25-minute wait for nothing: a confident wrong
-    # diagnosis is worse than none.
+    # The invariant, end-to-end through the real verb (the unit test pins the count;
+    # this pins what an operator actually READS): every Tree the sweep DELETES is judged,
+    # so `unexamined` never counts one the same run removed — the audit trail can never
+    # contradict the destruction (`INCOMPLETE - 1 of 2 skipped; removed 2, kept 0`).
+    # Two idle, clean, fully-pushed Trees: both removable, the whole root judged.
     root = tmp_path / "trees"
-    unknown = _make_tree_dir(root, "acme/widget/issues/1/work-unknown")
+    plain = _make_tree_dir(root, "acme/widget/issues/1/work-idle")
+    other = _make_tree_dir(root, "acme/widget/issues/2/work-idle2")
     records = [
-        _record(
-            path=str(unknown),
-            branch="b1",
-            dirty=False,
-            ahead=0,
-            mtime=0.0,
-            pr_state="UNKNOWN",
-        ),
+        _record(path=str(plain), branch="b1", mtime=0.0),
+        _record(path=str(other), branch="b2", mtime=0.0),
+    ]
+    monkeypatch.setattr(layout_mod, "central_root", lambda: str(root))
+    monkeypatch.setattr(registry_mod, "scan", lambda r: records)
+
+    rc = tree_verb.run_gc()
+
+    captured = capsys.readouterr()
+    assert not plain.exists()
+    assert not other.exists()  # both were deleted ...
+    assert "removed 2, kept 0" in captured.out  # ... and the report says exactly that
+    assert "INCOMPLETE" not in captured.out
+    assert "UNEXAMINED" not in captured.err
+    assert rc == 0  # the whole root was judged; nothing was skipped
+
+
+def test_run_gc_incomplete_view_names_a_local_cause_not_a_network_one(
+    tmp_path, monkeypatch, capsys
+):
+    # Naming a cause is the point (#1011): a bare "1 unexamined" is a mystery an
+    # operator will either ignore or go hunting over. But the cause text has to follow
+    # the SIGNALS, and ADR-0072 changed which ones can hide a Tree from the rule. It
+    # used to name the PR read (a drained `gh` budget, then one repo's failed
+    # `gh pr list`); reclaim reads no PR state at all now. What is left is the rule's
+    # own two arms, and both are LOCAL. Sending an operator to check `gh api rate_limit`
+    # for what is a filesystem problem is a confident wrong diagnosis — worse than none.
+    root = tmp_path / "trees"
+    blind = _make_tree_dir(root, "acme/widget/issues/1/work-unreadable")
+    records = [
+        _record(path=str(blind), branch="b1", mtime=0.0, unpushed_shas=None),
     ]
     monkeypatch.setattr(layout_mod, "central_root", lambda: str(root))
     monkeypatch.setattr(registry_mod, "scan", lambda r: records)
@@ -961,42 +952,30 @@ def test_run_gc_incomplete_view_leads_with_the_repo_shaped_cause(
 
     assert rc == 1
     err = capsys.readouterr().err
-    per_repo = err.index("read once per repo")
-    rate_limit = err.index("gh api rate_limit")
-    # Both are offered, but the repo-shaped cause comes FIRST.
-    assert per_repo < rate_limit
-    # The budget line is explicitly conditional now, not stated as "the usual cause".
-    assert "if the skip covers most of the fleet" in err
-    assert "the usual cause is an exhausted gh API budget" not in err
+    # It names the two signals that can actually do this ...
+    assert "unpushed-commit list" in err
+    assert "activity walk" in err
+    # ... and points at the right machine.
+    assert "local" in err
+    assert "gh api rate_limit" not in err
+    assert "read once per repo" not in err
 
 
-def test_run_gc_dry_run_warns_on_unknown_and_deletes_nothing(
+def test_run_gc_dry_run_warns_on_an_unexamined_tree_and_deletes_nothing(
     tmp_path, monkeypatch, capsys
 ):
-    # A --dry-run preview over a fleet that contains an unreadable-state Tree must
-    # still surface the incomplete-view warning, yet touch nothing on disk. The
-    # UNKNOWN Tree lands in STALE (conservative).
+    # A --dry-run preview over a fleet holding an unreadable Tree must still surface
+    # the incomplete-view warning, yet touch nothing on disk. The preview is the mode
+    # an operator uses to ASK whether the fleet is clean, so it is the mode that most
+    # has to admit when it does not know (#1011).
     root = tmp_path / "trees"
-    merged = _make_tree_dir(root, "acme/widget/issues/1/work-merged")
-    unknown = _make_tree_dir(root, "acme/widget/issues/2/work-unknown")
+    idle = _make_tree_dir(root, "acme/widget/issues/1/work-idle")
+    blind = _make_tree_dir(root, "acme/widget/issues/2/work-unreadable")
     aged = 0.0
     records = [
-        _record(
-            path=str(merged),
-            branch="b1",
-            dirty=False,
-            ahead=0,
-            mtime=aged,
-            pr_state="MERGED",
-        ),
-        _record(
-            path=str(unknown),
-            branch="b2",
-            dirty=False,
-            ahead=0,
-            mtime=aged,
-            pr_state="UNKNOWN",
-        ),
+        _record(path=str(idle), branch="b1", dirty=False, ahead=0, mtime=aged),
+        # The walk failed -> kept WITHOUT a verdict, and counted as such.
+        _record(path=str(blind), branch="b2", mtime=aged, newest_mtime=None),
     ]
     monkeypatch.setattr(layout_mod, "central_root", lambda: str(root))
     monkeypatch.setattr(registry_mod, "scan", lambda r: records)
@@ -1009,30 +988,28 @@ def test_run_gc_dry_run_warns_on_unknown_and_deletes_nothing(
     rc = tree_verb.run_gc(dry_run=True)
 
     assert rc == 1  # the preview cannot answer "is the fleet clean?" either
-    assert merged.exists() and unknown.exists()  # nothing deleted in dry-run
+    assert idle.exists() and blind.exists()  # nothing deleted in dry-run
     captured = capsys.readouterr()
-    # Preview lists the partition (the UNKNOWN Tree is conservatively STALE) ...
-    assert f"REMOVABLE {merged}" in captured.out
-    assert f"STALE     {unknown}" in captured.out
+    # Preview lists the partition ...
+    assert f"REMOVABLE {idle}" in captured.out
+    assert f"KEEP      {blind}" in captured.out
     assert "no Trees deleted" in captured.out
-    # ... and leads its counts with the skip, in the preview's own tense.
-    assert "INCOMPLETE — 1 of 2 skipped (PR state unknown)" in captured.out
-    assert "would sweep 1 of 2; 1 skipped" in captured.err
-    assert "gh api rate_limit" in captured.err
+    # ... and leads its counts with the gap, in the preview's own tense.
+    assert "INCOMPLETE — 1 of 2 unexamined (a signal could not be read)" in captured.out
+    assert "would judge 1 of 2" in captured.err
 
 
 def test_run_gc_streams_removals_before_the_summary(tmp_path, monkeypatch, capsys):
     # The verb supplies the sweep's sink, so REMOVED lines are on stdout as each
-    # Tree dies — ahead of the STALE list and the summary, which only the end of
-    # the sweep can produce.
+    # Tree dies — ahead of the summary, which only the end of the sweep can produce.
     root = tmp_path / "trees"
-    removable, stale, _keep_dirty, _keep_open = _gc_fleet(root, monkeypatch)
+    removable, _keep_dirty, _keep_unpushed, _keep_active = _gc_fleet(root, monkeypatch)
 
     assert tree_verb.run_gc() == 0
 
     lines = capsys.readouterr().out.splitlines()
     assert lines.index(f"REMOVED {removable}") < lines.index(
-        f"STALE   {stale} (ambiguous — left for review, not removed)"
+        next(line for line in lines if line.startswith("gc: removed"))
     )
     assert [line for line in lines if line.startswith("REMOVED")] == [
         f"REMOVED {removable}"
@@ -1090,19 +1067,18 @@ def test_run_gc_flushes_each_removed_line(tmp_path, monkeypatch):
 
 
 def test_run_gc_no_warning_when_no_unknown(tmp_path, monkeypatch, capsys):
-    # A sweep where every PR state is readable saw the whole root: exit 0, and no
+    # A sweep where every signal is readable saw the whole root: exit 0, and no
     # incomplete-view report anywhere. The loud path must stay rare enough to mean
     # something.
     root = tmp_path / "trees"
-    merged = _make_tree_dir(root, "acme/widget/issues/1/work-merged")
+    healthy = _make_tree_dir(root, "acme/widget/issues/1/work-healthy")
     records = [
         _record(
-            path=str(merged),
+            path=str(healthy),
             branch="b1",
             dirty=False,
             ahead=0,
             mtime=0.0,
-            pr_state="MERGED",
         ),
     ]
     monkeypatch.setattr(layout_mod, "central_root", lambda: str(root))
@@ -1114,4 +1090,4 @@ def test_run_gc_no_warning_when_no_unknown(tmp_path, monkeypatch, capsys):
     captured = capsys.readouterr()
     assert "INCOMPLETE" not in captured.out
     assert "skipped" not in captured.err and "skipped" not in captured.out
-    assert "gc: removed 1, stale 0, kept 0" in captured.out  # the plain healthy form
+    assert "gc: removed 1, kept 0" in captured.out  # the plain healthy form

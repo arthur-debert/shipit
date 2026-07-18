@@ -112,9 +112,10 @@ it up — that artifact is codex's, not shipit's.
 
 ### Teardown
 
-An abandoned ephemeral Tree is reclaimed by the gc ladder eventually
-(ADR-0027: liveness-checked, dirty/unpushed work protected absolutely, hard
-time cap as backstop). To reclaim a smoke Tree immediately:
+An abandoned ephemeral Tree is reclaimed by `tree gc` eventually
+(ADR-0072: activity-based — dirty/unpushed work protected absolutely, otherwise
+kept until it has been idle past the 48h threshold). To reclaim a smoke Tree
+immediately:
 
 ```sh
 shipit tree remove <tree-path-or-name>
@@ -155,14 +156,12 @@ sign-in, from the WS04 Tree checkout:
   `.codex/` layer only after the operator trusts that checkout, and every
   launch mints a *new* Tree path — so expect a trust prompt per fresh
   interactive session before the managed hooks/config activate; headless
-  `codex exec` simply runs without the untrusted project layer. Consequence:
-  the SessionStart-written liveness pidfile (`.git/shipit-session.json`) only
-  appears once the layer runs, so an untrusted or headless session Tree reads
-  as not-live to the gc ladder — safe (the dirty/unpushed floor and the
-  conservative ladder still protect work), but a live idle session in an
-  untrusted Tree relies on the age threshold rather than liveness. Verifying
-  the interactive trust-flow + hook firing end-to-end once CDX01 is on `main`
-  is the natural follow-up dogfood pass.
+  `codex exec` simply runs without the untrusted project layer. Reclaim is
+  unaffected either way: `tree gc` is purely activity-based (ADR-0072) — it
+  reads a Tree's idle age and its dirty/unpushed floor, never a per-session
+  liveness signal — so an untrusted or headless session Tree is judged exactly
+  like any other. Verifying the interactive trust-flow + hook firing end-to-end
+  once CDX01 is on `main` is the natural follow-up dogfood pass.
 - **Launch-side vs in-session log context.** Records written *by the launch*
   (Tree provisioning, the launch milestone) carry the launcher process's log
   context (whatever agent/epic ran `shipit session codex`) alongside the

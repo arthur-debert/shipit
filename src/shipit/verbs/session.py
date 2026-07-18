@@ -40,7 +40,6 @@ import shutil
 import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
-from pathlib import Path
 
 import click
 
@@ -48,8 +47,8 @@ from .. import execrun, git, identity, logcontext, logsetup, workenv
 from ..agent.backend import CLAUDE
 from ..session import bootstrap, resume
 from ..spawn.launch import scrub_tree_env
-from ..tree.create import Tree, create_from_source, new_agent_hash
-from ..tree.layout import TreeSpec, plan
+from ..tree.create import Tree, create_from_source, new_tree_naming
+from ..tree.layout import TreeSpec
 from ._errors import cli_errors
 from ._params import REPO_SLUG
 
@@ -256,7 +255,7 @@ def run_codex(
     try:
         spec = TreeSpec(
             repo=repo_identity or identity.resolve_repo(root),
-            agent_hash=new_agent_hash(),
+            **new_tree_naming(bootstrap.CODEX.binary),
             ephemeral=session_id,
         )
         tree = creator(spec, source_repo=root)
@@ -382,10 +381,11 @@ def run_claude_resume(
     session_id = (
         f"sess-{time.strftime('%Y%m%d-%H%M%S', time.gmtime(time.time()))}-{os.getpid()}"
     )
-    spec = TreeSpec(
-        repo=repo_identity, agent_hash=new_agent_hash(), ephemeral=session_id
-    )
-    expected_tree = plan(spec).dir
+    # The Tree is minted by the WorktreeCreate hook AFTER exec (`claude --worktree`),
+    # and under the flat grammar its dir `<id>` is the HARNESS session UUID the hook
+    # reads from the payload (ADR-0074) — NOT derivable here. So this launch no longer
+    # precomputes the dir; the branch (`ephemeral/<session_id>`) is still the birth
+    # branch the hook builds. `session_id` remains the pre-exec log-context key.
     argv = [
         CLAUDE.binary,
         "--worktree",
@@ -397,16 +397,15 @@ def run_claude_resume(
     if prompt is not None:
         argv.append(prompt)
     display_argv = _display_argv(argv, prompt=prompt)
-    env = _claude_resume_env(os.environ if environ is None else environ)
+    env = _claude_resume_env(os.environ if environ is None else environ, session_id)
     print(
-        _format_claude_resume_launch(session_id, expected_tree, display_argv),
+        _format_claude_resume_launch(session_id, display_argv),
         flush=True,
     )
-    with logcontext.scoped(session=session_id, tree=str(expected_tree)):
+    with logcontext.scoped(session=session_id):
         logger.info(
-            "launching claude coordinator session %s for resume in %s",
+            "launching claude coordinator session %s for resume",
             session_id,
-            expected_tree,
             extra={
                 "argv": shlex.join(display_argv),
                 **({"prompt_chars": len(prompt)} if prompt is not None else {}),
@@ -438,11 +437,27 @@ def run_claude_resume(
     return 0
 
 
-def _claude_resume_env(parent_env: Mapping[str, str]) -> dict[str, str]:
-    """Claude resume env: preserve Claude's session seams, scrub stale Tree identity."""
+def _claude_resume_env(
+    parent_env: Mapping[str, str], session_id: str
+) -> dict[str, str]:
+    """Claude resume env: scrub stale Tree/log identity, export the MINTED session id.
+
+    Scrubs the inherited Tree pointers and every ``SHIPIT_LOG_CTX_*`` key (a global resume
+    may target a different repo/task than the shell that launched it), then exports THIS
+    launch's freshly minted ``session_id`` as ``SHIPIT_LOG_CTX_SESSION`` — the same var
+    :func:`shipit.session.current.current_session_id` reads first and the SessionStart hook
+    re-exports. Without it that resolver finds no exported key and falls back to the flat
+    Tree's leaf UUID, so SessionStart records the resumed session under a DIFFERENT id than
+    the pre-exec launch record used — splitting one launch's flow log across two ids and
+    minting two ``ResumeTarget``s for one native id. Exporting it here folds both events
+    into one session. (Only ``session`` is exported, not the Tree: the resume's Tree is
+    minted by the WorktreeCreate hook AFTER exec and is not knowable at this seam.)
+    """
 
     env = scrub_tree_env(dict(parent_env))
-    return logcontext.scrub_env(env)
+    env = logcontext.scrub_env(env)
+    env[logcontext.ENV_PREFIX + "SESSION"] = session_id
+    return env
 
 
 def _display_argv(argv: Sequence[str], *, prompt: str | None) -> list[str]:
@@ -451,9 +466,12 @@ def _display_argv(argv: Sequence[str], *, prompt: str | None) -> list[str]:
     return [*argv[:-1], "<prompt:redacted>"] if prompt is not None else list(argv)
 
 
-def _format_claude_resume_launch(
-    session_id: str, tree: str | Path, argv: Sequence[str]
-) -> str:
-    """Human scrollback line-set before Claude takes over the terminal."""
+def _format_claude_resume_launch(session_id: str, argv: Sequence[str]) -> str:
+    """Human scrollback line-set before Claude takes over the terminal.
 
-    return f"claude session {session_id}\ntree {tree}\nexec {shlex.join(list(argv))}"
+    No ``tree`` line: the resume's Tree is minted by the WorktreeCreate hook after
+    exec and its flat dir ``<id>`` is the harness session UUID (ADR-0074), so it is
+    not knowable at this pre-exec seam.
+    """
+
+    return f"claude session {session_id}\nexec {shlex.join(list(argv))}"

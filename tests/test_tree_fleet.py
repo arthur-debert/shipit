@@ -12,30 +12,34 @@ from shipit.tree import fleet
 from shipit.tree.registry import TreeRecord
 from shipit.verbs.tree import format_fleet
 
-#: The exact JSON field set every `tree list --json` row must emit.
+#: The exact JSON field set every `tree list --json` row must emit. Since ADR-0074
+#: the `kind` field is gone (no kind segment to parse) and a real `created` column —
+#: the flat leaf's `<timestamp>` — takes its place.
 EXPECTED_ROW_FIELDS = {
     "path",
-    "kind",
+    "created",
     "branch",
     "base",
     "ahead",
     "behind",
     "dirty",
-    "pr",
     "age_seconds",
 }
+
+#: A flat Tree leaf (ADR-0074): `<repo>-<agent>-<timestamp>-<id>`, so its `<timestamp>`
+#: slot is a real created column and `created_from_leaf` recovers it.
+_LEAF_A = "widget-claude-20260717-081333-619cf51a-f501-44dc-992f-74df773204aa"
+_LEAF_B = "widget-codex-20260102-030405-7c9e6679-7425-40de-944b-e07fc1f90ae7"
 
 
 def _record(**over) -> TreeRecord:
     base = dict(
-        path="/trees/acme/widget/issues/7/work-aaaa",
+        path=f"/trees/{_LEAF_A}",
         branch="issues/7/work",
         base="origin/main",
         dirty=False,
         ahead=0,
         behind=0,
-        pr="#7 DRAFT",
-        pr_state="DRAFT",
         mtime=1000.0,
         unpushed_shas=(),
     )
@@ -46,16 +50,23 @@ def _record(**over) -> TreeRecord:
 # --- build: the pure record -> row derivation -----------------------------------
 
 
-def test_build_derives_kind_from_the_path():
+def test_build_derives_created_from_the_flat_leaf():
+    # The created column is sourced from the flat leaf's `<timestamp>` slot (ADR-0074);
+    # an OLD nested Tree (no flat leaf, reclaimed by attrition) reads None, never a
+    # fabricated date.
     records = [
-        _record(),  # issues/<id>/... -> write
-        _record(path="/trees/acme/widget/review/tre03-ws03", branch="TRE03/WS03"),
-        _record(path="/trees/acme/widget/ephemeral/sess-1", branch="ephemeral/sess-1"),
+        _record(),  # flat leaf A -> its timestamp
+        _record(path=f"/trees/{_LEAF_B}", branch="HAR02/WS02"),
+        _record(path="/trees/acme/widget/issues/7/work-aaaa", branch="issues/7/work"),
     ]
 
     result = fleet.build(records, now=1000.0)
 
-    assert [row.kind for row in result.trees] == ["write", "review", "ephemeral"]
+    assert [row.created for row in result.trees] == [
+        "20260717-081333",
+        "20260102-030405",
+        None,
+    ]
 
 
 def test_build_ages_each_row_against_the_injected_now():
@@ -73,9 +84,9 @@ def test_build_clamps_a_future_mtime_to_zero_age():
 def test_build_keeps_absent_facts_as_none():
     # The typed row carries honest nulls; placeholder spellings ("(detached)",
     # "-") are the text renderer's job, so the JSON surface stays raw.
-    result = fleet.build([_record(branch=None, base=None, pr=None)], now=1000.0)
+    result = fleet.build([_record(branch=None, base=None)], now=1000.0)
     row = result.trees[0]
-    assert row.branch is None and row.base is None and row.pr is None
+    assert row.branch is None and row.base is None
 
 
 def test_build_preserves_scan_order():
@@ -106,52 +117,56 @@ def test_format_fleet_renders_the_table():
     records = [
         _record(),
         _record(
-            path="/trees/acme/widget/epics/HAR02/WS02-bbbb",
+            path=f"/trees/{_LEAF_B}",
             branch="HAR02/WS02",
             base="origin/HAR02/umbrella",
             dirty=True,
             ahead=2,
             behind=1,
-            pr="#9 OPEN",
             mtime=500.0,
         ),
     ]
 
     out = format_fleet(fleet.build(records, now=1000.0))
 
-    # Header + both Trees render, with branch, base, dirty state, and PR label.
-    assert "BRANCH" in out and "BASE" in out and "PR" in out and "KIND" in out
+    # Header + both Trees render, with branch, base, and dirty state. The KIND column
+    # is gone (no kind segment since ADR-0074); a real CREATED column takes its place.
+    # No PR column: the `gh` read is gone with the reclaim signal it fed (ADR-0072).
+    assert "BRANCH" in out and "BASE" in out and "CREATED" in out
+    assert "KIND" not in out
+    assert "PR" not in out
     assert "issues/7/work" in out
     assert "HAR02/WS02" in out
     assert "clean" in out and "dirty" in out
-    assert "#7 DRAFT" in out and "#9 OPEN" in out
+    # The created stamps render from the flat leaves.
+    assert "20260717-081333" in out and "20260102-030405" in out
     # Divergence is annotated on the BASE cell.
     assert "origin/HAR02/umbrella (+2/-1)" in out
 
 
 def test_format_fleet_renders_placeholders():
-    out = format_fleet(
-        fleet.build([_record(branch=None, base=None, pr=None)], now=1000.0)
-    )
-    assert "(detached)" in out
+    out = format_fleet(fleet.build([_record(branch=None, base=None)], now=1000.0))
+    assert "(detached)" in out  # the branch placeholder
     lines = out.splitlines()
     assert len(lines) == 2  # header + one row
-    assert lines[1].split()[-1] == "-"  # the PR placeholder
+    assert lines[1].split()[3] == "-"  # the BASE placeholder (column index 3)
 
 
-def test_format_fleet_renders_the_kind_column():
+def test_format_fleet_renders_the_created_column():
+    # The CREATED cell (column index 1, after PATH) is the flat leaf's `<timestamp>`;
+    # a pre-flat nested Tree reads `-`.
     records = [
         _record(),
-        _record(path="/trees/acme/widget/review/tre03-ws03", branch="b", pr=None),
-        _record(path="/trees/acme/widget/ephemeral/sess-1", branch="b", pr=None),
+        _record(path=f"/trees/{_LEAF_B}", branch="b"),
+        _record(path="/trees/acme/widget/review/tre03-ws03", branch="b"),
     ]
 
     out = format_fleet(fleet.build(records, now=1000.0))
 
     rows = {line.split()[0]: line.split()[1] for line in out.splitlines()[1:]}
-    assert rows["/trees/acme/widget/issues/7/work-aaaa"] == "write"
-    assert rows["/trees/acme/widget/review/tre03-ws03"] == "review"
-    assert rows["/trees/acme/widget/ephemeral/sess-1"] == "ephemeral"
+    assert rows[f"/trees/{_LEAF_A}"] == "20260717-081333"
+    assert rows[f"/trees/{_LEAF_B}"] == "20260102-030405"
+    assert rows["/trees/acme/widget/review/tre03-ws03"] == "-"
 
 
 def test_format_fleet_has_no_trailing_whitespace_or_newline():

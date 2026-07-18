@@ -143,7 +143,9 @@ def _seams(monkeypatch):
     monkeypatch.setattr(
         fanout.producer,
         "provision_review_tree",
-        lambda ctx: capture["trees"].append("/tree") or "/tree",
+        lambda ctx, backend, *, naming=None: (
+            capture["trees"].append("/tree") or "/tree"
+        ),
     )
 
     def fake_pass_task_text(
@@ -417,7 +419,9 @@ def test_round_preflights_the_reviewer_backend_once_before_the_fanout(
     monkeypatch.setattr(
         fanout.producer,
         "provision_review_tree",
-        lambda ctx: order.append("provision") or real_provision(ctx),
+        lambda ctx, backend, *, naming=None: (
+            order.append("provision") or real_provision(ctx, backend, naming=naming)
+        ),
     )
     fanout.run_fanout_review(agent_backend.CODEX, _ctx(), dimensions=["correctness"])
     assert order == ["preflight", "provision"]

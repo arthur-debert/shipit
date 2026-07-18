@@ -17,9 +17,9 @@ What this module owns (and ONLY this):
     registry value objects themselves, never a retyped agent-name string — ONE
     definition of "launch codex/agy as a reviewer", shared with the spawn
     surface (the WS04a read-only posture);
-  * provision the shared read-only Tree on the PR head (reusing
-    :func:`shipit.tree.readonly.create_readonly` — a second reviewer on the same
-    ``(repo, branch)`` reuses the clone);
+  * provision the per-Run read-only Tree on the PR head
+    (:func:`shipit.tree.readonly.create_readonly` — a fresh flat Tree per reviewer
+    Run, ADR-0074; cross-reviewer sharing is retired);
   * build the Tree-fetch reviewer task (:func:`shipit.review.prompt.build_reviewer_task`)
     and, for codex, write the JSON schema temp file so codex enforces the output
     shape natively (``--output-schema`` — the robustness win ADR-0020 keeps);
@@ -42,8 +42,9 @@ feeds the no-post replay path (:mod:`shipit.review.replay`) instead of the funne
 
 The RVW02-WS04 dimension fan-out (:mod:`shipit.review.fanout`) drives
 :func:`run_tree_review` too — once per configured **Dimension pass**
-(``dimension=…``) against ONE shared Tree it provisions up front
-(:func:`provision_review_tree`, so N parallel passes never race N refreshes) —
+(``dimension=…``) against ONE per-Run Tree it provisions up front
+(:func:`provision_review_tree`, so the N parallel passes of one reviewer Run share
+its single clone) —
 and hashes each pass's exact prompt via :func:`pass_task_text` for the
 review-round record's per-run **Variant**. The offline fan-out replay
 (RVW03-WS01) drives :func:`run_range_review` the same way — once per pass with
@@ -73,7 +74,7 @@ import os
 import shutil
 import tempfile
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from .. import execrun, gh, git, workenv
@@ -84,6 +85,7 @@ from ..spawn.backends.antigravity import AntigravityAdapter
 from ..spawn.backends.base import BackendAdapter
 from ..spawn.backends.codex import CodexAdapter
 from ..tree.cleanup import parse_duration
+from ..tree.create import new_tree_naming
 from ..tree.readonly import create_readonly, readonly_plan
 from .artifacts import RunArtifacts
 from .backends import BackendError, BackendUnavailable, parse_review_output
@@ -353,28 +355,39 @@ def range_pass_task_text(
     )
 
 
-def provision_review_tree(ctx) -> str:
-    """Provision (or reuse) the shared read-only Tree on ``ctx``'s PR head and
-    return its path.
+def provision_review_tree(
+    ctx, backend: Backend, *, naming: Mapping[str, str] | None = None
+) -> str:
+    """Provision the per-Run read-only Tree on ``ctx``'s PR head and return its path.
 
     The one Tree resolution the review producers share: resolve the repo
-    identity + head branch, then :func:`shipit.tree.readonly.create_readonly`
-    (a second caller on the same ``(repo, branch)`` reuses the clone). The
+    identity + head branch, then :func:`shipit.tree.readonly.create_readonly` — a
+    fresh, per-Run flat Tree (ADR-0074) named after ``backend``'s binary. The
     RVW02-WS04 fan-out calls this ONCE before launching its parallel dimension
-    passes so the N passes share one provisioning instead of racing N
-    refreshes; :func:`run_tree_review` provisions through here too when no
-    ``tree_path`` was handed in. Raises ``RuntimeError`` when the head branch
-    is unknown (no Tree can be provisioned).
+    passes so the N passes of ONE reviewer Run share the one clone (this is
+    within-Run sharing, NOT the retired cross-reviewer sharing);
+    :func:`run_tree_review` provisions through here too when no ``tree_path`` was
+    handed in. Raises ``RuntimeError`` when the head branch is unknown (no Tree can
+    be provisioned).
+
+    ``naming`` (#1039) hands in the flat-leaf coordinates the coordinator ALREADY
+    minted for this reviewer Run — the ``{agent, created, tree_id}`` dict from
+    :func:`shipit.tree.create.new_tree_naming` — so the Tree this provisions lands
+    at the EXACT path the spawn boundary reported in its SPAWNED ``tree`` payload.
+    ``None`` (every other caller) keeps today's behaviour: mint a fresh naming here
+    from ``backend``'s binary. A supplied naming already carries its own ``agent``,
+    so ``backend`` is not consulted for the leaf name in that case.
     """
     repo = _resolve_repo(ctx)
     branch = (ctx.head_ref or "").strip()
     if not branch:
         raise RuntimeError(
             f"cannot review PR #{ctx.number}: its head branch (headRefName) is "
-            "unknown, so the shared read-only Tree cannot be provisioned."
+            "unknown, so the read-only Tree cannot be provisioned."
         )
+    leaf = dict(naming) if naming is not None else new_tree_naming(backend.binary)
     tree = create_readonly(
-        readonly_plan(repo=repo, branch=branch),
+        readonly_plan(repo=repo, branch=branch, **leaf),
         source_repo=ctx.workdir,
         github_url=_github_url(ctx),
     )
@@ -399,7 +412,7 @@ def run_tree_review(
 ) -> CapturedReview:
     """Launch ``backend`` as a reviewer in a read-only Tree and CAPTURE its review.
 
-    Provisions the shared read-only Tree on ``ctx``'s PR head, launches the backend
+    Provisions the per-Run read-only Tree on ``ctx``'s PR head, launches the backend
     through its spawn read-only posture with a task that fetches the diff via
     ``gh pr diff`` and emits structured JSON, captures stdout, and parses it. Returns
     a :class:`CapturedReview` — the review dict plus the launch's measured token
@@ -481,7 +494,7 @@ def run_tree_review(
     if not branch:
         raise RuntimeError(
             f"cannot review PR #{ctx.number}: its head branch "
-            "(headRefName) is unknown, so the shared read-only Tree "
+            "(headRefName) is unknown, so the per-Run read-only Tree "
             "cannot be provisioned."
         )
 
@@ -493,7 +506,9 @@ def run_tree_review(
         if spec.native_schema:
             schema_path = _write_schema_tempfile()
 
-        cwd = tree_path if tree_path is not None else provision_review_tree(ctx)
+        cwd = (
+            tree_path if tree_path is not None else provision_review_tree(ctx, backend)
+        )
         head = getattr(ctx, "head_sha", None)
         commit = head if isinstance(head, Sha) else None
         review_env = workenv.resolve_readonly_review_env(
@@ -910,7 +925,7 @@ def _dry_run(
     review flows on to ``post_review(dry_run=True)``, which prints the would-post payload
     — so the whole dry-run is honest end to end and bills nothing.
     """
-    plan = readonly_plan(repo=repo, branch=branch)
+    plan = readonly_plan(repo=repo, branch=branch, **new_tree_naming(agent))
     placeholder = "<review-schema-tempfile>.json" if spec.native_schema else None
     cmd = adapter.build_command(
         task,
@@ -961,22 +976,15 @@ def _require_review_model(backend: Backend, model: str | None) -> None:
 
 def _preflight(backend: Backend, *, model: str | None = None, dry_run: bool) -> None:
     """Verify the backend can actually review as configured — its CLI binary (the
-    registry's ``binary`` alias) is on PATH, for agy that it supports the reviewer's
-    ``--agent`` flag, and that ``model`` is not one the backend declares unusable for
-    a review Run; raise :class:`BackendUnavailable` otherwise.
+    registry's ``binary`` alias) is on PATH, and that ``model`` is not one the
+    backend declares unusable for a review Run; raise
+    :class:`BackendUnavailable` otherwise.
 
-    The binary/flag probes are skipped in ``dry_run`` (a dry-run only prints the
+    The binary probe is skipped in ``dry_run`` (a dry-run only prints the
     would-run argv; it must work without the CLI installed, mirroring the spawn
     dry-run posture); the ``model`` refusal (:func:`_require_review_model`) is NOT —
     it is config, not environment. A missing CLI on a REAL run fails loud — these are
     LOCAL backends and a missing binary must never silently degrade.
-
-    For the ANTIGRAVITY backend the reviewer posture depends on AGY 1.1.2's native
-    ``--agent`` flag (issue #989), so a real launch additionally preflights that
-    capability (:func:`shipit.spawn.backends.antigravity.require_agent_support`)
-    and surfaces a clean UPGRADE message when the installed ``agy`` predates it —
-    the same :class:`BackendUnavailable` surface as a missing binary, so the
-    round-level preflight and the service map it uniformly.
     """
     _require_review_model(backend, model)
     if dry_run:
@@ -987,13 +995,6 @@ def _preflight(backend: Backend, *, model: str | None = None, dry_run: bool) -> 
             f"the '{backend.binary}' CLI on your PATH, but it was not found. "
             f"Install it (and log it in), then re-run."
         )
-    if backend is ANTIGRAVITY:
-        from ..spawn.backends.antigravity import require_agent_support
-
-        try:
-            require_agent_support(binary=backend.binary)
-        except RuntimeError as exc:
-            raise BackendUnavailable(str(exc)) from exc
 
 
 def preflight_round(
@@ -1011,12 +1012,8 @@ def preflight_round(
     error and NO pass processes launch — never as "all N dimension passes
     failed" with N truncated per-pass details. ``backends`` is the round's
     configured set (the reviewer's own backend plus, when the dormant judge is
-    on, the calibrator's); duplicate binaries are checked once. For an AGY
-    backend the round preflight ALSO validates the reviewer's ``--agent`` support
-    once here (issue #989), so an ``agy`` predating 1.1.2 surfaces ONE clean
-    UPGRADE :class:`BackendUnavailable` before Tree provisioning — never a
-    wrapped "all N passes failed" from each per-launch :func:`_preflight`. The
-    per-launch checks (:func:`_preflight`, the calibrator's own) stay as
+    on, the calibrator's); duplicate binaries are checked once.
+    The per-launch checks (:func:`_preflight`, the calibrator's own) stay as
     backstops for callers outside a fan-out round.
 
     ``models`` is the round's configured model per entry, POSITIONALLY aligned to
@@ -1028,8 +1025,8 @@ def preflight_round(
     A length mismatch is a programming error raised loud, never a silently
     unchecked model.
 
-    ``dry_run`` mirrors :func:`_preflight`'s split: the environment probes (binary
-    on PATH, agy's ``--agent`` support) are SKIPPED, because a dry-run only prints
+    ``dry_run`` mirrors :func:`_preflight`'s split: the environment probe (binary
+    on PATH) is SKIPPED, because a dry-run only prints
     the would-run argv and must work without the CLIs installed; the ``models``
     check is NOT, because model capability is a config fact, not an environment
     one — a dry-run of a round whose reviewer could never return a verdict must
@@ -1062,17 +1059,6 @@ def preflight_round(
         raise BackendUnavailable(
             f"review preflight failed, no passes were launched: {details}"
         )
-    # Every configured binary is present; now verify AGY's reviewer capability
-    # once, before any Tree is provisioned (issue #989). The membership check
-    # above already guarantees the binary is on PATH, so a False here is an
-    # OUTDATED agy, not a missing one — raise the targeted upgrade message.
-    if any(backend is ANTIGRAVITY for backend in backends):
-        from ..spawn.backends.antigravity import require_agent_support
-
-        try:
-            require_agent_support(binary=ANTIGRAVITY.binary)
-        except RuntimeError as exc:
-            raise BackendUnavailable(str(exc)) from exc
 
 
 def _resolve_repo(ctx) -> Repo:

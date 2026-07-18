@@ -19,7 +19,6 @@ import logging
 
 import pytest
 
-from shipit.session import liveness
 from shipit.verbs.hook import eval as hook_eval
 from shipit.verbs.hook import pretooluse, sessionstart, worktreecreate, worktreeremove
 
@@ -124,37 +123,27 @@ def test_sessionstart_malformed_payload_warns_with_exception_on_each_arm(
     monkeypatch, tmp_path, caplog
 ):
     # A malformed payload is swallowed INSIDE the checks, past the top-level
-    # stdin read. All 7 WARNINGs come from the shared PARSE-FALLBACK helpers
+    # stdin read. All 5 WARNINGs come from the shared PARSE-FALLBACK helpers
     # (`_payload_cwd` / `_payload_session_id`), which log WARNING per the canon
-    # (a swallowed parse is a degraded-but-continuing outcome): five cwd
+    # (a swallowed parse is a degraded-but-continuing outcome): four cwd
     # fallbacks (the source-clone warning check, the ADR-0033 pin-staleness
-    # advisory, the #444 test-task advisory, the liveness half, and the
-    # session.started event step — LOG04-WS02 — each parse the payload
-    # independently) plus two session-id fallbacks (the liveness half and the
-    # event step). The event step's OWN swallow arm is NOT among them: its
-    # emission failure is calibrated to DEBUG by design (advisory correlation,
-    # nothing durable degrades — pinned by
+    # advisory, the #444 test-task advisory, and the session.started event step —
+    # LOG04-WS02 — each parse the payload independently; activation and log-context
+    # bail on the absent CLAUDE_ENV_FILE before parsing) plus one session-id
+    # fallback (the event step). The liveness half that once added a cwd and a
+    # session-id fallback is retired (ADR-0072). The event step's OWN swallow arm is
+    # NOT among them: its emission failure is calibrated to DEBUG by design
+    # (advisory correlation, nothing durable degrades — pinned by
     # test_session_started_emission_failure_is_fail_open) and does not fire
     # here, since the emit itself succeeds on the fallback cwd.
     (tmp_path / ".git").mkdir()  # the cwd fallback must land in a clone shape
     monkeypatch.chdir(tmp_path)
-    ancestry = {  # hook (300) → claude (100): the session-id arm is reached
-        300: liveness.ProcessInfo(
-            pid=300, ppid=100, create_time=1.0, argv="shipit hook sessionstart"
-        ),
-        100: liveness.ProcessInfo(pid=100, ppid=1, create_time=1.0, argv="claude"),
-    }
     with caplog.at_level(logging.DEBUG, logger=HOOK_LOGGER):
-        rc = sessionstart.run(
-            stdin=io.StringIO("{not json"),
-            environ={},
-            probe=ancestry.get,
-            self_pid=300,
-        )
+        rc = sessionstart.run(stdin=io.StringIO("{not json"), environ={})
     assert rc == 0  # fail-open: the session start continues
     warnings = _records(caplog, logging.WARNING)
-    assert len(warnings) == 7, (
-        "exactly the seven parse-fallback arms (5× cwd + 2× session-id) produce "
+    assert len(warnings) == 5, (
+        "exactly the five parse-fallback arms (4× cwd + 1× session-id) produce "
         "a WARNING — the event step's own swallow is DEBUG by design"
     )
     assert all(r.exc_info for r in warnings)
