@@ -4,6 +4,8 @@
 
 ## Unreleased
 
+## 1.2.4 - 2026-07-18
+
 - The **`agy` local reviewer works again** (#1006). It has been pinned to Gemini
   3.5 Flash since #990, and Flash goes *agentic* in `agy`'s headless `--print`
   mode: instead of reviewing the diff it is handed, it narrates its hunt for one
