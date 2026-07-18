@@ -278,14 +278,15 @@ PROVISIONING: dict[str, tuple[Provisioned, ...]] = {
         Provisioned(
             "rattler-build",
             PIXI_MANAGED,
-            pin="0.68.*",
+            pin="0.69.*",
             test="test_missing_rattler_build_gets_the_reconcile_remedy",
             note="the conda endpoint's packager (ARF01-WS01 #950, ADR-0064): "
             "`rattler-build build`/`publish` repackage a final release binary "
             "into a `.conda` and push+reindex the Artifact channel; rides the "
             "rust-release-deps block (rust signal — the walking-skeleton "
-            "producer lex-fmt/lex is rust), pinned 0.68.* from conda-forge, "
-            "spike-validated at 0.68.0",
+            "producer lex-fmt/lex is rust), pinned 0.69.* from conda-forge, "
+            "seed-validated at 0.69 against the live channel (#1049 — 0.68.* "
+            "panicked during the S3 upload)",
         ),
     ),
     "vsce": (
