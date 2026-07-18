@@ -135,7 +135,10 @@ def test_an_unreadable_directory_blanks_the_signal(tmp_path, monkeypatch):
     assert newest_mtime(tmp_path) is None
 
 
-@pytest.mark.skipif(os.getuid() == 0, reason="root reads unreadable dirs anyway")
+@pytest.mark.skipif(
+    not hasattr(os, "getuid") or os.getuid() == 0,
+    reason="needs POSIX non-root: os.getuid is absent on Windows; root reads unreadable dirs anyway",
+)
 def test_a_really_unreadable_subdir_blanks_the_signal_rather_than_reporting_the_rest(
     tmp_path,
 ):
@@ -155,7 +158,10 @@ def test_a_really_unreadable_subdir_blanks_the_signal_rather_than_reporting_the_
         (tmp_path / "secret").chmod(0o755)
 
 
-@pytest.mark.skipif(os.getuid() == 0, reason="root reads unreadable dirs anyway")
+@pytest.mark.skipif(
+    not hasattr(os, "getuid") or os.getuid() == 0,
+    reason="needs POSIX non-root: os.getuid is absent on Windows; root reads unreadable dirs anyway",
+)
 def test_an_unreadable_dir_inside_a_pruned_dir_does_not_blank_the_signal(tmp_path):
     # The prune set runs BEFORE the error can happen: `.pixi` is never descended into,
     # so an unreadable dir inside it is never even opened. This keeps the failure arm
