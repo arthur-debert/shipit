@@ -2,10 +2,12 @@
 
 The producer replaces the retired front-loaded backends (ADR-0020 §Reviewer-path
 reconciliation — REPLACE): it provisions a per-Run read-only Tree on the PR head,
-launches codex / agy through their spawn read-only posture with a task that fetches
-the diff itself, and CAPTURES the structured stdout. These tests pin the seam inputs
-(agent → adapter mapping, the launch argv, the capture/parse, dry-run, preflight) with
-the Tree clone + the model launch FAKED — no real Tree, no real model.
+launches codex / agy through their spawn read-only posture, and CAPTURES the
+structured stdout. Codex still fetches the diff itself; AGY 1.1.3+ gets shipit's
+already-authoritative diff supplied in the prompt because headless command
+permissions are soft-denied. These tests pin the seam inputs (agent → adapter
+mapping, the launch argv, the capture/parse, dry-run, preflight) with the Tree
+clone + the model launch FAKED — no real Tree, no real model.
 """
 
 from __future__ import annotations
@@ -149,6 +151,10 @@ def test_agy_maps_to_the_antigravity_adapter_with_prose_schema(_faked):
     # No native schema flag for agy; the schema rides the prompt prose instead.
     assert "--output-schema" not in cmd
     assert "JSON Schema:" in cmd[-1]
+    assert _ctx().diff in cmd[-1]
+    assert "AUTHORITATIVE DIFF DATA" in cmd[-1]
+    assert "gh pr diff" not in cmd[-1]
+    assert "git diff" not in cmd[-1]
     # Reviewer posture: agy omits the write Run's --dangerously-skip-permissions.
     assert "--dangerously-skip-permissions" not in cmd
     # #404: agy enforces `--print-timeout` ITSELF and its native timeout yields a
@@ -313,9 +319,12 @@ def test_agy_reprompts_once_on_unparseable_output_then_parses_the_retry(_faked):
     assert captured.review["summary"]["status"] == "COMMENT"  # the RETRY parsed
     assert len(prompts) == 2  # original + exactly ONE retry
     retry = prompts[1]
-    # The retry is the ORIGINAL task (still fetches the diff) PLUS a terminal block
-    # quoting the SPECIFIC parse failure so agy fixes the concrete problem.
-    assert "gh pr diff 42" in retry
+    # The retry is the ORIGINAL task (still carrying the authoritative diff) PLUS a
+    # terminal block quoting the SPECIFIC parse failure so agy fixes the concrete
+    # problem without switching back to self-fetch.
+    assert _ctx().diff in retry
+    assert "gh pr diff" not in retry
+    assert "git diff" not in retry
     assert "RETRY — your PREVIOUS response could NOT be parsed" in retry
     # The actual failure hint fed back — since #1006 the diagnosis states what the
     # output WAS (a non-verdict) instead of the old catch-all size/latency guess.
@@ -579,6 +588,21 @@ def test_pass_task_text_matches_the_launched_prompt(_faked):
     assert task in _faked["cmd"][-1]
 
 
+def test_agy_pass_task_text_matches_supplied_diff_launch(_faked):
+    producer.run_tree_review(
+        agent_backend.ANTIGRAVITY, _ctx(), launcher=_faked["launcher"]
+    )
+    task = producer.pass_task_text(agent_backend.ANTIGRAVITY, 42, diff=_ctx().diff)
+    assert task in _faked["cmd"][-1]
+    assert "gh pr diff" not in task
+    assert "git diff" not in task
+
+
+def test_agy_pass_task_text_requires_diff_for_supplied_delivery():
+    with pytest.raises(ValueError, match="requires diff"):
+        producer.pass_task_text(agent_backend.ANTIGRAVITY, 42)
+
+
 def _range_view():
     from shipit.identity import Sha
     from shipit.review.diff import RangeView
@@ -603,7 +627,7 @@ def test_range_dimension_pass_runs_offline_with_the_range_scoped_focus(_faked):
 
     view = _range_view()
     captured = producer.run_range_review(
-        agent_backend.CODEX,
+        agent_backend.ANTIGRAVITY,
         view,
         launcher=_faked["launcher"],
         dimension=by_name("correctness"),
@@ -611,11 +635,12 @@ def test_range_dimension_pass_runs_offline_with_the_range_scoped_focus(_faked):
     assert captured.review["summary"]["status"] == "COMMENT"
     assert _faked["cwd"] == "/checkout"
     prompt = _faked["cmd"][-1]
-    assert f"git diff {'a' * 40}..{'b' * 40}" in prompt
+    assert view.diff in prompt
     assert "DIMENSION FOCUS — Correctness" in prompt
     # The shared scope baseline reaches the range pass and names the range's diff.
     assert "report ONLY findings this range's diff INTRODUCED or EXPOSED" in prompt
     assert "this PR's diff" not in prompt
+    assert f"git diff {'a' * 40}..{'b' * 40}" not in prompt
     assert "gh pr diff" not in prompt
 
 
@@ -656,6 +681,30 @@ def test_incremental_range_launches_the_fix_range_task(_faked):
     assert "MANDATORY CONTEXT EXPANSION" in prompt
     task = producer.pass_task_text(
         agent_backend.CODEX, 42, incremental_range=("b" * 40, "c" * 40)
+    )
+    assert task in prompt
+
+
+def test_agy_incremental_launches_supplied_fix_range_diff(_faked):
+    ctx = _ctx()
+    ctx.diff = "diff --git a/fix.py b/fix.py\n@@\n-before\n+after\n"
+    captured = producer.run_tree_review(
+        agent_backend.ANTIGRAVITY,
+        ctx,
+        launcher=_faked["launcher"],
+        incremental_range=("b" * 40, "c" * 40),
+        tree_path="/trees/shared/leaf",
+    )
+    assert captured.review["summary"]["status"] == "COMMENT"
+    prompt = _faked["cmd"][-1]
+    assert ctx.diff in prompt
+    assert f"git diff {'b' * 40}..{'c' * 40}" not in prompt
+    assert "gh pr diff" not in prompt
+    task = producer.pass_task_text(
+        agent_backend.ANTIGRAVITY,
+        42,
+        diff=ctx.diff,
+        incremental_range=("b" * 40, "c" * 40),
     )
     assert task in prompt
 
@@ -804,6 +853,67 @@ def test_success_launch_fills_the_bundle(_faked, tmp_path):
     assert meta["timed_out"] is False
     assert meta["argv"] == _faked["cmd"]
     assert "duration_ms" in meta
+
+
+def test_agy_bundle_records_supplied_diff_runtime_provenance(_faked, tmp_path):
+    import json
+
+    bundle = _bundle(tmp_path)
+    producer.run_tree_review(
+        agent_backend.ANTIGRAVITY,
+        _ctx(),
+        model="pro",
+        launcher=_faked["launcher"],
+        run_id="agy-run",
+        artifacts=bundle,
+    )
+    meta = json.loads((bundle.dir / "meta.json").read_text())
+    assert meta["cli_version"]
+    assert meta["resolved_model"] == "Gemini 3.1 Pro (High)"
+    assert meta["delivery_mode"] == "supplied-diff"
+    assert meta["permission_posture"] == "read-only-tree-no-dangerous-skip"
+    assert meta["input_digest"].startswith("sha256:")
+    assert meta["input_bytes"] == len((bundle.dir / "prompt.txt").read_bytes())
+    assert meta["diff_digest"].startswith("sha256:")
+    assert meta["diff_bytes"] == len(_ctx().diff.encode())
+    assert meta["argv"] == _faked["cmd"]
+    assert meta["exit_code"] == 0
+    assert meta["timed_out"] is False
+
+
+def test_agy_live_and_replay_same_diff_record_same_digest(_faked, tmp_path):
+    import json
+
+    ctx = _ctx()
+    view = _range_view()
+    view = type(view)(
+        repo=view.repo,
+        base_sha=view.base_sha,
+        head_sha=view.head_sha,
+        diff=ctx.diff,
+        changed_files=view.changed_files,
+        workdir=view.workdir,
+    )
+    live_bundle = _bundle(tmp_path / "live")
+    replay_bundle = _bundle(tmp_path / "replay")
+
+    producer.run_tree_review(
+        agent_backend.ANTIGRAVITY,
+        ctx,
+        launcher=_faked["launcher"],
+        artifacts=live_bundle,
+    )
+    producer.run_range_review(
+        agent_backend.ANTIGRAVITY,
+        view,
+        launcher=_faked["launcher"],
+        artifacts=replay_bundle,
+    )
+
+    live_meta = json.loads((live_bundle.dir / "meta.json").read_text())
+    replay_meta = json.loads((replay_bundle.dir / "meta.json").read_text())
+    assert live_meta["diff_digest"] == replay_meta["diff_digest"]
+    assert live_meta["diff_bytes"] == replay_meta["diff_bytes"]
 
 
 def test_nonzero_exit_bundle_keeps_full_raw_and_logs_point_at_it(

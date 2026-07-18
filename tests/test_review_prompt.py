@@ -1,11 +1,10 @@
-"""Tests for `shipit.review.prompt` — the Tree-fetch reviewer task body.
+"""Tests for `shipit.review.prompt` — the reviewer task bodies.
 
-Since TRE05-WS04b the producer no longer front-loads the diff: the task tells the
-agent to fetch the scoped diff itself with `gh pr diff <n>` and to emit JSON WITHOUT
-posting. The only backend-conditional part is the schema presentation — codex enforces
-the JSON shape natively (`--output-schema`) so its task omits the schema; agy has no
-native enforcement, so the schema is described in-prose AND followed by the #76
-JSON-validity instruction.
+Codex still uses the Tree-fetch reviewer task: it fetches the scoped diff with
+`gh pr diff <n>` and emits JSON WITHOUT posting. AGY 1.1.3+ soft-denies the
+headless command permission that Tree-fetch needs, so AGY uses supplied-diff
+tasks: the already-authoritative diff is embedded as untrusted review data and
+the task asks for code reads only.
 
 Since RVW03-WS05 (ADR-0050) every arm — full, dimension, incremental, range — carries
 ONE shared scope/context baseline: report only on the diff; read anything; run
@@ -22,10 +21,12 @@ from shipit.review.prompt import (
     build_incremental_reviewer_task,
     build_range_reviewer_task,
     build_reviewer_task,
+    build_supplied_diff_reviewer_task,
 )
 from shipit.review.schema import REVIEW_SCHEMA
 
 _INSTRUCTIONS = "Be thorough."
+_DIFF = "diff --git a/src/x.py b/src/x.py\n@@\n-old\n+new\n"
 
 
 def _every_arm_task(instructions=_INSTRUCTIONS):
@@ -68,13 +69,35 @@ def test_agy_prose_notes_line_may_be_null():
 
 
 def test_task_tells_agent_to_fetch_the_diff_itself_and_not_post():
-    """The task never embeds a diff: it directs the agent to `gh pr diff <n>` (with the
-    PR's real base, not an assumed `main`) and to emit JSON without self-posting."""
+    """The Codex task never embeds a diff: it directs the agent to `gh pr diff
+    <n>` (with the PR's real base, not an assumed `main`) and to emit JSON
+    without self-posting."""
     task = build_reviewer_task(_INSTRUCTIONS, 42, schema_inline=False)
     assert "gh pr diff 42" in task
     assert "do not assume the base is" in task.lower()
     assert "do not run" in task.lower() and "gh pr review" in task
     # The custom instructions ride the task.
+    assert _INSTRUCTIONS in task
+
+
+def test_supplied_diff_task_embeds_authoritative_diff_without_fetch_commands():
+    """AGY receives shipit's already-authoritative diff as untrusted data, not a
+    prompt to run `gh pr diff` / `git diff`, while preserving the same review
+    contract and AGY inline schema."""
+    task = build_supplied_diff_reviewer_task(
+        _INSTRUCTIONS,
+        _DIFF,
+        target_label="pull request #42",
+        diff_noun="this PR's diff",
+        schema_inline=True,
+    )
+    assert _DIFF in task
+    assert "AUTHORITATIVE DIFF DATA" in task
+    assert "gh pr diff" not in task
+    assert "git diff" not in task
+    assert "do NOT execute build, test, or shell commands" in task
+    assert "read the checkout for surrounding code context" in task
+    assert "JSON Schema:" in task
     assert _INSTRUCTIONS in task
 
 

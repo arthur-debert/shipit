@@ -22,10 +22,11 @@ decision would have missed (do NOT "simplify" them away):
   (auto-approve every tool/shell request). Without it a non-interactive ``--print``
   **write** Run stalls on permission prompts editing files. A **reviewer** Run
   (``read_only=True``, WS04a) **omits** it: WS04a probed agy 1.0.14 — a ``--print`` Run
-  *without* ``--dangerously-skip-permissions`` still runs network shell commands (it ran
-  ``curl https://api.github.com/zen`` and returned the result), so the reviewer can fetch
-  PR context without the dangerous flag. Read-only is enforced by the chmod'd Tree
-  (ADR-0020 §Decision 3); omitting the flag is best-effort defense-in-depth on top.
+  *without* ``--dangerously-skip-permissions`` still launches successfully. Read-only is
+  enforced by the chmod'd Tree (ADR-0020 §Decision 3); omitting the flag is best-effort
+  defense-in-depth on top. The review-input module, not this CLI adapter, decides how
+  scope bytes are delivered; AGY 1.1.3+ now receives supplied diffs instead of being asked
+  to run ``gh`` / ``git diff`` in headless mode (#1051).
 - **The model must be pinned to a capable, non-agentic name.** ``agy`` silently resolves a
   bare ``pro`` to Gemini Flash, which in ``--print`` mode goes **agentic** (runs
   shell/build instead of answering). :data:`MODEL_ALIASES` pins ``pro`` →
@@ -155,9 +156,10 @@ class AntigravityAdapter(BackendAdapter):
           ONLY for a **write** Run (``read_only=False``) — without it a non-interactive
           write Run stalls on permission prompts editing files. A **reviewer**
           (``read_only=True``) **omits** it: WS04a probe-confirmed agy still runs network
-          shell commands (for example, the ``gh pr diff`` fetch a reviewer needs) without
-          it, and read-only is enforced by the chmod'd Tree (ADR-0020 §Decision 3) —
-          omitting the flag is best-effort defense-in-depth.
+          enough of the review posture without it, and read-only is enforced by the
+          chmod'd Tree (ADR-0020 §Decision 3). The prompt's diff-delivery mode is owned
+          by :mod:`shipit.review.producer`, not by this argv builder; omitting the flag is
+          best-effort defense-in-depth.
 
         - ``--print "<text>"`` is the headless invocation.
 
