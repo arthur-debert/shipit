@@ -60,6 +60,15 @@ on:
         type: boolean
         required: false
         default: false
+      endpoints:
+        description: >-
+          Per-invocation endpoint selector (ADR-0070, #1046): a comma- or
+          space-separated endpoint-name list, forwarded VERBATIM to the
+          publish stage — the one consumer; the publish verb validates it
+          and fires only the named endpoints. Empty/omitted: the full
+          post-guard set fires (unchanged behavior).
+        type: string
+        required: false
     secrets:
       # The full closed registry (shipit.release.secretreq, PRD story 46),
       # forwarded explicitly to the stage that consumes each — the
@@ -194,6 +203,9 @@ jobs:
       matrix: ${{ needs.prepare.outputs.matrix }}
       unsigned-matrix: ${{ needs.prepare.outputs.unsigned-matrix }}
       stages: ${{ needs.prepare.outputs.stages }}
+      # The per-invocation endpoint selector (ADR-0070) rides verbatim to
+      # the publish block — no other stage consumes it.
+      endpoints: ${{ inputs.endpoints }}
     secrets:
       CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
       PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}

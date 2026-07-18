@@ -6,7 +6,7 @@ name: shipit-release
 # (full | prepare | build | sign | publish), one job per stage, each a
 # single `uses:` line against the matching block, gated
 # `if: inputs.stage == '...'`, forwarding `version`/`tag`/`run-id`/
-# `unsigned` verbatim. Routing ONLY (ADR-0040): the release plan — matrix,
+# `unsigned`/`endpoints` verbatim. Routing ONLY (ADR-0040): the release plan — matrix,
 # live stages, the post-RC-guard endpoint set, required secrets — is
 # preflight's, computed inside the blocks; nothing is re-derived or wired
 # stage-to-stage here (that is exactly the consumer-owned wiring ADR-0040
@@ -102,6 +102,21 @@ on:
         required: false
         type: boolean
         default: false
+      endpoints:
+        description: >-
+          Per-invocation endpoint selector (ADR-0070, #1046), consumed by
+          `full`/`publish`: a comma- or space-separated endpoint-name list
+          the publish verb narrows the fire to — every other declared
+          endpoint is selector-skipped (`gh-release` cannot be deselected;
+          unknown names are refused, by the verb). Empty: the full
+          post-guard set fires. Ignored by the other stages. shipit's own
+          plan is gh-release-only, so a selector is a no-op here — offered
+          because this caller dogfoods the blessed shape (it is what makes
+          a consumer's scoped CI dispatch — e.g. the ARF02 channel seed's
+          `gh-release,conda` — possible without firing owner-gated
+          endpoints).
+        required: false
+        type: string
 
 # The standalone dispatch caller's grant (workflows.lex §8): `contents:
 # write` for prepare's push and publish's gh-release, `actions: read` for
@@ -119,6 +134,7 @@ jobs:
     with:
       version: ${{ inputs.version }}
       unsigned: ${{ inputs.unsigned }}
+      endpoints: ${{ inputs.endpoints }}
     secrets:
       RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
 
@@ -151,3 +167,4 @@ jobs:
       tag: ${{ inputs.tag }}
       run-id: ${{ inputs.run-id }}
       unsigned: ${{ inputs.unsigned }}
+      endpoints: ${{ inputs.endpoints }}

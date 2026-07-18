@@ -662,8 +662,48 @@ def test_standalone_build_run_rederives_notes_as_a_relay_source():
 # The dogfood dispatch caller (#774) — the WS09 blessed stage-choice shape
 # --------------------------------------------------------------------------
 
+
 #: shipit's own release caller — the blessed per-stage dispatch surface
 #: (workflows.lex §8, ADR-0054), dogfooded verbatim on the publisher repo.
+def test_endpoint_selector_threads_from_input_to_the_verb():
+    # ADR-0070 (#1046, the ARF02/WS03 seed prerequisite): the per-invocation
+    # endpoint selector rides a workflow input down to `shipit release
+    # publish` — one `--endpoint` per listed name, appended in order — so a
+    # CI dispatch can scope to e.g. gh-release+conda without firing the
+    # owner-gated sibling endpoints. The selector's VALIDATION (unknown
+    # name, the gh-release-deselect refusal, derived-without-base) is the
+    # verb's alone: the block threads, never re-implements.
+    doc = _load("wf-publish.yml")
+    declared = doc["on"]["workflow_call"]["inputs"]["endpoints"]
+    # Optional on purpose: empty/absent = today's full post-guard fire.
+    assert declared["required"] is False
+    assert "default" not in declared
+
+    publish = doc["jobs"]["publish"]
+    step = next(s for s in publish["steps"] if "release publish" in s.get("run", ""))
+    # Env passthrough (never inline interpolation into the script — the
+    # defensive-input rule the whole step already follows) …
+    assert step["env"]["ENDPOINTS"] == "${{ inputs.endpoints }}"
+    script = step["run"]
+    # … split comma-or-space into a list, each name its own quoted argument.
+    assert '<<<"${ENDPOINTS//,/ }"' in script
+    assert 'args+=(--endpoint "$endpoint")' in script
+
+
+def test_composed_chain_forwards_the_endpoint_selector_to_publish():
+    # The composed `full` path (#1046 point 2): wf-release declares the
+    # same optional input and forwards it VERBATIM to the publish stage —
+    # the one consumer; no other stage's `with:` carries it, and the chain
+    # stays zero-logic (a passthrough, never a re-derivation).
+    doc = _load(COMPOSED)
+    declared = doc["on"]["workflow_call"]["inputs"]["endpoints"]
+    assert declared["required"] is False
+    jobs = doc["jobs"]
+    assert jobs["publish"]["with"]["endpoints"] == "${{ inputs.endpoints }}"
+    for job_id in ("prepare", "build", "sign"):
+        assert "endpoints" not in jobs[job_id].get("with", {}), job_id
+
+
 DISPATCH_CALLER = "shipit-release.yml"
 
 
@@ -714,15 +754,31 @@ def test_dispatch_caller_forwards_the_stage_input_contract_verbatim():
     # forward nothing ONLY because their blocks don't declare it.
     jobs = _load(DISPATCH_CALLER)["jobs"]
     withs = {job_id: set(job.get("with", {})) for job_id, job in jobs.items()}
-    assert withs["release"] == {"version", "unsigned"}
+    assert withs["release"] == {"version", "unsigned", "endpoints"}
     assert withs["prepare"] == {"version", "unsigned"}
     assert withs["build"] == {"tag"}
     assert withs["sign"] == {"tag", "run-id"}
-    assert withs["publish"] == {"tag", "run-id", "unsigned"}
+    assert withs["publish"] == {"tag", "run-id", "unsigned", "endpoints"}
     for job_id, job in jobs.items():
         secrets = job.get("secrets", {})
         expected = {"RELEASE_TOKEN"} if job_id in ("release", "prepare") else set()
         assert set(secrets) == expected, job_id
+
+
+def test_dispatch_caller_threads_the_endpoint_selector():
+    # #1046 point 3: the blessed caller — the round-trip surface every
+    # consumer copy (lex-fmt/lex's seed dispatch, ARF02 #1002) inherits —
+    # offers the ADR-0070 `endpoints` dispatch input and forwards it
+    # VERBATIM to both consumers: the `full` chain (wf-release routes it to
+    # its publish stage) and the standalone `publish` stage dispatch.
+    # Optional on purpose: an empty dispatch is today's full fire.
+    doc = _load(DISPATCH_CALLER)
+    declared = doc["on"]["workflow_dispatch"]["inputs"]["endpoints"]
+    assert declared["required"] is False
+    assert declared["type"] == "string"
+    jobs = doc["jobs"]
+    assert jobs["release"]["with"]["endpoints"] == "${{ inputs.endpoints }}"
+    assert jobs["publish"]["with"]["endpoints"] == "${{ inputs.endpoints }}"
 
 
 def test_dispatch_caller_grants_cross_run_download_permissions():
