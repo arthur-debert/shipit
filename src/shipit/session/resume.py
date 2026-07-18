@@ -228,26 +228,24 @@ def _sessions(
     its thread (falling back to its session id), every other backend by its session
     id.
     """
+    # Insertion order IS the recency order: pop-and-reinsert moves a re-seen session to the
+    # end, so a dict is both the field accumulator and the newest-last ordering — O(1) per
+    # record. ``--last`` then follows the session's newest record even when its earlier fields
+    # came from a rotated file before another session was seen.
     fields: dict[str, dict[str, str]] = {}
-    order: list[str] = []
     for record in records:
         session_id = record.get("session")
         if not isinstance(session_id, str) or not session_id:
             continue
-        entry = fields.setdefault(session_id, {})
+        entry = fields.pop(session_id, {})
         for key in ("backend", "session_id", "codex_thread", "tree", "repo"):
             value = _str_field(record, key)
             if value:
                 entry[key] = value
-        # Track newest-last so ``--last`` follows the session's newest record even when
-        # its earlier fields came from a rotated file before another session was seen.
-        if session_id in order:
-            order.remove(session_id)
-        order.append(session_id)
+        fields[session_id] = entry
 
     targets: list[ResumeTarget] = []
-    for session_id in order:
-        entry = fields[session_id]
+    for session_id, entry in fields.items():
         backend = entry.get("backend")
         if backend is None:
             continue
