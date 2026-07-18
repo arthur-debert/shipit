@@ -31,6 +31,11 @@ decision would have missed (do NOT "simplify" them away):
   bare ``pro`` to Gemini Flash, which in ``--print`` mode goes **agentic** (runs
   shell/build instead of answering). :data:`MODEL_ALIASES` pins ``pro`` →
   ``Gemini 3.1 Pro (High)``.
+- **The prompt still rides ``--print`` argv.** agy exposes no documented stdin or
+  prompt-file flag for print mode. To avoid an opaque OS ``E2BIG`` before agy
+  starts, the adapter refuses a role-prefixed prompt above a conservative
+  per-argument ceiling and tells the caller to reduce the diff / split the review
+  until agy grows a non-argv prompt transport.
 
 Auth rides agy's Antigravity OAuth login (creds under ``~/.gemini/antigravity-cli`` +
 ``~/.antigravity``, inherited by the child). The adapter scrubs :data:`SCRUBBED_AUTH_ENV`
@@ -78,6 +83,13 @@ DEFAULT_MODEL: str = _IDENTITY.default_model
 #: with consistently large work raises it via the per-reviewer ``timeout`` option.
 DEFAULT_TIMEOUT = "600s"
 
+# Linux's per-string exec ceiling (MAX_ARG_STRLEN) is commonly 128 KiB. Keep a
+# conservative application limit below that so an oversized supplied-diff review
+# fails with a clear shipit error before the OS refuses exec with E2BIG. macOS
+# allows larger argv, but this path must be portable to CI and Linux developer
+# machines.
+MAX_PRINT_ARG_BYTES = 120 * 1024
+
 #: The env vars the ``antigravity`` adapter scrubs from the child env (ADR-0020
 #: §Decision-per-backend, agy auth): a stale ``GEMINI_API_KEY`` / ``GOOGLE_API_KEY`` could
 #: shadow agy's preferred Antigravity OAuth login, so both are removed so the login wins.
@@ -100,6 +112,20 @@ def role_prompt(task: str, role: str) -> str:
     pollute the PR or cause issues).
     """
     return f"You are acting as the '{role}' role for this Run.\n\n{task}"
+
+
+def _enforce_print_arg_limit(prompt: str) -> None:
+    """Fail before ``execve`` if agy's single ``--print`` argument is too large."""
+    size = len(prompt.encode("utf-8"))
+    if size <= MAX_PRINT_ARG_BYTES:
+        return
+    raise ValueError(
+        "antigravity (agy) --print prompt is too large for portable argv "
+        f"delivery ({size} bytes > {MAX_PRINT_ARG_BYTES} bytes). agy exposes no "
+        "documented stdin or prompt-file transport for print mode; reduce the "
+        "review diff, split the range, or use a backend with non-argv prompt "
+        "delivery."
+    )
 
 
 class AntigravityAdapter(BackendAdapter):
@@ -183,6 +209,7 @@ class AntigravityAdapter(BackendAdapter):
         # or the custom-agent posture caused it to explore instead of returning JSON.
         # It now conveys its role by prompt-prepend like every other posture.
         prompt = role_prompt(task, role)
+        _enforce_print_arg_limit(prompt)
         permission = [] if read_only else ["--dangerously-skip-permissions"]
         return [
             "agy",

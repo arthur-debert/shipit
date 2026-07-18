@@ -522,9 +522,8 @@ def run_fanout_review(
                 "instructions_path": instructions_path,
                 "dimension": dim if scoped else None,
                 "incremental_range": incremental_range,
+                "diff": target.diff,
             }
-            if backend == agent_backend.ANTIGRAVITY:
-                task_kwargs["diff"] = target.diff
             task = producer.pass_task_text(backend, target.number, **task_kwargs)
         run_id = uuid.uuid4().hex
         kind = f"{pass_word}-pass"

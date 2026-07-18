@@ -148,7 +148,9 @@ def _seams(monkeypatch):
         instructions_path=None,
         dimension=None,
         incremental_range=None,
+        diff=None,
     ):
+        del diff
         if incremental_range is not None:
             return (
                 f"incremental task for {incremental_range[0]}..{incremental_range[1]}"

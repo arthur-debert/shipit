@@ -143,6 +143,12 @@ def test_build_command_honours_construction_model_and_timeout():
     assert "--print-timeout=900s" in cmd
 
 
+def test_build_command_rejects_oversized_print_prompt_before_exec():
+    task = "x" * agy_backend.MAX_PRINT_ARG_BYTES
+    with pytest.raises(ValueError, match="too large for portable argv delivery"):
+        AGY.build_command(task, "reviewer", cwd=TREE, read_only=True)
+
+
 def test_default_model_resolves_pro_to_a_capable_non_agentic_name():
     # The default alias `pro` MUST NOT resolve to Flash (which goes agentic in --print
     # and never answers): it is pinned to the capable Gemini 3.1 Pro (High).

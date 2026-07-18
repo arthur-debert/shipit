@@ -103,6 +103,8 @@ from .prompt import (
     build_incremental_reviewer_task,
     build_range_reviewer_task,
     build_reviewer_task,
+    build_supplied_diff_incremental_task,
+    build_supplied_diff_range_task,
     build_supplied_diff_reviewer_task,
 )
 from .schema import REVIEW_SCHEMA
@@ -281,11 +283,15 @@ def _sha256(text: str) -> str:
     return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _permission_posture(spec: _BackendSpec) -> str:
-    """Stable provenance label for the reviewer launch's permission posture."""
+def _permission_posture(spec: _BackendSpec, *, substrate: str) -> str:
+    """Stable provenance label for the launch posture and execution substrate."""
+    if substrate not in {"read-only-tree", "ambient-checkout"}:
+        raise ValueError(f"unknown review substrate {substrate!r}")
     if spec.delivery_mode == "supplied-diff":
-        return "read-only-tree-no-dangerous-skip"
-    return "read-only-tree-workspace-write-sandbox"
+        suffix = "no-dangerous-skip"
+    else:
+        suffix = "workspace-write-sandbox"
+    return f"{substrate}-{suffix}"
 
 
 def _cli_version(binary: str) -> str:
@@ -297,7 +303,7 @@ def _cli_version(binary: str) -> str:
     """
     try:
         result = execrun.run([binary, "--version"], check=False, timeout=5)
-    except execrun.ExecError:
+    except Exception:
         return "unknown"
     text = (result.stdout or result.stderr or "").strip()
     return text.splitlines()[0].strip() if text else "unknown"
@@ -353,21 +359,18 @@ def pass_task_text(
                 "pass_task_text: backend 'agy' uses supplied-diff delivery and "
                 "requires diff so the variant hashes the exact launched prompt"
             )
-        noun = (
-            "the fix range's diff"
-            if incremental_range is not None
-            else "this PR's diff"
-        )
-        label = (
-            f"pull request #{pr_number} fix range"
-            if incremental_range is not None
-            else f"pull request #{pr_number}"
-        )
+        if incremental_range is not None:
+            return build_supplied_diff_incremental_task(
+                instructions,
+                diff,
+                pr_number,
+                schema_inline=spec.schema_inline,
+            )
         return build_supplied_diff_reviewer_task(
             instructions,
             diff,
-            target_label=label,
-            diff_noun=noun,
+            target_label=f"pull request #{pr_number}",
+            diff_noun="this PR's diff",
             schema_inline=spec.schema_inline,
             dimension=dimension,
         )
@@ -414,11 +417,11 @@ def range_pass_task_text(
         )
     instructions = load_instructions(instructions_path)
     if spec.delivery_mode == "supplied-diff":
-        return build_supplied_diff_reviewer_task(
+        return build_supplied_diff_range_task(
             instructions,
             view.diff,
-            target_label=f"offline range {view.base_sha}..{view.head_sha}",
-            diff_noun="this range's diff",
+            str(view.base_sha),
+            str(view.head_sha),
             schema_inline=spec.schema_inline,
             dimension=dimension,
         )
@@ -550,22 +553,22 @@ def run_tree_review(
 
     instructions = load_instructions(instructions_path)
     if spec.delivery_mode == "supplied-diff":
-        task = build_supplied_diff_reviewer_task(
-            instructions,
-            ctx.diff,
-            target_label=(
-                f"pull request #{ctx.number} fix range"
-                if incremental_range is not None
-                else f"pull request #{ctx.number}"
-            ),
-            diff_noun=(
-                "the fix range's diff"
-                if incremental_range is not None
-                else "this PR's diff"
-            ),
-            schema_inline=spec.schema_inline,
-            dimension=dimension,
-        )
+        if incremental_range is not None:
+            task = build_supplied_diff_incremental_task(
+                instructions,
+                ctx.diff,
+                ctx.number,
+                schema_inline=spec.schema_inline,
+            )
+        else:
+            task = build_supplied_diff_reviewer_task(
+                instructions,
+                ctx.diff,
+                target_label=f"pull request #{ctx.number}",
+                diff_noun="this PR's diff",
+                schema_inline=spec.schema_inline,
+                dimension=dimension,
+            )
     elif incremental_range is not None:
         base_sha, head_sha = incremental_range
         task = build_incremental_reviewer_task(
@@ -645,6 +648,7 @@ def run_tree_review(
             launcher=launcher,
             artifacts=artifacts,
             run_id=run_id,
+            substrate="read-only-tree",
         )
     finally:
         if schema_path and os.path.exists(schema_path):
@@ -703,11 +707,11 @@ def run_range_review(
 
     instructions = load_instructions(instructions_path)
     if spec.delivery_mode == "supplied-diff":
-        task = build_supplied_diff_reviewer_task(
+        task = build_supplied_diff_range_task(
             instructions,
             view.diff,
-            target_label=f"offline range {view.base_sha}..{view.head_sha}",
-            diff_noun="this range's diff",
+            str(view.base_sha),
+            str(view.head_sha),
             schema_inline=spec.schema_inline,
             dimension=dimension,
         )
@@ -749,6 +753,7 @@ def run_range_review(
             launcher=launcher,
             artifacts=artifacts,
             run_id=run_id,
+            substrate="ambient-checkout",
         )
     finally:
         if schema_path and os.path.exists(schema_path):
@@ -769,6 +774,7 @@ def _launch_and_capture(
     launcher: launch.Runner | None,
     artifacts: RunArtifacts | None = None,
     run_id: str | None = None,
+    substrate: str,
 ) -> CapturedReview:
     """Launch a reviewer child, capture its review, and — for a schema-unenforced
     backend — apply the deterministic ONE-shot re-prompt net (#826).
@@ -805,6 +811,7 @@ def _launch_and_capture(
             launcher=launcher,
             artifacts=artifacts,
             run_id=run_id,
+            substrate=substrate,
         )
     except BackendError as exc:
         # The retry net (#826) fires ONLY for a schema-unenforced backend (agy) and
@@ -835,6 +842,7 @@ def _launch_and_capture(
             launcher=launcher,
             artifacts=artifacts,
             run_id=run_id,
+            substrate=substrate,
         )
 
 
@@ -872,6 +880,7 @@ def _attempt(
     launcher: launch.Runner | None,
     artifacts: RunArtifacts | None = None,
     run_id: str | None = None,
+    substrate: str,
 ) -> CapturedReview:
     """Launch ONE reviewer child in ``cwd`` under the seam deadline and parse its
     stdout — one attempt, no retry (the retry lives in :func:`_launch_and_capture`).
@@ -911,7 +920,7 @@ def _attempt(
         cli_version=_cli_version(backend.binary),
         resolved_model=getattr(adapter, "model", None),
         delivery_mode=spec.delivery_mode,
-        permission_posture=_permission_posture(spec),
+        permission_posture=_permission_posture(spec, substrate=substrate),
         input_digest=_sha256(task),
         input_bytes=len(task.encode("utf-8")),
         diff_digest=None if diff is None else _sha256(diff),
@@ -977,6 +986,9 @@ def _attempt(
             timed_out=exc.timed_out,
             outcome="timed_out" if exc.timed_out else "failed",
         )
+        raise
+    except RuntimeError:
+        sink.record(outcome="failed")
         raise
     sink.record(outcome="success")
     # RVW03-WS04: wrap the captured review with the launch's measured token usage

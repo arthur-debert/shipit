@@ -12,6 +12,7 @@ clone + the model launch FAKED — no real Tree, no real model.
 
 from __future__ import annotations
 
+import json
 import logging
 
 import pytest
@@ -30,6 +31,11 @@ from shipit.spawn.launch import LaunchResult
 from shipit.tree.create import Tree
 
 _VALID = '{"summary": {"status": "COMMENT", "overall_feedback": "ok"}, "comments": []}'
+
+
+def _supplied_diff_from_prompt(prompt: str) -> str:
+    data_line = prompt.split("AUTHORITATIVE DIFF DATA JSON:\n", 1)[1].splitlines()[0]
+    return json.loads(data_line)["unified_diff"]
 
 
 def _ctx() -> ReviewView:
@@ -151,8 +157,8 @@ def test_agy_maps_to_the_antigravity_adapter_with_prose_schema(_faked):
     # No native schema flag for agy; the schema rides the prompt prose instead.
     assert "--output-schema" not in cmd
     assert "JSON Schema:" in cmd[-1]
-    assert _ctx().diff in cmd[-1]
-    assert "AUTHORITATIVE DIFF DATA" in cmd[-1]
+    assert _supplied_diff_from_prompt(cmd[-1]) == _ctx().diff
+    assert "AUTHORITATIVE DIFF DATA JSON" in cmd[-1]
     assert "gh pr diff" not in cmd[-1]
     assert "git diff" not in cmd[-1]
     # Reviewer posture: agy omits the write Run's --dangerously-skip-permissions.
@@ -281,6 +287,14 @@ def test_non_timeout_launch_execerror_propagates_as_a_plain_failure(_faked):
     assert not isinstance(exc.value, BackendError)
 
 
+def test_cli_version_probe_is_best_effort(monkeypatch):
+    def explode(*args, **kwargs):
+        raise OSError("temporarily unavailable")
+
+    monkeypatch.setattr(producer.execrun, "run", explode)
+    assert producer._cli_version("agy") == "unknown"
+
+
 def test_unparseable_output_raises_backend_error_with_raw_for_salvage(_faked):
     raw = "here is some prose but no json at all"
 
@@ -322,7 +336,7 @@ def test_agy_reprompts_once_on_unparseable_output_then_parses_the_retry(_faked):
     # The retry is the ORIGINAL task (still carrying the authoritative diff) PLUS a
     # terminal block quoting the SPECIFIC parse failure so agy fixes the concrete
     # problem without switching back to self-fetch.
-    assert _ctx().diff in retry
+    assert _supplied_diff_from_prompt(retry) == _ctx().diff
     assert "gh pr diff" not in retry
     assert "git diff" not in retry
     assert "RETRY — your PREVIOUS response could NOT be parsed" in retry
@@ -635,7 +649,7 @@ def test_range_dimension_pass_runs_offline_with_the_range_scoped_focus(_faked):
     assert captured.review["summary"]["status"] == "COMMENT"
     assert _faked["cwd"] == "/checkout"
     prompt = _faked["cmd"][-1]
-    assert view.diff in prompt
+    assert _supplied_diff_from_prompt(prompt) == view.diff
     assert "DIMENSION FOCUS — Correctness" in prompt
     # The shared scope baseline reaches the range pass and names the range's diff.
     assert "report ONLY findings this range's diff INTRODUCED or EXPOSED" in prompt
@@ -697,8 +711,9 @@ def test_agy_incremental_launches_supplied_fix_range_diff(_faked):
     )
     assert captured.review["summary"]["status"] == "COMMENT"
     prompt = _faked["cmd"][-1]
-    assert ctx.diff in prompt
+    assert _supplied_diff_from_prompt(prompt) == ctx.diff
     assert f"git diff {'b' * 40}..{'c' * 40}" not in prompt
+    assert "MANDATORY CONTEXT EXPANSION" in prompt
     assert "gh pr diff" not in prompt
     task = producer.pass_task_text(
         agent_backend.ANTIGRAVITY,
@@ -914,6 +929,8 @@ def test_agy_live_and_replay_same_diff_record_same_digest(_faked, tmp_path):
     replay_meta = json.loads((replay_bundle.dir / "meta.json").read_text())
     assert live_meta["diff_digest"] == replay_meta["diff_digest"]
     assert live_meta["diff_bytes"] == replay_meta["diff_bytes"]
+    assert live_meta["permission_posture"] == "read-only-tree-no-dangerous-skip"
+    assert replay_meta["permission_posture"] == "ambient-checkout-no-dangerous-skip"
 
 
 def test_nonzero_exit_bundle_keeps_full_raw_and_logs_point_at_it(
@@ -952,6 +969,7 @@ def test_nonzero_exit_bundle_keeps_full_raw_and_logs_point_at_it(
     assert (bundle.dir / "stdout.raw").read_text() == "partial out"
     meta = json.loads((bundle.dir / "meta.json").read_text())
     assert meta["exit_code"] == 1
+    assert meta["outcome"] == "failed"
 
 
 def test_seam_timeout_bundle_keeps_partial_streams_and_timed_out_meta(_faked, tmp_path):
