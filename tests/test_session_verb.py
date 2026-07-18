@@ -6,6 +6,9 @@ from dataclasses import dataclass, replace
 from click.testing import CliRunner
 
 from shipit.identity import Repo, repo_from_slug
+from shipit.session import resume
+from shipit.session.current import current_session_id
+from shipit.tree import layout
 from shipit.tree.create import Tree
 from shipit.verbs import session
 from shipit.verbs.hook import worktreecreate
@@ -574,7 +577,14 @@ def test_run_claude_resume_execs_native_resume_through_worktree(
     assert capture.env is not None
     assert capture.env["PATH"] == "/bin"
     assert "PIXI_PROJECT_ROOT" not in capture.env
+    # Every stale domain key is scrubbed EXCEPT session, which carries the freshly minted
+    # id forward so SessionStart records the resumed session under that same id (one flow,
+    # one ResumeTarget) rather than falling back to the flat Tree's leaf UUID.
+    session_key = session.logcontext.ENV_PREFIX + "SESSION"
+    assert capture.env[session_key] == "sess-20260709-082101-4242"
     for key in session.logcontext.DOMAIN_KEYS:
+        if key == "session":
+            continue
         assert session.logcontext.ENV_PREFIX + key.upper() not in capture.env
     launch = next(r for r in caplog.records if r.msg.startswith("launching claude"))
     assert secret_prompt not in launch.argv
@@ -584,6 +594,90 @@ def test_run_claude_resume_execs_native_resume_through_worktree(
     assert "claude session sess-20260709-082101-4242" in output
     assert secret_prompt not in output
     assert "<prompt:redacted>" in output
+
+
+def test_claude_resume_folds_launch_and_sessionstart_into_one_session(
+    monkeypatch, tmp_path
+):
+    """FINDING 2 regression: one native resume launch mints ONE session identity.
+
+    The pre-exec launch record is logged under the freshly minted ``sess-...``, but
+    ``_claude_resume_env`` scrubbed all log context before exec. SessionStart then found no
+    exported session key and fell back to the flat Tree's leaf UUID
+    (``current_session_id`` -> ``leaf.tree_id``), recording the resumed session under a
+    DIFFERENT id — so the two records folded into TWO ``ResumeTarget``s for one native id
+    and ``resume.resolve(native)`` rejected it as ambiguous. The fix exports the minted
+    ``sess-...`` as ``SHIPIT_LOG_CTX_SESSION`` into the exec env, so ``current_session_id``
+    (env-first, the same reader SessionStart uses) returns it even when cwd is a flat Tree
+    whose leaf UUID differs.
+
+    Teeth: the flat Tree cwd's leaf UUID is what the PRE-fix fallback would have used, so
+    without the export the first assertion fails (the SessionStart session resolves to
+    ``leaf_uuid``, not the launch id) — and the fold then yields two ambiguous targets.
+    """
+    repo = repo_from_slug("arthur-debert/shipit")
+    trees_root = tmp_path / "trees"
+    monkeypatch.setenv(layout.CENTRAL_ROOT_ENV, str(trees_root))
+    leaf_uuid = "0198abcd-1111-7222-8333-444455556666"
+    leaf = trees_root / layout.tree_leaf(repo, "claude", CREATED, leaf_uuid)
+    leaf.mkdir(parents=True)
+
+    capture = LaunchCapture()
+    _stub_naming(monkeypatch, session)
+    monkeypatch.setattr(session.time, "time", lambda: 1783585261)
+    monkeypatch.setattr(session.os, "getpid", lambda: 4242)
+
+    def fake_execute(file: str, argv: list[str], env: dict[str, str]) -> None:
+        capture.env = env
+
+    session.run_claude_resume(
+        "claude-native",
+        [],
+        repo_identity=repo,
+        source_repo=str(tmp_path / "source"),
+        chdir=lambda path: None,
+        execute=fake_execute,
+        which=lambda binary: "/usr/local/bin/claude",
+        environ={"PATH": "/bin"},
+    )
+
+    minted_session_id = "sess-20260709-082101-4242"
+    # SessionStart resolves the session from the exec env FIRST; the export makes it the
+    # launch's minted id rather than the flat Tree's differing leaf UUID.
+    sessionstart_session = current_session_id(env=capture.env, cwd=leaf)
+    assert sessionstart_session == minted_session_id
+    assert sessionstart_session != leaf_uuid, "still falling back to the leaf UUID"
+
+    # Fold the two records one launch emits — the pre-exec launch record and the
+    # SessionStart witness, both now carrying the SAME session — and assert the native id
+    # resolves to exactly ONE ResumeTarget.
+    log = tmp_path / "logs" / repo.owner.login / repo.name / "shipit.log"
+    log.parent.mkdir(parents=True)
+    log.write_text(
+        "\n".join(
+            json.dumps(record)
+            for record in (
+                {
+                    "repo": repo.slug,
+                    "session": minted_session_id,
+                    "session_id": "claude-native",
+                    "backend": "claude",
+                },
+                {
+                    "repo": repo.slug,
+                    "event": "session.started",
+                    "session": sessionstart_session,
+                    "session_id": "claude-native",
+                    "backend": "claude",
+                },
+            )
+        )
+        + "\n"
+    )
+
+    target = resume.resolve("claude-native", base_dir=tmp_path / "logs")
+    assert target.shipit_session_id == minted_session_id
+    assert target.native_session_id == "claude-native"
 
 
 def test_run_codex_refuses_outside_git_checkout(monkeypatch, capsys):

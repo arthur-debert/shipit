@@ -397,7 +397,7 @@ def run_claude_resume(
     if prompt is not None:
         argv.append(prompt)
     display_argv = _display_argv(argv, prompt=prompt)
-    env = _claude_resume_env(os.environ if environ is None else environ)
+    env = _claude_resume_env(os.environ if environ is None else environ, session_id)
     print(
         _format_claude_resume_launch(session_id, display_argv),
         flush=True,
@@ -437,11 +437,27 @@ def run_claude_resume(
     return 0
 
 
-def _claude_resume_env(parent_env: Mapping[str, str]) -> dict[str, str]:
-    """Claude resume env: preserve Claude's session seams, scrub stale Tree identity."""
+def _claude_resume_env(
+    parent_env: Mapping[str, str], session_id: str
+) -> dict[str, str]:
+    """Claude resume env: scrub stale Tree/log identity, export the MINTED session id.
+
+    Scrubs the inherited Tree pointers and every ``SHIPIT_LOG_CTX_*`` key (a global resume
+    may target a different repo/task than the shell that launched it), then exports THIS
+    launch's freshly minted ``session_id`` as ``SHIPIT_LOG_CTX_SESSION`` — the same var
+    :func:`shipit.session.current.current_session_id` reads first and the SessionStart hook
+    re-exports. Without it that resolver finds no exported key and falls back to the flat
+    Tree's leaf UUID, so SessionStart records the resumed session under a DIFFERENT id than
+    the pre-exec launch record used — splitting one launch's flow log across two ids and
+    minting two ``ResumeTarget``s for one native id. Exporting it here folds both events
+    into one session. (Only ``session`` is exported, not the Tree: the resume's Tree is
+    minted by the WorktreeCreate hook AFTER exec and is not knowable at this seam.)
+    """
 
     env = scrub_tree_env(dict(parent_env))
-    return logcontext.scrub_env(env)
+    env = logcontext.scrub_env(env)
+    env[logcontext.ENV_PREFIX + "SESSION"] = session_id
+    return env
 
 
 def _display_argv(argv: Sequence[str], *, prompt: str | None) -> list[str]:
