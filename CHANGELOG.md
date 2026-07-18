@@ -4,24 +4,8 @@
 
 ## Unreleased
 
-## 1.2.4 - 2026-07-18
+## 1.3.0 - 2026-07-18
 
-- The **`agy` local reviewer works again** (#1006). It has been pinned to Gemini
-  3.5 Flash since #990, and Flash goes *agentic* in `agy`'s headless `--print`
-  mode: instead of reviewing the diff it is handed, it narrates its hunt for one
-  and never emits a verdict. Every `agy-local` run therefore settled `failed`.
-  The reviewer was not slow or wrong — it was **absent**, and had been for days.
-  What made it invisible is worth recording, because nothing here misbehaved: a
-  required reviewer that fails is *degraded*, and the PR engine deliberately
-  declines to let a degraded reviewer block Ready — otherwise one broken
-  reviewer would wedge every PR in the repo. So PRs kept flowing, green, with
-  codex and Copilot passing, while the roster promised three required reviewers
-  and delivered two. Measured on this repo: `agy-local` failed on **every PR of
-  the TREE03 epic**, roughly ten review rounds, without ever once blocking one.
-  A check that fails loudly on every run reads, over time, as furniture.
-  `agy` returns to `pro` (Gemini 3.1 Pro (High)). The ~20% review-speed win that
-  #989's spike measured for Flash is given up **deliberately**: a reviewer that
-  never returns a verdict is not faster than one that does, it is not a reviewer.
 - Every repo now has **one Claude Code session store, shared by all its Trees**
   (#1023). Claude Code keys session transcripts *and* auto-memory on
   `~/.claude/projects/<slug>/`, where the slug is the session's working
@@ -152,6 +136,83 @@
     carries `pr`/`pr_state`. The stale bucket, the per-kind gc dispatch, and the
     unreachable `live_reviews` review-Tree rung are gone with the ladder.
   - Net change is a deletion of roughly 2,000 lines across source and tests.
+- tree: Trees are now **flat and self-describing** — one directory per Tree named
+  `<repo>-<agent>-<timestamp>-<id>` under the central root, replacing the five
+  nested `<owner>/<repo>/<kind>/[<code>/]<leaf>` shapes at two depths (ADR-0074,
+  #1025). Repo leads the name so `ls | grep <repo>` is the tooling-free narrowing
+  the hierarchy promised; `<agent>` is the backend binary (`claude`/`codex`/`agy`),
+  minted once from the backend registry rather than smuggled in as a session-id
+  prefix; `<timestamp>` (`%Y%m%d-%H%M%S`) gives `tree list` its first real
+  **created** column; and `<id>` is a full UUID — never a pid, never truncated. Its
+  provenance follows the creator: a coordinator session Tree carries the harness
+  session UUID from the `WorktreeCreate` payload (so the dir name IS the
+  `claude --resume` handle), while every spawned-Run and native-helper Tree mints
+  its own. The `<kind>` and `<owner>` segments and `tree_kind()` are gone (reclaim
+  is one uniform activity-based rule since ADR-0072, and repo identity comes from
+  the origin remote); `session/current.py` now resolves a Tree from cwd with no
+  depth arithmetic; and `resume.py` reads the backend from a recorded field instead
+  of reverse-engineering it from the id prefix.
+- tree: **review Trees are per-Run**, not shared. ADR-0018's read-only *mode*
+  stands — a reviewer still gets a chmod'd read-only clone — but the deterministic
+  `(repo, branch)` sharing is dropped along with its reuse/refresh/acquisition-stamp
+  machinery: each reviewer Run gets its own flat Tree, dated by its own files like
+  every other Tree (#1025). Old nested Trees are not migrated — they are reclaimed
+  by attrition and coexist with the flat shape (`registry.scan` walks for `.git`
+  markers and never parsed depth). Branch names are unchanged.
+
+## 1.2.4 - 2026-07-18
+
+- The **`agy` local reviewer works again** (#1006). It has been pinned to Gemini
+  3.5 Flash since #990, and Flash goes *agentic* in `agy`'s headless `--print`
+  mode: instead of reviewing the diff it is handed, it narrates its hunt for one
+  and never emits a verdict. Every `agy-local` run therefore settled `failed`.
+  The reviewer was not slow or wrong — it was **absent**, and had been for days.
+  What made it invisible is worth recording, because nothing here misbehaved: a
+  required reviewer that fails is *degraded*, and the PR engine deliberately
+  declines to let a degraded reviewer block Ready — otherwise one broken
+  reviewer would wedge every PR in the repo. So PRs kept flowing, green, with
+  codex and Copilot passing, while the roster promised three required reviewers
+  and delivered two. Measured on this repo: `agy-local` failed on **every PR of
+  the TREE03 epic**, roughly ten review rounds, without ever once blocking one.
+  A check that fails loudly on every run reads, over time, as furniture.
+  `agy` returns to `pro` (Gemini 3.1 Pro (High)). The ~20% review-speed win that
+  #989's spike measured for Flash is given up **deliberately**: a reviewer that
+  never returns a verdict is not faster than one that does, it is not a reviewer.
+- `tree gc` now **reclaims a merged Tree without waiting out the age
+  threshold** (#1009). The write ladder gated on age BEFORE it looked at the PR,
+  so a Tree whose PR merged days ago — clean, nothing unpushed, the work safely
+  on the remote — was kept purely because its directory mtime was under the
+  two-week boundary. At a real merge rate that parks a fortnight of finished
+  work: measured over a 503-Tree fleet, **421 Trees were kept by the age gate
+  alone** while exactly one had a PR in flight, and the `kept: 500` the verb
+  reported read as "500 Trees in use" when it only ever meant "500 Trees are
+  recent". The gate was measuring throughput, not use.
+  A merged PR is now decided FIRST, held only until the Tree has been **idle for
+  12h**: the merge already proves the loss is safe, and the window covers the one
+  thing age was really buying — a write Tree has no liveness signal (unlike an
+  ephemeral session Tree, which has its pidfile), so an agent may still be
+  working in a still-clean Tree whose PR has merged. That window's clock is time
+  since the Tree's last ACTIVITY, NOT time since the merge: what it needs to know
+  is whether anyone is still working in the Tree. Hours of idleness instead of
+  weeks of age closes that hole without parking the fleet. This brings the write
+  ladder in line with the ephemeral one (ADR-0027), which already checked the
+  merge ahead of its liveness and age rungs.
+  Idleness is measured from the **newest of the Tree's directory mtime and its
+  `HEAD` commit timestamp**, and both are needed. A directory's mtime moves only
+  when an entry is added or removed in that directory, so the ordinary shape of
+  agent work — editing a file under `src/`, staging it, committing it — leaves
+  the clone root's mtime untouched and is invisible to it; the commit timestamp
+  is what observes an agent at work. Pushing does not change that stamp either,
+  so the one interval this window exists to cover — between a push and the next
+  edit, when a live agent's Tree momentarily reads clean and fully pushed — is
+  genuinely covered rather than nominally. An unreadable commit timestamp reads
+  as ACTIVE, never as ancient: a git hiccup must not license a delete.
+  `--threshold` (14d by default) is unchanged and still governs the **unmerged**
+  shapes — no PR, or a PR closed without merging — where age remains the only
+  abandonment signal, and those still land in `stale` for a human rather than
+  being deleted. Every never-lose-work guarantee is untouched: a dirty tree,
+  unpushed commits, an unreadable commit list, an in-flight PR, or an unreadable
+  PR state all still keep, whatever the Tree's age or merge state.
 - **TREE03 planning docs land: the Tree gets rethought** (#1020, epic #1019).
   Running Trees
   for a while exposed three failures with one root cause — the system infers
@@ -186,29 +247,6 @@
   that its memory is doomed — memory now persists, so learnings get promoted to
   the repo because the repo is how knowledge reaches reviewers, not because
   memory leaks.
-- tree: Trees are now **flat and self-describing** — one directory per Tree named
-  `<repo>-<agent>-<timestamp>-<id>` under the central root, replacing the five
-  nested `<owner>/<repo>/<kind>/[<code>/]<leaf>` shapes at two depths (ADR-0074,
-  #1025). Repo leads the name so `ls | grep <repo>` is the tooling-free narrowing
-  the hierarchy promised; `<agent>` is the backend binary (`claude`/`codex`/`agy`),
-  minted once from the backend registry rather than smuggled in as a session-id
-  prefix; `<timestamp>` (`%Y%m%d-%H%M%S`) gives `tree list` its first real
-  **created** column; and `<id>` is a full UUID — never a pid, never truncated. Its
-  provenance follows the creator: a coordinator session Tree carries the harness
-  session UUID from the `WorktreeCreate` payload (so the dir name IS the
-  `claude --resume` handle), while every spawned-Run and native-helper Tree mints
-  its own. The `<kind>` and `<owner>` segments and `tree_kind()` are gone (reclaim
-  is one uniform activity-based rule since ADR-0072, and repo identity comes from
-  the origin remote); `session/current.py` now resolves a Tree from cwd with no
-  depth arithmetic; and `resume.py` reads the backend from a recorded field instead
-  of reverse-engineering it from the id prefix.
-- tree: **review Trees are per-Run**, not shared. ADR-0018's read-only *mode*
-  stands — a reviewer still gets a chmod'd read-only clone — but the deterministic
-  `(repo, branch)` sharing is dropped along with its reuse/refresh/acquisition-stamp
-  machinery: each reviewer Run gets its own flat Tree, dated by its own files like
-  every other Tree (#1025). Old nested Trees are not migrated — they are reclaimed
-  by attrition and coexist with the flat shape (`registry.scan` walks for `.git`
-  markers and never parsed depth). Branch names are unchanged.
 
 ## 1.2.3 - 2026-07-16
 
