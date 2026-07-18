@@ -158,9 +158,11 @@ on:
           space-separated endpoint-name list — the publish verb fires ONLY
           the named endpoints, recording every other declared endpoint as
           selector-skipped. Empty/omitted: the full post-guard set fires
-          (unchanged behavior). The VERB validates the selector (unknown
-          name, the gh-release-deselect refusal, derived-without-base) —
-          this block only threads it, never re-implements the checks.
+          (unchanged behavior). A nonblank selector with only delimiters
+          (e.g. ",") is rejected — it never falls back to a full publish.
+          The VERB validates the selector (unknown name, the
+          gh-release-deselect refusal, derived-without-base) — this block
+          only threads it, never re-implements the checks.
         type: string
         required: false
     secrets:
@@ -501,10 +503,20 @@ jobs:
           # ADR-0070: one --endpoint per selector name (comma- or
           # space-separated, order preserved). The names are a closed set,
           # but the input is threaded defensively anyway: env passthrough
-          # above, word-split here, each name its own quoted argument. An
-          # empty selector appends nothing — the full post-guard set fires.
-          # Selector VALIDATION is the verb's, never re-implemented here.
+          # above, word-split here, each name its own quoted argument. A
+          # BLANK selector appends nothing — the full post-guard set fires
+          # — but a nonblank selector that tokenizes to ZERO names
+          # (delimiters only, e.g. ",") fails CLOSED right here: falling
+          # through would look exactly like an omitted selector and fire
+          # every endpoint this input exists to suppress. Selector
+          # VALIDATION beyond that (unknown name, gh-release deselect) is
+          # the verb's, never re-implemented here.
           read -r -a endpoint_list <<<"${ENDPOINTS//,/ }"
+          if [[ -n "${ENDPOINTS//[[:space:]]/}" && ${#endpoint_list[@]} -eq 0 ]]; then
+            echo "endpoints selector '${ENDPOINTS}' contains only delimiters —" \
+              "refusing to fall back to a full publish (ADR-0070)" >&2
+            exit 1
+          fi
           for endpoint in "${endpoint_list[@]}"; do
             args+=(--endpoint "$endpoint")
           done

@@ -690,6 +690,46 @@ def test_endpoint_selector_threads_from_input_to_the_verb():
     assert 'args+=(--endpoint "$endpoint")' in script
 
 
+def test_delimiter_only_endpoint_selector_fails_closed():
+    # Codex round-1 finding on #1047: `endpoints: ","` tokenizes to zero
+    # names, and appending no `--endpoint` flag reads to the verb exactly
+    # like an OMITTED selector — a full publish, firing the irreversible
+    # registries the selector exists to suppress. The block fail-closes on
+    # a nonblank selector with zero tokens; blank/whitespace-only stays
+    # the full-fire no-op. Executed for real: the step's run script with
+    # the verb invocation swapped for an args printf.
+    doc = _load("wf-publish.yml")
+    publish = doc["jobs"]["publish"]
+    step = next(s for s in publish["steps"] if "release publish" in s.get("run", ""))
+    verb_line = 'pixi run --locked ./bin/shipit release publish "$VERSION" "${args[@]}"'
+    script = step["run"]
+    assert verb_line in script
+    harness = script.replace(verb_line, 'printf "%s\\n" "${args[@]}"')
+
+    def run(selector: str) -> subprocess.CompletedProcess[str]:
+        # `bash -e`: the default shell GitHub gives an unadorned `run:`.
+        return subprocess.run(
+            ["bash", "-e", "-c", harness],
+            env={"PATH": "/usr/bin:/bin", "ENDPOINTS": selector},
+            capture_output=True,
+            text=True,
+        )
+
+    for selector in (",", ", ,", " ,, "):
+        rejected = run(selector)
+        assert rejected.returncode != 0, selector
+        assert "delimiters" in rejected.stderr, selector
+        assert "--endpoint" not in rejected.stdout, selector
+    for selector in ("", "   "):
+        blank = run(selector)
+        assert blank.returncode == 0, repr(selector)
+        assert "--endpoint" not in blank.stdout, repr(selector)
+    scoped = run("gh-release, conda")
+    assert scoped.returncode == 0, scoped.stderr
+    tail = scoped.stdout.splitlines()[-4:]
+    assert tail == ["--endpoint", "gh-release", "--endpoint", "conda"]
+
+
 def test_composed_chain_forwards_the_endpoint_selector_to_publish():
     # The composed `full` path (#1046 point 2): wf-release declares the
     # same optional input and forwards it VERBATIM to the publish stage —

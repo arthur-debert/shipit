@@ -272,7 +272,8 @@ logic is thin YAML) is stated in [./architecture.lex#3].
     is the ADR-0070 per-invocation selector, consumed by `full`/`publish`
     alone: a comma- or space-separated name list wf-publish threads to
     `shipit release publish` as one `--endpoint` per name; empty fires the
-    full post-guard set, and the VERB owns the validation). The caller
+    full post-guard set, a delimiter-only selector fails closed in the
+    block, and the VERB owns the validation). The caller
     never wires stage outputs — that is the consumer-owned wiring ADR-0040
     forbids, and exactly what WS06 proved unwireable.
 
