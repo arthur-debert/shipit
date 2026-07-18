@@ -258,15 +258,19 @@ CONDA_S3_REGION = "auto"
 
 #: The child-process env vars rattler-build's S3 backend READS the channel
 #: endpoint/region/credentials under (``rattler-build upload s3`` / ``publish``
-#: — the ``[env: S3_*]`` bindings of its S3 credentials group). The endpoint
-#: and region are the fixed GCS-interop constants above; the key/secret ride
-#: from the endpoint's secret pair (:data:`CONDA_KEY_ID_SECRET` /
-#: :data:`CONDA_SECRET_KEY_SECRET`), looked up in ``req.env`` and fed here —
-#: never argv, so the HMAC secret is never recorded in an Exec argv line.
-CONDA_S3_ENDPOINT_ENV = "S3_ENDPOINT_URL"
-CONDA_S3_REGION_ENV = "S3_REGION"
-CONDA_S3_KEY_ID_ENV = "S3_ACCESS_KEY_ID"
-CONDA_S3_SECRET_KEY_ENV = "S3_SECRET_ACCESS_KEY"
+#: — the **AWS SDK credential chain**: rattler-build resolves S3 config through
+#: the standard ``AWS_*`` env vars, and the ``S3_*`` names its ``--help`` once
+#: suggested are IGNORED — with them it dies "Could not determine region from
+#: AWS SDK configuration"; confirmed on both 0.68.* and 0.69.*, #1049). The
+#: endpoint and region are the fixed GCS-interop constants above; the
+#: key/secret ride from the endpoint's secret pair
+#: (:data:`CONDA_KEY_ID_SECRET` / :data:`CONDA_SECRET_KEY_SECRET`), looked up
+#: in ``req.env`` and fed here — never argv, so the HMAC secret is never
+#: recorded in an Exec argv line.
+CONDA_S3_ENDPOINT_ENV = "AWS_ENDPOINT_URL"
+CONDA_S3_REGION_ENV = "AWS_REGION"
+CONDA_S3_KEY_ID_ENV = "AWS_ACCESS_KEY_ID"
+CONDA_S3_SECRET_KEY_ENV = "AWS_SECRET_ACCESS_KEY"
 
 #: The scratch subdir names under the staged assets tree the conda adapter
 #: renders recipes / stages the built channel into — never top-level files (so
@@ -1595,8 +1599,10 @@ def render_conda_recipe(
     ``$PREFIX/<install_dir>/<install_binary>``. ``source_binary`` is the
     binary's path WITHIN the extracted tree — the release archive stages it
     under a top-level ``<artifact>-<triple>/`` dir (bundle._compose_archive's
-    contract), so the copy source is that dir + the binary name, never the
-    archive root. ``archive_path`` is a POSIX path (``Path.as_posix``) emitted
+    contract), but rattler-build STRIPS that single top-level dir on
+    extraction, so the copy source is the bare binary name, never a
+    ``<artifact>-<triple>/`` prefix (#1049). ``archive_path`` is a POSIX path
+    (``Path.as_posix``) emitted
     through ``json.dumps`` — a JSON string IS a valid YAML 1.2 double-quoted
     scalar, so spaces, ``#``, and any embedded ``"`` / ``\\`` are escaped
     rather than breaking the recipe or silently re-pointing the source.
@@ -1672,15 +1678,16 @@ def _publish_conda(req: PublishRequest) -> Published:
     channel_dir = req.assets_dir / CONDA_CHANNEL_SCRATCH / req.artifact.name
     built: list[Path] = []
     actions: list[str] = []
-    for subdir, (triple, asset_name) in sorted(assets.items()):
+    for subdir, (_triple, asset_name) in sorted(assets.items()):
         binary_name, install_dir, install_binary = _conda_binary_layout(subdir, binary)
         # The release archive stages the binary under a top-level
         # `<artifact>-<triple>/` dir (bundle._compose_archive's contract:
         # `Composed(..., (archive, f"{stem}/"))`, stem == `<artifact>-<triple>`)
-        # and rattler-build extracts it preserving that dir, so the build
-        # script's copy source is `<artifact>-<triple>/<binary>`, NOT the
-        # archive root — copying just `<binary>` would miss the file.
-        source_binary = f"{req.artifact.name}-{triple}/{binary_name}"
+        # but rattler-build STRIPS that single top-level dir on extraction, so
+        # the binary lands at the work root and the copy source is just
+        # `<binary>` — a `<artifact>-<triple>/<binary>` prefix fails with
+        # `cp: cannot stat` (#1049, validated on the real lexd archive).
+        source_binary = binary_name
         recipe_dir = recipe_root / subdir
         recipe_dir.mkdir(parents=True, exist_ok=True)
         recipe = recipe_dir / "recipe.yaml"

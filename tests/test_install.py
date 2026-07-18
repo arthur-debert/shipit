@@ -2240,8 +2240,9 @@ def test_toolchain_block_units_have_the_right_shape():
     # here: the wasm32 target std (#853) — a sysroot component, it rides the
     # toolchain block below so a consumer-owned `rust` pin skips it too.
     # rattler-build rides HERE too (ARF01-WS01 #950): the conda endpoint's
-    # packager, on conda-forge in the DEFAULT release env, pinned 0.68.*
-    # (spike-validated) — rust-signal-delivered for the walking-skeleton
+    # packager, on conda-forge in the DEFAULT release env, pinned 0.69.*
+    # (seed-validated against the live channel; 0.68.* panicked during the S3
+    # upload, #1049) — rust-signal-delivered for the walking-skeleton
     # producer (lex-fmt/lex → lexd).
     rust_release = units[iunits.PIXI_RUST_RELEASE_DEPS_KEY]
     assert rust_release.dest == "pixi.toml"
@@ -2249,7 +2250,7 @@ def test_toolchain_block_units_have_the_right_shape():
     assert tomllib.loads(rust_release.desired_inner()) == {
         "cargo-edit": "0.13.11.*",
         "wasm-pack": "0.15.*",
-        "rattler-build": "0.68.*",
+        "rattler-build": "0.69.*",
     }
 
     # The rust RELEASE toolchain (#801, TOL02-WS17 hole 1): cargo itself in

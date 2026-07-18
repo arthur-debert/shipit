@@ -2406,10 +2406,13 @@ def test_conda_builds_each_served_subdir_and_publishes_the_channel(tmp_path):
     assert "--force" in pub_argv
     # The three built .conda files ride as positionals.
     assert sum(1 for a in pub_argv if a.endswith(".conda")) == 3
-    assert pub_env[publish_mod.CONDA_S3_ENDPOINT_ENV] == publish_mod.CONDA_S3_ENDPOINT
-    assert pub_env[publish_mod.CONDA_S3_REGION_ENV] == "auto"
-    assert pub_env[publish_mod.CONDA_S3_KEY_ID_ENV] == "chan-key-id"
-    assert pub_env[publish_mod.CONDA_S3_SECRET_KEY_ENV] == "chan-secret-key"
+    # The literal AWS_* names are load-bearing: rattler-build resolves S3
+    # config via the AWS SDK credential chain and IGNORES the S3_* names
+    # ("Could not determine region from AWS SDK configuration", #1049).
+    assert pub_env["AWS_ENDPOINT_URL"] == publish_mod.CONDA_S3_ENDPOINT
+    assert pub_env["AWS_REGION"] == "auto"
+    assert pub_env["AWS_ACCESS_KEY_ID"] == "chan-key-id"
+    assert pub_env["AWS_SECRET_ACCESS_KEY"] == "chan-secret-key"
     # The HMAC secret NEVER rides argv (it is env-only, redactor-registered).
     assert not any("chan-secret-key" in a for a in pub_argv)
     assert any("published 3 package(s)" in a for a in published.actions)
@@ -2444,26 +2447,27 @@ def test_conda_publishes_a_private_repo_to_the_private_bucket(tmp_path):
     assert any("shipit-artifacts-private" in a for a in published.actions)
 
 
-def test_conda_recipe_source_path_matches_the_archive_staging_dir(tmp_path):
-    """The rendered build script copies the binary from the archive's
-    top-level `<artifact>-<triple>/` staging dir — the contract
-    `bundle._compose_archive` emits (`Composed(..., (archive, f"{stem}/"))`,
-    stem == `<artifact>-<triple>`). rattler-build extracts preserving that
-    dir, so copying just `<binary>` from the archive root would miss the file.
-    """
+def test_conda_recipe_source_is_the_bare_binary_name(tmp_path):
+    """The rendered build script copies the BARE binary name from the work
+    root. The release archive stages the binary under a top-level
+    `<artifact>-<triple>/` dir (`bundle._compose_archive`'s contract), but
+    rattler-build STRIPS that single top-level dir on extraction, so a
+    `<artifact>-<triple>/<binary>` copy source fails `cp: cannot stat` —
+    the #1049 seed bug, validated against the real lexd release archive."""
     req, _ = _conda_request(tmp_path)
 
     publish_mod._publish_conda(req)
 
     recipe_root = req.assets_dir / publish_mod.CONDA_RECIPE_SCRATCH / req.artifact.name
-    # osx-arm64 (unix): binary staged at `lex-<triple>/lex`, copied into bin.
-    # The dir prefix IS the archive stem `lex-<triple>` (the `.tar.gz` staging
-    # subdir), never the archive root.
+    # osx-arm64 (unix): the stripped-root binary copied into bin — no
+    # `lex-<triple>/` prefix on the cp source.
     unix_recipe = (recipe_root / "osx-arm64" / "recipe.yaml").read_text()
-    assert f'cp "lex-{MAC_ARM}/lex" "${{PREFIX}}/bin/lex"' in unix_recipe
-    # win-64: the `.exe` staged at `lex-<triple>/lex.exe`, copied into Scripts.
+    assert 'cp "lex" "${PREFIX}/bin/lex"' in unix_recipe
+    assert f"lex-{MAC_ARM}/lex" not in unix_recipe
+    # win-64: the `.exe` at the stripped root, copied into Scripts.
     win_recipe = (recipe_root / "win-64" / "recipe.yaml").read_text()
-    assert f'cp "lex-{WIN}/lex.exe" "${{PREFIX}}/Scripts/lex.exe"' in win_recipe
+    assert 'cp "lex.exe" "${PREFIX}/Scripts/lex.exe"' in win_recipe
+    assert f"lex-{WIN}/lex.exe" not in win_recipe
 
 
 def test_conda_scratch_is_namespaced_per_artifact(tmp_path):
