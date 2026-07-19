@@ -150,11 +150,18 @@ functions the entries carry:
   ``CFBundleExecutable`` as the darwin anchor. Linux/windows legs ship unsigned.
   Mac/linux/windows targets only (the windows leg's integrity + endpoint land
   with WS11).
-- **tarball** — the generated-parser ``<name>.tar.gz`` (TOL02-WS16 #792,
-  legacy ``tree-sitter.yml@v3``): the tree-sitter leg's generated ``src/``
-  tree plus the grammar/queries/bindings that are present. Platform-
-  independent (generated C source, no per-OS variant — no ``-<target>``
-  suffix), so every matrix leg composes the identical bytes.
+- **tarball** — the tree-sitter release ``<name>.tar.gz`` (TOL02-WS16 #792,
+  legacy ``tree-sitter.yml@v3``): the tree-sitter leg's generated ``src/`` tree
+  plus the grammar/queries/manifests that are present (``grammar.js``,
+  ``package.json``, ``tree-sitter.json``, ``shared/embedded-grammars.json``,
+  bindings), AND the built ``tree-sitter-<parser>.wasm`` at the bundle root —
+  ``tree-sitter build --wasm`` compiles the grammar to WebAssembly for the
+  editor consumers, exactly as the legacy build job did before tarring (#1078:
+  the shipit cutover shipped source only, dropping the wasm + editor manifest;
+  this restores the v0.11.2 union). A run producing no wasm is a hard failure
+  (a wasm backend — emscripten or Docker — must be on the bundle leg).
+  Platform-independent (no per-OS variant — no ``-<target>`` suffix), so the one
+  leg that composes it emits the one unqualified name.
 - **zed** — the Zed-extension ``<name>.tar.gz`` (TOL03-WS02 #973, ADR-0068):
   the extension's committed source under the rust leg (the extension is a Rust
   crate compiled to WASM) — ``extension.toml`` (the REQUIRED manifest core, its
@@ -467,7 +474,7 @@ def _compose_wheel(req: ComposeRequest) -> Composed:
     return Composed(req.artifact.name, "wheel", (*wheels, *sdists))
 
 
-#: The generated-parser payload the ``tarball`` composition ships — tree-sitter's
+#: The committed-file payload the ``tarball`` composition ships — tree-sitter's
 #: conventional layout under the tree-sitter leg's path. ``src`` (the
 #: ``tree-sitter generate`` output: ``parser.c``, the ``tree_sitter/``
 #: headers, ``node-types.json``, ``grammar.json``) is the REQUIRED core — its
@@ -476,28 +483,88 @@ def _compose_wheel(req: ComposeRequest) -> Composed:
 #: and bindings or it does not, and an absent one ships nothing rather than an
 #: empty dir. This is the legacy ``tree-sitter.yml@v3`` tarball contract
 #: (generated parser + grammar + queries), assembled shipit-side.
+#:
+#: ``tree-sitter.json`` is the CLI's config manifest (present since tree-sitter
+#: CLI 0.24 — the legacy v0.11.2 bundle shipped it; the shipit cutover dropped
+#: it, #1078). ``shared/embedded-grammars.json`` is the editor-bundle manifest
+#: the wasm consumers (lex-fmt/vscode, lex-fmt/lexed) read at install time to
+#: drive their grammar-fetch — the legacy ``app-bin/bundle-extras.sh``
+#: convention, folded here as a declarative WHEN-PRESENT entry (a specific
+#: committed file, so a grammar without it ships nothing and its ``shared/``
+#: sibling ``lex-deps.json`` does NOT ride — preserving the v0.11.2 surface)
+#: rather than a run-arbitrary-consumer-shell hook. The built
+#: ``tree-sitter-<parser>.wasm`` is NOT here — it is a compile output, added at
+#: the bundle ROOT by :func:`_compose_tarball` after ``tree-sitter build
+#: --wasm``, not a checked-in file.
 TREE_SITTER_PAYLOAD: tuple[str, ...] = (
     "src",
     "queries",
     "grammar.js",
     "package.json",
+    "tree-sitter.json",
     "binding.gyp",
     "bindings",
+    "shared/embedded-grammars.json",
 )
 
 
-def _compose_tarball(req: ComposeRequest) -> Composed:
-    """The generated-parser tarball: ``<name>.tar.gz`` of the tree-sitter
-    leg's :data:`TREE_SITTER_PAYLOAD` (the ``tree-sitter generate`` output
-    plus the grammar/queries/bindings, when present). See the module
-    docstring's tarball entry.
+def _tree_sitter_parser_name(leg_dir: Path, artifact_name: str) -> str:
+    """The bare parser name the ``tree-sitter-<parser>.wasm`` output carries,
+    derived from ``package.json`` ``.name`` by stripping the ``tree-sitter-``
+    prefix (the legacy ``tree-sitter.yml@v3`` "Resolve parser name" step). A
+    non-conforming or absent name is a HARD failure, never a silent skip:
+    ``tree-sitter build --wasm`` names the file off the grammar, so a wrong
+    name would make the bundle look empty at the consumer's install, the worst
+    place to discover it. Pure but for the one ``package.json`` read."""
+    pkg = leg_dir / "package.json"
+    if not pkg.is_file():
+        raise ReleaseError(
+            f"[artifacts.{artifact_name}] tarball composition: no {pkg} — the "
+            f"wasm bundle names its file `tree-sitter-<parser>.wasm` off the "
+            f"grammar's package.json `name`; a tree-sitter grammar ships one"
+        )
+    try:
+        name = json.loads(pkg.read_text()).get("name")
+    except (ValueError, OSError) as exc:
+        raise ReleaseError(
+            f"[artifacts.{artifact_name}] tarball composition: could not read "
+            f"the parser name from {pkg}: {exc}"
+        ) from exc
+    if not isinstance(name, str) or not name.startswith("tree-sitter-"):
+        raise ReleaseError(
+            f"[artifacts.{artifact_name}] tarball composition: package.json "
+            f"name {name!r} does not start with `tree-sitter-`, so the wasm "
+            f"output name cannot be derived (convention: `tree-sitter-<parser>`)"
+        )
+    return name[len("tree-sitter-") :]
 
-    A generated parser is platform-independent C source — no per-OS variant —
-    so the archive carries NO ``-<target>`` suffix: every matrix leg that runs
-    it composes the identical bytes under the one name (parity with legacy
-    ``tree-sitter.tar.gz``). ``src`` is required — its absence is a bundle-
-    stage failure (``shipit build`` runs ``tree-sitter generate`` first),
-    never a quiet empty archive.
+
+def _compose_tarball(req: ComposeRequest) -> Composed:
+    """The tree-sitter release tarball: ``<name>.tar.gz`` of the tree-sitter
+    leg's :data:`TREE_SITTER_PAYLOAD` (the ``tree-sitter generate`` output plus
+    the grammar/queries/manifests, when present) PLUS the built
+    ``tree-sitter-<parser>.wasm`` at the bundle root. See the module docstring's
+    tarball entry.
+
+    The wasm is BUILT here — ``tree-sitter build --wasm`` compiles the grammar
+    to WebAssembly for the editor consumers (lex-fmt/vscode, lex-fmt/lexed),
+    exactly as the legacy ``tree-sitter.yml@v3`` build job did before tarring
+    (#1078: the shipit cutover shipped source only, dropping the wasm +
+    ``shared/embedded-grammars.json`` the wasm consumers load — this restores
+    the v0.11.2 union). The build needs a wasm backend (emscripten on PATH, or
+    Docker) like every ``tree-sitter build --wasm``; a run that produces no
+    ``tree-sitter-<parser>.wasm`` is a HARD bundle-stage failure (ADR-0009's
+    loud-barrier + the legacy job's hard error), never a quiet source-only
+    archive. The wasm is a compile output built into the leg dir, tarred, then
+    REMOVED (like wasm-pack's scratch ``pkg/``): only the archive under
+    ``out_dir`` survives.
+
+    A generated parser is platform-independent — no per-OS variant — so the
+    archive carries NO ``-<target>`` suffix: the ONE leg that runs it (the
+    config boundary refuses >1 ``platforms``) composes the bytes under the one
+    name (parity with legacy ``tree-sitter.tar.gz``). ``src`` is required — its
+    absence is a bundle-stage failure (``shipit build`` runs ``tree-sitter
+    generate`` first), never a quiet empty archive.
     """
     leg = _leg_for(req.artifact, req.entries, "tree-sitter", "tarball")
     leg_dir = req.root if leg.path in (".", "") else req.root / leg.path
@@ -507,18 +574,43 @@ def _compose_tarball(req: ComposeRequest) -> Composed:
             f"parser at {leg_dir / 'src'} — the tarball ships the "
             f"`tree-sitter generate` output; run `shipit build` first"
         )
-    present = [name for name in TREE_SITTER_PAYLOAD if (leg_dir / name).exists()]
-    archive = f"{req.artifact.name}.tar.gz"
-    archive_path = req.out_dir / archive
-    req.out_dir.mkdir(parents=True, exist_ok=True)
-    if archive_path.exists():
-        # tar -czf truncates, but an unlink keeps the rerun's artifact exactly
-        # the fresh tree (the archive/mac-app recreate-from-clean contract).
-        archive_path.unlink()
-    req.run_cmd(
-        ["tar", "-czf", str(archive_path), "-C", str(leg_dir), *present],
-        req.root,
-    )
+    parser = _tree_sitter_parser_name(leg_dir, req.artifact.name)
+    wasm_name = f"tree-sitter-{parser}.wasm"
+    wasm_path = leg_dir / wasm_name
+    # Rebuild fresh — never tar a stale wasm from a prior run.
+    wasm_path.unlink(missing_ok=True)
+    try:
+        req.run_cmd(["tree-sitter", "build", "--wasm"], leg_dir)
+        if not wasm_path.is_file():
+            raise ReleaseError(
+                f"[artifacts.{req.artifact.name}] tarball composition: "
+                f"`tree-sitter build --wasm` produced no {wasm_name} in "
+                f"{leg_dir} — the editor consumers load this file by name, so a "
+                f"source-only tarball is a hard failure. A wasm backend "
+                f"(emscripten on PATH or Docker) must be available on the "
+                f"bundle leg"
+            )
+        # The wasm rides at the bundle ROOT (the consumer contract: a flat
+        # `tree-sitter-<parser>.wasm`), ahead of the committed-file payload.
+        present = [wasm_name] + [
+            name for name in TREE_SITTER_PAYLOAD if (leg_dir / name).exists()
+        ]
+        archive = f"{req.artifact.name}.tar.gz"
+        archive_path = req.out_dir / archive
+        req.out_dir.mkdir(parents=True, exist_ok=True)
+        if archive_path.exists():
+            # tar -czf truncates, but an unlink keeps the rerun's artifact
+            # exactly the fresh tree (the archive recreate-from-clean contract).
+            archive_path.unlink()
+        req.run_cmd(
+            ["tar", "-czf", str(archive_path), "-C", str(leg_dir), *present],
+            req.root,
+        )
+    finally:
+        # A compile output, not a checked-in file: leave the leg dir clean
+        # whether the tar succeeded or a hard-fail exited early (ADR-0009: only
+        # the declared archive under out_dir survives a composition).
+        wasm_path.unlink(missing_ok=True)
     return Composed(req.artifact.name, "tarball", (archive,))
 
 

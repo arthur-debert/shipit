@@ -114,10 +114,11 @@ _ADAPTER_HOMES: dict[str, tuple[str, ...]] = {
     # release-stage tool.
     "busted": ("tools/registry.py",),
     # tree-sitter (TOL02-WS16 #792): the generated-parser toolchain's
-    # generate/corpus commands, assembled ONLY in the closed registry. The
-    # tarball composition's payload is bytes, not a tree-sitter argv — the
-    # tar invocation stays under `tar`'s bundle home.
-    "tree-sitter": ("tools/registry.py",),
+    # generate/corpus commands, assembled in the closed registry — PLUS the
+    # tarball composition's `tree-sitter build --wasm` (#1078), which compiles
+    # the grammar to WebAssembly for the editor consumers before the tar (the
+    # tar invocation itself stays under `tar`'s bundle home).
+    "tree-sitter": ("tools/registry.py", "release/bundle.py"),
     "npm": (
         "tools/registry.py",
         "tree/create.py",

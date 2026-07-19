@@ -1090,23 +1090,53 @@ def _tarball_artifact():
     return artifact
 
 
-def test_tarball_tars_the_generated_parser_payload_present(tmp_path):
+def _wasm_build(wasm_name="tree-sitter-lex.wasm"):
+    """A `tree-sitter build --wasm` effect: writes the compiled wasm into the
+    build cwd (the leg dir), simulating the real tool so the composition's
+    hard "wasm produced?" check and its inclusion in the tar are exercised."""
+
+    def _build(argv, cwd):
+        # \0asm + version — the wasm module magic, so the fake is a real-ish file.
+        (Path(cwd) / wasm_name).write_bytes(b"\x00asm\x01\x00\x00\x00")
+
+    return _build
+
+
+def _tree_sitter_grammar(leg_dir, *, name="tree-sitter-lex"):
+    """A minimal generated-grammar tree under `leg_dir`: the required `src/` +
+    the `package.json` the wasm parser-name is derived from."""
+    (leg_dir / "src").mkdir(parents=True, exist_ok=True)
+    (leg_dir / "src/parser.c").write_text("/* generated */")
+    (leg_dir / "package.json").write_text(json.dumps({"name": name}))
+
+
+def test_tarball_builds_the_wasm_and_ships_the_union(tmp_path):
+    # The v0.11.2 union (#1078): the built `tree-sitter-<parser>.wasm` at the
+    # bundle root, the editor manifest `shared/embedded-grammars.json`, and
+    # `tree-sitter.json` — all beside the generated src/ + queries the cutover
+    # already shipped.
     artifact = _tarball_artifact()
     entries = _entries({".": "tree-sitter"})
-    (tmp_path / "src").mkdir()
-    (tmp_path / "src/parser.c").write_text("/* generated */")
+    _tree_sitter_grammar(tmp_path)
     (tmp_path / "queries").mkdir()
     (tmp_path / "queries/highlights.scm").write_text(";; hi")
     (tmp_path / "grammar.js").write_text("module.exports = grammar({});")
-    # binding.gyp / package.json / bindings absent — ship only what is present.
-    recorder = RunRecorder()
+    (tmp_path / "tree-sitter.json").write_text("{}")
+    (tmp_path / "shared").mkdir()
+    (tmp_path / "shared/embedded-grammars.json").write_text('{"grammars": []}')
+    # shared/lex-deps.json must NOT ride — only the specific manifest does.
+    (tmp_path / "shared/lex-deps.json").write_text("{}")
+    recorder = RunRecorder({"tree-sitter": _wasm_build()})
 
     composed = bundle_mod.TARBALL.compose(
         _request(tmp_path, artifact, entries, run_cmd=recorder)
     )
 
     archive = tmp_path / "dist" / "parser.tar.gz"
+    # The wasm is built first (in the leg dir), then the union is tarred with the
+    # wasm at the root, ahead of the committed-file payload; lex-deps.json omitted.
     assert recorder.calls == [
+        (("tree-sitter", "build", "--wasm"), tmp_path),
         (
             (
                 "tar",
@@ -1114,43 +1144,54 @@ def test_tarball_tars_the_generated_parser_payload_present(tmp_path):
                 str(archive),
                 "-C",
                 str(tmp_path),
+                "tree-sitter-lex.wasm",
                 "src",
                 "queries",
                 "grammar.js",
+                "package.json",
+                "tree-sitter.json",
+                "shared/embedded-grammars.json",
             ),
             tmp_path,
-        )
+        ),
     ]
-    # Platform-independent: no `-<target>` suffix — every leg composes the same name.
+    # Platform-independent: no `-<target>` suffix — the one leg composes the name.
     assert composed == bundle_mod.Composed("parser", "tarball", ("parser.tar.gz",))
+    # The built wasm is a compile output, removed after tar — the leg dir stays
+    # clean (ADR-0009: only the declared archive survives).
+    assert not (tmp_path / "tree-sitter-lex.wasm").exists()
 
 
 def test_tarball_reads_the_tree_sitter_leg_subdir(tmp_path):
-    # The payload is collected under the tree-sitter leg's path, not the root.
+    # The payload is collected under the tree-sitter leg's path, not the root —
+    # so the wasm builds there and the tar reads there.
     (artifact,) = _artifacts(
         {"parser": {"build": ["tree-sitter"], "bundle": {"composition": "tarball"}}}
     )
     entries = _entries({"grammar": "tree-sitter"})
-    (tmp_path / "grammar/src").mkdir(parents=True)
-    (tmp_path / "grammar/src/parser.c").write_text("/* generated */")
-    recorder = RunRecorder()
+    _tree_sitter_grammar(tmp_path / "grammar")
+    recorder = RunRecorder({"tree-sitter": _wasm_build()})
 
     bundle_mod.TARBALL.compose(_request(tmp_path, artifact, entries, run_cmd=recorder))
 
-    ((argv, cwd),) = recorder.calls
-    assert argv == (
+    build_call, tar_call = recorder.calls
+    assert build_call == (("tree-sitter", "build", "--wasm"), tmp_path / "grammar")
+    assert tar_call[0] == (
         "tar",
         "-czf",
         str(tmp_path / "dist" / "parser.tar.gz"),
         "-C",
         str(tmp_path / "grammar"),
+        "tree-sitter-lex.wasm",
         "src",
+        "package.json",
     )
 
 
 def test_tarball_without_generated_src_refuses(tmp_path):
     # The tarball ships the `tree-sitter generate` output — no src/ means the
-    # parser was never generated (run `shipit build` first), a hard fail.
+    # parser was never generated (run `shipit build` first), a hard fail BEFORE
+    # any wasm build.
     artifact = _tarball_artifact()
     recorder = RunRecorder()
     with pytest.raises(ReleaseError, match="no generated parser"):
@@ -1162,11 +1203,57 @@ def test_tarball_without_generated_src_refuses(tmp_path):
     assert recorder.calls == []  # nothing ran, nothing written
 
 
-def test_tarball_rerun_unlinks_the_stale_archive(tmp_path):
+def test_tarball_wasm_not_produced_refuses(tmp_path):
+    # `tree-sitter build --wasm` that emits no wasm (no backend on the leg) is a
+    # HARD failure — the editor consumers load this file by name, so a
+    # source-only tarball must never pass silently (#1078).
+    artifact = _tarball_artifact()
+    entries = _entries({".": "tree-sitter"})
+    _tree_sitter_grammar(tmp_path)
+    recorder = RunRecorder()  # no `tree-sitter` effect → nothing written
+    with pytest.raises(ReleaseError, match="produced no tree-sitter-lex.wasm"):
+        bundle_mod.TARBALL.compose(
+            _request(tmp_path, artifact, entries, run_cmd=recorder)
+        )
+    # The build was attempted; the tar never ran (no half-built archive).
+    assert recorder.heads == ["tree-sitter"]
+    assert not (tmp_path / "dist" / "parser.tar.gz").exists()
+
+
+def test_tarball_nonconforming_package_name_refuses(tmp_path):
+    # The wasm output name is derived from package.json `name`; a name not of
+    # the `tree-sitter-<parser>` form cannot name the file, a loud refusal
+    # BEFORE the build runs.
+    artifact = _tarball_artifact()
+    entries = _entries({".": "tree-sitter"})
+    _tree_sitter_grammar(tmp_path, name="my-grammar")
+    recorder = RunRecorder({"tree-sitter": _wasm_build()})
+    with pytest.raises(ReleaseError, match="does not start with `tree-sitter-`"):
+        bundle_mod.TARBALL.compose(
+            _request(tmp_path, artifact, entries, run_cmd=recorder)
+        )
+    assert recorder.calls == []  # name refused before the build
+
+
+def test_tarball_missing_package_json_refuses(tmp_path):
+    # No package.json → no parser name to derive → hard refusal (a tree-sitter
+    # grammar ships one).
     artifact = _tarball_artifact()
     entries = _entries({".": "tree-sitter"})
     (tmp_path / "src").mkdir()
     (tmp_path / "src/parser.c").write_text("/* generated */")
+    recorder = RunRecorder({"tree-sitter": _wasm_build()})
+    with pytest.raises(ReleaseError, match="package.json"):
+        bundle_mod.TARBALL.compose(
+            _request(tmp_path, artifact, entries, run_cmd=recorder)
+        )
+    assert recorder.calls == []
+
+
+def test_tarball_rerun_unlinks_the_stale_archive(tmp_path):
+    artifact = _tarball_artifact()
+    entries = _entries({".": "tree-sitter"})
+    _tree_sitter_grammar(tmp_path)
     dist = tmp_path / "dist"
     dist.mkdir()
     stale = dist / "parser.tar.gz"
@@ -1175,7 +1262,7 @@ def test_tarball_rerun_unlinks_the_stale_archive(tmp_path):
     def _tar_writes(argv, cwd):
         Path(argv[2]).write_bytes(b"FRESH")
 
-    recorder = RunRecorder({"tar": _tar_writes})
+    recorder = RunRecorder({"tree-sitter": _wasm_build(), "tar": _tar_writes})
     bundle_mod.TARBALL.compose(_request(tmp_path, artifact, entries, run_cmd=recorder))
     assert stale.read_bytes() == b"FRESH"  # the stale archive was replaced
 
