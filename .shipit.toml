@@ -163,6 +163,21 @@ run = "test"
 required = true
 local = true
 
+# The PR-time changelog fragment gate (issue #1073): fail a PR to `main` that
+# adds no CHANGELOG/unreleased-*.md fragment, with a `skip-changelog` label
+# escape hatch (docs/CI/chore-only PRs). `run` is the `changelog` pixi task
+# (./bin/shipit changelog) plus the `check-fragment` subcommand arg — the same
+# invocation a laptop runs. `local = false` keeps it OUT of the derived
+# commit/push checks (the required∩local set stays exactly lint + test): the gate
+# is PR/CI-only, so lefthook/laptop never runs it. Base-branch and label gating
+# live in the subcommand (the planner has no base/label awareness); the lane
+# rolls up into the single required `check` gate with no workflow YAML change.
+[lanes.changelog]
+run = "changelog check-fragment"
+required = true
+local = false
+trigger = "pr"
+
 # [project] — the CONSUMER-OWNED, un-validated namespace. shipit validates that
 # top-level tables are KNOWN (so a typo dies fast), but `[project]` (alias:
 # `[custom]`) is the well-known escape hatch whose SUBTREE shipit reads but does NOT

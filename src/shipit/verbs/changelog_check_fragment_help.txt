@@ -1,0 +1,26 @@
+`shipit changelog check-fragment` fails a pull request to `main` that adds no
+release-note fragment, so a missing fragment is caught at PR time — not at the
+next release cut, once every PR is already merged.
+
+It is self-gating and offline (no `gh` auth). The PR context comes from the CI
+runner environment, not a live API call:
+
+- base ref from `GITHUB_BASE_REF` (empty off a PR)
+- labels from the `GITHUB_EVENT_PATH` event payload
+
+The check PASSES (exit 0), requiring no fragment, when any of:
+
+- it is not a PR context (`GITHUB_BASE_REF` empty) — so laptop/lefthook runs
+  never block
+- the PR base is not `main` — work-stream PRs target epic branches and are
+  exempt; only PRs to `main` are gated
+- the PR carries the `skip-changelog` label — the escape hatch for docs/CI/
+  chore-only PRs that legitimately need no release note
+
+Otherwise it requires the PR's own diff (the three-dot merge-base diff against
+`origin/main`) to add or modify at least one `CHANGELOG/unreleased-*.md`
+fragment, and exits non-zero when none is found.
+
+Wire it as a required, PR-only lane in `.shipit.toml` (`local = false`, so it
+runs in CI but never on a laptop commit/push). The base-branch and label gating
+lives here, in the subcommand — the lane planner stays base/label-unaware.

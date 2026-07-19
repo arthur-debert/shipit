@@ -397,6 +397,10 @@ _HELP_RESOURCES = {
     ("e2e",): ("shipit.verbs", "e2e_help.txt"),
     ("changelog",): ("shipit.verbs", "changelog_help.txt"),
     ("changelog", "check"): ("shipit.verbs", "changelog_check_help.txt"),
+    ("changelog", "check-fragment"): (
+        "shipit.verbs",
+        "changelog_check_fragment_help.txt",
+    ),
     ("changelog", "render"): ("shipit.verbs", "changelog_render_help.txt"),
     ("changelog", "coalesce"): ("shipit.verbs", "changelog_coalesce_help.txt"),
     ("release",): ("shipit.verbs", "release_help.txt"),
