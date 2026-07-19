@@ -27,13 +27,18 @@ registry, exactly as `rust` and `node` are.
 
 - **A root-app Artifact declares no package; that generalization is #1083 seam
   work.** The current Creation Artifact contract makes `ArtifactDecl.package`
-  mandatory, the planner always serializes it, and npm build narrowing appends
-  `--workspace <package>` ([src/shipit/tools/build.py](../../src/shipit/tools/build.py)
-  `_narrow`) — so a single-root Vite app modeled with a package would run an
-  invalid `vite build --workspace <package>`. svelte-app is therefore a single-root
-  app that **omits** the package: `ArtifactDecl.package` becomes **optional**, the
-  planner skips it when absent, and `_narrow` skips `--workspace` when the target
-  has no package, leaving a bare `pnpm run build`. Making the package optional is
+  mandatory, the planner always serializes it, and
+  [src/shipit/tools/build.py](../../src/shipit/tools/build.py) `_narrow` appends
+  the `--workspace <package>` token to the **toolchain build command** (`npm run
+  build` today, pnpm-reconciled to `pnpm run build` per ADR-0077) — so a
+  single-root Vite app modeled with a package would run an invalid `pnpm run build
+  --workspace <package>` (the narrowing token tacked onto the build command, not
+  onto `vite` itself). svelte-app is therefore a single-root app that **omits** the
+  package: `ArtifactDecl.package` becomes **optional**, the planner skips it when
+  absent, and `_narrow` skips the narrowing token when the target has no package,
+  leaving a bare `pnpm run build` (a `vite build`). This is also why the pnpm
+  reconciliation must be `--filter`-aware for packaged Artifacts, not
+  `--workspace` (ADR-0077). Making the package optional is
   prerequisite seam work **owned by #1083** (alongside the pnpm-leg reconciliation
   and dependency materialization ADR-0077 depends on). This ADR decides the
   modeling — root app, no package, bare build — while #1083 provides the machinery.
