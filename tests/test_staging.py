@@ -5,8 +5,9 @@ Unit-tested against a CONSTRUCTED env prefix (the copy logic is pure filesystem;
 the REAL `.conda` → pixi resolve round trip that produces such a prefix is proven
 in test_release_publish.py's staging round-trip test). Covers file + directory
 copies, the executable-bit round trip a shipped binary needs, idempotent re-runs,
-the loud missing-source refusal, the symlinked-parent escape guard, and feature
-(named-env) prefix resolution.
+the loud missing-source refusal, the bounded-destination guard, the refuse-links
+model (a symlink/junction on the source, env anchor, or staging root is refused,
+never followed), and feature (named-env) prefix resolution.
 """
 
 import pytest
@@ -287,11 +288,12 @@ def test_file_source_refuses_to_overwrite_an_existing_directory_dest(tmp_path):
 
 
 # --------------------------------------------------------------------------
-# Source symlink escape — the scan and the copy are ONE traversal
+# Refuse links — the copy never follows a symlink/junction, it only copies real
+# files and real directories, so the whole symlink-escape class is closed at once
 # --------------------------------------------------------------------------
 
 
-def test_top_level_source_symlink_escaping_the_prefix_is_refused(tmp_path):
+def test_top_level_source_symlink_is_refused(tmp_path):
     prefix = _prefix(tmp_path)
     secret = tmp_path.parent / "host-secret.txt"
     secret.write_text("SECRET", encoding="utf-8")
@@ -299,25 +301,41 @@ def test_top_level_source_symlink_escaping_the_prefix_is_refused(tmp_path):
     (prefix / "bin").mkdir(parents=True, exist_ok=True)
     (prefix / "bin" / "evil").symlink_to(secret)
 
-    with pytest.raises(staging.StagingError, match="outside the env prefix"):
+    with pytest.raises(staging.StagingError, match="symlink or junction"):
         staging.stage(
             tmp_path, [config.StageEntry("evil", "bin/evil", "resources/evil")]
         )
     assert not (tmp_path / "resources" / "evil").exists()
 
 
-def test_nested_directory_source_symlink_escaping_the_prefix_is_refused(tmp_path):
+def test_intermediate_source_symlink_component_is_refused(tmp_path):
+    # A link is refused ANYWHERE on the source path, not just the leaf: `share/pkg`
+    # here is a symlink out of the prefix, and `bin/tool` is the leaf under it.
+    prefix = _prefix(tmp_path)
+    outside = tmp_path.parent / "outside-pkg"
+    _plant(outside / "tool", "loot", mode=0o755)
+    (prefix / "share").mkdir(parents=True, exist_ok=True)
+    (prefix / "share" / "pkg").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(staging.StagingError, match="symlink or junction"):
+        staging.stage(
+            tmp_path, [config.StageEntry("pkg", "share/pkg/tool", "resources/tool")]
+        )
+    assert not (tmp_path / "resources" / "tool").exists()
+
+
+def test_nested_directory_source_symlink_is_refused(tmp_path):
     prefix = _prefix(tmp_path)
     outside = tmp_path.parent / "outside-tree"
     outside.mkdir(exist_ok=True)
     (outside / "loot.txt").write_text("LOOT", encoding="utf-8")
     tree = prefix / "share" / "pkg" / "data"
     _plant(tree / "real.txt", "real")
-    # A symlink INSIDE the staged directory tree points outside the prefix; the
-    # unified copy resolves+checks it in the same pass that would copy it.
+    # A symlink INSIDE the staged directory tree — refused during the copy walk, so
+    # nothing is followed and nothing lands.
     (tree / "escape").symlink_to(outside, target_is_directory=True)
 
-    with pytest.raises(staging.StagingError, match="outside the env prefix"):
+    with pytest.raises(staging.StagingError, match="symlink or junction"):
         staging.stage(
             tmp_path,
             [config.StageEntry("pkg", "share/pkg/data", "resources/data")],
@@ -325,35 +343,11 @@ def test_nested_directory_source_symlink_escaping_the_prefix_is_refused(tmp_path
     assert not (tmp_path / "resources" / "data").exists()
 
 
-def test_escape_hidden_behind_a_good_directory_symlink_is_refused(tmp_path):
-    # The round-2 divergence case: `data/good` is an IN-prefix directory symlink
-    # (a separate os.walk pre-scan would accept it and NOT descend), but its target
-    # contains `escape -> /outside`. Because scan and copy are the SAME recursive
-    # traversal that follows in-prefix directory symlinks, the hidden escape is
-    # caught — not copied in behind copytree's back.
-    prefix = _prefix(tmp_path)
-    outside = tmp_path.parent / "outside-loot"
-    outside.mkdir(exist_ok=True)
-    (outside / "loot.txt").write_text("LOOT", encoding="utf-8")
-    tree = prefix / "share" / "pkg" / "data"
-    _plant(tree / "real.txt", "real")
-    # An in-prefix directory the good symlink points to, holding the real escape.
-    target = prefix / "share" / "pkg" / "other"
-    _plant(target / "ok.txt", "ok")
-    (target / "escape").symlink_to(outside, target_is_directory=True)
-    (tree / "good").symlink_to(target, target_is_directory=True)
-
-    with pytest.raises(staging.StagingError, match="outside the env prefix"):
-        staging.stage(
-            tmp_path,
-            [config.StageEntry("pkg", "share/pkg/data", "resources/data")],
-        )
-    assert not (tmp_path / "resources" / "data").exists()
-
-
-def test_in_prefix_directory_symlink_is_followed_and_copied(tmp_path):
-    # A GOOD in-prefix directory symlink is dereferenced and its contents copied —
-    # the containment check accepts it, so the bundle is self-contained.
+def test_even_an_in_prefix_directory_symlink_is_refused_not_followed(tmp_path):
+    # The class-closing point: a directory symlink whose target is INSIDE the prefix
+    # (previously "followed and copied") is now REFUSED outright. We never follow a
+    # link, so there is no divergence, no DAG/cycle question, no hidden-escape-behind-
+    # a-good-link vector — the real files still stage, the link does not.
     prefix = _prefix(tmp_path)
     tree = prefix / "share" / "pkg" / "data"
     _plant(tree / "real.txt", "real")
@@ -361,55 +355,51 @@ def test_in_prefix_directory_symlink_is_followed_and_copied(tmp_path):
     _plant(target / "ok.txt", "ok")
     (tree / "linked").symlink_to(target, target_is_directory=True)
 
-    (result,) = staging.stage(
-        tmp_path,
-        [config.StageEntry("pkg", "share/pkg/data", "resources/data")],
+    with pytest.raises(staging.StagingError, match="symlink or junction"):
+        staging.stage(
+            tmp_path,
+            [config.StageEntry("pkg", "share/pkg/data", "resources/data")],
+        )
+    assert not (tmp_path / "resources" / "data").exists()
+
+
+def test_symlinked_pixi_envs_redirecting_out_of_tree_is_refused(tmp_path):
+    # The copilot finding: a symlinked `.pixi/envs` (or `.pixi`) redirecting outside
+    # the checkout must not let staging read out-of-tree files. The env-anchor
+    # link-refusal catches it before the prefix is even resolved.
+    outside_env = tmp_path.parent / "outside-env" / "default"
+    _plant(outside_env / "bin" / "lex", "loot", mode=0o755)
+    pixi = tmp_path / ".pixi"
+    pixi.mkdir()
+    (pixi / "envs").symlink_to(
+        tmp_path.parent / "outside-env", target_is_directory=True
     )
 
-    assert (tmp_path / "resources" / "data" / "real.txt").read_text() == "real"
-    assert (tmp_path / "resources" / "data" / "linked" / "ok.txt").read_text() == "ok"
-    assert result.is_dir is True
+    with pytest.raises(staging.StagingError, match="symlink or junction"):
+        staging.stage(tmp_path, [config.StageEntry("lex", "bin/lex", "resources/lex")])
+    assert not (tmp_path / "resources" / "lex").exists()
 
 
-def test_two_symlinks_to_the_same_dir_a_dag_copy_fully_at_both_dests(tmp_path):
-    # Two DIFFERENT in-prefix directory symlinks pointing at the SAME target is a
-    # DAG, not a cycle. A global visited-set would copy the first and skip the
-    # second (leaving it empty) — a silently incomplete bundle. The recursion-stack
-    # scope (pop on unwind) copies the shared target in FULL at both destinations.
+def test_real_files_and_directories_still_stage_fine(tmp_path):
+    # Refusing links does NOT touch the normal path: a real binary and a real data
+    # directory (what conda actually extracts) stage exactly as before.
     prefix = _prefix(tmp_path)
-    tree = prefix / "share" / "pkg" / "data"
-    _plant(tree / "real.txt", "real")
-    shared = prefix / "share" / "pkg" / "shared"
-    _plant(shared / "payload.txt", "PAYLOAD")
-    (tree / "one").symlink_to(shared, target_is_directory=True)
-    (tree / "two").symlink_to(shared, target_is_directory=True)
+    _plant(prefix / "bin" / "lexd-lsp", "#!/bin/sh\n", mode=0o755)
+    _plant(prefix / "share" / "ts" / "highlights.scm", "; hl")
+    _plant(prefix / "share" / "ts" / "sub" / "locals.scm", "; loc")
 
-    staging.stage(
-        tmp_path, [config.StageEntry("pkg", "share/pkg/data", "resources/data")]
-    )
-
-    base = tmp_path / "resources" / "data"
-    assert (base / "one" / "payload.txt").read_text() == "PAYLOAD"
-    assert (base / "two" / "payload.txt").read_text() == "PAYLOAD", (
-        "the second symlink to a shared dir must copy in full, not be skipped"
-    )
-
-
-def test_symlink_cycle_in_the_source_tree_terminates(tmp_path):
-    # A directory symlink that points back to an ancestor (a cycle) must not loop
-    # forever: the recursion-stack of resolved dirs stops it, and the copy completes.
-    prefix = _prefix(tmp_path)
-    tree = prefix / "share" / "pkg" / "data"
-    _plant(tree / "real.txt", "real")
-    (tree / "loop").symlink_to(tree, target_is_directory=True)
-
-    (result,) = staging.stage(
+    result = staging.stage(
         tmp_path,
-        [config.StageEntry("pkg", "share/pkg/data", "resources/data")],
+        [
+            config.StageEntry("lexd-lsp", "bin/lexd-lsp", "resources/lexd-lsp"),
+            config.StageEntry("ts", "share/ts", "resources/ts"),
+        ],
     )
 
-    assert (tmp_path / "resources" / "data" / "real.txt").read_text() == "real"
-    assert result.is_dir is True
+    assert (tmp_path / "resources" / "lexd-lsp").stat().st_mode & 0o111
+    assert (tmp_path / "resources" / "ts" / "highlights.scm").read_text() == "; hl"
+    assert (tmp_path / "resources" / "ts" / "sub" / "locals.scm").read_text() == "; loc"
+    assert [r.dest for r in result] == ["resources/lexd-lsp", "resources/ts"]
 
 
 def test_directory_mode_is_preserved(tmp_path):
