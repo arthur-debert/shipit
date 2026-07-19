@@ -21,6 +21,18 @@ file until their own cutover). The bare
 caller-job name of a reusable call is never a reported context and would deadlock
 every PR — release#602.
 
+Static discovery NEVER guesses a context it cannot name (#1056). A job whose
+reported check name is statically unpredictable — a ``${{ … }}`` display name,
+or a ``strategy.matrix`` job (it reports ``id (values)``, never the bare id) —
+is DROPPED, not resolved to its job id: guessing there minted a phantom
+``<caller> / run`` on ``lex-fmt/lex`` that no job ever reported, and requiring
+it bricked every PR. Each drop is warned loudly (stderr + WARNING, LOG02). The
+guard is per-workflow: :func:`discover` writes the ruleset only when EVERY PR
+workflow still contributes at least one certain context; if any PR workflow is
+left with zero, discovery REFUSES (a :class:`Discovery` carrying a ``refusal``
+message, no checks) rather than write a weaker rule, and gh-setup surfaces the
+refusal as a failed ruleset pass demanding explicit ``--checks``.
+
 This module also owns the workflow-file parsing seam gh-setup's Actions
 access-level verify pass (#739) uses: :func:`is_reusable_workflow` /
 :func:`publishes_reusable_workflows` detect ``workflow_call`` publishers, from
@@ -40,6 +52,7 @@ import logging
 import os
 import re
 import sys
+from dataclasses import dataclass
 
 import yaml
 
@@ -94,6 +107,55 @@ _MAX_NESTING = 4
 #: CI/manual/experimental workflow's stale cross-repo ref is not part of the
 #: release dispatch and must never block a cut (#917).
 RELEASE_CALLER_WORKFLOW = "shipit-release.yml"
+
+
+# --------------------------------------------------------------------------
+# Discovery value objects (#1056)
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class DroppedJob:
+    """A job static discovery could not statically name, so dropped (#1056).
+
+    ``job`` is the job label (caller-prefixed — ``<caller> / <called>`` — at
+    nested levels). ``reason`` is ``"matrix"`` (a ``strategy.matrix`` job reports
+    ``id (values)``, never the bare id) or ``"dynamic name"`` (its display name
+    carries a ``${{ … }}`` expression). Either way the reported context can't be
+    predicted statically, so the job contributes no required check.
+    """
+
+    job: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class WorkflowContexts:
+    """One PR workflow's static-discovery outcome (#1056).
+
+    ``certain`` is the set of contexts its jobs reliably report (sorted, unique);
+    ``dropped`` is every job dropped as statically unpredictable. A workflow with
+    an empty ``certain`` is one discovery could not confidently name — it drives
+    :func:`discover`'s refusal.
+    """
+
+    workflow: str
+    certain: tuple[str, ...]
+    dropped: tuple[DroppedJob, ...]
+
+
+@dataclass(frozen=True)
+class Discovery:
+    """The required-check discovery result (#1056).
+
+    ``checks`` is the set to require. ``refusal`` is ``None`` on success, or an
+    actionable message when static discovery left a PR workflow contributing zero
+    certain contexts: the caller must NOT write the ruleset (``checks`` is empty
+    then) and must surface the refusal as a failed pass demanding ``--checks``.
+    """
+
+    checks: tuple[str, ...]
+    refusal: str | None = None
 
 
 # --------------------------------------------------------------------------
@@ -153,13 +215,36 @@ def job_display_name(job_id: str, job: object) -> str:
     """A job's reported check name: a static ``name:`` override, else the job id.
 
     A ``name:`` carrying a ``${{ … }}`` expression can't be resolved statically,
-    so the job id is used (runs-based detection sees the rendered name).
+    so the job id is used (runs-based detection sees the rendered name). Callers
+    that must NOT guess such a name gate on :func:`job_unpredictable` first.
     """
     if isinstance(job, dict):
         name = job.get("name")
         if isinstance(name, str) and "${{" not in name:
             return name
     return job_id
+
+
+def job_unpredictable(job: object) -> str | None:
+    """Why a job's reported check name is statically unpredictable, else ``None``.
+
+    Returns ``"matrix"`` when the job has a ``strategy.matrix`` (each lane reports
+    ``id (values)`` / a per-lane ``name``, never the bare id) or ``"dynamic
+    name"`` when its ``name:`` carries a ``${{ … }}`` expression that only renders
+    at run time. Static discovery must DROP such a job rather than guess its job
+    id: on ``lex-fmt/lex`` a matrix ``run`` job minted the phantom ``checks /
+    run`` context that bricked every PR (#1056). Matrix is reported in preference
+    to a dynamic name (a matrix job's per-lane name is the same unpredictability).
+    """
+    if not isinstance(job, dict):
+        return None
+    strategy = job.get("strategy")
+    if isinstance(strategy, dict) and "matrix" in strategy:
+        return "matrix"
+    name = job.get("name")
+    if isinstance(name, str) and "${{" in name:
+        return "dynamic name"
+    return None
 
 
 def _called_job_included(job: object, with_values: dict) -> bool:
@@ -232,17 +317,31 @@ def _job_contexts(
     toplevel: str | None,
     cache: dict[str, object],
     depth: int = 0,
-) -> list[str]:
-    """The status-check contexts one workflow job reports.
+) -> tuple[list[str], list[DroppedJob]]:
+    """The status-check contexts one workflow job reports, and the jobs dropped.
 
-    A plain job reports its display name. A job that CALLS a reusable workflow
-    reports one ``<caller> / <called>`` context per called job (the bare caller
-    name is never reported — release#602), recursing through nesting.
+    A plain job reports its display name — UNLESS it is statically unpredictable
+    (a ``${{ … }}`` display name or a ``strategy.matrix``, see
+    :func:`job_unpredictable`), in which case it contributes no context and is
+    recorded as a :class:`DroppedJob` (#1056): guessing the bare job id there
+    minted phantom required checks that bricked rulesets. A job that CALLS a
+    reusable workflow reports one ``<caller> / <called>`` context per called job
+    (the bare caller name is never reported — release#602), recursing through
+    nesting; an unpredictable CALLER drops the whole subtree, since its
+    ``<caller>`` prefix can't be named. Nested drops are surfaced caller-prefixed
+    too, so the warning names the full path.
     """
+    unpredictable = job_unpredictable(job)
     uses = job.get("uses") if isinstance(job, dict) else None
     display = job_display_name(job_id, job)
     if not isinstance(uses, str):
-        return [display]
+        if unpredictable is not None:
+            return [], [DroppedJob(job=job_id, reason=unpredictable)]
+        return [display], []
+    if unpredictable is not None:
+        # The caller's own name is unpredictable, so no nested `<caller> / …`
+        # context can be named — drop the entire subtree, don't recurse.
+        return [], [DroppedJob(job=job_id, reason=unpredictable)]
     if depth >= _MAX_NESTING:
         # Degraded-but-continuing (LOG02): discovery drops this job's contexts
         # and carries on — loud on both the user surface and the durable record.
@@ -251,7 +350,7 @@ def _job_contexts(
             f"warning: reusable-workflow nesting too deep at job {job_id!r}",
             file=sys.stderr,
         )
-        return []
+        return [], []
     if uses not in cache:
         try:
             cache[uses] = _fetch_called_workflow(uses, toplevel)
@@ -272,17 +371,21 @@ def _job_contexts(
             cache[uses] = None
     doc = cache[uses]
     if not isinstance(doc, dict) or not isinstance(doc.get("jobs"), dict):
-        return []
+        return [], []
     with_values = job.get("with") if isinstance(job.get("with"), dict) else {}
     out: list[str] = []
+    dropped: list[DroppedJob] = []
     for called_id, called in doc["jobs"].items():
         if not _called_job_included(called, with_values):
             continue
-        for ctx in _job_contexts(
+        ctxs, sub_dropped = _job_contexts(
             called_id, called, toplevel=toplevel, cache=cache, depth=depth + 1
-        ):
+        )
+        for ctx in ctxs:
             out.append(f"{display} / {ctx}")
-    return out
+        for d in sub_dropped:
+            dropped.append(DroppedJob(job=f"{display} / {d.job}", reason=d.reason))
+    return out, dropped
 
 
 # --------------------------------------------------------------------------
@@ -457,35 +560,120 @@ def checks_from_runs(repo: str, default_branch: str, paths: list[str]) -> list[s
     return sorted(found)
 
 
-def checks_from_workflows(toplevel: str, paths: list[str]) -> list[str]:
-    """Static contexts the local workflows declare (the no-runs onboarding case)."""
-    found: set[str] = set()
+def _warn_dropped(workflow: str, dropped: DroppedJob) -> None:
+    """Loudly report one dropped job (LOG02): user-facing stderr + WARNING."""
+    logger.warning(
+        "dropping statically-unpredictable job %r in %s (%s)",
+        dropped.job,
+        workflow,
+        dropped.reason,
+    )
+    print(
+        f"warning: {workflow}: dropping job {dropped.job!r} ({dropped.reason}) — "
+        "its reported check name can't be predicted statically, so requiring it "
+        "would brick every PR",
+        file=sys.stderr,
+    )
+
+
+def static_workflow_contexts(toplevel: str, paths: list[str]) -> list[WorkflowContexts]:
+    """Per-PR-workflow static discovery — one :class:`WorkflowContexts` per path.
+
+    Each entry names the workflow, the contexts its jobs certainly report, and
+    every job dropped as statically unpredictable (#1056); each drop is warned
+    loudly as it is found. A workflow that will not parse (or declares no
+    ``jobs``) yields an empty ``certain`` — :func:`discover` treats a
+    zero-certain workflow as one it could not name and refuses over it.
+    """
     cache: dict[str, object] = {}
+    results: list[WorkflowContexts] = []
     for path in paths:
         try:
             doc = _load_yaml_file(os.path.join(toplevel, path))
         except (OSError, UnicodeDecodeError, yaml.YAMLError):
+            results.append(WorkflowContexts(workflow=path, certain=(), dropped=()))
             continue
         if not isinstance(doc, dict) or not isinstance(doc.get("jobs"), dict):
+            results.append(WorkflowContexts(workflow=path, certain=(), dropped=()))
             continue
+        certain: set[str] = set()
+        dropped: list[DroppedJob] = []
         for job_id, job in doc["jobs"].items():
-            found.update(_job_contexts(job_id, job, toplevel=toplevel, cache=cache))
-    return sorted(found)
+            ctxs, drops = _job_contexts(job_id, job, toplevel=toplevel, cache=cache)
+            certain.update(c for c in ctxs if c != "")
+            dropped.extend(drops)
+        for d in dropped:
+            _warn_dropped(path, d)
+        results.append(
+            WorkflowContexts(
+                workflow=path,
+                certain=tuple(sorted(certain)),
+                dropped=tuple(dropped),
+            )
+        )
+    return results
 
 
-def discover(repo: str, default_branch: str, *, toplevel: str | None) -> list[str]:
-    """The required checks for ``repo``: runs-based first, static fallback.
+def checks_from_workflows(toplevel: str, paths: list[str]) -> list[str]:
+    """The flat certain-context set static discovery names across ``paths``.
+
+    A thin flattening of :func:`static_workflow_contexts` — the union of every
+    workflow's certain contexts, dropping the statically-unpredictable jobs
+    (#1056). Callers that need the per-workflow refusal guard use
+    :func:`discover`, which reads the structured contexts directly.
+    """
+    certain: set[str] = set()
+    for wf in static_workflow_contexts(toplevel, paths):
+        certain.update(wf.certain)
+    return sorted(certain)
+
+
+def _refusal_message(workflows: list[WorkflowContexts]) -> str:
+    """The actionable refusal shown when a PR workflow contributes zero certain
+    contexts (#1056): why the write is refused plus the per-workflow breakdown."""
+    lines = [
+        "required-check auto-discovery could not confidently name every PR "
+        "workflow's checks, so it refuses to write a ruleset that would brick "
+        'PRs. Re-run with explicit --checks (e.g. --checks "a,b,c"). '
+        "Per-workflow breakdown:",
+    ]
+    for wf in workflows:
+        certain = ", ".join(wf.certain) if wf.certain else "(none)"
+        lines.append(f"  {wf.workflow}: certain [{certain}]")
+        for d in wf.dropped:
+            lines.append(f"    dropped {d.job!r} ({d.reason})")
+    return "\n".join(lines)
+
+
+def discover(repo: str, default_branch: str, *, toplevel: str | None) -> Discovery:
+    """The required checks for ``repo``: runs-based first, static fallback (#1056).
 
     ``toplevel`` is the local checkout root when shipit runs inside the target
     repo (enabling the static fallback); ``None`` for a remote-only target, in
     which case only runs-based discovery is available.
+
+    Runs-based discovery is authoritative (its names come from real runs) and
+    never refuses. Only the static fallback can refuse: when no runs exist yet
+    and static discovery leaves ANY PR workflow contributing zero certain
+    contexts (every nameable job dropped, or an unresolvable/unparseable file),
+    the returned :class:`Discovery` carries no checks and a ``refusal`` message —
+    the caller must not write the ruleset and must demand explicit ``--checks``.
     """
     paths: list[str] = []
     if toplevel is not None:
         workflows_dir = os.path.join(toplevel, ".github", "workflows")
         if os.path.isdir(workflows_dir):
             paths = pr_workflow_paths(workflows_dir)
-    checks = checks_from_runs(repo, default_branch, paths) if paths else []
-    if not checks and toplevel is not None and paths:
-        checks = checks_from_workflows(toplevel, paths)
-    return [c for c in checks if c != ""]
+    runs_checks = checks_from_runs(repo, default_branch, paths) if paths else []
+    runs_checks = [c for c in runs_checks if c != ""]
+    if runs_checks:
+        return Discovery(checks=tuple(runs_checks))
+    if toplevel is None or not paths:
+        # No static fallback available (remote target, or no PR-check workflow at
+        # all) — an empty set is an honest "nothing to require", not a refusal.
+        return Discovery(checks=())
+    workflows = static_workflow_contexts(toplevel, paths)
+    if any(not wf.certain for wf in workflows):
+        return Discovery(checks=(), refusal=_refusal_message(workflows))
+    certain = sorted({c for wf in workflows for c in wf.certain})
+    return Discovery(checks=tuple(certain))
