@@ -15,13 +15,6 @@ on:
   push:
     branches: ['**']
   pull_request:
-    # The default activity set (opened/synchronize/reopened) plus label events:
-    # the required `changelog` fragment gate reads the PR's labels from the
-    # event payload, so applying the `skip-changelog` escape hatch must itself
-    # fire a fresh run with the new payload. Re-running the old workflow keeps
-    # the old (label-free) payload, so without `labeled`/`unlabeled` the hatch
-    # would not un-block a PR until an unrelated push.
-    types: [opened, synchronize, reopened, labeled, unlabeled]
 
 # Superseded-run hygiene (#645): a branch with an open PR gets BOTH a push run
 # and a pull_request run per push, and without a concurrency group those

@@ -1137,3 +1137,77 @@ def test_added_paths_since_answers_none_when_git_cannot(monkeypatch):
         lambda args, *, cwd: _fail("fatal: bad revision 'origin/gone...HEAD'", rc=128),
     )
     assert git.added_paths_since("origin/gone", cwd="/tree") is None
+
+
+def test_skip_changelog_requested_pins_the_trailer_log_argv(monkeypatch):
+    # The changelog gate's skip boundary (#1073): a TWO-dot `<base>..HEAD` range
+    # (the PR's own commits) with git's trailer format for the `Changelog` key,
+    # value-only — pinned so a regression to the key/format/range is caught.
+    seen = {}
+
+    def fake(args, *, cwd):
+        seen["args"], seen["cwd"] = args, cwd
+        return _ok("skip\n")
+
+    monkeypatch.setattr(git, "_probe", fake)
+    assert git.skip_changelog_requested("origin/main", cwd="/tree") is True
+    assert seen["args"] == [
+        "log",
+        "--format=%(trailers:key=Changelog,valueonly)",
+        "origin/main..HEAD",
+    ]
+    assert seen["cwd"] == "/tree"
+
+
+def test_skip_changelog_requested_case_and_whitespace_insensitive(monkeypatch):
+    # The value is trimmed and lowercased before the `skip` compare, so a
+    # `Changelog: Skip ` trailer still opts out; an unrelated value does not.
+    monkeypatch.setattr(git, "_probe", lambda args, *, cwd: _ok("  Skip \n"))
+    assert git.skip_changelog_requested("origin/main", cwd="/tree") is True
+    monkeypatch.setattr(git, "_probe", lambda args, *, cwd: _ok("later\n"))
+    assert git.skip_changelog_requested("origin/main", cwd="/tree") is False
+    monkeypatch.setattr(git, "_probe", lambda args, *, cwd: _ok(""))
+    assert git.skip_changelog_requested("origin/main", cwd="/tree") is False
+
+
+def test_skip_changelog_requested_answers_none_when_git_cannot(monkeypatch):
+    # Same fail-safe as added_paths_since: an unresolvable range is None, which
+    # the runner treats as "not skipped" (only an explicit True opts out).
+    monkeypatch.setattr(
+        git,
+        "_probe",
+        lambda args, *, cwd: _fail("fatal: bad revision 'origin/gone..HEAD'", rc=128),
+    )
+    assert git.skip_changelog_requested("origin/gone", cwd="/tree") is None
+
+
+def test_skip_changelog_requested_reads_a_real_commit_trailer(tmp_path):
+    # End-to-end over REAL git (a fake seam cannot prove git's OWN trailer
+    # parsing): a `Changelog: skip` trailer on any commit in <base>..HEAD makes
+    # the boundary answer True, and a branch without it answers False.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t.co"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=repo, check=True)
+    (repo / "a.txt").write_text("base\n")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "base"], cwd=repo, check=True)
+
+    # A PR branch whose commit carries NO skip trailer → False.
+    subprocess.run(["git", "switch", "-qc", "work"], cwd=repo, check=True)
+    (repo / "b.txt").write_text("work\n")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "feat: a change"], cwd=repo, check=True)
+    assert git.skip_changelog_requested("main", cwd=str(repo)) is False
+
+    # A later commit on the branch carrying the trailer → True: git's trailer
+    # parser reads `Changelog: skip` out of the message's last paragraph.
+    (repo / "c.txt").write_text("more\n")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-qm", "docs: tidy\n\nChangelog: skip"],
+        cwd=repo,
+        check=True,
+    )
+    assert git.skip_changelog_requested("main", cwd=str(repo)) is True

@@ -465,11 +465,11 @@ def test_render_current_matches_the_verb_render(tmp_path):
 # --------------------------------------------------------------------------
 
 
-def _fragment_gate(base_ref, labels, paths):
+def _fragment_gate(base_ref, paths, *, skip_requested=False):
     """Drive the pure decision with a canned changed-paths thunk."""
     return verb.decide_fragment_gate(
         base_ref=base_ref,
-        labels=labels,
+        skip_requested=skip_requested,
         changed_paths=lambda: paths,
     )
 
@@ -480,7 +480,9 @@ def test_fragment_gate_passes_off_a_pr():
     def _boom():
         raise AssertionError("changed_paths must not be consulted off a PR")
 
-    verdict = verb.decide_fragment_gate(base_ref="", labels=[], changed_paths=_boom)
+    verdict = verb.decide_fragment_gate(
+        base_ref="", skip_requested=False, changed_paths=_boom
+    )
     assert verdict.ok
     assert "not a PR" in verdict.message
 
@@ -492,38 +494,38 @@ def test_fragment_gate_passes_on_a_non_main_base():
         raise AssertionError("changed_paths must not be consulted off main")
 
     verdict = verb.decide_fragment_gate(
-        base_ref="ADP02", labels=[], changed_paths=_boom
+        base_ref="ADP02", skip_requested=False, changed_paths=_boom
     )
     assert verdict.ok
     assert "not 'main'" in verdict.message
 
 
-def test_fragment_gate_passes_with_the_skip_label():
-    # The escape hatch for docs/CI/chore-only PRs: the label passes the gate
-    # without touching the diff.
+def test_fragment_gate_passes_with_the_skip_trailer():
+    # The escape hatch for docs/CI/chore-only PRs: a `Changelog: skip` trailer
+    # passes the gate without touching the diff.
     def _boom():
         raise AssertionError("changed_paths must not be consulted when skipped")
 
     verdict = verb.decide_fragment_gate(
         base_ref="main",
-        labels=["enhancement", verb.SKIP_CHANGELOG_LABEL],
+        skip_requested=True,
         changed_paths=_boom,
     )
     assert verdict.ok
-    assert verb.SKIP_CHANGELOG_LABEL in verdict.message
+    assert verb.SKIP_TRAILER_KEY in verdict.message
+    assert verb.SKIP_TRAILER_VALUE in verdict.message
 
 
 def test_fragment_gate_fails_on_main_with_no_fragment():
-    verdict = _fragment_gate("main", [], ["src/shipit/verbs/changelog.py"])
+    verdict = _fragment_gate("main", ["src/shipit/verbs/changelog.py"])
     assert not verdict.ok
     assert "no CHANGELOG/unreleased-*.md fragment added" in verdict.message
-    assert verb.SKIP_CHANGELOG_LABEL in verdict.message  # names the escape hatch
+    # names the escape hatch (the trailer, not a label)
+    assert f"{verb.SKIP_TRAILER_KEY}: {verb.SKIP_TRAILER_VALUE}" in verdict.message
 
 
 def test_fragment_gate_passes_when_a_fragment_is_added():
-    verdict = _fragment_gate(
-        "main", [], ["src/x.py", "CHANGELOG/unreleased-feature.md"]
-    )
+    verdict = _fragment_gate("main", ["src/x.py", "CHANGELOG/unreleased-feature.md"])
     assert verdict.ok
     assert "unreleased-feature.md" in verdict.message
 
@@ -534,38 +536,38 @@ def test_fragment_gate_is_status_agnostic_the_boundary_filters():
     # fragment must NOT satisfy the gate) lives in the runner's default boundary
     # (git.added_paths_since, --diff-filter=A), pinned in
     # test_run_check_fragment_default_boundary_filters_to_added below.
-    verdict = _fragment_gate("main", [], ["CHANGELOG/unreleased-feature.md"])
+    verdict = _fragment_gate("main", ["CHANGELOG/unreleased-feature.md"])
     assert verdict.ok
 
 
 def test_fragment_gate_ignores_a_lookalike_outside_the_changelog_dir():
     # Only CHANGELOG/unreleased-*.md counts; a stray unreleased-*.md elsewhere
     # is not a fragment.
-    verdict = _fragment_gate("main", [], ["docs/unreleased-notes.md"])
+    verdict = _fragment_gate("main", ["docs/unreleased-notes.md"])
     assert not verdict.ok
 
 
 def test_fragment_gate_counts_a_monorepo_sub_changelog():
-    verdict = _fragment_gate("main", [], ["pkg/CHANGELOG/unreleased-x.md"])
+    verdict = _fragment_gate("main", ["pkg/CHANGELOG/unreleased-x.md"])
     assert verdict.ok
 
 
 def test_fragment_gate_fails_loudly_when_the_diff_is_unavailable():
     # A required gate that cannot compute the diff refuses (loud), never
     # silently passes a PR whose fragment could not be verified.
-    verdict = _fragment_gate("main", [], None)
+    verdict = _fragment_gate("main", None)
     assert not verdict.ok
     assert "could not diff" in verdict.message
 
 
 def test_run_check_fragment_wires_env_and_git_seams(tmp_path, capsys):
-    # The runner resolves base_ref/labels/changed_paths_fn and returns 0/1 off
-    # the pure verdict. base==main + no fragment in the injected diff = exit 1.
+    # The runner resolves base_ref/skip/changed_paths and returns 0/1 off the
+    # pure verdict. base==main + no fragment + no skip trailer = exit 1.
     rc = verb.run_check_fragment(
         str(tmp_path),
         base_ref="main",
-        labels=[],
         changed_paths_fn=lambda ref, cwd: ["src/x.py"],
+        skip_requested_fn=lambda ref, cwd: False,
     )
     assert rc == 1
     assert "no CHANGELOG/unreleased-*.md fragment added" in capsys.readouterr().out
@@ -575,60 +577,75 @@ def test_run_check_fragment_passes_when_the_diff_adds_a_fragment(tmp_path, capsy
     rc = verb.run_check_fragment(
         str(tmp_path),
         base_ref="main",
-        labels=[],
         changed_paths_fn=lambda ref, cwd: ["CHANGELOG/unreleased-x.md"],
+        skip_requested_fn=lambda ref, cwd: False,
     )
     assert rc == 0
     assert "OK" in capsys.readouterr().out
 
 
-def test_run_check_fragment_default_boundary_filters_to_added(
+def test_run_check_fragment_passes_on_the_skip_trailer_seam(tmp_path, capsys):
+    # The injected skip seam short-circuits the gate: a `Changelog: skip` trailer
+    # passes even with no fragment, and the diff seam is never consulted.
+    def _boom(ref, cwd):
+        raise AssertionError("changed_paths must not be consulted when skipped")
+
+    rc = verb.run_check_fragment(
+        str(tmp_path),
+        base_ref="main",
+        changed_paths_fn=_boom,
+        skip_requested_fn=lambda ref, cwd: True,
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert verb.SKIP_TRAILER_KEY in out and verb.SKIP_TRAILER_VALUE in out
+
+
+def test_run_check_fragment_unverifiable_skip_does_not_bypass(tmp_path, capsys):
+    # A None skip read (git could not answer) must NOT skip the gate: only an
+    # explicit True opts out. With no fragment in the diff the gate still fails,
+    # so a broken skip read can never silently license a missing fragment.
+    rc = verb.run_check_fragment(
+        str(tmp_path),
+        base_ref="main",
+        changed_paths_fn=lambda ref, cwd: ["src/x.py"],
+        skip_requested_fn=lambda ref, cwd: None,
+    )
+    assert rc == 1
+    assert "no CHANGELOG/unreleased-*.md fragment added" in capsys.readouterr().out
+
+
+def test_run_check_fragment_default_boundaries_pin_the_git_argv(
     tmp_path, capsys, monkeypatch
 ):
-    # With no injected changed_paths_fn, the runner's default boundary must be
-    # git.added_paths_since — i.e. it diffs origin/<base> with --diff-filter=A,
-    # so a regression dropping the filter (and letting a deleted/modified base
-    # fragment satisfy the gate) is caught here. Pins the git argv.
+    # With no injected seams, the runner's defaults must be git.added_paths_since
+    # (the fragment diff, --diff-filter=A against origin/<base>) and
+    # git.skip_changelog_requested (the trailer read). Pins BOTH git argvs so a
+    # regression dropping the filter, or changing the trailer read, is caught.
     from shipit import git
     from shipit.execrun import ExecResult
 
-    seen = {}
+    seen = []
 
     def fake_probe(argv, *, cwd):
-        seen["argv"], seen["cwd"] = argv, cwd
-        return ExecResult(
-            argv=("git",),
-            rc=0,
-            stdout="CHANGELOG/unreleased-x.md\n",
-            stderr="",
-            duration_ms=1,
-        )
+        seen.append(argv)
+        # The trailer read finds no skip; the fragment diff finds a fragment.
+        stdout = "CHANGELOG/unreleased-x.md\n" if "--diff-filter=A" in argv else ""
+        return ExecResult(argv=("git",), rc=0, stdout=stdout, stderr="", duration_ms=1)
 
     monkeypatch.setattr(git, "_probe", fake_probe)
-    rc = verb.run_check_fragment(str(tmp_path), base_ref="main", labels=[])
+    rc = verb.run_check_fragment(str(tmp_path), base_ref="main")
 
     assert rc == 0
     assert "OK" in capsys.readouterr().out
-    assert seen["argv"] == [
+    assert [
         "diff",
         "--name-only",
         "--diff-filter=A",
         "origin/main...HEAD",
-    ]
-
-
-def test_pr_labels_reads_the_event_payload(tmp_path):
-    event = tmp_path / "event.json"
-    event.write_text(
-        '{"pull_request": {"labels": [{"name": "bug"}, {"name": "skip-changelog"}]}}',
-        encoding="utf-8",
-    )
-    assert verb._pr_labels(str(event)) == ("bug", "skip-changelog")
-
-
-def test_pr_labels_is_empty_off_a_pr_or_bad_payload(tmp_path):
-    assert verb._pr_labels(None) == ()
-    assert verb._pr_labels(str(tmp_path / "missing.json")) == ()
-    bad = tmp_path / "push.json"
-    bad.write_text('{"ref": "refs/heads/main"}', encoding="utf-8")
-    assert verb._pr_labels(str(bad)) == ()
+    ] in seen
+    assert [
+        "log",
+        "--format=%(trailers:key=Changelog,valueonly)",
+        "origin/main..HEAD",
+    ] in seen

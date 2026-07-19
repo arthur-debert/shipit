@@ -777,6 +777,35 @@ def added_paths_since(base_ref: str, *, cwd: str) -> list[str] | None:
     return [line for line in res.stdout.splitlines() if line.strip()]
 
 
+def skip_changelog_requested(base_ref: str, *, cwd: str) -> bool | None:
+    """Whether any commit this branch adds since ``base_ref`` carries a
+    ``Changelog: skip`` trailer — the repo-native escape hatch for the PR-time
+    changelog fragment gate (:func:`shipit.verbs.changelog.run_check_fragment`).
+
+    Reads the PR's own commits in the two-dot range ``<base_ref>..HEAD`` and asks
+    git for each commit's ``Changelog`` trailer value
+    (``git log --format=%(trailers:key=Changelog,valueonly) <base_ref>..HEAD``).
+    Returns ``True`` iff some commit's trailer value, trimmed and lowercased,
+    equals ``skip``. A trailer rides in the commit MESSAGE, so it travels with the
+    same git the gate already reads — offline, no event payload, no CI event
+    trigger, and it re-answers identically on a re-run or a laptop, unlike a
+    mutable GitHub label whose toggle re-fires the whole CI suite.
+
+    A probe like :func:`added_paths_since`, with the SAME failure contract:
+    ``None`` when git cannot answer (unknown ref, a shallow clone missing the
+    merge-base, not a checkout) — an unverifiable read the caller must never turn
+    into a silent skip (only an explicit ``True`` opts a PR out of the gate;
+    ``None``/``False`` fall through to the fragment requirement).
+    """
+    res = _probe(
+        ["log", "--format=%(trailers:key=Changelog,valueonly)", f"{base_ref}..HEAD"],
+        cwd=cwd,
+    )
+    if res.rc != 0:
+        return None
+    return any(line.strip().lower() == "skip" for line in res.stdout.splitlines())
+
+
 # --------------------------------------------------------------------------
 # mutations — thin typed functions (install / Tree creation / review reuse)
 # --------------------------------------------------------------------------

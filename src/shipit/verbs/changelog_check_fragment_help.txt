@@ -2,11 +2,10 @@
 release-note fragment, so a missing fragment is caught at PR time — not at the
 next release cut, once every PR is already merged.
 
-It is self-gating and offline (no `gh` auth). The PR context comes from the CI
-runner environment, not a live API call:
-
-- base ref from `GITHUB_BASE_REF` (empty off a PR)
-- labels from the `GITHUB_EVENT_PATH` event payload
+It is self-gating and offline (no `gh` auth). Only the base ref comes from the
+CI runner environment (`GITHUB_BASE_REF`, empty off a PR); everything else — the
+added fragment and the escape hatch — is read from the PR's own git, so no CI
+event trigger and no event payload is involved.
 
 The check PASSES (exit 0), requiring no fragment, when any of:
 
@@ -14,8 +13,11 @@ The check PASSES (exit 0), requiring no fragment, when any of:
   never block
 - the PR base is not `main` — work-stream PRs target epic branches and are
   exempt; only PRs to `main` are gated
-- the PR carries the `skip-changelog` label — the escape hatch for docs/CI/
-  chore-only PRs that legitimately need no release note
+- a commit on the PR carries a `Changelog: skip` trailer — the escape hatch for
+  docs/CI/chore-only PRs that legitimately need no release note. A trailer (not
+  a GitHub label): it rides the same git the gate already reads, so it works
+  offline, on a re-run, and on a laptop, and never churns the CI suite the way a
+  mutable label toggle would.
 
 Otherwise it requires the PR's own diff (the three-dot merge-base diff against
 `origin/main`, `--diff-filter=A`) to ADD at least one `CHANGELOG/unreleased-*.md`
