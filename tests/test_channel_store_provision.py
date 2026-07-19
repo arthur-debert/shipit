@@ -490,6 +490,84 @@ def test_verify_public_get_fails_when_one_served_subdir_is_missing():
     assert not report.ok
 
 
+def _subdir_http_for(subdirs, public_status, private_status):
+    """Per-subdir repodata HTTP-status map over an EXPLICIT subdir set (#1076) —
+    so a verify scoped to the repo's own subdirs finds only those, and a probe of
+    an unpublished subdir (win-64 for a windows-less repo) would KeyError rather
+    than pass silently."""
+    m = {}
+    for subdir in subdirs:
+        obj = f"{subdir}/repodata.json"
+        m[sp.public_object_url("shipit-artifacts-public", "r", obj)] = public_status
+        m[sp.public_object_url("shipit-artifacts-private", "r", obj)] = private_status
+    return m
+
+
+def test_verify_scoped_to_the_repos_own_subdirs_is_ready_without_win64():
+    # #1076: a repo that ships linux + darwin but NO windows (lexd's shape)
+    # publishes no `win-64/repodata.json`. Probing the fixed all-of-served set
+    # reports its correctly-provisioned channel NOT ready (win-64 → 404) — a false
+    # negative. Scoped to the repo's OWN three subdirs, the channel verifies READY.
+    own = ("osx-arm64", "linux-64", "linux-aarch64")
+    http = _subdir_http_for(own, 200, 403)
+    report = sp.verify(
+        "supage-prod",
+        "r",
+        subdirs=own,
+        runner=_verify_runner(),
+        # A KeyError here would mean verify probed a subdir outside the repo's own
+        # set — the map deliberately carries no win-64 entry.
+        http_get=lambda url: http[url],
+    )
+    assert report.ok
+    assert report.public_get_200 and report.private_get_403
+    # win-64 was never probed (the map has no such key, and the verdict is green).
+    win = sp.public_object_url("shipit-artifacts-public", "r", "win-64/repodata.json")
+    assert win not in http
+
+
+def test_verify_unscoped_still_false_negs_a_windowsless_repo():
+    # The control that motivates #1076: WITHOUT scoping (the pre-fix default),
+    # verify probes ALL served subdirs, so a windows-less repo whose win-64 probe
+    # 404s reports NOT ready — the exact false negative the scoping removes.
+    http = _subdir_http(200, 403)
+    http[
+        sp.public_object_url("shipit-artifacts-public", "r", "win-64/repodata.json")
+    ] = 404
+    report = sp.verify(
+        "p", "r", runner=_verify_runner(), http_get=lambda url: http[url]
+    )
+    assert not report.public_get_200
+    assert not report.ok
+
+
+def test_repo_served_subdirs_reads_the_manifest(tmp_path):
+    # #1076 CLI wiring: `_repo_served_subdirs` projects the repo's own
+    # `.shipit.toml` conda-endpoint platforms onto the served subdir set, so the
+    # verify CLI scopes its probe to what the channel publishes.
+    (tmp_path / ".shipit.toml").write_text(
+        "[artifacts.lexd]\n"
+        'build = ["rust"]\n'
+        'platforms = ["linux-x86_64", "linux-arm64", "darwin-arm64"]\n'
+        'endpoints = ["gh-release", "conda"]\n'
+    )
+    assert sp._repo_served_subdirs(str(tmp_path / ".shipit.toml")) == (
+        "osx-arm64",
+        "linux-64",
+        "linux-aarch64",
+    )
+
+
+def test_repo_served_subdirs_none_without_a_conda_producer(tmp_path):
+    # No conda endpoint, or no/unparseable manifest → None, so the CLI falls back
+    # to the full served set (the pre-#1076 behavior for a bare invocation).
+    (tmp_path / ".shipit.toml").write_text(
+        '[artifacts.cli]\nbuild = ["rust"]\nendpoints = ["gh-release"]\n'
+    )
+    assert sp._repo_served_subdirs(str(tmp_path / ".shipit.toml")) is None
+    assert sp._repo_served_subdirs(str(tmp_path / "absent.toml")) is None
+
+
 def test_verify_flags_a_public_binding_on_the_private_bucket():
     http = _subdir_http(200, 200)  # private serves authless → leaked
     report = sp.verify(

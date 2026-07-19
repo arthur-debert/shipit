@@ -63,7 +63,7 @@ import logging
 import sys
 import urllib.error
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
 from .. import execrun
@@ -639,6 +639,7 @@ def verify(
     *,
     obj: str = "repodata.json",
     noarch: bool = False,
+    subdirs: Sequence[str] | None = None,
     runner: Callable[..., execrun.ExecResult] = execrun.run,
     http_get: Callable[[str], int] = _http_status,
 ) -> VerifyReport:
@@ -647,8 +648,9 @@ def verify(
     Each criterion → one boolean on the :class:`VerifyReport`:
 
     - public authless GET of ``<repo>/<subdir>/<obj>`` returns **200** for
-      **every** served subdir (:data:`shipit.channel.buckets.SERVED_SUBDIRS`);
-    - private authless GET returns **403** for every served subdir (no creds →
+      **every** probed subdir (``subdirs``, or :data:`SERVED_SUBDIRS` when the
+      caller does not scope it — see ``subdirs`` below);
+    - private authless GET returns **403** for every probed subdir (no creds →
       denied);
     - private read AS the reader SA succeeds for a representative served subdir
       (scoped credential works — bucket-wide, so one subdir proves it);
@@ -660,14 +662,23 @@ def verify(
     over the served-subdir set — the same completeness the spec's readiness gate
     (docs/spec/artifact-channel.md §3) checks with a copy-pasteable curl loop.
 
+    ``subdirs`` (#1076) is the per-platform probe set: the served subdirs the
+    repo ACTUALLY publishes — (its declared release platforms ∩ the served set),
+    :func:`shipit.release.publish.conda_served_subdirs`. Defaults to ALL of
+    :data:`~shipit.channel.buckets.SERVED_SUBDIRS` when ``None``, but the caller
+    SHOULD scope it: a repo that ships fewer platforms (e.g. lexd has no windows)
+    publishes no ``win-64/repodata.json``, so probing the fixed all-of-served set
+    reports a correctly-provisioned channel NOT ready — a false negative (the
+    sibling of the #1072 lexd-target bug on the store-verify surface). Ignored
+    under ``noarch`` (a data artifact fans out to no platform subdir at all).
+
     ``noarch`` (ADR-0076) switches the object probe from the per-platform
-    :data:`~shipit.channel.buckets.SERVED_SUBDIRS` sweep to a SINGLE
-    :data:`~shipit.channel.buckets.NOARCH_SUBDIR` probe: a cross-repo DATA
-    artifact rides one platform-independent ``noarch/`` package with no OS×arch
-    fan-out, so its readiness is one ``noarch/<obj>`` resolve — never a
-    per-platform sweep, and never subject to the ADR-0071 ``win-64`` pause
-    subtraction (there is no ``win-64`` analogue to pause). The tier/UBLA/IAM
-    criteria are bucket-wide and unchanged.
+    ``subdirs`` sweep to a SINGLE :data:`~shipit.channel.buckets.NOARCH_SUBDIR`
+    probe: a cross-repo DATA artifact rides one platform-independent ``noarch/``
+    package with no OS×arch fan-out, so its readiness is one ``noarch/<obj>``
+    resolve — never a per-platform sweep, and never subject to the ADR-0071
+    ``win-64`` pause subtraction (there is no ``win-64`` analogue to pause). The
+    tier/UBLA/IAM criteria are bucket-wide and unchanged.
 
     ``runner`` (gcloud) and ``http_get`` (an HTTPS GET → status) are injectable
     so the verdict logic is unit-tested without live cloud. Live, this needs the
@@ -693,15 +704,21 @@ def verify(
     report = VerifyReport()
 
     # Repodata is PER-SUBDIR (ADR-0064): the conda endpoint publishes
-    # `<repo>/<subdir>/repodata.json` for EACH subdir and NOTHING at the repo
-    # root, so a root-level probe would 404 against a correctly-published channel
-    # (a false negative) and could miss a partial publish. A per-platform tool
-    # artifact probes every served subdir (:data:`SERVED_SUBDIRS` — the spec's
-    # readiness-gate §3 set) and takes the conjunction; a `noarch` DATA artifact
-    # (ADR-0076) probes the ONE `noarch/` subdir (no fan-out, no pause). Either
-    # way: the public tier serves authless (200) on ALL probed subdirs, the
-    # private tier denies (403) on ALL of them.
-    probe_subdirs = (buckets.NOARCH_SUBDIR,) if noarch else buckets.SERVED_SUBDIRS
+    # `<repo>/<subdir>/repodata.json` for EACH subdir it builds and NOTHING at the
+    # repo root, so a root-level probe would 404 against a correctly-published
+    # channel (a false negative) and could miss a partial publish. A per-platform
+    # tool artifact probes the subdirs the repo actually publishes (`subdirs` —
+    # its declared platforms ∩ served, #1076; the fixed all-of-served set
+    # false-negs a repo that ships fewer platforms) and takes the conjunction; a
+    # `noarch` DATA artifact (ADR-0076) probes the ONE `noarch/` subdir (no
+    # fan-out, no pause). Either way: the public tier serves authless (200) on ALL
+    # probed subdirs, the private tier denies (403) on ALL of them.
+    if noarch:
+        probe_subdirs: Sequence[str] = (buckets.NOARCH_SUBDIR,)
+    elif subdirs is not None:
+        probe_subdirs = tuple(subdirs)
+    else:
+        probe_subdirs = buckets.SERVED_SUBDIRS
     subdir_objs = [f"{subdir}/{obj}" for subdir in probe_subdirs]
     report.public_get_200 = all(
         http_get(public_object_url(public, repo, o)) == 200 for o in subdir_objs
@@ -751,6 +768,31 @@ def _emit(payload: object, *, as_json: bool, human: str) -> None:
     print(json.dumps(payload, indent=2) if as_json else human)
 
 
+def _repo_served_subdirs(manifest: str) -> tuple[str, ...] | None:
+    """The served conda subdirs the repo at ``manifest`` publishes, or ``None``.
+
+    Reads the repo's own ``.shipit.toml`` and projects its conda-endpoint
+    artifacts' declared platforms onto the served subdir set
+    (:func:`shipit.release.publish.conda_served_subdirs`), so ``verify`` probes
+    exactly the subdirs the channel's own publish writes rather than the fixed
+    all-of-served set (#1076). ``None`` — config absent/unparseable, or no conda
+    producer — falls the caller back to the full served set (the pre-#1076
+    behavior), so a bare invocation outside a checkout is unchanged. Imports the
+    release projector lazily so the channel CLI stays release-independent unless a
+    scope is actually derived.
+    """
+    from .. import config
+    from ..release import publish
+
+    try:
+        cfg = config.load(manifest)
+        artifacts = config.load_artifacts(cfg)
+    except config.ConfigError:
+        return None
+    served = publish.conda_served_subdirs(artifacts)
+    return served or None
+
+
 def main(argv: list[str] | None = None) -> int:
     """``python -m shipit.channel.store_provision`` — REFUSES without ``--project``.
 
@@ -786,6 +828,14 @@ def main(argv: list[str] | None = None) -> int:
         help="probe the single noarch/ subdir (a cross-repo DATA artifact, "
         "ADR-0076) instead of the per-platform served-subdir sweep",
     )
+    p_ver.add_argument(
+        "--manifest",
+        default=".shipit.toml",
+        help="the repo's .shipit.toml, whose conda-endpoint artifacts' declared "
+        "platforms scope the probed subdirs to what the channel actually "
+        "publishes (#1076); default: .shipit.toml in the current directory. A "
+        "missing/conda-less manifest falls back to the full served set.",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -802,7 +852,18 @@ def main(argv: list[str] | None = None) -> int:
                 + f"\n  private: gs://{report.private_bucket} (reader {report.reader_sa})",
             )
             return 0
-        vreport = verify(args.project, args.repo, obj=args.obj, noarch=args.noarch)
+        # Scope the per-platform probe to the subdirs THIS repo publishes (#1076):
+        # a repo shipping fewer platforms (no windows) publishes no win-64
+        # repodata, so probing the fixed all-of-served set false-negs its channel.
+        # Skipped under --noarch (a data artifact fans out to no platform subdir).
+        subdirs = None if args.noarch else _repo_served_subdirs(args.manifest)
+        vreport = verify(
+            args.project,
+            args.repo,
+            obj=args.obj,
+            noarch=args.noarch,
+            subdirs=subdirs,
+        )
         _emit(
             vreport.to_dict(),
             as_json=args.as_json,
