@@ -63,18 +63,41 @@ configurable generator.
   the same ecosystem on two different axes and are both pre-existing; the Node
   profile speaks `npm` because it is declaring a dispatch target, not a
   provisioning signal. Reconciling or unifying the two vocabularies is out of
-  scope here and belongs to the seam generalization (shipit#1083).
+  scope here and belongs to the seam generalization (shipit#1083). In particular
+  the `npm`-named dispatch leg still spells its commands `npm test` /
+  `npm run build`; because this profile chooses pnpm (below), making the leg's
+  install and run spellings use pnpm consistently is a #1083 item — the `npm`
+  leg name is a vocabulary artifact, not an instruction to shell out to the `npm`
+  CLI while the project is a pnpm project.
 
-- **Project-dependency materialization is DEFERRED to shipit#1083.** The Rust
+- **The profile chooses pnpm and a reproducible lockfile — that CHOICE lives
+  here.** Provisioning deliberately refuses a `package.json` whose package manager
+  cannot be determined (it requires a `packageManager` pin or exactly one
+  recognized lockfile), and `pnpm install` and `npm ci` are not interchangeable
+  spellings — they need different lockfiles and an authoritative manager signal.
+  Selecting the manager is therefore observable scaffold policy and belongs in
+  this profile decision. The profile chooses **pnpm**, consistent with the install
+  baseline, which already provisions `pnpm = "11.*"` in the managed node block
+  ([src/shipit/install/units.py](../../src/shipit/install/units.py)). Concretely:
+  the scaffold's `package.json` carries a `"packageManager": "pnpm@<version>"`
+  pin, the profile tracks **`pnpm-lock.yaml`** as its reproducible lockfile, and
+  the frozen install is **`pnpm install --frozen-lockfile`**. This satisfies the
+  "the manager must be determinable; a repo that declares node deps but whose
+  manager cannot be determined must never be half-provisioned" invariant.
+
+- **WHERE that frozen install runs is DEFERRED to shipit#1083.** The Rust
   profile's verification works because Cargo resolves path dependencies at build
   time with no separate install step. A Node project instead needs its
-  dependencies materialized (`pnpm install` / `npm ci`) into `node_modules/`
-  BEFORE the creation Checks (`npm test` / `npm run build`) can run. That
-  pre-check materialization step is a base build/install toolchain-seam concern,
-  filed separately as **shipit#1083**; this ADR does NOT specify its mechanism,
-  where it hooks into the staged-verification flow, or how a profile signals
-  that it needs it. The Node profile depends on #1083 landing that step; it does
-  not define it.
+  dependencies materialized (`pnpm install --frozen-lockfile`) into
+  `node_modules/` BEFORE the creation Checks (`npm test` / `npm run build`) can
+  run. The manager and lockfile CHOICE above is fixed here; the SEAM that runs the
+  frozen install — where it hooks into the staged-verification flow, how a profile
+  signals that it needs it, and how the SAME frozen command is applied in
+  creation, Trees, and CI consuming this profile declaration — is a base
+  build/install toolchain-seam concern filed separately as **shipit#1083**. That
+  same seam item must also reconcile the `npm`-named dispatch leg's install/run
+  spellings to pnpm (above). The Node profile depends on #1083 landing those
+  steps; it does not define them.
 
 ### What is genuinely new (and what is not)
 
@@ -88,8 +111,11 @@ polymorphic over a `Profile` protocol (today
 [src/shipit/repocreate/profiles.py](../../src/shipit/repocreate/profiles.py)
 `_REGISTRY` is typed `dict[str, RustProfile]`), profile-owned naming (the Rust
 `lib<name>`/hyphen-to-underscore rules generalized so each profile owns its
-ecosystem's naming), and the pre-check dependency-materialization step above.
-The Node profile is a CONSUMER of that seam, not its author.
+ecosystem's naming), reconciling the `npm`-named dispatch leg so its install/run
+spellings use the pnpm this profile declares, and the pre-check
+dependency-materialization step above. The Node profile is a CONSUMER of that
+seam, not its author — it fixes the manager/lockfile CHOICE and consumes the seam
+that runs it.
 
 ## Consequences
 

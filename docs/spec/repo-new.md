@@ -129,7 +129,7 @@ must not invalidate or roll back the usable local Repo.
 The public command is:
 
 ```text
-shipit repo new --stack rust \
+shipit repo new --stack <rust|node|svelte-app> \
   (--no-remote | --remote-reuse OWNER/REPO | --remote-create OWNER/REPO) \
   <name> [parent]
 ```
@@ -140,12 +140,19 @@ parent or an exact destination. The parent must already exist as a writable
 directory; a symlink resolving to such a directory is accepted, but creation
 never creates missing parent directories. The destination may be absent or an
 existing empty directory. Files, symlinks, and directories containing any
-entry, including a hidden one, are refused. `--stack` is repeatable so the
-creation request can later compose several toolchains, but at least one
-selection is mandatory. The accepted profiles are `rust`, `node`, and
-`svelte-app`; omission, unknown values, and duplicate selections are usage
-errors. (`rust` was the sole v1 profile; `node` and `svelte-app` were added by
-the Node + svelte-app profiles amendment.)
+entry, including a hidden one, are refused. `--stack` remains repeatable in the
+interface so a creation request can later compose several toolchains, but this
+release accepts exactly **one effective profile**, one of `rust`, `node`, or
+`svelte-app`. Omission, unknown values, selecting more than one profile, and
+duplicate selections are all usage errors. (`rust` was the sole v1 profile; the
+Node + svelte-app profiles amendment extended the accepted values to three while
+keeping the original one-effective-profile constraint.) Multi-profile composition
+— several profiles contributing disjoint build-bearing paths, the compatibility
+matrix of which profiles may co-occur, and the explicit path-to-toolchain map it
+would require — is future work gated on #1083, not this release. A single selected
+profile maps `.` to exactly one root toolchain, so no orphaned second Artifact
+arises; mutually exclusive choices such as node and svelte-app cannot be selected
+together.
 
 Exactly one remote mode is also mandatory. `--no-remote` completes the local
 Repo and performs no GitHub or remote operation. `--remote-reuse OWNER/REPO`
@@ -174,12 +181,23 @@ guidance, exactly like any other push rejection. `--no-remote` requires neither
 force-pushes, merges, rebases, or otherwise reconciles remote history; a normal
 push rejection is reported as a remote-publication failure.
 
-`<name>` uses canonical lowercase kebab-case: it begins with an ASCII lowercase
-letter and continues with lowercase alphanumeric segments separated by single
-hyphens. The destination, CLI package, and executable keep that spelling. The
-library package is `lib<name>`; Rust source refers to it through Cargo's normal
-hyphen-to-underscore crate identifier conversion. Names rejected by the managed
-Cargo toolchain are also refused rather than silently rewritten.
+The **universal** naming rule, shared by every profile, is the destination and
+project-name grammar: `<name>` uses canonical lowercase kebab-case — it begins
+with an ASCII lowercase letter and continues with lowercase alphanumeric segments
+separated by single hyphens.
+
+The remaining derived names and reserved-word validation are
+**Rust-profile-specific**, not universal. Under the `rust` profile the CLI package
+and executable keep the `<name>` spelling; the library package is `lib<name>`;
+Rust source refers to it through Cargo's normal hyphen-to-underscore crate
+identifier conversion; and names rejected by the managed Cargo toolchain (Cargo
+keywords, the reserved `test` crate name, and the like) are refused rather than
+silently rewritten. The `node` and `svelte-app` profiles own their own (npm)
+naming rules instead. Because this release selects exactly one effective profile,
+cross-profile validation composition is not needed here; the profile-owned-naming
+mechanism that generalizes the Rust `lib<name>` rules so each profile owns its
+ecosystem's validation is #1083 seam work (see the Design Decisions), not designed
+in this Spec.
 
 The command creates a virtual Cargo workspace root—the root manifest is not a
 package—with two members whose paths mirror their package names:
@@ -227,19 +245,28 @@ that greeting, exercising the CLI, its library dependency, and the configured
 runs `npm test` and `shipit build` runs `npm run build`. Its Node runtime is the
 one the install baseline already provisions for any Repo tracking a
 `package.json` — the managed `nodejs`/`pnpm` block — so the profile adds no
-bespoke provisioning path. Materializing the project's own dependencies
-(`pnpm install` / `npm ci`) before the creation Checks run is a build/install
-toolchain-seam concern deferred to #1083; this Spec does not fix its mechanism.
+bespoke provisioning path. The profile chooses **pnpm** as its package manager,
+consistent with the managed `pnpm` the install baseline already provisions: the
+scaffold's `package.json` carries a `"packageManager": "pnpm@<version>"` pin, the
+profile tracks **`pnpm-lock.yaml`** as its reproducible lockfile, and the frozen
+install is **`pnpm install --frozen-lockfile`**. That manager and lockfile choice
+is fixed here; *where* the frozen install runs (creation, Trees, CI) before the
+creation Checks is a build/install toolchain-seam concern deferred to #1083, which
+must also reconcile the `npm`-named dispatch leg's install/run spellings to pnpm.
 See [ADR-0077](../adr/0077-node-creation-profile.md).
 
 ### The svelte-app Creation profile
 
 The `svelte-app` profile is a **distinct** Creation profile — its own registry
 entry, not a flavour of `node` — that scaffolds an **SPA-only** frontend: Vite +
-Svelte + Tailwind + TypeScript, with one smoke test. It declares its Artifact
-with `toolchain="npm"` and builds via `npm run build` (a `vite build`), riding
-the same `npm` leg and managed `nodejs`/`pnpm` provisioning as the Node profile.
-It is deliberately a scaffold, **not** SvelteKit, SSR, or an application
+Svelte + Tailwind + TypeScript, with one smoke test. It is a **single-root Vite
+app** (not a nested workspace member), so it declares its Artifact with
+`toolchain="npm"` and **no package**, and builds via a bare `pnpm run build` (a
+`vite build`) with no `--workspace` narrowing, riding the same `npm` dispatch leg
+and managed `nodejs`/`pnpm` provisioning as the Node profile. (Omitting the
+Artifact package requires making `ArtifactDecl.package` optional — prerequisite
+seam work owned by #1083.) It is deliberately a scaffold, **not** SvelteKit, SSR,
+or an application
 framework, and it may exceed the minimal library-and-CLI shape the Rust and Node
 profiles keep while remaining a minimal, non-production starting point. See
 [ADR-0078](../adr/0078-frontend-scaffolds-are-distinct-profiles.md).
@@ -344,9 +371,10 @@ depend on an interactive `pixi shell`.
    change.
 8. As a maintainer, I want unsupported stacks rejected explicitly, so that the
    command never silently omits requested project capabilities.
-9. As a maintainer, I want at least one Creation profile required and duplicate
-   selections rejected, so that the creation request is explicit and accidental
-   repetition is not hidden.
+9. As a maintainer, I want exactly one effective Creation profile required —
+   omission, more than one profile, and duplicate selections all rejected — so
+   that the creation request is explicit and accidental repetition or unsupported
+   multi-profile composition is not hidden.
 10. As a Rust developer, I want a workspace whose CLI package is `<name>`, so that
     the installed executable has the project name.
 11. As a Rust developer, I want the library-only package to be `lib<name>`, so
@@ -467,13 +495,17 @@ depend on an interactive `pixi shell`.
   opinionated scaffold rather than a configurable generator. See
   [ADR-0078](../adr/0078-frontend-scaffolds-are-distinct-profiles.md).
 - The Node and svelte-app profiles depend on the build/install toolchain-seam
-  generalization tracked in #1083: the Creation-profile registry becoming
+  generalization tracked in #1083: (1) the Creation-profile registry becoming
   polymorphic over a `Profile` protocol (it is typed for the single Rust profile
-  today), profile-owned naming (each profile owns its ecosystem's naming rules
-  rather than the Rust `lib<name>`/hyphen-to-underscore rules), and a pre-check
-  dependency-materialization step (`pnpm install` / `npm ci`) run before the
-  Node/Svelte Checks. This Spec does not fix those seam internals; it records the
-  dependency.
+  today); (2) profile-owned naming (each profile owns its ecosystem's naming rules
+  rather than the Rust `lib<name>`/hyphen-to-underscore rules); (3) a pre-check
+  dependency-materialization step (`pnpm install --frozen-lockfile`, consuming the
+  Node profile's pnpm + `pnpm-lock.yaml` declaration) run before the Node/Svelte
+  Checks; (4) reconciling the `npm`-named dispatch leg so its install and run
+  spellings use pnpm consistently (see ADR-0077); and (5) making
+  `ArtifactDecl.package` optional so a root-app Artifact target such as svelte-app
+  can omit it and build without `--workspace` narrowing (see ADR-0078). This Spec
+  does not fix those seam internals; it records the dependency.
 - The Rust workspace contributes one Rust Tool leg at the workspace root. The
   two Cargo members are not separate Rust legs.
 - The Rust workspace root is virtual rather than a package. Member paths mirror
@@ -485,10 +517,16 @@ depend on an interactive `pixi shell`.
 - The Rust Creation profile declares one Artifact named `<name>` whose Rust
   build target names package `<name>`. The Artifact has no distribution endpoint
   or release behavior in v1.
-- Project names use lowercase kebab-case. The external name is preserved for the
-  destination, CLI package, and executable; `lib` prefixes the library package,
-  and only Rust's import identifier applies Cargo's normal hyphen-to-underscore
-  conversion. Creation never performs any other silent normalization.
+- The universal naming rule is the destination/project-name kebab-case grammar,
+  shared by every profile. The `lib<name>` library derivation and the Cargo
+  keyword / reserved-`test`-crate / import-identifier validation are
+  Rust-profile-specific, not global: under the `rust` profile the external name is
+  preserved for the destination, CLI package, and executable, `lib` prefixes the
+  library package, and only Rust's import identifier applies Cargo's normal
+  hyphen-to-underscore conversion. Node and svelte-app own their own npm naming
+  rules. Creation never performs any other silent normalization. Because this
+  release selects exactly one effective profile, cross-profile validation
+  composition is deferred to the profile-owned-naming seam in #1083.
 - Shared configuration is composed once. Stack contributions must not append
   competing textual definitions of the same `.shipit.toml` or `pixi.toml`
   tables.
@@ -656,12 +694,14 @@ depend on an interactive `pixi shell`.
 
 - Test the repository-creation module through its interface: valid planning,
   existing/writable parent validation and symlink resolution, derived
-  destinations and crate names, required/repeatable stack input, duplicate and
-  unsupported stacks, invalid names, acceptance of absent and empty-directory
+  destinations and crate names, required single-effective-profile stack input
+  (duplicate, more-than-one, and unsupported stacks all rejected), invalid names,
+  acceptance of absent and empty-directory
   destinations, and refusal of files, symlinks, and non-empty directories.
-- Cover the naming grammar at its edges: one-letter names, digits after the first
-  letter, multi-segment kebab names, and rejection of uppercase, underscores,
-  whitespace, leading digits, empty segments, and Cargo-reserved names.
+- Cover the universal kebab-case grammar at its edges: one-letter names, digits
+  after the first letter, multi-segment kebab names, and rejection of uppercase,
+  underscores, whitespace, leading digits, and empty segments. Cover the
+  Rust-profile-specific rejection of Cargo-reserved names under the `rust` profile.
 - Test the public command in a temporary parent directory. Assert the generated
   workspace and consumer-owned configuration, managed install results, Git
   `main` branch, one root commit named `Initial commit`, and a clean working

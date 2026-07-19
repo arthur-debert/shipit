@@ -11,11 +11,12 @@ registry, exactly as `rust` and `node` are.
 
 - **`svelte-app` is a distinct Creation profile with its own registry entry.**
   It scaffolds an SPA-only project — Vite + Svelte + Tailwind + TypeScript, one
-  smoke test — declares its Artifact with `toolchain="npm"`, and builds via
-  `npm run build` (a `vite build`). It is a scaffold, deliberately NOT SvelteKit
-  or any SSR/app framework: a `--stack svelte-app` selection produces a minimal,
-  non-production single-page-app starting point, not an application
-  architecture.
+  smoke test. It is a **single-root Vite app**, not a nested npm workspace member,
+  so it declares its Artifact with `toolchain="npm"` and **no package**, and builds
+  via a bare `pnpm run build` (a `vite build`) with no `--workspace` narrowing. It
+  is a scaffold, deliberately NOT SvelteKit or any SSR/app framework: a
+  `--stack svelte-app` selection produces a minimal, non-production
+  single-page-app starting point, not an application architecture.
 
 - **This mirrors the existing profile pattern.** `RustProfile`
   ([src/shipit/repocreate/profiles.py](../../src/shipit/repocreate/profiles.py))
@@ -23,6 +24,19 @@ registry, exactly as `rust` and `node` are.
   the two-member Cargo workspace, the source, and the single test. `svelte-app`
   is the same kind of thing for a frontend — an opinionated set of owned files
   and a `Contribution` — so it is a peer profile, not a new mechanism.
+
+- **A root-app Artifact declares no package; that generalization is #1083 seam
+  work.** The current Creation Artifact contract makes `ArtifactDecl.package`
+  mandatory, the planner always serializes it, and npm build narrowing appends
+  `--workspace <package>` ([src/shipit/tools/build.py](../../src/shipit/tools/build.py)
+  `_narrow`) — so a single-root Vite app modeled with a package would run an
+  invalid `vite build --workspace <package>`. svelte-app is therefore a single-root
+  app that **omits** the package: `ArtifactDecl.package` becomes **optional**, the
+  planner skips it when absent, and `_narrow` skips `--workspace` when the target
+  has no package, leaving a bare `pnpm run build`. Making the package optional is
+  prerequisite seam work **owned by #1083** (alongside the pnpm-leg reconciliation
+  and dependency materialization ADR-0077 depends on). This ADR decides the
+  modeling — root app, no package, bare build — while #1083 provides the machinery.
 
 - **Rejected: multi-stack composition (`--stack node --stack svelte`).** The
   `--stack` flag is repeatable so a request can later compose ORTHOGONAL
@@ -70,6 +84,9 @@ registry, exactly as `rust` and `node` are.
 - Because `svelte-app` declares `toolchain="npm"` and tracks a `package.json`,
   it rides the same existing `npm` dispatch leg and managed `nodejs`/`pnpm`
   provisioning as the Node profile (ADR-0077), and depends on the same #1083
-  dependency-materialization step before its smoke test can run.
+  dependency-materialization step (a frozen `pnpm install --frozen-lockfile`) and
+  pnpm-leg reconciliation before its smoke test can run. It additionally depends
+  on the optional-`ArtifactDecl.package` generalization above so its packageless
+  root-app Artifact builds without `--workspace` narrowing.
 - Future frontend or specialized scaffolds follow the same rule: a new
   opinionated scaffold is a new profile key, not a flavour axis or a composition.
