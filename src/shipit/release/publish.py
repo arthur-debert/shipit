@@ -74,8 +74,9 @@ switch), one adapter per name of :data:`shipit.config.ENDPOINTS`:
   but it IS external, so a ``-release-rc`` live-fire rehearsal stays
   gh-release-only. Idempotent-resumable via ``--force`` (a re-run re-uploads
   and re-indexes; already-published converges, ADR-0009 phase 2). A cross-repo
-  DATA artifact (the ``tarball`` composition — one platform-independent archive,
-  no triple) takes the additive NOARCH mode (ADR-0076,
+  DATA artifact (a ``platform_independent`` composition — tarball/zed or
+  wasm-pack, one platform-independent archive, no triple) takes the NOARCH mode
+  (ADR-0076,
   :func:`_publish_conda_noarch`): ONE ``noarch: generic`` ``.conda`` published
   to the channel's ``noarch/`` subdir, which every conda client reads alongside
   its platform subdir (no consumer change). The per-platform triple→subdir path
@@ -168,6 +169,7 @@ from ..changelog import SEMVER_RE
 from ..channel import buckets
 from . import ReleaseError, secretreq
 from . import brew as brew_mod
+from . import bundle as bundle_mod
 from . import integrity as integrity_mod
 from .bundle import VSCE_TARGETS
 from .version import RELEASE_RC_PRE
@@ -1507,15 +1509,13 @@ CONDA_ASSET_EXTS: tuple[str, ...] = (".tar.gz", ".zip")
 #: error instead of an actionable config fix.
 _CONDA_PACKAGE_NAME_RE = re.compile(r"[a-z0-9._-]+")
 
-#: The bundle composition that makes a conda artifact NOARCH-eligible (ADR-0076):
-#: ``tarball`` produces ONE platform-independent archive (``<artifact>.tar.gz``,
-#: no ``-<triple>`` suffix — the tree-sitter grammar's shape,
-#: :func:`shipit.release.bundle._compose_tarball`). The eligibility criterion is
-#: "one arch-independent archive to repackage," NOT an empty ``platforms`` list
-#: (``platforms = ()`` means the default linux lane, not platform-independence —
-#: ADR-0076): a data artifact declares the ``tarball`` composition, so the
-#: composition name is the witness, read off :attr:`config.Artifact.bundle`.
-NOARCH_COMPOSITION = "tarball"
+#: The one NOARCH-eligible composition whose single archive is an npm ``.tgz``
+#: (``npm pack``'s ``<flattened-pkg>-<version>.tgz``, :func:`npm_tarball_name`)
+#: rather than the ``<artifact>.tar.gz`` the other platform-independent
+#: compositions (``tarball``/``zed``) stage. :func:`conda_noarch_asset_name`
+#: branches the expected asset name on this, and :func:`conda_noarch_package_name`
+#: flattens its scoped ``@scope/name`` identity into a conda-safe package name.
+NOARCH_WASM_COMPOSITION = bundle_mod.WASM_PACK.name
 
 #: Where the noarch build script installs a DATA artifact's files under
 #: ``$PREFIX`` (ADR-0076: "a data artifact installs its files into the env").
@@ -1676,33 +1676,92 @@ def render_conda_recipe(
 def conda_noarch_eligible(artifact: config.Artifact) -> bool:
     """Whether ``artifact``'s conda endpoint runs in NOARCH mode (ADR-0076). Pure.
 
-    True iff the artifact's bundle composition is the ``tarball`` composition
-    (:data:`NOARCH_COMPOSITION`) — the ONE that produces a single
-    platform-independent archive (``<artifact>.tar.gz``, the tree-sitter grammar
-    shape). That single arch-independent archive is the eligibility criterion,
-    NOT an empty ``platforms`` list (``platforms = ()`` is the default linux
-    lane, not platform-independence — ADR-0076), so this reads the composition
-    name off the bundle, never the platform set. A per-platform TOOL artifact
-    (any other composition, or none) stays on the existing triple→subdir path —
-    the two modes are additive.
+    True iff the artifact's bundle composition is ``platform_independent`` — the
+    registry flag (:attr:`shipit.release.bundle.Composition.platform_independent`)
+    marking a composition that produces a SINGLE platform-independent archive with
+    no ``-<target>`` qualifier: ``tarball``/``zed`` (the tree-sitter grammar /
+    Zed-extension ``<artifact>.tar.gz`` shape) AND ``wasm-pack`` (the npm
+    ``<flattened-pkg>-<version>.tgz``). "One arch-independent archive to
+    repackage" IS the ADR-0076 eligibility criterion — read off the composition's
+    own flag, NOT the composition NAME (so a new platform-independent composition
+    is eligible without editing this) and NOT an empty ``platforms`` list
+    (``platforms = ()`` is the default linux lane, not platform-independence).
+    A per-platform TOOL artifact (a platform-qualified composition, or none) stays
+    on the existing triple→subdir path — the two modes are additive.
     """
     bundle = artifact.bundle
-    return bundle is not None and bundle.composition == NOARCH_COMPOSITION
+    if bundle is None:
+        return False
+    composition = bundle_mod.composition(bundle.composition)
+    return composition is not None and composition.platform_independent
 
 
-def conda_noarch_asset(artifact_name: str, names: Sequence[str]) -> str | None:
+def conda_noarch_asset_name(artifact: config.Artifact, version: str) -> str:
+    """The KNOWN staged name of the single platform-independent archive a NOARCH
+    artifact repackages — the release-stage convention, never a scrape (ADR-0064).
+    Pure over the artifact's composition.
+
+    The archive name depends on the composition (each stages exactly ONE
+    unqualified archive, no ``-<triple>`` suffix):
+
+    - ``wasm-pack`` (:data:`NOARCH_WASM_COMPOSITION`) stages the npm
+      ``<flattened-pkg>-<version>.tgz`` that ``npm pack`` names
+      (:func:`npm_tarball_name`, off the ``@scope/name`` identity) — a ``.tgz``,
+      not a ``.tar.gz``.
+    - ``tarball``/``zed`` stage the bare ``<artifact>.tar.gz``
+      (:func:`shipit.release.bundle._compose_tarball`, the tree-sitter grammar /
+      Zed-extension shape).
+    """
+    bundle = artifact.bundle
+    if bundle is not None and bundle.composition == NOARCH_WASM_COMPOSITION:
+        return npm_tarball_name(integrity_mod.expected_main_binary(artifact), version)
+    return f"{artifact.name}.tar.gz"
+
+
+def conda_noarch_asset(
+    artifact: config.Artifact, version: str, names: Sequence[str]
+) -> str | None:
     """The single platform-independent archive a NOARCH artifact repackages, or
     ``None`` when the staged tree carries none. Pure.
 
-    The ``tarball`` composition stages exactly ONE ``<artifact>.tar.gz`` with NO
-    ``-<triple>`` suffix (:func:`shipit.release.bundle._compose_tarball`), so the
-    noarch asset is the bare ``<artifact_name>.tar.gz`` — matched by its KNOWN
-    name (the release-stage convention, never a scrape; ADR-0064). A staged tree
-    without it (the composition never ran) is ``None``, which the adapter turns
-    into a loud refusal rather than a silent empty publish.
+    The eligible composition stages exactly ONE unqualified archive
+    (:func:`conda_noarch_asset_name` — the tarball/zed ``<artifact>.tar.gz`` or
+    the wasm-pack npm ``.tgz``), matched by its KNOWN name. A staged tree without
+    it (the composition never ran) is ``None``, which the adapter turns into a
+    loud refusal rather than a silent empty publish.
     """
-    want = f"{artifact_name}.tar.gz"
+    want = conda_noarch_asset_name(artifact, version)
     return want if want in names else None
+
+
+def conda_noarch_package_name(artifact: config.Artifact) -> str:
+    """The conda package name for a NOARCH artifact — the artifact's derived
+    identity FLATTENED into the conda vocabulary. Pure.
+
+    A ``wasm-pack`` data artifact derives a SCOPED npm identity
+    (``@scope/name`` — :func:`shipit.release.integrity.expected_main_binary`),
+    which the strict :func:`conda_package_name` (the tool path) rightly rejects:
+    a conda package name cannot carry an ``@`` or ``/``. The noarch path instead
+    FLATTENS it exactly as ``npm pack`` flattens its tarball stem
+    (:func:`npm_tarball_name`: drop the leading ``@``, ``/`` scope separator →
+    ``-``), so ``@lex-fmt/lex-wasm`` → ``lex-fmt-lex-wasm``. An unscoped
+    tarball/zed identity has no ``@``/``/`` and is unchanged (bar the lowercase).
+    The flattened name is validated against the conda vocabulary
+    (:data:`_CONDA_PACKAGE_NAME_RE`) so a residually-invalid identity (a spaced
+    ``product-name``) is still one loud :class:`ReleaseError`, not an opaque
+    ``rattler-build`` failure.
+    """
+    raw = integrity_mod.expected_main_binary(artifact)
+    name = raw.lstrip("@").replace("/", "-").lower()
+    if not _CONDA_PACKAGE_NAME_RE.fullmatch(name):
+        raise ReleaseError(
+            f"[artifacts.{artifact.name}] conda (noarch): derived package name "
+            f"`{name}` is not a valid conda package name (lowercase letters, "
+            f"digits, `.`, `_`, `-` only) — set `main-binary` to a conda-safe "
+            f"name or drop the conda endpoint. A spaced `product-name` cannot "
+            f"name a conda package."
+        )
+    return name
 
 
 def render_conda_noarch_recipe(
@@ -1729,10 +1788,15 @@ def render_conda_noarch_recipe(
     (``conda_build.sh``, ``build_env.sh``, ``.source_info.json``, …) into the
     work ROOT, so a ``cp -R .`` from there would sweep that scaffolding INTO the
     package. Extracting under ``payload/`` and copying ``payload/.`` keeps the
-    package to the archive's own bytes. The ``tarball`` composition's archive has
-    MULTIPLE top-level entries (``src/``, ``queries/``, … — a
-    ``tar -C <leg> <entries…>``, not a single-dir wrap), so rattler-build strips
-    no top-level dir and the whole grammar tree lands intact under ``payload/``.
+    package to the archive's own bytes. rattler-build strips a SINGLE top-level
+    wrapper dir on extraction but leaves a multi-entry archive intact, so the copy
+    is correct for both eligible shapes: the ``tarball``/``zed`` archive has
+    MULTIPLE top-level entries (``src/``, ``queries/`` — a ``tar -C <leg>
+    <entries>``, not a single-dir wrap) and lands intact under ``payload/``; the
+    ``wasm-pack`` npm ``.tgz`` wraps its files in a single ``package/`` dir, which
+    rattler-build strips, so the wasm files ALSO land directly under ``payload/``
+    (never nested under ``package/``) — the same ``cp -R payload/.`` installs the
+    artifact's own files either way.
 
     ``build.number`` is 0 (the tag version is the sole ordering axis, ADR-0041).
     ``build.noarch: generic`` is what makes rattler-build emit a noarch package
@@ -1789,7 +1853,7 @@ def _conda_channel_url(req: PublishRequest) -> str:
 
 
 def _publish_conda_noarch(
-    req: PublishRequest, *, key_id: str, secret_key: str, package: str
+    req: PublishRequest, *, key_id: str, secret_key: str
 ) -> Published:
     """Repackage the single platform-independent archive into ONE
     ``noarch: generic`` ``.conda`` and push+reindex it to the producing repo's
@@ -1804,11 +1868,15 @@ def _publish_conda_noarch(
     step the per-platform path uses, so ``noarch/`` is written and merged with no
     special store code. Idempotent-resumable via ``--force`` (ADR-0009 phase 2).
     """
-    asset_name = conda_noarch_asset(req.artifact.name, release_assets(req.assets_dir))
+    package = conda_noarch_package_name(req.artifact)
+    asset_name = conda_noarch_asset(
+        req.artifact, req.version, release_assets(req.assets_dir)
+    )
     if asset_name is None:
+        want = conda_noarch_asset_name(req.artifact, req.version)
         raise ReleaseError(
-            f"[artifacts.{req.artifact.name}] conda (noarch): no "
-            f"`{req.artifact.name}.tar.gz` under {req.assets_dir} — the `tarball` "
+            f"[artifacts.{req.artifact.name}] conda (noarch): no `{want}` under "
+            f"{req.assets_dir} — the `{req.artifact.bundle.composition}` "
             f"composition stages the one platform-independent archive the noarch "
             f"mode repackages; run `shipit release bundle` first"
         )
@@ -1912,15 +1980,17 @@ def _publish_conda(req: PublishRequest) -> Published:
         )
     key_id = _require_token(req, "conda", CONDA_KEY_ID_SECRET)
     secret_key = _require_token(req, "conda", CONDA_SECRET_KEY_SECRET)
-    package = conda_package_name(req.artifact)
-    # NOARCH mode (ADR-0076): a DATA artifact (the `tarball` composition) has one
-    # platform-independent archive and no triple, so it takes the single-package
-    # noarch path instead of the per-platform triple→subdir fan-out below. The
-    # two modes are additive — a tool artifact never reaches this branch.
+    # NOARCH mode (ADR-0076): a DATA artifact (a platform-independent composition
+    # — tarball/zed grammar, or a wasm-pack npm package) has one arch-independent
+    # archive and no triple, so it takes the single-package noarch path instead of
+    # the per-platform triple→subdir fan-out below. It derives its OWN (flattened)
+    # package name (:func:`conda_noarch_package_name`) — the strict
+    # :func:`conda_package_name` used by the tool path below would reject a scoped
+    # wasm `@scope/name`, so the noarch package name is resolved inside that path,
+    # never here. The two modes are additive — a tool artifact never branches.
     if conda_noarch_eligible(req.artifact):
-        return _publish_conda_noarch(
-            req, key_id=key_id, secret_key=secret_key, package=package
-        )
+        return _publish_conda_noarch(req, key_id=key_id, secret_key=secret_key)
+    package = conda_package_name(req.artifact)
     assets = conda_assets(req.artifact.name, release_assets(req.assets_dir))
     if not assets:
         served = ", ".join(sorted(CONDA_SUBDIRS.values()))

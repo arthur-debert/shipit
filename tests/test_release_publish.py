@@ -2561,12 +2561,39 @@ def _noarch_artifact():
     )[0]
 
 
-def test_conda_noarch_eligible_only_for_the_tarball_composition():
-    """Eligibility (ADR-0076) is the `tarball` composition — one arch-independent
-    archive to repackage — NOT an empty `platforms` list. A per-platform tool
-    artifact (archive composition, or none) stays on the triple→subdir path."""
-    assert publish_mod.conda_noarch_eligible(_noarch_artifact())
-    # `archive`-composition tool artifact (lexd shape): NOT noarch-eligible.
+def _wasm_noarch_artifact(scope="lex-fmt"):
+    """A `wasm-pack`-composition DATA artifact declaring the conda endpoint — the
+    lex-wasm shape (one platform-independent npm `.tgz`, no triple). A `scope`
+    gives it a SCOPED npm identity (`@scope/lex-wasm`); `scope=None` is unscoped."""
+    bundle = {"composition": "wasm-pack"}
+    if scope is not None:
+        bundle["scope"] = scope
+    return _artifacts(
+        {"lex-wasm": {"build": ["rust"], "bundle": bundle, "endpoints": ["conda"]}}
+    )[0]
+
+
+def test_conda_noarch_eligible_for_every_platform_independent_composition():
+    """Eligibility (ADR-0076) is the composition's `platform_independent` flag —
+    one arch-independent archive to repackage — so BOTH the `tarball`/`zed`
+    (`<artifact>.tar.gz`) and the `wasm-pack` (npm `.tgz`) data compositions
+    qualify. A per-platform tool artifact (archive composition, or none) stays on
+    the triple→subdir path — NOT an empty `platforms` list."""
+    assert publish_mod.conda_noarch_eligible(_noarch_artifact())  # tarball
+    assert publish_mod.conda_noarch_eligible(_wasm_noarch_artifact())  # wasm-pack
+    # `zed` is platform_independent too (a source tarball) — also eligible.
+    zed = _artifacts(
+        {
+            "ext": {
+                "build": ["tree-sitter"],
+                "bundle": {"composition": "zed"},
+                "endpoints": ["conda"],
+            }
+        }
+    )[0]
+    assert publish_mod.conda_noarch_eligible(zed)
+    # `archive`-composition tool artifact (lexd shape): platform-qualified, so
+    # NOT noarch-eligible.
     tool = _artifacts(
         {
             "lex": {
@@ -2586,15 +2613,61 @@ def test_conda_noarch_asset_is_the_single_untripled_archive():
     """The `tarball` composition stages ONE `<artifact>.tar.gz` (no `-<triple>`
     suffix); the noarch asset is matched by that KNOWN name, never a scrape. A
     tree without it (or a per-triple archive) is None."""
+    grammar = _noarch_artifact()
     assert (
-        publish_mod.conda_noarch_asset("grammar", ["grammar.tar.gz", "other.tar.gz"])
+        publish_mod.conda_noarch_asset(
+            grammar, "1.2.3", ["grammar.tar.gz", "other.tar.gz"]
+        )
         == "grammar.tar.gz"
     )
     # A per-triple archive is NOT the noarch asset (that is the tool path).
     assert (
-        publish_mod.conda_noarch_asset("grammar", [f"grammar-{LINUX}.tar.gz"]) is None
+        publish_mod.conda_noarch_asset(grammar, "1.2.3", [f"grammar-{LINUX}.tar.gz"])
+        is None
     )
-    assert publish_mod.conda_noarch_asset("grammar", []) is None
+    assert publish_mod.conda_noarch_asset(grammar, "1.2.3", []) is None
+
+
+def test_conda_noarch_asset_for_wasm_pack_is_the_npm_tgz():
+    """A `wasm-pack` data artifact stages the npm `<flattened-pkg>-<version>.tgz`
+    (`npm pack`'s name off the `@scope/name` identity), NOT an `<artifact>.tar.gz`
+    — the noarch asset resolver branches on the composition."""
+    wasm = _wasm_noarch_artifact()
+    want = "lex-fmt-lex-wasm-1.2.3.tgz"
+    assert publish_mod.conda_noarch_asset_name(wasm, "1.2.3") == want
+    assert publish_mod.conda_noarch_asset(wasm, "1.2.3", [want, "other.tgz"]) == want
+    # The tarball-shape `<artifact>.tar.gz` is NOT the wasm asset.
+    assert publish_mod.conda_noarch_asset(wasm, "1.2.3", ["lex-wasm.tar.gz"]) is None
+
+
+def test_conda_noarch_package_name_flattens_a_scoped_wasm_identity():
+    """A scoped wasm-pack `@scope/name` — which the strict `conda_package_name`
+    (tool path) rejects — is FLATTENED into a conda-safe `scope-name` on the
+    noarch path (mirroring `npm pack`'s tarball stem). An unscoped tarball name
+    is unchanged."""
+    assert (
+        publish_mod.conda_noarch_package_name(_wasm_noarch_artifact())
+        == "lex-fmt-lex-wasm"
+    )
+    assert (
+        publish_mod.conda_noarch_package_name(_wasm_noarch_artifact(scope=None))
+        == "lex-wasm"
+    )
+    assert publish_mod.conda_noarch_package_name(_noarch_artifact()) == "grammar"
+    # A residually-invalid identity (a spaced product-name) is still a loud
+    # refusal, not an opaque rattler-build failure.
+    spaced = _artifacts(
+        {
+            "x": {
+                "build": ["tree-sitter"],
+                "bundle": {"composition": "tarball"},
+                "endpoints": ["conda"],
+                "product-name": "my grammar",
+            }
+        }
+    )[0]
+    with pytest.raises(ReleaseError, match="not a valid conda package name"):
+        publish_mod.conda_noarch_package_name(spaced)
 
 
 def test_render_conda_noarch_recipe_is_generic_and_installs_the_payload():
@@ -2733,6 +2806,63 @@ def test_conda_noarch_scratch_is_namespaced_per_artifact(tmp_path):
     assert not (req.assets_dir / publish_mod.CONDA_RECIPE_SCRATCH / "noarch").exists()
 
 
+def _wasm_noarch_request(tmp_path, *, assets=None, run_cmd=None):
+    """A `wasm-pack` noarch request — stages the npm `.tgz` (`npm pack`'s name
+    off the `@lex-fmt/lex-wasm` identity) the wasm data artifact repackages."""
+    _staged_assets(
+        tmp_path, assets if assets is not None else ["lex-fmt-lex-wasm-1.2.3.tgz"]
+    )
+    req = _request(
+        tmp_path,
+        _wasm_noarch_artifact(),
+        env=CONDA_CREDS,
+        run_cmd=run_cmd or _CondaNoarchBuildRecorder(),
+    )
+    return req, req.run_cmd
+
+
+def test_conda_noarch_wasm_pack_takes_the_noarch_path(tmp_path):
+    """A `wasm-pack` DATA artifact (platform_independent, scoped npm identity)
+    takes the SAME additive noarch path as the tarball grammar (codex-major
+    #1065): ONE `noarch: generic` build off its npm `.tgz`, its recipe naming the
+    FLATTENED conda package `lex-fmt-lex-wasm`, published once to `noarch/`."""
+    req, run_cmd = _wasm_noarch_request(tmp_path)
+
+    published = publish_mod._publish_conda(req)
+
+    builds = [
+        argv for argv, _, _ in run_cmd.calls if argv[:2] == ("rattler-build", "build")
+    ]
+    assert len(builds) == 1
+    (build_argv,) = builds
+    assert "--target-platform" not in build_argv
+    recipe = yaml.safe_load(
+        Path(build_argv[build_argv.index("--recipe") + 1]).read_text()
+    )
+    # The scoped `@lex-fmt/lex-wasm` is flattened to a conda-safe package name...
+    assert recipe["package"]["name"] == "lex-fmt-lex-wasm"
+    assert recipe["build"]["noarch"] == "generic"
+    # ...and the source is the npm `.tgz`, not an `<artifact>.tar.gz`.
+    assert recipe["source"][0]["path"].endswith("lex-fmt-lex-wasm-1.2.3.tgz")
+    publishes = [
+        argv for argv, _, _ in run_cmd.calls if argv[:2] == ("rattler-build", "publish")
+    ]
+    assert len(publishes) == 1
+    assert sum(1 for a in publishes[0] if a.endswith(".conda")) == 1
+    assert any("noarch" in a for a in published.actions)
+
+
+def test_conda_noarch_wasm_pack_without_the_tgz_refuses(tmp_path):
+    """A wasm noarch tree missing the npm `.tgz` is a loud refusal naming the
+    EXPECTED `.tgz` and the `wasm-pack` composition, never a silent empty
+    publish."""
+    req, _ = _wasm_noarch_request(tmp_path, assets=["lex-wasm.tar.gz"])
+    with pytest.raises(
+        ReleaseError, match=r"no `lex-fmt-lex-wasm-1\.2\.3\.tgz`.*wasm-pack"
+    ):
+        publish_mod._publish_conda(req)
+
+
 def test_conda_noarch_without_the_archive_refuses(tmp_path):
     """A staged tree with no `<artifact>.tar.gz` (the tarball composition never
     ran) is a loud refusal, never a silent empty publish."""
@@ -2752,7 +2882,9 @@ def test_conda_noarch_requires_the_write_credentials(tmp_path):
 def _conda_package_files(conda_path: Path) -> list[str]:
     """The payload file paths inside a `.conda` (a zip of zstd-compressed tars),
     excluding the `info/` metadata dir — for the REAL-build content assertion."""
-    import zstandard
+    # `importorskip`: a bare host with rattler-build but no `zstandard` python
+    # module skips cleanly instead of raising a `ModuleNotFoundError` mid-test.
+    zstandard = pytest.importorskip("zstandard")
 
     names: list[str] = []
     with zipfile.ZipFile(conda_path) as z:
@@ -2838,6 +2970,52 @@ def test_conda_noarch_real_repackage_builds_a_generic_conda(tmp_path):
         == "s3://shipit-artifacts-public/acme/widget"
     )
     assert any(a.endswith(".conda") for a in pub_argv)
+    assert any("noarch" in a for a in published.actions)
+
+
+@pytest.mark.skipif(
+    shutil.which("rattler-build") is None,
+    reason="rattler-build not on PATH (present in the `test` env; a bare host skips)",
+)
+def test_conda_noarch_wasm_pack_real_repackage_builds_a_generic_conda(tmp_path):
+    """REAL end-to-end noarch build for the WASM shape (codex-major #1065): an
+    actual `rattler-build build` repackages a real npm `.tgz` — whose files are
+    wrapped in a single top-level `package/` dir, which rattler-build STRIPS —
+    into a genuine `noarch: generic` `.conda` whose files land under
+    `share/<flattened-pkg>/` with neither the `package/` wrapper nor any
+    rattler-build scaffolding swept in. Only the S3 publish is faked."""
+    # An npm-pack-shaped tarball: ALL entries under a single top-level `package/`
+    # dir (npm pack's wrap), which rattler-build strips on extraction.
+    pkg = tmp_path / "package"
+    (pkg / "snippets").mkdir(parents=True)
+    (pkg / "lex_wasm_bg.wasm").write_bytes(b"\x00asm\x01\x00\x00\x00")
+    (pkg / "lex_wasm.js").write_text("export const x = 1\n", encoding="utf-8")
+    (pkg / "package.json").write_text(
+        '{"name":"@lex-fmt/lex-wasm"}\n', encoding="utf-8"
+    )
+    (pkg / "snippets" / "helper.js").write_text("// snip\n", encoding="utf-8")
+    dist = _staged_assets(tmp_path, [])
+    with tarfile.open(dist / "lex-fmt-lex-wasm-1.2.3.tgz", "w:gz") as tf:
+        tf.add(pkg, arcname="package")
+
+    run_cmd = _RealBuildFakePublish()
+    req = _request(tmp_path, _wasm_noarch_artifact(), env=CONDA_CREDS, run_cmd=run_cmd)
+
+    published = publish_mod._publish_conda(req)
+
+    channel = req.assets_dir / publish_mod.CONDA_CHANNEL_SCRATCH / "lex-wasm" / "noarch"
+    built = list(channel.glob("*.conda"))
+    assert len(built) == 1, f"expected one noarch .conda, got {built}"
+    # The `package/` wrapper is stripped: files land directly under
+    # `share/lex-fmt-lex-wasm/` (the FLATTENED conda name), never `package/`.
+    files = sorted(_conda_package_files(built[0]))
+    assert files == [
+        "share/lex-fmt-lex-wasm/lex_wasm.js",
+        "share/lex-fmt-lex-wasm/lex_wasm_bg.wasm",
+        "share/lex-fmt-lex-wasm/package.json",
+        "share/lex-fmt-lex-wasm/snippets/helper.js",
+    ]
+    assert not any("package/package/" in f for f in files)
     assert any("noarch" in a for a in published.actions)
 
 

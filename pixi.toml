@@ -168,7 +168,9 @@ rattler-build = "0.69.*"
 # bug (#1049) is exactly a "wrong files in the package" defect, so the real
 # test verifies the payload lands under `share/<pkg>/` with no rattler-build
 # scaffolding swept in. Test-only; the producer path itself needs no zstd lib.
-zstandard = "*"
+# Pinned to the minor line pixi.lock already resolves (`0.25.0`), matching the
+# file's pinned-dependency pattern so a lock refresh stays deterministic.
+zstandard = "0.25.*"
 
 [feature.test.tasks]
 # The full-gate suite, THROUGH the test verb (TOL01-WS01, ADR-0039): the task is a
