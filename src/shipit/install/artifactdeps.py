@@ -1,11 +1,23 @@
 """Consumer-side Artifact channel — ``[artifact-deps]`` → managed pixi blocks.
 
-The CONSUMER half of the Artifact channel (ADR-0064/0065, ARF01-WS02 #952). A
-downstream repo declares a cross-repo artifact-pinned dependency as
-``.shipit.toml`` ``[artifact-deps.<pkg>]`` (parsed to a typed
-:class:`shipit.config.ArtifactDep`), and ``shipit install`` PROJECTS it here
-into managed pixi blocks so pixi resolves/locks/fetches it like any ordinary
-dependency and a ``version`` bump re-resolves transparently.
+The CONSUMER half of the Artifact channel (ADR-0064/0065/0077, ARF01-WS02 #952,
+conda-direct #1092). A downstream repo declares a cross-repo artifact producer as
+``.shipit.toml`` ``[artifact-deps.<pkg>] { repo }`` (parsed to a typed
+:class:`shipit.config.ArtifactDep`), and ``shipit install`` PROJECTS the DERIVED
+channel location here into managed pixi blocks so pixi can resolve/lock/fetch the
+package.
+
+The contract is split by OWNERSHIP (ADR-0077, the conda-direct collapse):
+
+- **location is derived** — the ``{ repo }`` reference is the sole input from
+  which this module projects the managed ``channels`` (+ private-tier
+  ``[s3-options]``) block; the URL is never restated, the one fact that has never
+  drifted.
+- **version is consumer-owned** — NOT projected. The consumer pins the package as
+  an ordinary ``[dependencies] <pkg> = "…"`` line that ``pixi.lock`` records and a
+  generic bot (``pixi update`` / Renovate) bumps, resolved against the channels
+  this projection emits. No version pin lives in a shipit-managed block anymore;
+  the projected feature block carries channels only.
 
 Two halves, kept apart so the projection stays a PURE, network-free core:
 
@@ -21,17 +33,19 @@ Two halves, kept apart so the projection stays a PURE, network-free core:
 - **projection** (:func:`project`) — pure over ``(ArtifactDep, channel_url)``
   pairs: it emits the managed :class:`~shipit.install.units.Unit` blocks the
   reconcile then treats exactly like every other managed block (four-case
-  hash-compare, idempotent reconcile-to-noop, ADD/UPDATE on a bump). No
-  filesystem, no network — the projection is exercised entirely on values. A
-  PRIVATE channel (an ``s3://`` URL) additionally emits the reserved
-  ``[s3-options.<bucket>]`` block (endpoint-url / region / force-path-style)
-  templated DIRECTLY into TOML — never ``pixi config set s3-options.*``, a
-  silent no-op in pixi 0.71.0 (ADR-0065).
+  hash-compare, idempotent reconcile-to-noop, ADD/UPDATE when the derived
+  channel set changes). No filesystem, no network — the projection is exercised
+  entirely on values. A PRIVATE channel (an ``s3://`` URL) additionally emits the
+  reserved ``[s3-options.<bucket>]`` block (endpoint-url / region /
+  force-path-style) templated DIRECTLY into TOML — never ``pixi config set
+  s3-options.*``, a silent no-op in pixi 0.71.0 (ADR-0065).
 
 Projection shape (the WS02 design, documented for the shepherd): each distinct
 TARGET (a declared ``feature`` name, or the default target when ``feature`` is
 omitted) becomes one dedicated, shipit-reserved pixi FEATURE carrying that
-target's channel URL(s) and version pin(s), wired into an ENVIRONMENT:
+target's channel URL(s) (conda-direct: channels ONLY — the version is the
+consumer's own ``[dependencies]`` pin, never projected), wired into an
+ENVIRONMENT:
 
 - the DEFAULT target (no ``feature``) → the ``shipit-artifacts`` feature, added
   to the ``default`` environment — so the pin resolves on a bare ``pixi
@@ -241,21 +255,23 @@ def materialized_bin_path(root: Path, dep: ArtifactDep, *, target: str) -> Path:
 def _toml_str_list(values: Sequence[str]) -> str:
     """A TOML inline array of double-quoted string VALUES (the channel URLs /
     feature names the projection emits are URL/identifier-safe, so no escaping
-    is needed). Table headers and dependency KEYS go through :func:`_toml_key`
+    is needed). Table headers and feature KEYS go through :func:`_toml_key`
     instead — a dot is a key-path separator there, but harmless inside a string
     value."""
     return "[" + ", ".join(f'"{v}"' for v in values) + "]"
 
 
-#: TOML bare-key shape — the identifier chars a table header or dependency key
-#: may carry UNQUOTED (``A-Za-z0-9_-``). A projected name outside this set (a
-#: dotted conda package like ``ruamel.yaml``, or a dotted ``feature``) MUST be
-#: emitted as a QUOTED key, else TOML reads the dot as a key-path separator and
-#: the one name splits into nested tables/keys — a silently wrong pixi manifest
-#: (ARF01-WS02 review). Dots are legitimately valid: the producer's conda
-#: package vocabulary admits them (``release.publish._CONDA_PACKAGE_NAME_RE``),
-#: so ``config._FEATURE_NAME_RE`` deliberately keeps admitting them and quoting
-#: at emission — not rejecting at parse — is what keeps them safe.
+#: TOML bare-key shape — the identifier chars a table header or key may carry
+#: UNQUOTED (``A-Za-z0-9_-``). A projected name outside this set (a dotted
+#: ``feature`` or ``[s3-options.<bucket>]`` name) MUST be emitted as a QUOTED key,
+#: else TOML reads the dot as a key-path separator and the one name splits into
+#: nested tables/keys — a silently wrong pixi manifest (ARF01-WS02 review). Dots
+#: are legitimately valid: ``config._FEATURE_NAME_RE`` admits them (the producer's
+#: conda vocabulary allows dotted package names, and a ``feature`` may echo one),
+#: so quoting at emission — not rejecting at parse — is what keeps them safe.
+#: (Under conda-direct the package NAME itself is no longer projected — it lives
+#: in the consumer's own ``[dependencies]`` — so only feature/bucket names flow
+#: through here now.)
 _BARE_KEY_RE = re.compile(r"[A-Za-z0-9_-]+")
 
 
@@ -275,24 +291,29 @@ def _feature_block(
     feature: str | None, resolved: Sequence[tuple[ArtifactDep, str]]
 ) -> str:
     """The inner text of one target's managed feature block: its channel URLs
-    and its version pins, under the reserved ``shipit-artifacts*`` feature.
+    ONLY, under the reserved ``shipit-artifacts*`` feature.
 
-    Deterministic: channels de-duped in first-seen order (several pins from the
-    same producing repo share one channel), pins in declaration order.
+    Under conda-direct (ADR-0077) the block carries the DERIVED location and
+    nothing else — no version pin. The version is consumer-owned: a plain
+    ``[dependencies] <pkg> = "…"`` line the consumer authors and ``pixi.lock``
+    pins, resolved against THESE channels (pixi unions a feature's channels into
+    every environment the feature is wired into). So the projection emits the
+    channels and stops — it never restates a URL and never owns a pin.
+
+    Deterministic: channels de-duped in first-seen order (several deps from the
+    same producing repo share one channel).
     """
     name = _toml_key(_feature_name(feature))
     urls: list[str] = []
     for _, url in resolved:
         if url not in urls:
             urls.append(url)
-    lines = [
-        f"[feature.{name}]",
-        f"channels = {_toml_str_list(urls)}",
-        "",
-        f"[feature.{name}.dependencies]",
-    ]
-    lines += [f'{_toml_key(dep.package)} = "{dep.version}"' for dep, _ in resolved]
-    return "\n".join(lines)
+    return "\n".join(
+        [
+            f"[feature.{name}]",
+            f"channels = {_toml_str_list(urls)}",
+        ]
+    )
 
 
 def _feature_unit(
@@ -390,11 +411,14 @@ def project(resolved: Sequence[tuple[ArtifactDep, str]]) -> list[Unit]:
     :class:`~shipit.install.units.Unit` blocks — the pure, network-free core.
 
     Groups the deps by TARGET (the declared ``feature``, or the default target)
-    in first-seen order, emits one dedicated-feature block per target, and one
-    consolidated environments block wiring them in. ``[]`` for no deps (a repo
-    declaring no artifact pin projects nothing). The reconcile treats these
-    exactly like every other managed block: idempotent reconcile-to-noop, and a
-    ``version`` bump changes a feature block's inner text into a single UPDATE.
+    in first-seen order, emits one dedicated-feature block per target carrying
+    that target's DERIVED channels (conda-direct, ADR-0077: channels only — no
+    version pin; the consumer owns the version as a plain ``[dependencies]``
+    pin), and one consolidated environments block wiring them in. ``[]`` for no
+    deps (a repo declaring no artifact reference projects nothing). The reconcile
+    treats these exactly like every other managed block: idempotent
+    reconcile-to-noop, and a change to a producer's derived channel set is a
+    single UPDATE.
 
     A PRIVATE channel (an ``s3://`` URL, ADR-0065) additionally emits ONE
     consolidated ``[s3-options]`` block carrying an ``[s3-options.<bucket>]``

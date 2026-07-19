@@ -136,6 +136,23 @@ def test_partial_already_current_bumps_only_the_stale_entry():
     assert [b.package for b in result.bumped] == ["lexd-lsp"]
 
 
+def test_conda_direct_repo_only_entry_is_skipped_not_a_refusal():
+    # conda-direct (ADR-0077): a `[artifact-deps.<pkg>] { repo }` entry with NO
+    # `version` owns its pin in `[dependencies]` (bumped by a generic bot), so the
+    # Cascade has no shipit-managed version line to edit — it SKIPS the entry
+    # rather than raising on an unlocatable line. A repo mid-migration (one versioned
+    # entry, one conda-direct entry on the same upstream) bumps only the versioned one.
+    text = (
+        '[artifact-deps.lexd]\nrepo = "lex-fmt/lex"\nversion = "0.19.0"\n'
+        '[artifact-deps.lexd-lsp]\nrepo = "lex-fmt/lex"\n'
+    )
+    result = _bump(text, "lex-fmt/lex", "0.20.0")
+    assert [b.package for b in result.bumped] == ["lexd"]
+    assert 'version = "0.20.0"' in result.text
+    # The conda-direct entry is untouched — no spurious `version` line invented.
+    assert result.text.count("version = ") == 1
+
+
 def test_quoted_dotted_package_header_is_matched_and_bumped():
     text = '[artifact-deps."ruamel.yaml"]\nrepo = "acme/tools"\nversion = "0.17.0"\n'
     result = _bump(text, "acme/tools", "0.18.0")

@@ -266,10 +266,13 @@ def bump_artifact_deps(text: str, payload: CascadePayload) -> BumpResult:
     ``repo`` equals the payload upstream, and SURGICALLY rewrites only their
     ``version`` value lines — every other byte (comments, non-matching entries,
     layout) is preserved. Entries already AT the target version are left untouched
-    and reported as not-bumped, so a redundant re-dispatch is a no-op. An unknown
-    upstream matches nothing and returns the text unchanged. A matching entry the
-    edit cannot locate for a surgical rewrite raises :class:`CascadeError` (never
-    a blind, structure-losing rewrite of ``.shipit.toml``).
+    and reported as not-bumped, so a redundant re-dispatch is a no-op. A
+    conda-direct entry (ADR-0077: ``{ repo }`` with no ``version`` — the pin lives
+    in ``[dependencies]``, bumped by a generic bot) is likewise skipped: there is
+    no shipit-managed version line to edit. An unknown upstream matches nothing
+    and returns the text unchanged. A matching, versioned entry the edit cannot
+    locate for a surgical rewrite raises :class:`CascadeError` (never a blind,
+    structure-losing rewrite of ``.shipit.toml``).
     """
     deps = config.load_artifact_deps(_parse(text))
     matching = [d for d in deps if d.repo == payload.upstream]
@@ -277,6 +280,14 @@ def bump_artifact_deps(text: str, payload: CascadePayload) -> BumpResult:
     lines = text.split("\n")
     bumped: list[Bumped] = []
     for dep in matching:
+        # conda-direct (ADR-0077): a `[artifact-deps.<pkg>] { repo }` entry with
+        # NO `version` here owns its pin in `[dependencies]`, bumped by a generic
+        # bot — there is no shipit-managed `version` line to surgically edit, so
+        # the Cascade cleanly SKIPS it rather than raising on an unlocatable line.
+        # (The whole Cascade rail is superseded by that generic bot and slated for
+        # removal with the field — ADR-0077's coupled bundle, task 3.)
+        if dep.version is None:
+            continue
         if dep.version == payload.version:
             continue
         old = _bump_one(lines, dep.package, payload.version)

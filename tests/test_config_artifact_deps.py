@@ -91,16 +91,23 @@ def test_missing_repo_is_refused():
 
 def test_malformed_repo_slug_is_refused_naming_the_key():
     with pytest.raises(config.ConfigError, match=r"\[artifact-deps\].lexd.repo"):
-        _load('[artifact-deps.lexd]\nrepo = "not-a-slug"\nversion = "1.0.0"\n')
+        _load('[artifact-deps.lexd]\nrepo = "not-a-slug"\n')
 
 
-def test_missing_version_is_refused():
-    with pytest.raises(config.ConfigError, match=r"\.version must be"):
-        _load('[artifact-deps.lexd]\nrepo = "lex-fmt/lex"\n')
+def test_bare_repo_only_declaration_parses_conda_direct():
+    # conda-direct (ADR-0077): `{ repo }` alone is a complete declaration — the
+    # version is consumer-owned (a `[dependencies]` pin), not declared here — so a
+    # bare `[artifact-deps.<pkg>] { repo }` parses with `version = None`.
+    (dep,) = _load('[artifact-deps.lexd]\nrepo = "lex-fmt/lex"\n')
+    assert dep == config.ArtifactDep(
+        package="lexd", repo="lex-fmt/lex", version=None, feature=None
+    )
 
 
-def test_empty_version_is_refused():
-    with pytest.raises(config.ConfigError, match=r"\.version must be"):
+def test_empty_version_is_refused_even_though_optional():
+    # `version` is OPTIONAL, but a `version = ""` present in the table is a typo,
+    # not "conda-direct" — refuse it loudly (only its absence is the new shape).
+    with pytest.raises(config.ConfigError, match=r"\.version, when present, must be"):
         _load('[artifact-deps.lexd]\nrepo = "lex-fmt/lex"\nversion = ""\n')
 
 

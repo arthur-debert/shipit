@@ -8,9 +8,11 @@ boolean), matching the acceptance criterion "projection exercised without
 touching the network".
 
 Coverage: the URL derivation and its public/private tier gate; the projected
-block structure and its TOML validity when spliced into a seeded manifest; the
-idempotent reconcile-to-noop and the single-UPDATE version bump; and a drift
-guard tying the consumer bucket to the producer's.
+block structure (conda-direct, ADR-0077: DERIVED channels only — no version pin)
+and its TOML validity when spliced into a seeded manifest; the idempotent
+reconcile-to-noop and the single-UPDATE on a derived-channel change; the
+invariance of the projection to the (unprojected, consumer-owned) version; and a
+drift guard tying the consumer bucket to the producer's.
 """
 
 import tomllib
@@ -26,7 +28,10 @@ from shipit.install import units as iunits
 from shipit.verbs import install as verb
 
 
-def _dep(package="lexd", repo="lex-fmt/lex", version="0.19.3", feature=None):
+def _dep(package="lexd", repo="lex-fmt/lex", version=None, feature=None):
+    # conda-direct (ADR-0077): the version is consumer-owned and NOT projected, so
+    # the default declaration carries none. A few tests still pass an explicit
+    # `version` to prove the projection IGNORES it.
     return config.ArtifactDep(
         package=package, repo=repo, version=version, feature=feature
     )
@@ -93,8 +98,9 @@ def test_default_target_projects_a_feature_and_a_default_env_wiring():
         'channels = ["https://storage.googleapis.com/'
         'shipit-artifacts-public/lex-fmt/lex"]' in inner
     )
-    assert "[feature.shipit-artifacts.dependencies]" in inner
-    assert 'lexd = "0.19.3"' in inner
+    # conda-direct (ADR-0077): channels only — no version pin, no dependencies
+    # table (the consumer owns the version as a plain `[dependencies]` pin).
+    assert "dependencies" not in inner
     env = next(u for u in units if u.key == ad.ENVIRONMENTS_KEY)
     assert env.anchor == "[environments]"
     assert env.desired_inner() == 'default = ["shipit-artifacts"]'
@@ -112,11 +118,10 @@ def test_deps_sharing_a_repo_share_one_channel_entry():
     units = _project([_dep(package="lexd"), _dep(package="lexd-lsp")])
     feat = next(u for u in units if u.key == "pixi.toml#shipit-artifacts")
     inner = feat.desired_inner()
-    # One channels entry (both pins resolve from the same producing repo)...
+    # One channels entry (both deps resolve from the same producing repo), and no
+    # per-package pin — the derived location is de-duped to a single channel.
     assert inner.count("storage.googleapis.com") == 1
-    # ...and both pins present.
-    assert 'lexd = "0.19.3"' in inner
-    assert 'lexd-lsp = "0.19.3"' in inner
+    assert "dependencies" not in inner
 
 
 def test_projected_blocks_splice_into_a_seed_manifest_as_valid_toml():
@@ -131,24 +136,29 @@ def test_projected_blocks_splice_into_a_seed_manifest_as_valid_toml():
             unit.anchor,
         )
     parsed = tomllib.loads(manifest)  # must parse — no duplicate tables/keys
-    assert parsed["feature"]["shipit-artifacts"]["dependencies"]["lexd"] == "0.19.3"
+    # conda-direct: the managed feature carries channels only, no `dependencies`.
+    assert parsed["feature"]["shipit-artifacts"]["channels"] == [
+        "https://storage.googleapis.com/shipit-artifacts-public/lex-fmt/lex"
+    ]
+    assert "dependencies" not in parsed["feature"]["shipit-artifacts"]
     assert parsed["environments"]["default"] == ["shipit-artifacts"]
     assert parsed["environments"]["shipit-artifacts-tools"] == [
         "shipit-artifacts-tools"
     ]
 
 
-def test_dotted_names_are_emitted_as_quoted_toml_keys():
-    # A dotted conda package (`ruamel.yaml` is a real one — the producer's
-    # vocabulary admits dots) and a dotted `feature` must render as QUOTED keys,
-    # else TOML reads the dot as a key-path separator and the one name splits
-    # into nested tables/keys — a silently wrong manifest (ARF01-WS02 review).
+def test_dotted_feature_names_are_emitted_as_quoted_toml_keys():
+    # A dotted `feature` must render as a QUOTED key in the reserved feature table
+    # header and the env wiring, else TOML reads the dot as a key-path separator
+    # and the one name splits into nested tables/keys — a silently wrong manifest
+    # (ARF01-WS02 review). (conda-direct: the package name is no longer projected
+    # — it lives in the consumer's own `[dependencies]` — so only the feature/env
+    # names still flow through the projection's quoting.)
     units = _project([_dep(package="ruamel.yaml", feature="tools.v2")])
     feat = next(u for u in units if u.key == "pixi.toml#shipit-artifacts-tools.v2")
     inner = feat.desired_inner()
     assert '[feature."shipit-artifacts-tools.v2"]' in inner
-    assert '[feature."shipit-artifacts-tools.v2".dependencies]' in inner
-    assert '"ruamel.yaml" = "0.19.3"' in inner
+    assert "dependencies" not in inner
     env = next(u for u in units if u.key == ad.ENVIRONMENTS_KEY)
     assert (
         env.desired_inner()
@@ -171,21 +181,24 @@ def test_dotted_names_splice_into_a_seed_manifest_as_valid_toml():
         )
     parsed = tomllib.loads(manifest)
     feature = parsed["feature"]["shipit-artifacts-tools.v2"]
-    assert feature["dependencies"]["ruamel.yaml"] == "0.19.3"
+    assert feature["channels"] == [
+        "https://storage.googleapis.com/shipit-artifacts-public/lex-fmt/lex"
+    ]
     assert parsed["environments"]["shipit-artifacts-tools.v2"] == [
         "shipit-artifacts-tools.v2"
     ]
 
 
-def test_bare_safe_names_stay_unquoted():
-    # Only names that NEED quoting get it — a plain `lexd`/`tools` stays bare so
+def test_bare_safe_feature_names_stay_unquoted():
+    # Only names that NEED quoting get it — a plain `tools` feature stays bare so
     # the common case reads cleanly and existing manifests do not churn.
     units = _project([_dep(package="lexd", feature="tools")])
     feat = next(u for u in units if u.key == "pixi.toml#shipit-artifacts-tools")
     inner = feat.desired_inner()
     assert "[feature.shipit-artifacts-tools]" in inner
-    assert 'lexd = "0.19.3"' in inner
-    assert '"' not in inner.split("dependencies]")[1].split("=")[0]
+    assert '[feature."' not in inner  # the bare feature header is not quoted
+    env = next(u for u in units if u.key == ad.ENVIRONMENTS_KEY)
+    assert env.desired_inner() == 'shipit-artifacts-tools = ["shipit-artifacts-tools"]'
 
 
 # --------------------------------------------------------------------------
@@ -492,16 +505,31 @@ def test_reconcile_to_noop_after_projection_is_idempotent():
         )
 
 
-def test_version_bump_is_a_single_update():
-    old = _project([_dep(version="0.19.3")])
-    new = _project([_dep(version="0.20.0")])
+def test_projection_is_invariant_to_the_unprojected_version():
+    # conda-direct (ADR-0077): the version is consumer-owned and NOT projected, so
+    # two declarations differing ONLY in `version` project a byte-identical
+    # managed block. A consumer bumping their `[dependencies]` pin therefore never
+    # churns the shipit-managed pixi block — the block carries the derived
+    # LOCATION and nothing that a version bump can move.
+    a = _project([_dep(version="0.19.3")])
+    b = _project([_dep(version="0.20.0")])
+    assert [u.key for u in a] == [u.key for u in b]
+    for ua, ub in zip(a, b, strict=True):
+        assert ua.desired_inner() == ub.desired_inner()
+
+
+def test_channel_change_is_a_single_update():
+    # A change to the DERIVED channel set (a repo re-point) IS a real block
+    # change: the feature block's channels differ, so the reconcile decides a
+    # single UPDATE (consumer==old pristine, desired==new).
+    old = _project([_dep(repo="lex-fmt/lex")])
+    new = _project([_dep(repo="lex-fmt/other")])
     manifest = _splice_all(iunits.pixi_manifest_seed("x"), old)
     feat_new = next(u for u in new if u.key == "pixi.toml#shipit-artifacts")
     current = splice.extract_block(
         manifest, feat_new.open_marker, feat_new.close_marker
     )
     consumer_hash = config.content_hash(current.encode("utf-8"))
-    # A bump re-resolves transparently: consumer==old pristine, desired==new.
     assert (
         irec.decide(
             consumer_hash=consumer_hash,
@@ -510,10 +538,6 @@ def test_version_bump_is_a_single_update():
         )
         == irec.UPDATE
     )
-    # And the env wiring is byte-identical across a pure version bump (no churn).
-    env_old = next(u for u in old if u.key == ad.ENVIRONMENTS_KEY)
-    env_new = next(u for u in new if u.key == ad.ENVIRONMENTS_KEY)
-    assert env_old.desired_inner() == env_new.desired_inner()
 
 
 # --------------------------------------------------------------------------
