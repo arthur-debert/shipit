@@ -1,11 +1,13 @@
-"""producer — the Tree-fetch review producer (ADR-0020 §Reviewer-path, REPLACE).
+"""producer — the captured review producer (ADR-0020 §Reviewer-path, REPLACE).
 
 This is the new producer that feeds the EXISTING funnel gate. The maintainer
-ratified REPLACE outright (ADR-0020): the front-loaded ``codex`` / ``agy`` review
-backends (which pasted a pre-computed diff into the prompt and ran the CLI in the
-consumer's checkout) are retired in favour of a reviewer that runs in a **shared
-read-only Tree** (ADR-0018) at the PR's true head and **fetches the scoped diff
-itself** with ``gh pr diff``. shipit then CAPTURES the agent's structured stdout
+ratified REPLACE outright (ADR-0020): the retired ``codex`` / ``agy`` review
+backends no longer bypass the shared spawn adapter seam. A reviewer runs in a
+per-Run read-only Tree (ADR-0018) at the PR's true head; Codex still fetches the
+scoped diff itself with ``gh pr diff``, while AGY 1.1.3+ receives shipit's
+already-authoritative ``ReviewView.diff`` / ``RangeView.diff`` bytes directly in
+the prompt so headless command permission denial cannot block delivery. shipit
+then CAPTURES the agent's structured stdout
 and the service posts it via the existing App-identity ``post`` path onto the
 existing ``review: <agent>-local`` check-run — so readiness/posting/identity/config
 are all preserved; only the producer changed.
@@ -20,9 +22,11 @@ What this module owns (and ONLY this):
   * provision the per-Run read-only Tree on the PR head
     (:func:`shipit.tree.readonly.create_readonly` — a fresh flat Tree per reviewer
     Run, ADR-0074; cross-reviewer sharing is retired);
-  * build the Tree-fetch reviewer task (:func:`shipit.review.prompt.build_reviewer_task`)
-    and, for codex, write the JSON schema temp file so codex enforces the output
-    shape natively (``--output-schema`` — the robustness win ADR-0020 keeps);
+  * build the backend-appropriate reviewer task (Codex command-fetch via
+    :func:`shipit.review.prompt.build_reviewer_task`; AGY supplied-diff via
+    :func:`shipit.review.prompt.build_supplied_diff_reviewer_task`) and, for
+    codex, write the JSON schema temp file so codex enforces the output shape
+    natively (``--output-schema`` — the robustness win ADR-0020 keeps);
   * launch the child rooted in the Tree (shared :func:`shipit.spawn.launch.launch`,
     stdin ``/dev/null``, auth-env scrubbed) under the reviewer's ``--timeout`` as a
     real process DEADLINE (#404) — a review is a bounded, non-blocking degrade
@@ -36,9 +40,10 @@ What this module owns (and ONLY this):
     config).
 
 A second producer shares the same launch core (RVW02-WS03):
-:func:`run_range_review`, the OFFLINE commit-range sibling — no Tree, no ``gh``,
-the diff read via ``git diff <base>..<head>`` in the caller's checkout — which
-feeds the no-post replay path (:mod:`shipit.review.replay`) instead of the funnel.
+:func:`run_range_review`, the OFFLINE commit-range sibling — no Tree, no ``gh``.
+Codex's prompt asks for ``git diff <base>..<head>`` in the caller's checkout;
+AGY's prompt receives the already-resolved :class:`RangeView.diff` bytes. Both
+feed the no-post replay path (:mod:`shipit.review.replay`) instead of the funnel.
 
 The RVW02-WS04 dimension fan-out (:mod:`shipit.review.fanout`) drives
 :func:`run_tree_review` too — once per configured **Dimension pass**
@@ -46,10 +51,11 @@ The RVW02-WS04 dimension fan-out (:mod:`shipit.review.fanout`) drives
 (:func:`provision_review_tree`, so the N parallel passes of one reviewer Run share
 its single clone) —
 and hashes each pass's exact prompt via :func:`pass_task_text` for the
-review-round record's per-run **Variant**. The offline fan-out replay
+review-round record's per-run **Variant**. For AGY that variant text includes
+the exact supplied diff bytes the launch receives. The offline fan-out replay
 (RVW03-WS01) drives :func:`run_range_review` the same way — once per pass with
 the same ``dimension=`` narrowing, :func:`range_pass_task_text` as its variant
-source — so the live and replay arms differ only in how the diff is fetched.
+source.
 
 A schema-unenforced backend (agy) whose stdout is UNPARSEABLE is re-prompted ONCE
 with the specific parse failure appended before the producer gives up (#826, the
@@ -68,6 +74,7 @@ service maps to the ``failed`` funnel outcome.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -96,6 +103,9 @@ from .prompt import (
     build_incremental_reviewer_task,
     build_range_reviewer_task,
     build_reviewer_task,
+    build_supplied_diff_incremental_task,
+    build_supplied_diff_range_task,
+    build_supplied_diff_reviewer_task,
 )
 from .schema import REVIEW_SCHEMA
 from .usage import UNREPORTED, TokenUsage, from_codex_stderr
@@ -166,6 +176,7 @@ class _BackendSpec:
     a slow one) — the salvage stays the backstop there.
     """
 
+    delivery_mode: str
     schema_inline: bool
     native_schema: bool
     native_timeout: bool
@@ -214,6 +225,7 @@ def _agy_usage(result: launch.LaunchResult) -> TokenUsage:
 #: are mapped onto the spawn seam.
 _SPECS: dict[Backend, _BackendSpec] = {
     CODEX: _BackendSpec(
+        delivery_mode="self-fetch",
         schema_inline=False,
         native_schema=True,
         native_timeout=False,
@@ -224,6 +236,7 @@ _SPECS: dict[Backend, _BackendSpec] = {
         retry_on_parse_failure=False,
     ),
     ANTIGRAVITY: _BackendSpec(
+        delivery_mode="supplied-diff",
         schema_inline=True,
         native_schema=False,
         native_timeout=True,
@@ -265,10 +278,42 @@ def _seam_deadline(timeout: str, spec: _BackendSpec) -> float:
     return base + _SEAM_HEADROOM_SECONDS if spec.native_timeout else base
 
 
+def _sha256(text: str) -> str:
+    """Digest prompt/diff bytes for review-run provenance."""
+    return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _permission_posture(spec: _BackendSpec, *, substrate: str) -> str:
+    """Stable provenance label for the launch posture and execution substrate."""
+    if substrate not in {"read-only-tree", "ambient-checkout"}:
+        raise ValueError(f"unknown review substrate {substrate!r}")
+    if spec.delivery_mode == "supplied-diff":
+        suffix = "no-dangerous-skip"
+    else:
+        suffix = "workspace-write-sandbox"
+    return f"{substrate}-{suffix}"
+
+
+def _cli_version(binary: str) -> str:
+    """Best-effort runtime CLI version string for artifact provenance.
+
+    Telemetry must not make a review fail. If the binary lacks ``--version`` or
+    the probe cannot run in the current test/host environment, record an explicit
+    unknown marker and keep the review path moving.
+    """
+    try:
+        result = execrun.run([binary, "--version"], check=False, timeout=5)
+    except Exception:
+        return "unknown"
+    text = (result.stdout or result.stderr or "").strip()
+    return text.splitlines()[0].strip() if text else "unknown"
+
+
 def pass_task_text(
     backend: Backend,
     pr_number: int,
     *,
+    diff: str | None = None,
     instructions_path: str | None = None,
     dimension: Dimension | None = None,
     incremental_range: tuple[str, str] | None = None,
@@ -284,14 +329,16 @@ def pass_task_text(
     launching anything. Raises ``ValueError`` for a non-funnel backend, exactly
     like the launch path.
 
-    ``incremental_range`` (RVW02-WS06) selects the INCREMENTAL fix-range task
-    (:func:`~shipit.review.prompt.build_incremental_reviewer_task`) over
-    ``(base_sha, head_sha)`` instead of the full-PR task — so the incremental
-    round's single pass hashes the same bytes it launches with. ``incremental_range``
-    is mutually exclusive with ``dimension`` (round ≥ 2 is ONE full-scope pass, not
-    a dimension fan-out); passing both is a caller error this helper rejects with
-    ``ValueError`` — exactly like the launch path — so misuse fails loudly instead
-    of silently hashing the wrong task shape.
+    ``diff`` is required for a supplied-diff backend (AGY) and forbidden to be
+    absent because the prompt hash must cover the exact bytes the launch receives.
+    Command-fetch backends (Codex) ignore it and keep the historical self-fetch
+    prompt. ``incremental_range`` (RVW02-WS06) selects the INCREMENTAL fix-range
+    task over ``(base_sha, head_sha)`` instead of the full-PR task — so the
+    incremental round's single pass hashes the same bytes it launches with.
+    ``incremental_range`` is mutually exclusive with ``dimension`` (round ≥ 2 is
+    ONE full-scope pass, not a dimension fan-out); passing both is a caller error
+    this helper rejects with ``ValueError`` — exactly like the launch path — so
+    misuse fails loudly instead of silently hashing the wrong task shape.
     """
     spec = _SPECS.get(backend)
     if spec is None:
@@ -305,17 +352,39 @@ def pass_task_text(
             "exclusive — an incremental round is ONE full-scope fix-range pass, "
             "not a dimension pass"
         )
+    instructions = load_instructions(instructions_path)
+    if spec.delivery_mode == "supplied-diff":
+        if diff is None:
+            raise ValueError(
+                "pass_task_text: backend 'agy' uses supplied-diff delivery and "
+                "requires diff so the variant hashes the exact launched prompt"
+            )
+        if incremental_range is not None:
+            return build_supplied_diff_incremental_task(
+                instructions,
+                diff,
+                pr_number,
+                schema_inline=spec.schema_inline,
+            )
+        return build_supplied_diff_reviewer_task(
+            instructions,
+            diff,
+            target_label=f"pull request #{pr_number}",
+            diff_noun="this PR's diff",
+            schema_inline=spec.schema_inline,
+            dimension=dimension,
+        )
     if incremental_range is not None:
         base_sha, head_sha = incremental_range
         return build_incremental_reviewer_task(
-            load_instructions(instructions_path),
+            instructions,
             pr_number,
             base_sha,
             head_sha,
             schema_inline=spec.schema_inline,
         )
     return build_reviewer_task(
-        load_instructions(instructions_path),
+        instructions,
         pr_number,
         schema_inline=spec.schema_inline,
         dimension=dimension,
@@ -346,8 +415,18 @@ def range_pass_task_text(
             f"unknown funnel review backend {backend.name!r} "
             f"(known: {', '.join(b.name for b in _SPECS)})"
         )
+    instructions = load_instructions(instructions_path)
+    if spec.delivery_mode == "supplied-diff":
+        return build_supplied_diff_range_task(
+            instructions,
+            view.diff,
+            str(view.base_sha),
+            str(view.head_sha),
+            schema_inline=spec.schema_inline,
+            dimension=dimension,
+        )
     return build_range_reviewer_task(
-        load_instructions(instructions_path),
+        instructions,
         str(view.base_sha),
         str(view.head_sha),
         schema_inline=spec.schema_inline,
@@ -413,15 +492,16 @@ def run_tree_review(
     """Launch ``backend`` as a reviewer in a read-only Tree and CAPTURE its review.
 
     Provisions the per-Run read-only Tree on ``ctx``'s PR head, launches the backend
-    through its spawn read-only posture with a task that fetches the diff via
-    ``gh pr diff`` and emits structured JSON, captures stdout, and parses it. Returns
-    a :class:`CapturedReview` — the review dict plus the launch's measured token
-    usage and the reasoning level ACTUALLY applied to argv (RVW03-WS04); it does NOT
-    post and does NOT touch the check-run (the service
-    owns those). Raises :class:`BackendUnavailable` (missing CLI), :class:`BackendError`
+    through its spawn read-only posture with a backend-appropriate diff delivery
+    task (Codex command-fetches ``gh pr diff``; AGY receives ``ctx.diff`` as
+    supplied data), captures stdout, and parses it. Returns a
+    :class:`CapturedReview` — the review dict plus the launch's measured token
+    usage and the reasoning level ACTUALLY applied to argv (RVW03-WS04); it does
+    NOT post and does NOT touch the check-run (the service owns those). Raises
+    :class:`BackendUnavailable` (missing CLI), :class:`BackendError`
     (unparseable / timed-out output, carrying the raw for salvage), or a plain
-    ``RuntimeError`` (a nonzero child / a missing PR head branch) → the service maps it
-    to ``failed``.
+    ``RuntimeError`` (a nonzero child / a missing PR head branch) → the service
+    maps it to ``failed``.
 
     ``reasoning`` requests a ReasoningLevel for the launch (RVW03-WS04, #685). It
     reaches real argv ONLY where the backend's CLI has a knob (codex
@@ -435,14 +515,14 @@ def run_tree_review(
     fan-out provisions once via :func:`provision_review_tree` and shares it
     across its parallel passes); ``None`` provisions here, exactly as before.
 
-    ``incremental_range`` (RVW02-WS06) selects the INCREMENTAL fix-range task
-    (:func:`~shipit.review.prompt.build_incremental_reviewer_task`) over
-    ``(base_sha, head_sha)`` — the reviewer reads only ``git diff base..head``
-    plus the dependency neighborhood, not the full ``gh pr diff``. It is
-    mutually exclusive with ``dimension`` (round ≥ 2 is ONE full-scope pass, not
-    a fan-out) — passing both raises ``ValueError`` so a misrouted call fails
-    loudly rather than silently running the wrong task shape; the fan-out never
-    combines them. ``None`` keeps the full-PR task, exactly as before.
+    ``incremental_range`` (RVW02-WS06) selects the INCREMENTAL fix-range task over
+    ``(base_sha, head_sha)`` — Codex reads only ``git diff base..head`` plus the
+    dependency neighborhood, while AGY receives the already-rescoped ``ctx.diff``
+    for that same fix range. It is mutually exclusive with ``dimension`` (round
+    ≥ 2 is ONE full-scope pass, not a fan-out) — passing both raises
+    ``ValueError`` so a misrouted call fails loudly rather than silently running
+    the wrong task shape; the fan-out never combines them. ``None`` keeps the
+    full-PR task, exactly as before.
 
     ``run_id`` / ``artifacts`` are the RVW03-WS02 observability seam: ``run_id``
     is the fan-out-minted pass id, stamped (with the dimension) onto this
@@ -472,7 +552,24 @@ def run_tree_review(
     _preflight(backend, dry_run=dry_run)
 
     instructions = load_instructions(instructions_path)
-    if incremental_range is not None:
+    if spec.delivery_mode == "supplied-diff":
+        if incremental_range is not None:
+            task = build_supplied_diff_incremental_task(
+                instructions,
+                ctx.diff,
+                ctx.number,
+                schema_inline=spec.schema_inline,
+            )
+        else:
+            task = build_supplied_diff_reviewer_task(
+                instructions,
+                ctx.diff,
+                target_label=f"pull request #{ctx.number}",
+                diff_noun="this PR's diff",
+                schema_inline=spec.schema_inline,
+                dimension=dimension,
+            )
+    elif incremental_range is not None:
         base_sha, head_sha = incremental_range
         task = build_incremental_reviewer_task(
             instructions,
@@ -540,15 +637,18 @@ def run_tree_review(
         )
         return _launch_and_capture(
             agent,
+            backend,
             spec,
             adapter,
             task,
             cwd=cwd,
             timeout=timeout,
+            diff=ctx.diff if spec.delivery_mode == "supplied-diff" else None,
             schema_path=schema_path,
             launcher=launcher,
             artifacts=artifacts,
             run_id=run_id,
+            substrate="read-only-tree",
         )
     finally:
         if schema_path and os.path.exists(schema_path):
@@ -577,9 +677,10 @@ def run_range_review(
     capture (:func:`_launch_and_capture`), with two deliberate differences:
 
       * NO Tree and NO ``gh``: the review runs in ``view.workdir`` (the checkout
-        whose range is being replayed) with a task that reads the diff itself via
-        ``git diff <base>..<head>`` (:func:`~shipit.review.prompt.build_range_reviewer_task`)
-        — the replay boundary already resolved + validated both endpoints;
+        whose range is being replayed). Codex gets a task that reads the diff via
+        ``git diff <base>..<head>``; AGY gets a supplied-diff task carrying
+        ``view.diff``. The replay boundary already resolved + validated both
+        endpoints;
       * nothing downstream posts: the caller (:mod:`shipit.review.replay`) writes
         the review-round record and stops — no PR is touched.
 
@@ -605,13 +706,23 @@ def run_range_review(
     _preflight(backend, dry_run=False)
 
     instructions = load_instructions(instructions_path)
-    task = build_range_reviewer_task(
-        instructions,
-        str(view.base_sha),
-        str(view.head_sha),
-        schema_inline=spec.schema_inline,
-        dimension=dimension,
-    )
+    if spec.delivery_mode == "supplied-diff":
+        task = build_supplied_diff_range_task(
+            instructions,
+            view.diff,
+            str(view.base_sha),
+            str(view.head_sha),
+            schema_inline=spec.schema_inline,
+            dimension=dimension,
+        )
+    else:
+        task = build_range_reviewer_task(
+            instructions,
+            str(view.base_sha),
+            str(view.head_sha),
+            schema_inline=spec.schema_inline,
+            dimension=dimension,
+        )
     adapter = spec.adapter_factory(model, timeout, reasoning)  # type: ignore[operator]
 
     schema_path: str | None = None
@@ -631,15 +742,18 @@ def run_range_review(
         )
         return _launch_and_capture(
             agent,
+            backend,
             spec,
             adapter,
             task,
             cwd=str(view.workdir),
             timeout=timeout,
+            diff=view.diff if spec.delivery_mode == "supplied-diff" else None,
             schema_path=schema_path,
             launcher=launcher,
             artifacts=artifacts,
             run_id=run_id,
+            substrate="ambient-checkout",
         )
     finally:
         if schema_path and os.path.exists(schema_path):
@@ -648,16 +762,19 @@ def run_range_review(
 
 def _launch_and_capture(
     agent: str,
+    backend: Backend,
     spec: _BackendSpec,
     adapter: BackendAdapter,
     task: str,
     *,
     cwd: str,
     timeout: str,
+    diff: str | None = None,
     schema_path: str | None,
     launcher: launch.Runner | None,
     artifacts: RunArtifacts | None = None,
     run_id: str | None = None,
+    substrate: str,
 ) -> CapturedReview:
     """Launch a reviewer child, capture its review, and — for a schema-unenforced
     backend — apply the deterministic ONE-shot re-prompt net (#826).
@@ -683,15 +800,18 @@ def _launch_and_capture(
     try:
         return _attempt(
             agent,
+            backend,
             spec,
             adapter,
             task,
             cwd=cwd,
             timeout=timeout,
+            diff=diff,
             schema_path=schema_path,
             launcher=launcher,
             artifacts=artifacts,
             run_id=run_id,
+            substrate=substrate,
         )
     except BackendError as exc:
         # The retry net (#826) fires ONLY for a schema-unenforced backend (agy) and
@@ -711,15 +831,18 @@ def _launch_and_capture(
         )
         return _attempt(
             agent,
+            backend,
             spec,
             adapter,
             _retry_task(task, exc),
             cwd=cwd,
             timeout=timeout,
+            diff=diff,
             schema_path=schema_path,
             launcher=launcher,
             artifacts=artifacts,
             run_id=run_id,
+            substrate=substrate,
         )
 
 
@@ -745,16 +868,19 @@ def _retry_task(task: str, failure: BackendError) -> str:
 
 def _attempt(
     agent: str,
+    backend: Backend,
     spec: _BackendSpec,
     adapter: BackendAdapter,
     task: str,
     *,
     cwd: str,
     timeout: str,
+    diff: str | None,
     schema_path: str | None,
     launcher: launch.Runner | None,
     artifacts: RunArtifacts | None = None,
     run_id: str | None = None,
+    substrate: str,
 ) -> CapturedReview:
     """Launch ONE reviewer child in ``cwd`` under the seam deadline and parse its
     stdout — one attempt, no retry (the retry lives in :func:`_launch_and_capture`).
@@ -772,9 +898,11 @@ def _attempt(
     ``artifacts`` (RVW03-WS02) is the run's fail-open bundle: the EXACT prompt
     is written BEFORE the launch (a hung/killed child still leaves it
     inspectable), the raw streams + launch meta (argv, exit code, duration,
-    timed-out flag) after — on the success, timeout, and nonzero-exit paths
-    alike, so the full raw output is always on disk even where the raised
-    error's message truncates. ``None`` disables the bundle (pre-WS02 callers).
+    timed-out flag, delivery mode, permission posture, CLI version, resolved
+    model, prompt digest/bytes, and diff digest/bytes when a diff was supplied)
+    after — on the success, timeout, and nonzero-exit paths alike, so the full
+    raw output is always on disk even where the raised error's message
+    truncates. ``None`` disables the bundle (pre-WS02 callers).
     """
     sink = artifacts if artifacts is not None else RunArtifacts.disabled()
     cmd = adapter.build_command(
@@ -785,7 +913,19 @@ def _attempt(
         output_schema_path=schema_path,
     )
     sink.write_prompt(task)
-    sink.record(argv=list(cmd), cwd=cwd, seam_deadline_s=_seam_deadline(timeout, spec))
+    sink.record(
+        argv=list(cmd),
+        cwd=cwd,
+        seam_deadline_s=_seam_deadline(timeout, spec),
+        cli_version=_cli_version(backend.binary),
+        resolved_model=getattr(adapter, "model", None),
+        delivery_mode=spec.delivery_mode,
+        permission_posture=_permission_posture(spec, substrate=substrate),
+        input_digest=_sha256(task),
+        input_bytes=len(task.encode("utf-8")),
+        diff_digest=None if diff is None else _sha256(diff),
+        diff_bytes=None if diff is None else len(diff.encode("utf-8")),
+    )
     start = time.monotonic()
     try:
         result = launch.launch(
@@ -802,6 +942,9 @@ def _attempt(
             duration_ms=int((time.monotonic() - start) * 1000),
             exit_code=None,
             timed_out=timed_out,
+            stdout_bytes=len((exc.stdout or "").encode("utf-8")),
+            stderr_bytes=len((exc.stderr or "").encode("utf-8")),
+            outcome="timed_out" if timed_out else "failed",
             error=str(exc),
         )
         if not timed_out:
@@ -828,6 +971,8 @@ def _attempt(
         duration_ms=int((time.monotonic() - start) * 1000),
         exit_code=result.returncode,
         timed_out=False,
+        stdout_bytes=len((result.stdout or "").encode("utf-8")),
+        stderr_bytes=len((result.stderr or "").encode("utf-8")),
     )
     try:
         review = _capture(agent, result, artifacts=sink, run_id=run_id)
@@ -839,8 +984,15 @@ def _attempt(
         # the `timed_out` outcome the fanout/service will settle, before the
         # failure propagates — the bundle must never claim a timeout was a clean
         # exit.
-        sink.record(timed_out=exc.timed_out)
+        sink.record(
+            timed_out=exc.timed_out,
+            outcome="timed_out" if exc.timed_out else "failed",
+        )
         raise
+    except RuntimeError:
+        sink.record(outcome="failed")
+        raise
+    sink.record(outcome="success")
     # RVW03-WS04: wrap the captured review with the launch's measured token usage
     # and the reasoning level the adapter actually applied to argv.
     return CapturedReview(

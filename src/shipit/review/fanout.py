@@ -79,9 +79,9 @@ sanctioned experiment driver (:func:`shipit.review.replay.run_fanout_replay`)
 hands :func:`run_fanout_review` a range-scoped
 :class:`~shipit.review.diff.RangeView` instead of a PR ctx, and the three
 PR-coupled seams dispatch on it — no Tree (the passes run in the replay
-checkout), range tasks reading ``git diff <base>..<head>``
-(:func:`shipit.review.producer.run_range_review` /
-:func:`~shipit.review.producer.range_pass_task_text`), and the calibrator's
+checkout), backend-appropriate range delivery (Codex command-fetch,
+AGY supplied-diff) via :func:`shipit.review.producer.run_range_review` /
+:func:`~shipit.review.producer.range_pass_task_text`, and the calibrator's
 ground truth the same range diff. Everything else — union, dedup/calibration,
 routing, run trail — is one code path for both arms.
 """
@@ -237,13 +237,13 @@ def run_fanout_review(
     (round ≥ 2), and return the routed :class:`FanoutOutcome`.
 
     ``target`` is EITHER a PR review view (the live path — provisions the
-    per-Run read-only Tree; a round-1 pass fetches ``gh pr diff``, a round-≥2
-    ``incremental`` pass the fix-range ``git diff <base>..<head>`` instead — see
-    ``incremental`` below) or a range-scoped
+    per-Run read-only Tree; Codex command-fetches ``gh pr diff`` / fix-range
+    ``git diff`` while AGY receives the already-resolved target diff) or a
+    range-scoped
     :class:`~shipit.review.diff.RangeView` (the offline fan-out replay,
-    RVW03-WS01 — the passes run in the replay checkout over
-    ``git diff <base>..<head>``, and the calibrator's ground truth is that same
-    range diff). The dispatch happens at the three PR-coupled seams only;
+    RVW03-WS01 — the passes run in the replay checkout, with Codex command-fetch
+    and AGY supplied-diff, and the calibrator's ground truth is that same range
+    diff). The dispatch happens at the three PR-coupled seams only;
     union, dedup/calibration, routing, and the run trail are ONE code path for
     both arms — the sanctioned replacement for the retired transient
     monkey-patch driver (#680).
@@ -518,13 +518,13 @@ def run_fanout_review(
                 dimension=dim if scoped else None,
             )
         else:
-            task = producer.pass_task_text(
-                backend,
-                target.number,
-                instructions_path=instructions_path,
-                dimension=dim if scoped else None,
-                incremental_range=incremental_range,
-            )
+            task_kwargs = {
+                "instructions_path": instructions_path,
+                "dimension": dim if scoped else None,
+                "incremental_range": incremental_range,
+                "diff": target.diff,
+            }
+            task = producer.pass_task_text(backend, target.number, **task_kwargs)
         run_id = uuid.uuid4().hex
         kind = f"{pass_word}-pass"
         bundle = artifacts_mod.RunArtifacts.under(round_dir, run_id)

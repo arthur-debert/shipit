@@ -22,14 +22,20 @@ decision would have missed (do NOT "simplify" them away):
   (auto-approve every tool/shell request). Without it a non-interactive ``--print``
   **write** Run stalls on permission prompts editing files. A **reviewer** Run
   (``read_only=True``, WS04a) **omits** it: WS04a probed agy 1.0.14 — a ``--print`` Run
-  *without* ``--dangerously-skip-permissions`` still runs network shell commands (it ran
-  ``curl https://api.github.com/zen`` and returned the result), so the reviewer can fetch
-  PR context without the dangerous flag. Read-only is enforced by the chmod'd Tree
-  (ADR-0020 §Decision 3); omitting the flag is best-effort defense-in-depth on top.
+  *without* ``--dangerously-skip-permissions`` still launches successfully. Read-only is
+  enforced by the chmod'd Tree (ADR-0020 §Decision 3); omitting the flag is best-effort
+  defense-in-depth on top. The review-input module, not this CLI adapter, decides how
+  scope bytes are delivered; AGY 1.1.3+ now receives supplied diffs instead of being asked
+  to run ``gh`` / ``git diff`` in headless mode (#1051).
 - **The model must be pinned to a capable, non-agentic name.** ``agy`` silently resolves a
   bare ``pro`` to Gemini Flash, which in ``--print`` mode goes **agentic** (runs
   shell/build instead of answering). :data:`MODEL_ALIASES` pins ``pro`` →
   ``Gemini 3.1 Pro (High)``.
+- **The prompt still rides ``--print`` argv.** agy exposes no documented stdin or
+  prompt-file flag for print mode. To avoid an opaque OS ``E2BIG`` before agy
+  starts, the adapter refuses a role-prefixed prompt above a conservative
+  per-argument ceiling and tells the caller to reduce the diff / split the review
+  until agy grows a non-argv prompt transport.
 
 Auth rides agy's Antigravity OAuth login (creds under ``~/.gemini/antigravity-cli`` +
 ``~/.antigravity``, inherited by the child). The adapter scrubs :data:`SCRUBBED_AUTH_ENV`
@@ -77,6 +83,13 @@ DEFAULT_MODEL: str = _IDENTITY.default_model
 #: with consistently large work raises it via the per-reviewer ``timeout`` option.
 DEFAULT_TIMEOUT = "600s"
 
+# Linux's per-string exec ceiling (MAX_ARG_STRLEN) is commonly 128 KiB. Keep a
+# conservative application limit below that so an oversized supplied-diff review
+# fails with a clear shipit error before the OS refuses exec with E2BIG. macOS
+# allows larger argv, but this path must be portable to CI and Linux developer
+# machines.
+MAX_PRINT_ARG_BYTES = 120 * 1024
+
 #: The env vars the ``antigravity`` adapter scrubs from the child env (ADR-0020
 #: §Decision-per-backend, agy auth): a stale ``GEMINI_API_KEY`` / ``GOOGLE_API_KEY`` could
 #: shadow agy's preferred Antigravity OAuth login, so both are removed so the login wins.
@@ -99,6 +112,20 @@ def role_prompt(task: str, role: str) -> str:
     pollute the PR or cause issues).
     """
     return f"You are acting as the '{role}' role for this Run.\n\n{task}"
+
+
+def _enforce_print_arg_limit(prompt: str) -> None:
+    """Fail before ``execve`` if agy's single ``--print`` argument is too large."""
+    size = len(prompt.encode("utf-8"))
+    if size <= MAX_PRINT_ARG_BYTES:
+        return
+    raise ValueError(
+        "antigravity (agy) --print prompt is too large for portable argv "
+        f"delivery ({size} bytes > {MAX_PRINT_ARG_BYTES} bytes). agy exposes no "
+        "documented stdin or prompt-file transport for print mode; reduce the "
+        "review diff, split the range, or use a backend with non-argv prompt "
+        "delivery."
+    )
 
 
 class AntigravityAdapter(BackendAdapter):
@@ -155,9 +182,10 @@ class AntigravityAdapter(BackendAdapter):
           ONLY for a **write** Run (``read_only=False``) — without it a non-interactive
           write Run stalls on permission prompts editing files. A **reviewer**
           (``read_only=True``) **omits** it: WS04a probe-confirmed agy still runs network
-          shell commands (for example, the ``gh pr diff`` fetch a reviewer needs) without
-          it, and read-only is enforced by the chmod'd Tree (ADR-0020 §Decision 3) —
-          omitting the flag is best-effort defense-in-depth.
+          enough of the review posture without it, and read-only is enforced by the
+          chmod'd Tree (ADR-0020 §Decision 3). The prompt's diff-delivery mode is owned
+          by :mod:`shipit.review.producer`, not by this argv builder; omitting the flag is
+          best-effort defense-in-depth.
 
         - ``--print "<text>"`` is the headless invocation.
 
@@ -181,6 +209,7 @@ class AntigravityAdapter(BackendAdapter):
         # or the custom-agent posture caused it to explore instead of returning JSON.
         # It now conveys its role by prompt-prepend like every other posture.
         prompt = role_prompt(task, role)
+        _enforce_print_arg_limit(prompt)
         permission = [] if read_only else ["--dangerously-skip-permissions"]
         return [
             "agy",

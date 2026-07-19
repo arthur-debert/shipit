@@ -238,8 +238,9 @@ shared read-only Tree at the correct head and tells it to fetch the scoped diff 
 > (`run_tree_review`): it provisions the shared read-only Tree (ADR-0018) on the PR head
 > via `create_readonly`, launches the agent through the SAME spawn `BackendAdapter`
 > read-only posture the spawn surface uses (`build_command(..., read_only=True)` — one
-> definition of "launch codex/agy as a reviewer"), and the agent **fetches the scoped
-> diff itself** with `gh pr diff` (the diff is no longer in the prompt). shipit then
+> definition of "launch codex/agy as a reviewer"). Codex **fetches the scoped
+> diff itself** with `gh pr diff`; AGY now receives the already-resolved diff in the
+> prompt (see issue #1051 amendment below). shipit then
 > **captures** the agent's structured stdout and posts it AS the bot App identity through
 > the EXISTING `post.py` onto the EXISTING `review: <agent>-local` check-run — so the
 > readiness engine, the App-identity posting, the `reviewers:` config, dry-run honesty,
@@ -265,10 +266,11 @@ first suggested (see §"The falsified hypothesis" below), so the decision rests 
    PR's true head. The reviewer sees the *whole codebase*, not a context-free diff, and walks it
    lazily — codex tree-rooted returned **richer, code-located findings** (absolute path + line
    range, cross-referenced against unchanged code) than a front-loaded diff can support.
-2. **Scoped diff without guessing the base.** The reviewer runs **`gh pr diff`** (which resolves
-   the PR's real base/head — epic branch *or* `main`; do **not** assume `main`) inside the Tree,
-   instead of the funnel front-loading a pre-computed diff. One reviewer prompt, no schema/diff
-   temp-file plumbing.
+2. **Scoped diff without guessing the base.** The review producer owns the authoritative scope
+   bytes. Codex runs **`gh pr diff`** (which resolves the PR's real base/head — epic branch *or*
+   `main`; do **not** assume `main`) inside the Tree. AGY receives the already-resolved
+   `ReviewView.diff` / `RangeView.diff` directly in the prompt so headless command permission
+   drift cannot prevent delivery. One reviewer boundary, backend-specific delivery.
 3. **Uniformity.** One reviewer mechanism across claude/codex/antigravity over one Tree substrate,
    rather than a second, divergent review path.
 
@@ -430,3 +432,28 @@ diff", sending the operator chasing diff size when size was never the fault.
   reviewer health needs runtime provenance and cross-run escalation — tracking the resolved model,
   launch posture and delivery outcome per run — which is follow-up work, not a config constant.
   This amendment claims better *diagnostics*, not that AGY reliability is fixed.
+
+## Amendment (issue #1051) — AGY supplied-diff delivery; self-fetch probe falsified for AGY 1.1.3+
+
+The original reviewer-path decision was probe-confirmed on **agy v1.0.14**, where headless
+`--print` could run the command needed to fetch scope. Installed AGY 1.1.3+ changed headless
+permission behavior: command/tool requests that require confirmation are soft-denied because
+headless mode cannot prompt. A real no-post replay on agy 1.1.4 failed with empty stdout and
+stderr explaining that a tool required the `command` permission, while an A/B prompt requiring
+no tools returned valid review JSON. Authentication, launch, capture, and parsing were not the
+broken seam; review-input delivery was.
+
+Shipit already holds the authoritative scope in `ReviewView.diff` for live reviews and
+`RangeView.diff` for offline replay. For AGY Reviewer Runs the producer now supplies those exact
+diff bytes as untrusted prompt data and instructs AGY not to run `gh pr diff` or `git diff`.
+Full-PR, incremental, fan-out, retry, and replay prompts all compose from the same supplied-diff
+builder, and the Variant hash is computed from the exact launched prompt so task-text helpers
+cannot drift from launch composition. Codex self-fetch is unchanged.
+
+The spawn adapter remains the CLI argv/environment seam: it still omits
+`--dangerously-skip-permissions` for reviewers and does not grow a generic capability lattice.
+Delivery mode and provenance live behind the review producer boundary. Per-run artifacts record
+the CLI version when available, resolved model, delivery mode, permission posture, prompt and
+diff digests/byte counts, argv, raw streams, duration, timeout, and outcome on success and
+failure. This keeps AGY 1.1.3+ operational without mutating global/project allow rules, changing
+model aliases, or altering readiness, posting, roster, or retry-count behavior.
