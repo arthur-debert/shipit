@@ -16,14 +16,17 @@ rendered projection / cut section / notes file. Three subcommands, one model
   and the identical command runs on a laptop: one definition, enforced
   everywhere.
 * ``check-fragment`` — the PR-TIME FRAGMENT GATE (issue #1073): fail a PR
-  merging to ``main`` that adds no ``CHANGELOG/unreleased-*.md`` fragment, with
-  a ``Changelog: skip`` commit-trailer escape hatch for docs/CI/chore-only PRs.
-  The cut-time empty-release refusal (:func:`shipit.changelog.plan_coalesce`)
-  fires only once every merged PR is in, so this per-PR gate catches the miss
-  where a fragment can still be added. Self-gating and offline: the base ref is
-  read from the CI runner env and everything else — the added fragment and the
-  skip trailer — from the PR's own git, so no ``gh`` auth and no CI event
-  trigger is involved. The pure decision is :func:`decide_fragment_gate`.
+  merging to ``main`` when ``CHANGELOG/`` holds no unreleased fragment, so the
+  release has notes to cut. It asks the cut's OWN question at PR time — "does
+  ``CHANGELOG/`` contain ≥1 unreleased fragment?" — over the same discovery
+  machinery the cut uses (:func:`_read_tree` → :func:`shipit.changelog.classify_dir`),
+  not a bespoke diff. The cut-time empty-release refusal
+  (:func:`shipit.changelog.plan_coalesce`) fires only once every merged PR is
+  in; this per-PR gate catches the miss earlier, where a fragment can still be
+  added. Self-gating and offline: the base ref is read from the CI runner env
+  (``GITHUB_BASE_REF``) and the fragment presence from the current checkout's
+  ``CHANGELOG/``, so no ``gh`` auth and no CI event trigger is involved. The pure
+  decision is :func:`decide_fragment_gate`.
 * ``render`` — regenerate ``CHANGELOG.md`` from ``CHANGELOG/*`` (the fix for a
   failing ``check``).
 * ``coalesce VERSION`` — the cut-time face (story 26): refuse an empty release,
@@ -47,11 +50,11 @@ from __future__ import annotations
 import logging
 import os
 import sys
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 import click
 
@@ -290,15 +293,6 @@ def apply_cut(
 #: merge, not every intermediate WS merge.
 GATED_BASE_REF = "main"
 
-#: The commit trailer that opts a PR out of the gate — for docs/CI/chore-only
-#: PRs that legitimately add no release note. A ``Changelog: skip`` trailer on
-#: ANY commit the PR adds passes the gate unconditionally. A trailer, not a
-#: GitHub label: it rides the same git the gate already reads (offline, no event
-#: payload, no CI trigger), so it works on a re-run and on a laptop and never
-#: churns the CI suite the way a mutable label toggle does.
-SKIP_TRAILER_KEY = "Changelog"
-SKIP_TRAILER_VALUE = "skip"
-
 
 @dataclass(frozen=True)
 class FragmentGate:
@@ -309,34 +303,18 @@ class FragmentGate:
     message: str
 
 
-def _is_fragment_path(path: str) -> bool:
-    """Whether a git-diff path names a ``CHANGELOG/`` unreleased fragment.
-
-    Paths ride verbatim from ``git diff --name-only`` (repo-relative, forward
-    slashes). The predicate reuses the core :func:`shipit.changelog.is_fragment_name`
-    over the basename and requires the immediate parent to be the ``CHANGELOG/``
-    directory — so a stray ``docs/unreleased-notes.md`` never counts, while a
-    monorepo sub-changelog (``pkg/CHANGELOG/unreleased-x.md``) still does.
-    """
-    p = PurePosixPath(path)
-    return p.parent.name == core.CHANGELOG_DIR and core.is_fragment_name(p.name)
-
-
 def decide_fragment_gate(
     *,
     base_ref: str,
-    skip_requested: Callable[[], bool],
-    changed_paths: Callable[[], Sequence[str] | None],
+    has_unreleased_fragment: bool,
 ) -> FragmentGate:
-    """The PURE fragment-gate decision (issue #1073), git/env reads injected.
+    """The PURE fragment-gate decision (issue #1073), env/fs reads injected.
 
-    Given the PR's base ref, a thunk that reports whether a ``Changelog: skip``
-    trailer is present, and a thunk that yields the PR's own changed paths (the
-    three-dot merge-base diff), decide whether a changelog fragment is required
-    and, if so, whether one was added. BOTH thunks are only invoked on the
-    branch that needs them — the skip thunk after the base short-circuits, the
-    diff thunk only when the base is gated and no skip trailer is set — so a
-    laptop/lefthook run (empty base) and an epic-branch PR touch NEITHER git read.
+    Given the PR's base ref and whether the current checkout's ``CHANGELOG/``
+    holds any unreleased fragment, decide whether the PR may merge. This is the
+    SAME question the cut asks (:func:`shipit.changelog.plan_coalesce` refuses an
+    empty release) — asked at PR time so a missing fragment fails before merge,
+    not at the next cut once every PR is already in.
 
     Passes (``ok=True``) when any of:
 
@@ -344,20 +322,12 @@ def decide_fragment_gate(
       gate never blocks local work.
     * ``base_ref`` is not :data:`GATED_BASE_REF` — a WS PR to an epic branch is
       exempt.
-    * ``skip_requested()`` is True — a ``Changelog: skip`` trailer
-      (:data:`SKIP_TRAILER_KEY`/:data:`SKIP_TRAILER_VALUE`) is present on one of
-      the PR's commits.
-    * a ``CHANGELOG/unreleased-*.md`` path was ADDED in the diff. The diff is
-      the merge-base ``base...HEAD`` (:func:`shipit.git.added_paths_since`,
-      ``--diff-filter=A``), so a fragment the PR introduces counts even when
-      amended across review rounds (the base never had it → still a net add),
-      while merely modifying, deleting, or renaming a fragment already present
-      on the base does NOT — that adds no new release note.
+    * ``has_unreleased_fragment`` is True — ``CHANGELOG/`` holds ≥1 unreleased
+      fragment, so the release will have notes to cut.
 
-    Fails (``ok=False``) when the base is ``main``, no skip trailer is set, and
-    the diff carries no fragment — or when the diff is unavailable (``None``),
-    which for a required gate is a loud refusal (better than passing a PR whose
-    fragment could not be verified), not a silent pass.
+    Fails (``ok=False``) only when the base is ``main`` and ``CHANGELOG/`` holds
+    no unreleased fragment — the exact condition that makes the cut refuse an
+    empty release.
     """
     base = base_ref.strip()
     if not base:
@@ -369,36 +339,16 @@ def decide_fragment_gate(
             "fragment required (only PRs to "
             f"{GATED_BASE_REF} are gated)",
         )
-    if skip_requested():
+    if has_unreleased_fragment:
         return FragmentGate(
             True,
-            f"changelog: {SKIP_TRAILER_KEY}: {SKIP_TRAILER_VALUE} trailer present "
-            "— no fragment required",
-        )
-    paths = changed_paths()
-    if paths is None:
-        return FragmentGate(
-            False,
-            f"changelog: could not diff against origin/{GATED_BASE_REF} — "
-            "cannot verify a changelog fragment was added; fetch the base "
-            f"branch (or add a {SKIP_TRAILER_KEY!r}: {SKIP_TRAILER_VALUE!r} "
-            "trailer to a commit)",
-        )
-    added = [p for p in paths if _is_fragment_path(p)]
-    if added:
-        shown = ", ".join(sorted(added))
-        return FragmentGate(
-            True,
-            f"changelog: OK — fragment added ({shown})",
+            f"changelog: OK — {core.CHANGELOG_DIR}/ has an unreleased fragment",
         )
     return FragmentGate(
         False,
         f"no {core.CHANGELOG_DIR}/{core.FRAGMENT_PREFIX}*{core.FRAGMENT_SUFFIX} "
-        f"fragment added — every PR to {GATED_BASE_REF} needs one: a "
-        f"{core.CHANGELOG_DIR}/{core.FRAGMENT_PREFIX}*{core.FRAGMENT_SUFFIX} "
-        f"fragment (a package's own {core.CHANGELOG_DIR}/ in a monorepo counts "
-        f"too), or a '{SKIP_TRAILER_KEY}: {SKIP_TRAILER_VALUE}' trailer on a "
-        "commit for docs/CI/chore-only PRs",
+        "fragment present — add one so the release has notes to cut (this is the "
+        "same condition that makes 'release' refuse an empty cut)",
     )
 
 
@@ -459,46 +409,33 @@ def run_check_fragment(
     path: str | None = None,
     *,
     base_ref: str | None = None,
-    changed_paths_fn: Callable[[str, str], Sequence[str] | None] | None = None,
-    skip_requested_fn: Callable[[str, str], bool | None] | None = None,
+    read_tree: Callable[[Path], ChangelogTree] | None = None,
 ) -> int:
-    """The PR-time fragment gate: 0 when no fragment is required or one was
-    added, else 1 (issue #1073).
+    """The PR-time fragment gate: 0 when no fragment is required or ``CHANGELOG/``
+    holds one, else 1 (issue #1073).
 
-    Self-gating, offline (no ``gh`` auth), pure git. The PR context comes from
-    git, not a live API call: the base ref from ``GITHUB_BASE_REF`` (empty
-    off-PR), the escape hatch from a ``Changelog: skip`` commit trailer read out
-    of the PR's own commits. Only PRs to :data:`GATED_BASE_REF` are gated. The
-    whole decision is the pure :func:`decide_fragment_gate`; this shell only
-    resolves the seams.
+    Self-gating and offline (no ``gh`` auth). The PR context comes from the CI
+    runner env, not a live API call: the base ref from ``GITHUB_BASE_REF`` (empty
+    off-PR). Only PRs to :data:`GATED_BASE_REF` are gated. The fragment-presence
+    answer reuses the cut's OWN discovery machinery — :func:`_read_tree` (which
+    classifies ``CHANGELOG/`` via :func:`shipit.changelog.classify_dir`) — so the
+    gate and the cut agree on what counts as an unreleased fragment. The whole
+    decision is the pure :func:`decide_fragment_gate`; this shell only resolves
+    the seams.
 
-    The seams are injectable for tests: ``base_ref`` overrides the env read,
-    ``changed_paths_fn`` (``(base_ref, cwd) -> paths | None``) and
-    ``skip_requested_fn`` (``(base_ref, cwd) -> bool | None``) the two git
-    boundaries — mirroring the ``ci plan`` injection pattern
-    (:func:`shipit.verbs.ci.run`). Both are wrapped as THUNKS the pure decision
-    calls lazily, so a laptop run (empty base) and an epic-branch PR never touch
-    git. The default fragment boundary is :func:`shipit.git.added_paths_since`
-    (``--diff-filter=A`` against ``origin/<base>``): only a fragment the PR ADDS
-    satisfies the gate, so modifying/deleting/renaming a pre-existing base
-    fragment cannot. The default skip boundary is
-    :func:`shipit.git.skip_changelog_requested`; only an explicit ``True`` skips
-    — an unverifiable read (``None``) falls through to the fragment requirement
-    (the ``is True`` below), so a broken git read can never silently bypass the gate.
+    ``base_ref`` overrides the env read and ``read_tree`` the ``CHANGELOG/``
+    discovery, both for tests (mirroring the seam-injection style of the other
+    runners). The default ``read_tree`` is :func:`_read_tree` over the resolved
+    root; the fragment-presence bool is simply whether its fragment set is
+    non-empty.
     """
-    root = Path(path or ".").resolve()
+    read_tree = read_tree or _read_tree
+    root = _resolve_root(Path(path or ".").resolve(), repo_root=git.repo_root)
     if base_ref is None:
         base_ref = os.environ.get("GITHUB_BASE_REF", "")
-    fetch = changed_paths_fn or (
-        lambda ref, cwd: git.added_paths_since(f"origin/{ref}", cwd=cwd)
-    )
-    skip_fn = skip_requested_fn or (
-        lambda ref, cwd: git.skip_changelog_requested(f"origin/{ref}", cwd=cwd)
-    )
     verdict = decide_fragment_gate(
         base_ref=base_ref,
-        skip_requested=lambda: skip_fn(base_ref.strip(), str(root)) is True,
-        changed_paths=lambda: fetch(base_ref.strip(), str(root)),
+        has_unreleased_fragment=bool(read_tree(root).fragments),
     )
     print(verdict.message)
     logger.info(
@@ -661,9 +598,9 @@ def changelog() -> None:
     Release notes accumulate as CHANGELOG/unreleased-*.md fragments, one per
     feature/fix PR; CHANGELOG.md is rendered from them, never hand-edited.
     `check` is the PR-time fragment-sync check (the changelog-sync lane);
-    `check-fragment` is the PR-time gate that a PR to main added a fragment
-    (`Changelog: skip` trailer escape hatch); `coalesce` is the cut-time roll
-    that emits the one release-notes text.
+    `check-fragment` is the PR-time gate that a PR to main has an unreleased
+    fragment in CHANGELOG/; `coalesce` is the cut-time roll that emits the one
+    release-notes text.
     """
 
 
@@ -682,14 +619,15 @@ def check_cmd(path: str | None) -> None:
 @changelog.command(name="check-fragment")
 @click.argument("path", required=False)
 def check_fragment_cmd(path: str | None) -> None:
-    """Fail a PR to main that adds no changelog fragment (`Changelog: skip` hatch).
+    """Fail a PR to main when CHANGELOG/ holds no unreleased fragment.
 
-    The PR-time counterpart to the cut-time empty-release refusal: it fires
-    per-PR so a missing fragment is caught before merge, not at the next cut.
-    Self-gating and offline — the base ref comes from the CI runner env
-    (GITHUB_BASE_REF), the fragment check and the skip trailer both from the PR's
-    own git. Passes with no fragment off-PR, on a non-main base, or when a commit
-    on the PR carries a `Changelog: skip` trailer (docs/CI/chore-only PRs).
+    The PR-time counterpart to the cut-time empty-release refusal: it asks the
+    cut's own "are there unreleased fragments?" question per-PR, so a missing
+    fragment is caught before merge, not at the next cut. Self-gating and offline
+    — the base ref comes from the CI runner env (GITHUB_BASE_REF) and the
+    fragment presence from the current checkout's CHANGELOG/ (the same discovery
+    the cut uses). Passes off-PR or on a non-main base (WS PRs to epic branches
+    are exempt).
     """
     raise SystemExit(run_check_fragment(path))
 

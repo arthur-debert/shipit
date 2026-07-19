@@ -1,11 +1,17 @@
-`shipit changelog check-fragment` fails a pull request to `main` that adds no
-release-note fragment, so a missing fragment is caught at PR time — not at the
-next release cut, once every PR is already merged.
+`shipit changelog check-fragment` fails a pull request to `main` when
+`CHANGELOG/` holds no unreleased fragment, so a missing release note is caught at
+PR time — not at the next release cut, once every PR is already merged.
+
+It is a fragment-PRESENCE check: it asks the cut's OWN question — "does
+`CHANGELOG/` contain at least one unreleased fragment?" — at PR time, over the
+same discovery machinery the cut uses (`shipit.changelog.classify_dir` over
+`CHANGELOG/`). That is exactly the condition that makes a release refuse an empty
+cut, so the gate and the cut never disagree on what counts as a fragment.
 
 It is self-gating and offline (no `gh` auth). Only the base ref comes from the
-CI runner environment (`GITHUB_BASE_REF`, empty off a PR); everything else — the
-added fragment and the escape hatch — is read from the PR's own git, so no CI
-event trigger and no event payload is involved.
+CI runner environment (`GITHUB_BASE_REF`, empty off a PR); the fragment presence
+is read straight from the current checkout's `CHANGELOG/`, so no CI event
+trigger and no event payload is involved.
 
 The check PASSES (exit 0), requiring no fragment, when any of:
 
@@ -13,19 +19,14 @@ The check PASSES (exit 0), requiring no fragment, when any of:
   never block
 - the PR base is not `main` — work-stream PRs target epic branches and are
   exempt; only PRs to `main` are gated
-- a commit on the PR carries a `Changelog: skip` trailer — the escape hatch for
-  docs/CI/chore-only PRs that legitimately need no release note. A trailer (not
-  a GitHub label): it rides the same git the gate already reads, so it works
-  offline, on a re-run, and on a laptop, and never churns the CI suite the way a
-  mutable label toggle would.
+- `CHANGELOG/` holds at least one `unreleased-*.md` fragment
 
-Otherwise it requires the PR's own diff (the three-dot merge-base diff against
-`origin/main`, `--diff-filter=A`) to ADD at least one `CHANGELOG/unreleased-*.md`
-fragment, and exits non-zero when none is found. A fragment the PR introduces
-counts even when amended across review rounds (the base never had it); merely
-modifying, deleting, or renaming a fragment already on `main` does not.
+Otherwise (base `main`, no unreleased fragment) it exits non-zero: add a
+`CHANGELOG/unreleased-*.md` fragment so the release has notes to cut. There is
+no escape hatch — the same fragment the release needs to cut is the one the gate
+asks for.
 
 Wire it as a required, PR-only lane in `.shipit.toml` (`local = false`, so it
-runs in CI but never on a laptop commit/push). The base-branch check (main only)
-and the `Changelog: skip` trailer read both live here, in the subcommand — the
-lane planner is unaware of either.
+runs in CI but never on a laptop commit/push). It reads the working tree, so it
+needs no git history and no workflow YAML change. The base-branch check (main
+only) lives here, in the subcommand — the lane planner is unaware of it.
