@@ -275,8 +275,11 @@ def _require_consumer_pins(root: Path, deps) -> None:
     pixi = root / install_units.PIXI_FILE
     try:
         manifest = tomllib.loads(pixi.read_text(encoding="utf-8"))
-    except (OSError, tomllib.TOMLDecodeError):
-        manifest = {}  # absent/invalid -> every declared pin is missing (loud)
+    except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError):
+        # Absent / unparseable / non-UTF-8 -> empty, so every declared pin reads
+        # as missing (loud). A non-UTF-8 manifest is as unusable as an absent one;
+        # it must not slip past the fail-safe by raising a raw decode error.
+        manifest = {}
     missing = artifactdeps.missing_pins(deps, manifest)
     if not missing:
         return

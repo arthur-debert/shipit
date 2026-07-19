@@ -537,6 +537,28 @@ def test_explicit_consumer_feature_table_is_a_real_conflict(tmp_path):
     assert "pixi.toml#shipit-artifacts" not in {d.unit.key for d in plan.decisions}
 
 
+def test_explicit_but_commented_consumer_header_is_a_real_conflict(tmp_path):
+    # Round-4 (#1094): a consumer's EXPLICIT header with a trailing comment —
+    # `[feature.shipit-artifacts]  # owned by consumer` — is still an explicit
+    # table, even alongside `[feature.shipit-artifacts.dependencies]`. The guard
+    # must NOT misread it as a re-openable implicit super and clobber it; it is a
+    # real redeclaration → skipped + warned.
+    (tmp_path / "pixi.toml").write_text(
+        iunits.pixi_manifest_seed("downstream")
+        + "\n[feature.shipit-artifacts]  # owned by consumer\n"
+        + 'channels = ["https://consumer.example/ch"]\n'
+        + '[feature.shipit-artifacts.dependencies]\nlexd = "0.19.3"\n'
+    )
+    _units, plan = _reconcile_public(tmp_path, [_dep(package="lexd")])
+    conflict = next(
+        c
+        for c in plan.pixi_table_conflicts
+        if c.unit_key == "pixi.toml#shipit-artifacts"
+    )
+    assert conflict.tables == ("feature.shipit-artifacts",)
+    assert "pixi.toml#shipit-artifacts" not in {d.unit.key for d in plan.decisions}
+
+
 def test_toml_table_headers_return_verbatim_text_and_split_segments():
     # A dotted segment is quoted at emission (_toml_key). The parser returns the
     # VERBATIM header (for a faithful conflict report) plus the split segments
@@ -550,6 +572,20 @@ def test_toml_table_headers_return_verbatim_text_and_split_segments():
     )
     # Array-of-tables and non-header lines are ignored.
     assert irec._toml_table_headers("[[x]]\nk = 1\n") == ()
+
+
+def test_toml_table_headers_honor_a_trailing_comment():
+    # Round-4 (#1094): a header with a trailing comment is a valid TOML header —
+    # the scan strips the `# …` (before the `]` check) so it is still detected.
+    assert irec._toml_table_headers("[feature.x]  # owned by consumer\n") == (
+        ("feature.x", ("feature", "x")),
+    )
+    # A `#` INSIDE a quoted key is a literal, not a comment start.
+    assert irec._toml_table_headers('[feature."a#b"]  # c\n') == (
+        ('feature."a#b"', ("feature", "a#b")),
+    )
+    # A wholly-commented-out header line is NOT a declaration.
+    assert irec._toml_table_headers("# [feature.x]\n") == ()
 
 
 def test_s3_options_table_conflict_reports_the_quoted_header(tmp_path):
@@ -902,6 +938,18 @@ def test_verb_fails_loud_when_pixi_toml_is_unparseable(tmp_path):
 
     _write_config(tmp_path, '[artifact-deps.lexd]\nrepo = "lex-fmt/lex"\n')
     _write_pixi(tmp_path, "this is not valid toml = = =\n")
+    with pytest.raises(config.ConfigError, match=r"no consumer-owned version pin"):
+        verb._artifact_dep_units(tmp_path, is_private=lambda slug: False)
+
+
+def test_verb_fails_loud_when_pixi_toml_is_not_utf8(tmp_path):
+    # Round-4 / copilot (#1094): a non-UTF-8 pixi.toml is as unusable as an absent
+    # one — treated as empty (all pins missing → loud), never a raw decode error
+    # that slips past the fail-safe.
+    from shipit.verbs import install as verb
+
+    _write_config(tmp_path, '[artifact-deps.lexd]\nrepo = "lex-fmt/lex"\n')
+    (tmp_path / "pixi.toml").write_bytes(b"\xff\xfe not utf-8 \x80\n")
     with pytest.raises(config.ConfigError, match=r"no consumer-owned version pin"):
         verb._artifact_dep_units(tmp_path, is_private=lambda slug: False)
 

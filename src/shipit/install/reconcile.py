@@ -992,13 +992,20 @@ def _toml_table_headers(inner: str) -> tuple[tuple[str, tuple[str, ...]], ...]:
     ``".".join(segments)`` keeps the quoting: a bare ``s3-options.my.bucket`` is
     a DIFFERENT (nested) table in TOML and would misdirect the fix.
 
+    A TRAILING COMMENT is honored: ``[feature.x]  # owned by consumer`` is a valid
+    TOML header, so the scan strips a trailing ``# …`` (respecting a ``#`` inside a
+    quoted key, which is a literal, not a comment) before the ``]`` check — else an
+    explicitly-commented consumer header would be missed and
+    :func:`_table_redeclared` would misread the explicit table as re-openable and
+    clobber it (#1094 round-4).
+
     Only plain-table headers matter to the redeclaration guard: array-of-tables
     (``[[...]]``) declarations stack rather than clash, and the projection emits
     none anyway.
     """
     headers: list[tuple[str, tuple[str, ...]]] = []
     for line in inner.splitlines():
-        stripped = line.strip()
+        stripped = _strip_toml_comment(line).strip()
         if (
             not stripped.startswith("[")
             or stripped.startswith("[[")
@@ -1008,6 +1015,25 @@ def _toml_table_headers(inner: str) -> tuple[tuple[str, tuple[str, ...]], ...]:
         raw = stripped[1:-1].strip()
         headers.append((raw, _split_toml_key(raw)))
     return tuple(headers)
+
+
+def _strip_toml_comment(line: str) -> str:
+    """``line`` with any trailing TOML ``# …`` comment removed — quote-aware.
+
+    A ``#`` inside a quoted string (``[feature."a#b"]``) is a literal char, not a
+    comment start, so the scan tracks single/double quote state and truncates at
+    the FIRST unquoted ``#``. A line that is wholly a comment returns ``""``.
+    """
+    quote: str | None = None
+    for i, ch in enumerate(line):
+        if quote is not None:
+            if ch == quote:
+                quote = None
+        elif ch in "\"'":
+            quote = ch
+        elif ch == "#":
+            return line[:i]
+    return line
 
 
 def _table_declared(manifest: Mapping[str, object], path: tuple[str, ...]) -> bool:
