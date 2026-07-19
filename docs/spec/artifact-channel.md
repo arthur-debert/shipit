@@ -3,7 +3,7 @@
 ## Context
 
 Repos in the portfolio share build artifacts. `lex-fmt/lex` produces `lexd`,
-`lexd-lsp`, a wasm build, and (planned) a tree-sitter grammar; these power
+`lexd-lsp`, a wasm build, and a tree-sitter grammar; these power
 downstream nvim, vscode, and tree-sitter repos. The legacy release system
 carried bespoke code to fetch these cross-repo binary dependencies from
 releases. shipit has not replaced that: the pieces it does have solve adjacent
@@ -90,9 +90,12 @@ object-storage buckets, consumed by downstreams in artifact-pinned mode.
 - **Consumer declaration** — `[artifact-deps.<pkg>]` in `.shipit.toml`
   (`repo` + `version` + optional `feature`), projected by `shipit install` into
   a managed pixi block. The key names the artifact and its conda package; tool
-  artifacts (`lexd`, `lexd-lsp`) install a binary on PATH, data artifacts (wasm,
-  grammar) install their files into the env.
-  ([ADR-0064](../adr/0064-artifact-channel-conda-for-cross-repo-consumption.md))
+  artifacts (`lexd`, `lexd-lsp`) install a per-platform binary on PATH, data
+  artifacts (wasm, tree-sitter grammar) install their files into the env as
+  **`noarch`** channel packages — one platform-independent `.conda` in
+  `noarch/`, published by the same `conda` endpoint in a noarch mode.
+  ([ADR-0064](../adr/0064-artifact-channel-conda-for-cross-repo-consumption.md),
+  [ADR-0076](../adr/0076-noarch-data-artifacts-ride-the-channel.md))
 - **`provision lexd` retires** — `lexd` becomes a public-channel package; the
   gate pin moves to a managed, non-consumer-editable lint block.
   ([ADR-0066](../adr/0066-provision-lexd-retires-onto-the-channel.md))
@@ -134,6 +137,9 @@ The load-bearing decisions and their trade-offs are recorded as ADRs:
 - [ADR-0071](../adr/0071-the-readiness-gate-is-the-served-subdirs-that-are-not-paused.md)
   — the readiness gate is the served subdirs that are not owner-paused; amends
   ADR-0066.
+- [ADR-0076](../adr/0076-noarch-data-artifacts-ride-the-channel.md) — cross-repo
+  data artifacts (wasm, tree-sitter grammar) ride the channel as `noarch` conda
+  packages via a noarch mode on the `conda` endpoint; amends ADR-0064.
 
 ### Seeding the channel
 
@@ -259,8 +265,12 @@ prefix-scoped IAM (leak-prone under UBLA), a capability URL (leaks via
 
 ## Out Of Scope
 
-- The tree-sitter grammar as a shipped artifact (not yet released; lands later
-  as `noarch`).
+Data artifacts (the wasm build, the tree-sitter grammar) are now **in** scope:
+they ride the channel as `noarch` conda packages via the same `conda` endpoint
+([ADR-0076](../adr/0076-noarch-data-artifacts-ride-the-channel.md)).
+
+Still out of scope:
+
 - Marketplace endpoints; Intel-mac / musl coverage; non-Release deploys.
 
 ## Further Notes
