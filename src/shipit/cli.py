@@ -19,6 +19,7 @@ from .logsetup import configure_logging, reset_logging
 from .verbs import build as build_verb
 from .verbs import e2e as e2e_verb
 from .verbs import gh_setup, install, lint, logs, opportunities, verify_apps
+from .verbs import stage as stage_verb
 from .verbs import test as test_verb
 from .verbs._context import resolve_root_context
 from .verbs._help import register_long_help
@@ -186,6 +187,13 @@ def verify_apps_cmd(repo: str | None, agents: tuple[str, ...]) -> None:
 # command lives with its renderers in verbs/install.py; the domain (plan/apply)
 # is the shipit.install package.
 root.add_command(install.cmd)
+
+
+# The app-consumer stage-from-prefix step (conda-direct #1079): copies resolved
+# conda files from the pixi env prefix into the consumer's bundle (resources/),
+# the manifest-driven replacement for the legacy fetch-deps. Command + renderer
+# live with the domain in verbs/stage.py; the copy logic is shipit.staging.
+root.add_command(stage_verb.cmd)
 
 
 @root.command(name="lint")
@@ -383,6 +391,7 @@ _HELP_RESOURCES = {
     ("gh-setup",): ("shipit.verbs", "gh_setup_help.txt"),
     ("verify-apps",): ("shipit.verbs", "verify_apps_help.txt"),
     ("install",): ("shipit.verbs", "install_help.txt"),
+    ("stage",): ("shipit.verbs", "stage_help.txt"),
     ("lint",): ("shipit.verbs", "lint_help.txt"),
     ("test",): ("shipit.verbs", "test_help.txt"),
     ("build",): ("shipit.verbs", "build_help.txt"),

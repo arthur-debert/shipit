@@ -267,6 +267,23 @@ def _is_windows_target(target: str) -> bool:
     return "windows" in target
 
 
+def env_prefix(root: Path, feature: str | None) -> Path:
+    """The on-disk pixi env PREFIX a projected artifact-dep materializes into —
+    ``<root>/.pixi/envs/<env>`` for the env :func:`env_name` maps ``feature`` to.
+
+    This is the ``$CONDA_PREFIX``-equivalent for a checkout's resolved env: pixi
+    extracts every resolved conda package under it, so a tool artifact lands at
+    ``<prefix>/bin/<package>`` (:func:`materialized_bin_path`) and a data artifact
+    under ``<prefix>/share/<package>/…`` (ADR-0076). Both the vsix bundle staging
+    (:func:`materialized_bin_path`) and the generic stage-from-prefix step
+    (:mod:`shipit.staging`, #1079) resolve the prefix through THIS one helper, so
+    a named feature never maps to a different env in one caller than in another —
+    the single source of truth :func:`env_name` promises. Pure path arithmetic;
+    the caller probes existence.
+    """
+    return root.joinpath(*_PIXI_ENVS_DIR, env_name(feature))
+
+
 def materialized_bin_path(root: Path, dep: ArtifactDep, *, target: str) -> Path:
     """On-disk path of a TOOL artifact-dep's binary in the projected pixi env,
     for the ``target`` platform being composed for.
@@ -280,8 +297,8 @@ def materialized_bin_path(root: Path, dep: ArtifactDep, *, target: str) -> Path:
     ``Scripts``/``.exe`` install), which is why the path is TARGET-aware: a
     ``win32-x64`` vsix leg resolves ``Scripts/<package>.exe``, not the unix
     ``bin/<package>`` that would never exist on that runner. The prefix is the
-    pixi env the projection wired the pin into (:func:`env_name` off
-    ``dep.feature``), under ``<root>/.pixi/envs/<env>/``.
+    pixi env the projection wired the pin into (:func:`env_prefix` off
+    ``dep.feature``, ``<root>/.pixi/envs/<env>/``).
 
     The vsix bundle staging (:func:`shipit.release.bundle._stage_vsix_natives`,
     release#974) reads this to copy the per-platform binary into the extension
@@ -292,7 +309,7 @@ def materialized_bin_path(root: Path, dep: ArtifactDep, *, target: str) -> Path:
     filesystem probe; the caller checks existence and reports the "run ``shipit
     install``" remediation.
     """
-    prefix = root.joinpath(*_PIXI_ENVS_DIR, env_name(dep.feature))
+    prefix = env_prefix(root, dep.feature)
     if _is_windows_target(target):
         return prefix / "Scripts" / f"{dep.package}.exe"
     return prefix / "bin" / dep.package

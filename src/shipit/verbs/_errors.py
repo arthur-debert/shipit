@@ -42,6 +42,7 @@ from ..review.diff import ReviewError
 from ..review.groundtruth import FixtureError
 from ..session.resume import ResumeError
 from ..spawn.subagent import SpawnError
+from ..staging import StagingError
 from ..tree.layout import LayoutError
 from ..tree.removal import RemovalError
 from ._context import NoAmbientRepoError
@@ -66,7 +67,9 @@ from ._context import NoAmbientRepoError
 #: stages' refusals (a no-op bump, a manifest a projection cannot rewrite,
 #: a prepare outside a checkout / on a detached HEAD — TOL02-WS01; a bundle
 #: composition over missing build outputs, an unresolvable assert-bundle
-#: expected name — TOL02-WS03). Extended deliberately, one entry per new
+#: expected name — TOL02-WS03), and the stage-from-prefix step's refusals (a
+#: source not materialized in the env prefix, a destination that escapes the
+#: checkout — conda-direct #1079). Extended deliberately, one entry per new
 #: domain refusal, as verbs adopt the shell.
 KNOWN_ERRORS: tuple[type[Exception], ...] = (
     execrun.ExecError,
@@ -77,6 +80,7 @@ KNOWN_ERRORS: tuple[type[Exception], ...] = (
     NoAmbientRepoError,
     NotReady,
     SpawnError,
+    StagingError,
     InstallError,
     OpportunityError,
     LayoutError,

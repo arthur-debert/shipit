@@ -4,6 +4,8 @@
 
 ## Unreleased
 
+## 1.4.3 - 2026-07-19
+
 - changelog: new `shipit changelog check-fragment` — a required PR-time gate
   that fails a PR merging to `main` when `CHANGELOG/` holds no unreleased
   fragment (#1073). It is a fragment-PRESENCE check: it asks the cut's own "are
@@ -15,6 +17,76 @@
   trigger. Wired as a required, PR-only `changelog` lane (`local = false`), so it
   runs in the CI checks matrix but never on a laptop commit/push; it reads the
   working tree, so it needs no workflow YAML change.
+- docs: record the decision to collapse the cross-repo artifact system to
+  **conda-direct** (see ADR-0077, docs/adr/0077-collapse-to-conda-direct.md, plus
+  the docs/spec/conda-direct.md spec); supersedes the accreted parts of
+  ADR-0064/0067/0070/0071 (part of #1089).
+- release/conda: the conda endpoint now packages a producer's build output
+  **directly** into a `.conda` (conda-direct, ADR-0077, #1092) — the served
+  subdirs, target triples and staged archive names are DERIVED from the
+  artifact's own `[artifacts.<name>].platforms` declaration (the causal single
+  source), never reverse-engineered from a staged filename. The gh-release→conda
+  repackage coupling is gone: the build output is staged by the bundle stage and
+  conda has NO gh-release dependency, so a conda-only publish plan is valid (the
+  release-before-derived ordering constraint that required an unskipped
+  gh-release for conda is removed; brew/notify-downstreams keep theirs). Both the
+  per-platform and the noarch (`noarch: generic`) paths are covered, and the
+  load-bearing `binary_relocation: false` no-relink recipe insight is preserved.
+- test/conda: the conda **per-platform** producer path (`_publish_conda`) now has
+  a REAL `rattler-build build` integration test — the seam that hid the four
+  original conda-producer bugs (#1049 ×3 + #1052) was faked
+  (`_CondaBuildRecorder` wrote an empty `.conda`), so shipit's argv/recipe were
+  asserted but rattler-build never ran. `test_conda_per_platform_real_repackage_*`
+  drives the real producer through an ACTUAL cross-target
+  (`--target-platform` non-native) build, faking only the S3 publish, and asserts
+  the `.conda` lands with the prebuilt binary at `bin/<binary>` (the
+  archive-top-dir-strip class, #1049) and the no-relink guard on the recipe (the
+  cross-platform relink class, #1052). Reverting fix #1049 makes the real build
+  fail with `cp: <artifact>-<triple>/<binary>: No such file or directory`
+  (#1053).
+- test/conda: the ADR-0064 `file://` round trip (build → local conda channel →
+  scratch `pixi` resolve → read the env-prefix staging path) is now automated —
+  `test_conda_file_channel_roundtrip_*` plus a reusable, runnable harness
+  (`tools/conda_channel_roundtrip.py`). It resolves via a PLAIN
+  `[workspace]` channel+dep `pixi.toml` (not the `[artifact-deps]` projection,
+  which hard-codes the GCS host), the loop ARF02 Steps 1/2 (#1078/#1079) run
+  against. Both tests `skipif` cleanly when `rattler-build`/`pixi` are absent, so
+  a bare host skips rather than fails.
+- docs(repo-new): plan two new `shipit repo new` Creation profiles — a **Node**
+  profile (TypeScript CLI + local library, one black-box `Hello, world!` test,
+  `toolchain="npm"`, riding the existing `npm` dispatch leg and the managed
+  `nodejs`/`pnpm` provisioning; chooses **pnpm** as its package manager with an
+  exact `packageManager` pin (`pnpm@X.Y.Z` — the concrete version the managed
+  pixi environment resolves, not a range), a tracked `pnpm-lock.yaml`, and a
+  frozen `pnpm install --frozen-lockfile`) and a distinct **svelte-app** profile
+  (SPA-only Vite + Svelte + Tailwind + TypeScript, one smoke test; a single-root
+  Vite app whose Artifact declares no package and builds via a bare
+  `pnpm run build`). This release accepts exactly **one effective profile** per
+  `repo new` (one of `rust`, `node`, `svelte-app`); multi-profile composition
+  stays future work. Amends `docs/spec/repo-new.md` (Rust → Rust + Node +
+  svelte-app; one-effective-profile constraint restored and extended; Cargo naming
+  scoped to the Rust profile; retires the Rust-only Non-Goals; carves svelte-app
+  out of the minimal lib+CLI limit) and adds ADR-0077 (Node profile) and ADR-0078
+  (frontend scaffolds are distinct profiles, not multi-stack composition or a
+  base×flavour matrix). Planning only: the build/install toolchain-seam
+  generalization the profiles depend on — registry polymorphism, profile-owned
+  naming, pre-check dependency materialization, reconciling the `npm`-named
+  dispatch leg to pnpm (including pnpm-aware `--filter` Artifact narrowing, not
+  `--workspace`), and making `ArtifactDecl.package` optional — is separate work
+  tracked in #1083.
+- install: `shipit install` now makes the fundamental skills loadable by the
+  agent runtimes (#1088). Skill content is a single real managed dir at
+  `.agents/skills/<name>` (where agy/codex read it), and `.claude/skills` is a
+  whole-directory symlink to it (`../.agents/skills`) that install ensures as a
+  structural step — so Claude Code reads the identical set without a second
+  physical copy. Previously install shipped the source-only `.shipit-skills/`
+  store, which no runtime loads. The switch from an existing real `.claude/skills`
+  dir is path-scoped and pristine-checked: a dir of shipit-pristine content is
+  removed and symlinked; any consumer-modified file blocks and is left untouched
+  (fail-safe), never via content-hash-global retirement (which would delete
+  shipit's own byte-identical source). Whole-file managed writes also fail closed
+  on a symlinked destination component in every mode, so an install never writes
+  through a discovery-dir symlink onto a target outside the repo. See ADR-0077.
 
 ## 1.4.2 - 2026-07-19
 
