@@ -183,6 +183,127 @@ def test_symlinked_parent_escape_is_refused_and_touches_nothing(tmp_path):
 
 
 # --------------------------------------------------------------------------
+# Data-loss defenses — a dest that would wipe the checkout or repo-critical dirs
+# --------------------------------------------------------------------------
+
+
+def test_dest_of_dot_refuses_and_never_rmtrees_the_checkout(tmp_path):
+    # `dest = "."` makes dst == root; the pre-fix code would `shutil.rmtree(root)`
+    # and delete .git + all work. The guard must refuse LOUDLY, touching nothing.
+    prefix = _prefix(tmp_path)
+    _plant(prefix / "bin" / "lexd-lsp", "x", mode=0o755)
+    sentinel = tmp_path / "PRECIOUS.txt"
+    sentinel.write_text("do not delete me", encoding="utf-8")
+
+    with pytest.raises(staging.StagingError, match="checkout root"):
+        staging.stage(tmp_path, [config.StageEntry("lexd-lsp", "bin/lexd-lsp", ".")])
+    assert sentinel.read_text(encoding="utf-8") == "do not delete me"
+
+
+@pytest.mark.parametrize("protected", [".git", ".pixi"])
+def test_dest_into_a_repo_critical_dir_refuses_and_touches_nothing(tmp_path, protected):
+    prefix = _prefix(tmp_path)
+    _plant(prefix / "bin" / "lexd-lsp", "x", mode=0o755)
+    keep = tmp_path / protected / "KEEP"
+    keep.parent.mkdir(parents=True, exist_ok=True)
+    keep.write_text("keep", encoding="utf-8")
+
+    with pytest.raises(staging.StagingError, match="repo-critical"):
+        staging.stage(
+            tmp_path,
+            [config.StageEntry("lexd-lsp", "bin/lexd-lsp", f"{protected}/lexd-lsp")],
+        )
+    assert keep.read_text(encoding="utf-8") == "keep"
+
+
+def test_symlinked_dest_onto_root_is_refused(tmp_path):
+    # A committed `resources` symlink pointing AT the checkout root resolves dst
+    # onto root; the resolved-path root guard must catch it, not just the lexical
+    # parse guard (which sees a clean relative dest).
+    prefix = _prefix(tmp_path)
+    _plant(prefix / "bin" / "lexd-lsp", "x", mode=0o755)
+    (tmp_path / "resources").symlink_to(tmp_path, target_is_directory=True)
+
+    with pytest.raises(staging.StagingError, match="checkout root"):
+        staging.stage(
+            tmp_path,
+            [config.StageEntry("lexd-lsp", "bin/lexd-lsp", "resources")],
+        )
+
+
+def test_file_source_refuses_to_overwrite_an_existing_directory_dest(tmp_path):
+    # A file source mapped onto an existing directory dest would `rmtree` the whole
+    # directory to drop one file — refuse loudly rather than wipe it.
+    prefix = _prefix(tmp_path)
+    _plant(prefix / "bin" / "tool", "x", mode=0o755)
+    existing = tmp_path / "resources" / "keep-me"
+    existing.mkdir(parents=True)
+    (existing / "data.txt").write_text("valuable", encoding="utf-8")
+
+    with pytest.raises(staging.StagingError, match="wipe a directory"):
+        staging.stage(
+            tmp_path,
+            [config.StageEntry("tool", "bin/tool", "resources/keep-me")],
+        )
+    assert (existing / "data.txt").read_text(encoding="utf-8") == "valuable"
+
+
+# --------------------------------------------------------------------------
+# Source symlink escape — a package-planted link that leaves the prefix
+# --------------------------------------------------------------------------
+
+
+def test_top_level_source_symlink_escaping_the_prefix_is_refused(tmp_path):
+    prefix = _prefix(tmp_path)
+    secret = tmp_path.parent / "host-secret.txt"
+    secret.write_text("SECRET", encoding="utf-8")
+    # A conda package plants bin/evil -> /outside/host-secret.txt inside the env.
+    (prefix / "bin").mkdir(parents=True, exist_ok=True)
+    (prefix / "bin" / "evil").symlink_to(secret)
+
+    with pytest.raises(staging.StagingError, match="outside the env prefix"):
+        staging.stage(
+            tmp_path, [config.StageEntry("evil", "bin/evil", "resources/evil")]
+        )
+    assert not (tmp_path / "resources" / "evil").exists()
+
+
+def test_nested_directory_source_symlink_escaping_the_prefix_is_refused(tmp_path):
+    prefix = _prefix(tmp_path)
+    outside = tmp_path.parent / "outside-tree"
+    outside.mkdir(exist_ok=True)
+    (outside / "loot.txt").write_text("LOOT", encoding="utf-8")
+    tree = prefix / "share" / "pkg" / "data"
+    _plant(tree / "real.txt", "real")
+    # A symlink INSIDE the staged directory tree points outside the prefix;
+    # copytree would dereference it and copy host files into the bundle.
+    (tree / "escape").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(staging.StagingError, match="outside the env prefix"):
+        staging.stage(
+            tmp_path,
+            [config.StageEntry("pkg", "share/pkg/data", "resources/data")],
+        )
+    assert not (tmp_path / "resources" / "data").exists()
+
+
+# --------------------------------------------------------------------------
+# --feature validation — a path-shaped feature must not escape .pixi/envs
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("bad", ["../evil", "a/b", "..", "x/../..", "foo/bar"])
+def test_path_shaped_feature_is_refused(tmp_path, bad):
+    _prefix(tmp_path)
+    with pytest.raises(staging.StagingError, match="valid feature name"):
+        staging.stage(
+            tmp_path,
+            [config.StageEntry("lexd", "bin/lexd", "resources/lexd")],
+            feature=bad,
+        )
+
+
+# --------------------------------------------------------------------------
 # Feature (named-env) prefix resolution
 # --------------------------------------------------------------------------
 

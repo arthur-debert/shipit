@@ -65,6 +65,20 @@ def test_run_malformed_config_maps_to_exit_one(tmp_path, capsys):
     assert "error:" in capsys.readouterr().err
 
 
+def test_run_path_shaped_feature_maps_to_exit_one(tmp_path, capsys):
+    # A traversal-shaped `--feature` must not flow into the env prefix path; the
+    # domain refuses it and the cli_errors shell maps it to `error: …` + exit 1.
+    _plant_prefix_tool(tmp_path)
+    (tmp_path / ".shipit.toml").write_text(
+        '[stage.lexd-lsp]\n"bin/lexd-lsp" = "resources/lexd-lsp"\n', encoding="utf-8"
+    )
+
+    rc = stage_verb.run(str(tmp_path), feature="../../etc")
+
+    assert rc == 1
+    assert "error:" in capsys.readouterr().err
+
+
 # --------------------------------------------------------------------------
 # The pure renderer
 # --------------------------------------------------------------------------

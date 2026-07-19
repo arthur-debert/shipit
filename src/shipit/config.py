@@ -1339,9 +1339,9 @@ def load_artifact_deps(cfg: dict) -> tuple[ArtifactDep, ...]:
 # resolves a conda dep and extracts it into the env prefix, an app that SHIPS the
 # embedded files needs them copied into its bundle (`resources/`). This map is the
 # manifest-driven mirror of the legacy `fetch-deps`/`deps.json` (ADR-0076), with
-# only the SOURCE axis swapped: a gh-release download becomes a read of the already
-# -resolved env prefix (`shipit.staging` does the copy). It is DISTINCT from the
-# vsix `bundle.stage` map (config §BundleSpec): that is release-time, transient
+# only the SOURCE axis swapped: a gh-release download becomes a read of the
+# already-resolved env prefix (`shipit.staging` does the copy). It is DISTINCT from
+# the vsix `bundle.stage` map (config §BundleSpec): that is release-time, transient
 # (unstaged after `vsce package`), single-binary, and keyed on `[artifact-deps]`;
 # THIS is a durable, standalone, files-and-dirs copy keyed on the source path.
 #
@@ -1359,6 +1359,16 @@ def load_artifact_deps(cfg: dict) -> tuple[ArtifactDep, ...]:
 # path (relative to the checkout root). Both are checkout/prefix-relative and refused
 # if they escape (:func:`_reject_path_escape`), the same guard the vsix stage dest
 # takes.
+
+
+#: Checkout-relative top-level directories a `[stage]` dest must never target: git
+#: metadata and the pixi env tree (the resolved SOURCE env staging copies FROM),
+#: plus the other common VCS metadata dirs. Staging onto any of them corrupts the
+#: repository or the very env being read. Refused LEXICALLY at parse
+#: (:func:`_parse_stage_table`) and again on the RESOLVED path at copy-time
+#: (:func:`shipit.staging._reject_escape`), so a symlinked parent cannot smuggle a
+#: dest into one of them.
+_PROTECTED_DEST_ROOTS = frozenset({".git", ".pixi", ".hg", ".svn"})
 
 
 @dataclass(frozen=True)
@@ -1395,10 +1405,14 @@ def _parse_stage_table(package: str, spec: object) -> tuple[StageEntry, ...]:
     identifier (:data:`_CONDA_PKG_KEY_RE`, the same shape ``[artifact-deps.<pkg>]``
     and the vsix ``stage`` map take), and each ``source = dest`` pair must map a
     non-empty prefix-relative source path to a non-empty checkout-relative dest
-    path — both refused if they escape (:func:`_reject_path_escape`). A repeated
-    source key cannot reach here: ``tomllib`` rejects a duplicate table key before
-    the parse runs. An empty table is refused — a ``[stage.<pkg>]`` header that
-    stages nothing is a mistake, not an intent.
+    path — both refused if they escape (:func:`_reject_path_escape`). A dest that
+    normalizes to ``.`` (the repo root, whose stage would wipe the whole checkout)
+    or that targets a repo-critical dir (:data:`_PROTECTED_DEST_ROOTS`) is refused
+    loudly here; the runtime path re-checks the RESOLVED dest so a symlinked parent
+    cannot slip past this lexical guard. A repeated source key cannot reach here:
+    ``tomllib`` rejects a duplicate table key before the parse runs. An empty table
+    is refused — a ``[stage.<pkg>]`` header that stages nothing is a mistake, not an
+    intent.
     """
     where = f"[stage].{package}"
     if not _CONDA_PKG_KEY_RE.match(package):
@@ -1425,11 +1439,25 @@ def _parse_stage_table(package: str, spec: object) -> tuple[StageEntry, ...]:
                 f'path, e.g. "resources/lexd-lsp"; got {dest!r}'
             )
         _reject_path_escape(f"{where}.{src!r} (dest)", dest)
+        dest_norm = str(PurePosixPath(dest))
+        if dest_norm == ".":
+            raise ConfigError(
+                f"{where}.{src!r}: destination must be a subdirectory of the "
+                f"checkout, not the repo root itself ('.') — staging onto the root "
+                f'would wipe the whole checkout; e.g. "resources/lexd-lsp"'
+            )
+        top = PurePosixPath(dest_norm).parts[0]
+        if top in _PROTECTED_DEST_ROOTS:
+            raise ConfigError(
+                f"{where}.{src!r}: destination must not target the repo-critical "
+                f"{top!r} directory (git metadata or the resolved env being copied "
+                f'from) — staging there would corrupt it; e.g. "resources/lexd-lsp"'
+            )
         entries.append(
             StageEntry(
                 package=package,
                 source=str(PurePosixPath(src)),
-                dest=str(PurePosixPath(dest)),
+                dest=dest_norm,
             )
         )
     return tuple(entries)
@@ -1442,7 +1470,10 @@ def load_stage(cfg: dict) -> tuple[StageEntry, ...]:
     ``()`` when the table is absent — a repo that stages nothing (a tool-only
     consumer, or shipit itself) has no copy list. Malformed shapes raise
     :class:`ConfigError` naming the offending entry (construction is validation,
-    ADR-0030). The per-package section key doubles as the conda package name.
+    ADR-0030). The per-package section key doubles as the conda package name. Two
+    packages declaring the SAME dest is refused loudly: staging them in sequence
+    would silently clobber the earlier copy, dropping a file from the shipped
+    bundle — a consumer mistake, not an intent.
     """
     section = cfg.get("stage", {})
     if not isinstance(section, dict):
@@ -1450,8 +1481,19 @@ def load_stage(cfg: dict) -> tuple[StageEntry, ...]:
             "[stage] must be a table of `<pkg>` stage-from-prefix declarations"
         )
     entries: list[StageEntry] = []
+    seen_dest: dict[str, str] = {}
     for package, table in section.items():
-        entries.extend(_parse_stage_table(str(package), table))
+        for entry in _parse_stage_table(str(package), table):
+            if entry.dest in seen_dest:
+                raise ConfigError(
+                    f"[stage] duplicate destination {entry.dest!r}: declared by both "
+                    f"[stage.{seen_dest[entry.dest]}] and [stage.{entry.package}] — "
+                    f"two packages staging to the same dest would silently clobber "
+                    f"each other, dropping a file from the bundle; give each a "
+                    f"distinct destination"
+                )
+            seen_dest[entry.dest] = entry.package
+            entries.append(entry)
     return tuple(entries)
 
 

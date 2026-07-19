@@ -120,6 +120,31 @@ def test_absolute_source_is_refused():
         _load('[stage.lexd-lsp]\n"/etc/passwd" = "resources/x"\n')
 
 
+def test_dot_destination_is_refused_at_parse():
+    # `dest = "."` normalizes to the repo root; staging it would wipe the whole
+    # checkout, so it is refused LOUDLY at the config boundary.
+    with pytest.raises(config.ConfigError, match="repo root itself"):
+        _load('[stage.lexd-lsp]\n"bin/lexd-lsp" = "."\n')
+
+
+@pytest.mark.parametrize("protected", [".git", ".pixi", ".hg", ".svn"])
+def test_repo_critical_destination_is_refused_at_parse(protected):
+    with pytest.raises(config.ConfigError, match="repo-critical"):
+        _load(f'[stage.lexd-lsp]\n"bin/lexd-lsp" = "{protected}/x"\n')
+
+
+def test_duplicate_destination_across_packages_is_refused():
+    # Two packages staging to the same dest would silently clobber each other,
+    # dropping a file from the bundle — a loud refusal at load.
+    with pytest.raises(config.ConfigError, match="duplicate destination"):
+        _load(
+            "[stage.pkg-a]\n"
+            '"bin/a" = "resources/tool"\n'
+            "[stage.pkg-b]\n"
+            '"bin/b" = "resources/tool"\n'
+        )
+
+
 def test_stage_is_a_known_top_level_table():
     # `[stage]` must be in the closed table registry so it is not rejected as an
     # unknown top-level table (the whole reason a new section needs registering).
