@@ -42,32 +42,35 @@ holds, including agents-only skills such as `pixi`. Per-surface targeting is
 given up **by construction** — this is the accepted trade, not a deferral. There
 is no slice 2; frontmatter surfaces / `pixi` vendoring are cancelled.
 
-### Migration is path-scoped and pristine-checked — never content-hash retirement
+### Adoption is create-only-when-absent — shipit never removes `.claude/skills`
 
-Existing repos (and shipit-self, after the copies-both-dirs round) have a **real**
-`.claude/skills/` dir of content today. Switching to the symlink requires
-actively **removing** that real dir first — and it **must not** use
-content-hash-global retirement. `.claude/skills/<x>/SKILL.md` is byte-identical
-to `.shipit-skills/*` **and** `.agents/skills/*`, so a content-hash-global delete
-would also nuke the source tree and the agents copy. That is the landmine.
+`install` creates the symlink through a create-only-when-absent structural step
+(`reconcile.plan_claude_skills_link`), and **shipit never removes an existing
+`.claude/skills`**:
 
-Instead `install` runs a path-scoped, pristine-checked step
-(`reconcile.plan_claude_skills_link`):
+- `.claude/skills` **absent** → create the whole-dir symlink (`LINK_CREATE`).
+- `.claude/skills` already the **exact managed symlink** → NOOP (`LINK_NOOP`).
+- `.claude/skills` **anything else** — a real dir (the copies-round / pre-symlink
+  layout), a real file, or a symlink pointing elsewhere → **BLOCK** in the
+  fail-closed conflict idiom (`LINK_BLOCKED`), with guidance: *"`.claude/skills`
+  already exists — remove it (relocate any of your own skills into
+  `.agents/skills` first) and re-run to adopt the managed symlink."* Install
+  deletes nothing and creates no link until the operator resolves it.
 
-- `.claude/skills` **absent** → create the symlink (`LINK_CREATE`).
-- `.claude/skills` a **real dir whose every file is shipit-pristine** → remove
-  that dir and create the symlink (`LINK_MIGRATE`). "Pristine" is path-scoped:
-  the file's content matches the current desired `.agents/skills/<rel>` content
-  or a historically-shipped skill pristine (retired-files) — checked only for
-  files **under `.claude/skills`**, and the removal touches only `.claude/skills`.
-- **any consumer-modified file**, or a foreign symlink/non-dir at the path →
-  **flag and skip** (`LINK_BLOCKED`): fail-safe, pull-not-push. Shipit warns and
-  leaves the consumer's content intact; it never clobbers an intentional layout.
+An earlier revision auto-removed a "shipit-pristine" real dir. That destructive
+migration was **cut** (owner decision): a content-hash pristine check keyed on
+`.agents/skills/*` + retired hashes is a content-hash-**global** notion (the
+landmine — `.claude/skills/<x>/SKILL.md` is byte-identical to `.shipit-skills/*`
+and `.agents/skills/*`), and the gather→apply window made re-verifying the
+removal fragile. Refusing to remove anything dissolves that whole class: no
+pristine check, no window re-hash, no `rmtree`, no `retired-files.toml` entry for
+`.claude/skills/*` ever. Adopters (and shipit-self) do a **one-time manual
+`rm -rf .claude/skills`** and re-run; **shipit-self was hand-migrated in this
+PR** (its `.claude/skills` is committed as the symlink).
 
-`apply` re-verifies over the gather→apply window before the destructive remove:
-a file that changed or appeared aborts the migration. The removed pristine files
-and the new symlink both ride the commit scope, so a committing mode publishes
-the switch atomically.
+The gather→apply window is still handled without destruction: a CREATE planned
+against an absent path re-checks at apply and stands down if the path is now
+occupied — a NOOP if it is already the managed symlink, otherwise left untouched.
 
 ### The symlink-write containment guard stays (defense-in-depth)
 
@@ -103,10 +106,13 @@ write-through.
   unmanaged file and is now Claude-visible through the link. The
   reconcile-to-noop drift test asserts this exact layout.
 - **No `retired-files.toml` entry for `.claude/skills/*` or `.shipit-skills/*`.**
-  The `.claude/skills` migration is path-scoped (above); `.shipit-skills/*` is the
-  pristine source, so a content-hash-global retirement would delete it. Orphaned
-  `.shipit-skills/*` copies in already-installed consumers are accepted residue —
-  `[managed]` drops the stale keys on the next install.
+  shipit never removes `.claude/skills` (create-only-when-absent, above);
+  `.shipit-skills/*` is the pristine source, so a content-hash-global retirement
+  would delete it. Orphaned `.shipit-skills/*` copies in already-installed
+  consumers are accepted residue — `[managed]` drops the stale keys on the next
+  install.
 - **Managed markdownlint** lints the real `.agents/skills/*` (non-exempt stance
-  kept). `.claude/skills` is a symlink to that same tree; it is exempted from the
-  lint walk only if it is found to double-lint the identical files.
+  kept) and needs NO `.claude/skills` ignore entry: `shipit lint` discovers files
+  via `git ls-files`, which yields the whole-dir symlink as one non-`.md` entry,
+  so the files under it are never enumerated through the link — no double-linting
+  (verified).

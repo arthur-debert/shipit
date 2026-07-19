@@ -1203,10 +1203,11 @@ def format_symlinked_dest(sd: SymlinkedDest) -> str:
 #: `.claude/skills` -> `.agents/skills` symlink actions. Skill CONTENT is a real
 #: managed dir at `.agents/skills` only; Claude reads the identical set through
 #: this whole-directory symlink, so install never duplicates the files.
+#: Create-only-when-absent (ADR-0077, owner decision): shipit NEVER removes an
+#: existing `.claude/skills` — anything already there BLOCKS with guidance.
 LINK_NOOP = "link-noop"  # the correct relative symlink is already present
 LINK_CREATE = "link-create"  # absent → create the symlink
-LINK_MIGRATE = "link-migrate"  # a real dir of shipit-pristine content → remove + link
-LINK_BLOCKED = "link-blocked"  # a real dir with consumer edits, or a foreign link/file
+LINK_BLOCKED = "link-blocked"  # anything else already at the path — never removed
 
 
 @dataclass(frozen=True)
@@ -1214,106 +1215,64 @@ class ClaudeSkillsLink:
     """The structural ``.claude/skills`` -> ``.agents/skills`` symlink decision.
 
     Not a managed content unit — a whole-directory pointer install ensures, like
-    lefthook activation. ``stale_files`` (MIGRATE only) names the shipit-pristine
-    real files removed to make way for the link, so a committing mode publishes
-    their deletion. ``reason`` (BLOCKED only) is the human-readable why.
+    lefthook activation, and ONLY when the path is absent. ``reason`` (BLOCKED
+    only) is the human-readable why: shipit never removes an existing
+    ``.claude/skills``, so a real dir / real file / wrong-target symlink is left
+    untouched and flagged for the operator to resolve.
     """
 
     action: str
     reason: str = ""
-    stale_files: tuple[str, ...] = ()
 
     @property
     def is_work(self) -> bool:
-        """CREATE/MIGRATE change the tree; NOOP/BLOCKED do not (BLOCKED warns)."""
-        return self.action in (LINK_CREATE, LINK_MIGRATE)
+        """CREATE changes the tree; NOOP/BLOCKED do not (BLOCKED warns)."""
+        return self.action == LINK_CREATE
 
 
-def plan_claude_skills_link(
-    root: Path, units: Sequence[Unit], retired: Sequence[RetiredFile]
-) -> ClaudeSkillsLink:
+def _claude_skills_exists_reason(link: Path) -> str:
+    """The BLOCKED guidance for an existing ``.claude/skills`` (any shape)."""
+    if link.is_symlink():
+        what = f"a symlink to {str(link.readlink())!r}, not the managed {CLAUDE_SKILLS_LINK_TARGET!r}"
+    elif link.is_dir():
+        what = "a real directory"
+    else:
+        what = "a regular file"
+    return (
+        f"{CLAUDE_SKILLS_DIR} already exists ({what}) — shipit will not remove it. "
+        f"Remove it (relocate any of your own skills into {AGENTS_SKILLS_DIR} first) "
+        f"and re-run `shipit install` to adopt the managed symlink"
+    )
+
+
+def plan_claude_skills_link(root: Path) -> ClaudeSkillsLink:
     """Decide the ``.claude/skills`` symlink — read at the gather boundary.
 
-    Path-scoped and pristine-checked (ADR-0077): a real ``.claude/skills`` dir is
-    migrated to the symlink ONLY when every file under it is shipit-pristine, and
-    the removal touches ``.claude/skills`` alone — NEVER content-hash-global
-    retirement, which would also delete the byte-identical ``.agents/skills`` copy
-    and the ``.shipit-skills`` source. A consumer-modified file, or a foreign
-    symlink/file at the path, blocks (fail-safe, pull-not-push): shipit warns and
-    leaves it, never clobbering the consumer's layout.
+    Create-only-when-absent (ADR-0077, owner decision): shipit creates the
+    whole-dir symlink ONLY when the path is absent. An existing ``.claude/skills``
+    of ANY shape — a real dir (the copies-round / pre-symlink layout), a real
+    file, or a symlink pointing elsewhere — is NEVER removed: it BLOCKS with
+    guidance to remove it manually. Only the exact managed symlink is a NOOP.
 
-    A file is shipit-pristine when its content matches the CURRENT desired
-    ``.agents/skills/<rel>`` content or any historically-shipped skill pristine
-    (retired-files) — so a consumer who received the round-0 copies, or never
-    edited the mirror, migrates cleanly.
+    shipit never deletes a consumer's ``.claude/skills``; there is no
+    content-hash retirement of ``.claude/skills/*`` (which would also delete the
+    byte-identical ``.agents/skills`` copy and the ``.shipit-skills`` source).
     """
     link = root / CLAUDE_SKILLS_DIR
     if link.is_symlink():
-        target = str(link.readlink())
-        if target == CLAUDE_SKILLS_LINK_TARGET:
+        if str(link.readlink()) == CLAUDE_SKILLS_LINK_TARGET:
             return ClaudeSkillsLink(LINK_NOOP)
-        return ClaudeSkillsLink(
-            LINK_BLOCKED,
-            reason=(
-                f"{CLAUDE_SKILLS_DIR} is a symlink to {target!r}, not the managed "
-                f"{CLAUDE_SKILLS_LINK_TARGET!r} — left untouched (remove it to adopt "
-                f"the managed link)"
-            ),
-        )
+        return ClaudeSkillsLink(LINK_BLOCKED, reason=_claude_skills_exists_reason(link))
     if not link.exists():
         return ClaudeSkillsLink(LINK_CREATE)
-    if not link.is_dir():
-        return ClaudeSkillsLink(
-            LINK_BLOCKED,
-            reason=(
-                f"{CLAUDE_SKILLS_DIR} is a regular file, not a directory — left "
-                f"untouched (remove it to adopt the managed link)"
-            ),
-        )
-    pristine_hashes = {
-        u.desired_hash()
-        for u in units
-        if u.kind == "file" and u.dest.startswith(f"{AGENTS_SKILLS_DIR}/")
-    }
-    for r in retired:
-        pristine_hashes.update(r.pristine_hashes)
-    stale: list[str] = []
-    modified: list[str] = []
-    for child in sorted(link.rglob("*")):
-        if child.is_dir() and not child.is_symlink():
-            continue
-        rel = str(child.relative_to(root))
-        if child.is_symlink() or not child.is_file():
-            # A nested symlink or special file — can't prove pristine; fail safe.
-            modified.append(rel)
-            continue
-        if config.content_hash(child.read_bytes()) in pristine_hashes:
-            stale.append(rel)
-        else:
-            modified.append(rel)
-    if modified:
-        return ClaudeSkillsLink(
-            LINK_BLOCKED,
-            reason=(
-                f"{CLAUDE_SKILLS_DIR} is a real directory with "
-                f"{len(modified)} file(s) that are not shipit-pristine "
-                f"({', '.join(modified[:3])}{'…' if len(modified) > 3 else ''}) — "
-                f"left untouched; resolve them, then re-run to adopt the managed link"
-            ),
-        )
-    return ClaudeSkillsLink(LINK_MIGRATE, stale_files=tuple(stale))
+    return ClaudeSkillsLink(LINK_BLOCKED, reason=_claude_skills_exists_reason(link))
 
 
 def format_claude_skills_link(link: ClaudeSkillsLink) -> str:
     """The one-line description of a non-noop link action — used by the dry-run
-    report (CREATE/MIGRATE) and the stderr warning (BLOCKED)."""
+    report (CREATE) and the stderr warning (BLOCKED)."""
     if link.action == LINK_CREATE:
         return f"link     {CLAUDE_SKILLS_DIR} -> {CLAUDE_SKILLS_LINK_TARGET}"
-    if link.action == LINK_MIGRATE:
-        return (
-            f"link     {CLAUDE_SKILLS_DIR} -> {CLAUDE_SKILLS_LINK_TARGET} "
-            f"(migrated from {len(link.stale_files)} pristine file(s))"
-        )
     return f"{CLAUDE_SKILLS_DIR}: {link.reason}"
 
 
@@ -1490,7 +1449,7 @@ def gather(
         changelog_stale=_changelog_stale(root),
         declines=declines,
         symlinked_dests=symlinked_dests(root, units),
-        claude_skills_link=plan_claude_skills_link(root, units, retired),
+        claude_skills_link=plan_claude_skills_link(root),
     )
 
 
@@ -1630,9 +1589,10 @@ class Plan:
     # surface warns off this record.
     symlinked_dests: tuple[SymlinkedDest, ...] = ()
     # The `.claude/skills` -> `.agents/skills` structural symlink (#1088,
-    # ADR-0077): CREATE/MIGRATE are a work axis of their own (apply ensures the
+    # ADR-0077): CREATE (absent path) is a work axis of its own (apply ensures the
     # link; :attr:`nothing_to_do` and :attr:`changed_paths` account for it);
-    # BLOCKED warns and is left untouched (fail-safe). Never a content unit.
+    # BLOCKED (anything already there) warns and is left untouched — shipit never
+    # removes it (fail-safe). Never a content unit.
     claude_skills_link: ClaudeSkillsLink = field(
         default_factory=lambda: ClaudeSkillsLink(LINK_NOOP)
     )
@@ -1696,10 +1656,11 @@ class Plan:
             and not self.retire_hook_deletes
             and not self.pin_stale
             and not self.rerender_changelog
-            # A missing/real `.claude/skills` the install must link or migrate is
-            # a work axis of its own (#1088): the managed set can be current yet
-            # the structural symlink absent — the common migration case. BLOCKED
-            # is NOT work (it warns and is left alone), so it stays a no-op.
+            # An ABSENT `.claude/skills` the install must link is a work axis of
+            # its own (#1088): the managed set can be current yet the structural
+            # symlink absent — the common adoption case. BLOCKED (anything already
+            # at the path) is NOT work (it warns and is left alone), so it stays a
+            # no-op — shipit never removes an existing `.claude/skills`.
             and not self.claude_skills_link.is_work
         )
 
@@ -1725,14 +1686,10 @@ class Plan:
                 | {d.retired.path for d in self.retire_deletes}
                 | {d.retired.file for d in self.retire_hook_deletes}
                 | ({CHANGELOG_FILE} if self.rerender_changelog else set())
-                # The structural `.claude/skills` symlink and any pristine files
-                # a migration removed both ride the commit, so a committing mode
-                # publishes the link and the deletion of the old real dir (#1088).
-                | (
-                    {CLAUDE_SKILLS_DIR, *self.claude_skills_link.stale_files}
-                    if self.claude_skills_link.is_work
-                    else set()
-                )
+                # The structural `.claude/skills` symlink rides the commit when
+                # install creates it (create-only-when-absent), so a committing
+                # mode publishes the new managed link (#1088).
+                | ({CLAUDE_SKILLS_DIR} if self.claude_skills_link.is_work else set())
             )
         )
 

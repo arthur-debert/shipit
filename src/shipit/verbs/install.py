@@ -590,7 +590,7 @@ def format_plan(plan: Plan, *, dry_run: bool = False) -> str:
         lines.append(f"  {DELETE:8} {d.retired.key} (retired hook entry)")
     if plan.claude_skills_link.is_work:
         # #1088: the structural `.claude/skills` -> `.agents/skills` symlink is a
-        # plan line like any write — create or migrate-then-create.
+        # plan line like any write — created only when the path is absent.
         lines.append(f"  {format_claude_skills_link(plan.claude_skills_link)}")
     if plan.pin_stale:
         # ADR-0033: a pin roll-forward is a reconcile outcome in its own right —

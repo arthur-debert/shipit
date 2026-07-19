@@ -14,7 +14,6 @@ terminal report is the renderer's (:mod:`shipit.verbs.install`).
 from __future__ import annotations
 
 import logging
-import shutil
 import stat
 import tempfile
 import time
@@ -30,8 +29,6 @@ from .errors import InstallError, SelfCertError
 from .reconcile import (
     DELETE,
     KEEP,
-    LINK_CREATE,
-    LINK_MIGRATE,
     ClaudeSkillsLink,
     Plan,
     consumer_inner,
@@ -196,67 +193,43 @@ def write_unit(root: Path, unit: Unit) -> None:
         dest.chmod(0o755)
 
 
-def ensure_claude_skills_link(
-    root: Path, link: ClaudeSkillsLink
-) -> tuple[bool, tuple[str, ...]]:
+def ensure_claude_skills_link(root: Path, link: ClaudeSkillsLink) -> bool:
     """Execute the ``.claude/skills`` -> ``.agents/skills`` symlink decision.
 
-    Returns ``(created, removed_files)``: whether this apply left the managed
-    symlink in place, and the repo-relative pristine files a MIGRATE removed (the
-    committing modes publish their deletion). NOOP/BLOCKED do nothing.
+    Returns whether this apply CREATED the managed symlink (so a committing mode
+    stages it). Create-only-when-absent (ADR-0077, owner decision): shipit NEVER
+    removes an existing ``.claude/skills`` — NOOP/BLOCKED do nothing here.
 
-    Defensive over the gather→apply window (ADR-0077): a MIGRATE removes the real
-    ``.claude/skills`` dir ONLY while it is still a real dir whose current files
-    are all within the gather-approved pristine set — a file that changed or
-    appeared in the window ABORTS the migration (fail-safe), leaving the
-    consumer's content intact. A CREATE that finds the path now occupied likewise
-    stands down. Never destroys consumer content.
+    Defensive over the gather→apply window: a CREATE planned against an absent
+    path re-checks at apply and stands down if the path is now occupied — a NOOP
+    if it is already the exact managed symlink, otherwise left untouched (never
+    overwritten). Never destroys consumer content.
     """
     if not link.is_work:  # NOOP / BLOCKED — nothing structural to do
-        return False, ()
+        return False
     dest = root / CLAUDE_SKILLS_DIR
-    removed: tuple[str, ...] = ()
-    if link.action == LINK_MIGRATE:
-        if dest.is_symlink():
-            # Already a link (someone migrated in the window). Leave it — a wrong
-            # target would have been BLOCKED at gather; re-pointing is not ours.
-            return False, ()
-        if not dest.is_dir():
-            return False, ()  # vanished in the window; goal (no real dir) holds
-        approved = set(link.stale_files)
-        current = {
-            str(p.relative_to(root))
-            for p in dest.rglob("*")
-            if p.is_file() and not p.is_symlink()
-        }
-        if not current <= approved:
-            logger.warning(
-                "claude skills migration aborted — %s changed in the "
-                "gather→apply window; left untouched",
-                CLAUDE_SKILLS_DIR,
-                extra={"root": str(root), "path": CLAUDE_SKILLS_DIR},
-            )
-            return False, ()
-        shutil.rmtree(dest)
-        removed = link.stale_files
-    elif link.action == LINK_CREATE and (dest.exists() or dest.is_symlink()):
-        # Something occupied the path in the window — don't clobber it.
+    if dest.is_symlink() or dest.exists():
+        # Something occupied the path in the gather→apply window. Never clobber:
+        # a correct managed symlink is a silent NOOP, anything else is left as-is
+        # (a re-run re-plans it as a BLOCK).
+        if dest.is_symlink() and str(dest.readlink()) == CLAUDE_SKILLS_LINK_TARGET:
+            return False
         logger.warning(
             "claude skills link skipped — %s appeared in the gather→apply "
             "window; left untouched",
             CLAUDE_SKILLS_DIR,
             extra={"root": str(root), "path": CLAUDE_SKILLS_DIR},
         )
-        return False, ()
+        return False
     dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.symlink_to(CLAUDE_SKILLS_LINK_TARGET)
+    dest.symlink_to(CLAUDE_SKILLS_LINK_TARGET, target_is_directory=True)
     logger.info(
         "linked %s -> %s",
         CLAUDE_SKILLS_DIR,
         CLAUDE_SKILLS_LINK_TARGET,
         extra={"root": str(root), "path": CLAUDE_SKILLS_DIR},
     )
-    return True, removed
+    return True
 
 
 def _rerender_changelog(root: Path) -> bool:
@@ -1075,18 +1048,12 @@ def apply(
 
     # The `.claude/skills` structural symlink (#1088, ADR-0077): ensure it here,
     # after the `.agents/skills` content writes above so the link's target
-    # already holds the managed set. A CREATE/MIGRATE joins the commit scope; a
-    # MIGRATE also publishes the removed pristine files' deletion (staged from
-    # the INDEX, like a retired removal, never `git add` on an absent path).
-    link_created, link_removed = ensure_claude_skills_link(
-        root, plan.claude_skills_link
-    )
-    if link_created:
+    # already holds the managed set. Create-only-when-absent — shipit never
+    # removes an existing `.claude/skills` (an existing one BLOCKS at gather), so
+    # a CREATE only ever ADDs the symlink; it joins the commit scope.
+    if ensure_claude_skills_link(root, plan.claude_skills_link):
         touched.add(CLAUDE_SKILLS_DIR)
         staged_writes.add(CLAUDE_SKILLS_DIR)
-    for stale in link_removed:
-        touched.add(stale)
-        retired_removals.add(stale)
 
     cfg_path = root / config.CONFIG_NAME
     # Seed the consumer-owned policy BEFORE the manifest write, which preserves

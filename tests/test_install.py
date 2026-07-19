@@ -1323,58 +1323,41 @@ def test_claude_skills_link_planned_and_created_for_a_fresh_consumer(tmp_path, r
     assert (link / "to-spec" / "SKILL.md").is_file()  # through the symlink
 
 
-def _seed_real_claude_skills(root: Path, *, modify: bool = False) -> Path:
-    """A consumer with a REAL `.claude/skills` dir (the pre-symlink shape): byte
-    copies of the store content, so the migration's pristine check passes — unless
-    ``modify`` dirties one file (the consumer-edited, must-not-touch case)."""
-    src = REPO_ROOT / ".shipit-skills"
-    dst = root / ".claude" / "skills"
-    shutil.copytree(src, dst)
-    if modify:
-        (dst / "coordinating" / "SKILL.md").write_text("CONSUMER EDIT\n")
-    return dst
-
-
-def test_install_migrates_a_pristine_claude_skills_dir_to_the_symlink(tmp_path, rec):
-    """#1088 migration: a consumer with a REAL `.claude/skills` dir of pristine
-    content is path-scoped, pristine-checked, and switched to the symlink — the
-    real dir removed, the whole-dir link created. NEVER content-hash retirement
-    (which would nuke the byte-identical `.agents/skills` + `.shipit-skills`)."""
-    real = _seed_real_claude_skills(tmp_path)
+def test_install_blocks_and_preserves_an_existing_real_claude_skills_dir(tmp_path, rec):
+    """#1088 block-and-guide (owner decision): shipit NEVER removes an existing
+    `.claude/skills`. A real dir there — pristine copies or not — BLOCKS with
+    guidance; install deletes NOTHING and creates no symlink until the operator
+    removes it. (This dissolves the whole destructive-migration risk class.)"""
+    real = tmp_path / ".claude" / "skills"
+    shutil.copytree(REPO_ROOT / ".shipit-skills", real)
     assert real.is_dir() and not real.is_symlink()
-
-    plan = _plan(tmp_path)
-    assert plan.claude_skills_link.action == irec.LINK_MIGRATE
-    assert plan.claude_skills_link.stale_files  # the pristine files it will remove
-
-    _apply(tmp_path)
-    link = tmp_path / iunits.CLAUDE_SKILLS_DIR
-    assert link.is_symlink()
-    assert str(link.readlink()) == iunits.CLAUDE_SKILLS_LINK_TARGET
-    # The real content survives at `.agents/skills`, reachable through the link.
-    assert (tmp_path / iunits.AGENTS_SKILLS_DIR / "coordinating" / "SKILL.md").is_file()
-    assert (link / "coordinating" / "SKILL.md").is_file()
-
-
-def test_install_flags_and_preserves_a_consumer_modified_claude_skills_dir(
-    tmp_path, rec
-):
-    """#1088 migration fail-safe: a `.claude/skills` real dir with ANY
-    consumer-modified file BLOCKS — shipit warns and leaves it untouched (never a
-    symlink, never a destructive removal), pull-not-push."""
-    real = _seed_real_claude_skills(tmp_path, modify=True)
 
     plan = _plan(tmp_path)
     assert plan.claude_skills_link.action == irec.LINK_BLOCKED
     assert not plan.claude_skills_link.is_work
-    # The block is surfaced loudly for the operator.
+    # Surfaced loudly, with actionable guidance.
     warning = verb.format_plan_warnings(plan)
     assert "claude skills link" in warning
+    assert "will not remove it" in warning
 
     _apply(tmp_path)
-    # Untouched: still a real dir, and the consumer's edit is intact.
+    # Deletes nothing: still a real dir, content intact, no symlink created.
     assert real.is_dir() and not real.is_symlink()
-    assert (real / "coordinating" / "SKILL.md").read_text() == "CONSUMER EDIT\n"
+    assert (real / "coordinating" / "SKILL.md").is_file()
+
+
+def test_install_blocks_a_wrong_target_claude_skills_symlink(tmp_path, rec):
+    """#1088: a `.claude/skills` symlink pointing somewhere OTHER than the managed
+    target is the consumer's own — BLOCKS with guidance, never re-pointed."""
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude" / "skills").symlink_to("../somewhere-else")
+
+    plan = _plan(tmp_path)
+    assert plan.claude_skills_link.action == irec.LINK_BLOCKED
+    _apply(tmp_path)
+    # Untouched — still points where the consumer aimed it.
+    assert (tmp_path / ".claude" / "skills").is_symlink()
+    assert str((tmp_path / ".claude" / "skills").readlink()) == "../somewhere-else"
 
 
 def test_shipits_own_skills_reconcile_to_noop():
@@ -1382,7 +1365,8 @@ def test_shipits_own_skills_reconcile_to_noop():
     self-installs at Tree provisioning, so its own committed `.agents/skills/*`
     must be BYTE-IDENTICAL to the managed units, and `.claude/skills` must be the
     structural whole-dir symlink (#1088) — a skill-store edit is one source change
-    mirrored into `.agents/skills` (or this test fails), and the link is current."""
+    mirrored into `.agents/skills` (or this test fails), and the link is current
+    (create-only-when-absent = NOOP since it already exists as the managed link)."""
     skill_units = [
         u
         for u in iunits.load_units()
@@ -1395,8 +1379,7 @@ def test_shipits_own_skills_reconcile_to_noop():
         assert component is None, f"{component} is a symlink (must be real content)"
         assert irec.consumer_hash(REPO_ROOT, unit) == unit.desired_hash(), unit.key
     # `.claude/skills` is the structural symlink → `.agents/skills`, current.
-    retired = irec.load_retired()
-    link = irec.plan_claude_skills_link(REPO_ROOT, iunits.load_units(), retired)
+    link = irec.plan_claude_skills_link(REPO_ROOT)
     assert link.action == irec.LINK_NOOP, link
     claude_link = REPO_ROOT / iunits.CLAUDE_SKILLS_DIR
     assert claude_link.is_symlink()
