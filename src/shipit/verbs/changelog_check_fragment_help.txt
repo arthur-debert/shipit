@@ -26,5 +26,6 @@ counts even when amended across review rounds (the base never had it); merely
 modifying, deleting, or renaming a fragment already on `main` does not.
 
 Wire it as a required, PR-only lane in `.shipit.toml` (`local = false`, so it
-runs in CI but never on a laptop commit/push). The base-branch and label gating
-lives here, in the subcommand — the lane planner stays base/label-unaware.
+runs in CI but never on a laptop commit/push). The base-branch check (main only)
+and the `Changelog: skip` trailer read both live here, in the subcommand — the
+lane planner is unaware of either.

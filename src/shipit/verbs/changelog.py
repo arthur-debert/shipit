@@ -325,17 +325,18 @@ def _is_fragment_path(path: str) -> bool:
 def decide_fragment_gate(
     *,
     base_ref: str,
-    skip_requested: bool,
+    skip_requested: Callable[[], bool],
     changed_paths: Callable[[], Sequence[str] | None],
 ) -> FragmentGate:
     """The PURE fragment-gate decision (issue #1073), git/env reads injected.
 
-    Given the PR's base ref, whether a ``Changelog: skip`` trailer was requested,
-    and a thunk that yields the PR's own changed paths (the three-dot merge-base
-    diff), decide whether a changelog fragment is required and, if so, whether
-    one was added. The thunk is only invoked on the one branch that needs it
-    (base == ``main``, no skip trailer), so the three short-circuit passes never
-    touch the diff.
+    Given the PR's base ref, a thunk that reports whether a ``Changelog: skip``
+    trailer is present, and a thunk that yields the PR's own changed paths (the
+    three-dot merge-base diff), decide whether a changelog fragment is required
+    and, if so, whether one was added. BOTH thunks are only invoked on the
+    branch that needs them — the skip thunk after the base short-circuits, the
+    diff thunk only when the base is gated and no skip trailer is set — so a
+    laptop/lefthook run (empty base) and an epic-branch PR touch NEITHER git read.
 
     Passes (``ok=True``) when any of:
 
@@ -343,7 +344,7 @@ def decide_fragment_gate(
       gate never blocks local work.
     * ``base_ref`` is not :data:`GATED_BASE_REF` — a WS PR to an epic branch is
       exempt.
-    * ``skip_requested`` is True — a ``Changelog: skip`` trailer
+    * ``skip_requested()`` is True — a ``Changelog: skip`` trailer
       (:data:`SKIP_TRAILER_KEY`/:data:`SKIP_TRAILER_VALUE`) is present on one of
       the PR's commits.
     * a ``CHANGELOG/unreleased-*.md`` path was ADDED in the diff. The diff is
@@ -368,7 +369,7 @@ def decide_fragment_gate(
             "fragment required (only PRs to "
             f"{GATED_BASE_REF} are gated)",
         )
-    if skip_requested:
+    if skip_requested():
         return FragmentGate(
             True,
             f"changelog: {SKIP_TRAILER_KEY}: {SKIP_TRAILER_VALUE} trailer present "
@@ -393,9 +394,11 @@ def decide_fragment_gate(
     return FragmentGate(
         False,
         f"no {core.CHANGELOG_DIR}/{core.FRAGMENT_PREFIX}*{core.FRAGMENT_SUFFIX} "
-        f"fragment added — every PR to {GATED_BASE_REF} needs one (add a "
-        f"fragment, or add a '{SKIP_TRAILER_KEY}: {SKIP_TRAILER_VALUE}' trailer "
-        "to a commit for docs/CI/chore-only PRs)",
+        f"fragment added — every PR to {GATED_BASE_REF} needs one: a "
+        f"{core.CHANGELOG_DIR}/{core.FRAGMENT_PREFIX}*{core.FRAGMENT_SUFFIX} "
+        f"fragment (a package's own {core.CHANGELOG_DIR}/ in a monorepo counts "
+        f"too), or a '{SKIP_TRAILER_KEY}: {SKIP_TRAILER_VALUE}' trailer on a "
+        "commit for docs/CI/chore-only PRs",
     )
 
 
@@ -473,13 +476,15 @@ def run_check_fragment(
     ``changed_paths_fn`` (``(base_ref, cwd) -> paths | None``) and
     ``skip_requested_fn`` (``(base_ref, cwd) -> bool | None``) the two git
     boundaries — mirroring the ``ci plan`` injection pattern
-    (:func:`shipit.verbs.ci.run`). The default fragment boundary is
-    :func:`shipit.git.added_paths_since` (``--diff-filter=A`` against
-    ``origin/<base>``): only a fragment the PR ADDS satisfies the gate, so
-    modifying/deleting/renaming a pre-existing base fragment cannot. The default
-    skip boundary is :func:`shipit.git.skip_changelog_requested`; only an
-    explicit ``True`` skips — an unverifiable read (``None``) falls through to the
-    fragment requirement, so a broken git read can never silently bypass the gate.
+    (:func:`shipit.verbs.ci.run`). Both are wrapped as THUNKS the pure decision
+    calls lazily, so a laptop run (empty base) and an epic-branch PR never touch
+    git. The default fragment boundary is :func:`shipit.git.added_paths_since`
+    (``--diff-filter=A`` against ``origin/<base>``): only a fragment the PR ADDS
+    satisfies the gate, so modifying/deleting/renaming a pre-existing base
+    fragment cannot. The default skip boundary is
+    :func:`shipit.git.skip_changelog_requested`; only an explicit ``True`` skips
+    — an unverifiable read (``None``) falls through to the fragment requirement
+    (the ``is True`` below), so a broken git read can never silently bypass the gate.
     """
     root = Path(path or ".").resolve()
     if base_ref is None:
@@ -492,7 +497,7 @@ def run_check_fragment(
     )
     verdict = decide_fragment_gate(
         base_ref=base_ref,
-        skip_requested=(skip_fn(base_ref.strip(), str(root)) is True),
+        skip_requested=lambda: skip_fn(base_ref.strip(), str(root)) is True,
         changed_paths=lambda: fetch(base_ref.strip(), str(root)),
     )
     print(verdict.message)

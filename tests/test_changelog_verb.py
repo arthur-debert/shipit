@@ -466,22 +466,26 @@ def test_render_current_matches_the_verb_render(tmp_path):
 
 
 def _fragment_gate(base_ref, paths, *, skip_requested=False):
-    """Drive the pure decision with a canned changed-paths thunk."""
+    """Drive the pure decision with canned skip/changed-paths thunks."""
     return verb.decide_fragment_gate(
         base_ref=base_ref,
-        skip_requested=skip_requested,
+        skip_requested=lambda: skip_requested,
         changed_paths=lambda: paths,
     )
 
 
 def test_fragment_gate_passes_off_a_pr():
     # Empty base ref = not a PR context (laptop/lefthook): the gate must never
-    # block, and it never even looks at the diff.
-    def _boom():
+    # block, and it never touches git — neither the skip trailer read nor the
+    # diff. Both thunks raise to prove the base short-circuit runs first.
+    def _boom_skip():
+        raise AssertionError("skip trailer must not be read off a PR")
+
+    def _boom_diff():
         raise AssertionError("changed_paths must not be consulted off a PR")
 
     verdict = verb.decide_fragment_gate(
-        base_ref="", skip_requested=False, changed_paths=_boom
+        base_ref="", skip_requested=_boom_skip, changed_paths=_boom_diff
     )
     assert verdict.ok
     assert "not a PR" in verdict.message
@@ -489,12 +493,15 @@ def test_fragment_gate_passes_off_a_pr():
 
 def test_fragment_gate_passes_on_a_non_main_base():
     # A WS PR targets an epic branch, not main: exempt (the umbrella PR to main
-    # carries the fragment).
-    def _boom():
+    # carries the fragment). Neither git read fires — the base check exits first.
+    def _boom_skip():
+        raise AssertionError("skip trailer must not be read off main")
+
+    def _boom_diff():
         raise AssertionError("changed_paths must not be consulted off main")
 
     verdict = verb.decide_fragment_gate(
-        base_ref="ADP02", skip_requested=False, changed_paths=_boom
+        base_ref="ADP02", skip_requested=_boom_skip, changed_paths=_boom_diff
     )
     assert verdict.ok
     assert "not 'main'" in verdict.message
@@ -502,18 +509,46 @@ def test_fragment_gate_passes_on_a_non_main_base():
 
 def test_fragment_gate_passes_with_the_skip_trailer():
     # The escape hatch for docs/CI/chore-only PRs: a `Changelog: skip` trailer
-    # passes the gate without touching the diff.
+    # passes the gate without touching the diff (the skip thunk short-circuits
+    # before the diff thunk).
     def _boom():
         raise AssertionError("changed_paths must not be consulted when skipped")
 
     verdict = verb.decide_fragment_gate(
         base_ref="main",
-        skip_requested=True,
+        skip_requested=lambda: True,
         changed_paths=_boom,
     )
     assert verdict.ok
     assert verb.SKIP_TRAILER_KEY in verdict.message
     assert verb.SKIP_TRAILER_VALUE in verdict.message
+
+
+def test_fragment_gate_skip_thunk_is_lazy_only_read_when_gated():
+    # The skip trailer read is a THUNK the pure decision calls only on the gated
+    # branch (base == main), never before the base short-circuits — so a laptop
+    # run and an epic-branch PR issue no git command at all. Record calls.
+    calls: list[str] = []
+
+    def _skip() -> bool:
+        calls.append("skip")
+        return False
+
+    # Off-PR and non-main: the skip thunk is never invoked.
+    verb.decide_fragment_gate(
+        base_ref="", skip_requested=_skip, changed_paths=lambda: []
+    )
+    verb.decide_fragment_gate(
+        base_ref="ADP02", skip_requested=_skip, changed_paths=lambda: []
+    )
+    assert calls == []
+    # Gated (base == main): now it IS consulted.
+    verb.decide_fragment_gate(
+        base_ref="main",
+        skip_requested=_skip,
+        changed_paths=lambda: ["CHANGELOG/unreleased-x.md"],
+    )
+    assert calls == ["skip"]
 
 
 def test_fragment_gate_fails_on_main_with_no_fragment():
@@ -522,6 +557,8 @@ def test_fragment_gate_fails_on_main_with_no_fragment():
     assert "no CHANGELOG/unreleased-*.md fragment added" in verdict.message
     # names the escape hatch (the trailer, not a label)
     assert f"{verb.SKIP_TRAILER_KEY}: {verb.SKIP_TRAILER_VALUE}" in verdict.message
+    # and does not mislead: a monorepo package's own CHANGELOG/ counts too
+    assert "monorepo" in verdict.message
 
 
 def test_fragment_gate_passes_when_a_fragment_is_added():
