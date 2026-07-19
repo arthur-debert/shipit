@@ -491,12 +491,14 @@ def load_toolchains(cfg: dict) -> tuple[ToolchainEntry, ...]:
 #: prerelease) release — the legacy ``tree-sitter.yml`` notify hook, modeled
 #: as a publish-stage action rather than a consumer post-release block so the
 #: rc/prerelease gate is the ONE the release stages already enforce. ``conda``
-#: is the Artifact channel's producer endpoint (ARF01-WS01 #950, ADR-0064): a
-#: derived endpoint that, after ``gh-release``, repackages the final release
-#: asset into a versioned ``.conda`` and pushes+reindexes it to the producing
-#: repo's per-repo channel in a public object-storage bucket — the same
-#: derived shape as ``brew``, consuming final release assets by their known
-#: names. ``zed`` is the Zed-extension registry endpoint (TOL03-WS02 #973,
+#: is the Artifact channel's producer endpoint (ARF01-WS01 #950, ADR-0064,
+#: conda-direct ADR-0077): a derived endpoint that packages the staged BUILD
+#: OUTPUT directly into a versioned ``.conda`` — the served subdirs and archive
+#: names DERIVED from the artifact's own ``platforms`` declaration, independent
+#: of ``gh-release`` (the build output is present from the bundle stage;
+#: gh-release only uploads the same tree) — then pushes+reindexes it to the
+#: producing repo's per-repo channel in a public object-storage bucket. ``zed``
+#: is the Zed-extension registry endpoint (TOL03-WS02 #973,
 #: ADR-0068): a derived, stable-only endpoint that RENDERS the
 #: ``zed-industries/extensions`` registry coordinates (the ``extensions.toml``
 #: bump + submodule rev pointing at the released tag) for a MANUALLY-gated
