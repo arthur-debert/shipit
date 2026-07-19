@@ -172,7 +172,10 @@ def run(
         "gh-setup completed for %s (%d secret failure(s))",
         target.slug,
         report.secrets_failed,
-        extra={"secrets_failed": report.secrets_failed or None},
+        extra={
+            "secrets_failed": report.secrets_failed or None,
+            "ruleset_refused": report.ruleset_refused or None,
+        },
     )
     return 1 if report.secrets_failed or report.ruleset_refused else 0
 

@@ -156,9 +156,9 @@ class RulesetOutcome:
     ``"dry-run"`` (nothing sent), or ``"refused"`` (auto-discovery could not
     confidently name a PR workflow's checks, so the ruleset was NOT written —
     #1056). ``payload`` is the full ruleset body that was sent — or, on a dry
-    run, WOULD have been sent (empty on a refusal, since nothing is built). ``
-    list_error`` records the degraded-but-continuing listing failure: when it is
-    set, ``existing_id is None`` means "could not list, assumed none", NOT
+    run, WOULD have been sent (empty on a refusal, since nothing is built).
+    ``list_error`` records the degraded-but-continuing listing failure: when it
+    is set, ``existing_id is None`` means "could not list, assumed none", NOT
     "verified absent". ``refusal`` carries the actionable message on a refusal
     (``None`` otherwise) — the run's exit contract makes a refusal rc 1.
     """
