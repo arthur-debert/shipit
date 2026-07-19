@@ -26,7 +26,10 @@ Otherwise (base `main`, no unreleased fragment) it exits non-zero: add a
 no escape hatch — the same fragment the release needs to cut is the one the gate
 asks for.
 
-Wire it as a required, PR-only lane in `.shipit.toml` (`local = false`, so it
-runs in CI but never on a laptop commit/push). It reads the working tree, so it
-needs no git history and no workflow YAML change. The base-branch check (main
-only) lives here, in the subcommand — the lane planner is unaware of it.
+Wire it as a required, CI-only lane in `.shipit.toml` (`local = false`, so it
+runs in CI but never on a laptop commit/push). ENFORCEMENT is PR-gated, not the
+job: a `trigger = "pr"` lane's job may still run on push/nightly/dispatch, but
+off a PR `GITHUB_BASE_REF` is empty and the command exits pass — so only PRs are
+actually gated. It reads the working tree, so it needs no git history and no
+workflow YAML change. The base-branch check (main only) lives here, in the
+subcommand — the lane planner is unaware of it.

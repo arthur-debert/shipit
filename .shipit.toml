@@ -170,8 +170,11 @@ local = true
 # machinery. `run` is the `changelog` pixi task (./bin/shipit changelog) plus the
 # `check-fragment` subcommand arg — the same invocation a laptop runs.
 # `local = false` keeps it OUT of the derived commit/push checks (the
-# required∩local set stays exactly lint + test): the gate is PR/CI-only, so
-# lefthook/laptop never runs it. The base-branch check (main only) lives in the
+# required∩local set stays exactly lint + test): CI-only, so lefthook/laptop
+# never runs it. Enforcement is PR-gated via GITHUB_BASE_REF — a `trigger = "pr"`
+# lane also runs on push/nightly/dispatch, but off a PR GITHUB_BASE_REF is empty
+# and the check no-ops (exits pass), so only PRs are gated. The base-branch
+# check (main only) lives in the
 # subcommand (the planner is unaware of it); the lane rolls up into the single
 # required `check` gate and needs NO workflow YAML change — a presence check
 # reads the working tree, so no git history/fetch-depth is required.
