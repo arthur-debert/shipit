@@ -85,7 +85,10 @@ def test_loader_keeps_true_false_as_bool():
 def test_job_contexts_plain_job():
     assert checks._job_contexts(
         "build", {"name": "Build"}, toplevel=None, cache={}
-    ) == ["Build"]
+    ) == (
+        ["Build"],
+        [],
+    )
 
 
 def test_is_reusable_workflow():
@@ -326,6 +329,167 @@ def test_job_contexts_reusable_nesting_and_conditions():
             }
         }
     }
-    ctxs = checks._job_contexts("call", job, toplevel=None, cache=cache)
+    ctxs, dropped = checks._job_contexts("call", job, toplevel=None, cache=cache)
     # e2e is excluded (inputs.e2e not enabled); the bare caller name is never used.
     assert ctxs == ["call / build", "call / bats"]
+    assert dropped == []
+
+
+# --------------------------------------------------------------------------
+# Static drop-and-refuse — the #1056 phantom `<caller> / run` guard.
+# --------------------------------------------------------------------------
+
+
+def test_job_unpredictable_matrix_and_dynamic_name():
+    assert checks.job_unpredictable({"strategy": {"matrix": {"os": ["a", "b"]}}}) == (
+        "matrix"
+    )
+    assert checks.job_unpredictable({"name": "${{ matrix.name }}"}) == "dynamic name"
+    # Matrix wins over a dynamic name — both are the same unpredictability.
+    assert (
+        checks.job_unpredictable(
+            {"name": "${{ matrix.name }}", "strategy": {"matrix": {"x": [1]}}}
+        )
+        == "matrix"
+    )
+    # A predictable job — static name or no name at all.
+    assert checks.job_unpredictable({"name": "Build"}) is None
+    assert checks.job_unpredictable({}) is None
+    assert checks.job_unpredictable("nonsense") is None
+
+
+def test_job_contexts_drops_matrix_job_instead_of_guessing_id():
+    # A matrix job reports `id (values)`, never the bare id — so it is DROPPED,
+    # not resolved to `run` (the phantom that bricked lex — #1056).
+    ctxs, dropped = checks._job_contexts(
+        "run",
+        {"strategy": {"matrix": {"name": ["lint", "test"]}}},
+        toplevel=None,
+        cache={},
+    )
+    assert ctxs == []
+    assert dropped == [checks.DroppedJob(job="run", reason="matrix")]
+
+
+def test_job_contexts_drops_nested_matrix_job_caller_prefixed():
+    # lex's exact shape: a caller job → reusable wf with a static `plan` and a
+    # matrix `run`. `plan` is named `checks / plan`; `run` is dropped, and the
+    # drop is surfaced caller-prefixed so the warning names the full path.
+    uses = "o/r/.github/workflows/wf-checks.yml@v1"
+    job = {"uses": uses}
+    cache = {
+        uses: {
+            "jobs": {
+                "plan": {},
+                "run": {"name": "${{ matrix.name }}", "strategy": {"matrix": {}}},
+            }
+        }
+    }
+    ctxs, dropped = checks._job_contexts("checks", job, toplevel=None, cache=cache)
+    assert ctxs == ["checks / plan"]
+    assert dropped == [checks.DroppedJob(job="checks / run", reason="matrix")]
+
+
+@pytest.fixture
+def no_runs(monkeypatch):
+    """Force the runs-based path empty so discover falls to static (the
+    onboarding case) without any network call."""
+    monkeypatch.setattr(checks, "checks_from_runs", lambda *a, **k: [])
+
+
+def test_discover_lex_shape_names_certain_set_never_phantom_run(
+    tmp_path, capsys, no_runs
+):
+    # Mirror lex: a caller workflow with a `checks` job (→ reusable wf-checks
+    # with static `plan` + matrix `run`) and a sibling aggregator `check`, plus
+    # `Documentation` and `WASM build` workflows. Discovery must yield exactly
+    # the certain set and NEVER `checks / run`.
+    reusable = tmp_path / ".github" / "workflows" / "wf-checks.yml"
+    reusable.parent.mkdir(parents=True, exist_ok=True)
+    reusable.write_text(
+        "on: workflow_call\n"
+        "jobs:\n"
+        "  plan: {}\n"
+        "  run:\n"
+        "    name: ${{ matrix.name }}\n"
+        "    strategy:\n"
+        "      matrix:\n"
+        "        name: [lint, test]\n",
+        encoding="utf-8",
+    )
+    _write_workflow(
+        tmp_path,
+        "checks.yml",
+        "on: pull_request\n"
+        "jobs:\n"
+        "  checks:\n"
+        "    uses: ./.github/workflows/wf-checks.yml\n"
+        "  check:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps: []\n",
+    )
+    _write_workflow(
+        tmp_path,
+        "docs.yml",
+        "on: pull_request\njobs:\n  Documentation:\n    name: Documentation\n"
+        "    steps: []\n",
+    )
+    _write_workflow(
+        tmp_path,
+        "wasm.yml",
+        'on: pull_request\njobs:\n  wasm:\n    name: "WASM build"\n    steps: []\n',
+    )
+
+    result = checks.discover("o/r", "main", toplevel=str(tmp_path))
+    assert result.refusal is None
+    assert set(result.checks) == {
+        "check",
+        "checks / plan",
+        "Documentation",
+        "WASM build",
+    }
+    assert "checks / run" not in result.checks
+    # The drop is warned loudly on stderr.
+    err = capsys.readouterr().err
+    assert "run" in err and "matrix" in err
+
+
+def test_discover_refuses_when_a_workflow_has_only_a_matrix_job(tmp_path, no_runs):
+    # A PR workflow whose ONLY job is a bare matrix job contributes zero certain
+    # contexts — discovery refuses and demands --checks rather than write a rule
+    # that omits the workflow's real gate (#1056).
+    _write_workflow(
+        tmp_path,
+        "ci.yml",
+        "on: pull_request\n"
+        "jobs:\n"
+        "  build:\n"
+        "    strategy:\n"
+        "      matrix:\n"
+        "        os: [ubuntu, macos]\n"
+        "    steps: []\n",
+    )
+    result = checks.discover("o/r", "main", toplevel=str(tmp_path))
+    assert result.checks == ()
+    assert result.refusal is not None
+    assert "--checks" in result.refusal
+    assert "ci.yml" in result.refusal
+    assert "matrix" in result.refusal
+
+
+def test_discover_all_certain_writes_without_refusal(tmp_path, no_runs):
+    # Plain single-job workflow — a certain context, no refusal.
+    _write_workflow(
+        tmp_path,
+        "ci.yml",
+        "on: pull_request\njobs:\n  build:\n    name: Build\n    steps: []\n",
+    )
+    result = checks.discover("o/r", "main", toplevel=str(tmp_path))
+    assert result.refusal is None
+    assert result.checks == ("Build",)
+
+
+def test_discover_no_pr_workflows_is_empty_not_refusal(tmp_path, no_runs):
+    # No PR-check workflow at all — an honest empty set, NOT a refusal.
+    result = checks.discover("o/r", "main", toplevel=str(tmp_path))
+    assert result == checks.Discovery(checks=(), refusal=None)

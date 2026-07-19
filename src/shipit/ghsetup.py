@@ -152,12 +152,15 @@ def existing_ruleset_id(rulesets: object, name: str) -> int | None:
 class RulesetOutcome:
     """Pass (a)'s outcome: what was checked and what happened.
 
-    ``action`` is ``"created"`` / ``"updated"`` (a mutation happened) or
-    ``"dry-run"`` (nothing sent). ``payload`` is the full ruleset body that was
-    sent — or, on a dry run, WOULD have been sent — so a caller can see exactly
-    what would change. ``list_error`` records the degraded-but-continuing
-    listing failure: when it is set, ``existing_id is None`` means "could not
-    list, assumed none", NOT "verified absent".
+    ``action`` is ``"created"`` / ``"updated"`` (a mutation happened),
+    ``"dry-run"`` (nothing sent), or ``"refused"`` (auto-discovery could not
+    confidently name a PR workflow's checks, so the ruleset was NOT written —
+    #1056). ``payload`` is the full ruleset body that was sent — or, on a dry
+    run, WOULD have been sent (empty on a refusal, since nothing is built). ``
+    list_error`` records the degraded-but-continuing listing failure: when it is
+    set, ``existing_id is None`` means "could not list, assumed none", NOT
+    "verified absent". ``refusal`` carries the actionable message on a refusal
+    (``None`` otherwise) — the run's exit contract makes a refusal rc 1.
     """
 
     name: str
@@ -166,6 +169,7 @@ class RulesetOutcome:
     action: str
     payload: dict[str, Any]
     list_error: str | None = None
+    refusal: str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -175,6 +179,7 @@ class RulesetOutcome:
             "action": self.action,
             "payload": self.payload,
             "list_error": self.list_error,
+            "refusal": self.refusal,
         }
 
 
@@ -260,6 +265,12 @@ class SetupReport:
     secrets_error: str | None = None
 
     @property
+    def ruleset_refused(self) -> bool:
+        """Whether the ruleset pass refused to write (auto-discovery could not
+        name a PR workflow's checks — #1056). A refusal makes the run rc 1."""
+        return self.ruleset.action == "refused"
+
+    @property
     def secrets_set(self) -> int:
         """Secrets actually pushed (a dry run pushes none)."""
         return sum(1 for s in self.secrets if s.action == "set")
@@ -303,8 +314,31 @@ class SetupReport:
 # --------------------------------------------------------------------------
 
 
-def apply_ruleset(repo: str, checks: list[str], *, dry_run: bool) -> RulesetOutcome:
-    """Pass (a). Create-or-update the standard ruleset; returns its outcome."""
+def apply_ruleset(
+    repo: str, checks: list[str], *, dry_run: bool, refusal: str | None = None
+) -> RulesetOutcome:
+    """Pass (a). Create-or-update the standard ruleset; returns its outcome.
+
+    ``refusal`` short-circuits the pass (#1056): when auto-discovery could not
+    confidently name a PR workflow's checks it hands a message here, and the
+    ruleset is NOT written (real or dry) — writing the discovered-but-incomplete
+    set could brick every PR. The refusal rides the outcome (``action`` is
+    ``"refused"``) so the renderer shows it and the run exits rc 1.
+    """
+    if refusal is not None:
+        logger.warning(
+            "refusing ruleset write — auto-discovery could not name every "
+            "PR workflow's checks",
+            extra={"repo": repo},
+        )
+        return RulesetOutcome(
+            name=RULESET_NAME,
+            existing_id=None,
+            checks=(),
+            action="refused",
+            payload={},
+            refusal=refusal,
+        )
     template = load_template()
     body = build_payload(template, checks)
     list_error: str | None = None
@@ -676,19 +710,22 @@ def setup(
     """
     started = time.monotonic()
     slug = repo.slug
+    refusal: str | None = None
     if checks_override is not None:
         checks = [c for c in checks_override if c]
     else:
         default_branch = gh.default_branch(slug)
-        checks = checks_mod.discover(slug, default_branch, toplevel=local_checkout)
-    if not checks:
+        discovery = checks_mod.discover(slug, default_branch, toplevel=local_checkout)
+        checks = list(discovery.checks)
+        refusal = discovery.refusal
+    if refusal is None and not checks:
         logger.warning(
             "no required checks found — ruleset applied without a "
             "required-status-checks gate",
             extra={"repo": slug},
         )
 
-    ruleset = apply_ruleset(slug, checks, dry_run=dry_run)
+    ruleset = apply_ruleset(slug, checks, dry_run=dry_run, refusal=refusal)
     labels = ensure_labels(slug, load_labels(), dry_run=dry_run)
     # Pass (d) reads only, so dry-run runs it identically — the report is the
     # same either way, and a dry run still surfaces the access warning.
