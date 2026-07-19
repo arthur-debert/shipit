@@ -120,22 +120,18 @@ def test_absolute_source_is_refused():
         _load('[stage.lexd-lsp]\n"/etc/passwd" = "resources/x"\n')
 
 
-def test_dot_destination_is_refused_at_parse():
-    # `dest = "."` normalizes to the repo root; staging it would wipe the whole
-    # checkout, so it is refused LOUDLY at the config boundary.
-    with pytest.raises(config.ConfigError, match="repo root itself"):
-        _load('[stage.lexd-lsp]\n"bin/lexd-lsp" = "."\n')
-
-
-@pytest.mark.parametrize("protected", [".git", ".pixi", ".hg", ".svn"])
-def test_repo_critical_destination_is_refused_at_parse(protected):
-    with pytest.raises(config.ConfigError, match="repo-critical"):
-        _load(f'[stage.lexd-lsp]\n"bin/lexd-lsp" = "{protected}/x"\n')
+# The bounded staging root: every dest must be a strict descendant of `resources/`,
+# so `.`, the checkout root, `.git`/`.Git`, `.pixi` are not expressible at parse.
+@pytest.mark.parametrize(
+    "dest",
+    [".", "resources", ".git/HEAD", ".Git/HEAD", ".pixi/envs", "lexd-lsp", "x/y"],
+)
+def test_destination_outside_the_staging_root_is_refused_at_parse(dest):
+    with pytest.raises(config.ConfigError, match="the staging root"):
+        _load(f'[stage.lexd-lsp]\n"bin/lexd-lsp" = "{dest}"\n')
 
 
 def test_duplicate_destination_across_packages_is_refused():
-    # Two packages staging to the same dest would silently clobber each other,
-    # dropping a file from the bundle — a loud refusal at load.
     with pytest.raises(config.ConfigError, match="duplicate destination"):
         _load(
             "[stage.pkg-a]\n"
@@ -143,6 +139,29 @@ def test_duplicate_destination_across_packages_is_refused():
             "[stage.pkg-b]\n"
             '"bin/b" = "resources/tool"\n'
         )
+
+
+def test_overlapping_ancestor_descendant_destinations_are_refused():
+    # `resources/tool` and `resources/tool/plugin` overlap: the idempotent rmtree of
+    # the ancestor would silently drop the descendant. Refused loudly at load.
+    with pytest.raises(config.ConfigError, match="overlapping destination"):
+        _load(
+            "[stage.pkg-a]\n"
+            '"bin/a" = "resources/tool"\n'
+            "[stage.pkg-b]\n"
+            '"share/b/plugin" = "resources/tool/plugin"\n'
+        )
+
+
+def test_disjoint_destinations_under_a_shared_parent_are_allowed():
+    # Siblings that merely share a parent dir do NOT overlap — both are kept.
+    entries = _load(
+        "[stage.pkg-a]\n"
+        '"bin/a" = "resources/a"\n'
+        "[stage.pkg-b]\n"
+        '"bin/b" = "resources/b"\n'
+    )
+    assert [e.dest for e in entries] == ["resources/a", "resources/b"]
 
 
 def test_stage_is_a_known_top_level_table():

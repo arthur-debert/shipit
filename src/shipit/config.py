@@ -1355,20 +1355,24 @@ def load_artifact_deps(cfg: dict) -> tuple[ArtifactDep, ...]:
 # The section KEY names the conda package (the same `[artifact-deps]`/conda-package
 # vocabulary), grouping a consumer's per-package subset; each entry maps a
 # SOURCE-in-prefix POSIX path (relative to `<root>/.pixi/envs/<env>` — `bin/<tool>`
-# for a tool, `share/<pkg>/…` for a data artifact) to a DEST-under-resources POSIX
-# path (relative to the checkout root). Both are checkout/prefix-relative and refused
+# for a tool, `share/<pkg>/…` for a data artifact) to a DEST POSIX path that must be
+# a strict descendant of the staging root `resources/` (`_STAGING_ROOT`). Bounding
+# every dest to the shipped-bundle dir makes the data-loss class (`.`, the checkout
+# root, `.git`/`.Git`, `.pixi`) unexpressible; both source and dest are also refused
 # if they escape (:func:`_reject_path_escape`), the same guard the vsix stage dest
 # takes.
 
 
-#: Checkout-relative top-level directories a `[stage]` dest must never target: git
-#: metadata and the pixi env tree (the resolved SOURCE env staging copies FROM),
-#: plus the other common VCS metadata dirs. Staging onto any of them corrupts the
-#: repository or the very env being read. Refused LEXICALLY at parse
-#: (:func:`_parse_stage_table`) and again on the RESOLVED path at copy-time
-#: (:func:`shipit.staging._reject_escape`), so a symlinked parent cannot smuggle a
-#: dest into one of them.
-_PROTECTED_DEST_ROOTS = frozenset({".git", ".pixi", ".hg", ".svn"})
+#: The single fixed staging root every `[stage]` dest must live UNDER: the app
+#: consumer's shipped-bundle dir. Bounding every dest to a strict descendant of
+#: `<root>/resources` makes the whole data-loss class unexpressible by
+#: construction — the checkout root, `.git`/`.Git`, `.pixi`, `.` are none of them
+#: reachable — and confines every rmtree/overwrite to inside the bundle dir. This
+#: one rule replaces a per-dest protected-name denylist (which a case-fold alias
+#: like `.Git` could slip past). Enforced LEXICALLY at parse (:func:`_parse_stage_table`)
+#: and again on the RESOLVED absolute path at copy-time
+#: (:func:`shipit.staging._reject_unbounded_dest`).
+_STAGING_ROOT = "resources"
 
 
 @dataclass(frozen=True)
@@ -1388,9 +1392,11 @@ class StageEntry:
     - ``source`` is a POSIX path RELATIVE TO THE ENV PREFIX (``bin/<tool>`` for a
       tool artifact, ``share/<pkg>/…`` for a data artifact) — the file or directory
       pixi extracted; refused if it escapes the prefix.
-    - ``dest`` is a POSIX path RELATIVE TO THE CHECKOUT ROOT (e.g.
-      ``resources/tree-sitter-lex.wasm``) the file/dir is copied to; refused if it
-      escapes the checkout.
+    - ``dest`` is a POSIX path UNDER THE STAGING ROOT ``resources/`` (e.g.
+      ``resources/tree-sitter-lex.wasm``) the file/dir is copied to; refused unless
+      it is a strict descendant of the shipped-bundle dir (:data:`_STAGING_ROOT`),
+      which bounds staging so it can never touch the checkout root, ``.git``, or the
+      env.
     """
 
     package: str
@@ -1404,17 +1410,18 @@ def _parse_stage_table(package: str, spec: object) -> tuple[StageEntry, ...]:
     Loud at the boundary (ADR-0030): the section key must be a valid conda package
     identifier (:data:`_CONDA_PKG_KEY_RE`, the same shape ``[artifact-deps.<pkg>]``
     and the vsix ``stage`` map take), and each ``source = dest`` pair must map a
-    non-empty prefix-relative source path to a non-empty checkout-relative dest
-    path — both refused if they escape (:func:`_reject_path_escape`). A dest that
-    normalizes to ``.`` (the repo root, whose stage would wipe the whole checkout)
-    or that targets a repo-critical dir (:data:`_PROTECTED_DEST_ROOTS`) is refused
-    loudly here; the runtime path re-checks the RESOLVED dest so a symlinked parent
+    non-empty prefix-relative source path to a dest that is a STRICT DESCENDANT of
+    the staging root ``resources/`` (:data:`_STAGING_ROOT`) — both refused if they
+    escape (:func:`_reject_path_escape`), and the dest refused unless it lives under
+    the bundle dir. Bounding the dest to a single staging root makes the whole
+    data-loss class (``.``, the checkout root, ``.git``/``.Git``, ``.pixi``)
+    unexpressible; the runtime path re-checks the RESOLVED dest so a symlinked parent
     cannot slip past this lexical guard. A repeated source key cannot reach here:
     ``tomllib`` rejects a duplicate table key before the parse runs. An empty table
     is refused — a ``[stage.<pkg>]`` header that stages nothing is a mistake, not an
     intent.
     """
-    where = f"[stage].{package}"
+    where = f"[stage.{package}]"
     if not _CONDA_PKG_KEY_RE.match(package):
         raise ConfigError(
             f"{where}: the section key is the conda package name and must be a "
@@ -1424,40 +1431,35 @@ def _parse_stage_table(package: str, spec: object) -> tuple[StageEntry, ...]:
     if not isinstance(spec, dict) or not spec:
         raise ConfigError(
             f"{where} must be a non-empty table mapping a source-in-prefix path to "
-            f'a destination under the checkout, e.g. {{ "bin/lexd-lsp" = '
-            f'"resources/lexd-lsp" }}; got {spec!r}'
+            f'a destination under {_STAGING_ROOT}/, e.g. {{ "bin/lexd-lsp" = '
+            f'"{_STAGING_ROOT}/lexd-lsp" }}; got {spec!r}'
         )
     entries: list[StageEntry] = []
     for source, dest in spec.items():
         src = str(source)
         if not src:
             raise ConfigError(f"{where}: a source path must be non-empty")
-        _reject_path_escape(f"{where}.{src!r} (source)", src)
+        _reject_path_escape(f"{where} {src!r} (source)", src)
         if not isinstance(dest, str) or not dest:
             raise ConfigError(
-                f"{where}.{src!r}: destination must be a non-empty checkout-relative "
-                f'path, e.g. "resources/lexd-lsp"; got {dest!r}'
+                f"{where} {src!r}: destination must be a non-empty path under "
+                f'{_STAGING_ROOT}/, e.g. "{_STAGING_ROOT}/lexd-lsp"; got {dest!r}'
             )
-        _reject_path_escape(f"{where}.{src!r} (dest)", dest)
-        dest_norm = str(PurePosixPath(dest))
-        if dest_norm == ".":
+        _reject_path_escape(f"{where} {src!r} (dest)", dest)
+        dest_parts = PurePosixPath(dest).parts
+        if len(dest_parts) < 2 or dest_parts[0] != _STAGING_ROOT:
             raise ConfigError(
-                f"{where}.{src!r}: destination must be a subdirectory of the "
-                f"checkout, not the repo root itself ('.') — staging onto the root "
-                f'would wipe the whole checkout; e.g. "resources/lexd-lsp"'
-            )
-        top = PurePosixPath(dest_norm).parts[0]
-        if top in _PROTECTED_DEST_ROOTS:
-            raise ConfigError(
-                f"{where}.{src!r}: destination must not target the repo-critical "
-                f"{top!r} directory (git metadata or the resolved env being copied "
-                f'from) — staging there would corrupt it; e.g. "resources/lexd-lsp"'
+                f"{where} {src!r}: destination must be a path UNDER the staging root "
+                f"{_STAGING_ROOT}/ (a strict descendant, e.g. "
+                f'"{_STAGING_ROOT}/lexd-lsp"); got {dest!r} — staging is bounded to '
+                f"the shipped-bundle dir so it can never touch the checkout root, "
+                f".git, or the env"
             )
         entries.append(
             StageEntry(
                 package=package,
                 source=str(PurePosixPath(src)),
-                dest=dest_norm,
+                dest=str(PurePosixPath(dest)),
             )
         )
     return tuple(entries)
@@ -1471,9 +1473,12 @@ def load_stage(cfg: dict) -> tuple[StageEntry, ...]:
     consumer, or shipit itself) has no copy list. Malformed shapes raise
     :class:`ConfigError` naming the offending entry (construction is validation,
     ADR-0030). The per-package section key doubles as the conda package name. Two
-    packages declaring the SAME dest is refused loudly: staging them in sequence
-    would silently clobber the earlier copy, dropping a file from the shipped
-    bundle — a consumer mistake, not an intent.
+    dests that OVERLAP — identical, or one an ancestor of the other
+    (``resources/tool`` vs ``resources/tool/plugin``) — are refused loudly: because
+    each stage removes its dest subtree before copying (idempotent re-run), an
+    ancestor stage would ``rmtree`` a sibling's already-staged descendant, silently
+    dropping it from the bundle. Requiring the dest space to be DISJOINT removes the
+    clobber class, not just the exact-match instance.
     """
     section = cfg.get("stage", {})
     if not isinstance(section, dict):
@@ -1484,14 +1489,22 @@ def load_stage(cfg: dict) -> tuple[StageEntry, ...]:
     seen_dest: dict[str, str] = {}
     for package, table in section.items():
         for entry in _parse_stage_table(str(package), table):
-            if entry.dest in seen_dest:
-                raise ConfigError(
-                    f"[stage] duplicate destination {entry.dest!r}: declared by both "
-                    f"[stage.{seen_dest[entry.dest]}] and [stage.{entry.package}] — "
-                    f"two packages staging to the same dest would silently clobber "
-                    f"each other, dropping a file from the bundle; give each a "
-                    f"distinct destination"
-                )
+            dest_path = PurePosixPath(entry.dest)
+            for seen, seen_pkg in seen_dest.items():
+                seen_path = PurePosixPath(seen)
+                if dest_path.is_relative_to(seen_path) or seen_path.is_relative_to(
+                    dest_path
+                ):
+                    kind = "duplicate" if entry.dest == seen else "overlapping"
+                    raise ConfigError(
+                        f"[stage] {kind} destination {entry.dest!r} (from "
+                        f"[stage.{entry.package}]) and {seen!r} (from "
+                        f"[stage.{seen_pkg}]) — destinations must be DISJOINT, since "
+                        f"the idempotent re-run rmtrees each dest subtree and an "
+                        f"ancestor stage would silently drop a sibling's staged "
+                        f"files from the bundle; give each a distinct, "
+                        f"non-nested destination"
+                    )
             seen_dest[entry.dest] = entry.package
             entries.append(entry)
     return tuple(entries)

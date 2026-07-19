@@ -8,7 +8,7 @@ bundler (electron-builder, vsce, …) ships them. This step is that copy.
 
 The manifest is the `.shipit.toml` `[stage]` map. Each `[stage.<pkg>]` table names
 a conda package and maps a source path IN THE ENV PREFIX to a destination UNDER
-the checkout:
+the staging root `resources/` (the shipped-bundle dir):
 
     [stage.lexd-lsp]
     "bin/lexd-lsp" = "resources/lexd-lsp"          # a tool binary
@@ -23,9 +23,11 @@ tool binary stays executable in the shipped bundle. The copy is durable and
 idempotent — re-running replaces a prior stage rather than refusing it.
 
 This step COPIES an already-resolved env; it never fetches. A source that is not
-materialized in the prefix is a hard error pointing at `shipit install`, and a
-destination that would escape the checkout (an absolute/`..` path, or a symlinked
-parent) is refused. It is deliberately separate from the release-time, transient
+materialized in the prefix is a hard error pointing at `shipit install`. Staging is
+bounded to the shipped-bundle dir: every destination must be a strict descendant of
+`resources/`, so it can never touch the checkout root, `.git`, or the env — and a
+source symlink that resolves outside the env prefix, or two destinations that
+overlap, are refused. It is deliberately separate from the release-time, transient
 vsix `bundle.stage` map: the two share only the env-prefix resolver and the
 checkout-escape guard.
 

@@ -183,51 +183,44 @@ def test_symlinked_parent_escape_is_refused_and_touches_nothing(tmp_path):
 
 
 # --------------------------------------------------------------------------
-# Data-loss defenses — a dest that would wipe the checkout or repo-critical dirs
+# Bounded destination — the data-loss class is unexpressible by construction
 # --------------------------------------------------------------------------
+#
+# Every dest must resolve to a STRICT DESCENDANT of the staging root
+# `<root>/resources`. `.`, the checkout root, `.git`/`.Git`, `.pixi` are all
+# outside the staging root, so none of them can drive an rmtree — the class is
+# closed by the one rule, not a per-name denylist.
 
 
-def test_dest_of_dot_refuses_and_never_rmtrees_the_checkout(tmp_path):
-    # `dest = "."` makes dst == root; the pre-fix code would `shutil.rmtree(root)`
-    # and delete .git + all work. The guard must refuse LOUDLY, touching nothing.
+@pytest.mark.parametrize("dest", [".", ".git/HEAD", ".Git/HEAD", ".pixi/envs", "x"])
+def test_dest_outside_the_staging_root_is_refused_and_touches_nothing(tmp_path, dest):
+    # A domain-level StageEntry bypasses the parse guard; the RUNTIME bound (compared
+    # on resolved absolute paths, so the `.Git` case-alias cannot slip past) must
+    # refuse each and leave the sentinels untouched. `.Git` aliases `.git` only on a
+    # case-insensitive fs, but is rejected everywhere because it is not under
+    # resources/ regardless.
     prefix = _prefix(tmp_path)
     _plant(prefix / "bin" / "lexd-lsp", "x", mode=0o755)
     sentinel = tmp_path / "PRECIOUS.txt"
     sentinel.write_text("do not delete me", encoding="utf-8")
+    gitdir = tmp_path / ".git"
+    gitdir.mkdir()
+    (gitdir / "HEAD").write_text("ref: refs/heads/main", encoding="utf-8")
 
-    with pytest.raises(staging.StagingError, match="checkout root"):
-        staging.stage(tmp_path, [config.StageEntry("lexd-lsp", "bin/lexd-lsp", ".")])
+    with pytest.raises(staging.StagingError, match="staging root"):
+        staging.stage(tmp_path, [config.StageEntry("lexd-lsp", "bin/lexd-lsp", dest)])
     assert sentinel.read_text(encoding="utf-8") == "do not delete me"
+    assert (gitdir / "HEAD").read_text(encoding="utf-8") == "ref: refs/heads/main"
 
 
-@pytest.mark.parametrize("protected", [".git", ".pixi"])
-def test_dest_into_a_repo_critical_dir_refuses_and_touches_nothing(tmp_path, protected):
+def test_dest_equal_to_the_staging_root_itself_is_refused(tmp_path):
+    # The staging root is not a STRICT descendant of itself — `dest = "resources"`
+    # would rmtree the whole bundle dir; refuse it.
     prefix = _prefix(tmp_path)
     _plant(prefix / "bin" / "lexd-lsp", "x", mode=0o755)
-    keep = tmp_path / protected / "KEEP"
-    keep.parent.mkdir(parents=True, exist_ok=True)
-    keep.write_text("keep", encoding="utf-8")
-
-    with pytest.raises(staging.StagingError, match="repo-critical"):
+    with pytest.raises(staging.StagingError, match="strict descendant"):
         staging.stage(
-            tmp_path,
-            [config.StageEntry("lexd-lsp", "bin/lexd-lsp", f"{protected}/lexd-lsp")],
-        )
-    assert keep.read_text(encoding="utf-8") == "keep"
-
-
-def test_symlinked_dest_onto_root_is_refused(tmp_path):
-    # A committed `resources` symlink pointing AT the checkout root resolves dst
-    # onto root; the resolved-path root guard must catch it, not just the lexical
-    # parse guard (which sees a clean relative dest).
-    prefix = _prefix(tmp_path)
-    _plant(prefix / "bin" / "lexd-lsp", "x", mode=0o755)
-    (tmp_path / "resources").symlink_to(tmp_path, target_is_directory=True)
-
-    with pytest.raises(staging.StagingError, match="checkout root"):
-        staging.stage(
-            tmp_path,
-            [config.StageEntry("lexd-lsp", "bin/lexd-lsp", "resources")],
+            tmp_path, [config.StageEntry("lexd-lsp", "bin/lexd-lsp", "resources")]
         )
 
 
@@ -249,7 +242,7 @@ def test_file_source_refuses_to_overwrite_an_existing_directory_dest(tmp_path):
 
 
 # --------------------------------------------------------------------------
-# Source symlink escape — a package-planted link that leaves the prefix
+# Source symlink escape — the scan and the copy are ONE traversal
 # --------------------------------------------------------------------------
 
 
@@ -275,8 +268,8 @@ def test_nested_directory_source_symlink_escaping_the_prefix_is_refused(tmp_path
     (outside / "loot.txt").write_text("LOOT", encoding="utf-8")
     tree = prefix / "share" / "pkg" / "data"
     _plant(tree / "real.txt", "real")
-    # A symlink INSIDE the staged directory tree points outside the prefix;
-    # copytree would dereference it and copy host files into the bundle.
+    # A symlink INSIDE the staged directory tree points outside the prefix; the
+    # unified copy resolves+checks it in the same pass that would copy it.
     (tree / "escape").symlink_to(outside, target_is_directory=True)
 
     with pytest.raises(staging.StagingError, match="outside the env prefix"):
@@ -285,6 +278,86 @@ def test_nested_directory_source_symlink_escaping_the_prefix_is_refused(tmp_path
             [config.StageEntry("pkg", "share/pkg/data", "resources/data")],
         )
     assert not (tmp_path / "resources" / "data").exists()
+
+
+def test_escape_hidden_behind_a_good_directory_symlink_is_refused(tmp_path):
+    # The round-2 divergence case: `data/good` is an IN-prefix directory symlink
+    # (a separate os.walk pre-scan would accept it and NOT descend), but its target
+    # contains `escape -> /outside`. Because scan and copy are the SAME recursive
+    # traversal that follows in-prefix directory symlinks, the hidden escape is
+    # caught — not copied in behind copytree's back.
+    prefix = _prefix(tmp_path)
+    outside = tmp_path.parent / "outside-loot"
+    outside.mkdir(exist_ok=True)
+    (outside / "loot.txt").write_text("LOOT", encoding="utf-8")
+    tree = prefix / "share" / "pkg" / "data"
+    _plant(tree / "real.txt", "real")
+    # An in-prefix directory the good symlink points to, holding the real escape.
+    target = prefix / "share" / "pkg" / "other"
+    _plant(target / "ok.txt", "ok")
+    (target / "escape").symlink_to(outside, target_is_directory=True)
+    (tree / "good").symlink_to(target, target_is_directory=True)
+
+    with pytest.raises(staging.StagingError, match="outside the env prefix"):
+        staging.stage(
+            tmp_path,
+            [config.StageEntry("pkg", "share/pkg/data", "resources/data")],
+        )
+    assert not (tmp_path / "resources" / "data").exists()
+
+
+def test_in_prefix_directory_symlink_is_followed_and_copied(tmp_path):
+    # A GOOD in-prefix directory symlink is dereferenced and its contents copied —
+    # the containment check accepts it, so the bundle is self-contained.
+    prefix = _prefix(tmp_path)
+    tree = prefix / "share" / "pkg" / "data"
+    _plant(tree / "real.txt", "real")
+    target = prefix / "share" / "pkg" / "other"
+    _plant(target / "ok.txt", "ok")
+    (tree / "linked").symlink_to(target, target_is_directory=True)
+
+    (result,) = staging.stage(
+        tmp_path,
+        [config.StageEntry("pkg", "share/pkg/data", "resources/data")],
+    )
+
+    assert (tmp_path / "resources" / "data" / "real.txt").read_text() == "real"
+    assert (tmp_path / "resources" / "data" / "linked" / "ok.txt").read_text() == "ok"
+    assert result.is_dir is True
+
+
+def test_symlink_cycle_in_the_source_tree_terminates(tmp_path):
+    # A directory symlink that points back to an ancestor (a cycle) must not loop
+    # forever: the visited-set of resolved dirs stops it, and the copy completes.
+    prefix = _prefix(tmp_path)
+    tree = prefix / "share" / "pkg" / "data"
+    _plant(tree / "real.txt", "real")
+    (tree / "loop").symlink_to(tree, target_is_directory=True)
+
+    (result,) = staging.stage(
+        tmp_path,
+        [config.StageEntry("pkg", "share/pkg/data", "resources/data")],
+    )
+
+    assert (tmp_path / "resources" / "data" / "real.txt").read_text() == "real"
+    assert result.is_dir is True
+
+
+def test_directory_tree_preserves_per_file_exec_bit(tmp_path):
+    # The exec-bit reassertion is applied UNIFORMLY per copied file, so a runnable
+    # binary nested inside a staged directory keeps its +x (not only a lone-file
+    # entry) — the inconsistency the round-2 minor flagged, resolved structurally.
+    prefix = _prefix(tmp_path)
+    tree = prefix / "share" / "pkg" / "tools"
+    _plant(tree / "runme", "#!/bin/sh\n", mode=0o755)
+    _plant(tree / "data.json", "{}", mode=0o644)
+
+    staging.stage(
+        tmp_path, [config.StageEntry("pkg", "share/pkg/tools", "resources/tools")]
+    )
+
+    assert (tmp_path / "resources" / "tools" / "runme").stat().st_mode & 0o111
+    assert not (tmp_path / "resources" / "tools" / "data.json").stat().st_mode & 0o111
 
 
 # --------------------------------------------------------------------------

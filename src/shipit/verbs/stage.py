@@ -39,13 +39,13 @@ def cmd(path: str | None, feature: str | None) -> None:
 
     PATH defaults to the current directory. For each `[stage.<pkg>]` entry —
     a source-in-prefix path (`bin/<tool>` for a tool, `share/<pkg>/…` for a data
-    artifact) mapped to a dest under the checkout (`resources/…`) — this copies
+    artifact) mapped to a dest under the staging root `resources/…` — this copies
     the file or directory pixi already extracted into `<PATH>/.pixi/envs/<env>`.
     Run it AFTER `shipit install`/`pixi install` has resolved the deps; a source
     that is not materialized is a hard error pointing at install (the step copies,
     it never fetches). A tool binary keeps its executable bit. Exit: 0 on success
-    (an empty `[stage]` map is a clean no-op), 1 on a missing source or an escaping
-    destination, 2 usage.
+    (an empty `[stage]` map is a clean no-op), 1 on a missing source, a source that
+    escapes the prefix, or a dest outside the staging root, 2 usage.
     """
     raise SystemExit(run(path, feature=feature))
 
