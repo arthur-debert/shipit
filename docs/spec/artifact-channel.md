@@ -2,7 +2,7 @@
 
 > **Superseded** for the cross-repo-artifact design by
 > [ADR-0077](../adr/0077-collapse-to-conda-direct.md) and
-> [`docs/spec/conda-direct.md`](conda-direct.md): the cross-repo artifact system
+> [`conda-direct.md`](conda-direct.md): the cross-repo artifact system
 > collapses to **conda-direct** — pin governance moves off shipit onto
 > pixi + a generic bump bot, and the managed block is retained only for the
 > `lexd` lint-tool. The accreted parts of this spec no longer describe the

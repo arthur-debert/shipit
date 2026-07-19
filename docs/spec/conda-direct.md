@@ -14,8 +14,9 @@ The one axis that has **never** drifted is the channel *location* — the only f
 ## 2. Target model (conda-direct)
 
 - **Producer** packages its build output **directly** as a `.conda` and publishes it to the channel (`rattler-build` — one command). One name, carried *in* the package.
-- **Consumer** writes a **normal conda dependency** (`channels = [...]` + `pkg = "ver"`) in `pixi.toml`. `pixi lock` resolves, pins, sha256-verifies. **The resolver is the agreement** — a wrong name/version fails locally, before any release.
-- **Channel** = a GCS bucket (authless-read, per-producer-repo layout) holding both the `.conda` files and the `repodata.json` index. Necessary infrastructure; it exists and works.
+- **Consumer** declares a **minimal producer-repo reference** — `[artifact-deps.<pkg>] { repo = "owner/name" }` — from which shipit *derives and projects* a managed `channels = [...]` + (private-tier) `[s3-options]` block. The **channel URL stays derived, never restated.** The **version** is then a **normal consumer-owned conda dependency** (`[dependencies] <pkg> = "ver"`), pinned by `pixi.lock`. `pixi lock` resolves, pins, sha256-verifies. **The resolver is the agreement** — a wrong name/version fails locally, before any release.
+- The consumer contract is therefore split by ownership: **location is derived** (shipit projects channel/`[s3-options]` from the one `repo` input — the only fact that never drifts); **version is consumer-owned** (a plain pinned dep, bumped by `pixi update`/a bot). No pin lives in a shipit-managed block.
+- **Channel** = a GCS bucket (per-producer-repo layout) holding both the `.conda` files and the `repodata.json` index. Per ADR-0065's two tiers: a **public** bucket (authless-read) and a **private** bucket (creds-accessed via `[s3-options]`). Necessary infrastructure; it exists and works.
 - **Staging** (only for app-type consumers): after conda extracts into the env prefix, a tiny generic file-copy moves the embedded files into the app's shipped bundle (`resources/`). Tools used from the env (e.g. `lexd`) need nothing.
 
 ## 3. Decision (the one fork)
@@ -34,7 +35,7 @@ The `[artifact-deps]` DSL, the managed-block pin ownership, and Cascade are **on
 | --- | --- |
 | `rattler-build` build → publish → index `.conda` to the channel | The irreducible producer (incl. the load-bearing `binary_relocation: false` / no-relink insight) |
 | conda as one row in the release fan-out | "release once → gh-release + npm + conda" is a genuine need |
-| tier→URL glue (`public→https`, `private→s3 + [s3-options]`) | ~30 lines pixi genuinely can't derive |
+| tier→URL glue (`public→https`, `private→s3 + [s3-options]`), **derived from a minimal `[artifact-deps.<pkg>] { repo }` input** and projected into a managed `channels`/`[s3-options]` block | ~30 lines pixi genuinely can't derive; keeps the URL derived, never restated |
 | two-tier bucket provisioning (`store_provision`) | authless-public / private-creds is a real access model |
 | RC-guard + `--endpoint` selector | protects the *other* endpoints from co-firing on a conda seed |
 
@@ -43,7 +44,7 @@ The `[artifact-deps]` DSL, the managed-block pin ownership, and Cascade are **on
 | Layer | Replace with |
 | --- | --- |
 | gh-release → conda **repackage hop** (re-downloads its own asset, reverse-engineers the filename) | Package the build output **directly** as a first-class `.conda` |
-| `[artifact-deps]` **DSL** | A plain conda dep + channel in `pixi.toml` (keep the tier-URL helper) |
+| the **pin-governance** half of `[artifact-deps]` (version ownership inside the managed block) | move the **version** to a normal consumer-owned conda dep (`pixi.lock` pins it; a bot bumps it). The declaration **shrinks to `{ repo }`** — its channel-derivation input, which stays (see kernel above) |
 | managed-block/hash **ownership over pins** | `pixi.lock` (already pins + verifies) — *except* the `lexd` lint-tool carve-out |
 | **Cascade** (a bespoke Renovate) | `pixi update` / a generic update bot |
 | readiness-gate / served-subdir / pause **bookkeeping** | `pixi lock` — a missing subdir is a failed resolve (fail-closed, which is what the win-64 pause wants anyway) |
@@ -70,7 +71,7 @@ Reference table (stable — changes only when an artifact or consumer is added/r
 - **ADR-0067** — supersede (Cascade removed).
 - **ADR-0070/0071** — the selector/RC-guard survive (they protect the fan-out); the readiness-gate/served-subdir bookkeeping is superseded by resolve-time availability.
 - **ADR-0065** — unchanged (two-tier buckets).
-- **ARF02:** #1078 stays (build the grammar `.conda` directly — now simpler); #1079 stays (staging copy — simpler, generic); **#1087 dropped** (`channel verify` is itself accretion — `pixi lock` is the verify); #999/#1059 re-scoped to this PRD.
+- **ARF02:** #1078 stays (build the grammar `.conda` directly — now simpler); #1079 stays (staging copy — simpler, generic); **#1087 dropped** (`channel verify` is itself accretion — `pixi lock` is the verify); #999/#1059 re-scoped to this spec.
 
 ## 8. Definition of done
 
@@ -79,7 +80,7 @@ Every step is verified by a **real local run** (a real `.conda`, a real `pixi lo
 ## 9. Task list (for the epic issue)
 
 1. Producer: package build output directly as `.conda`; delete the gh-release→conda hop + asset-name reverse-engineering.
-2. Consumer: replace `[artifact-deps]` with a plain conda dep + channel; keep the tier-URL helper.
+2. Consumer: shrink `[artifact-deps.<pkg>]` to its `{ repo }` channel-derivation input (shipit keeps projecting the managed `channels`/`[s3-options]` block — URL stays derived); move the **version** out to a normal consumer-owned conda dependency pinned by `pixi.lock`.
 3. Remove Cascade; adopt `pixi update` / a generic bump bot.
 4. Remove the readiness-gate/served-subdir bookkeeping; `pixi lock` is the availability oracle.
 5. Retain the managed block **only** for the `lexd` lint-tool uniformity; drop it for artifact consumption.

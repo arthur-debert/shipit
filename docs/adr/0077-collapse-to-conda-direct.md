@@ -18,10 +18,15 @@ Collapse the cross-repo artifact system to **conda-direct**:
 - The producer packages its build output **directly** into a `.conda` and
   publishes it to the channel (`rattler-build`), instead of round-tripping
   through a gh-release asset it then re-downloads and reverse-engineers.
-- The consumer declares a **normal conda dependency** (`channels = [...]` + a
-  versioned `[dependencies]` line) in `pixi.toml`. `pixi lock` resolves, pins
-  and sha256-verifies it. **The resolver is the agreement** — a wrong
-  name/version fails at lock time, locally, before any release.
+- The consumer's contract splits by ownership. **Location is derived:** a
+  minimal `[artifact-deps.<pkg>] { repo = "owner/name" }` reference is the sole
+  input from which shipit projects a managed `channels` (+ private-tier
+  `[s3-options]`) block — the channel URL is never restated. **Version is
+  consumer-owned:** a plain pinned `[dependencies] <pkg> = "ver"` line, recorded
+  by `pixi.lock`, bumped by `pixi update` / a generic bot. No pin lives in a
+  shipit-managed block. `pixi lock` resolves, pins and sha256-verifies — **the
+  resolver is the agreement**, and a wrong name/version fails at lock time,
+  locally, before any release.
 - The channel (a GCS bucket holding the `.conda` files and `repodata.json`) and
   the two-tier access model (ADR-0065) are unchanged: they are the necessary
   kernel.
@@ -50,15 +55,18 @@ bucket provisioning; the RC guard and `--endpoint` selector (which protect the
 
 **Accretion — removed:** the gh-release→conda repackage hop and its
 per-composition asset-name reverse-engineering (package the build output
-directly); the `[artifact-deps]` DSL (write a plain conda dep); the managed-block
-pin ownership (pixi.lock already pins/verifies — except the `lexd` carve-out);
+directly); the **pin-governance** half of `[artifact-deps]` — the declaration
+shrinks to its `{ repo }` channel-derivation input (kept above), while the
+version becomes a plain consumer-owned dep; the managed-block pin ownership
+(pixi.lock already pins/verifies — except the `lexd` carve-out);
 Cascade (use `pixi update` / a generic bot); the readiness-gate / served-subdir /
 pause bookkeeping (a missing subdir is a failed `pixi lock` — fail-closed, which
 is what the win-64 pause wants anyway).
 
 ## Consequences
 
-- **Supersedes** the `[artifact-deps]` DSL and the derived-after-gh-release
+- **Supersedes** the pin-governance half of `[artifact-deps]` (the block shrinks
+  to its `{ repo }` channel-derivation input) and the derived-after-gh-release
   requirement of **ADR-0064**; **supersedes ADR-0067** (Cascade removed);
   supersedes the readiness-gate/served-subdir bookkeeping of **ADR-0070/0071**
   (their RC-guard/selector survive to protect the fan-out). **ADR-0065**
@@ -74,4 +82,4 @@ is what the win-64 pause wants anyway).
   local and independently verifiable — which is why it converges instead of
   spiralling.
 - The full design, dimensions, reference-table shape (structure, never state),
-  and task list live in `docs/spec/conda-direct.md`.
+  and task list live in [`docs/spec/conda-direct.md`](../spec/conda-direct.md).
