@@ -73,7 +73,13 @@ switch), one adapter per name of :data:`shipit.config.ENDPOINTS`:
   NOT ``stable_only`` (prereleases publish for manual pin-testing, ADR-0064),
   but it IS external, so a ``-release-rc`` live-fire rehearsal stays
   gh-release-only. Idempotent-resumable via ``--force`` (a re-run re-uploads
-  and re-indexes; already-published converges, ADR-0009 phase 2).
+  and re-indexes; already-published converges, ADR-0009 phase 2). A cross-repo
+  DATA artifact (the ``tarball`` composition — one platform-independent archive,
+  no triple) takes the additive NOARCH mode (ADR-0076,
+  :func:`_publish_conda_noarch`): ONE ``noarch: generic`` ``.conda`` published
+  to the channel's ``noarch/`` subdir, which every conda client reads alongside
+  its platform subdir (no consumer change). The per-platform triple→subdir path
+  (:data:`CONDA_SUBDIRS`) is untouched — the two modes are additive.
 - **zed** (a *derived*, stable-only endpoint, TOL03-WS02 #973, ADR-0068) — the
   Zed-extension registry endpoint. A Zed extension "publishes" only when a PR
   into the foreign, review-gated ``zed-industries/extensions`` monorepo (bump
@@ -248,6 +254,13 @@ CONDA_SUBDIRS: dict[str, str] = {
 #: provisioner never made).
 PUBLIC_ARTIFACT_BUCKET = buckets.PUBLIC_ARTIFACT_BUCKET
 PRIVATE_ARTIFACT_BUCKET = buckets.PRIVATE_ARTIFACT_BUCKET
+
+#: The single platform-independent subdir the conda endpoint's NOARCH MODE
+#: (ADR-0076) publishes a cross-repo DATA artifact to — re-exports the ONE source
+#: of truth (:data:`shipit.channel.buckets.NOARCH_SUBDIR`). A ``noarch: generic``
+#: ``.conda`` lands under ``<channel>/noarch/`` and every conda client reads it
+#: alongside the platform subdir it resolves, so no consumer change is needed.
+NOARCH_SUBDIR = buckets.NOARCH_SUBDIR
 
 #: The GCS S3-interop endpoint + region (ADR-0065 — ``region = "auto"`` and the
 #: global ``storage.googleapis.com`` endpoint are load-bearing for GCS
@@ -1494,6 +1507,26 @@ CONDA_ASSET_EXTS: tuple[str, ...] = (".tar.gz", ".zip")
 #: error instead of an actionable config fix.
 _CONDA_PACKAGE_NAME_RE = re.compile(r"[a-z0-9._-]+")
 
+#: The bundle composition that makes a conda artifact NOARCH-eligible (ADR-0076):
+#: ``tarball`` produces ONE platform-independent archive (``<artifact>.tar.gz``,
+#: no ``-<triple>`` suffix — the tree-sitter grammar's shape,
+#: :func:`shipit.release.bundle._compose_tarball`). The eligibility criterion is
+#: "one arch-independent archive to repackage," NOT an empty ``platforms`` list
+#: (``platforms = ()`` means the default linux lane, not platform-independence —
+#: ADR-0076): a data artifact declares the ``tarball`` composition, so the
+#: composition name is the witness, read off :attr:`config.Artifact.bundle`.
+NOARCH_COMPOSITION = "tarball"
+
+#: Where the noarch build script installs a DATA artifact's files under
+#: ``$PREFIX`` (ADR-0076: "a data artifact installs its files into the env").
+#: A tool artifact puts a binary on PATH (``bin``/``Scripts``,
+#: :func:`_conda_binary_layout`); a data artifact has no binary, so its whole
+#: payload lands under ``$PREFIX/share/<package>/`` — the conventional conda home
+#: for arch-independent shared data, namespaced by package so two noarch data
+#: artifacts in one env never collide. A later ``#1059`` leg stages these files
+#: into each editor consumer's bundle; this WS only publishes them there.
+CONDA_NOARCH_INSTALL_DIR = "share"
+
 
 def conda_subdir(triple: str) -> str | None:
     """The conda subdir for a release target ``triple``, or ``None`` when the
@@ -1640,6 +1673,216 @@ def render_conda_recipe(
     )
 
 
+def conda_noarch_eligible(artifact: config.Artifact) -> bool:
+    """Whether ``artifact``'s conda endpoint runs in NOARCH mode (ADR-0076). Pure.
+
+    True iff the artifact's bundle composition is the ``tarball`` composition
+    (:data:`NOARCH_COMPOSITION`) — the ONE that produces a single
+    platform-independent archive (``<artifact>.tar.gz``, the tree-sitter grammar
+    shape). That single arch-independent archive is the eligibility criterion,
+    NOT an empty ``platforms`` list (``platforms = ()`` is the default linux
+    lane, not platform-independence — ADR-0076), so this reads the composition
+    name off the bundle, never the platform set. A per-platform TOOL artifact
+    (any other composition, or none) stays on the existing triple→subdir path —
+    the two modes are additive.
+    """
+    bundle = artifact.bundle
+    return bundle is not None and bundle.composition == NOARCH_COMPOSITION
+
+
+def conda_noarch_asset(artifact_name: str, names: Sequence[str]) -> str | None:
+    """The single platform-independent archive a NOARCH artifact repackages, or
+    ``None`` when the staged tree carries none. Pure.
+
+    The ``tarball`` composition stages exactly ONE ``<artifact>.tar.gz`` with NO
+    ``-<triple>`` suffix (:func:`shipit.release.bundle._compose_tarball`), so the
+    noarch asset is the bare ``<artifact_name>.tar.gz`` — matched by its KNOWN
+    name (the release-stage convention, never a scrape; ADR-0064). A staged tree
+    without it (the composition never ran) is ``None``, which the adapter turns
+    into a loud refusal rather than a silent empty publish.
+    """
+    want = f"{artifact_name}.tar.gz"
+    return want if want in names else None
+
+
+def render_conda_noarch_recipe(
+    *,
+    package: str,
+    version: str,
+    archive_path: str,
+    install_dir: str,
+) -> str:
+    """The ``rattler-build`` recipe.yaml that repackages ONE platform-independent
+    DATA archive into a ``noarch: generic`` ``.conda`` (ADR-0076). Pure text
+    (the render-vs-effect split brew/the per-platform recipe use).
+
+    rattler-build extracts the local ``archive_path`` source into a
+    ``payload/`` subdir (``source.target_directory``), then the build script
+    (run once on the host — a noarch package is built one time and read on every
+    platform) copies that payload's CONTENTS into
+    ``$PREFIX/<install_dir>/<package>/``. Unlike the per-platform tool recipe
+    (:func:`render_conda_recipe`), a data artifact has no binary to place on
+    PATH: it installs its FILES into the env (ADR-0064), so the whole tree is
+    copied verbatim under a package-namespaced dir.
+
+    The extraction target MATTERS: rattler-build writes its own build scaffolding
+    (``conda_build.sh``, ``build_env.sh``, ``.source_info.json``, …) into the
+    work ROOT, so a ``cp -R .`` from there would sweep that scaffolding INTO the
+    package. Extracting under ``payload/`` and copying ``payload/.`` keeps the
+    package to the archive's own bytes. The ``tarball`` composition's archive has
+    MULTIPLE top-level entries (``src/``, ``queries/``, … — a
+    ``tar -C <leg> <entries…>``, not a single-dir wrap), so rattler-build strips
+    no top-level dir and the whole grammar tree lands intact under ``payload/``.
+
+    ``build.number`` is 0 (the tag version is the sole ordering axis, ADR-0041).
+    ``build.noarch: generic`` is what makes rattler-build emit a noarch package
+    to the ``noarch/`` subdir — it also FORBIDS a ``--target-platform noarch``
+    build flag ("that should be defined in the recipe"), so the noarch build is
+    driven off the recipe alone (:func:`_publish_conda_noarch`). NO
+    ``dynamic_linking`` block (unlike the tool recipe): a noarch package carries
+    no binary, so there is nothing to relink. ``archive_path`` is emitted through
+    ``json.dumps`` — a JSON string IS a valid YAML 1.2 double-quoted scalar, so
+    spaces / ``#`` / embedded ``"``\\ / ``\\`` are escaped rather than breaking
+    the recipe or silently re-pointing the source (the same escaping the tool
+    recipe uses).
+    """
+    return (
+        f"package:\n"
+        f"  name: {package}\n"
+        f'  version: "{version}"\n'
+        f"\n"
+        f"source:\n"
+        f"  - path: {json.dumps(archive_path)}\n"
+        f"    target_directory: payload\n"
+        f"\n"
+        f"build:\n"
+        f"  number: 0\n"
+        f"  noarch: generic\n"
+        f"  script:\n"
+        f'    - mkdir -p "${{PREFIX}}/{install_dir}/{package}"\n'
+        f'    - cp -R payload/. "${{PREFIX}}/{install_dir}/{package}"\n'
+    )
+
+
+def _conda_channel_env(key_id: str, secret_key: str) -> dict[str, str]:
+    """The rattler-build S3 child env for a channel push — the fixed GCS-interop
+    endpoint/region plus the write HMAC pair (:data:`CONDA_S3_*_ENV`). The pair
+    rides the ENV (merged over the process env by the Exec runner), never argv,
+    so the HMAC secret is never recorded in an Exec argv line."""
+    return {
+        CONDA_S3_ENDPOINT_ENV: CONDA_S3_ENDPOINT,
+        CONDA_S3_REGION_ENV: CONDA_S3_REGION,
+        CONDA_S3_KEY_ID_ENV: key_id,
+        CONDA_S3_SECRET_KEY_ENV: secret_key,
+    }
+
+
+def _conda_channel_url(req: PublishRequest) -> str:
+    """The per-repo channel URL a publish writes to — ``s3://<bucket>/<repo>``,
+    the bucket DERIVED from the producing repo's visibility (ADR-0065): a private
+    repo → the private bucket, a public one → the public bucket. Both writes ride
+    the SAME S3-interop rail + HMAC pair (a public-read bucket is still
+    write-protected); the tier only picks the bucket."""
+    private = bool(req.ghio.repo_is_private(req.repo))
+    bucket = PRIVATE_ARTIFACT_BUCKET if private else PUBLIC_ARTIFACT_BUCKET
+    return f"s3://{bucket}/{req.repo}"
+
+
+def _publish_conda_noarch(
+    req: PublishRequest, *, key_id: str, secret_key: str, package: str
+) -> Published:
+    """Repackage the single platform-independent archive into ONE
+    ``noarch: generic`` ``.conda`` and push+reindex it to the producing repo's
+    ``noarch/`` subdir (ADR-0076). See the module docstring's conda entry.
+
+    A DATA artifact has no target triple, so there is no per-subdir fan-out: one
+    ``rattler-build build`` renders the noarch recipe into a local channel tree
+    (the ``noarch: generic`` in the recipe drives the noarch output — rattler-
+    build REFUSES a ``--target-platform noarch`` flag, "that should be defined in
+    the recipe"), then one ``rattler-build publish`` uploads AND reindexes
+    ``noarch/repodata.json`` on the remote S3 channel — the SAME upload+reindex
+    step the per-platform path uses, so ``noarch/`` is written and merged with no
+    special store code. Idempotent-resumable via ``--force`` (ADR-0009 phase 2).
+    """
+    asset_name = conda_noarch_asset(req.artifact.name, release_assets(req.assets_dir))
+    if asset_name is None:
+        raise ReleaseError(
+            f"[artifacts.{req.artifact.name}] conda (noarch): no "
+            f"`{req.artifact.name}.tar.gz` under {req.assets_dir} — the `tarball` "
+            f"composition stages the one platform-independent archive the noarch "
+            f"mode repackages; run `shipit release bundle` first"
+        )
+    # Namespace the scratch trees by artifact (as the per-platform path does):
+    # `assets_dir` is the stage-wide bundle tree, so an un-namespaced channel
+    # tree would let a second conda artifact's post-build glob pick up this one's
+    # `.conda`.
+    recipe_dir = (
+        req.assets_dir / CONDA_RECIPE_SCRATCH / req.artifact.name / NOARCH_SUBDIR
+    )
+    channel_dir = req.assets_dir / CONDA_CHANNEL_SCRATCH / req.artifact.name
+    recipe_dir.mkdir(parents=True, exist_ok=True)
+    recipe = recipe_dir / "recipe.yaml"
+    recipe.write_text(
+        render_conda_noarch_recipe(
+            package=package,
+            version=req.version,
+            archive_path=(req.assets_dir / asset_name).as_posix(),
+            install_dir=CONDA_NOARCH_INSTALL_DIR,
+        ),
+        encoding="utf-8",
+        newline="\n",
+    )
+    req.run_cmd(
+        [
+            "rattler-build",
+            "build",
+            "--recipe",
+            str(recipe),
+            # NO `--target-platform noarch`: rattler-build refuses it ("that
+            # should be defined in the recipe") — `build.noarch: generic` in the
+            # rendered recipe is what routes the package to `noarch/`.
+            "--output-dir",
+            str(channel_dir),
+            "--package-format",
+            "conda",
+            "--no-build-id",
+            # A noarch package has no per-OS test binary; there is nothing to run.
+            "--test",
+            "native",
+        ],
+        req.root,
+        None,
+    )
+    built = sorted((channel_dir / NOARCH_SUBDIR).glob("*.conda"))
+    if not built:  # pragma: no cover — a successful build always writes a .conda
+        raise ReleaseError(
+            f"[artifacts.{req.artifact.name}] conda (noarch): rattler-build "
+            f"produced no `.conda` under {channel_dir / NOARCH_SUBDIR} — the "
+            f"build recorded success but emitted no package"
+        )
+    channel_url = _conda_channel_url(req)
+    req.run_cmd(
+        [
+            "rattler-build",
+            "publish",
+            "--to",
+            channel_url,
+            "--force",
+            *[str(path) for path in built],
+        ],
+        req.root,
+        _conda_channel_env(key_id, secret_key),
+    )
+    return Published(
+        req.artifact.name,
+        "conda",
+        (
+            f"built {len(built)} noarch package(s) from {asset_name}",
+            f"published {len(built)} package(s) to {channel_url}/noarch (+ reindex)",
+        ),
+    )
+
+
 def _publish_conda(req: PublishRequest) -> Published:
     """Repackage the final release archives into ``.conda`` packages and
     push+reindex them to the producing repo's per-repo Artifact channel. See
@@ -1669,6 +1912,15 @@ def _publish_conda(req: PublishRequest) -> Published:
         )
     key_id = _require_token(req, "conda", CONDA_KEY_ID_SECRET)
     secret_key = _require_token(req, "conda", CONDA_SECRET_KEY_SECRET)
+    package = conda_package_name(req.artifact)
+    # NOARCH mode (ADR-0076): a DATA artifact (the `tarball` composition) has one
+    # platform-independent archive and no triple, so it takes the single-package
+    # noarch path instead of the per-platform triple→subdir fan-out below. The
+    # two modes are additive — a tool artifact never reaches this branch.
+    if conda_noarch_eligible(req.artifact):
+        return _publish_conda_noarch(
+            req, key_id=key_id, secret_key=secret_key, package=package
+        )
     assets = conda_assets(req.artifact.name, release_assets(req.assets_dir))
     if not assets:
         served = ", ".join(sorted(CONDA_SUBDIRS.values()))
@@ -1679,7 +1931,6 @@ def _publish_conda(req: PublishRequest) -> Published:
             f"`{req.artifact.name}-<triple>.tar.gz`/`.zip` archives; an "
             f"unserved-only set (osx-64 / musl) publishes nothing"
         )
-    package = conda_package_name(req.artifact)
     binary = integrity_mod.expected_main_binary(req.artifact)
     # Namespace both scratch trees by artifact: `assets_dir` is the stage-wide
     # bundle tree shared by EVERY artifact in the run, so an un-namespaced
@@ -1753,20 +2004,11 @@ def _publish_conda(req: PublishRequest) -> Published:
     # the public bucket. Both writes ride the SAME S3-interop rail and HMAC
     # write pair (a public-read bucket is still write-protected) — the tier only
     # picks the bucket, so the consumer read model (authless HTTPS vs S3-interop
-    # creds, WS02/WS04) is the only place the tiers diverge.
-    private = bool(req.ghio.repo_is_private(req.repo))
-    bucket = PRIVATE_ARTIFACT_BUCKET if private else PUBLIC_ARTIFACT_BUCKET
-    channel_url = f"s3://{bucket}/{req.repo}"
-    # The endpoint/region are the fixed GCS-interop constants; the write HMAC
-    # pair rides the env (merged over the process env by the Exec runner),
-    # never argv — the keys are registered with the central redactor by the
-    # verb's token validation, so they are masked in every Exec record.
-    channel_env = {
-        CONDA_S3_ENDPOINT_ENV: CONDA_S3_ENDPOINT,
-        CONDA_S3_REGION_ENV: CONDA_S3_REGION,
-        CONDA_S3_KEY_ID_ENV: key_id,
-        CONDA_S3_SECRET_KEY_ENV: secret_key,
-    }
+    # creds, WS02/WS04) is the only place the tiers diverge. The write HMAC pair
+    # rides the env (merged over the process env by the Exec runner), never argv
+    # — the keys are registered with the central redactor by the verb's token
+    # validation, so they are masked in every Exec record.
+    channel_url = _conda_channel_url(req)
     req.run_cmd(
         [
             "rattler-build",
@@ -1777,7 +2019,7 @@ def _publish_conda(req: PublishRequest) -> Published:
             *[str(path) for path in built],
         ],
         req.root,
-        channel_env,
+        _conda_channel_env(key_id, secret_key),
     )
     actions.append(f"published {len(built)} package(s) to {channel_url} (+ reindex)")
     return Published(req.artifact.name, "conda", tuple(actions))

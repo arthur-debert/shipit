@@ -59,6 +59,14 @@ def test_served_subdirs_match_the_producers_published_subdir_set():
         "linux-aarch64",
         "win-64",
     )
+    # noarch (ADR-0076) is a DISTINCT always-present subdir a DATA artifact rides
+    # — deliberately NOT a member of the per-platform SERVED_SUBDIRS set (the
+    # producer maps triples only onto platforms, so folding noarch in would break
+    # the drift invariant above), and re-exported by the producer so all three
+    # sides share one name.
+    assert buckets.NOARCH_SUBDIR == "noarch"
+    assert buckets.NOARCH_SUBDIR not in buckets.SERVED_SUBDIRS
+    assert publish.NOARCH_SUBDIR == buckets.NOARCH_SUBDIR
 
 
 def test_reader_sa_email_is_derived_in_project():
@@ -419,6 +427,52 @@ def test_verify_all_green():
     assert report.public_ubla_on and report.private_ubla_on
     assert report.private_no_public_binding
     assert report.notes == []
+
+
+def _noarch_http(public_status, private_status):
+    """The single-subdir HTTP-status map the noarch readiness probe (ADR-0076)
+    reads: a DATA artifact rides ONE `noarch/repodata.json`, so verify probes
+    exactly that one object under each bucket — no per-platform fan-out."""
+    obj = f"{sp.buckets.NOARCH_SUBDIR}/repodata.json"
+    return {
+        sp.public_object_url("shipit-artifacts-public", "r", obj): public_status,
+        sp.public_object_url("shipit-artifacts-private", "r", obj): private_status,
+    }
+
+
+def test_verify_noarch_probes_only_the_single_noarch_subdir():
+    # ADR-0076: a served DATA artifact is present when its ONE `noarch/` package
+    # resolves — a single probe, never the per-platform sweep and never subject
+    # to the win-64 pause subtraction. `noarch=True` probes ONLY `noarch/`, so a
+    # map carrying only that object is sufficient for a green verdict (a
+    # per-platform verify against the same map would KeyError on the missing
+    # platform subdirs).
+    http = _noarch_http(200, 403)
+    report = sp.verify(
+        "supage-prod",
+        "r",
+        noarch=True,
+        runner=_verify_runner(),
+        http_get=lambda url: http[url],
+    )
+    assert report.ok
+    assert report.public_get_200 and report.private_get_403
+    # The probed object is the noarch one — a platform subdir is never touched.
+    win = sp.public_object_url(
+        "shipit-artifacts-public", "r", f"{sp.buckets.SERVED_SUBDIRS[-1]}/repodata.json"
+    )
+    assert win not in http
+
+
+def test_verify_noarch_red_when_the_noarch_package_is_absent():
+    # The single probe still fails closed: an absent `noarch/repodata.json` (the
+    # data artifact never published) is a red gate, honestly.
+    http = _noarch_http(404, 403)
+    report = sp.verify(
+        "p", "r", noarch=True, runner=_verify_runner(), http_get=lambda url: http[url]
+    )
+    assert not report.public_get_200
+    assert not report.ok
 
 
 def test_verify_public_get_fails_when_one_served_subdir_is_missing():
