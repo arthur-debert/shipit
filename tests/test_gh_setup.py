@@ -275,6 +275,46 @@ def test_apply_ruleset_dry_run_sends_nothing_and_carries_the_payload(fake_gh):
     assert rule["parameters"]["required_status_checks"] == [{"context": "c1"}]
 
 
+def test_apply_ruleset_refusal_short_circuits_without_writing(fake_gh):
+    # A refusal (#1056): auto-discovery could not name a PR workflow's checks —
+    # the pass writes NOTHING (real or dry) and rides the message on the outcome.
+    outcome = ghsetup.apply_ruleset(
+        "o/r", ["c1"], dry_run=False, refusal="brick guard: pass --checks"
+    )
+    assert outcome.action == "refused"
+    assert outcome.checks == ()
+    assert outcome.payload == {}
+    assert outcome.refusal == "brick guard: pass --checks"
+    assert not any(m in ("POST", "PUT") for (_, _, m) in fake_gh.calls)
+    assert outcome.to_dict()["refusal"] == "brick guard: pass --checks"
+
+
+def test_setup_refusal_from_discovery_is_rc1_and_writes_no_ruleset(
+    fake_gh, monkeypatch
+):
+    # discover refuses (a PR workflow it could not name) → the ruleset pass
+    # refuses, no ruleset is written, and the run exits rc 1 (#1056).
+    monkeypatch.setattr(ghsetup.gh, "default_branch", lambda repo: "main")
+    monkeypatch.setattr(
+        ghsetup.checks_mod,
+        "discover",
+        lambda *a, **k: ghsetup.checks_mod.Discovery(
+            checks=(), refusal="required-check auto-discovery could not name ..."
+        ),
+    )
+    report = ghsetup.setup(REPO, config_path="/dev/null", dry_run=False)
+    assert report.ruleset_refused
+    assert report.ruleset.action == "refused"
+    assert report.ruleset.refusal.startswith("required-check auto-discovery")
+    # No ruleset mutation went out.
+    assert not any(
+        p.endswith("/rulesets") and m == "POST" for (_, p, m) in fake_gh.calls
+    )
+    # The refusal renders and drives a non-empty exit path.
+    text = gh_setup_verb.format_setup(report)
+    assert "REFUSED" in text
+
+
 def test_apply_ruleset_unlistable_is_a_report_fact(monkeypatch):
     """A failed listing degrades to "assume none" — and says so on the outcome,
     so a --json consumer can tell "verified absent" from "could not list"."""
@@ -353,7 +393,11 @@ def test_push_secrets_dry_run_never_resolves(fake_gh, monkeypatch):
 
 def test_setup_dry_run_reports_and_mutates_nothing(fake_gh, monkeypatch):
     monkeypatch.setattr(ghsetup.gh, "default_branch", lambda repo: "main")
-    monkeypatch.setattr(ghsetup.checks_mod, "discover", lambda *a, **k: ["c / check"])
+    monkeypatch.setattr(
+        ghsetup.checks_mod,
+        "discover",
+        lambda *a, **k: ghsetup.checks_mod.Discovery(checks=("c / check",)),
+    )
 
     report = ghsetup.setup(REPO, config_path="/dev/null", dry_run=True)
     assert report.repo == "o/r"
@@ -373,7 +417,11 @@ def test_setup_pushes_the_derived_requirement_set(fake_gh, monkeypatch, tmp_path
     """The sync consumes the derivation (TOL02-WS02, story 44): required and
     sourced → pushed; declared-but-unrequired → orphan, NOT pushed."""
     monkeypatch.setattr(ghsetup.gh, "default_branch", lambda repo: "main")
-    monkeypatch.setattr(ghsetup.checks_mod, "discover", lambda *a, **k: ["c / check"])
+    monkeypatch.setattr(
+        ghsetup.checks_mod,
+        "discover",
+        lambda *a, **k: ghsetup.checks_mod.Discovery(checks=("c / check",)),
+    )
     monkeypatch.setenv("VAR_A", "secret-a")
     monkeypatch.setenv("VAR_B", "secret-b")
     cfg = tmp_path / ".shipit.toml"
@@ -411,7 +459,11 @@ def test_setup_missing_source_fails_naming_the_requiring_entry(
     SYNC-TIME error naming the requiring registry entry — drift is caught at
     gh-setup, not at release."""
     monkeypatch.setattr(ghsetup.gh, "default_branch", lambda repo: "main")
-    monkeypatch.setattr(ghsetup.checks_mod, "discover", lambda *a, **k: ["c / check"])
+    monkeypatch.setattr(
+        ghsetup.checks_mod,
+        "discover",
+        lambda *a, **k: ghsetup.checks_mod.Discovery(checks=("c / check",)),
+    )
     monkeypatch.setenv("VAR_A", "secret-a")
     cfg = tmp_path / ".shipit.toml"
     cfg.write_text(
@@ -433,7 +485,11 @@ def test_setup_reads_reviewers_and_provisions_their_credentials(
     """#740 end-to-end: the [reviewers] table is the third derivation input —
     a declared funnel reviewer's sourced credential pair is pushed."""
     monkeypatch.setattr(ghsetup.gh, "default_branch", lambda repo: "main")
-    monkeypatch.setattr(ghsetup.checks_mod, "discover", lambda *a, **k: ["c / check"])
+    monkeypatch.setattr(
+        ghsetup.checks_mod,
+        "discover",
+        lambda *a, **k: ghsetup.checks_mod.Discovery(checks=("c / check",)),
+    )
     monkeypatch.setenv("VAR_PEM", "pem")
     monkeypatch.setenv("VAR_ID", "42")
     # A direct caller may supply any filename; all policy tables must come from
@@ -465,7 +521,11 @@ def test_setup_declared_reviewer_with_pruned_secrets_fails_the_sync(
     """#740's deliberate behavior change, end-to-end: reviewers declared +
     broken/pruned [secrets] → failed outcomes → rc 1, loud at sync time."""
     monkeypatch.setattr(ghsetup.gh, "default_branch", lambda repo: "main")
-    monkeypatch.setattr(ghsetup.checks_mod, "discover", lambda *a, **k: ["c / check"])
+    monkeypatch.setattr(
+        ghsetup.checks_mod,
+        "discover",
+        lambda *a, **k: ghsetup.checks_mod.Discovery(checks=("c / check",)),
+    )
     cfg = tmp_path / ".shipit.toml"
     cfg.write_text("[reviewers]\ncodex = {}\n[secrets]\n", encoding="utf-8")
 
@@ -485,7 +545,11 @@ def test_setup_malformed_reviewers_degrades_like_a_config_error(
     """A bad [reviewers] table is the same degraded-but-continuing posture as a
     malformed [secrets]: ruleset/labels applied, the failure a report fact."""
     monkeypatch.setattr(ghsetup.gh, "default_branch", lambda repo: "main")
-    monkeypatch.setattr(ghsetup.checks_mod, "discover", lambda *a, **k: ["c / check"])
+    monkeypatch.setattr(
+        ghsetup.checks_mod,
+        "discover",
+        lambda *a, **k: ghsetup.checks_mod.Discovery(checks=("c / check",)),
+    )
     cfg = tmp_path / "custom-policy.toml"
     cfg.write_text("[reviewers]\nnotareviewer = {}\n", encoding="utf-8")
 
@@ -822,7 +886,7 @@ def test_setup_discovery_respects_local_checkout(fake_gh, monkeypatch):
 
     def fake_discover(target, branch, *, toplevel):
         seen["toplevel"] = toplevel
-        return []
+        return ghsetup.checks_mod.Discovery(checks=())
 
     monkeypatch.setattr(ghsetup.checks_mod, "discover", fake_discover)
     ghsetup.setup(REPO, local_checkout=None, config_path="/dev/null", dry_run=True)
@@ -1062,7 +1126,11 @@ def test_setup_report_carries_the_workflow_access_outcome(fake_gh, monkeypatch):
     """setup() threads pass (d) into the report; the fake's default public
     repo is typed not-applicable — on the dry run too (the pass reads only)."""
     monkeypatch.setattr(ghsetup.gh, "default_branch", lambda repo: "main")
-    monkeypatch.setattr(ghsetup.checks_mod, "discover", lambda *a, **k: ["c / check"])
+    monkeypatch.setattr(
+        ghsetup.checks_mod,
+        "discover",
+        lambda *a, **k: ghsetup.checks_mod.Discovery(checks=("c / check",)),
+    )
     report = ghsetup.setup(REPO, config_path="/dev/null", dry_run=True)
     assert report.workflow_access.status == "not-applicable"
     assert "public" in report.workflow_access.reason
@@ -1117,9 +1185,12 @@ def test_report_json_field_set():
         "action",
         "payload",
         "list_error",
+        "refusal",
     }
     # A clean listing is the explicit null, not an absent key.
     assert payload["ruleset"]["list_error"] is None
+    # No refusal on a normal run (#1056) — the explicit null, not an absent key.
+    assert payload["ruleset"]["refusal"] is None
     assert payload["labels"] == [{"name": "bug", "action": "upserted"}]
     assert payload["secrets"][1] == {
         "name": "X",
@@ -1380,6 +1451,53 @@ def test_run_failed_secret_derives_exit_1(stub_setup, monkeypatch, capsys):
         ),
     )
     assert gh_setup_verb.run(None) == 1
+
+
+def test_run_ruleset_refusal_derives_exit_1_and_errors_on_stderr(
+    stub_setup, monkeypatch, capsys
+):
+    # A #1056 refusal: the run exits rc 1 and prints the actionable error on
+    # stderr (not the plain no-checks nudge).
+    _ambient(monkeypatch)
+    monkeypatch.setattr(
+        gh_setup_verb,
+        "setup",
+        lambda repo, **kw: _report(
+            ruleset=ghsetup.RulesetOutcome(
+                name=ghsetup.RULESET_NAME,
+                existing_id=None,
+                checks=(),
+                action="refused",
+                payload={},
+                refusal="required-check auto-discovery could not name every PR "
+                "workflow's checks; re-run with explicit --checks",
+            )
+        ),
+    )
+    assert gh_setup_verb.run(None) == 1
+    err = capsys.readouterr().err
+    assert "error:" in err
+    assert "--checks" in err
+
+
+def test_format_setup_refused_renders_breakdown_and_continues(monkeypatch):
+    # The renderer shows the REFUSED block plus the remaining passes.
+    report = _report(
+        ruleset=ghsetup.RulesetOutcome(
+            name=ghsetup.RULESET_NAME,
+            existing_id=None,
+            checks=(),
+            action="refused",
+            payload={},
+            refusal="could not name checks\n  ci.yml: certain [(none)]",
+        )
+    )
+    out = gh_setup_verb.format_setup(report)
+    assert "REFUSED — ruleset NOT written" in out
+    assert "ci.yml: certain [(none)]" in out
+    # The later passes still render.
+    assert "labels:" in out
+    assert out.rstrip().endswith("done.")
 
 
 def test_no_repo_and_no_checkout_is_the_uniform_refusal(monkeypatch, capsys):

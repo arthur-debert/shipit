@@ -111,12 +111,14 @@ def run(
     uniform refusal (:class:`~._context.NoAmbientRepoError`) maps to
     ``error: …`` + exit 1 via the shell.
 
-    0 when every pass applied (dry or real); 1 when any secret failed — the
-    exit contract derives from the report. The workflow-access pass is
-    advisory (verify-and-warn, #739): a warn or unknown outcome renders in
-    the report but never changes the exit code. Local workflow auto-discovery is
-    enabled only when the target IS the ambient checkout's repo; the config
-    default is the ambient checkout's ``.shipit.toml`` either way.
+    0 when every pass applied (dry or real); 1 when any secret failed OR the
+    ruleset pass refused (auto-discovery could not confidently name a PR
+    workflow's checks — #1056) — the exit contract derives from the report. The
+    workflow-access pass is advisory (verify-and-warn, #739): a warn or unknown
+    outcome renders in the report but never changes the exit code. Local workflow
+    auto-discovery is enabled only when the target IS the ambient checkout's
+    repo; the config default is the ambient checkout's ``.shipit.toml`` either
+    way.
     """
     ctx = current_root_context()
     target = repo if repo is not None else ctx.require_repo()
@@ -157,7 +159,11 @@ def run(
             extra={"step": "setup (ruleset/labels/access/secrets)"},
         )
         raise
-    if not report.ruleset.checks:
+    if report.ruleset_refused:
+        # A refusal is not the empty-gate case — it has its own rendered message
+        # and a distinct exit code; the "pass --checks" nudge would double up.
+        print(f"  error: {report.ruleset.refusal}", file=sys.stderr)
+    elif not report.ruleset.checks:
         print(_NO_CHECKS_WARNING, file=sys.stderr)
     emit(report, format_setup, as_json=as_json)
     events.emit(
@@ -166,9 +172,12 @@ def run(
         "gh-setup completed for %s (%d secret failure(s))",
         target.slug,
         report.secrets_failed,
-        extra={"secrets_failed": report.secrets_failed or None},
+        extra={
+            "secrets_failed": report.secrets_failed or None,
+            "ruleset_refused": report.ruleset_refused or None,
+        },
     )
-    return 1 if report.secrets_failed else 0
+    return 1 if report.secrets_failed or report.ruleset_refused else 0
 
 
 def format_setup(report: SetupReport) -> str:
@@ -182,23 +191,31 @@ def format_setup(report: SetupReport) -> str:
 
     rs = report.ruleset
     lines.append("ruleset:")
-    if rs.list_error is not None:
-        # Degraded path only: the listing failed and the pass assumed no
-        # existing ruleset — say so, or "existing id: none" reads as verified.
-        lines.append(
-            "  warning: could not list rulesets — assumed none exists"
-            f" ({rs.list_error})"
-        )
-    lines.append(
-        f"  ruleset: {rs.name} "
-        f"(existing id: {rs.existing_id if rs.existing_id is not None else 'none'})"
-    )
-    lines.append(f"  checks:  {', '.join(rs.checks) if rs.checks else '(none)'}")
-    if rs.action == "dry-run":
-        lines.append("  --- payload (dry-run, not sent) ---")
-        lines.append(json.dumps(rs.payload, indent=2))
+    if rs.action == "refused":
+        # Auto-discovery could not confidently name a PR workflow's checks, so
+        # the ruleset was NOT written (#1056) — show the actionable breakdown,
+        # then fall through to the remaining passes.
+        lines.append("  REFUSED — ruleset NOT written (auto-discovery uncertain)")
+        for detail in (rs.refusal or "").splitlines():
+            lines.append(f"  {detail}")
     else:
-        lines.append(f"  ruleset {rs.action}")
+        if rs.list_error is not None:
+            # Degraded path only: the listing failed and the pass assumed no
+            # existing ruleset — say so, or "existing id: none" reads as verified.
+            lines.append(
+                "  warning: could not list rulesets — assumed none exists"
+                f" ({rs.list_error})"
+            )
+        lines.append(
+            f"  ruleset: {rs.name} (existing id: "
+            f"{rs.existing_id if rs.existing_id is not None else 'none'})"
+        )
+        lines.append(f"  checks:  {', '.join(rs.checks) if rs.checks else '(none)'}")
+        if rs.action == "dry-run":
+            lines.append("  --- payload (dry-run, not sent) ---")
+            lines.append(json.dumps(rs.payload, indent=2))
+        else:
+            lines.append(f"  ruleset {rs.action}")
 
     lines.append("labels:")
     for label in report.labels:
