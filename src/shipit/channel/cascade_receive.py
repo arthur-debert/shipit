@@ -368,12 +368,12 @@ jobs:
           # rightly errors on an empty --upstream) — so the foreign dispatch is
           # inert, never a red workflow run or a corrupt bump.
           if [ -z "$UPSTREAM" ]; then
-            echo "no client_payload.upstream — foreign upstream-release dispatch (e.g. the notify-downstreams rail); nothing to bump."
+            echo "no client_payload.upstream — foreign dispatch (e.g. notify-downstreams); nothing to bump."
             exit 0
           fi
           git config user.name "shipit-cascade[bot]"
           git config user.email "shipit-cascade@users.noreply.github.com"
-          pixi run --locked ./bin/shipit channel receive \\
+          pixi run --locked -- ./bin/shipit channel receive \\
             --upstream "$UPSTREAM" --version "$VERSION"
 """
 

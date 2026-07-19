@@ -225,6 +225,38 @@ def test_receive_workflow_unit_is_a_whole_file_managed_unit():
     assert "UPSTREAM: ${{ github.event.client_payload.upstream }}" in body
 
 
+def test_receive_workflow_passes_shipits_own_yamllint():
+    # #1057: the generated cascade workflow must pass the SAME strict yamllint the
+    # fleet ships (line-length max 120), so no consumer needs a `[lint].ignore`
+    # for the managed bytes. Render it and run the shipped canonical config over
+    # it — a regression guard so a >120-char generator line can't silently return.
+    from yamllint import linter
+    from yamllint.config import YamlLintConfig
+
+    from shipit import lint
+
+    body = cr.receive_workflow_unit().content.decode("utf-8")
+    cfg = YamlLintConfig(file=lint.data_path("yamllint.yaml"))
+    problems = [str(p) for p in linter.run(body, cfg)]
+    assert problems == [], problems
+
+
+def test_receive_workflow_no_line_exceeds_the_120_column_cap():
+    # #1057: the direct invariant behind the yamllint gate — the managed workflow
+    # keeps every line within the 120-column cap shipit's yamllint enforces.
+    body = cr.receive_workflow_unit().content.decode("utf-8")
+    long = [ln for ln in body.splitlines() if len(ln) > 120]
+    assert long == [], long
+
+
+def test_receive_workflow_pixi_run_uses_the_double_dash_separator():
+    # #1057: `pixi run … -- ./bin/shipit …` — without `--`, pixi may treat
+    # `./bin/shipit` as a task name and fail at runtime. The generator must emit
+    # the separator so the managed workflow runs the launcher, not a phantom task.
+    body = cr.receive_workflow_unit().content.decode("utf-8")
+    assert "pixi run --locked -- ./bin/shipit channel receive" in body
+
+
 def test_receive_workflow_guards_against_foreign_upstream_release_payloads():
     # ARF01-WS08: `upstream-release` is SHARED with the pre-existing
     # notify-downstreams rail (ADR-0067 reuses that dispatch rail), whose payload
