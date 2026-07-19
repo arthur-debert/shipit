@@ -15,6 +15,25 @@
 > (channel `https://storage.googleapis.com/shipit-artifacts-public/lex-fmt/lex`,
 > `lexd = "==0.19.10"`) wired into the lint env and resolved through `pixi.lock`.
 > No fallback is retained; a win-64 lint solve fails closed by design.
+>
+> **Refined by #1068.** The managed `lexd` pin is **platform-scoped** to the
+> **closed served set** — `SERVED_SUBDIRS` (`src/shipit/channel/buckets.py`):
+> osx-arm64/linux-64/linux-aarch64 **and win-64** — via pixi `[target]` tables
+> (`[feature.shipit-lexd.target.<subdir>.dependencies]`), **not** a blanket
+> `[feature.shipit-lexd.dependencies]`. A blanket dep applied `lexd` to *every*
+> platform a composing env declares, so a consumer declaring a platform **outside
+> the served set** (e.g. `osx-64`, Intel Mac) got an unsatisfiable lint-env solve
+> and `shipit install` failed closed — no commit, no reconcile. Two behaviours are
+> now distinct, and both are preserved:
+>
+> - **Outside the served set** (osx-64, musl, …) — no target dep, so lexd is
+>   *absent* and the lint env **solves** (lint cannot run there, as under the
+>   retired `provision lexd`). This is the #1068 unblock.
+> - **win-64** — **in** the served set, merely owner-paused (#895), so it **keeps
+>   a target dep**. The channel serves no win-64 `lexd` while the pause holds, so
+>   the solve finds no candidate and **fails closed** — ADR-0071's Windows
+>   fail-closed at *solve* time is unchanged (dropping the win-64 target would
+>   move it to fail-*open*). It re-resolves automatically when #895 lifts.
 
 `lexd` is the one lint-gate tool not on conda-forge, so it could not ride
 `pixi.lock` like the other linters; `shipit provision lexd` fetched it bespoke

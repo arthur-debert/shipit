@@ -8,10 +8,34 @@
 # binary constant to this managed block (ADR-0047: not consumer config).
 channels = ["https://storage.googleapis.com/shipit-artifacts-public/lex-fmt/lex"]
 
-[feature.shipit-lexd.dependencies]
-# The fleet-pinned lexd. A bump is one data edit here, rolled fleet-wide on each
-# consumer's next `shipit install` reconcile. Exact-pinned (`==`) so uniformity
-# is a single version, never a resolved range. win-64 is unserved while the
-# Windows build pause holds (#895, ADR-0071), so a win-64 lint solve fails
-# closed — deliberately, with no `provision` fallback.
+# The fleet-pinned lexd, PLATFORM-SCOPED via pixi `[target]` tables to the
+# channel's CLOSED SERVED SET (#1068) — `SERVED_SUBDIRS`
+# (`src/shipit/channel/buckets.py`): osx-arm64/linux-64/linux-aarch64 AND win-64.
+# The one target table per served subdir below IS that set; keep the two in step
+# (drift-guarded by `test_load_units_includes_the_managed_lexd_feature_block`,
+# which asserts these targets == `SERVED_SUBDIRS`). A bump is one edit here,
+# rolled fleet-wide on each consumer's next `shipit install` reconcile;
+# exact-pinned (`==`) so uniformity is a single version, never a resolved range.
+#
+# Scoping is load-bearing AND fail-closed-preserving:
+#  - A BLANKET `[feature.shipit-lexd.dependencies]` applied lexd to EVERY platform
+#    a composing env declares, so a consumer declaring a platform OUTSIDE the
+#    served set (e.g. osx-64, Intel Mac) had no channel candidate and got an
+#    unsatisfiable lint-env solve — `shipit install` then failed closed with no
+#    commit and no reconcile (#1068). Platforms NOT in the served set now carry
+#    NO lexd dep, so their lint env SOLVES and install/reconcile no longer breaks.
+#  - win-64 IS in the served set (served, merely owner-PAUSED under the Windows
+#    build pause #895, ADR-0071), so it KEEPS a target dep. The channel serves no
+#    win-64 lexd while the pause holds, so a win-64 lint solve finds no candidate
+#    and FAILS CLOSED — ADR-0071's "Windows consumers fail closed, loudly." Drop
+#    the win-64 target and a win-64 consumer would instead solve WITHOUT lexd
+#    (fail-open), silently breaking that invariant. It re-resolves automatically
+#    when #895 lifts and the channel produces win-64 — no edit here.
+[feature.shipit-lexd.target.osx-arm64.dependencies]
+lexd = "==0.19.10"
+[feature.shipit-lexd.target.linux-64.dependencies]
+lexd = "==0.19.10"
+[feature.shipit-lexd.target.linux-aarch64.dependencies]
+lexd = "==0.19.10"
+[feature.shipit-lexd.target.win-64.dependencies]
 lexd = "==0.19.10"
