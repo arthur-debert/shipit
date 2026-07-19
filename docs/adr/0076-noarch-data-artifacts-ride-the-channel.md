@@ -14,8 +14,12 @@ A data artifact is not arch-specific: `tree-sitter-lex`'s distributable is a
 single platform-independent `tree-sitter.tar.gz`, and the wasm build is one
 `.wasm` blob. conda has a name for this — a **noarch** package, published to
 the channel's `noarch/` subdir, which every conda client reads alongside the
-platform subdir it resolves. The channel already serves an (empty) `noarch/`.
-The only missing piece is a producer mode that targets it.
+platform subdir it resolves — so a `noarch/` package is resolvable without any
+consumer change. What is missing is producer-side: a mode that repackages into
+`noarch/`, plus adding `noarch/` to the served/probed set (the readiness gate
+and store verification are platform-only today —
+`SERVED_SUBDIRS`/`CONDA_SUBDIRS` list `osx-arm64`/`linux-64`/`linux-aarch64`/
+`win-64`, not `noarch`).
 
 ## Decision
 
@@ -29,10 +33,13 @@ The only missing piece is a producer mode that targets it.
 - **The mechanism is the existing `conda` derived endpoint, extended with a
   noarch mode** — not a new composition. The endpoint already repackages a
   final gh-release archive into a `.conda` (`rattler-build`; ADR-0064). Noarch
-  mode changes only the recipe target and the destination subdir: a
-  platform-independent artifact — one with a **tarball composition and no
-  `platforms` list** (e.g. `tree-sitter-lex`'s `tree-sitter.tar.gz`) —
-  repackages its **single** archive into one `noarch: generic` `.conda`
+  mode changes only the recipe target and the destination subdir: an artifact
+  whose composition produces a **single platform-independent archive** (e.g.
+  the `tarball` composition `tree-sitter-lex` uses for `tree-sitter.tar.gz`) —
+  the criterion is "one arch-independent archive to repackage," **not** an
+  empty `platforms` list (in shipit config `platforms = ()` means the default
+  linux lane, not platform-independence) —
+  repackages that **single** archive into one `noarch: generic` `.conda`
   published to `noarch/`, **instead of** keying a per-platform release asset
   to a per-platform subdir (`CONDA_SUBDIRS`,
   [src/shipit/release/publish.py](../../src/shipit/release/publish.py)). No

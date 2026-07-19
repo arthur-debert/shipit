@@ -2,9 +2,9 @@
 
 > **Amended by ADR-0076.** The **data** artifacts this ADR defers (the wasm
 > build, the tree-sitter grammar — "not a released artifact yet … lands later
-> as `noarch`") are no longer deferred: they ride the channel as `noarch:
-> generic` conda packages through the same `conda` derived endpoint, extended
-> with a noarch mode. See ADR-0076.
+> as `noarch`") are no longer deferred: they ride the channel as
+> `noarch: generic` conda packages through the same `conda` derived endpoint,
+> extended with a noarch mode. See ADR-0076.
 
 The portfolio shares build artifacts across repos: `lexd`, `lexd-lsp`, wasm,
 and (later) the tree-sitter grammar — all produced by `lex-fmt/lex` — power

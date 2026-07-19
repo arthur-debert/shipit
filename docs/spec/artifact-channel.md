@@ -265,11 +265,13 @@ prefix-scoped IAM (leak-prone under UBLA), a capability URL (leaks via
 
 ## Out Of Scope
 
-- Marketplace endpoints; Intel-mac / musl coverage; non-Release deploys.
-
 Data artifacts (the wasm build, the tree-sitter grammar) are now **in** scope:
 they ride the channel as `noarch` conda packages via the same `conda` endpoint
 ([ADR-0076](../adr/0076-noarch-data-artifacts-ride-the-channel.md)).
+
+Still out of scope:
+
+- Marketplace endpoints; Intel-mac / musl coverage; non-Release deploys.
 
 ## Further Notes
 
