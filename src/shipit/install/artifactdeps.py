@@ -333,56 +333,51 @@ def _toml_key(name: str) -> str:
     return name if _BARE_KEY_RE.fullmatch(name) else f'"{name}"'
 
 
-def feature_anchor(feature: str | None) -> str:
-    """The ``[feature.<X>]`` TOML table header the channel block MERGES under —
-    the SAME table the consumer authors the version pin's ``.dependencies``
-    sub-table into (``pin_feature``). Public so tests/callers name the exact
-    anchor."""
-    return f"[feature.{_toml_key(_feature_name(feature))}]"
-
-
 def _feature_block(
     feature: str | None, resolved: Sequence[tuple[ArtifactDep, str]]
 ) -> str:
-    """The inner text of one target's managed feature block: its ``channels``
-    KEY LINE ONLY, MERGED under the reserved ``shipit-artifacts*`` feature table.
+    """The inner text of one target's managed feature block: the ``channels`` for
+    the reserved ``shipit-artifacts*`` feature, under its own ``[feature.<X>]``
+    header — a CLEAN, self-contained TOML table shipit fully owns.
 
     Under conda-direct (ADR-0077) the block carries the DERIVED location and
-    nothing else — no version pin, and (since #1094 review) no ``[feature.<X>]``
-    HEADER either: the consumer authors the version pin in that SAME feature
-    (``[feature.<X>.dependencies].<pkg>``), so the ``[feature.<X>]`` table already
-    exists and an anchor-LESS block redeclaring it would be seen as a table
-    conflict and SKIPPED — leaving the pin with no channel. So the block emits
-    just ``channels = [...]`` and is ANCHORED under ``[feature.<X>]`` (see
-    :func:`_feature_unit`): it MERGES its channels into the shared feature table
-    the same way the ``[environments]`` block merges its env wiring (ADR-0066's
-    shared-by-design → merge, not conflict). pixi then unions the feature's
-    channels into every environment the feature is wired into, and resolves the
-    co-located pin against them.
+    nothing else — no version pin. The consumer co-locates the version pin in the
+    SAME feature via a SEPARATE table (``[feature.<X>.dependencies].<pkg>``), which
+    makes ``feature.<X>`` exist implicitly; TOML lets the managed ``[feature.<X>]``
+    channel header re-open that implicit super-table, so the two coexist as valid
+    TOML (the reconcile's :func:`~shipit.install.reconcile._table_redeclared`
+    honors that rule and does not skip the block — #1094 round-3). pixi then
+    resolves the co-located pin against these channels.
+
+    Keeping the ``[feature.<X>]`` header INSIDE the block (an anchor-LESS,
+    whole-table marker block) is load-bearing for UPDATE: ``splice_block`` replaces
+    a marker-present span in place, so the header rides inside the markers and a
+    channel-URL change never orphans ``channels`` into a preceding table.
 
     Deterministic: channels de-duped in first-seen order (several deps from the
     same producing repo share one channel).
     """
+    name = _toml_key(_feature_name(feature))
     urls: list[str] = []
     for _, url in resolved:
         if url not in urls:
             urls.append(url)
-    return f"channels = {_toml_str_list(urls)}"
+    return "\n".join([f"[feature.{name}]", f"channels = {_toml_str_list(urls)}"])
 
 
 def _feature_unit(
     feature: str | None, resolved: Sequence[tuple[ArtifactDep, str]]
 ) -> Unit:
-    """One managed block MERGING a target's derived ``channels`` INTO its shared
-    ``[feature.<X>]`` table.
+    """One managed, self-contained ``[feature.<X>]`` channel block for a target.
 
-    ANCHORED under ``[feature.<X>]`` (not EOF-appended): the consumer co-locates
-    the version pin in the SAME table (``[feature.<X>.dependencies]``), so that
-    table pre-exists and an anchor-less redeclaration would trip the
-    table-conflict guard and skip the channel (#1094 review, Major 1). Anchoring
-    makes the reconcile MERGE ``channels`` under the existing header (creating the
-    header at EOF if the consumer wrote only the ``.dependencies`` sub-table) —
-    the same shared-by-design merge the ``[environments]`` unit uses.
+    ANCHOR-LESS (a whole ``[feature.<X>]`` table with its ``channels``, appended
+    at EOF and replaced in place on UPDATE): the reserved ``shipit-artifacts*``
+    feature is shipit's, so the block owns the whole table cleanly rather than
+    splicing a bare key into a shared one. It coexists with the consumer's
+    co-located ``[feature.<X>.dependencies]`` pin because TOML re-opens the
+    implicit super-table (the reconcile's ``_table_redeclared`` does not mistake
+    that for a redeclaration). A consumer who EXPLICITLY declares ``[feature.<X>]``
+    themselves is a genuine conflict the table-conflict guard skips + warns.
     """
     name = _feature_name(feature)
     return Unit(
@@ -395,11 +390,11 @@ def _feature_unit(
             f"(do not edit; regenerate via `shipit install`) >>>"
         ),
         close_marker=f"# <<< shipit-managed artifact-dep feature `{name}` <<<",
-        # Anchored under the shared `[feature.<name>]` table so the channels MERGE
-        # in (never a redeclaration the table-conflict guard would skip); the
-        # anchor header is created at EOF if only the consumer's `.dependencies`
-        # sub-table exists (splice._insert_under_anchor).
-        anchor=feature_anchor(feature),
+        # No anchor: the block is a whole `[feature.<name>]` table (header inside
+        # the markers). It never redeclares a consumer table — `feature.<name>`
+        # exists only implicitly via the consumer's co-located `.dependencies`
+        # sub-table, which TOML lets this header re-open (reconcile._table_redeclared).
+        anchor=None,
     )
 
 

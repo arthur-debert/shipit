@@ -98,15 +98,15 @@ def test_default_target_projects_a_feature_and_a_default_env_wiring():
         ad.ENVIRONMENTS_KEY,
     }
     feat = next(u for u in units if u.key == "pixi.toml#shipit-artifacts")
-    # The channel block MERGES into the shared `[feature.shipit-artifacts]` table
-    # (anchored), so the header is the ANCHOR and the inner is the channels line
-    # only — never a table redeclaration (#1094 review, Major 1).
-    assert feat.anchor == "[feature.shipit-artifacts]"
+    # A CLEAN, self-contained `[feature.shipit-artifacts]` channel table shipit
+    # fully owns — anchor-less (header inside the markers), so an UPDATE replaces
+    # it in place without orphaning `channels` (#1094 round-3).
+    assert feat.anchor is None
     inner = feat.desired_inner()
-    assert "[feature" not in inner  # header lives in the anchor, not the block
+    assert "[feature.shipit-artifacts]" in inner
     assert (
-        inner == 'channels = ["https://storage.googleapis.com/'
-        'shipit-artifacts-public/lex-fmt/lex"]'
+        'channels = ["https://storage.googleapis.com/'
+        'shipit-artifacts-public/lex-fmt/lex"]' in inner
     )
     # conda-direct (ADR-0077): channels only — no version pin (the consumer owns
     # the version as a co-located `[feature.<X>.dependencies]` pin).
@@ -166,11 +166,9 @@ def test_dotted_feature_names_are_emitted_as_quoted_toml_keys():
     # names still flow through the projection's quoting.)
     units = _project([_dep(package="ruamel.yaml", feature="tools.v2")])
     feat = next(u for u in units if u.key == "pixi.toml#shipit-artifacts-tools.v2")
-    # The dotted feature name is quoted in the ANCHOR header the channel merges
-    # under (the block inner is just the channels line).
-    assert feat.anchor == '[feature."shipit-artifacts-tools.v2"]'
+    # The dotted feature name is quoted in the block's own `[feature."…"]` header.
     inner = feat.desired_inner()
-    assert "[feature" not in inner
+    assert '[feature."shipit-artifacts-tools.v2"]' in inner
     assert "dependencies" not in inner
     env = next(u for u in units if u.key == ad.ENVIRONMENTS_KEY)
     assert (
@@ -207,8 +205,9 @@ def test_bare_safe_feature_names_stay_unquoted():
     # the common case reads cleanly and existing manifests do not churn.
     units = _project([_dep(package="lexd", feature="tools")])
     feat = next(u for u in units if u.key == "pixi.toml#shipit-artifacts-tools")
-    assert feat.anchor == "[feature.shipit-artifacts-tools]"  # bare, unquoted
-    assert ad.feature_anchor("tools") == "[feature.shipit-artifacts-tools]"
+    inner = feat.desired_inner()
+    assert "[feature.shipit-artifacts-tools]" in inner  # bare, unquoted header
+    assert '[feature."' not in inner
     env = next(u for u in units if u.key == ad.ENVIRONMENTS_KEY)
     assert env.desired_inner() == 'shipit-artifacts-tools = ["shipit-artifacts-tools"]'
 
@@ -431,12 +430,13 @@ def _reconcile_public(root, deps):
 
 
 def test_channel_merges_into_the_shared_feature_table_not_skipped(tmp_path):
-    # Major 1 (#1094 review): the consumer co-locates the pin in
-    # `[feature.shipit-artifacts.dependencies]`, so `[feature.shipit-artifacts]`
-    # pre-exists. The channel block must MERGE its `channels` under that shared
-    # table (anchored), NOT be skipped as a table redeclaration — else the pin has
-    # no channel. End-to-end: no table conflict, the block ADDs, and the applied
-    # manifest carries BOTH the consumer pin and the merged channel.
+    # Major 1 (#1094): the consumer co-locates the pin in
+    # `[feature.shipit-artifacts.dependencies]`, so `feature.shipit-artifacts`
+    # exists IMPLICITLY. The managed `[feature.shipit-artifacts]` channel block
+    # re-opens that implicit super-table (valid TOML), so it is NOT skipped as a
+    # redeclaration (round-3 root-cause fix) — else the pin has no channel.
+    # End-to-end: no table conflict, the block ADDs, and the applied manifest
+    # carries BOTH the consumer pin and the channel.
     (tmp_path / "AGENTS.md").write_text("# Downstream\n")
     (tmp_path / "pixi.toml").write_text(
         iunits.pixi_manifest_seed("downstream")
@@ -482,6 +482,59 @@ def test_dotted_feature_channel_merges_with_its_colocated_pin(tmp_path):
     assert shared["channels"] == [
         "https://storage.googleapis.com/shipit-artifacts-public/lex-fmt/lex"
     ]
+
+
+def test_existing_consumer_channel_update_preserves_the_feature_header(tmp_path):
+    # Round-3 bug 1 (migration): an EXISTING consumer carries the managed markers
+    # around a whole `[feature.shipit-artifacts]` channel table. A channel-URL
+    # change is an UPDATE — `splice_block` replaces the marker span IN PLACE, so
+    # the `[feature.shipit-artifacts]` header (INSIDE the markers) is preserved and
+    # `channels` never orphans into a preceding table. The consumer's co-located
+    # pin (outside the markers) is untouched, and `pixi.toml` stays valid.
+    (tmp_path / "AGENTS.md").write_text("# Downstream\n")
+    (tmp_path / "pixi.toml").write_text(iunits.pixi_manifest_seed("downstream"))
+    # 1) The consumer's first install, with an initial derived channel — records
+    #    the managed block + its pristine hash (so a later diff is a clean UPDATE).
+    old_units = ad.project([(_dep(package="lexd"), "https://old.example/ch")])
+    st = irec.gather(tmp_path, old_units, irec.load_retired())
+    iapply.apply(irec.reconcile(old_units, irec.load_retired(), st), iapply.MODE_TREE)
+    # 2) The consumer authors their co-located pin (after the managed block).
+    with (tmp_path / "pixi.toml").open("a", encoding="utf-8") as f:
+        f.write('\n[feature.shipit-artifacts.dependencies]\nlexd = "0.19.3"\n')
+
+    # 3) A later install: the real derived channel differs -> UPDATE in place.
+    _units, plan = _reconcile_public(tmp_path, [_dep(package="lexd")])
+    feat = next(d for d in plan.decisions if d.unit.key == "pixi.toml#shipit-artifacts")
+    assert feat.action == irec.UPDATE
+    iapply.apply(plan, iapply.MODE_TREE)
+
+    text = (tmp_path / "pixi.toml").read_text()
+    parsed = tomllib.loads(text)  # still valid TOML — header not dropped
+    shared = parsed["feature"]["shipit-artifacts"]
+    assert shared["channels"] == [
+        "https://storage.googleapis.com/shipit-artifacts-public/lex-fmt/lex"
+    ]
+    assert shared["dependencies"]["lexd"] == "0.19.3"  # consumer pin untouched
+    assert text.count("[feature.shipit-artifacts]\n") == 1  # header preserved, once
+
+
+def test_explicit_consumer_feature_table_is_a_real_conflict(tmp_path):
+    # The guard still catches a REAL redeclaration: a consumer who EXPLICITLY
+    # writes `[feature.shipit-artifacts]` themselves (not merely the implicit super
+    # from a `.dependencies` sub-table) would make the managed channel header a
+    # duplicate — so it is skipped + warned, the consumer's table authoritative.
+    (tmp_path / "pixi.toml").write_text(
+        iunits.pixi_manifest_seed("downstream")
+        + "\n[feature.shipit-artifacts]\nchannels = []\n"
+    )
+    _units, plan = _reconcile_public(tmp_path, [_dep(package="lexd")])
+    conflict = next(
+        c
+        for c in plan.pixi_table_conflicts
+        if c.unit_key == "pixi.toml#shipit-artifacts"
+    )
+    assert conflict.tables == ("feature.shipit-artifacts",)
+    assert "pixi.toml#shipit-artifacts" not in {d.unit.key for d in plan.decisions}
 
 
 def test_toml_table_headers_return_verbatim_text_and_split_segments():
