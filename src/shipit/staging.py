@@ -68,7 +68,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-from .config import _FEATURE_NAME_RE, _STAGING_ROOT, StageEntry
+from .config import _FEATURE_NAME_RE, _STAGING_ROOT, StageEntry, path_escapes
 from .install.artifactdeps import env_prefix
 
 logger = logging.getLogger("shipit.staging")
@@ -173,6 +173,27 @@ def _reject_link_components(
             )
 
 
+def _reject_source_escape(entry: StageEntry) -> None:
+    """Refuse a ``entry.source`` that is not prefix-relative — absolute, drive- or
+    backslash-anchored, or carrying a ``..`` segment — BEFORE it is joined to the
+    prefix.
+
+    ``config.load_stage`` already applies :func:`shipit.config.path_escapes` at parse,
+    but ``staging.stage`` can be handed a programmatically-constructed
+    :class:`~shipit.config.StageEntry` (a test, or a future caller bypassing the
+    loader). Since ``prefix / entry.source`` would DISCARD the prefix for an absolute
+    source (or climb out with ``..``), this runtime belt reuses the SAME predicate the
+    config boundary does, so the refuse-links model's "the source root is under the
+    prefix" precondition holds no matter how the entry was built.
+    """
+    if path_escapes(entry.source):
+        raise StagingError(
+            f"[stage.{entry.package}] source {entry.source!r} is not a prefix-relative "
+            f"path — no leading '/', no '\\', no drive letter, no '..' segment; the "
+            f"source must live inside the resolved env prefix"
+        )
+
+
 def _copy_into(src: Path, dst: Path, entry: StageEntry) -> None:
     """Recursively copy ``src`` → ``dst``, copying ONLY real files and directories.
 
@@ -238,9 +259,10 @@ def _stage_one(
     The source must already be materialized under ``prefix`` (``shipit install``/
     ``pixi install`` extracted it); an absent source is a loud :class:`StagingError`
     pointing at install, never a silent skip — this step COPIES an already-resolved
-    env, it never fetches. No component of the source path (:func:`_reject_link_components`)
-    may be a link/junction, and the dest is bounded to a strict descendant of the
-    staging root (:func:`_reject_unbounded_dest`) BEFORE anything is touched; a file
+    env, it never fetches. The source must be prefix-relative
+    (:func:`_reject_source_escape`) and no component of its path may be a link/junction
+    (:func:`_reject_link_components`), and the dest is bounded to a strict descendant of
+    the staging root (:func:`_reject_unbounded_dest`) BEFORE anything is touched; a file
     source may not overwrite an existing directory dest (that would wipe the tree to
     drop one file). Any prior stage at the dest is removed (idempotent re-run) and
     the copy runs through the link-refusing :func:`_copy_into`; on ANY failure the
@@ -249,8 +271,12 @@ def _stage_one(
     boundary so a ``PermissionError``/``FileExistsError`` surfaces as the uniform
     ``error: …`` + exit 1, never a raw traceback.
     """
-    # Refuse a link/junction ANYWHERE along the source path before touching it, so a
-    # redirect cannot steer even the top-level lookup out of the resolved env.
+    # Belt to the config-time parse check: refuse a non-prefix-relative source
+    # (absolute / drive / backslash / `..`) BEFORE the join, so a programmatically
+    # built entry cannot make `prefix / source` discard or climb out of the prefix.
+    _reject_source_escape(entry)
+    # Then refuse a link/junction ANYWHERE along the source path before touching it,
+    # so a redirect cannot steer even the top-level lookup out of the resolved env.
     _reject_link_components(prefix, PurePosixPath(entry.source).parts, "source", entry)
     src = prefix / entry.source
     if not src.exists():

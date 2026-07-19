@@ -380,6 +380,19 @@ def test_symlinked_pixi_envs_redirecting_out_of_tree_is_refused(tmp_path):
     assert not (tmp_path / "resources" / "lex").exists()
 
 
+@pytest.mark.parametrize("bad_source", ["/etc/passwd", "../../etc/passwd", "a/../../x"])
+def test_non_prefix_relative_source_is_refused_before_any_copy(tmp_path, bad_source):
+    # config.load_stage validates the source lexically, but a programmatically built
+    # StageEntry bypasses the loader. staging.stage must ALSO refuse an absolute or
+    # `..`-bearing source at runtime, before `prefix / source` can discard or climb
+    # out of the prefix — belt-and-suspenders with the config-time check.
+    _prefix(tmp_path)
+    (tmp_path / "resources").mkdir()
+    with pytest.raises(staging.StagingError, match="prefix-relative"):
+        staging.stage(tmp_path, [config.StageEntry("pkg", bad_source, "resources/x")])
+    assert not (tmp_path / "resources" / "x").exists()
+
+
 def test_real_files_and_directories_still_stage_fine(tmp_path):
     # Refusing links does NOT touch the normal path: a real binary and a real data
     # directory (what conda actually extracts) stage exactly as before.

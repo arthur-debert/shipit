@@ -330,35 +330,47 @@ def _parse_argv(where: str, value: object) -> tuple[str, ...]:
     return tuple(value)
 
 
-def _reject_path_escape(where: str, value: str) -> None:
-    """Refuse a config path that leaves the checkout — absolute, or carrying a
-    ``..`` segment. Pure, and OS-INDEPENDENT of the runner.
+def path_escapes(value: str) -> bool:
+    """Whether ``value`` would leave the checkout when joined to the repo root —
+    absolute, drive-anchored, backslash-bearing, or carrying a ``..`` segment.
+    Pure, and OS-INDEPENDENT of the runner.
 
-    Such a path is later joined to the repo root and READ or REWRITTEN (an
-    adapter's leg cwd, a bundle-config bump, a vsix stage destination); an
-    absolute path discards the root and ``..`` climbs above it, so a repo's own
-    ``.shipit.toml`` could steer a release rewrite at a file outside the tree.
-    The join happens with the RUNNER's native ``pathlib`` (``leg_dir / dest``),
-    so a value that is harmless under POSIX but ABSOLUTE under Windows —
-    ``C:\\x``, ``\\\\server\\share``, a leading ``\\``, or a bare drive ``C:x`` —
-    would escape on a Windows runner (``vsce package`` runs on the win32-x64 leg,
-    #974). Both path flavours are therefore checked here, at the parse boundary,
-    the one place every value flows through, so the guard never depends on which
-    OS the config is loaded on. Backslashes are refused outright: a repo-relative
-    config path is always POSIX-separated, so a ``\\`` is either a Windows anchor
-    or a filename that would mis-split on the wrong OS — never a legitimate value.
+    The one predicate behind both the config-time :func:`_reject_path_escape` and
+    the runtime staging source guard (:func:`shipit.staging._reject_source_escape`),
+    so the two never drift. A value is checked under BOTH path flavours: one that is
+    harmless under POSIX but ABSOLUTE under Windows — ``C:\\x``, ``\\\\server\\share``,
+    a leading ``\\``, or a bare drive ``C:x`` — would escape on a Windows runner
+    (``vsce package`` runs on the win32-x64 leg, #974), so both are rejected here, at
+    the one place every value flows through, independent of which OS loaded it.
+    Backslashes are refused outright: a repo-relative POSIX path never carries one,
+    so a ``\\`` is either a Windows anchor or a filename that would mis-split on the
+    wrong OS — never a legitimate value.
     """
     posix = PurePosixPath(value)
     windows = PureWindowsPath(value)
-    if (
+    return (
         posix.is_absolute()
         or ".." in posix.parts
         or "\\" in value
         or windows.is_absolute()
-        or windows.drive
-        or windows.root
+        or bool(windows.drive)
+        or bool(windows.root)
         or ".." in windows.parts
-    ):
+    )
+
+
+def _reject_path_escape(where: str, value: str) -> None:
+    """Refuse a config path that leaves the checkout — absolute, or carrying a
+    ``..`` segment (:func:`path_escapes`). Pure, and OS-INDEPENDENT of the runner.
+
+    Such a path is later joined to the repo root and READ or REWRITTEN (an
+    adapter's leg cwd, a bundle-config bump, a vsix stage destination); an
+    absolute path discards the root and ``..`` climbs above it, so a repo's own
+    ``.shipit.toml`` could steer a release rewrite at a file outside the tree. The
+    predicate is applied at the parse boundary, the one place every value flows
+    through, so the guard never depends on which OS the config is loaded on.
+    """
+    if path_escapes(value):
         raise ConfigError(
             f"{where}: must be a repo-relative POSIX path inside the checkout — "
             f"no leading '/', no '\\' anywhere, no drive letter, no '..' segment; "
