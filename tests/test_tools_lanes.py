@@ -366,14 +366,33 @@ def test_shipits_own_commit_push_checks_are_lint_plus_the_fast_test_set():
 def test_shipits_own_plan_covers_the_pre_cutover_ci_on_every_event():
     # The cutover guarantee: on shipit's declarations every event plans
     # lint + test (trigger "pr" sits at the ladder's most frequent rung), so
-    # the block reproduces the retired explicit lint/test steps everywhere.
+    # the block reproduces the retired explicit lint/test steps everywhere. The
+    # changelog fragment gate (#1073) is also trigger "pr", so it rides every
+    # event too — required at merge but NOT local, so it never joins the
+    # commit/push set (asserted separately below).
     own = config.load(Path(__file__).resolve().parents[1] / config.CONFIG_NAME)
     declared = config.load_lanes(own)
     for event in lanes.EVENTS:
         assert [job.name for job in lanes.plan(declared, event=event)] == [
             "lint",
             "test",
+            "changelog",
         ]
+
+
+def test_shipits_own_changelog_lane_is_pr_gated_but_not_local():
+    # The fragment gate (#1073) rolls up into the required `check` at merge but
+    # stays OUT of the derived commit/push checks: `local = false`, so lefthook
+    # and a laptop never run it, while CI's PR matrix does.
+    own = config.load(Path(__file__).resolve().parents[1] / config.CONFIG_NAME)
+    declared = config.load_lanes(own)
+    changelog = {lane.name: lane for lane in declared}["changelog"]
+    assert changelog.run == "changelog check-fragment"
+    assert changelog.required and not changelog.local
+    # Present in the PR matrix...
+    assert "changelog" in [job.name for job in lanes.plan(declared, event="pr")]
+    # ...absent from the commit/push (required∩local) set.
+    assert "changelog" not in [lane.name for lane in lanes.commit_push_checks(declared)]
 
 
 # ---------------------------------------------------------------------------

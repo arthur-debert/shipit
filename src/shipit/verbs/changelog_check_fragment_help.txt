@@ -1,0 +1,35 @@
+`shipit changelog check-fragment` fails a pull request to `main` when
+`CHANGELOG/` holds no unreleased fragment, so a missing release note is caught at
+PR time — not at the next release cut, once every PR is already merged.
+
+It is a fragment-PRESENCE check: it asks the cut's OWN question — "does
+`CHANGELOG/` contain at least one unreleased fragment?" — at PR time, over the
+same discovery machinery the cut uses (`shipit.changelog.classify_dir` over
+`CHANGELOG/`). That is exactly the condition that makes a release refuse an empty
+cut, so the gate and the cut never disagree on what counts as a fragment.
+
+It is self-gating and offline (no `gh` auth). Only the base ref comes from the
+CI runner environment (`GITHUB_BASE_REF`, empty off a PR); the fragment presence
+is read straight from the current checkout's `CHANGELOG/`, so no CI event
+trigger and no event payload is involved.
+
+The check PASSES (exit 0), requiring no fragment, when any of:
+
+- it is not a PR context (`GITHUB_BASE_REF` empty) — so laptop/lefthook runs
+  never block
+- the PR base is not `main` — work-stream PRs target epic branches and are
+  exempt; only PRs to `main` are gated
+- `CHANGELOG/` holds at least one `unreleased-*.md` fragment
+
+Otherwise (base `main`, no unreleased fragment) it exits non-zero: add a
+`CHANGELOG/unreleased-*.md` fragment so the release has notes to cut. There is
+no escape hatch — the same fragment the release needs to cut is the one the gate
+asks for.
+
+Wire it as a required, CI-only lane in `.shipit.toml` (`local = false`, so it
+runs in CI but never on a laptop commit/push). ENFORCEMENT is PR-gated, not the
+job: a `trigger = "pr"` lane's job may still run on push/nightly/dispatch, but
+off a PR `GITHUB_BASE_REF` is empty and the command exits pass — so only PRs are
+actually gated. It reads the working tree, so it needs no git history and no
+workflow YAML change. The base-branch check (main only) lives here, in the
+subcommand — the lane planner is unaware of it.

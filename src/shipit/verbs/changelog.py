@@ -15,6 +15,18 @@ rendered projection / cut section / notes file. Three subcommands, one model
   :data:`shipit.config.CHANGELOG_SYNC_LANE`) — WS05's planner routes it in CI
   and the identical command runs on a laptop: one definition, enforced
   everywhere.
+* ``check-fragment`` — the PR-TIME FRAGMENT GATE (issue #1073): fail a PR
+  merging to ``main`` when ``CHANGELOG/`` holds no unreleased fragment, so the
+  release has notes to cut. It asks the cut's OWN question at PR time — "does
+  ``CHANGELOG/`` contain ≥1 unreleased fragment?" — over the same discovery
+  machinery the cut uses (:func:`_read_tree` → :func:`shipit.changelog.classify_dir`),
+  not a bespoke diff. The cut-time empty-release refusal
+  (:func:`shipit.changelog.plan_coalesce`) fires only once every merged PR is
+  in; this per-PR gate catches the miss earlier, where a fragment can still be
+  added. Self-gating and offline: the base ref is read from the CI runner env
+  (``GITHUB_BASE_REF``) and the fragment presence from the current checkout's
+  ``CHANGELOG/``, so no ``gh`` auth and no CI event trigger is involved. The pure
+  decision is :func:`decide_fragment_gate`.
 * ``render`` — regenerate ``CHANGELOG.md`` from ``CHANGELOG/*`` (the fix for a
   failing ``check``).
 * ``coalesce VERSION`` — the cut-time face (story 26): refuse an empty release,
@@ -272,6 +284,80 @@ def apply_cut(
 
 
 # --------------------------------------------------------------------------
+# The PR-time fragment gate (story: issue #1073)
+# --------------------------------------------------------------------------
+
+#: The base branch the fragment gate enforces. Only PRs to `main` are gated:
+#: work-stream PRs target an epic branch and are exempt (the umbrella PR to
+#: `main` carries the fragment), so the user-facing note belongs on the `main`
+#: merge, not every intermediate WS merge.
+GATED_BASE_REF = "main"
+
+
+@dataclass(frozen=True)
+class FragmentGate:
+    """The pure fragment-gate verdict: ``ok`` (exit 0 when true, else 1) plus
+    the human line to print either way."""
+
+    ok: bool
+    message: str
+
+
+def decide_fragment_gate(
+    *,
+    base_ref: str,
+    has_unreleased_fragment: Callable[[], bool],
+) -> FragmentGate:
+    """The PURE fragment-gate decision (issue #1073), env/fs reads injected.
+
+    Given the PR's base ref and a THUNK reporting whether the current checkout's
+    ``CHANGELOG/`` holds any unreleased fragment, decide whether the PR may merge.
+    This is the SAME question the cut asks (:func:`shipit.changelog.plan_coalesce`
+    refuses an empty release) — asked at PR time so a missing fragment fails
+    before merge, not at the next cut once every PR is already in.
+
+    ``has_unreleased_fragment`` is a thunk, invoked ONLY on the branch that needs
+    it — the base short-circuits first — so an exempt run (empty base or a
+    non-``main`` base) never reads ``CHANGELOG/`` at all, and an inaccessible or
+    non-UTF-8 fragment can never fail a run that requires no fragment.
+
+    Passes (``ok=True``) when any of:
+
+    * ``base_ref`` is empty — not a PR context (a laptop/lefthook run), so the
+      gate never blocks local work.
+    * ``base_ref`` is not :data:`GATED_BASE_REF` — a WS PR to an epic branch is
+      exempt.
+    * ``has_unreleased_fragment()`` is True — ``CHANGELOG/`` holds ≥1 unreleased
+      fragment, so the release will have notes to cut.
+
+    Fails (``ok=False``) only when the base is ``main`` and ``CHANGELOG/`` holds
+    no unreleased fragment — the exact condition that makes the cut refuse an
+    empty release.
+    """
+    base = base_ref.strip()
+    if not base:
+        return FragmentGate(True, "changelog: not a PR context — no fragment required")
+    if base != GATED_BASE_REF:
+        return FragmentGate(
+            True,
+            f"changelog: PR base {base!r} is not {GATED_BASE_REF!r} — no "
+            "fragment required (only PRs to "
+            f"{GATED_BASE_REF} are gated)",
+        )
+    if has_unreleased_fragment():
+        return FragmentGate(
+            True,
+            f"changelog: OK — {core.CHANGELOG_DIR}/ has an unreleased fragment",
+        )
+    return FragmentGate(
+        False,
+        f"no {core.CHANGELOG_DIR}/{core.FRAGMENT_PREFIX}*{core.FRAGMENT_SUFFIX} "
+        "fragment present — add one so the release has notes to cut (this is the "
+        "same condition that makes 'release' refuse an empty cut)",
+    )
+
+
+# --------------------------------------------------------------------------
 # The verb runners (click-free, seams injectable — the testable surface)
 # --------------------------------------------------------------------------
 
@@ -321,6 +407,51 @@ def run_check(
         extra={"root": str(root), "fragments": len(tree.fragments)},
     )
     return 1
+
+
+@cli_errors
+def run_check_fragment(
+    path: str | None = None,
+    *,
+    base_ref: str | None = None,
+    read_tree: Callable[[Path], ChangelogTree] | None = None,
+) -> int:
+    """The PR-time fragment gate: 0 when no fragment is required or ``CHANGELOG/``
+    holds one, else 1 (issue #1073).
+
+    Self-gating and offline (no ``gh`` auth). The PR context comes from the CI
+    runner env, not a live API call: the base ref from ``GITHUB_BASE_REF`` (empty
+    off-PR). Only PRs to :data:`GATED_BASE_REF` are gated. The fragment-presence
+    answer reuses the cut's OWN discovery machinery — :func:`_read_tree` (which
+    classifies ``CHANGELOG/`` via :func:`shipit.changelog.classify_dir`) — so the
+    gate and the cut agree on what counts as an unreleased fragment. The whole
+    decision is the pure :func:`decide_fragment_gate`; this shell only resolves
+    the seams.
+
+    ``base_ref`` overrides the env read and ``read_tree`` the ``CHANGELOG/``
+    discovery, both for tests (mirroring the seam-injection style of the other
+    runners). The default ``read_tree`` is :func:`_read_tree` over the resolved
+    root; the fragment-presence bool is simply whether its fragment set is
+    non-empty. The read is wrapped as a THUNK the pure decision calls only on the
+    gated branch (base == ``main``), so an exempt run (empty base, or a
+    non-``main`` base) never reads or decodes ``CHANGELOG/`` — an inaccessible or
+    non-UTF-8 fragment cannot fail a run that requires no fragment.
+    """
+    read_tree = read_tree or _read_tree
+    root = _resolve_root(Path(path or ".").resolve(), repo_root=git.repo_root)
+    if base_ref is None:
+        base_ref = os.environ.get("GITHUB_BASE_REF", "")
+    verdict = decide_fragment_gate(
+        base_ref=base_ref,
+        has_unreleased_fragment=lambda: bool(read_tree(root).fragments),
+    )
+    print(verdict.message)
+    logger.info(
+        "changelog fragment gate %s",
+        "passed" if verdict.ok else "failed",
+        extra={"root": str(root), "base_ref": base_ref.strip(), "ok": verdict.ok},
+    )
+    return 0 if verdict.ok else 1
 
 
 @cli_errors
@@ -475,7 +606,9 @@ def changelog() -> None:
     Release notes accumulate as CHANGELOG/unreleased-*.md fragments, one per
     feature/fix PR; CHANGELOG.md is rendered from them, never hand-edited.
     `check` is the PR-time fragment-sync check (the changelog-sync lane);
-    `coalesce` is the cut-time roll that emits the one release-notes text.
+    `check-fragment` is the PR-time gate that a PR to main has an unreleased
+    fragment in CHANGELOG/; `coalesce` is the cut-time roll that emits the one
+    release-notes text.
     """
 
 
@@ -489,6 +622,22 @@ def check_cmd(path: str | None) -> None:
     same invocation runs in the changelog-sync lane and on a laptop.
     """
     raise SystemExit(run_check(path))
+
+
+@changelog.command(name="check-fragment")
+@click.argument("path", required=False)
+def check_fragment_cmd(path: str | None) -> None:
+    """Fail a PR to main when CHANGELOG/ holds no unreleased fragment.
+
+    The PR-time counterpart to the cut-time empty-release refusal: it asks the
+    cut's own "are there unreleased fragments?" question per-PR, so a missing
+    fragment is caught before merge, not at the next cut. Self-gating and offline
+    — the base ref comes from the CI runner env (GITHUB_BASE_REF) and the
+    fragment presence from the current checkout's CHANGELOG/ (the same discovery
+    the cut uses). Passes off-PR or on a non-main base (WS PRs to epic branches
+    are exempt).
+    """
+    raise SystemExit(run_check_fragment(path))
 
 
 @changelog.command(name="render")

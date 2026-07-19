@@ -163,6 +163,27 @@ run = "test"
 required = true
 local = true
 
+# The PR-time changelog fragment gate (issue #1073): fail a PR to `main` when
+# CHANGELOG/ holds no unreleased fragment — a fragment-PRESENCE check that asks
+# the cut's own "are there unreleased fragments?" question (the same condition
+# that makes a release refuse an empty cut) at PR time, over the same discovery
+# machinery. `run` is the `changelog` pixi task (./bin/shipit changelog) plus the
+# `check-fragment` subcommand arg — the same invocation a laptop runs.
+# `local = false` keeps it OUT of the derived commit/push checks (the
+# required∩local set stays exactly lint + test): CI-only, so lefthook/laptop
+# never runs it. Enforcement is PR-gated via GITHUB_BASE_REF — a `trigger = "pr"`
+# lane also runs on push/nightly/dispatch, but off a PR GITHUB_BASE_REF is empty
+# and the check no-ops (exits pass), so only PRs are gated. The base-branch
+# check (main only) lives in the
+# subcommand (the planner is unaware of it); the lane rolls up into the single
+# required `check` gate and needs NO workflow YAML change — a presence check
+# reads the working tree, so no git history/fetch-depth is required.
+[lanes.changelog]
+run = "changelog check-fragment"
+required = true
+local = false
+trigger = "pr"
+
 # [project] — the CONSUMER-OWNED, un-validated namespace. shipit validates that
 # top-level tables are KNOWN (so a typo dies fast), but `[project]` (alias:
 # `[custom]`) is the well-known escape hatch whose SUBTREE shipit reads but does NOT
