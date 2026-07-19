@@ -315,7 +315,6 @@ def stage(
     the default env, where conda-direct's plain consumer-owned deps resolve.
     """
     _reject_bad_feature(feature)
-    root_res = root.resolve()
     prefix = env_prefix(root, feature)
     prefix_res = prefix.resolve()
     # Defense in depth behind the feature-name check: the resolved prefix must stay
@@ -327,23 +326,33 @@ def stage(
             f"refusing to stage; check the --feature value"
         )
     # The single bounded destination space: <root>/resources. Its RESOLVED path
-    # anchors every per-entry strict-descendant check, so it must be EXACTLY
-    # `<root>/resources` — a real directory (or not yet created), never a symlink
-    # redirecting elsewhere. A committed `resources` → `.`/`.git`/`/outside` would
-    # otherwise make the "strict descendant of the staging root" bound point AT the
-    # checkout root, the git metadata, or off the tree — reopening the very
-    # data-loss class the bound closes. Requiring identity (not merely "inside the
-    # checkout") refuses all of those, restoring the deleted denylist's protection
-    # with one invariant.
-    staging_root_res = (root / _STAGING_ROOT).resolve()
-    if staging_root_res != root_res / _STAGING_ROOT:
+    # anchors every per-entry strict-descendant check, so the `resources` component
+    # must be a REAL directory (or not yet created), never a symlink redirecting
+    # elsewhere. A committed `resources` → `.`/`.git`/`/outside` would otherwise make
+    # the "strict descendant of the staging root" bound point AT the checkout root,
+    # the git metadata, or off the tree — reopening the very data-loss class the
+    # bound closes. The test is on the component's OWN nature (lstat, via
+    # `is_symlink`), NOT string-equality of the resolved path: a symlink is refused
+    # regardless of where it points, while a real dir is accepted even when the
+    # on-disk case differs (`Resources` on a case-insensitive FS) — which a
+    # `resolved == <root>/resources` comparison would false-reject. (A `samefile`
+    # against the `resources` PATH cannot be used: it would FOLLOW the symlink and
+    # match its target, accepting the redirect.)
+    staging_root = root / _STAGING_ROOT
+    if staging_root.is_symlink():
         raise StagingError(
-            f"the staging root `{_STAGING_ROOT}/` must be a real directory at "
-            f"{root_res / _STAGING_ROOT} but resolves to {staging_root_res} — a "
-            f"symlinked `{_STAGING_ROOT}` redirecting into the checkout root, "
-            f"`.git`, or outside the tree is refused; make `{_STAGING_ROOT}` a real "
-            f"directory in the checkout"
+            f"the staging root `{_STAGING_ROOT}/` must be a real directory in the "
+            f"checkout, not a symlink — `{staging_root}` is a symlink (it would "
+            f"redirect staging into the checkout root, `.git`, or off the tree); "
+            f"make `{_STAGING_ROOT}` a real directory"
         )
+    if staging_root.exists() and not staging_root.is_dir():
+        raise StagingError(
+            f"the staging root `{_STAGING_ROOT}/` must be a directory, but "
+            f"`{staging_root}` exists as a non-directory; make `{_STAGING_ROOT}` a "
+            f"real directory in the checkout"
+        )
+    staging_root_res = staging_root.resolve()
     staged: list[StagedFile] = []
     for entry in entries:
         staged.append(_stage_one(prefix, prefix_res, root, staging_root_res, entry))

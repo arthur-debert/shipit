@@ -205,6 +205,28 @@ def test_symlinked_staging_root_redirecting_into_the_checkout_is_refused(
     assert (gitdir / "HEAD").read_text(encoding="utf-8") == "ref: refs/heads/main"
 
 
+def test_capitalized_real_staging_root_is_accepted(tmp_path):
+    # On a case-insensitive FS (macOS/APFS) a real `Resources` dir is reached via
+    # `resources`, and `resolve()` returns the on-disk case `Resources`. The guard
+    # tests the component's OWN nature (not a symlink), so the capitalized real dir
+    # is ACCEPTED — a string-equality check against `<root>/resources` would have
+    # false-rejected it. On a case-sensitive FS `resources` simply doesn't exist yet
+    # and is created; either way the stage succeeds and the file lands.
+    prefix = _prefix(tmp_path)
+    _plant(prefix / "bin" / "lexd-lsp", "x", mode=0o755)
+    (tmp_path / "Resources").mkdir()
+    case_insensitive = (tmp_path / "resources").is_dir()  # True on APFS/macOS
+
+    (result,) = staging.stage(
+        tmp_path,
+        [config.StageEntry("lexd-lsp", "bin/lexd-lsp", "resources/lexd-lsp")],
+    )
+
+    assert result.dest == "resources/lexd-lsp"
+    landed = tmp_path / ("Resources" if case_insensitive else "resources") / "lexd-lsp"
+    assert landed.read_text(encoding="utf-8") == "x"
+
+
 # --------------------------------------------------------------------------
 # Bounded destination — the data-loss class is unexpressible by construction
 # --------------------------------------------------------------------------
