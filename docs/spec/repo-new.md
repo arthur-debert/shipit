@@ -66,8 +66,11 @@ must not invalidate or roll back the usable local Repo.
 
 - Provide one command that creates a new local Repo with a complete,
   shipit-managed development baseline.
-- Make the creation interface multi-stack even though the first supported stack
-  is Rust.
+- Make the creation interface multi-stack, with Rust, Node, and svelte-app as
+  the supported stacks. Node scaffolds a TypeScript CLI + library; svelte-app
+  scaffolds an SPA-only Svelte frontend. (Rust was the first supported stack;
+  Node and svelte-app were added by the Node + svelte-app profiles amendment,
+  which depends on the build/install toolchain-seam generalization in #1083.)
 - Generate a Rust workspace containing one CLI crate and one library-only crate
   with deterministic names and working dependency wiring.
 - Keep lint, test, build, and CI generic; stack-specific behavior belongs behind
@@ -99,15 +102,22 @@ must not invalidate or roll back the usable local Repo.
   GitHub.
 - Configuring publishing, distribution endpoints, release secrets, or a release
   schedule.
-- Supporting stacks other than Rust in the first release.
+- Supporting stacks beyond Rust, Node, and svelte-app for now. (This replaces the
+  original Rust-only exclusion; Node and svelte-app are now in scope. The
+  creation interface must still not preclude further stacks, but none beyond
+  these three is planned here.)
 - Designing a general-purpose template marketplace or user-provided template
   language.
 - Loading external Creation profiles, remote templates, plugin directories, or
   arbitrary template paths.
 - Replacing `shipit install` or duplicating its managed catalog in scaffold
   templates.
-- Generating a production application architecture beyond a minimal working
-  library and CLI.
+- Generating a production application architecture. The Rust and Node profiles
+  stay a minimal working library and CLI; the svelte-app profile is a
+  deliberately fuller frontend scaffold (an index page, a component, and Vite +
+  Tailwind + TypeScript config) that may exceed the lib+CLI shape while remaining
+  a minimal, non-production scaffold — not SvelteKit, SSR, or an application
+  framework.
 - Diffing a proposed scaffold against a non-empty destination or incrementally
   applying creation changes; that may be added as a separate later capability.
 - A public `repo new --dry-run` mode. The internal plan remains directly
@@ -132,8 +142,10 @@ never creates missing parent directories. The destination may be absent or an
 existing empty directory. Files, symlinks, and directories containing any
 entry, including a hidden one, are refused. `--stack` is repeatable so the
 creation request can later compose several toolchains, but at least one
-selection is mandatory. V1 accepts only one effective profile, `rust`;
-omission, unknown values, and duplicate selections are usage errors.
+selection is mandatory. The accepted profiles are `rust`, `node`, and
+`svelte-app`; omission, unknown values, and duplicate selections are usage
+errors. (`rust` was the sole v1 profile; `node` and `svelte-app` were added by
+the Node + svelte-app profiles amendment.)
 
 Exactly one remote mode is also mandatory. `--no-remote` completes the local
 Repo and performs no GitHub or remote operation. `--remote-reuse OWNER/REPO`
@@ -202,6 +214,35 @@ The library supplies the hello-world value and the CLI prints it. The generated
 project contains one black-box test that runs the CLI and asserts its output,
 thereby exercising the binary, its library dependency, and the configured Rust
 test runner together.
+
+### The Node Creation profile
+
+The `node` profile mirrors the Rust profile's pedagogy in the Node ecosystem. It
+scaffolds a **TypeScript** project with a CLI package that consumes a local
+library package: the library supplies the `Hello, world!` value and the CLI
+prints it. It contains exactly one black-box test that runs the CLI and asserts
+that greeting, exercising the CLI, its library dependency, and the configured
+`npm` test runner together. The profile declares its Artifact with
+`toolchain="npm"` and rides the existing `npm` toolchain leg, so `shipit test`
+runs `npm test` and `shipit build` runs `npm run build`. Its Node runtime is the
+one the install baseline already provisions for any Repo tracking a
+`package.json` — the managed `nodejs`/`pnpm` block — so the profile adds no
+bespoke provisioning path. Materializing the project's own dependencies
+(`pnpm install` / `npm ci`) before the creation Checks run is a build/install
+toolchain-seam concern deferred to #1083; this Spec does not fix its mechanism.
+See [ADR-0077](../adr/0077-node-creation-profile.md).
+
+### The svelte-app Creation profile
+
+The `svelte-app` profile is a **distinct** Creation profile — its own registry
+entry, not a flavour of `node` — that scaffolds an **SPA-only** frontend: Vite +
+Svelte + Tailwind + TypeScript, with one smoke test. It declares its Artifact
+with `toolchain="npm"` and builds via `npm run build` (a `vite build`), riding
+the same `npm` leg and managed `nodejs`/`pnpm` provisioning as the Node profile.
+It is deliberately a scaffold, **not** SvelteKit, SSR, or an application
+framework, and it may exceed the minimal library-and-CLI shape the Rust and Node
+profiles keep while remaining a minimal, non-production starting point. See
+[ADR-0078](../adr/0078-frontend-scaffolds-are-distinct-profiles.md).
 
 Creation combines two ownership layers:
 
@@ -406,6 +447,33 @@ depend on an interactive `pixi shell`.
 - Creation profiles form a closed, shipit-owned registry keyed by the accepted
   `--stack` values. Adding a profile is a reviewed shipit change with fixtures,
   not runtime plugin discovery or user-supplied template execution.
+- The Node profile speaks `toolchain="npm"` in its Artifact declaration. This is
+  a deliberate two-vocabulary detail: the DISPATCH axis names the Node ecosystem
+  `npm` (the Tool registry key, so `shipit test`/`shipit build` run `npm test` /
+  `npm run build`), while the INSTALL/provisioning axis names it `node` (the
+  `package.json` → node signal that delivers the managed `nodejs`/`pnpm` runtime
+  block). Both names pre-exist and name the same ecosystem on different axes; the
+  profile declares a dispatch target, so it says `npm`. Reconciling the two
+  vocabularies is out of scope and belongs to the seam generalization (#1083).
+  See [ADR-0077](../adr/0077-node-creation-profile.md).
+- svelte-app is a distinct Creation profile with its own registry entry, not a
+  multi-stack composition (`--stack node --stack svelte`) and not a base×flavour
+  axis (`--stack node:svelte`). Composition is rejected because Svelte
+  specializes Node rather than being orthogonal to it — both would claim
+  `package.json` and the specialization dependency is not expressible in a flat
+  set of independently-composed stacks; a flavour axis is rejected because it
+  adds combinatorial-matrix machinery for a space shipit does not need. A
+  frontend scaffold is one opinionated profile, exactly as `RustProfile` is one
+  opinionated scaffold rather than a configurable generator. See
+  [ADR-0078](../adr/0078-frontend-scaffolds-are-distinct-profiles.md).
+- The Node and svelte-app profiles depend on the build/install toolchain-seam
+  generalization tracked in #1083: the Creation-profile registry becoming
+  polymorphic over a `Profile` protocol (it is typed for the single Rust profile
+  today), profile-owned naming (each profile owns its ecosystem's naming rules
+  rather than the Rust `lib<name>`/hyphen-to-underscore rules), and a pre-check
+  dependency-materialization step (`pnpm install` / `npm ci`) run before the
+  Node/Svelte Checks. This Spec does not fix those seam internals; it records the
+  dependency.
 - The Rust workspace contributes one Rust Tool leg at the workspace root. The
   two Cargo members are not separate Rust legs.
 - The Rust workspace root is virtual rather than a package. Member paths mirror
@@ -686,8 +754,8 @@ and Work Stream topology from the settled Spec and ADRs.
 - Interactive prompting; v1 is explicit and automation-friendly.
 - Updating existing Repos through `repo new`; reconciliation remains
   `shipit install`.
-- Additional stack implementations, even though the creation interface must not
-  preclude them.
+- Stack implementations beyond Rust, Node, and svelte-app, even though the
+  creation interface must not preclude them.
 
 ## Further Notes
 
@@ -704,3 +772,14 @@ atomic publication to the completed local Repo, and
 records why the required remote bootstrap follows local success, never rolls
 back local or external state, and warns with recovery while exiting zero on
 remote failure.
+
+The Node + svelte-app profiles amendment extends the original Rust-only v1
+contract with two further stacks: a `node` TypeScript CLI + library profile
+([ADR-0077](../adr/0077-node-creation-profile.md)) and a distinct SPA-only
+`svelte-app` frontend profile
+([ADR-0078](../adr/0078-frontend-scaffolds-are-distinct-profiles.md)). Both ride
+the existing `npm` toolchain leg and managed `nodejs`/`pnpm` provisioning, and
+both depend on the build/install toolchain-seam generalization tracked in #1083
+(registry polymorphism, profile-owned naming, and a pre-check
+dependency-materialization step). This amendment settles the product/profile
+altitude only; #1083 owns the seam internals.
