@@ -1,5 +1,9 @@
 # Artifact Channel
 
+> **Superseded** for the cross-repo-artifact design by
+> [ADR-0077](../adr/0077-collapse-to-conda-direct.md) and
+> [`conda-direct.md`](conda-direct.md); see those for the current model.
+
 ## Context
 
 Repos in the portfolio share build artifacts. `lex-fmt/lex` produces `lexd`,
