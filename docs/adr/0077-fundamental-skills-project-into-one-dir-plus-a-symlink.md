@@ -71,13 +71,18 @@ the switch atomically.
 
 ### The symlink-write containment guard stays (defense-in-depth)
 
-Whole-file reconciliation/writes still fail closed on a symlink in ANY
-destination path component (`reconcile.symlinked_dests` /
-`apply.reject_symlinked_dests`, every mode including `MODE_TREE`). Under this
-design install never writes *through* `.claude/skills` — content goes only to the
-real `.agents/skills` — so the guard does not trip in the happy path; it protects
-the intentional symlink from accidental write-through, and it is a general
-whole-file-unit guarantee.
+Reconciliation/writes fail closed on a symlink in ANY destination path component
+(`reconcile.symlinked_dests` / `apply.reject_symlinked_dests`, every mode
+including `MODE_TREE`). It covers **every managed unit kind** — whole-file AND
+block/splice: `write_unit` writes a block host via `dest.write_text`, which
+follows a symlinked leaf or parent exactly as `write_bytes` does, so a symlinked
+`AGENTS.md`, `pixi.toml`, or `.claude/settings.json` is the same containment
+breach (overwriting a target outside the repo) and is refused identically — the
+host being consumer-owned does not make the external write safe (#1088 review).
+Under this design install never writes *through* `.claude/skills` — content goes
+only to the real `.agents/skills` — so the guard does not trip in the happy path;
+it protects the intentional symlink and every managed dest from accidental
+write-through.
 
 ## Consequences
 

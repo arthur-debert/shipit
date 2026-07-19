@@ -1438,6 +1438,29 @@ def test_install_refuses_to_write_through_a_symlinked_dest_component(tmp_path, r
     assert sentinel.read_text() == "EXTERNAL — must never be touched\n"
 
 
+def test_install_refuses_to_write_through_a_symlinked_block_dest(tmp_path, rec):
+    """#1088 review (major): BLOCK units splice via `dest.write_text`, which
+    follows a symlinked host exactly as a whole-file `write_bytes` does — the
+    guard must cover them too, not just whole-file units. A consumer whose
+    `AGENTS.md` is a symlink to an external file must never have that target
+    rewritten by the managed AGENTS block splice."""
+    external = tmp_path.parent / f"{tmp_path.name}-external-agents.md"
+    external.write_text("EXTERNAL AGENTS — must never be touched\n")
+    (tmp_path / "AGENTS.md").symlink_to(external)
+
+    plan = _plan(tmp_path)
+    # The AGENTS block unit (a block/splice dest) is surfaced and excluded.
+    flagged = {sd.unit_key: sd for sd in plan.symlinked_dests}
+    assert iunits.AGENTS_KEY in flagged
+    assert flagged[iunits.AGENTS_KEY].component == "AGENTS.md"
+    assert all(d.unit.key != iunits.AGENTS_KEY for d in plan.writes)
+
+    with pytest.raises(InstallError, match="symlinked destination"):
+        _apply(tmp_path, iapply.MODE_TREE)
+    # The external target is byte-for-byte untouched — the splice never ran.
+    assert external.read_text() == "EXTERNAL AGENTS — must never be touched\n"
+
+
 # --------------------------------------------------------------------------
 # The pinned bin/shipit launcher (ADR-0033) — pin-resolve via uv, SHIPIT_EXEC
 # override, pinless refusal. The exec seam is FAKED: a shim `uv` (and shim

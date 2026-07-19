@@ -1125,11 +1125,13 @@ def consumer_inner(root: Path, unit: Unit) -> str | None:
 
 @dataclass(frozen=True)
 class SymlinkedDest:
-    """A whole-file unit whose destination crosses a consumer-owned symlink.
+    """A managed unit (any kind) whose destination crosses a consumer symlink.
 
     ``component`` is the repo-relative path of the SHALLOWEST symlinked path
     element (from the consumer root down to the leaf) — the containment breach
-    point the operator must remove before install can write the unit.
+    point the operator must remove before install can write the unit. Applies to
+    whole-file AND block/splice units: both write through ``root / dest`` and
+    would follow a symlinked component out of the repo (#1088 review).
     """
 
     unit_key: str
@@ -1140,14 +1142,16 @@ class SymlinkedDest:
 def symlinked_dest_component(root: Path, dest: str) -> str | None:
     """The shallowest symlinked component of ``dest`` under ``root``, or None.
 
-    Walks every path element from the consumer root down to the leaf. A
-    whole-file unit's write (:func:`shipit.install.apply.write_unit` ->
-    ``dest.write_bytes``) and its hash read (:func:`consumer_hash` ->
-    ``dest.read_bytes``) both FOLLOW a symlink in ANY path component, so a
-    symlinked element — a linked leaf, or a linked parent dir — would let an
-    install write THROUGH the link, over whatever it targets OUTSIDE the repo.
-    Returns the offending element's repo-relative path so the caller fails
-    closed on it; shipit never writes through a consumer's symlink (ADR-0077).
+    Walks every path element from the consumer root down to the leaf. EVERY
+    managed unit's apply writes through ``root / unit.dest``
+    (:func:`shipit.install.apply.write_unit`): a whole-file unit via
+    ``dest.write_bytes``, a block/splice unit via ``dest.read_text`` +
+    ``dest.write_text``. All of them — and the :func:`consumer_hash` read —
+    FOLLOW a symlink in ANY path component, so a symlinked element (a linked
+    leaf, or a linked parent dir) would let an install write THROUGH the link,
+    over whatever it targets OUTSIDE the repo. Returns the offending element's
+    repo-relative path so the caller fails closed on it; shipit never writes
+    through a consumer's symlink (ADR-0077).
     """
     current = root
     for part in Path(dest).parts:
@@ -1158,18 +1162,19 @@ def symlinked_dest_component(root: Path, dest: str) -> str | None:
 
 
 def symlinked_dests(root: Path, units: Sequence[Unit]) -> tuple[SymlinkedDest, ...]:
-    """Every whole-file unit whose dest crosses a consumer symlink (fail-closed).
+    """Every managed unit whose dest crosses a consumer symlink (fail-closed).
 
-    Block units are excluded: they splice into a consumer-owned host file
-    (``AGENTS.md``, ``pixi.toml``) whose symlinking is the consumer's own
-    business, and the splice reads+rewrites that one file rather than writing a
-    fresh path shipit owns. Only whole-file units carry the path-containment
-    guarantee this guard protects.
+    Covers EVERY unit kind — whole-file AND block/splice. A block unit splices
+    into a host file (``AGENTS.md``, ``pixi.toml``, ``.claude/settings.json``)
+    via ``dest.write_text``, which follows a symlinked leaf or parent exactly as
+    a whole-file ``write_bytes`` does; calling the host consumer-owned does not
+    make overwriting a target OUTSIDE the repo safe (#1088 review). The apply
+    path is identical, so the containment guard is too. One ``SymlinkedDest`` per
+    offending unit — several block units sharing one symlinked host (the pixi
+    blocks, the settings hooks) each report it, and apply fails closed on the set.
     """
     found: list[SymlinkedDest] = []
     for u in units:
-        if u.kind != "file":
-            continue
         component = symlinked_dest_component(root, u.dest)
         if component is not None:
             found.append(
@@ -1389,11 +1394,11 @@ class ConsumerState:
     # pristine map on an unreadable manifest (the degraded-but-continuing
     # path): no readable policy means no decline.
     declines: tuple[str, ...] = ()
-    # Whole-file units whose dest crosses a consumer symlink (#1088 review):
-    # read here (the ONE read boundary) so the reconcile's fail-closed decision
-    # stays pure over this state. A symlinked dest component would make an
-    # install write THROUGH the link, outside the repo — the containment breach
-    # every mode refuses.
+    # Managed units (ANY kind — file or block) whose dest crosses a consumer
+    # symlink (#1088 review): read here (the ONE read boundary) so the reconcile's
+    # fail-closed decision stays pure over this state. A symlinked dest component
+    # would make an install write THROUGH the link, outside the repo — the
+    # containment breach every mode refuses.
     symlinked_dests: tuple[SymlinkedDest, ...] = ()
     # The `.claude/skills` structural symlink decision (#1088, ADR-0077): read
     # here (the ONE read boundary) so reconcile stays pure over it. Defaults to
@@ -1616,12 +1621,13 @@ class Plan:
     # silently ignored — usually a typo, occasionally a toolchain-conditional
     # unit whose signal manifest this repo does not track.
     decline_unmatched: tuple[str, ...] = ()
-    # Whole-file units whose dest crosses a consumer symlink (#1088 review):
-    # their decisions are EXCLUDED (a symlinked read would hash the link's
-    # target, not shipit's dest) and EVERY mode fails closed on this record
-    # before any write (:func:`shipit.install.apply.reject_symlinked_dests`) —
-    # the containment guarantee is mode-independent, unlike the lefthook publish
-    # refusal. Every surface warns off this record.
+    # Managed units (ANY kind — file or block) whose dest crosses a consumer
+    # symlink (#1088 review): their decisions are EXCLUDED (a symlinked read
+    # would hash the link's target, not shipit's dest) and EVERY mode fails
+    # closed on this record before any write
+    # (:func:`shipit.install.apply.reject_symlinked_dests`) — the containment
+    # guarantee is mode-independent, unlike the lefthook publish refusal. Every
+    # surface warns off this record.
     symlinked_dests: tuple[SymlinkedDest, ...] = ()
     # The `.claude/skills` -> `.agents/skills` structural symlink (#1088,
     # ADR-0077): CREATE/MIGRATE are a work axis of their own (apply ensures the
