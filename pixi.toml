@@ -157,8 +157,15 @@ act = "0.2.*"
 # The conda producer's packager (ADR-0064/0076): the REAL conda-repackage tests
 # in tests/test_release_publish.py drive an ACTUAL `rattler-build build` — the
 # faked seam hid all the original conda-producer bugs (#1050/#1053 lesson), so
-# the noarch producer path (ADR-0076) is exercised end-to-end here. Pinned to
-# the same minor line the managed conda-packager block ships
+# BOTH the noarch producer path (ADR-0076, `test_conda_noarch_real_repackage_*`)
+# AND the per-platform tool path (`test_conda_per_platform_real_repackage_*`, a
+# NON-native cross-target build catching the #1052 relink class) are exercised
+# end-to-end here, plus a file:// resolve round trip
+# (`test_conda_file_channel_roundtrip_*`, ADR-0064). RUN THESE (and
+# `tools/conda_channel_roundtrip.py`) AS THE GUARD BEFORE BUMPING THIS PIN — a
+# rattler-build minor that changes archive stripping, relink defaults, or the
+# `.conda` layout is exactly what the faked seam would have shipped blind. Pinned
+# to the same minor line the managed conda-packager block ships
 # (`0.69.*`, src/shipit/data/pixi-conda-packager-block.toml — the #1071 re-gate
 # moved rattler-build off the rust signal onto the conda endpoint) so the test
 # runs the version releases run; a real-build test `skipif`s loudly when the
