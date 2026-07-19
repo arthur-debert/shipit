@@ -15,6 +15,18 @@
 > (channel `https://storage.googleapis.com/shipit-artifacts-public/lex-fmt/lex`,
 > `lexd = "==0.19.10"`) wired into the lint env and resolved through `pixi.lock`.
 > No fallback is retained; a win-64 lint solve fails closed by design.
+>
+> **Refined by #1068.** The managed `lexd` pin is **platform-scoped** to the
+> served subdirs via pixi `[target]` tables
+> (`[feature.shipit-lexd.target.<subdir>.dependencies]` for
+> osx-arm64/linux-64/linux-aarch64), **not** a blanket
+> `[feature.shipit-lexd.dependencies]`. A blanket dep applied `lexd` to *every*
+> platform a composing env declares, so a consumer declaring an **unserved**
+> platform (e.g. `osx-64`, Intel Mac) got an unsatisfiable lint-env solve and
+> `shipit install` failed closed — no commit, no reconcile. Scoping keeps
+> ADR-0071's "unserved platforms fail closed" (lexd is simply *absent* on
+> osx-64/win-64, so lint cannot run there) **while the env still solves**, so
+> install/reconcile no longer breaks on those platforms.
 
 `lexd` is the one lint-gate tool not on conda-forge, so it could not ride
 `pixi.lock` like the other linters; `shipit provision lexd` fetched it bespoke

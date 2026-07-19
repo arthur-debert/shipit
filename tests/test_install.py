@@ -503,6 +503,15 @@ LINT_TOOLS = (
     "lefthook",
 )
 
+# The managed lexd dependency is PLATFORM-SCOPED (#1068): pixi `[target]` tables
+# pin lexd only on the Artifact channel's SERVED subdirs, so a consumer declaring
+# an UNSERVED platform (osx-64, win-64) has NO lexd dep there and the lint env
+# still solves. A blanket `[feature.shipit-lexd.dependencies]` applied to every
+# platform, breaking install-reconcile on osx-64/win-64 repos.
+LEXD_SERVED_SUBDIRS = ("osx-arm64", "linux-64", "linux-aarch64")
+_LEXD_PIN = {"lexd": "==0.19.10"}
+LEXD_SCOPED_TARGET = {sub: {"dependencies": _LEXD_PIN} for sub in LEXD_SERVED_SUBDIRS}
+
 
 def test_load_units_includes_the_lint_env_blocks():
     units = {u.key: u for u in iunits.load_units()}
@@ -553,7 +562,11 @@ def test_load_units_includes_the_managed_lexd_feature_block():
     assert feature["channels"] == [
         "https://storage.googleapis.com/shipit-artifacts-public/lex-fmt/lex"
     ]
-    assert feature["dependencies"] == {"lexd": "==0.19.10"}
+    # The lexd pin is PLATFORM-SCOPED to the served subdirs via `[target]` tables
+    # (#1068) — no blanket `[dependencies]` that would break unserved-platform
+    # (osx-64/win-64) solves.
+    assert "dependencies" not in feature
+    assert feature["target"] == LEXD_SCOPED_TARGET
 
 
 def test_load_units_includes_the_launcher_deps_block():
@@ -4655,9 +4668,11 @@ def test_fresh_install_delivers_the_lint_environment(tmp_path, rec):
     deps = manifest["feature"]["lint"]["dependencies"]
     assert set(deps) == set(LINT_TOOLS)
     # The lint env composes the managed `shipit-lexd` feature (ARF02-WS06) so
-    # lexd resolves from the Artifact channel.
+    # lexd resolves from the Artifact channel — platform-scoped to the served
+    # subdirs (#1068), never a blanket dep.
     assert manifest["environments"]["lint"] == ["lint", "shipit-lexd"]
-    assert manifest["feature"]["shipit-lexd"]["dependencies"] == {"lexd": "==0.19.10"}
+    assert "dependencies" not in manifest["feature"]["shipit-lexd"]
+    assert manifest["feature"]["shipit-lexd"]["target"] == LEXD_SCOPED_TARGET
 
     # The blocks recorded a pristine hash in the manifest...
     managed = config.load_managed(config.load(tmp_path / ".shipit.toml"))
@@ -4665,6 +4680,38 @@ def test_fresh_install_delivers_the_lint_environment(tmp_path, rec):
     assert iunits.PIXI_ENVS_KEY in managed
     assert iunits.PIXI_LEXD_KEY in managed
     # ...and an unchanged re-install is a clean NOOP.
+    assert _plan(tmp_path).nothing_to_do
+
+
+def test_install_on_a_consumer_declaring_an_unserved_platform_delivers_scoped_lexd(
+    tmp_path, rec
+):
+    # #1068 regression: a consumer declaring an UNSERVED platform (osx-64, Intel
+    # Mac — the Artifact channel serves only osx-arm64/linux-64/linux-aarch64)
+    # must still reconcile. Under the old BLANKET `[feature.shipit-lexd.dependencies]`
+    # pixi applied `lexd ==0.19.10` to EVERY platform of the composing lint env, so
+    # the osx-64 solve had no candidate ("Cannot solve requirements ... for platform
+    # 'osx-64'") and `shipit install` failed closed — no commit, no PR, blocking the
+    # fleet reconcile. WS06's tests all used shipit-like manifests WITHOUT osx-64, so
+    # the fleet canary caught what self-host structurally couldn't. The fix
+    # platform-scopes the lexd dep to the served subdirs via `[target]` tables.
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    (tmp_path / "pixi.toml").write_text(
+        '[workspace]\nname = "acme"\nchannels = ["conda-forge"]\n'
+        'platforms = ["linux-64", "linux-aarch64", "osx-64", "osx-arm64"]\n\n'
+        '[tasks]\ntest = "pytest"\n'
+    )
+    _apply(tmp_path)
+
+    manifest = tomllib.loads((tmp_path / "pixi.toml").read_text())  # valid TOML
+    feature = manifest["feature"]["shipit-lexd"]
+    # lexd is delivered ONLY under the served-subdir `[target]` tables — never a
+    # blanket `[dependencies]` and never a target for the unserved osx-64, so that
+    # platform has no lexd requirement and its lint-env solve is satisfiable.
+    assert "dependencies" not in feature
+    assert feature["target"] == LEXD_SCOPED_TARGET
+    assert "osx-64" not in feature["target"]
+    # The membership was recorded pristine, so an unchanged re-install is a NOOP.
     assert _plan(tmp_path).nothing_to_do
 
 
@@ -4703,8 +4750,9 @@ def test_lint_env_merges_lexd_into_a_consumer_owned_lint_env(tmp_path, rec):
     # lexd is now composed into the consumer's lint env (append, not replace)...
     assert manifest["environments"]["lint"] == ["lint", "shipit-lexd"]
     # ...and the reserved feature it composes landed, so lexd resolves from the
-    # Artifact channel rather than the retired `provision lexd`.
-    assert manifest["feature"]["shipit-lexd"]["dependencies"] == {"lexd": "==0.19.10"}
+    # Artifact channel rather than the retired `provision lexd` — platform-scoped
+    # to the served subdirs (#1068).
+    assert manifest["feature"]["shipit-lexd"]["target"] == LEXD_SCOPED_TARGET
     assert manifest["feature"]["shipit-lexd"]["channels"] == [
         "https://storage.googleapis.com/shipit-artifacts-public/lex-fmt/lex"
     ]
@@ -4830,7 +4878,9 @@ def test_fresh_consumer_without_pixi_manifest_gets_a_valid_seed(tmp_path, rec):
     assert manifest["tasks"]["test"] == "./bin/shipit test"
     assert set(manifest["feature"]["lint"]["dependencies"]) == set(LINT_TOOLS)
     assert manifest["environments"]["lint"] == ["lint", "shipit-lexd"]
-    assert manifest["feature"]["shipit-lexd"]["dependencies"] == {"lexd": "==0.19.10"}
+    # lexd is platform-scoped to the served subdirs (#1068), never a blanket dep.
+    assert "dependencies" not in manifest["feature"]["shipit-lexd"]
+    assert manifest["feature"]["shipit-lexd"]["target"] == LEXD_SCOPED_TARGET
     # ...and the launcher's uv (#758): the managed tasks all ride ./bin/shipit.
     assert "uv" in manifest["dependencies"]
 

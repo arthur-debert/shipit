@@ -279,12 +279,25 @@ regen-roles = "bash tools/regen-roles.sh"
 # binary constant to this managed block (ADR-0047: not consumer config).
 channels = ["https://storage.googleapis.com/shipit-artifacts-public/lex-fmt/lex"]
 
-[feature.shipit-lexd.dependencies]
-# The fleet-pinned lexd. A bump is one data edit here, rolled fleet-wide on each
-# consumer's next `shipit install` reconcile. Exact-pinned (`==`) so uniformity
-# is a single version, never a resolved range. win-64 is unserved while the
-# Windows build pause holds (#895, ADR-0071), so a win-64 lint solve fails
-# closed — deliberately, with no `provision` fallback.
+# The fleet-pinned lexd, PLATFORM-SCOPED to the Artifact channel's SERVED subdirs
+# via pixi `[target]` tables (#1068). A bump is one edit here, rolled fleet-wide
+# on each consumer's next `shipit install` reconcile; exact-pinned (`==`) so
+# uniformity is a single version, never a resolved range. The served set is
+# osx-arm64/linux-64/linux-aarch64 (win-64 is unserved under the Windows build
+# pause, #895, ADR-0071). Scoping is load-bearing: a BLANKET
+# `[feature.shipit-lexd.dependencies]` applied lexd to EVERY platform a composing
+# env declares, so a consumer that declares an UNSERVED platform (e.g. osx-64,
+# Intel Mac) had no candidate for lexd and got an unsatisfiable lint-env solve —
+# `shipit install` then failed closed with no commit and no reconcile (#1068).
+# Scoping to the served subdirs keeps ADR-0071's "unserved platforms fail closed"
+# (lexd is simply ABSENT on osx-64/win-64, so lint cannot run there — already true
+# under the retired `provision lexd`, which raised for Intel Mac) WHILE the env
+# still SOLVES, so install/reconcile no longer breaks on those platforms.
+[feature.shipit-lexd.target.osx-arm64.dependencies]
+lexd = "==0.19.10"
+[feature.shipit-lexd.target.linux-64.dependencies]
+lexd = "==0.19.10"
+[feature.shipit-lexd.target.linux-aarch64.dependencies]
 lexd = "==0.19.10"
 # <<< shipit-managed lexd feature <<<
 
