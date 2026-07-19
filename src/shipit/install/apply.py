@@ -14,6 +14,7 @@ terminal report is the renderer's (:mod:`shipit.verbs.install`).
 from __future__ import annotations
 
 import logging
+import shutil
 import stat
 import tempfile
 import time
@@ -29,6 +30,9 @@ from .errors import InstallError, SelfCertError
 from .reconcile import (
     DELETE,
     KEEP,
+    LINK_CREATE,
+    LINK_MIGRATE,
+    ClaudeSkillsLink,
     Plan,
     consumer_inner,
     format_lefthook_conflict,
@@ -44,6 +48,8 @@ from .splice import (
     splice_settings_hook,
 )
 from .units import (
+    CLAUDE_SKILLS_DIR,
+    CLAUDE_SKILLS_LINK_TARGET,
     FMT_ENV_MEMBER,
     FMT_JSON_HOOK,
     HOOK_RECOVERY_CMD,
@@ -188,6 +194,69 @@ def write_unit(root: Path, unit: Unit) -> None:
     dest.write_bytes(unit.content)
     if unit.executable:
         dest.chmod(0o755)
+
+
+def ensure_claude_skills_link(
+    root: Path, link: ClaudeSkillsLink
+) -> tuple[bool, tuple[str, ...]]:
+    """Execute the ``.claude/skills`` -> ``.agents/skills`` symlink decision.
+
+    Returns ``(created, removed_files)``: whether this apply left the managed
+    symlink in place, and the repo-relative pristine files a MIGRATE removed (the
+    committing modes publish their deletion). NOOP/BLOCKED do nothing.
+
+    Defensive over the gather→apply window (ADR-0077): a MIGRATE removes the real
+    ``.claude/skills`` dir ONLY while it is still a real dir whose current files
+    are all within the gather-approved pristine set — a file that changed or
+    appeared in the window ABORTS the migration (fail-safe), leaving the
+    consumer's content intact. A CREATE that finds the path now occupied likewise
+    stands down. Never destroys consumer content.
+    """
+    if not link.is_work:  # NOOP / BLOCKED — nothing structural to do
+        return False, ()
+    dest = root / CLAUDE_SKILLS_DIR
+    removed: tuple[str, ...] = ()
+    if link.action == LINK_MIGRATE:
+        if dest.is_symlink():
+            # Already a link (someone migrated in the window). Leave it — a wrong
+            # target would have been BLOCKED at gather; re-pointing is not ours.
+            return False, ()
+        if not dest.is_dir():
+            return False, ()  # vanished in the window; goal (no real dir) holds
+        approved = set(link.stale_files)
+        current = {
+            str(p.relative_to(root))
+            for p in dest.rglob("*")
+            if p.is_file() and not p.is_symlink()
+        }
+        if not current <= approved:
+            logger.warning(
+                "claude skills migration aborted — %s changed in the "
+                "gather→apply window; left untouched",
+                CLAUDE_SKILLS_DIR,
+                extra={"root": str(root), "path": CLAUDE_SKILLS_DIR},
+            )
+            return False, ()
+        shutil.rmtree(dest)
+        removed = link.stale_files
+    elif link.action == LINK_CREATE and (dest.exists() or dest.is_symlink()):
+        # Something occupied the path in the window — don't clobber it.
+        logger.warning(
+            "claude skills link skipped — %s appeared in the gather→apply "
+            "window; left untouched",
+            CLAUDE_SKILLS_DIR,
+            extra={"root": str(root), "path": CLAUDE_SKILLS_DIR},
+        )
+        return False, ()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.symlink_to(CLAUDE_SKILLS_LINK_TARGET)
+    logger.info(
+        "linked %s -> %s",
+        CLAUDE_SKILLS_DIR,
+        CLAUDE_SKILLS_LINK_TARGET,
+        extra={"root": str(root), "path": CLAUDE_SKILLS_DIR},
+    )
+    return True, removed
 
 
 def _rerender_changelog(root: Path) -> bool:
@@ -1003,6 +1072,22 @@ def apply(
         # files-vs-hooks asymmetry, #984 round-6). Only a rewrite is apply's own.
         touched.add(d.retired.file)
         staged_writes.add(d.retired.file)
+
+    # The `.claude/skills` structural symlink (#1088, ADR-0077): ensure it here,
+    # after the `.agents/skills` content writes above so the link's target
+    # already holds the managed set. A CREATE/MIGRATE joins the commit scope; a
+    # MIGRATE also publishes the removed pristine files' deletion (staged from
+    # the INDEX, like a retired removal, never `git add` on an absent path).
+    link_created, link_removed = ensure_claude_skills_link(
+        root, plan.claude_skills_link
+    )
+    if link_created:
+        touched.add(CLAUDE_SKILLS_DIR)
+        staged_writes.add(CLAUDE_SKILLS_DIR)
+    for stale in link_removed:
+        touched.add(stale)
+        retired_removals.add(stale)
+
     cfg_path = root / config.CONFIG_NAME
     # Seed the consumer-owned policy BEFORE the manifest write, which preserves
     # `[secrets]`/`[reviewers]` textually while it re-stamps `[shipit]`/`[managed]`.

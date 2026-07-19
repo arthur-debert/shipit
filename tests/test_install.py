@@ -1062,6 +1062,9 @@ def test_conflict_bearing_noop_plan_still_fails_committing_modes(tmp_path, monke
         current_pin=None,
         target_pin=None,
         lefthook_conflicts=(conflict,),
+        # Zero the `.claude/skills` link axis too (a fresh consumer plans a
+        # CREATE, #1088), so the crafted plan is the exact empty-work-axes shape.
+        claude_skills_link=irec.ClaudeSkillsLink(irec.LINK_NOOP),
     )
     assert noop_conflict.nothing_to_do  # the exact bypass shape
     monkeypatch.setattr(verb, "reconcile", lambda *a, **k: noop_conflict)
@@ -1267,97 +1270,164 @@ def test_load_units_has_skills_agents_and_bootstrap():
     keys = {u.key for u in units}
     assert "AGENTS.md#shipit-block" in keys
     assert "bin/shipit" in keys
-    # Skills project into the two discovery dirs, never the source-only store (#1088).
-    assert any(k.startswith(".claude/skills/") for k in keys)
+    # Skill content is emitted once, into the single real `.agents/skills` dir —
+    # never the source-only store, never a `.claude/skills/*` content unit (that
+    # dir is a structural symlink, #1088).
     assert any(k.startswith(".agents/skills/") for k in keys)
     assert not any(k.startswith(".shipit-skills/") for k in keys)
+    assert not any(k.startswith(".claude/skills/") for k in keys)
     agents = next(u for u in units if u.key == "AGENTS.md#shipit-block")
     assert agents.kind == "block"
     boot = next(u for u in units if u.key == "bin/shipit")
     assert boot.executable is True
 
 
-def test_every_store_skill_projects_to_both_surfaces():
-    """Slice 1 (#1088): each fundamental store file fans out to BOTH discovery
-    dirs as byte-identical whole-file units — `.claude/skills/<rel>` (Claude Code)
-    and `.agents/skills/<rel>` (agy/codex) — with distinct, non-colliding keys.
-    Nothing is emitted at the source-only `.shipit-skills/` store."""
+def test_every_store_skill_is_emitted_once_into_agents_skills():
+    """#1088: each fundamental store file is emitted EXACTLY ONCE, into the single
+    real `.agents/skills/<rel>` dir — no `.claude/skills/*` content unit, no
+    `.shipit-skills/*` dest. Claude reads the identical set through the
+    `.claude/skills` symlink (a structural step, not a content unit)."""
     file_units = [u for u in iunits.load_units() if u.kind == "file"]
     # Collect keys as a LIST first: a dict would silently coalesce a collision,
-    # so the [managed]-table key uniqueness the fan-out promises would go
-    # unchecked. Assert no two units share a key before indexing by it.
+    # so the [managed]-table key uniqueness would go unchecked. Assert no two
+    # units share a key before indexing by it.
     keys = [u.key for u in file_units]
     assert len(keys) == len(set(keys)), "colliding managed keys among file units"
     units = {u.key: u for u in file_units}
     store = list(iunits.walk_files(iunits.skills_root()))
     assert store, "the fundamental skill store is empty"
     for rel, content in store:
-        claude_key = f"{iunits.CLAUDE_SKILLS_DIR}/{rel}"
         agents_key = f"{iunits.AGENTS_SKILLS_DIR}/{rel}"
-        assert claude_key in units, f"{claude_key} not projected"
-        assert agents_key in units, f"{agents_key} not projected"
-        # Same source bytes on both surfaces; dest mirrors key (a plain copy).
-        assert units[claude_key].content == content
+        assert agents_key in units, f"{agents_key} not emitted"
         assert units[agents_key].content == content
-        assert units[claude_key].dest == claude_key
         assert units[agents_key].dest == agents_key
+        # Emitted ONCE: the Claude dir carries no content unit for this skill.
+        assert f"{iunits.CLAUDE_SKILLS_DIR}/{rel}" not in units
     assert not any(k.startswith(".shipit-skills/") for k in units)
+    assert not any(k.startswith(f"{iunits.CLAUDE_SKILLS_DIR}/") for k in units)
+
+
+def test_claude_skills_link_planned_and_created_for_a_fresh_consumer(tmp_path, rec):
+    """#1088: a fresh consumer (no `.claude/skills`) plans a CREATE of the
+    structural symlink, and an apply lays it down as a whole-dir symlink to the
+    real `.agents/skills` dir — the identical set Claude reads."""
+    plan = _plan(tmp_path)
+    assert plan.claude_skills_link.action == irec.LINK_CREATE
+    assert plan.claude_skills_link.is_work
+    _apply(tmp_path)
+    link = tmp_path / iunits.CLAUDE_SKILLS_DIR
+    assert link.is_symlink()
+    assert str(link.readlink()) == iunits.CLAUDE_SKILLS_LINK_TARGET
+    # It resolves to the real content dir: the same skill is reachable both ways.
+    assert (tmp_path / iunits.AGENTS_SKILLS_DIR / "to-spec" / "SKILL.md").is_file()
+    assert (link / "to-spec" / "SKILL.md").is_file()  # through the symlink
+
+
+def _seed_real_claude_skills(root: Path, *, modify: bool = False) -> Path:
+    """A consumer with a REAL `.claude/skills` dir (the pre-symlink shape): byte
+    copies of the store content, so the migration's pristine check passes — unless
+    ``modify`` dirties one file (the consumer-edited, must-not-touch case)."""
+    src = REPO_ROOT / ".shipit-skills"
+    dst = root / ".claude" / "skills"
+    shutil.copytree(src, dst)
+    if modify:
+        (dst / "coordinating" / "SKILL.md").write_text("CONSUMER EDIT\n")
+    return dst
+
+
+def test_install_migrates_a_pristine_claude_skills_dir_to_the_symlink(tmp_path, rec):
+    """#1088 migration: a consumer with a REAL `.claude/skills` dir of pristine
+    content is path-scoped, pristine-checked, and switched to the symlink — the
+    real dir removed, the whole-dir link created. NEVER content-hash retirement
+    (which would nuke the byte-identical `.agents/skills` + `.shipit-skills`)."""
+    real = _seed_real_claude_skills(tmp_path)
+    assert real.is_dir() and not real.is_symlink()
+
+    plan = _plan(tmp_path)
+    assert plan.claude_skills_link.action == irec.LINK_MIGRATE
+    assert plan.claude_skills_link.stale_files  # the pristine files it will remove
+
+    _apply(tmp_path)
+    link = tmp_path / iunits.CLAUDE_SKILLS_DIR
+    assert link.is_symlink()
+    assert str(link.readlink()) == iunits.CLAUDE_SKILLS_LINK_TARGET
+    # The real content survives at `.agents/skills`, reachable through the link.
+    assert (tmp_path / iunits.AGENTS_SKILLS_DIR / "coordinating" / "SKILL.md").is_file()
+    assert (link / "coordinating" / "SKILL.md").is_file()
+
+
+def test_install_flags_and_preserves_a_consumer_modified_claude_skills_dir(
+    tmp_path, rec
+):
+    """#1088 migration fail-safe: a `.claude/skills` real dir with ANY
+    consumer-modified file BLOCKS — shipit warns and leaves it untouched (never a
+    symlink, never a destructive removal), pull-not-push."""
+    real = _seed_real_claude_skills(tmp_path, modify=True)
+
+    plan = _plan(tmp_path)
+    assert plan.claude_skills_link.action == irec.LINK_BLOCKED
+    assert not plan.claude_skills_link.is_work
+    # The block is surfaced loudly for the operator.
+    warning = verb.format_plan_warnings(plan)
+    assert "claude skills link" in warning
+
+    _apply(tmp_path)
+    # Untouched: still a real dir, and the consumer's edit is intact.
+    assert real.is_dir() and not real.is_symlink()
+    assert (real / "coordinating" / "SKILL.md").read_text() == "CONSUMER EDIT\n"
 
 
 def test_shipits_own_skills_reconcile_to_noop():
     """The dogfood drift check (the WS01 / lint-config pattern): shipit
-    self-installs at Tree provisioning, so its own committed `.claude/skills/*`
-    and `.agents/skills/*` must be BYTE-IDENTICAL copies of the managed units —
-    the #1088 migration replaced the hand-committed symlinks with real copies, so
-    a skill-store edit is one source change mirrored into both projected dirs (or
-    this test fails). NO destination path component (parent dirs included, not
-    just the leaf) may be a symlink — the pre-migration layout linked the parent
-    slug dir, which the containment guard now refuses."""
+    self-installs at Tree provisioning, so its own committed `.agents/skills/*`
+    must be BYTE-IDENTICAL to the managed units, and `.claude/skills` must be the
+    structural whole-dir symlink (#1088) — a skill-store edit is one source change
+    mirrored into `.agents/skills` (or this test fails), and the link is current."""
     skill_units = [
         u
         for u in iunits.load_units()
-        if u.key.startswith(
-            (f"{iunits.CLAUDE_SKILLS_DIR}/", f"{iunits.AGENTS_SKILLS_DIR}/")
-        )
+        if u.key.startswith(f"{iunits.AGENTS_SKILLS_DIR}/")
     ]
-    assert skill_units, "no projected skill units to check"
+    assert skill_units, "no skill units to check"
     for unit in skill_units:
-        # Check the WHOLE dest path, root..leaf — a linked parent slug dir
-        # (`.claude/skills/coordinating -> ...`) is exactly the pre-migration
-        # shape, and a leaf-only `is_symlink()` would miss it.
+        # No dest component may be a symlink (the real content dir stays real).
         component = irec.symlinked_dest_component(REPO_ROOT, unit.dest)
-        assert component is None, (
-            f"{component} is a symlink (#1088 migration must leave real copies)"
-        )
+        assert component is None, f"{component} is a symlink (must be real content)"
         assert irec.consumer_hash(REPO_ROOT, unit) == unit.desired_hash(), unit.key
+    # `.claude/skills` is the structural symlink → `.agents/skills`, current.
+    retired = irec.load_retired()
+    link = irec.plan_claude_skills_link(REPO_ROOT, iunits.load_units(), retired)
+    assert link.action == irec.LINK_NOOP, link
+    claude_link = REPO_ROOT / iunits.CLAUDE_SKILLS_DIR
+    assert claude_link.is_symlink()
+    assert str(claude_link.readlink()) == iunits.CLAUDE_SKILLS_LINK_TARGET
 
 
 def test_install_refuses_to_write_through_a_symlinked_dest_component(tmp_path, rec):
-    """#1088 review (critical): a consumer whose discovery dir is a SYMLINK to an
-    external directory must never have that target overwritten. A whole-file
-    unit's write (`dest.write_bytes`) follows a symlink in ANY path component, so
-    the projection would write THROUGH a linked parent, outside the repo. Install
-    surfaces the conflict, excludes the unit from the write set, and fails closed
-    in EVERY applying mode (MODE_TREE included) before any write."""
+    """#1088 review (critical): a whole-file unit whose destination crosses a
+    consumer SYMLINK to an external directory must never have that target
+    overwritten. `dest.write_bytes` follows a symlink in ANY path component, so
+    install surfaces the conflict, excludes the unit from the write set, and fails
+    closed in EVERY applying mode (MODE_TREE included) before any write. The real
+    content dir `.agents/skills` is the case that matters now."""
     external = tmp_path.parent / f"{tmp_path.name}-external-skills"
     external.mkdir()
     sentinel = external / "SKILL.md"
     sentinel.write_text("EXTERNAL — must never be touched\n")
 
-    # `.claude/skills/coordinating` -> the external dir (the pre-migration
-    # symlink shape); the projected `.claude/skills/coordinating/SKILL.md` would
-    # resolve into it.
-    link_parent = tmp_path / ".claude" / "skills"
+    # `.agents/skills/coordinating` -> the external dir; the managed content unit
+    # `.agents/skills/coordinating/SKILL.md` would resolve into it.
+    link_parent = tmp_path / ".agents" / "skills"
     link_parent.mkdir(parents=True)
     (link_parent / "coordinating").symlink_to(external, target_is_directory=True)
 
-    victim_key = ".claude/skills/coordinating/SKILL.md"
+    victim_key = ".agents/skills/coordinating/SKILL.md"
     plan = _plan(tmp_path)
     # The symlinked-dest unit is surfaced (naming the offending component) and
     # excluded from the write set — never a phantom NOOP/OVERRIDE.
     flagged = {sd.unit_key: sd for sd in plan.symlinked_dests}
     assert victim_key in flagged
-    assert flagged[victim_key].component == ".claude/skills/coordinating"
+    assert flagged[victim_key].component == ".agents/skills/coordinating"
     assert all(d.unit.key != victim_key for d in plan.writes)
 
     # Every applying mode refuses BEFORE any write — the raw filesystem write is
@@ -4509,9 +4579,12 @@ def test_fresh_install_writes_set_and_opens_draft_pr(tmp_path, rec):
     assert result.pr_url == "https://github.com/acme/repo/pull/1"
     assert result.pr_updated is False
 
-    # Managed files landed — projected into BOTH discovery dirs (#1088).
-    assert (tmp_path / ".claude" / "skills" / "to-spec" / "SKILL.md").is_file()
+    # Managed skill content landed in the single real dir; `.claude/skills` is
+    # the structural symlink to it (#1088), and the store was not shipped.
     assert (tmp_path / ".agents" / "skills" / "to-spec" / "SKILL.md").is_file()
+    claude_link = tmp_path / ".claude" / "skills"
+    assert claude_link.is_symlink()
+    assert (claude_link / "to-spec" / "SKILL.md").is_file()  # resolves through it
     assert not (tmp_path / ".shipit-skills").exists()
     assert (tmp_path / "bin" / "shipit").is_file()
     # The AGENTS block was spliced in without losing the consumer's text.
@@ -5080,14 +5153,14 @@ def test_consumer_edit_surfaces_as_override(tmp_path, rec):
     _apply(tmp_path)
     rec.calls.clear()
 
-    # The consumer edits a managed skill file (at a projected discovery dir, #1088).
-    skill = tmp_path / ".claude" / "skills" / "to-spec" / "SKILL.md"
+    # The consumer edits a managed skill file (the real `.agents/skills` dir, #1088).
+    skill = tmp_path / ".agents" / "skills" / "to-spec" / "SKILL.md"
     skill.write_text("CONSUMER EDIT\n")
 
     _apply(tmp_path, iapply.MODE_PR)
     assert ("pr_create", True) in rec.calls
     assert "### Overrides" in rec.pr_body
-    assert ".claude/skills/to-spec/SKILL.md" in rec.pr_body
+    assert ".agents/skills/to-spec/SKILL.md" in rec.pr_body
     # The diff is captured BEFORE the overwrite, so it shows the consumer's edit
     # (a non-empty diff), not an empty diff against what shipit just wrote.
     assert "CONSUMER EDIT" in rec.pr_body
@@ -5137,7 +5210,7 @@ def test_declined_unit_is_never_written_and_drops_from_the_manifest(tmp_path, re
     (tmp_path / "bin" / "shipit").write_text("#!/bin/sh\n# MY OWN LAUNCHER\n")
     _decline(tmp_path, "bin/shipit")
     # Another unit changes, so the plan still has work — an applying install runs.
-    (tmp_path / ".claude" / "skills" / "to-spec" / "SKILL.md").unlink()
+    (tmp_path / ".agents" / "skills" / "to-spec" / "SKILL.md").unlink()
 
     result = _apply(tmp_path, iapply.MODE_PR)
     assert result.pr_url is not None
@@ -5148,7 +5221,7 @@ def test_declined_unit_is_never_written_and_drops_from_the_manifest(tmp_path, re
     cfg = config.load(cfg_path)
     managed = config.load_managed(cfg)
     assert iunits.SHIPIT_LAUNCHER_FILE not in managed
-    assert ".claude/skills/to-spec/SKILL.md" in managed
+    assert ".agents/skills/to-spec/SKILL.md" in managed
     # The decline itself survives the manifest re-stamp (the durable half)...
     assert config.load_declines(cfg, cfg_path.read_text()) == (
         iunits.SHIPIT_LAUNCHER_FILE,
@@ -5706,7 +5779,7 @@ def test_default_install_mid_drift_never_branches_or_opens_pr(tmp_path, rec):
     _apply(tmp_path)
     rec.calls.clear()
 
-    skill = tmp_path / ".claude" / "skills" / "to-spec" / "SKILL.md"
+    skill = tmp_path / ".agents" / "skills" / "to-spec" / "SKILL.md"
     skill.write_text("CONSUMER EDIT\n")
     result = _apply(tmp_path)
     # The drifted unit was refreshed to shipit's content, in the working tree.
@@ -5717,7 +5790,7 @@ def test_default_install_mid_drift_never_branches_or_opens_pr(tmp_path, rec):
     # the renderer's stderr warning derives from the typed result.
     warning = verb.format_result_warnings(result)
     assert "consumer-edited" in warning
-    assert ".claude/skills/to-spec/SKILL.md" in warning
+    assert ".agents/skills/to-spec/SKILL.md" in warning
 
 
 def test_push_flag_pushes_to_branch_without_pr(tmp_path, rec):
@@ -6925,7 +6998,7 @@ def test_pr_selfcert_failure_rolls_the_staged_writes_back(tmp_path, rec):
     # restores file STATE; an emptied managed directory is inert — git does not
     # track it and reconcile reads files, not dirs.)
     assert not (tmp_path / ".shipit.toml").exists()
-    assert not (tmp_path / ".claude" / "skills" / "to-spec" / "SKILL.md").exists()
+    assert not (tmp_path / ".agents" / "skills" / "to-spec" / "SKILL.md").exists()
     assert not (tmp_path / "bin" / "shipit").exists()
     assert (tmp_path / "AGENTS.md").read_text() == original_agents
 
@@ -7243,16 +7316,15 @@ RELOCATED_SKILL_STORE_PATHS = (
 
 def test_retired_manifest_carries_the_relocated_skill_store():
     # The store moved out of `skills/` to `.shipit-skills/` (#921) and now
-    # PROJECTS into the discovery dirs (#1088): each of the ELEVEN relocated
-    # skills must still be delivered (under `.claude/skills/<rel>`, its content
-    # hash unchanged by the dest move) AND have its OLD `skills/<rel>` path
-    # retired, carrying the current content hash so a consumer sheds the polluting
-    # old copy on install (leaving consumer-authored `skills/` files alone — they
-    # are not in this manifest).
+    # PROJECTS into the single real `.agents/skills/<rel>` dir (#1088): each of the
+    # ELEVEN relocated skills must still be delivered (its content hash unchanged
+    # by the dest move) AND have its OLD `skills/<rel>` path retired, carrying the
+    # current content hash so a consumer sheds the polluting old copy on install
+    # (leaving consumer-authored `skills/` files alone — not in this manifest).
     retired = {r.path: r for r in irec.load_retired()}
     units = {u.key: u for u in iunits.load_units()}
     for rel in RELOCATED_SKILL_STORE_PATHS:
-        new_key = f".claude/skills/{rel}"
+        new_key = f".agents/skills/{rel}"
         old_path = f"skills/{rel}"
         assert new_key in units, f"{new_key} no longer delivered"
         assert old_path in retired, f"{old_path} not retired"
@@ -7264,8 +7336,8 @@ def test_install_deletes_a_pristine_relocated_skill_and_installs_new_store(
 ):
     # End-to-end for the store move: a consumer with a pristine copy of the OLD
     # `skills/coordinating/SKILL.md` sheds it on install, while the same content
-    # is (re)installed at the projected `.claude/skills/coordinating/SKILL.md`
-    # discovery dir (#1088). The store at `.shipit-skills/` is the read source.
+    # is (re)installed at the real `.agents/skills/coordinating/SKILL.md` dir
+    # (#1088). The store at `.shipit-skills/` is the read source.
     old_path = "skills/coordinating/SKILL.md"
     source = REPO_ROOT / ".shipit-skills/coordinating/SKILL.md"
     assert config.content_hash(source.read_bytes()) in {
@@ -7279,8 +7351,9 @@ def test_install_deletes_a_pristine_relocated_skill_and_installs_new_store(
     assert old_path in [d.retired.path for d in plan.retire_deletes]
     _apply(tmp_path)
     assert not victim.exists()
-    assert (tmp_path / ".claude/skills/coordinating/SKILL.md").is_file()
     assert (tmp_path / ".agents/skills/coordinating/SKILL.md").is_file()
+    # Claude reaches the same skill through the structural symlink.
+    assert (tmp_path / ".claude/skills/coordinating/SKILL.md").is_file()
 
 
 # The agent-specific launcher shims (#815): repo-root whole-file units shipit
@@ -7362,7 +7435,7 @@ def test_install_deletes_a_pristine_retired_skill_file(tmp_path, rec):
     assert retired_path in [d.retired.path for d in plan.retire_deletes]
     _apply(tmp_path)
     assert not victim.exists()
-    assert (tmp_path / ".claude/skills/grill-me-with-docs/ADR-FORMAT.md").is_file()
+    assert (tmp_path / ".agents/skills/grill-me-with-docs/ADR-FORMAT.md").is_file()
 
 
 def test_install_deletes_a_pristine_retired_to_prd_skill_and_installs_to_spec(
@@ -7382,7 +7455,7 @@ def test_install_deletes_a_pristine_retired_to_prd_skill_and_installs_to_spec(
     assert retired_path in [d.retired.path for d in plan.retire_deletes]
     _apply(tmp_path)
     assert not victim.exists()
-    assert (tmp_path / ".claude/skills/to-spec/SKILL.md").is_file()
+    assert (tmp_path / ".agents/skills/to-spec/SKILL.md").is_file()
 
 
 def test_install_keeps_a_modified_retired_file_with_warning(tmp_path, rec):

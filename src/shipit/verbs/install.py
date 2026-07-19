@@ -62,10 +62,12 @@ from ..install.reconcile import (
     ADD,
     DELETE,
     KEEP,
+    LINK_BLOCKED,
     NOOP,
     UPDATE,
     Plan,
     detect_toolchains,
+    format_claude_skills_link,
     format_lefthook_conflict,
     format_pixi_key_conflict,
     format_pixi_table_conflict,
@@ -586,6 +588,10 @@ def format_plan(plan: Plan, *, dry_run: bool = False) -> str:
         # #619: a consumer-local hook entry shipit used to prescribe — removed
         # from its event array; shipit's own managed entries are never touched.
         lines.append(f"  {DELETE:8} {d.retired.key} (retired hook entry)")
+    if plan.claude_skills_link.is_work:
+        # #1088: the structural `.claude/skills` -> `.agents/skills` symlink is a
+        # plan line like any write — create or migrate-then-create.
+        lines.append(f"  {format_claude_skills_link(plan.claude_skills_link)}")
     if plan.pin_stale:
         # ADR-0033: a pin roll-forward is a reconcile outcome in its own right —
         # it can be the ONLY change when a code-only shipit build ships (every
@@ -643,6 +649,10 @@ def format_plan_warnings(plan: Plan) -> str:
         lines.append(f"install: pixi block skipped: {format_pixi_table_conflict(bc)}")
     for sd in plan.symlinked_dests:
         lines.append(f"install: symlinked dest: {format_symlinked_dest(sd)}")
+    if plan.claude_skills_link.action == LINK_BLOCKED:
+        lines.append(
+            f"install: claude skills link: {format_claude_skills_link(plan.claude_skills_link)}"
+        )
     for key in plan.decline_unmatched:
         lines.append(
             f"install: declined key {key!r} names no managed unit in this "
