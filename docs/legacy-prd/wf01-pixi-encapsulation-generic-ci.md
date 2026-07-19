@@ -136,7 +136,9 @@ to a thin caller of `arthur-debert/shipit@vN`, upgraded by bumping one version.
   assembly) is a testable pure core; the `act` invocation is the injected boundary.
 - **Provisioning carried by pixi features** per Spike 0: webkit2gtk4.1 (+ glibc
   system-requirement), mold/lld, wasm-bindgen via pinned SHA-verified download
-  (the `tools/provision-lexd.sh` pattern), zlib/expat tail for native-GUI consumers.
+  (the `tools/provision-lexd.sh` pattern — that script itself was later retired by
+  ADR-0066, lexd now rides the Artifact channel via `pixi.lock`), zlib/expat tail
+  for native-GUI consumers.
 - **Required-check-name stability.** The generic workflow's required job name is held
   stable across the cutover so the branch ruleset keeps matching (the same move the
   current `ci.yml` migration already documents inline).

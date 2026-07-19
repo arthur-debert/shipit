@@ -44,8 +44,9 @@ because it runs from the managed SessionStart hook). It:
      could drift);
    - a second run is a fast no-op (idempotence: no `reconciling` line);
    - `pixi install --locked` succeeds for the default and `lint` envs;
-   - `pixi run -e lint lint` goes green end-to-end (lexd provisioned the same
-     way CI does it, via the managed `provision-lexd` task).
+   - `pixi run -e lint lint` goes green end-to-end (lexd resolves from the
+     Artifact channel through `pixi.lock` in the lint env — the same
+     `pixi install --locked -e lint` path as every other linter, ADR-0066).
 
 Host-arch native: the same script works on a linux/amd64 CI runner and on
 linux/arm64 Docker Desktop. There is deliberately no qemu multi-arch matrix.

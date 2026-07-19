@@ -31,7 +31,6 @@ from .verbs.hook import hook as hook_group
 from .verbs.lab import lab_group
 from .verbs.logevent import log as log_group
 from .verbs.pr import pr as pr_group
-from .verbs.provision import provision as provision_group
 from .verbs.release import release as release_group
 from .verbs.repo import repo as repo_group
 from .verbs.review import review as review_group
@@ -311,12 +310,6 @@ root.add_command(ci_group)
 root.add_command(logs.logs_cmd)
 
 
-# The nested `provision` group (ADP00-WS03) — pinned external tools delivered
-# by the binary (`shipit provision lexd`): the consumer's managed task line
-# invokes it, so no provisioning script is ever distributed or reconciled.
-root.add_command(provision_group)
-
-
 # The nested `channel` group (ARF01) — the Artifact channel's consumer-facing
 # verbs. `channel receive` is the cascade's consumer end (ARF01-WS07): the
 # managed receive-workflow invokes it to bump `[artifact-deps]` pins and open a
@@ -418,8 +411,6 @@ _HELP_RESOURCES = {
     ("ci",): ("shipit.verbs", "ci_help.txt"),
     ("ci", "plan"): ("shipit.verbs", "ci_plan_help.txt"),
     ("logs",): ("shipit.verbs", "logs_help.txt"),
-    ("provision",): ("shipit.verbs", "provision_help.txt"),
-    ("provision", "lexd"): ("shipit.verbs", "provision_lexd_help.txt"),
     ("channel",): ("shipit.verbs", "channel_help.txt"),
     ("channel", "receive"): ("shipit.verbs", "channel_receive_help.txt"),
     ("repo",): ("shipit.verbs", "repo_help.txt"),

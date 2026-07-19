@@ -177,17 +177,16 @@ def test_load_units_includes_lefthook_and_pixi_task_block():
     # The managed pixi TASKS block stays the thin task lines ONLY; the linter
     # deps ride in their own sibling `[feature.lint.dependencies]` block (ADP00,
     # docs/legacy-prd/adoption.md — amending the lint PRD's task-line-only
-    # decision), tested below. `provision-lexd` invokes the binary's provision subcommand
-    # (ADP00-WS03), so no provisioning script is ever distributed. `changelog`
-    # is the release-notes tool's thin caller (TOL01-WS06, ADR-0039: pixi tasks
-    # are one-line callers of the verb). Each task
-    # invokes the PINNED launcher `./bin/shipit`, never a bare PATH `shipit`
+    # decision), tested below. `changelog` is the release-notes tool's thin caller
+    # (TOL01-WS06, ADR-0039: pixi tasks are one-line callers of the verb). The
+    # `provision-lexd` task is GONE (ARF02-WS06, ADR-0066): lexd rides the managed
+    # `shipit-lexd` feature from the Artifact channel, not a bespoke fetcher. Each
+    # task invokes the PINNED launcher `./bin/shipit`, never a bare PATH `shipit`
     # (#481, ADR-0033: hooks/tasks ride the repo's pin, PATH is never consulted).
     assert pixi.desired_inner() == (
         'changelog = "./bin/shipit changelog"\n'
         'lint = "./bin/shipit lint"\n'
-        'logs = "./bin/shipit logs"\n'
-        'provision-lexd = "./bin/shipit provision lexd"'
+        'logs = "./bin/shipit logs"'
     )
 
 
@@ -291,9 +290,11 @@ def test_load_units_includes_the_lint_env_blocks():
     assert envs.kind == "block"
     assert envs.dest == "pixi.toml"
     assert envs.anchor == "[environments]"
-    assert tomllib.loads(envs.desired_inner()) == {"lint": ["lint"]}
+    # The lint env composes the managed `shipit-lexd` feature so lexd resolves
+    # from the Artifact channel (ARF02-WS06, ADR-0066).
+    assert tomllib.loads(envs.desired_inner()) == {"lint": ["lint", "shipit-lexd"]}
 
-    # Five sibling blocks in ONE consumer file: their marker fences must be
+    # Six sibling blocks in ONE consumer file: their marker fences must be
     # pairwise distinct or extract/splice would bleed across regions.
     fences = {
         units[k].open_marker
@@ -303,9 +304,29 @@ def test_load_units_includes_the_lint_env_blocks():
             iunits.PIXI_LINT_DEPS_KEY,
             iunits.PIXI_ENVS_KEY,
             iunits.PIXI_LAUNCHER_DEPS_KEY,
+            iunits.PIXI_LEXD_KEY,
         )
     }
-    assert len(fences) == 5
+    assert len(fences) == 6
+
+
+def test_load_units_includes_the_managed_lexd_feature_block():
+    # ARF02-WS06 (ADR-0066): `provision lexd` retired. lexd is a conda dependency
+    # pinned in a shipit-reserved feature carrying the Artifact channel, a fresh
+    # EOF-appended table (anchor-less) wired into the lint env by the environments
+    # block. The consumer cannot drift its lexd version — fleet uniformity moved
+    # from a compiled binary constant to this managed block (ADR-0047).
+    units = {u.key: u for u in iunits.load_units()}
+    lexd = units[iunits.PIXI_LEXD_KEY]
+    assert lexd.kind == "block"
+    assert lexd.dest == "pixi.toml"
+    assert lexd.anchor is None  # a fresh reserved feature table appends at EOF
+    block = tomllib.loads(lexd.desired_inner())
+    feature = block["feature"]["shipit-lexd"]
+    assert feature["channels"] == [
+        "https://storage.googleapis.com/shipit-artifacts-public/lex-fmt/lex"
+    ]
+    assert feature["dependencies"] == {"lexd": "==0.19.10"}
 
 
 def test_load_units_includes_the_launcher_deps_block():
@@ -363,8 +384,15 @@ def test_packaged_lint_env_agrees_with_shipits_own_manifest():
     assert own["feature"]["lint"]["dependencies"] == deps
 
     envs = tomllib.loads(iunits.data_bytes("pixi-lint-env-block.toml").decode("utf-8"))
-    assert envs == {"lint": ["lint"]}
+    assert envs == {"lint": ["lint", "shipit-lexd"]}
     assert own["environments"]["lint"] == envs["lint"]
+
+    # The managed lexd feature (ARF02-WS06, ADR-0066) dogfoods byte-for-byte:
+    # shipit's own `[feature.shipit-lexd]` carries the packaged block verbatim, so
+    # a self-install reconciles to a noop and the fleet's lexd pin/channel are
+    # exactly what shipit lints itself with.
+    lexd = tomllib.loads(iunits.data_bytes("pixi-lexd-block.toml").decode("utf-8"))
+    assert own["feature"]["shipit-lexd"] == lexd["feature"]["shipit-lexd"]
 
 
 def test_shipits_own_pixi_manifest_reconciles_to_noop():
@@ -386,6 +414,7 @@ def test_shipits_own_pixi_manifest_reconciles_to_noop():
         iunits.PIXI_ENVS_KEY,
         iunits.PIXI_LAUNCHER_DEPS_KEY,
         iunits.PIXI_PYTHON_RELEASE_DEPS_KEY,
+        iunits.PIXI_LEXD_KEY,
     ):
         unit = units[key]
         assert irec.consumer_hash(root, unit) == unit.desired_hash(), key
@@ -2968,7 +2997,7 @@ def test_a_consumer_test_task_in_the_tasks_table_is_the_key_conflict_guards_case
 
 def test_shipits_own_repo_keeps_its_feature_test_task_authoritative():
     # The dogfood pin: shipit's own full-gate `test` task lives in
-    # [feature.test.tasks] (rust toolchain env + inline lexd provisioning), so
+    # [feature.test.tasks] (for the rust toolchain env), so
     # the reconcile must SKIP the managed caller here — otherwise every fresh
     # Tree's self-install would make bare `pixi run test` ambiguous.
     root = Path(__file__).resolve().parents[1]
@@ -4398,12 +4427,16 @@ def test_fresh_install_delivers_the_lint_environment(tmp_path, rec):
     assert manifest["tasks"]["lint"] == "./bin/shipit lint"
     deps = manifest["feature"]["lint"]["dependencies"]
     assert set(deps) == set(LINT_TOOLS)
-    assert manifest["environments"]["lint"] == ["lint"]
+    # The lint env composes the managed `shipit-lexd` feature (ARF02-WS06) so
+    # lexd resolves from the Artifact channel.
+    assert manifest["environments"]["lint"] == ["lint", "shipit-lexd"]
+    assert manifest["feature"]["shipit-lexd"]["dependencies"] == {"lexd": "==0.19.10"}
 
-    # Both blocks recorded a pristine hash in the manifest...
+    # The blocks recorded a pristine hash in the manifest...
     managed = config.load_managed(config.load(tmp_path / ".shipit.toml"))
     assert iunits.PIXI_LINT_DEPS_KEY in managed
     assert iunits.PIXI_ENVS_KEY in managed
+    assert iunits.PIXI_LEXD_KEY in managed
     # ...and an unchanged re-install is a clean NOOP.
     assert _plan(tmp_path).nothing_to_do
 
@@ -4417,7 +4450,10 @@ def test_lint_env_block_merges_into_an_existing_environments_table(tmp_path, rec
     _apply(tmp_path)
 
     manifest = tomllib.loads((tmp_path / "pixi.toml").read_text())
-    assert manifest["environments"] == {"dev": ["dev"], "lint": ["lint"]}
+    assert manifest["environments"] == {
+        "dev": ["dev"],
+        "lint": ["lint", "shipit-lexd"],
+    }
 
 
 def test_consumer_edit_to_lint_deps_block_surfaces_as_override(tmp_path, rec):
@@ -4483,11 +4519,12 @@ def test_fresh_consumer_without_pixi_manifest_gets_a_valid_seed(tmp_path, rec):
     assert manifest["tasks"]["lint"] == "./bin/shipit lint"
     assert manifest["tasks"]["test"] == "./bin/shipit test"
     assert set(manifest["feature"]["lint"]["dependencies"]) == set(LINT_TOOLS)
-    assert manifest["environments"]["lint"] == ["lint"]
+    assert manifest["environments"]["lint"] == ["lint", "shipit-lexd"]
+    assert manifest["feature"]["shipit-lexd"]["dependencies"] == {"lexd": "==0.19.10"}
     # ...and the launcher's uv (#758): the managed tasks all ride ./bin/shipit.
     assert "uv" in manifest["dependencies"]
 
-    # The seed is scaffold, not a managed unit: only the five block units are
+    # The seed is scaffold, not a managed unit: only the six block units are
     # recorded, so the [workspace] table is consumer-owned from here on.
     managed = config.load_managed(config.load(tmp_path / ".shipit.toml"))
     pixi_keys = {k for k in managed if k.startswith("pixi.toml")}
@@ -4497,6 +4534,7 @@ def test_fresh_consumer_without_pixi_manifest_gets_a_valid_seed(tmp_path, rec):
         iunits.PIXI_LINT_DEPS_KEY,
         iunits.PIXI_ENVS_KEY,
         iunits.PIXI_LAUNCHER_DEPS_KEY,
+        iunits.PIXI_LEXD_KEY,
     }
 
     # The PR body tells the merger the table was seeded and is theirs to edit.

@@ -74,7 +74,6 @@ ADR-0028 whitelist (they never run on a release runner):
 | --- | --- | --- | --- |
 | `ps` | session liveness probe | OS | — |
 | `gcloud` | Artifact channel store provisioner (`shipit.channel.store_provision`, ARF01-WS03) | dev-host (operator's own gcloud, opt-in infra harness — never a release runner) | — |
-| `curl` | `shipit provision lexd` fetch | pixi (shipit's own default env) | `*` |
 | `act` / `docker` | `shipit wf test` harness | pixi test feature (`act = "0.2.*"`) / host daemon | act pinned |
 | `bin/check-e2e` | e2e harness default | repo-local committed script | — |
 

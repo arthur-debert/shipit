@@ -3,11 +3,11 @@ name: CI
 # shipit's own CI — the FIRST thin caller of the wf-checks block (TOL01-WS05,
 # ADR-0010/0040: consumer CI is routing-only YAML over shipit-published
 # reusable workflows). The pre-cutover explicit steps — setup-pixi --locked,
-# provision-lexd, `pixi run lint`, `pixi run test` — now live behind the
+# `pixi run lint`, `pixi run test` — now live behind the
 # block: the lane planner (`shipit ci plan`) reads .shipit.toml [lanes] and
 # emits the lint + test matrix, and each job's `pixi run <run>` (lint-full /
-# test, both provisioning lexd inline in their own env) preserves the exact
-# pre-cutover behavior. shipit calls the block by LOCAL PATH so a PR editing
+# test, both resolving lexd from the Artifact channel via pixi.lock — ARF02-WS06)
+# preserves the exact pre-cutover behavior. shipit calls the block by LOCAL PATH so a PR editing
 # the block is checked by the edited block; consumers pin
 # `arthur-debert/shipit/.github/workflows/wf-checks.yml@v1` (ADR-0010).
 

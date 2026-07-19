@@ -28,10 +28,11 @@ The existing domain model constrains this feature:
 - pixi is the substrate; shipit builds ON it rather than reinventing it
   (`docs/dev/pixi.md`). pixi already resolves, locks, and sha256-verifies
   versioned dependencies from channels.
-- `shipit provision lexd`
-  ([src/shipit/provision/lexd.py](../../src/shipit/provision/lexd.py)) is the
-  one existing cross-repo release-asset fetcher — hard-coded to a single tool
-  because `lexd` is "not on conda-forge."
+- `shipit provision lexd` **was** the one existing cross-repo release-asset
+  fetcher — hard-coded to a single tool because `lexd` was "not on
+  conda-forge." It has since been **retired** (ADR-0066): `lexd` now rides this
+  channel as an ordinary conda package, so the `provision` module and verb are
+  gone.
 
 This Spec realizes what the legacy roadmap sketched as **WF06** (the cross-repo
 cascade / artifact-pinned consumption), but via a **conda channel**, not the
@@ -54,7 +55,8 @@ binary (not per-consumer), and does not generalize.
   with no bespoke fetch code.
 - Support both **open** artifacts (lex — public) and **private** artifacts
   (phos), with the cheapest correct access model for each.
-- Retire `shipit provision lexd` by making `lexd` an ordinary channel package.
+- Retire `shipit provision lexd` by making `lexd` an ordinary channel package
+  (DONE, ADR-0066: `provision` deleted; `lexd` 0.19.10 served from the channel).
 - Cross-repo update propagation is **instant** on an upstream release.
 - The producer side is one more endpoint adapter, not new release orchestration.
 
@@ -64,7 +66,7 @@ binary (not per-consumer), and does not generalize.
 - Consuming CI *build-job* artifacts (ephemeral) — this consumes **released**,
   permanent artifacts only (CONTEXT.md: Artifact channel).
 - Serving Intel-mac (osx-64) or musl consumers — no conda subdir / no pinned
-  asset, matching today's `provision` refusal.
+  asset, matching the retired `provision` fetcher's own refusal.
 - Publishing to marketplace-class endpoints (VS Marketplace, Open VSX) — those
   remain separate endpoint adapters.
 
@@ -93,8 +95,10 @@ object-storage buckets, consumed by downstreams in artifact-pinned mode.
   artifacts (`lexd`, `lexd-lsp`) install a binary on PATH, data artifacts (wasm,
   grammar) install their files into the env.
   ([ADR-0064](../adr/0064-artifact-channel-conda-for-cross-repo-consumption.md))
-- **`provision lexd` retires** — `lexd` becomes a public-channel package; the
-  gate pin moves to a managed, non-consumer-editable lint block.
+- **`provision lexd` retired** (DONE) — `lexd` is now a public-channel package
+  (0.19.10, served on osx-arm64/linux-64/linux-aarch64; win-64 paused per
+  ADR-0071); the gate pin lives in a managed, non-consumer-editable
+  `[feature.shipit-lexd]` lint block and the `provision` module/verb are deleted.
   ([ADR-0066](../adr/0066-provision-lexd-retires-onto-the-channel.md))
 - **Updates — push, derived fan-out.** On stable release, dispatch to the
   derived consumer set; each opens its own draft bump PR; `pixi.lock`
@@ -125,7 +129,8 @@ The load-bearing decisions and their trade-offs are recorded as ADRs:
 - [ADR-0065](../adr/0065-artifact-channel-access-tiers-two-buckets.md) — two
   buckets; public-authless / private-GCS-creds; capability-URL rejected.
 - [ADR-0066](../adr/0066-provision-lexd-retires-onto-the-channel.md) —
-  `provision lexd` retires; gate uniformity via a managed lint block.
+  `provision lexd` retired (DONE, ARF02-WS06); gate uniformity via a managed
+  lint block.
 - [ADR-0067](../adr/0067-artifact-pinned-updates-push-derived-fanout.md) —
   push propagation with a derived fan-out.
 - [ADR-0070](../adr/0070-publish-fires-a-selectable-endpoint-subset.md) —
@@ -187,11 +192,12 @@ prefix-scoped IAM (leak-prone under UBLA), a capability URL (leaks via
 - **Release-time portfolio scan** for the derived fan-out needs a cross-repo
   read token; keep it bounded (reuse `fleetsweep`), do not let it become a
   fleet crawl per release.
-- **Bootstrap/self-hosting** for `lexd`: seed the channel once before the
-  `provision` cutover; `lex-fmt/lex` lints against its prior release's `lexd`.
-  The cutover (ADR-0066 — delete `provision`, move the pin into the managed
-  lint block) is **gated on that seed** and MUST NOT land before it. Once
-  `provision` is gone and `lexd` is an ordinary managed conda dependency, every
+- **Bootstrap/self-hosting** for `lexd` (cutover now DONE — ARF02-WS06): the
+  channel was seeded before the `provision` cutover; `lex-fmt/lex` lints against
+  its prior release's `lexd`. The cutover (ADR-0066 — delete `provision`, move
+  the pin into the managed `[feature.shipit-lexd]` lint block) was **gated on
+  that seed** and did not land before it. Now that `provision` is gone and
+  `lexd` is an ordinary managed conda dependency, every
   managed repo's `pixi install` / lint solve resolves `lexd` from the channel
   with **no fallback** (the clean cutover retains none — ADR-0066), so a solve
   against an unseeded channel fails closed. This binds shipit's own gate too:
@@ -226,8 +232,9 @@ prefix-scoped IAM (leak-prone under UBLA), a capability URL (leaks via
      done
      ```
 
-  Until all three hold, the cutover stays blocked and shipit keeps provisioning
-  `lexd` via the pinned fetcher so its own gate self-hosts.
+  All three now hold — the channel serves `lexd` 0.19.10 for the non-paused
+  subdirs — so the cutover has landed; until they did, shipit kept provisioning
+  `lexd` via the (now-deleted) pinned fetcher so its own gate self-hosted.
 - **Lock discipline:** a bump re-resolves only through `pixi install`/`update`,
   which rewrites `pixi.lock`; the downstream must commit the updated lock.
 

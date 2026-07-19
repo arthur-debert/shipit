@@ -121,14 +121,6 @@ PROVISIONING: dict[str, tuple[Provisioned, ...]] = {
             "opt-in infra harness, never a release runner",
         ),
     ),
-    "curl": (
-        Provisioned(
-            "curl",
-            PIXI_MANAGED,
-            pin="*",
-            note="lexd release fetch; pinned-open in shipit's own default env",
-        ),
-    ),
     "cargo": (
         Provisioned(
             "cargo",

@@ -91,11 +91,11 @@ PIXI_ANCHOR = "[tasks]"
 # INDEPENDENTLY: pixi refuses a bare `pixi run test` when a task named `test`
 # exists in several environments, so a consumer whose own manifest already
 # defines a `test` task in a feature (shipit's own repo does — the full-gate
-# task in [feature.test.tasks] needs its rust toolchain env and inline lexd
-# provisioning) keeps that task authoritative and this block is NOT delivered
+# task in [feature.test.tasks] needs its rust toolchain env) keeps that task
+# authoritative and this block is NOT delivered
 # (the reconcile's task-ambiguity guard, `PixiTaskConflict` — the #547
-# key-conflict guard's pixi-run-level sibling), while the lint/logs/
-# provision-lexd tasks block still lands. A `test` key in [tasks] itself is
+# key-conflict guard's pixi-run-level sibling), while the lint/logs tasks block
+# still lands. A `test` key in [tasks] itself is
 # caught by the existing duplicate-key guard.
 PIXI_TEST_TASK_KEY = "pixi.toml#shipit-test-task"
 PIXI_TEST_TASK_OPEN = (
@@ -115,8 +115,9 @@ PIXI_TEST_TASK_CLOSE = "# <<< shipit-managed test task <<<"
 # blocks verbatim — its Tree provisioning self-installs, so anything else would
 # splice duplicates into its hand-kept manifest — and a drift test asserts the
 # packaged block agrees with shipit's own lint environment (the dogfood
-# guarantee). The lexd leg is NOT part of the block: lexd delivery is the
-# provision-subcommand workstream.
+# guarantee). lexd is NOT part of this block: it rides its own reserved
+# `[feature.shipit-lexd]` block (below, PIXI_LEXD_KEY), which carries the
+# Artifact channel the lint-deps' conda-forge tools do not need (ARF02-WS06).
 PIXI_LINT_DEPS_KEY = "pixi.toml#shipit-lint-deps"
 PIXI_LINT_DEPS_OPEN = (
     "# >>> shipit-managed lint deps (do not edit; regenerate via `shipit install`) >>>"
@@ -127,6 +128,25 @@ PIXI_ENVS_KEY = "pixi.toml#shipit-environments"
 PIXI_ENVS_OPEN = "# >>> shipit-managed environments (do not edit; regenerate via `shipit install`) >>>"
 PIXI_ENVS_CLOSE = "# <<< shipit-managed environments <<<"
 PIXI_ENVS_ANCHOR = "[environments]"
+
+# The managed lexd block (ARF02-WS06, ADR-0066). `provision lexd` is retired:
+# lexd — the one lint-gate tool that was not on conda-forge — is now published
+# to the public Artifact channel (ADR-0064) and resolves as an ordinary conda
+# dependency through pixi.lock. The block is a dedicated shipit-reserved FEATURE
+# (`shipit-lexd`) carrying the channel + the fleet-pinned lexd version, wired
+# into the lint environment by the managed environments block above
+# (`lint = ["lint", "shipit-lexd"]`). A fresh reserved `[feature.shipit-lexd]`
+# table appended at EOF (anchor-less, the artifact-dep pattern) never
+# re-declares a table a consumer owns, so the block is collision-free and
+# consumer-non-editable — a consumer cannot drift its lexd version (ADR-0047,
+# fleet uniformity). shipit's own pixi.toml carries the block verbatim (its Tree
+# provisioning self-installs); a drift test (tests/test_install.py) asserts the
+# packaged block agrees with shipit's own reserved feature (the dogfood
+# guarantee). win-64 is unserved under the Windows build pause (#895, ADR-0071),
+# so a win-64 lint solve fails closed with no fallback.
+PIXI_LEXD_KEY = "pixi.toml#shipit-lexd"
+PIXI_LEXD_OPEN = "# >>> shipit-managed lexd feature (do not edit; regenerate via `shipit install`) >>>"
+PIXI_LEXD_CLOSE = "# <<< shipit-managed lexd feature <<<"
 
 # The UNCONDITIONAL launcher-deps block (#758, closed by TOL02-WS17 #794):
 # `uv` for the pinned ADR-0033 `bin/shipit` launcher, in the DEFAULT env's
@@ -807,6 +827,23 @@ def load_units(*, toolchains: frozenset[str] = frozenset()) -> list[Unit]:
             open_marker=PIXI_ENVS_OPEN,
             close_marker=PIXI_ENVS_CLOSE,
             anchor=PIXI_ENVS_ANCHOR,
+        )
+    )
+
+    # The managed lexd feature (ARF02-WS06, ADR-0066): the reserved
+    # `[feature.shipit-lexd]` block (channel + fleet-pinned lexd), a fresh table
+    # appended at EOF (anchor-less, so it never re-declares a consumer table),
+    # wired into the lint env by the environments block above. Replaces the
+    # retired `provision lexd` — see the PIXI_LEXD_KEY comment for the whole story.
+    units.append(
+        Unit(
+            key=PIXI_LEXD_KEY,
+            dest=PIXI_FILE,
+            kind="block",
+            content=data_bytes("pixi-lexd-block.toml"),
+            open_marker=PIXI_LEXD_OPEN,
+            close_marker=PIXI_LEXD_CLOSE,
+            anchor=None,
         )
     )
 

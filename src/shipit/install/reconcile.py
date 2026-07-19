@@ -711,8 +711,8 @@ class PixiTaskConflict:
     (``test = "./bin/shipit test"``) into a manifest whose own
     ``[feature.*.tasks]`` already defines the name would break the consumer's
     working command — shipit's own repo is the standing case (its full-gate
-    ``test`` task lives in the ``test`` feature for the rust toolchain env and
-    inline lexd provisioning). Detected only when the block's markers are
+    ``test`` task lives in the ``test`` feature for the rust toolchain env).
+    Detected only when the block's markers are
     absent (an ADD), like :class:`PixiKeyConflict`; the remedy is the
     consumer's call — keep their task (the block stays undelivered) or delete
     it and re-run install to adopt the managed caller. A same-named key in the

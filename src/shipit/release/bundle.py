@@ -200,8 +200,8 @@ from . import ReleaseError
 #: The pinned cargo-deb version the deb composition self-provisions (issue
 #: #784 F2). A floating ``cargo install cargo-deb`` resolves the latest crate
 #: at compose time — irreproducible builds and a supply-chain window — so the
-#: version is PINNED, the same shape as lexd's ``--tag``-pinned self-provision
-#: (:mod:`shipit.provision.lexd`). Bump deliberately, in its own change.
+#: version is PINNED, the same discipline every fleet-pinned tool follows.
+#: Bump deliberately, in its own change.
 CARGO_DEB_VERSION = "3.7.0"
 
 #: Target triple → VS Code ``vsce``/``ovsx`` target string (the vsix

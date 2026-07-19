@@ -1,4 +1,3 @@
 changelog = "./bin/shipit changelog"
 lint = "./bin/shipit lint"
 logs = "./bin/shipit logs"
-provision-lexd = "./bin/shipit provision lexd"

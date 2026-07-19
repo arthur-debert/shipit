@@ -7,6 +7,14 @@
 > **not** satisfy this gate — the cutover still requires a stable `lexd`.)
 > Windows consumers fail closed after the cutover — the no-fallback decision
 > below is unchanged.
+>
+> **Executed by ARF02-WS06.** The cutover has landed: `lexd` is published to the
+> public Artifact channel at **0.19.10** (served on osx-arm64/linux-64/linux-aarch64;
+> win-64 paused per ADR-0071), the `provision` module and verb are **deleted**,
+> and the pin now lives in a shipit-managed `[feature.shipit-lexd]` pixi block
+> (channel `https://storage.googleapis.com/shipit-artifacts-public/lex-fmt/lex`,
+> `lexd = "==0.19.10"`) wired into the lint env and resolved through `pixi.lock`.
+> No fallback is retained; a win-64 lint solve fails closed by design.
 
 `lexd` is the one lint-gate tool not on conda-forge, so it could not ride
 `pixi.lock` like the other linters; `shipit provision lexd` fetched it bespoke

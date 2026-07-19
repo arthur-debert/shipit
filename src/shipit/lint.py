@@ -133,8 +133,10 @@ logger = logging.getLogger("shipit.lint")
 # These are release-core toolset.py's battle-tested command lines (NOT its
 # lefthook orchestration, toolset provisioning, or verdict parsing — the three
 # things the pixi + binary model replaces). Version pinning lives in pixi.toml /
-# pixi.lock (the linters) and tools/provision-lexd.sh (lexd); the registry
-# only encodes WHICH tool runs and HOW it is invoked.
+# pixi.lock — the conda-forge linters AND lexd, which since ARF02-WS06 (ADR-0066)
+# rides the managed `[feature.shipit-lexd]` block from the Artifact channel like
+# any other pinned dep; the registry only encodes WHICH tool runs and HOW it is
+# invoked.
 
 
 #: The literal token a :attr:`Tool.config_inject` fragment carries where the

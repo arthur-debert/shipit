@@ -218,9 +218,10 @@ NOTIFY_EVENT_TYPE = "upstream-release"
 #: The Artifact channel serves EXACTLY these four subdirs: osx-arm64, linux-64,
 #: linux-aarch64, win-64. A release triple with no entry (``x86_64-apple-
 #: darwin`` → the missing osx-64, ``x86_64-unknown-linux-musl`` → the missing
-#: musl subdir) is UNSERVED — the conda endpoint silently skips its archive,
-#: matching today's ``shipit provision lexd`` refusal for Intel-mac/musl
-#: consumers (no conda subdir, no pinned dep). The keys are a subset of
+#: musl subdir) is UNSERVED — the conda endpoint silently skips its archive, so
+#: an Intel-mac/musl consumer's pin simply fails to resolve (no conda subdir, no
+#: package) — the same fail-closed posture win-64 has under the pause (ADR-0071).
+#: The keys are a subset of
 #: :data:`shipit.release.preflight.PLATFORM_MATRIX` targets (the release lanes);
 #: a lane the channel does not serve simply produces no package.
 CONDA_SUBDIRS: dict[str, str] = {

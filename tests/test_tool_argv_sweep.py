@@ -48,8 +48,6 @@ def _parsed(path: pathlib.Path) -> ast.Module:
 #: - ``pixi`` — the pixi adapter's two sides: execution
 #:   (:mod:`shipit.pixienv.run`, ``run_argv``/``install``) and the read verbs'
 #:   literals (:mod:`shipit.pixienv.read`).
-#: - ``curl`` — the lexd release fetch (:mod:`shipit.provision.lexd`): the one
-#:   external download shipit performs (ADP00-WS03).
 #: - ``cargo`` / ``go`` / ``pytest`` / ``npm`` / ``uv`` / ``tree-sitter`` /
 #:   ``busted`` — the Tool verbs' default producing commands (TOL01-WS01/WS02,
 #:   ``tree-sitter`` TOL02-WS16, ``busted`` the lua test slot TOL03-WS01):
@@ -98,7 +96,6 @@ _ADAPTER_HOMES: dict[str, tuple[str, ...]] = {
     "gh": ("gh.py",),
     "git": ("git.py",),
     "pixi": ("pixienv/read.py", "pixienv/run.py"),
-    "curl": ("provision/lexd.py",),
     # gcloud — the Artifact channel store provisioner (ARF01-WS03): the one
     # place that provisions the two access-tier GCS buckets + reader-SA IAM,
     # assembled ONLY in :mod:`shipit.channel.store_provision`. Operator-side

@@ -12,8 +12,8 @@
 #   1. `pixi --version` and `uv --version` resolve exactly the script's pins;
 #   2. a second run is a fast no-op (no "reconciling" line — idempotence);
 #   3. `pixi install --locked` succeeds against the shipped pixi.lock;
-#   4. `pixi run -e lint lint` goes green end-to-end (lexd provisioned the
-#      same way CI does it).
+#   4. `pixi run -e lint lint` goes green end-to-end (lexd resolves from the
+#      Artifact channel through pixi.lock, the same as every other linter).
 #
 # Unlike the bootstrap itself (fail-open — it runs from a session hook), this
 # harness FAILS HARD: any missed assertion exits non-zero. Opt-in only — it
@@ -99,8 +99,9 @@ pixi install --locked --environment lint || fail "pixi install --locked -e lint 
 echo "verify-self-provision(container): OK locked env solves" >&2
 
 # End to end: the full managed gate goes green on the provisioned box. lexd
-# arrives the same way CI provisions it (the managed provision-lexd task).
-pixi run -e lint provision-lexd || fail "provision-lexd failed"
+# arrives as an ordinary conda dependency of the lint env (the managed
+# `shipit-lexd` feature resolves it from the Artifact channel via pixi.lock —
+# ARF02-WS06, ADR-0066), so the `--locked` solve above already put it on PATH.
 pixi run -e lint lint || fail "pixi run -e lint lint failed"
 echo "verify-self-provision(container): OK green lint gate" >&2
 IN_CONTAINER

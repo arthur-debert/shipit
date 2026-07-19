@@ -5,9 +5,11 @@
 #
 # The linters are required-check-path tools, so they are conda-forge packages
 # PINNED in pixi.lock and CI runs `--locked` (architecture.lex §2) — version
-# bumps arrive as auto-PRs, never silently. The lone exception is `lexd` (not on
-# conda-forge), fetched at a pin by `shipit provision lexd` (the binary owns the
-# pin — docs/legacy-prd/adoption.md).
+# bumps arrive as auto-PRs, never silently. `lexd` (the one lint tool not on
+# conda-forge) rides the SAME shape since ARF02-WS06 (ADR-0066): it is published
+# to the public Artifact channel and pinned in the managed `[feature.shipit-lexd]`
+# block below, so it resolves through pixi.lock like every other linter — the
+# bespoke `provision lexd` fetcher is retired.
 
 [workspace]
 name = "shipit"
@@ -65,13 +67,15 @@ python = "3.13.*"
 # shipit-self with the standard consumer layout (architecture.lex §5/§7: one lint
 # definition, thin managed tasks) rather than pinning an env-specific override the
 # reconcile would surface as drift forever. The `-e lint` environment keeps its own
-# `lint` task (below) — the lexd-provisioning, lefthook/CI-pinned canonical path —
-# and inherits these same deps through the default feature.
+# helper tasks (below) — the lefthook/CI-pinned canonical path — and inherits these
+# same deps through the default feature. lexd itself is NOT here: it rides the
+# managed `[feature.shipit-lexd]` block (from the channel), wired into the lint and
+# test envs (ARF02-WS06, ADR-0066) — the envs that actually run the lex lint leg.
 #
 # The linters are required-check-path tools, so they are conda-forge packages PINNED
 # in pixi.lock and CI runs `--locked` (architecture.lex §2) — version bumps arrive as
-# auto-PRs, never silently. The lone exception is `lexd` (not on conda-forge), fetched
-# at a pin by `shipit provision lexd` (the managed `provision-lexd` task).
+# auto-PRs, never silently. Since ARF02-WS06 `lexd` (the one lint tool not on
+# conda-forge) rides the same shape from the Artifact channel — see the header.
 ruff = "0.15.*"
 # PINNED DOWN to 0.10.*: 0.11.0 has an SC2218 reaching-definitions false positive
 # that reds correct code near subshells — see the managed lint-deps block below for
@@ -87,10 +91,6 @@ markdownlint-cli = "0.49.*"
 # drift test).
 actionlint = "1.7.*"
 lefthook = "2.1.*"
-# curl performs `shipit provision lexd`'s pinned-release fetch (through the one
-# exec seam, ADR-0028); pinning it here keeps the lint checks from depending on
-# a host-provided curl ("identical everywhere").
-curl = "*"
 
 [pypi-dependencies]
 # shipit itself, editable — `shipit lint` is the lint orchestrator, so the env
@@ -121,7 +121,6 @@ CARGO_INCREMENTAL = "0"
 changelog = "./bin/shipit changelog"
 lint = "./bin/shipit lint"
 logs = "./bin/shipit logs"
-provision-lexd = "./bin/shipit provision lexd"
 # <<< shipit-managed tasks <<<
 
 # pytest lives here (not a linter) so the `test` task — defined in the `test`
@@ -142,10 +141,11 @@ version = ">=8"
 # The Rust toolchain (cargo + clippy-driver/cargo-clippy + rustfmt/cargo-fmt) is a
 # conda-forge package PINNED in pixi.lock — the invariance gate exercises the real
 # binaries, so like the required-check linters it must move only via an auto-PR bump.
-# lexd, the one lex tool not on conda-forge, is fetched at its pin INLINE by the
-# `test` task cmd (`shipit provision lexd` before pytest, IN this env) — NOT a
-# `provision-lexd` depends-on, which pixi would run in the default env; see the task
-# comment below for why.
+# lexd (the one lex tool not on conda-forge) reaches the test env as an ordinary
+# conda dependency: the `test` environment composes the managed `shipit-lexd`
+# feature (below, wired in `[environments]`), so lexd lands in this env's prefix
+# from the Artifact channel via pixi.lock — no inline provisioning (ARF02-WS06,
+# ADR-0066).
 [feature.test.dependencies]
 rust = "1.96.*"
 # The act harness behind `shipit wf test` (TOL01-WS04): the real-act smoke in
@@ -164,22 +164,15 @@ act = "0.2.*"
 # This task stays in the `test` FEATURE (not the managed default-[tasks] test
 # caller, which the install reconcile deliberately skips here — see the
 # PixiTaskConflict guard): the suite needs this env's Rust toolchain, and lexd
-# (not on conda-forge) is provisioned INLINE — the cmd runs `shipit provision
-# lexd` (idempotent — a no-op when the pin is already installed) before the verb,
-# IN this task's own env. Inline, NOT a `provision-lexd` depends-on: a bare
-# `pixi run test` auto-selects this env for the `test` task, but pixi runs a
-# depends-on in the depended task's HOME env, and the managed `provision-lexd` is
-# a DEFAULT-feature task — so a depends-on would provision lexd into
-# `.pixi/envs/default/bin`, NOT this env, and the composed test env does NOT
-# layer the default env's bin onto PATH. So `shutil.which("lexd")` would miss it and
-# the lex cases would silently `skipif`-skip on a clean `pixi run test` (the default
-# bin only leaks in when a shell has the default env separately activated). Running the
-# provision inline keeps it in THIS env's `CONDA_PREFIX`, so bare `pixi run test` and
-# CI's `pixi run -e test test` are byte-identical and both land lexd in the test env.
-# Without rust+lexd the rust/lex cases `skipif` their absent binaries and the
-# `xfail(strict)` "leak closed → reminder" signal for clippy/lexd (#526) would fire
-# local-only; this env is what makes them run everywhere.
-test = { cmd = "./bin/shipit provision lexd && ./bin/shipit test" }
+# reaches this env as an ordinary conda dependency — the `test` environment
+# composes the managed `shipit-lexd` feature (see `[environments]` below), so
+# `pixi install` lands lexd from the Artifact channel in THIS env's own prefix.
+# Bare `pixi run test` and CI's `pixi run -e test test` are byte-identical and
+# both carry lexd on PATH. Without rust+lexd the rust/lex cases `skipif` their
+# absent binaries and the `xfail(strict)` "leak closed → reminder" signal for
+# clippy/lexd (#526) would fire local-only; this env is what makes them run
+# everywhere.
+test = "./bin/shipit test"
 
 # The `lint` FEATURE carries the MANAGED fleet-pinned dependency block below —
 # the exact block `shipit install` delivers to every consumer (ADP00,
@@ -197,20 +190,14 @@ test = { cmd = "./bin/shipit provision lexd && ./bin/shipit test" }
 # `pixi run lint` ambiguous across default/lint/review; the lefthook `-e lint` pin was
 # the mitigation — see lefthook.yml). `pixi run -e lint lint` runs that same managed
 # task INSIDE the lint env (the canonical, lefthook/CI-pinned path). What stays here is
-# the lexd-dependent helpers (fmt, regen-roles, install-hooks). Because the managed
-# `lint` is a fixed plain-string task, it cannot carry a `provision-lexd` depends-on;
-# instead lexd is provisioned onto the lint env's PATH by the setup tasks that gate
-# it — `install-hooks` (the one-time hook activation every dev runs on a fresh clone)
-# depends on `provision-lexd` (the MANAGED task above: `shipit provision lexd`,
-# idempotent — a no-op when the pin is already installed), so lexd is fetched into
-# `.pixi/envs/lint/bin/` at hook-setup time and PERSISTS there for every subsequent
-# `-e lint lint` the pre-commit / pre-push hooks run. CI's lint lane provisions it
-# the same way, inline in the `lint-full` task below (the wf-checks matrix job's
-# `run`, TOL01-WS05 — the retired explicit ci.yml step). This keeps lexd off the
-# `lint`/`lefthook.yml` surface while never leaving a fresh clone's lex leg
-# un-provisioned. The pin, platform resolution, and checksum verification live in
-# the binary (src/shipit/provision/lexd.py, ADP00-WS03) — there is no repo-local
-# provisioning script anymore.
+# the lexd-dependent helpers (fmt, regen-roles, install-hooks). Since ARF02-WS06
+# (ADR-0066) lexd is an ordinary conda dependency: the lint environment composes the
+# managed `shipit-lexd` feature (see `[environments]` below), so `pixi install` lands
+# lexd from the Artifact channel in `.pixi/envs/lint/` and it is on PATH for every
+# `-e lint` task and every `-e lint lint` the pre-commit / pre-push hooks fire — no
+# depends-on, no inline provisioning, no bespoke fetcher. The fleet-wide pin lives in
+# the managed `[feature.shipit-lexd]` block (below), integrity-checked by pixi.lock's
+# sha256 — the `provision lexd` verb and its trust-on-first-use SHAs are retired.
 [feature.lint.dependencies]
 # >>> shipit-managed lint deps (do not edit; regenerate via `shipit install`) >>>
 # The fleet-pinned lint toolchain (https://github.com/arthur-debert/shipit/blob/main/docs/legacy-prd/adoption.md:
@@ -236,30 +223,53 @@ lefthook = "2.1.*"
 # <<< shipit-managed lint deps <<<
 
 [feature.lint.tasks]
-fmt = { cmd = "shipit lint --fix", depends-on = ["provision-lexd"] }
+fmt = "shipit lint --fix"
 # The lint LANE's run (TOL01-WS05; .shipit.toml [lanes].lint): the same managed
-# `./bin/shipit lint` the hooks ride, with the lex leg's lexd provisioned INLINE
-# first — the `test` task's exact pattern, for the same reason (a depends-on
-# would provision lexd into the DEFAULT env's bin, which this env does not layer
-# onto PATH; inline lands it in THIS env's prefix, idempotent). It cannot be
-# named `lint`: that name is the managed fixed-string task in the default
-# [tasks] block, and a second `lint` here would re-create the historical
-# bare-`pixi run lint` ambiguity across environments (see the feature comment
-# above). Defined ONLY in this feature, so it exists in EXACTLY ONE env (lint)
-# and bare `pixi run lint-full` resolves unambiguously — the wf-checks matrix
-# job's `pixi run --locked lint-full` and a laptop run are byte-identical
-# (checkout-provision-lint, exactly what CI's explicit steps did pre-cutover).
-lint-full = { cmd = "./bin/shipit provision lexd && ./bin/shipit lint" }
+# `./bin/shipit lint` the hooks ride. Since ARF02-WS06 lexd is a conda dependency
+# of the lint env (the composed `shipit-lexd` feature), so no inline provisioning
+# is needed — a plain `pixi install` puts lexd on PATH. It cannot be named `lint`:
+# that name is the managed fixed-string task in the default [tasks] block, and a
+# second `lint` here would re-create the historical bare-`pixi run lint` ambiguity
+# across environments (see the feature comment above). Defined ONLY in this feature,
+# so it exists in EXACTLY ONE env (lint) and bare `pixi run lint-full` resolves
+# unambiguously — the wf-checks matrix job's `pixi run --locked lint-full` and a
+# laptop run are byte-identical.
+lint-full = "./bin/shipit lint"
 # One command from a fresh clone to working lint checks (the `--install-hook` equiv):
-# activates the git hooks AND (via `provision-lexd`) fetches the pinned lexd into the
-# lint env, so the pre-commit / pre-push `pixi run -e lint lint` the hooks fire find
-# lexd on PATH without the managed `lint` task needing a depends-on it cannot carry.
-install-hooks = { cmd = "lefthook install", depends-on = ["provision-lexd"] }
+# activates the git hooks. lexd rides pixi.lock (the composed `shipit-lexd` feature),
+# so the pre-commit / pre-push `pixi run -e lint lint` the hooks fire find it on PATH
+# after a plain `pixi install` — no provisioning step to gate on.
+install-hooks = "lefthook install"
 # Re-flow every role-prompt surface from the lex fragments (HAR01-WS03, ADR-0011):
 # mirror src/shipit/data/roles/*.lex -> .md, then compose the agent-defs, the
 # bundled coordinator deny slice, and the AGENTS.md union. Needs lexd + prettier
 # (mirroring) and shipit (the generator), all on PATH in the lint env.
-regen-roles = { cmd = "bash tools/regen-roles.sh", depends-on = ["provision-lexd"] }
+regen-roles = "bash tools/regen-roles.sh"
+
+# The managed lexd feature (ARF02-WS06, ADR-0066) — carried VERBATIM so shipit's
+# self-install (`shipit install --local` at Tree provisioning) reconciles to a
+# NOOP; a drift test (tests/test_install.py) asserts it agrees with the packaged
+# `pixi-lexd-block.toml`. This is the reserved feature the lint (and test) envs
+# compose for lexd from the Artifact channel — see `[environments]` below.
+# >>> shipit-managed lexd feature (do not edit; regenerate via `shipit install`) >>>
+[feature.shipit-lexd]
+# lexd — the lex Lang's lint-gate tool — resolved as an ordinary conda package
+# from the public Artifact channel (ADR-0066: `provision lexd` retired). The
+# channel is scoped to THIS reserved feature (a sibling of conda-forge, added to
+# whatever env `shipit-lexd` is wired into — the lint env), so lexd rides
+# pixi.lock and pixi's sha256 like every other linter, and `shipit install`
+# keeps the whole fleet on ONE lexd version — uniformity moved from a compiled
+# binary constant to this managed block (ADR-0047: not consumer config).
+channels = ["https://storage.googleapis.com/shipit-artifacts-public/lex-fmt/lex"]
+
+[feature.shipit-lexd.dependencies]
+# The fleet-pinned lexd. A bump is one data edit here, rolled fleet-wide on each
+# consumer's next `shipit install` reconcile. Exact-pinned (`==`) so uniformity
+# is a single version, never a resolved range. win-64 is unserved while the
+# Windows build pause holds (#895, ADR-0071), so a win-64 lint solve fails
+# closed — deliberately, with no `provision` fallback.
+lexd = "==0.19.10"
+# <<< shipit-managed lexd feature <<<
 
 # The `review` env carries the `review` extra (PyJWT, to sign the App JWT) so the
 # normal `shipit pr review` path AND the opt-in funnel-verification harness can
@@ -305,17 +315,16 @@ verify-spawn = "python -m shipit.spawn.dogfood"
 
 [environments]
 # >>> shipit-managed environments (do not edit; regenerate via `shipit install`) >>>
-lint = ["lint"]
+lint = ["lint", "shipit-lexd"]
 # <<< shipit-managed environments <<<
 # The full-gate test env: default feature (core linters + pytest + shipit editable)
 # plus the `test` feature's Rust toolchain AND its `test` task, so the hermeticity
 # invariance gate runs its rust/lex cases instead of skipping them (#532). It is the
 # ONLY env carrying the `test` task, so bare `pixi run test` auto-selects it — the
 # developer command and the CI command (`pixi run -e test test`) run the same gate.
-# lexd is provisioned onto the run's PATH at its pin INLINE by the `test` task cmd
-# (`shipit provision lexd` before the test verb, landing in THIS env's own bin). NOT a
-# `provision-lexd` depends-on: pixi would run it in the default env, whose bin this
-# env does not layer onto PATH — see the task comment above.
-test = ["test"]
+# It composes the managed `shipit-lexd` feature so lexd rides pixi.lock from the
+# Artifact channel into THIS env's prefix (ARF02-WS06, ADR-0066) — the lex cases run
+# everywhere, no inline provisioning.
+test = ["test", "shipit-lexd"]
 review = ["review"]
 dogfood = ["dogfood"]
