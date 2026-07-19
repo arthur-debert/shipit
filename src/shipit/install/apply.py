@@ -26,7 +26,16 @@ from .. import buildid, config, execrun, gh, git, pixienv
 from ..changelog import CHANGELOG_FILE
 from . import selfcert
 from .errors import InstallError, SelfCertError
-from .reconcile import DELETE, KEEP, Plan, consumer_inner, format_lefthook_conflict
+from .reconcile import (
+    DELETE,
+    KEEP,
+    ClaudeSkillsLink,
+    Plan,
+    consumer_inner,
+    format_lefthook_conflict,
+    format_symlinked_dest,
+    symlinked_dest_component,
+)
 from .splice import (
     ENV_MEMBER_MALFORMED,
     ENV_MEMBER_UNSUPPORTED,
@@ -37,6 +46,8 @@ from .splice import (
     splice_settings_hook,
 )
 from .units import (
+    CLAUDE_SKILLS_DIR,
+    CLAUDE_SKILLS_LINK_TARGET,
     FMT_ENV_MEMBER,
     FMT_JSON_HOOK,
     HOOK_RECOVERY_CMD,
@@ -181,6 +192,58 @@ def write_unit(root: Path, unit: Unit) -> None:
     dest.write_bytes(unit.content)
     if unit.executable:
         dest.chmod(0o755)
+
+
+def ensure_claude_skills_link(root: Path, link: ClaudeSkillsLink) -> bool:
+    """Execute the ``.claude/skills`` -> ``.agents/skills`` symlink decision.
+
+    Returns whether this apply CREATED the managed symlink (so a committing mode
+    stages it). Create-only-when-absent (ADR-0077, owner decision): shipit NEVER
+    removes an existing ``.claude/skills`` — NOOP/BLOCKED do nothing here.
+
+    Defensive over the gather→apply window: a CREATE planned against an absent
+    path re-checks at apply and stands down if the path is now occupied — a NOOP
+    if it is already the exact managed symlink, otherwise left untouched (never
+    overwritten). Never destroys consumer content.
+    """
+    if not link.is_work:  # NOOP / BLOCKED — nothing structural to do
+        return False
+    dest = root / CLAUDE_SKILLS_DIR
+    # TOCTOU re-check: a PARENT component turned into a symlink in the gather→apply
+    # window (e.g. `.claude` became a link) would make `symlink_to` write outside
+    # the repo. Stand down rather than create through it (a re-run re-plans a BLOCK).
+    parent_link = symlinked_dest_component(root, str(Path(CLAUDE_SKILLS_DIR).parent))
+    if parent_link is not None:
+        logger.warning(
+            "claude skills link skipped — a parent of %s became a symlink (%s) in "
+            "the gather→apply window; left untouched",
+            CLAUDE_SKILLS_DIR,
+            parent_link,
+            extra={"root": str(root), "path": CLAUDE_SKILLS_DIR},
+        )
+        return False
+    if dest.is_symlink() or dest.exists():
+        # Something occupied the path in the gather→apply window. Never clobber:
+        # a correct managed symlink is a silent NOOP, anything else is left as-is
+        # (a re-run re-plans it as a BLOCK).
+        if dest.is_symlink() and str(dest.readlink()) == CLAUDE_SKILLS_LINK_TARGET:
+            return False
+        logger.warning(
+            "claude skills link skipped — %s appeared in the gather→apply "
+            "window; left untouched",
+            CLAUDE_SKILLS_DIR,
+            extra={"root": str(root), "path": CLAUDE_SKILLS_DIR},
+        )
+        return False
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.symlink_to(CLAUDE_SKILLS_LINK_TARGET, target_is_directory=True)
+    logger.info(
+        "linked %s -> %s",
+        CLAUDE_SKILLS_DIR,
+        CLAUDE_SKILLS_LINK_TARGET,
+        extra={"root": str(root), "path": CLAUDE_SKILLS_DIR},
+    )
+    return True
 
 
 def _rerender_changelog(root: Path) -> bool:
@@ -753,6 +816,32 @@ def reject_lefthook_conflicts(plan: Plan, mode: str) -> None:
         )
 
 
+def reject_symlinked_dests(plan: Plan) -> None:
+    """Fail closed on a symlinked destination component BEFORE any write — the
+    single guard shared by :func:`apply` and the verb's no-op shortcut
+    (:mod:`shipit.verbs.install`), so a symlink-bearing but otherwise-empty plan
+    cannot slip past a mode's no-op return.
+
+    A managed unit of ANY kind whose dest crosses a consumer symlink (a linked
+    leaf, or a linked parent dir) would write THROUGH the link and overwrite the
+    target OUTSIDE the repo (#1088 review): a whole-file unit via
+    ``dest.write_bytes``, a block/splice unit via ``dest.read_text`` +
+    ``dest.write_text`` — both follow a symlinked component identically, so the
+    host being consumer-owned does not make the external write safe. Unlike the
+    lefthook refusal — which only guards PUBLISHING a config, so ``MODE_TREE``
+    warns — the containment breach happens on the raw filesystem write, so EVERY
+    mode (``MODE_TREE`` included) refuses. The fix is the operator's: remove the
+    symlink and re-run to receive a real copy. A plain :class:`InstallError` (an
+    operator-fixable state), never a :class:`SelfCertError`."""
+    if plan.symlinked_dests:
+        raise InstallError(
+            "symlinked destination — refusing to write a managed file through a "
+            "consumer symlink (it would overwrite the link's target, outside "
+            "this repo):\n"
+            + "\n".join(f"  {format_symlinked_dest(sd)}" for sd in plan.symlinked_dests)
+        )
+
+
 def apply(
     plan: Plan,
     mode: str = MODE_TREE,
@@ -821,6 +910,7 @@ def apply(
     if mode == MODE_PR and pr_body is None:
         raise ValueError("MODE_PR needs the pr_body renderer")
     reject_lefthook_conflicts(plan, mode)
+    reject_symlinked_dests(plan)
     activate = activate_hooks or _activate_hooks
     started = time.monotonic()
     root = Path(plan.root)
@@ -972,6 +1062,16 @@ def apply(
         # files-vs-hooks asymmetry, #984 round-6). Only a rewrite is apply's own.
         touched.add(d.retired.file)
         staged_writes.add(d.retired.file)
+
+    # The `.claude/skills` structural symlink (#1088, ADR-0077): ensure it here,
+    # after the `.agents/skills` content writes above so the link's target
+    # already holds the managed set. Create-only-when-absent — shipit never
+    # removes an existing `.claude/skills` (an existing one BLOCKS at gather), so
+    # a CREATE only ever ADDs the symlink; it joins the commit scope.
+    if ensure_claude_skills_link(root, plan.claude_skills_link):
+        touched.add(CLAUDE_SKILLS_DIR)
+        staged_writes.add(CLAUDE_SKILLS_DIR)
+
     cfg_path = root / config.CONFIG_NAME
     # Seed the consumer-owned policy BEFORE the manifest write, which preserves
     # `[secrets]`/`[reviewers]` textually while it re-stamps `[shipit]`/`[managed]`.

@@ -501,6 +501,24 @@ def lexd_block(platforms: frozenset[str]) -> str:
 # `tests.conftest.managed_pretooluse_hook_command` (the single source of this
 # exact string) vs `managed_cc_hook_command` (the other four).
 AGENTS_DEF_DIR = ".claude/agents"
+#: The single real skill DISCOVERY dir (issue #1088, ADR-0077):
+#: ``.agents/skills/`` is where agy/codex load skills AND the ONE place
+#: :func:`load_units` emits fundamental skill content. Claude Code reads its own
+#: ``.claude/skills/`` — but rather than DUPLICATE the content there, install
+#: makes ``.claude/skills`` a whole-directory SYMLINK to this dir (see
+#: :data:`CLAUDE_SKILLS_DIR` / :data:`CLAUDE_SKILLS_LINK_TARGET`), so Claude sees
+#: the identical set without a second physical copy. The ``.shipit-skills/``
+#: store is source-only — read by :func:`skills_root`, never a shipped consumer
+#: dest — because no runtime loads that directory.
+AGENTS_SKILLS_DIR = ".agents/skills"
+#: The Claude discovery dir, a structural whole-directory symlink install ensures
+#: (NOT a content unit): ``.claude/skills`` -> :data:`CLAUDE_SKILLS_LINK_TARGET`.
+#: The everyone-but-claude split is CANCELLED by this design — Claude sees
+#: everything ``.agents/skills`` holds, ``pixi`` included (ADR-0077).
+CLAUDE_SKILLS_DIR = ".claude/skills"
+#: The relative target of the ``.claude/skills`` symlink, resolved from the
+#: link's own dir (``.claude/``): ``../.agents/skills`` -> ``<root>/.agents/skills``.
+CLAUDE_SKILLS_LINK_TARGET = "../.agents/skills"
 #: The AGY native custom-agent def dir (issue #989): the generated
 #: ``.agents/agents/<name>/agent.md`` defs `agy --agent <name>` reads. Managed as
 #: whole-file units the same way as the Claude agent-defs, sourced from
@@ -715,7 +733,7 @@ def data_bytes(*parts: str) -> bytes:
 
 
 def skills_root():
-    """The bundled skills tree — wheel package data, or the repo root in dev.
+    """The bundled skills store — the read SOURCE, wheel package data or repo root.
 
     Returns a Traversable (installed wheel) or a :class:`Path` (editable/source
     checkout, where the store lives at the repo root as ``.shipit-skills/`` — a
@@ -724,6 +742,12 @@ def skills_root():
     / ``read_bytes`` protocol :func:`walk_files` uses. The dot-prefix keeps
     shipit's OWN skill store from colliding with the public ``skills/`` convention
     a repo uses to publish its own skills (#921).
+
+    This store is **source-only** (ADR-0077): :func:`load_units` PROJECTS each
+    file out of here into the single real discovery dir :data:`AGENTS_SKILLS_DIR`
+    (Claude's :data:`CLAUDE_SKILLS_DIR` is a whole-dir symlink to it) —
+    ``.shipit-skills/`` itself is never a shipped consumer dest, because no agent
+    runtime loads that directory (#1088).
     """
     bundled = resources.files("shipit.data").joinpath("skills")
     if bundled.is_dir():
@@ -818,11 +842,19 @@ def load_units(
     """
     units: list[Unit] = []
 
+    # The fundamental skill store (issue #1088, ADR-0077): each store file is
+    # emitted ONCE, into the single real discovery dir :data:`AGENTS_SKILLS_DIR`
+    # (`.agents/skills/`). Claude's `.claude/skills` is a whole-directory SYMLINK
+    # to it (a STRUCTURAL step install ensures — :func:`plan_claude_skills_link`,
+    # not a content unit), so Claude reads the identical set without a second
+    # physical copy. The source-only `.shipit-skills/` store is never a consumer
+    # dest (no runtime loads it). Same `Unit(kind="file")` shape as the agent-defs
+    # fan-out below, so every reconcile/override/retire guarantee carries over.
     for rel, content in walk_files(skills_root()):
         units.append(
             Unit(
-                key=f".shipit-skills/{rel}",
-                dest=f".shipit-skills/{rel}",
+                key=f"{AGENTS_SKILLS_DIR}/{rel}",
+                dest=f"{AGENTS_SKILLS_DIR}/{rel}",
                 kind="file",
                 content=content,
             )

@@ -103,8 +103,14 @@ def test_session_status_skill_wraps_the_flow_view():
 
 
 def test_session_status_skill_is_in_the_managed_set():
+    # #1088: skill CONTENT is emitted once, into the single real `.agents/skills`
+    # dir (Claude reads it through the `.claude/skills` symlink, which is a
+    # structural step, not a content unit). Never the source-only store, and
+    # never a `.claude/skills/*` content unit.
     keys = {u.key for u in install_units.load_units()}
-    assert ".shipit-skills/shipit-session-status/SKILL.md" in keys
+    assert ".agents/skills/shipit-session-status/SKILL.md" in keys
+    assert not any(k.startswith(".shipit-skills/") for k in keys)
+    assert not any(k.startswith(".claude/skills/") for k in keys)
 
 
 # ==========================================================================

@@ -120,6 +120,9 @@ from .splice import (
     extract_settings_hook,
 )
 from .units import (
+    AGENTS_SKILLS_DIR,
+    CLAUDE_SKILLS_DIR,
+    CLAUDE_SKILLS_LINK_TARGET,
     FMT_ENV_MEMBER,
     FMT_JSON_HOOK,
     FMT_MARKERS,
@@ -1120,6 +1123,173 @@ def consumer_inner(root: Path, unit: Unit) -> str | None:
     return extract_block(text, unit.open_marker, unit.close_marker)
 
 
+@dataclass(frozen=True)
+class SymlinkedDest:
+    """A managed unit (any kind) whose destination crosses a consumer symlink.
+
+    ``component`` is the repo-relative path of the SHALLOWEST symlinked path
+    element (from the consumer root down to the leaf) — the containment breach
+    point the operator must remove before install can write the unit. Applies to
+    whole-file AND block/splice units: both write through ``root / dest`` and
+    would follow a symlinked component out of the repo (#1088 review).
+    """
+
+    unit_key: str
+    dest: str  # the unit's declared dest (repo-relative)
+    component: str  # the symlinked path element (repo-relative)
+
+
+def symlinked_dest_component(root: Path, dest: str) -> str | None:
+    """The shallowest symlinked component of ``dest`` under ``root``, or None.
+
+    Walks every path element from the consumer root down to the leaf. EVERY
+    managed unit's apply writes through ``root / unit.dest``
+    (:func:`shipit.install.apply.write_unit`): a whole-file unit via
+    ``dest.write_bytes``, a block/splice unit via ``dest.read_text`` +
+    ``dest.write_text``. All of them — and the :func:`consumer_hash` read —
+    FOLLOW a symlink in ANY path component, so a symlinked element (a linked
+    leaf, or a linked parent dir) would let an install write THROUGH the link,
+    over whatever it targets OUTSIDE the repo. Returns the offending element's
+    repo-relative path so the caller fails closed on it; shipit never writes
+    through a consumer's symlink (ADR-0077).
+    """
+    current = root
+    for part in Path(dest).parts:
+        current = current / part
+        if current.is_symlink():
+            return str(current.relative_to(root))
+    return None
+
+
+def symlinked_dests(root: Path, units: Sequence[Unit]) -> tuple[SymlinkedDest, ...]:
+    """Every managed unit whose dest crosses a consumer symlink (fail-closed).
+
+    Covers EVERY unit kind — whole-file AND block/splice. A block unit splices
+    into a host file (``AGENTS.md``, ``pixi.toml``, ``.claude/settings.json``)
+    via ``dest.write_text``, which follows a symlinked leaf or parent exactly as
+    a whole-file ``write_bytes`` does; calling the host consumer-owned does not
+    make overwriting a target OUTSIDE the repo safe (#1088 review). The apply
+    path is identical, so the containment guard is too. One ``SymlinkedDest`` per
+    offending unit — several block units sharing one symlinked host (the pixi
+    blocks, the settings hooks) each report it, and apply fails closed on the set.
+    """
+    found: list[SymlinkedDest] = []
+    for u in units:
+        component = symlinked_dest_component(root, u.dest)
+        if component is not None:
+            found.append(
+                SymlinkedDest(unit_key=u.key, dest=u.dest, component=component)
+            )
+    return tuple(found)
+
+
+def format_symlinked_dest(sd: SymlinkedDest) -> str:
+    """The one actionable message for a symlinked-dest conflict — used verbatim
+    by the working-tree/dry-run stderr warning and the fail-closed error, so the
+    two surfaces can never drift."""
+    leaf = "" if sd.component == sd.dest else f" (writing {sd.dest} would follow it)"
+    return (
+        f"{sd.component} is a symlink{leaf} — shipit refuses to write the managed "
+        f"unit {sd.unit_key} through it (it would overwrite the link's target, "
+        f"outside this repo). Remove the symlink and re-run `shipit install` to "
+        f"receive a real copy"
+    )
+
+
+# --------------------------------------------------------------------------
+# The `.claude/skills` structural symlink (issue #1088, ADR-0077)
+# --------------------------------------------------------------------------
+
+#: `.claude/skills` -> `.agents/skills` symlink actions. Skill CONTENT is a real
+#: managed dir at `.agents/skills` only; Claude reads the identical set through
+#: this whole-directory symlink, so install never duplicates the files.
+#: Create-only-when-absent (ADR-0077, owner decision): shipit NEVER removes an
+#: existing `.claude/skills` — anything already there BLOCKS with guidance.
+LINK_NOOP = "link-noop"  # the correct relative symlink is already present
+LINK_CREATE = "link-create"  # absent → create the symlink
+LINK_BLOCKED = "link-blocked"  # anything else already at the path — never removed
+
+
+@dataclass(frozen=True)
+class ClaudeSkillsLink:
+    """The structural ``.claude/skills`` -> ``.agents/skills`` symlink decision.
+
+    Not a managed content unit — a whole-directory pointer install ensures, like
+    lefthook activation, and ONLY when the path is absent. ``reason`` (BLOCKED
+    only) is the human-readable why: shipit never removes an existing
+    ``.claude/skills``, so a real dir / real file / wrong-target symlink is left
+    untouched and flagged for the operator to resolve.
+    """
+
+    action: str
+    reason: str = ""
+
+    @property
+    def is_work(self) -> bool:
+        """CREATE changes the tree; NOOP/BLOCKED do not (BLOCKED warns)."""
+        return self.action == LINK_CREATE
+
+
+def _claude_skills_exists_reason(link: Path) -> str:
+    """The BLOCKED guidance for an existing ``.claude/skills`` (any shape)."""
+    if link.is_symlink():
+        what = f"a symlink to {str(link.readlink())!r}, not the managed {CLAUDE_SKILLS_LINK_TARGET!r}"
+    elif link.is_dir():
+        what = "a real directory"
+    else:
+        what = "a regular file"
+    return (
+        f"{CLAUDE_SKILLS_DIR} already exists ({what}) — shipit will not remove it. "
+        f"Remove it (relocate any of your own skills into {AGENTS_SKILLS_DIR} first) "
+        f"and re-run `shipit install` to adopt the managed symlink"
+    )
+
+
+def plan_claude_skills_link(root: Path) -> ClaudeSkillsLink:
+    """Decide the ``.claude/skills`` symlink — read at the gather boundary.
+
+    Create-only-when-absent (ADR-0077, owner decision): shipit creates the
+    whole-dir symlink ONLY when the path is absent. An existing ``.claude/skills``
+    of ANY shape — a real dir (the copies-round / pre-symlink layout), a real
+    file, or a symlink pointing elsewhere — is NEVER removed: it BLOCKS with
+    guidance to remove it manually. Only the exact managed symlink is a NOOP.
+
+    shipit never deletes a consumer's ``.claude/skills``; there is no
+    content-hash retirement of ``.claude/skills/*`` (which would also delete the
+    byte-identical ``.agents/skills`` copy and the ``.shipit-skills`` source).
+
+    A symlinked PARENT component (a consumer who symlinks ``.claude`` itself)
+    BLOCKS before any ``is_dir``/``rglob`` read would follow it outside the repo —
+    the same containment stance as :func:`symlinked_dest_component`.
+    """
+    parent = symlinked_dest_component(root, str(Path(CLAUDE_SKILLS_DIR).parent))
+    if parent is not None:
+        return ClaudeSkillsLink(
+            LINK_BLOCKED,
+            reason=(
+                f"a parent of {CLAUDE_SKILLS_DIR} is a symlink ({parent}) — shipit "
+                f"will not create or read through it. Remove the symlink and re-run "
+                f"to adopt the managed link"
+            ),
+        )
+    link = root / CLAUDE_SKILLS_DIR
+    if link.is_symlink():
+        if str(link.readlink()) == CLAUDE_SKILLS_LINK_TARGET:
+            return ClaudeSkillsLink(LINK_NOOP)
+        return ClaudeSkillsLink(LINK_BLOCKED, reason=_claude_skills_exists_reason(link))
+    if not link.exists():
+        return ClaudeSkillsLink(LINK_CREATE)
+    return ClaudeSkillsLink(LINK_BLOCKED, reason=_claude_skills_exists_reason(link))
+
+
+def format_claude_skills_link(link: ClaudeSkillsLink) -> str:
+    """The one-line description of a non-noop link action — used by the dry-run
+    report (CREATE) and the stderr warning (BLOCKED)."""
+    if link.action == LINK_CREATE:
+        return f"link     {CLAUDE_SKILLS_DIR} -> {CLAUDE_SKILLS_LINK_TARGET}"
+    return f"{CLAUDE_SKILLS_DIR}: {link.reason}"
+
+
 def consumer_hash(root: Path, unit: Unit) -> str | None:
     """The hash of a unit's current content in the consumer, or ``None`` if absent."""
     if unit.kind == "block":
@@ -1197,6 +1367,18 @@ class ConsumerState:
     # pristine map on an unreadable manifest (the degraded-but-continuing
     # path): no readable policy means no decline.
     declines: tuple[str, ...] = ()
+    # Managed units (ANY kind — file or block) whose dest crosses a consumer
+    # symlink (#1088 review): read here (the ONE read boundary) so the reconcile's
+    # fail-closed decision stays pure over this state. A symlinked dest component
+    # would make an install write THROUGH the link, outside the repo — the
+    # containment breach every mode refuses.
+    symlinked_dests: tuple[SymlinkedDest, ...] = ()
+    # The `.claude/skills` structural symlink decision (#1088, ADR-0077): read
+    # here (the ONE read boundary) so reconcile stays pure over it. Defaults to
+    # NOOP so a synthetic state with no skills carries no phantom work.
+    claude_skills_link: ClaudeSkillsLink = field(
+        default_factory=lambda: ClaudeSkillsLink(LINK_NOOP)
+    )
 
 
 def gather(
@@ -1280,6 +1462,8 @@ def gather(
         pixi_table_conflicts=_pixi_table_conflicts(root, units, consumer_hashes),
         changelog_stale=_changelog_stale(root),
         declines=declines,
+        symlinked_dests=symlinked_dests(root, units),
+        claude_skills_link=plan_claude_skills_link(root),
     )
 
 
@@ -1410,6 +1594,22 @@ class Plan:
     # silently ignored — usually a typo, occasionally a toolchain-conditional
     # unit whose signal manifest this repo does not track.
     decline_unmatched: tuple[str, ...] = ()
+    # Managed units (ANY kind — file or block) whose dest crosses a consumer
+    # symlink (#1088 review): their decisions are EXCLUDED (a symlinked read
+    # would hash the link's target, not shipit's dest) and EVERY mode fails
+    # closed on this record before any write
+    # (:func:`shipit.install.apply.reject_symlinked_dests`) — the containment
+    # guarantee is mode-independent, unlike the lefthook publish refusal. Every
+    # surface warns off this record.
+    symlinked_dests: tuple[SymlinkedDest, ...] = ()
+    # The `.claude/skills` -> `.agents/skills` structural symlink (#1088,
+    # ADR-0077): CREATE (absent path) is a work axis of its own (apply ensures the
+    # link; :attr:`nothing_to_do` and :attr:`changed_paths` account for it);
+    # BLOCKED (anything already there) warns and is left untouched — shipit never
+    # removes it (fail-safe). Never a content unit.
+    claude_skills_link: ClaudeSkillsLink = field(
+        default_factory=lambda: ClaudeSkillsLink(LINK_NOOP)
+    )
 
     @property
     def writes(self) -> tuple[Decision, ...]:
@@ -1470,6 +1670,12 @@ class Plan:
             and not self.retire_hook_deletes
             and not self.pin_stale
             and not self.rerender_changelog
+            # An ABSENT `.claude/skills` the install must link is a work axis of
+            # its own (#1088): the managed set can be current yet the structural
+            # symlink absent — the common adoption case. BLOCKED (anything already
+            # at the path) is NOT work (it warns and is left alone), so it stays a
+            # no-op — shipit never removes an existing `.claude/skills`.
+            and not self.claude_skills_link.is_work
         )
 
     @property
@@ -1494,6 +1700,10 @@ class Plan:
                 | {d.retired.path for d in self.retire_deletes}
                 | {d.retired.file for d in self.retire_hook_deletes}
                 | ({CHANGELOG_FILE} if self.rerender_changelog else set())
+                # The structural `.claude/skills` symlink rides the commit when
+                # install creates it (create-only-when-absent), so a committing
+                # mode publishes the new managed link (#1088).
+                | ({CLAUDE_SKILLS_DIR} if self.claude_skills_link.is_work else set())
             )
         )
 
@@ -1524,6 +1734,10 @@ def reconcile(
         {c.unit_key for c in state.pixi_key_conflicts}
         | {c.unit_key for c in state.pixi_task_conflicts}
         | {c.unit_key for c in state.pixi_table_conflicts}
+        # A symlinked-dest unit's decision would be read THROUGH the link (its
+        # hash is the target's, not the dest's), so exclude it outright — apply
+        # fails closed on the record below before any write reaches the link.
+        | {sd.unit_key for sd in state.symlinked_dests}
     )
     decline_set = set(state.declines)
     unit_keys = {u.key for u in units}
@@ -1565,6 +1779,8 @@ def reconcile(
         rerender_changelog=state.changelog_stale,
         declined=declined,
         decline_unmatched=decline_unmatched,
+        symlinked_dests=state.symlinked_dests,
+        claude_skills_link=state.claude_skills_link,
     )
     logger.debug(
         "reconcile plan decided",
@@ -1623,6 +1839,18 @@ def reconcile(
             "pixi table conflict: %s",
             format_pixi_table_conflict(bc),
             extra={"root": state.root, "unit": bc.unit_key, "tables": bc.tables},
+        )
+    for sd in result.symlinked_dests:
+        logger.warning(
+            "symlinked dest: %s",
+            format_symlinked_dest(sd),
+            extra={"root": state.root, "unit": sd.unit_key, "component": sd.component},
+        )
+    if result.claude_skills_link.action == LINK_BLOCKED:
+        logger.warning(
+            "claude skills link blocked: %s",
+            result.claude_skills_link.reason,
+            extra={"root": state.root, "path": CLAUDE_SKILLS_DIR},
         )
     if result.nothing_to_do:
         logger.debug(

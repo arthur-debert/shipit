@@ -53,6 +53,7 @@ from ..install.apply import (
     MODE_TREE,
     InstallResult,
     reject_lefthook_conflicts,
+    reject_symlinked_dests,
 )
 from ..install.apply import (
     apply as apply_plan,
@@ -61,14 +62,17 @@ from ..install.reconcile import (
     ADD,
     DELETE,
     KEEP,
+    LINK_BLOCKED,
     NOOP,
     UPDATE,
     Plan,
     detect_toolchains,
+    format_claude_skills_link,
     format_lefthook_conflict,
     format_pixi_key_conflict,
     format_pixi_table_conflict,
     format_pixi_task_conflict,
+    format_symlinked_dest,
     gather,
     load_retired,
     load_retired_hooks,
@@ -456,6 +460,12 @@ def run(
             # it stays on the early-return path and never refuses.
             step = "apply"
             reject_lefthook_conflicts(plan, mode)
+            # Fail closed on a symlinked dest in EVERY applying mode (MODE_TREE
+            # included, unlike lefthook): the breach is the raw filesystem write,
+            # not a config publish. Placed before the no-op shortcut so a plan
+            # whose only finding is the symlink (its unit excluded from the write
+            # set) still refuses rather than exiting 0.
+            reject_symlinked_dests(plan)
         if plan.nothing_to_do or dry_run:
             # Dry-run has NO side effects (no writes, no deletes, no git, no PR);
             # a nothing-to-do plan is a clean no-op either way.
@@ -578,6 +588,10 @@ def format_plan(plan: Plan, *, dry_run: bool = False) -> str:
         # #619: a consumer-local hook entry shipit used to prescribe — removed
         # from its event array; shipit's own managed entries are never touched.
         lines.append(f"  {DELETE:8} {d.retired.key} (retired hook entry)")
+    if plan.claude_skills_link.is_work:
+        # #1088: the structural `.claude/skills` -> `.agents/skills` symlink is a
+        # plan line like any write — created only when the path is absent.
+        lines.append(f"  {format_claude_skills_link(plan.claude_skills_link)}")
     if plan.pin_stale:
         # ADR-0033: a pin roll-forward is a reconcile outcome in its own right —
         # it can be the ONLY change when a code-only shipit build ships (every
@@ -607,8 +621,11 @@ def format_plan_warnings(plan: Plan) -> str:
     surface, worded off the same formatter so the two can never drift), and
     each pixi block skipped over a consumer-owned duplicate key (#547) or a
     consumer-owned same-named task (TOL01-WS01 — a pixi-task ambiguity; both
-    warn-only in every mode: the skip already keeps the write set safe), and
-    each declined key that names no unit in this catalog (#600 — a typo must
+    warn-only in every mode: the skip already keeps the write set safe), each
+    whole-file unit whose dest crosses a consumer symlink (#1088 review — EVERY
+    applying mode also fails closed on these in apply/verb; the warning is the
+    dry-run surface, worded off the same formatter so the two can never drift),
+    and each declined key that names no unit in this catalog (#600 — a typo must
     not silently decline nothing)."""
     lines = []
     if plan.manifest_error is not None:
@@ -630,6 +647,12 @@ def format_plan_warnings(plan: Plan) -> str:
         lines.append(f"install: pixi block skipped: {format_pixi_task_conflict(tc)}")
     for bc in plan.pixi_table_conflicts:
         lines.append(f"install: pixi block skipped: {format_pixi_table_conflict(bc)}")
+    for sd in plan.symlinked_dests:
+        lines.append(f"install: symlinked dest: {format_symlinked_dest(sd)}")
+    if plan.claude_skills_link.action == LINK_BLOCKED:
+        lines.append(
+            f"install: claude skills link: {format_claude_skills_link(plan.claude_skills_link)}"
+        )
     for key in plan.decline_unmatched:
         lines.append(
             f"install: declined key {key!r} names no managed unit in this "
