@@ -351,21 +351,27 @@ def test_delivered_lint_fails_closed_when_a_planned_file_is_missing(staged):
 
 
 # --------------------------------------------------------------------------
-# Postcondition 2, managed skills (#777) — the delivered `.shipit-skills/*.md`
-# content is
-# no longer exempt from the delivered markdownlint gate, so self-cert's
-# delivered-lint CATCHES a skill-content defect that would otherwise ride the
-# managed set into a consumer's markdownlint gate (modes 4+6). These route the
-# REAL markdownlint through selfcert's own `_check_delivered_lint` boundary,
-# scoped to just the skill files so only the markdown leg runs.
+# Postcondition 2, managed skills (#777, projection #1088) — the delivered skill
+# markdown (now at `.claude/skills/*.md` + `.agents/skills/*.md`) is no longer
+# exempt from the delivered markdownlint gate, so self-cert's delivered-lint
+# CATCHES a skill-content defect that would otherwise ride the managed set into a
+# consumer's markdownlint gate (modes 4+6). These route the REAL markdownlint
+# through selfcert's own `_check_delivered_lint` boundary, scoped to just the
+# skill files so only the markdown leg runs.
 # --------------------------------------------------------------------------
 
 
 def _skill_only_plan(root) -> irec.Plan:
     """A plan whose write set is JUST the managed skill files, so a scoped
-    delivered-lint routes only markdownlint over the shipped
-    `.shipit-skills/*.md`."""
-    skills = [u for u in iunits.load_units() if u.key.startswith(".shipit-skills/")]
+    delivered-lint routes only markdownlint over the projected skill markdown at
+    `.claude/skills/*.md` + `.agents/skills/*.md` (#1088)."""
+    skills = [
+        u
+        for u in iunits.load_units()
+        if u.key.startswith(
+            (f"{iunits.CLAUDE_SKILLS_DIR}/", f"{iunits.AGENTS_SKILLS_DIR}/")
+        )
+    ]
     decisions = tuple(
         irec.Decision(
             unit=u,
@@ -401,12 +407,14 @@ def _unwrapping_real_runner():
 
 
 def test_managed_skill_files_are_in_the_delivered_lint_set(staged):
-    # The root-cause guard (no binary): every managed `.shipit-skills/*.md` is a whole-file
-    # unit, so it is in scope for the delivered-lint check — the blindness was
-    # only the shipped `.markdownlintignore` exempting `skills/`, now removed.
+    # The root-cause guard (no binary): every projected skill `*.md` is a
+    # whole-file unit, so it is in scope for the delivered-lint check — the
+    # blindness was only the shipped `.markdownlintignore` exempting `skills/`,
+    # now removed. Projection (#1088) lands each skill under BOTH discovery dirs.
     paths = selfcert.delivered_lint_paths(_skill_only_plan(staged))
-    assert ".shipit-skills/grill-me-with-docs/SKILL.md" in paths
-    assert ".shipit-skills/to-spec/SKILL.md" in paths
+    assert ".claude/skills/grill-me-with-docs/SKILL.md" in paths
+    assert ".agents/skills/grill-me-with-docs/SKILL.md" in paths
+    assert ".claude/skills/to-spec/SKILL.md" in paths
     # The delivered ignore no longer blanket-exempts the managed skills tree.
     ignore = (staged / ".markdownlintignore").read_text().splitlines()
     assert ".shipit-skills/" not in {line.strip() for line in ignore}
@@ -427,14 +435,14 @@ def test_delivered_skill_files_pass_the_delivered_config_real(staged):
 def test_delivered_lint_catches_a_planted_skill_defect_real(staged):
     # Plant an MD040 bare-fence defect (mode 4's exact class) into a delivered
     # skill file: self-cert must now CATCH it — the defect can no longer ship.
-    skill = staged / ".shipit-skills" / "grill-me-with-docs" / "SKILL.md"
+    skill = staged / ".claude" / "skills" / "grill-me-with-docs" / "SKILL.md"
     skill.write_text(skill.read_text() + "\n```\nplanted bare fence\n```\n")
     check = selfcert._check_delivered_lint(
         staged, _skill_only_plan(staged), _unwrapping_real_runner()
     )
     assert not check.ok
     assert "MD040" in check.detail
-    assert ".shipit-skills/grill-me-with-docs/SKILL.md" in check.detail
+    assert ".claude/skills/grill-me-with-docs/SKILL.md" in check.detail
 
 
 # --------------------------------------------------------------------------

@@ -1267,11 +1267,59 @@ def test_load_units_has_skills_agents_and_bootstrap():
     keys = {u.key for u in units}
     assert "AGENTS.md#shipit-block" in keys
     assert "bin/shipit" in keys
-    assert any(k.startswith(".shipit-skills/") for k in keys)
+    # Skills project into the two discovery dirs, never the source-only store (#1088).
+    assert any(k.startswith(".claude/skills/") for k in keys)
+    assert any(k.startswith(".agents/skills/") for k in keys)
+    assert not any(k.startswith(".shipit-skills/") for k in keys)
     agents = next(u for u in units if u.key == "AGENTS.md#shipit-block")
     assert agents.kind == "block"
     boot = next(u for u in units if u.key == "bin/shipit")
     assert boot.executable is True
+
+
+def test_every_store_skill_projects_to_both_surfaces():
+    """Slice 1 (#1088): each fundamental store file fans out to BOTH discovery
+    dirs as byte-identical whole-file units — `.claude/skills/<rel>` (Claude Code)
+    and `.agents/skills/<rel>` (agy/codex) — with distinct, non-colliding keys.
+    Nothing is emitted at the source-only `.shipit-skills/` store."""
+    units = {u.key: u for u in iunits.load_units() if u.kind == "file"}
+    store = list(iunits.walk_files(iunits.skills_root()))
+    assert store, "the fundamental skill store is empty"
+    for rel, content in store:
+        claude_key = f"{iunits.CLAUDE_SKILLS_DIR}/{rel}"
+        agents_key = f"{iunits.AGENTS_SKILLS_DIR}/{rel}"
+        assert claude_key in units, f"{claude_key} not projected"
+        assert agents_key in units, f"{agents_key} not projected"
+        # Same source bytes on both surfaces; dest mirrors key (a plain copy).
+        assert units[claude_key].content == content
+        assert units[agents_key].content == content
+        assert units[claude_key].dest == claude_key
+        assert units[agents_key].dest == agents_key
+    assert not any(k.startswith(".shipit-skills/") for k in units)
+
+
+def test_shipits_own_skills_reconcile_to_noop():
+    """The dogfood drift check (the WS01 / lint-config pattern): shipit
+    self-installs at Tree provisioning, so its own committed `.claude/skills/*`
+    and `.agents/skills/*` must be BYTE-IDENTICAL copies of the managed units —
+    the #1088 migration replaced the hand-committed symlinks with real copies, so
+    a skill-store edit is one source change mirrored into both projected dirs (or
+    this test fails). A symlink here would hash to a non-`sha256:` sentinel and
+    fail immediately."""
+    skill_units = [
+        u
+        for u in iunits.load_units()
+        if u.key.startswith(
+            (f"{iunits.CLAUDE_SKILLS_DIR}/", f"{iunits.AGENTS_SKILLS_DIR}/")
+        )
+    ]
+    assert skill_units, "no projected skill units to check"
+    for unit in skill_units:
+        dest = REPO_ROOT / unit.dest
+        assert not dest.is_symlink(), (
+            f"{unit.dest} is still a symlink (#1088 migration)"
+        )
+        assert irec.consumer_hash(REPO_ROOT, unit) == unit.desired_hash(), unit.key
 
 
 # --------------------------------------------------------------------------
@@ -4415,8 +4463,10 @@ def test_fresh_install_writes_set_and_opens_draft_pr(tmp_path, rec):
     assert result.pr_url == "https://github.com/acme/repo/pull/1"
     assert result.pr_updated is False
 
-    # Managed files landed.
-    assert (tmp_path / ".shipit-skills" / "to-spec" / "SKILL.md").is_file()
+    # Managed files landed — projected into BOTH discovery dirs (#1088).
+    assert (tmp_path / ".claude" / "skills" / "to-spec" / "SKILL.md").is_file()
+    assert (tmp_path / ".agents" / "skills" / "to-spec" / "SKILL.md").is_file()
+    assert not (tmp_path / ".shipit-skills").exists()
     assert (tmp_path / "bin" / "shipit").is_file()
     # The AGENTS block was spliced in without losing the consumer's text.
     agents = (tmp_path / "AGENTS.md").read_text()
@@ -4984,14 +5034,14 @@ def test_consumer_edit_surfaces_as_override(tmp_path, rec):
     _apply(tmp_path)
     rec.calls.clear()
 
-    # The consumer edits a managed skill file.
-    skill = tmp_path / ".shipit-skills" / "to-spec" / "SKILL.md"
+    # The consumer edits a managed skill file (at a projected discovery dir, #1088).
+    skill = tmp_path / ".claude" / "skills" / "to-spec" / "SKILL.md"
     skill.write_text("CONSUMER EDIT\n")
 
     _apply(tmp_path, iapply.MODE_PR)
     assert ("pr_create", True) in rec.calls
     assert "### Overrides" in rec.pr_body
-    assert ".shipit-skills/to-spec/SKILL.md" in rec.pr_body
+    assert ".claude/skills/to-spec/SKILL.md" in rec.pr_body
     # The diff is captured BEFORE the overwrite, so it shows the consumer's edit
     # (a non-empty diff), not an empty diff against what shipit just wrote.
     assert "CONSUMER EDIT" in rec.pr_body
@@ -5041,7 +5091,7 @@ def test_declined_unit_is_never_written_and_drops_from_the_manifest(tmp_path, re
     (tmp_path / "bin" / "shipit").write_text("#!/bin/sh\n# MY OWN LAUNCHER\n")
     _decline(tmp_path, "bin/shipit")
     # Another unit changes, so the plan still has work — an applying install runs.
-    (tmp_path / ".shipit-skills" / "to-spec" / "SKILL.md").unlink()
+    (tmp_path / ".claude" / "skills" / "to-spec" / "SKILL.md").unlink()
 
     result = _apply(tmp_path, iapply.MODE_PR)
     assert result.pr_url is not None
@@ -5052,7 +5102,7 @@ def test_declined_unit_is_never_written_and_drops_from_the_manifest(tmp_path, re
     cfg = config.load(cfg_path)
     managed = config.load_managed(cfg)
     assert iunits.SHIPIT_LAUNCHER_FILE not in managed
-    assert ".shipit-skills/to-spec/SKILL.md" in managed
+    assert ".claude/skills/to-spec/SKILL.md" in managed
     # The decline itself survives the manifest re-stamp (the durable half)...
     assert config.load_declines(cfg, cfg_path.read_text()) == (
         iunits.SHIPIT_LAUNCHER_FILE,
@@ -5610,7 +5660,7 @@ def test_default_install_mid_drift_never_branches_or_opens_pr(tmp_path, rec):
     _apply(tmp_path)
     rec.calls.clear()
 
-    skill = tmp_path / ".shipit-skills" / "to-spec" / "SKILL.md"
+    skill = tmp_path / ".claude" / "skills" / "to-spec" / "SKILL.md"
     skill.write_text("CONSUMER EDIT\n")
     result = _apply(tmp_path)
     # The drifted unit was refreshed to shipit's content, in the working tree.
@@ -5621,7 +5671,7 @@ def test_default_install_mid_drift_never_branches_or_opens_pr(tmp_path, rec):
     # the renderer's stderr warning derives from the typed result.
     warning = verb.format_result_warnings(result)
     assert "consumer-edited" in warning
-    assert ".shipit-skills/to-spec/SKILL.md" in warning
+    assert ".claude/skills/to-spec/SKILL.md" in warning
 
 
 def test_push_flag_pushes_to_branch_without_pr(tmp_path, rec):
@@ -6829,7 +6879,7 @@ def test_pr_selfcert_failure_rolls_the_staged_writes_back(tmp_path, rec):
     # restores file STATE; an emptied managed directory is inert — git does not
     # track it and reconcile reads files, not dirs.)
     assert not (tmp_path / ".shipit.toml").exists()
-    assert not (tmp_path / ".shipit-skills" / "to-spec" / "SKILL.md").exists()
+    assert not (tmp_path / ".claude" / "skills" / "to-spec" / "SKILL.md").exists()
     assert not (tmp_path / "bin" / "shipit").exists()
     assert (tmp_path / "AGENTS.md").read_text() == original_agents
 
@@ -7122,13 +7172,14 @@ def test_retired_manifest_carries_the_renamed_skill_history():
         assert retired[path].pristine_hashes == expected_hashes
 
 
-# The ELEVEN skills the #921 store move relocated from `skills/<rel>` to
-# `.shipit-skills/<rel>`. Pinned as an EXPLICIT set — not derived from the
-# current `.shipit-skills/` units — because "every store unit has a retired
-# `skills/<rel>`" is a one-time MIGRATION invariant, not a standing one: a new
-# skill added to the store later was never under `skills/`, so deriving from the
-# live units would force a bogus `skills/<rel>` retirement (which could shed a
-# consumer-authored `skills/<rel>` file whose content matched).
+# The ELEVEN skills the #921 store move relocated from `skills/<rel>` to the
+# `.shipit-skills/<rel>` store (now PROJECTED into the discovery dirs, #1088).
+# Pinned as an EXPLICIT set — not derived from the current skill units — because
+# "every store unit has a retired `skills/<rel>`" is a one-time MIGRATION
+# invariant, not a standing one: a new skill added to the store later was never
+# under `skills/`, so deriving from the live units would force a bogus
+# `skills/<rel>` retirement (which could shed a consumer-authored `skills/<rel>`
+# file whose content matched).
 RELOCATED_SKILL_STORE_PATHS = (
     "coordinating/SKILL.md",
     "grill-me-with-docs/ADR-FORMAT.md",
@@ -7145,15 +7196,17 @@ RELOCATED_SKILL_STORE_PATHS = (
 
 
 def test_retired_manifest_carries_the_relocated_skill_store():
-    # The store moved out of `skills/` to `.shipit-skills/` (#921): each of the
-    # ELEVEN relocated skills must still be delivered under `.shipit-skills/<rel>`
-    # AND have its OLD `skills/<rel>` path retired, carrying the current content
-    # hash so a consumer sheds the polluting old copy on install (leaving
-    # consumer-authored `skills/` files alone — they are not in this manifest).
+    # The store moved out of `skills/` to `.shipit-skills/` (#921) and now
+    # PROJECTS into the discovery dirs (#1088): each of the ELEVEN relocated
+    # skills must still be delivered (under `.claude/skills/<rel>`, its content
+    # hash unchanged by the dest move) AND have its OLD `skills/<rel>` path
+    # retired, carrying the current content hash so a consumer sheds the polluting
+    # old copy on install (leaving consumer-authored `skills/` files alone — they
+    # are not in this manifest).
     retired = {r.path: r for r in irec.load_retired()}
     units = {u.key: u for u in iunits.load_units()}
     for rel in RELOCATED_SKILL_STORE_PATHS:
-        new_key = f".shipit-skills/{rel}"
+        new_key = f".claude/skills/{rel}"
         old_path = f"skills/{rel}"
         assert new_key in units, f"{new_key} no longer delivered"
         assert old_path in retired, f"{old_path} not retired"
@@ -7165,7 +7218,8 @@ def test_install_deletes_a_pristine_relocated_skill_and_installs_new_store(
 ):
     # End-to-end for the store move: a consumer with a pristine copy of the OLD
     # `skills/coordinating/SKILL.md` sheds it on install, while the same content
-    # is (re)installed at the new `.shipit-skills/coordinating/SKILL.md` store.
+    # is (re)installed at the projected `.claude/skills/coordinating/SKILL.md`
+    # discovery dir (#1088). The store at `.shipit-skills/` is the read source.
     old_path = "skills/coordinating/SKILL.md"
     source = REPO_ROOT / ".shipit-skills/coordinating/SKILL.md"
     assert config.content_hash(source.read_bytes()) in {
@@ -7179,7 +7233,8 @@ def test_install_deletes_a_pristine_relocated_skill_and_installs_new_store(
     assert old_path in [d.retired.path for d in plan.retire_deletes]
     _apply(tmp_path)
     assert not victim.exists()
-    assert (tmp_path / ".shipit-skills/coordinating/SKILL.md").is_file()
+    assert (tmp_path / ".claude/skills/coordinating/SKILL.md").is_file()
+    assert (tmp_path / ".agents/skills/coordinating/SKILL.md").is_file()
 
 
 # The agent-specific launcher shims (#815): repo-root whole-file units shipit
@@ -7261,7 +7316,7 @@ def test_install_deletes_a_pristine_retired_skill_file(tmp_path, rec):
     assert retired_path in [d.retired.path for d in plan.retire_deletes]
     _apply(tmp_path)
     assert not victim.exists()
-    assert (tmp_path / ".shipit-skills/grill-me-with-docs/ADR-FORMAT.md").is_file()
+    assert (tmp_path / ".claude/skills/grill-me-with-docs/ADR-FORMAT.md").is_file()
 
 
 def test_install_deletes_a_pristine_retired_to_prd_skill_and_installs_to_spec(
@@ -7281,7 +7336,7 @@ def test_install_deletes_a_pristine_retired_to_prd_skill_and_installs_to_spec(
     assert retired_path in [d.retired.path for d in plan.retire_deletes]
     _apply(tmp_path)
     assert not victim.exists()
-    assert (tmp_path / ".shipit-skills/to-spec/SKILL.md").is_file()
+    assert (tmp_path / ".claude/skills/to-spec/SKILL.md").is_file()
 
 
 def test_install_keeps_a_modified_retired_file_with_warning(tmp_path, rec):

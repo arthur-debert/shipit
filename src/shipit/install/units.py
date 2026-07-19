@@ -501,6 +501,14 @@ def lexd_block(platforms: frozenset[str]) -> str:
 # `tests.conftest.managed_pretooluse_hook_command` (the single source of this
 # exact string) vs `managed_cc_hook_command` (the other four).
 AGENTS_DEF_DIR = ".claude/agents"
+#: The two skill DISCOVERY dirs a fundamental store skill projects INTO (issue
+#: #1088, ADR-0077): `.claude/skills/` is where Claude Code loads skills,
+#: `.agents/skills/` where agy/codex do. The `.shipit-skills/` store itself is
+#: source-only — read by :func:`skills_root`, never a shipped consumer dest —
+#: because no runtime loads that directory. Slice 1 projects EVERY store skill to
+#: BOTH dirs (the everyone-but-claude split is deferred to slice 2).
+CLAUDE_SKILLS_DIR = ".claude/skills"
+AGENTS_SKILLS_DIR = ".agents/skills"
 #: The AGY native custom-agent def dir (issue #989): the generated
 #: ``.agents/agents/<name>/agent.md`` defs `agy --agent <name>` reads. Managed as
 #: whole-file units the same way as the Claude agent-defs, sourced from
@@ -715,7 +723,7 @@ def data_bytes(*parts: str) -> bytes:
 
 
 def skills_root():
-    """The bundled skills tree — wheel package data, or the repo root in dev.
+    """The bundled skills store — the read SOURCE, wheel package data or repo root.
 
     Returns a Traversable (installed wheel) or a :class:`Path` (editable/source
     checkout, where the store lives at the repo root as ``.shipit-skills/`` — a
@@ -724,6 +732,11 @@ def skills_root():
     / ``read_bytes`` protocol :func:`walk_files` uses. The dot-prefix keeps
     shipit's OWN skill store from colliding with the public ``skills/`` convention
     a repo uses to publish its own skills (#921).
+
+    This store is **source-only** (ADR-0077): :func:`load_units` PROJECTS each
+    file out of here into the two runtime discovery dirs (:data:`CLAUDE_SKILLS_DIR`,
+    :data:`AGENTS_SKILLS_DIR`) — ``.shipit-skills/`` itself is never a shipped
+    consumer dest, because no agent runtime loads that directory (#1088).
     """
     bundled = resources.files("shipit.data").joinpath("skills")
     if bundled.is_dir():
@@ -818,15 +831,27 @@ def load_units(
     """
     units: list[Unit] = []
 
+    # The fundamental skill store (issue #1088, ADR-0077): each store file
+    # projects to BOTH discovery dirs a runtime actually reads —
+    # :data:`CLAUDE_SKILLS_DIR` and :data:`AGENTS_SKILLS_DIR` — as whole-file
+    # COPIES. The source-only `.shipit-skills/` store is never itself a consumer
+    # dest (no runtime loads it). Distinct keys per surface (the [managed] table
+    # keys must not collide); the `Unit(kind="file")` shape is identical to the
+    # agent-defs fan-out below, so every reconcile/override/retire guarantee
+    # carries over for free. `skills_root()` stays the read SOURCE; projection is
+    # copies because the managed writer is bytes-only (`apply.py`) and reconcile
+    # excludes symlinks from its model — duplication is cheap (small markdown),
+    # paid at the projection not the source.
     for rel, content in walk_files(skills_root()):
-        units.append(
-            Unit(
-                key=f".shipit-skills/{rel}",
-                dest=f".shipit-skills/{rel}",
-                kind="file",
-                content=content,
+        for skills_dir in (CLAUDE_SKILLS_DIR, AGENTS_SKILLS_DIR):
+            units.append(
+                Unit(
+                    key=f"{skills_dir}/{rel}",
+                    dest=f"{skills_dir}/{rel}",
+                    kind="file",
+                    content=content,
+                )
             )
-        )
 
     units.append(
         Unit(

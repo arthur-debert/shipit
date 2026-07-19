@@ -103,8 +103,13 @@ def test_session_status_skill_wraps_the_flow_view():
 
 
 def test_session_status_skill_is_in_the_managed_set():
+    # Slice 1 (#1088): each store skill projects to BOTH discovery dirs, so the
+    # session-status skill is present under each — never at the source-only
+    # `.shipit-skills/` store.
     keys = {u.key for u in install_units.load_units()}
-    assert ".shipit-skills/shipit-session-status/SKILL.md" in keys
+    assert ".claude/skills/shipit-session-status/SKILL.md" in keys
+    assert ".agents/skills/shipit-session-status/SKILL.md" in keys
+    assert not any(k.startswith(".shipit-skills/") for k in keys)
 
 
 # ==========================================================================
