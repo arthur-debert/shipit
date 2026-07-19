@@ -93,7 +93,9 @@ THREE are not — the same gap class Spike 0 hit with wasm-bindgen
   `npm install -g` the pinned versions, or pick conda-native substitutes.
 - lexd — a cargo/rust binary (it lives at `~/.cargo/bin`), NOT on conda-forge.
   `cargo install lexd` at a pinned version (the wasm-bindgen pattern from Spike
-  0), or vendor a prebuilt binary.
+  0), or vendor a prebuilt binary. (Resolved differently by ADR-0066: lexd is now
+  published to the Artifact channel and consumed as an ordinary conda dep via
+  `pixi.lock` — no cargo-install, no vendoring.)
 - cargo fmt / clippy — components of the rust toolchain; confirm the conda-forge
   `rust` package carries them or add the rustup components.
 
@@ -146,7 +148,9 @@ The questions this PRD originally left open are now resolved and captured in
 
 - **lexd + the conda-forge gap** — prettier and markdownlint-cli are conda-forge
   deps (no npm path needed); lexd is fetched at a pin by `tools/provision-lexd.sh`,
-  which the `lint`/`fmt` tasks depend on.
+  which the `lint`/`fmt` tasks depend on. (Superseded by ADR-0066: `tools/provision-lexd.sh`
+  and the `provision-lexd` task were retired — lexd now rides the Artifact channel
+  as a managed conda dep resolved through `pixi.lock`.)
 - **check vs fix** — check-only by default; `--fix` (= `pixi run fmt`) is the
   opt-in formatter pass. `--fix` NEVER rewrites files under a test-data
   directory (the built-in mutation guard below, #500) — a fixer corrupting a

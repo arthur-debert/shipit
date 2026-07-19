@@ -33,7 +33,6 @@ from ..events import EventNotRecordedError, UnknownEventError
 from ..fleetsweep import SweepError
 from ..install.errors import InstallError
 from ..opportunities import OpportunityError
-from ..provision.lexd import ProvisionError
 from ..prstate.errors import PrStateError
 from ..prstate.flip import NotReady
 from ..prstate.reviewers_config import RequiredReviewersConfigError
@@ -56,9 +55,8 @@ from ._context import NoAmbientRepoError
 #: misconfigured central Tree root, a refused/failed
 #: Tree removal (CLI02-WS03), and the constrained dev-cycle write path's two
 #: refusals (an out-of-vocabulary event name, an emission that failed past
-#: validation — CLI02-WS05), the tool-provisioning refusal (unsupported
-#: platform, checksum mismatch, malformed release — ADP00-WS03), and the
-#: changelog refusals (empty release, invalid version, unsyncable tree —
+#: validation — CLI02-WS05), and the changelog refusals (empty release,
+#: invalid version, unsyncable tree —
 #: TOL01-WS06), and the fleet sweep's refusals (a missing source checkout, an
 #: unresolvable candidate build, a selector outside the declared portfolio —
 #: TOL01-WS07), and the review path's precondition refusals (a bad commit
@@ -88,7 +86,6 @@ KNOWN_ERRORS: tuple[type[Exception], ...] = (
     RemovalError,
     UnknownEventError,
     EventNotRecordedError,
-    ProvisionError,
     SweepError,
     ReleaseError,
     ReviewError,

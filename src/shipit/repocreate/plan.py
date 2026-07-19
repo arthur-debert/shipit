@@ -169,17 +169,13 @@ _BUILD_TASK = "./bin/shipit build"
 #: data, NOT a managed-catalog entry; ``lint``/``test`` still arrive through
 #: their managed blocks and the hook keeps using the bare managed ``lint`` task.
 #:
-#: The cmd provisions lexd INLINE before invoking ``lint`` — the exact shape the
-#: fleet's own ``lint-full`` (and ``test``) task uses, and for the same reason:
-#: ``shipit lint`` treats a missing lint binary as a hard failure, and lexd (the
-#: one lint tool not on conda-forge) is fetched at its pin by ``shipit provision
-#: lexd``. A ``provision-lexd`` depends-on would land it in the DEFAULT env's bin
-#: (pixi runs a depends-on in the depended task's home env), which the composed
-#: ``lint`` env does not layer onto PATH; running it inline lands it in THIS env's
-#: prefix (idempotent — a no-op once the pin is installed). Without it a generated
-#: Repo that adds ``.lex`` sources would still fail hosted CI with ``lexd: not
-#: found`` even though the lane now routes to the lint env.
-_LINT_LANE_TASK = "./bin/shipit provision lexd && ./bin/shipit lint"
+#: The cmd is the plain managed ``lint`` invocation — the exact shape the fleet's
+#: own ``lint-full`` task uses. lexd (the one lint tool not on conda-forge) reaches
+#: the lint env as an ordinary conda dependency: since ARF02-WS06 (ADR-0066) the
+#: managed ``[feature.shipit-lexd]`` block pins it from the Artifact channel and the
+#: lint environment composes that feature, so a plain ``pixi install`` puts lexd on
+#: PATH — no inline provisioning, no bespoke fetcher (both retired).
+_LINT_LANE_TASK = "./bin/shipit lint"
 
 #: The generated Repo's CI policy: the standard, universal, required lint and
 #: test lanes, rendered into the consumer-owned ``.shipit.toml [lanes]`` (spec
@@ -247,8 +243,8 @@ def _pixi_manifest(name: ProjectName, deps: dict[str, str]) -> str:
     carries the merged profile deps; ``[tasks]`` carries only the universal
     ``build`` task (managed blocks splice in ``lint``/``test``/… beneath).
     ``[feature.lint.tasks]`` carries the ``lint-full`` twin (:data:`_LINT_LANE_TASK`,
-    rendered as an inline ``{ cmd = … }`` that provisions lexd first) the lint CI
-    lane runs so it provisions the ``lint`` env; the managed lint
+    the plain managed ``lint`` invocation) the lint CI lane runs so it provisions
+    the ``lint`` env; the managed lint
     dependency/environment blocks splice in beneath (``_insert_under_anchor``
     creates ``[feature.lint.dependencies]``/``[environments]`` at EOF, leaving
     this ``[feature.lint.tasks]`` table intact).
@@ -266,11 +262,7 @@ def _pixi_manifest(name: ProjectName, deps: dict[str, str]) -> str:
             },
             "dependencies": dict(deps),
             "tasks": {"build": _BUILD_TASK},
-            "feature": {
-                "lint": {
-                    "tasks": {"lint-full": tomlio.Inline({"cmd": _LINT_LANE_TASK})}
-                }
-            },
+            "feature": {"lint": {"tasks": {"lint-full": _LINT_LANE_TASK}}},
         }
     )
     return header + body

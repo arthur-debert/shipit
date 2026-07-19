@@ -30,7 +30,7 @@ folds into ADP00, and the rest of its payload rides the normal install set).
 
 | Epic | Delivers | Depends on |
 | --- | --- | --- |
-| ADP00 | shipit-side pre-work: the managed set owns the consumer environment (install-managed pixi env/dep blocks, fleet-pinned versions); consumer-generic lefthook; lexd provision subcommand; rust lint Langs; lex-mirror AGENTS.md fix (#363); documented shipit-on-PATH story; App-liveness check; tracking issue + survival prompts; canary passes the full local checklist. | CLI02 (`docs/legacy-prd/cli-api-separation.md`) |
+| ADP00 | shipit-side pre-work: the managed set owns the consumer environment (install-managed pixi env/dep blocks, fleet-pinned versions); consumer-generic lefthook; lexd provision subcommand (later retired by ADR-0066 — lexd now rides the Artifact channel as a managed conda dep); rust lint Langs; lex-mirror AGENTS.md fix (#363); documented shipit-on-PATH story; App-liveness check; tracking issue + survival prompts; canary passes the full local checklist. | CLI02 (`docs/legacy-prd/cli-api-separation.md`) |
 | ADP01 | Local adoption fleet-wide: per-repo nine-step checklist (install PR → gh-setup → `.treeinclude` → lint/test/build → Tree + session → agent smoke through the PR loop), evidence-verified via `shipit logs --flow` + eval. Sequencing (canary completes inside ADP00): lex → phos-core → phos-app → dodot → rest. | ADP00 |
 | ADP02 | CI adoption, build-then-adopt: actionlint Lang, act harness + howto, thin checks caller, pixi test/build/release encapsulation, release pipeline (absorbs Steps 5–6 / WF01 scope, verified against lex); then per-repo cutover — re-point callers one toolchain at a time, act-test, remote-verify (agent PR + rc cut), remove legacy release tooling, comb memory. | ADP01 |
 

@@ -376,9 +376,8 @@ behaves and how we ride it.
            closed the gap where that env did NOT reach the agent's own in-Tree
            `cargo` (only the provisioning subprocess had got it).
         2. Turn on pixi's task `inputs`/`outputs` cache — it is entirely idle
-           today. `provision-lexd` re-fetches lexd on every `lint`/`fmt` via
-           `depends-on`, and every `pixi run lint` re-runs all linters. Declare
-           `inputs`/`outputs` (start with `provision-lexd`) for pixi-native
+           today. Every `pixi run lint` re-runs all linters even when nothing
+           has changed. Declare `inputs`/`outputs` for pixi-native
            skip-if-unchanged. Scope carefully: lint is deliberately hard-fail/
            no-skip, so caching must not mask a real failure.
         3. Read pixi's persisted env identity instead of re-deriving it — prefer

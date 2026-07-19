@@ -111,7 +111,10 @@ capability.
     so that pixi sets it on every activation and it reaches the agent's own in-Tree
     `cargo` — which it does not today.
 20. As a developer, I want pixi's task `inputs`/`outputs` cache turned on for idempotent
-    tasks, so that `provision-lexd` stops re-fetching lexd on every lint/fmt.
+    tasks, so that `provision-lexd` stops re-fetching lexd on every lint/fmt. (Moot
+    since ADR-0066: `provision-lexd` was retired — lexd now rides `pixi.lock` from
+    the Artifact channel and no longer re-fetches; the cache would now target the
+    linters themselves.)
 21. As a developer, I want env identity read from pixi (`conda-meta/pixi`, `pixi info
     --json`) instead of re-derived, so that shipit rides pixi's model rather than
     shadowing it.
@@ -191,7 +194,8 @@ agentic layer are **owned** as shipit value objects.
 - `sccache_env()` moves into pixi `[activation.env]` (a manifest change); the Python
   builder is removed.
 - pixi task `inputs`/`outputs` are declared to enable the skip-if-unchanged cache,
-  starting with `provision-lexd`.
+  starting with `provision-lexd`. (Superseded by ADR-0066: `provision-lexd` was
+  retired; lexd now resolves from the Artifact channel via `pixi.lock`.)
 - The parked pixi KB refresh (branch `docs/pixi-kb-refresh`) lands here.
 
 ## Testing Decisions
@@ -248,6 +252,8 @@ tests follow the same injected-boundary + fixture shape.
   template vars can express a **per-Tree absolute path** for `SCCACHE_BASEDIRS` — verify
   before committing the sccache migration; (2) the `inputs`/`outputs` cache must be scoped
   so it cannot mask a real failure on the deliberately hard-fail lint path — start with
-  `provision-lexd`, not the linters themselves.
+  `provision-lexd`, not the linters themselves. (`provision-lexd` was since retired by
+  ADR-0066 — lexd rides `pixi.lock` from the Artifact channel — so the linters are now
+  the only remaining cache candidate.)
 - **WS-pixi-activation bundles the parked pixi KB refresh** (branch `docs/pixi-kb-refresh`
   @ `2568e06`) so the substrate doc ships with the code it documents.

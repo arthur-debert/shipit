@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
@@ -91,11 +92,11 @@ PIXI_ANCHOR = "[tasks]"
 # INDEPENDENTLY: pixi refuses a bare `pixi run test` when a task named `test`
 # exists in several environments, so a consumer whose own manifest already
 # defines a `test` task in a feature (shipit's own repo does — the full-gate
-# task in [feature.test.tasks] needs its rust toolchain env and inline lexd
-# provisioning) keeps that task authoritative and this block is NOT delivered
+# task in [feature.test.tasks] needs its rust toolchain env) keeps that task
+# authoritative and this block is NOT delivered
 # (the reconcile's task-ambiguity guard, `PixiTaskConflict` — the #547
-# key-conflict guard's pixi-run-level sibling), while the lint/logs/
-# provision-lexd tasks block still lands. A `test` key in [tasks] itself is
+# key-conflict guard's pixi-run-level sibling), while the lint/logs tasks block
+# still lands. A `test` key in [tasks] itself is
 # caught by the existing duplicate-key guard.
 PIXI_TEST_TASK_KEY = "pixi.toml#shipit-test-task"
 PIXI_TEST_TASK_OPEN = (
@@ -104,9 +105,9 @@ PIXI_TEST_TASK_OPEN = (
 PIXI_TEST_TASK_CLOSE = "# <<< shipit-managed test task <<<"
 
 # The ADP00 managed consumer environment (docs/legacy-prd/adoption.md: THE MANAGED SET
-# OWNS THE CONSUMER ENVIRONMENT). Two sibling marker blocks join the tasks block
-# in the consumer's pixi.toml: the lint feature/dependency block carrying the
-# fleet-pinned toolchain, and the lint environment definition — so the managed
+# OWNS THE CONSUMER ENVIRONMENT). Two sibling units join the tasks block in the
+# consumer's pixi.toml: the lint feature/dependency block (a marker block carrying
+# the fleet-pinned toolchain) and the lint environment definition — so the managed
 # lefthook caller's `pixi run -e lint lint` works on a stock consumer with
 # nothing pre-installed. This AMENDS the lint PRD's "task line only, never a
 # dependency block" decision. Canonical versions live in the packaged
@@ -115,18 +116,49 @@ PIXI_TEST_TASK_CLOSE = "# <<< shipit-managed test task <<<"
 # blocks verbatim — its Tree provisioning self-installs, so anything else would
 # splice duplicates into its hand-kept manifest — and a drift test asserts the
 # packaged block agrees with shipit's own lint environment (the dogfood
-# guarantee). The lexd leg is NOT part of the block: lexd delivery is the
-# provision-subcommand workstream.
+# guarantee). lexd is NOT part of the lint-deps block: it rides its own reserved
+# `[feature.shipit-lexd]` block (below, PIXI_LEXD_KEY), which carries the
+# Artifact channel the lint-deps' conda-forge tools do not need (ARF02-WS06),
+# composed into the lint env by the environments unit below.
 PIXI_LINT_DEPS_KEY = "pixi.toml#shipit-lint-deps"
 PIXI_LINT_DEPS_OPEN = (
     "# >>> shipit-managed lint deps (do not edit; regenerate via `shipit install`) >>>"
 )
 PIXI_LINT_DEPS_CLOSE = "# <<< shipit-managed lint deps <<<"
 PIXI_LINT_DEPS_ANCHOR = "[feature.lint.dependencies]"
+# The lint ENVIRONMENT unit is an FMT_ENV_MEMBER MERGE, not a marker block: it owns
+# only `shipit-lexd`'s MEMBERSHIP in the `lint` env (the managed invariant), while
+# WHICH base features the env carries stays the consumer's own config (ADR-0047). A
+# marker block would own the whole `lint = [...]` line and collide with a
+# consumer's own `[environments] lint`, get skipped by the key-conflict guard, and
+# leave lexd unwired (lint breaks, no `provision` fallback — the #1062 finding). So
+# the markers below are vestigial (kept only so the six sibling pixi blocks stay
+# fence-distinct); the anchor keeps the unit out of the anchor-less table-conflict
+# guard. The consumer read/write is :func:`splice.extract_env_member` /
+# :func:`splice.splice_env_member`, hashed on :func:`env_member_token`.
 PIXI_ENVS_KEY = "pixi.toml#shipit-environments"
 PIXI_ENVS_OPEN = "# >>> shipit-managed environments (do not edit; regenerate via `shipit install`) >>>"
 PIXI_ENVS_CLOSE = "# <<< shipit-managed environments <<<"
 PIXI_ENVS_ANCHOR = "[environments]"
+
+# The managed lexd block (ARF02-WS06, ADR-0066). `provision lexd` is retired:
+# lexd — the one lint-gate tool that was not on conda-forge — is now published
+# to the public Artifact channel (ADR-0064) and resolves as an ordinary conda
+# dependency through pixi.lock. The block is a dedicated shipit-reserved FEATURE
+# (`shipit-lexd`) carrying the channel + the fleet-pinned lexd version, MERGED
+# into the lint environment's feature list by the environments unit above
+# (`lint` composes `shipit-lexd`). A fresh reserved `[feature.shipit-lexd]`
+# table appended at EOF (anchor-less, the artifact-dep pattern) never
+# re-declares a table a consumer owns, so the block is collision-free and
+# consumer-non-editable — a consumer cannot drift its lexd version (ADR-0047,
+# fleet uniformity). shipit's own pixi.toml carries the block verbatim (its Tree
+# provisioning self-installs); a drift test (tests/test_install.py) asserts the
+# packaged block agrees with shipit's own reserved feature (the dogfood
+# guarantee). win-64 is unserved under the Windows build pause (#895, ADR-0071),
+# so a win-64 lint solve fails closed with no fallback.
+PIXI_LEXD_KEY = "pixi.toml#shipit-lexd"
+PIXI_LEXD_OPEN = "# >>> shipit-managed lexd feature (do not edit; regenerate via `shipit install`) >>>"
+PIXI_LEXD_CLOSE = "# <<< shipit-managed lexd feature <<<"
 
 # The UNCONDITIONAL launcher-deps block (#758, closed by TOL02-WS17 #794):
 # `uv` for the pinned ADR-0033 `bin/shipit` launcher, in the DEFAULT env's
@@ -531,6 +563,25 @@ EVENT_WORKTREECREATE = "WorktreeCreate"
 
 FMT_MARKERS = "markers"  # block splice via open/close comment markers (default)
 FMT_JSON_HOOK = "json-hook"  # block splice into a settings.json hooks-event array
+FMT_ENV_MEMBER = (
+    "env-member"  # merge a managed feature into a pixi [environments] entry
+)
+
+
+def env_member_token(env: str, required: Sequence[str]) -> str:
+    """The canonical membership token an ``FMT_ENV_MEMBER`` unit hashes on.
+
+    The unit's managed contribution is not a text block but an INVARIANT — that
+    ``env`` composes every ``required`` feature — so both the desired hash and the
+    consumer read (:func:`shipit.install.splice.extract_env_member`) reduce to
+    this one string. It is deliberately independent of the consumer's OTHER
+    features in ``env``: those are the consumer's own config (ADR-0047), so a
+    consumer who wired the feature into a hand-authored env still reconciles to a
+    clean NOOP.
+    """
+    return json.dumps(
+        {"environment": env, "requires": sorted(required)}, sort_keys=True
+    )
 
 
 @dataclass(frozen=True)
@@ -556,10 +607,18 @@ class Unit:
     # consumer file. ``FMT_MARKERS`` (default) uses the comment-marker pair above;
     # ``FMT_JSON_HOOK`` parses ``settings.json`` and owns just shipit's one entry in
     # the ``event`` hooks-array (identified by ``marker``), so the consumer's other
-    # settings — and shipit's other hook entries — merge through untouched.
+    # settings — and shipit's other hook entries — merge through untouched;
+    # ``FMT_ENV_MEMBER`` owns just the ``required_features`` MEMBERSHIP in the pixi
+    # ``[environments]`` entry named ``env_name`` (the consumer's other features in
+    # that env are their own config), so ``content`` is the packaged default line
+    # used only when the env is absent — the hash is over the membership invariant.
     fmt: str = FMT_MARKERS
     event: str = EVENT_PRETOOLUSE
     marker: str = SETTINGS_HOOK_MARKER
+    # FMT_ENV_MEMBER only: the environment whose feature list must compose every
+    # feature in ``required_features`` (a managed invariant, ADR-0047/ADR-0066).
+    env_name: str | None = None
+    required_features: tuple[str, ...] = ()
 
     def desired_inner(self) -> str:
         """A block unit's canonical inner text (newline-trimmed)."""
@@ -567,6 +626,9 @@ class Unit:
 
     def desired_hash(self) -> str:
         """The ``sha256:`` pristine hash of this unit's desired content."""
+        if self.fmt == FMT_ENV_MEMBER:
+            token = env_member_token(self.env_name or "", self.required_features)
+            return config.content_hash(token.encode("utf-8"))
         if self.kind == "block":
             return config.content_hash(self.desired_inner().encode("utf-8"))
         return config.content_hash(self.content)
@@ -807,6 +869,34 @@ def load_units(*, toolchains: frozenset[str] = frozenset()) -> list[Unit]:
             open_marker=PIXI_ENVS_OPEN,
             close_marker=PIXI_ENVS_CLOSE,
             anchor=PIXI_ENVS_ANCHOR,
+            # A MEMBERSHIP merge, not a marker block: the lint env must compose the
+            # managed `shipit-lexd` feature (ADR-0066), but WHICH base features the
+            # env carries is consumer config (ADR-0047). Owning the whole `lint`
+            # line would collide with a consumer's own `[environments] lint` and be
+            # skipped — leaving lexd unwired (lint breaks, no `provision` fallback).
+            # So this unit owns only `shipit-lexd`'s membership: the packaged
+            # `content` seeds a fresh env, and an existing consumer env has
+            # `shipit-lexd` merged in (append, never replace).
+            fmt=FMT_ENV_MEMBER,
+            env_name="lint",
+            required_features=("shipit-lexd",),
+        )
+    )
+
+    # The managed lexd feature (ARF02-WS06, ADR-0066): the reserved
+    # `[feature.shipit-lexd]` block (channel + fleet-pinned lexd), a fresh table
+    # appended at EOF (anchor-less, so it never re-declares a consumer table),
+    # wired into the lint env by the environments block above. Replaces the
+    # retired `provision lexd` — see the PIXI_LEXD_KEY comment for the whole story.
+    units.append(
+        Unit(
+            key=PIXI_LEXD_KEY,
+            dest=PIXI_FILE,
+            kind="block",
+            content=data_bytes("pixi-lexd-block.toml"),
+            open_marker=PIXI_LEXD_OPEN,
+            close_marker=PIXI_LEXD_CLOSE,
+            anchor=None,
         )
     )
 

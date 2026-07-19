@@ -28,12 +28,16 @@ from . import selfcert
 from .errors import InstallError, SelfCertError
 from .reconcile import DELETE, KEEP, Plan, consumer_inner, format_lefthook_conflict
 from .splice import (
+    ENV_MEMBER_MALFORMED,
+    ENV_MEMBER_UNSUPPORTED,
     SETTINGS_MALFORMED,
     remove_retired_hooks,
     splice_block,
+    splice_env_member,
     splice_settings_hook,
 )
 from .units import (
+    FMT_ENV_MEMBER,
     FMT_JSON_HOOK,
     HOOK_RECOVERY_CMD,
     LINT_ENV,
@@ -157,6 +161,13 @@ def write_unit(root: Path, unit: Unit) -> None:
             spliced = splice_settings_hook(
                 existing, unit.desired_inner(), unit.event, unit.marker
             )
+        elif unit.fmt == FMT_ENV_MEMBER:
+            spliced = splice_env_member(
+                existing,
+                unit.env_name or "",
+                unit.desired_inner(),
+                unit.required_features,
+            )
         else:
             spliced = splice_block(
                 existing,
@@ -254,9 +265,10 @@ def consumer_snapshot(root: Path, unit: Unit) -> str:
     """The consumer's current text for a unit — captured BEFORE any overwrite."""
     if unit.kind == "block":
         inner = consumer_inner(root, unit)
-        if inner == SETTINGS_MALFORMED:
-            # A malformed settings.json has no clean managed region; surface the
-            # whole file so the OVERRIDE diff shows the human the real content.
+        if inner in (SETTINGS_MALFORMED, ENV_MEMBER_MALFORMED, ENV_MEMBER_UNSUPPORTED):
+            # A malformed settings.json / pixi.toml, or an env in a form shipit
+            # cannot merge into, has no clean managed region; surface the whole
+            # file so the OVERRIDE diff shows the real content.
             dest = root / unit.dest
             return (
                 dest.read_text(encoding="utf-8", errors="replace")

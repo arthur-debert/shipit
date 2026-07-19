@@ -331,13 +331,11 @@ def test_plan_pixi_manifest_declares_build_task_and_nextest():
     assert 'lint = "./bin/shipit lint"' not in text
     # The lint lane's provisioned twin IS seeded, in the lint feature (so the
     # CI lane resolves onto the lint env — see the lane-env regression below).
-    # It provisions lexd INLINE before invoking lint — the fleet's own `lint-full`
-    # shape — so a generated Repo with `.lex` sources does not die `lexd: not
-    # found` in hosted CI (codex review, #947).
-    assert (
-        'lint-full = { cmd = "./bin/shipit provision lexd && ./bin/shipit lint" }'
-        in text
-    )
+    # It is the plain managed `lint` invocation — lexd rides pixi.lock from the
+    # Artifact channel (the managed `shipit-lexd` feature the lint env composes),
+    # so a generated Repo with `.lex` sources resolves lexd without any inline
+    # provisioning (ARF02-WS06, ADR-0066; the retired `provision lexd`).
+    assert 'lint-full = "./bin/shipit lint"' in text
     assert "[feature.lint.tasks]" in text
 
 

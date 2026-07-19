@@ -113,9 +113,16 @@ import yaml
 from .. import config, git
 from ..changelog import CHANGELOG_FILE, sync_diff
 from .errors import InstallError
-from .splice import count_retired_hooks, extract_block, extract_settings_hook
+from .splice import (
+    count_retired_hooks,
+    extract_block,
+    extract_env_member,
+    extract_settings_hook,
+)
 from .units import (
+    FMT_ENV_MEMBER,
     FMT_JSON_HOOK,
+    FMT_MARKERS,
     LEFTHOOK_FILE,
     PIXI_FILE,
     TOOLCHAIN_GO,
@@ -681,6 +688,12 @@ def _pixi_key_conflicts(
     for unit in units:
         if unit.kind != "block" or unit.dest != PIXI_FILE or unit.anchor is None:
             continue
+        if unit.fmt != FMT_MARKERS:
+            # An FMT_ENV_MEMBER unit shares its anchor table (`[environments]`) with
+            # the consumer BY DESIGN — it merges its managed feature into the
+            # consumer's own env entry (append, never a duplicate key), so its
+            # would-be "clash" is the merge, not a conflict to skip (ADR-0066).
+            continue
         if consumer_hashes.get(unit.key) is not None:
             continue  # markers present: the table's keys include the block's own
         try:
@@ -711,8 +724,8 @@ class PixiTaskConflict:
     (``test = "./bin/shipit test"``) into a manifest whose own
     ``[feature.*.tasks]`` already defines the name would break the consumer's
     working command — shipit's own repo is the standing case (its full-gate
-    ``test`` task lives in the ``test`` feature for the rust toolchain env and
-    inline lexd provisioning). Detected only when the block's markers are
+    ``test`` task lives in the ``test`` feature for the rust toolchain env).
+    Detected only when the block's markers are
     absent (an ADD), like :class:`PixiKeyConflict`; the remedy is the
     consumer's call — keep their task (the block stays undelivered) or delete
     it and re-run install to adopt the managed caller. A same-named key in the
@@ -1053,6 +1066,8 @@ def consumer_inner(root: Path, unit: Unit) -> str | None:
     text = dest.read_text(encoding="utf-8")
     if unit.fmt == FMT_JSON_HOOK:
         return extract_settings_hook(text, unit.event, unit.marker)
+    if unit.fmt == FMT_ENV_MEMBER:
+        return extract_env_member(text, unit.env_name or "", unit.required_features)
     return extract_block(text, unit.open_marker, unit.close_marker)
 
 

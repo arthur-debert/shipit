@@ -1,5 +1,0 @@
-`shipit provision` installs pinned external tools into the active pixi
-environment.
-
-These are tools required on check paths that cannot ride the normal lockfile.
-Provisioning is idempotent, platform-checked, and checksum-verified.

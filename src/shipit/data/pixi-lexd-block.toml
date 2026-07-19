@@ -1,0 +1,17 @@
+[feature.shipit-lexd]
+# lexd — the lex Lang's lint-gate tool — resolved as an ordinary conda package
+# from the public Artifact channel (ADR-0066: `provision lexd` retired). The
+# channel is scoped to THIS reserved feature (a sibling of conda-forge, added to
+# whatever env `shipit-lexd` is wired into — the lint env), so lexd rides
+# pixi.lock and pixi's sha256 like every other linter, and `shipit install`
+# keeps the whole fleet on ONE lexd version — uniformity moved from a compiled
+# binary constant to this managed block (ADR-0047: not consumer config).
+channels = ["https://storage.googleapis.com/shipit-artifacts-public/lex-fmt/lex"]
+
+[feature.shipit-lexd.dependencies]
+# The fleet-pinned lexd. A bump is one data edit here, rolled fleet-wide on each
+# consumer's next `shipit install` reconcile. Exact-pinned (`==`) so uniformity
+# is a single version, never a resolved range. win-64 is unserved while the
+# Windows build pause holds (#895, ADR-0071), so a win-64 lint solve fails
+# closed — deliberately, with no `provision` fallback.
+lexd = "==0.19.10"

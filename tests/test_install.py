@@ -161,6 +161,233 @@ def test_extract_block_absent_is_none():
 
 
 # --------------------------------------------------------------------------
+# The env-membership splicer (FMT_ENV_MEMBER, ARF02-WS06) — owns just a managed
+# feature's membership in a pixi `[environments]` entry, merging never replacing.
+# --------------------------------------------------------------------------
+
+_STOCK_LINT_ENV = 'lint = ["lint", "shipit-lexd"]'
+_LEXD = ("shipit-lexd",)
+
+
+def _lint_features(text: str) -> list[str]:
+    return tomllib.loads(text)["environments"]["lint"]
+
+
+def test_splice_env_member_creates_the_env_when_absent():
+    # No `[environments]` table at all → the env is created from the packaged
+    # default under a fresh header at EOF.
+    out = splice.splice_env_member(
+        '[workspace]\nname = "a"\n', "lint", _STOCK_LINT_ENV, _LEXD
+    )
+    assert _lint_features(out) == ["lint", "shipit-lexd"]
+
+
+def test_splice_env_member_creates_under_an_existing_environments_table():
+    out = splice.splice_env_member(
+        '[environments]\ndev = ["dev"]\n', "lint", _STOCK_LINT_ENV, _LEXD
+    )
+    assert tomllib.loads(out)["environments"] == {
+        "dev": ["dev"],
+        "lint": ["lint", "shipit-lexd"],
+    }
+
+
+def test_splice_env_member_appends_into_a_consumer_owned_env():
+    # The finding: a consumer-owned `lint` env gets `shipit-lexd` APPENDED, its
+    # own features preserved, and an inline comment left intact.
+    out = splice.splice_env_member(
+        '[environments]\nlint = ["lint", "extra"]  # mine\n',
+        "lint",
+        _STOCK_LINT_ENV,
+        _LEXD,
+    )
+    assert _lint_features(out) == ["lint", "extra", "shipit-lexd"]
+    assert "# mine" in out
+
+
+def test_splice_env_member_is_idempotent_when_already_a_member():
+    text = '[environments]\nlint = ["lint", "shipit-lexd"]\n'
+    assert splice.splice_env_member(text, "lint", _STOCK_LINT_ENV, _LEXD) == text
+
+
+def test_splice_env_member_handles_the_table_form_and_multiline_arrays():
+    # The `{ features = [...] }` form is preserved as a table, with lexd merged in.
+    table = '[environments]\nlint = { features = ["lint"] }\n'
+    merged = tomllib.loads(
+        splice.splice_env_member(table, "lint", _STOCK_LINT_ENV, _LEXD)
+    )
+    assert merged["environments"]["lint"] == {"features": ["lint", "shipit-lexd"]}
+    multiline = '[environments]\nlint = [\n  "lint",\n]\n'
+    assert _lint_features(
+        splice.splice_env_member(multiline, "lint", _STOCK_LINT_ENV, _LEXD)
+    ) == ["lint", "shipit-lexd"]
+
+
+def test_splice_env_member_preserves_a_malformed_manifest_verbatim():
+    broken = "[environments\nlint = ["  # unparseable TOML
+    assert splice.splice_env_member(broken, "lint", _STOCK_LINT_ENV, _LEXD) == broken
+    assert (
+        splice.extract_env_member(broken, "lint", _LEXD) == splice.ENV_MEMBER_MALFORMED
+    )
+
+
+def test_extract_env_member_reads_membership_as_present_or_absent():
+    present = '[environments]\nlint = ["lint", "shipit-lexd"]\n'
+    assert splice.extract_env_member(present, "lint", _LEXD) == iunits.env_member_token(
+        "lint", _LEXD
+    )
+    # Absent env, and an env missing the required feature, both read as None (ADD).
+    assert splice.extract_env_member("[workspace]\nname='a'\n", "lint", _LEXD) is None
+    assert (
+        splice.extract_env_member('[environments]\nlint = ["lint"]\n', "lint", _LEXD)
+        is None
+    )
+
+
+def test_splice_env_member_table_form_preserves_every_sibling_key():
+    # T1 (codex MAJOR): a table-form env carries more than `features` — merging
+    # lexd must rewrite ONLY the features array and leave every sibling key intact
+    # (dropping solve-group / no-default-feature would silently change solving).
+    text = (
+        "[environments]\n"
+        'lint = { features = ["lint"], solve-group = "shared", '
+        "no-default-feature = true }\n"
+    )
+    spec = tomllib.loads(
+        splice.splice_env_member(text, "lint", _STOCK_LINT_ENV, _LEXD)
+    )["environments"]["lint"]
+    assert spec["features"] == ["lint", "shipit-lexd"]
+    assert spec["solve-group"] == "shared"
+    assert spec["no-default-feature"] is True
+
+
+def test_splice_env_member_finds_a_commented_environments_header():
+    # T3 (copilot): a valid `[environments]` header with a trailing inline comment
+    # must still be located, or lexd never injects and the reconcile never
+    # converges (a phantom ADD every run).
+    text = '[environments]  # my envs\nlint = ["lint"]\n'
+    out = splice.splice_env_member(text, "lint", _STOCK_LINT_ENV, _LEXD)
+    assert _lint_features(out) == ["lint", "shipit-lexd"]
+    # ...and the read now agrees it is satisfied — the loop is closed.
+    assert splice.extract_env_member(out, "lint", _LEXD) == iunits.env_member_token(
+        "lint", _LEXD
+    )
+
+
+def test_splice_env_member_creates_under_a_commented_header_no_duplicate_table():
+    # Round-4 M1 (codex): the CREATE path (env absent) must ALSO honor a
+    # comment-suffixed `[environments]` header and insert `lint` UNDER it — never
+    # append a SECOND `[environments]` table (invalid TOML / lost envs).
+    text = '[environments]  # my envs\ndev = ["dev"]\n'
+    out = splice.splice_env_member(text, "lint", _STOCK_LINT_ENV, _LEXD)
+    assert out.count("[environments]") == 1  # no duplicate header
+    assert tomllib.loads(out)["environments"] == {  # valid TOML
+        "dev": ["dev"],
+        "lint": ["lint", "shipit-lexd"],
+    }
+
+
+def test_splice_env_member_table_form_ignores_a_dotted_features_subkey():
+    # Round-4 M2 (codex): a dotted sub-key `metadata.features` must NOT be mistaken
+    # for the env's own top-level `features` — only the real one gets lexd, and the
+    # dotted sub-table is preserved untouched.
+    text = '[environments]\nlint = { metadata.features = ["x"], features = ["lint"] }\n'
+    spec = tomllib.loads(
+        splice.splice_env_member(text, "lint", _STOCK_LINT_ENV, _LEXD)
+    )["environments"]["lint"]
+    assert spec["features"] == ["lint", "shipit-lexd"]
+    assert spec["metadata"] == {"features": ["x"]}
+
+
+def test_splice_env_member_table_form_ignores_features_inside_a_string_value():
+    # A sibling STRING value that literally contains `features = [` must not be
+    # mistaken for the key — the verify step rejects any edit that changes it.
+    text = (
+        '[environments]\nlint = { note = "features = [nope]", features = ["lint"] }\n'
+    )
+    spec = tomllib.loads(
+        splice.splice_env_member(text, "lint", _STOCK_LINT_ENV, _LEXD)
+    )["environments"]["lint"]
+    assert spec["features"] == ["lint", "shipit-lexd"]
+    assert spec["note"] == "features = [nope]"
+
+
+def test_env_member_unsupported_form_surfaces_instead_of_looping():
+    # T2 (copilot): an env in a form the splicer cannot merge into must NOT read as
+    # "absent" — that would decide an ADD the write can't apply and re-propose it
+    # forever. It reads as the UNSUPPORTED sentinel (→ OVERRIDE, surfaced) and the
+    # write leaves the file verbatim.
+    not_a_list = '[environments]\nlint = { features = "lint" }\n'
+    assert (
+        splice.extract_env_member(not_a_list, "lint", _LEXD)
+        == splice.ENV_MEMBER_UNSUPPORTED
+    )
+    assert (
+        splice.splice_env_member(not_a_list, "lint", _STOCK_LINT_ENV, _LEXD)
+        == not_a_list
+    )
+    # A top-level dotted key (no `[environments]` header to splice under) is also
+    # unlocatable → surfaced, not silently re-proposed.
+    dotted = 'environments.lint = ["lint"]\n'
+    assert (
+        splice.extract_env_member(dotted, "lint", _LEXD)
+        == splice.ENV_MEMBER_UNSUPPORTED
+    )
+    assert splice.splice_env_member(dotted, "lint", _STOCK_LINT_ENV, _LEXD) == dotted
+
+    # `environments` present but not a table at all → cannot place an env in it.
+    not_a_table = 'environments = "oops"\n'
+    assert (
+        splice.extract_env_member(not_a_table, "lint", _LEXD)
+        == splice.ENV_MEMBER_UNSUPPORTED
+    )
+    assert (
+        splice.splice_env_member(not_a_table, "lint", _STOCK_LINT_ENV, _LEXD)
+        == not_a_table
+    )
+
+    # CREATE where a dotted `environments.dev` already opened the table (no header
+    # to insert under; an EOF `[environments]` append would be a duplicate-table
+    # TOML error) → the verify step rejects it, so it surfaces rather than corrupts.
+    dotted_sibling = 'environments.dev = ["dev"]\n'
+    assert (
+        splice.extract_env_member(dotted_sibling, "lint", _LEXD)
+        == splice.ENV_MEMBER_UNSUPPORTED
+    )
+    out = splice.splice_env_member(dotted_sibling, "lint", _STOCK_LINT_ENV, _LEXD)
+    assert out == dotted_sibling  # left verbatim, never a broken duplicate table
+
+
+def test_splice_env_member_never_emits_invalid_toml_for_exotic_forms():
+    # The fail-loud floor: across a spread of exotic/edge inputs the splicer either
+    # produces VALID TOML with lexd wired, or leaves the input byte-for-byte — it
+    # NEVER emits something tomllib can't parse.
+    cases = [
+        '[environments]\nlint = ["lint"]\n',
+        '[environments]  # c\nlint = ["lint", "extra"]\n',
+        '[environments]\nlint = { features = ["lint"], solve-group = "s" }\n',
+        '[environments]\nlint = { metadata.features = ["x"], features = ["lint"] }\n',
+        '[environments]\nlint = [\n  "lint",\n]\n',
+        '[environments]\nlint = { features = "lint" }\n',  # unsupported
+        'environments.lint = ["lint"]\n',  # dotted, unlocatable
+        'environments = "oops"\n',  # not a table
+        "",  # empty
+        '[workspace]\nname = "a"\n',  # absent env → create
+    ]
+    for text in cases:
+        out = splice.splice_env_member(text, "lint", _STOCK_LINT_ENV, _LEXD)
+        parsed = tomllib.loads(out)  # always parseable — raises if it corrupted it
+        if out != text:
+            # When it DID edit, the env now composes lexd and re-reads as satisfied.
+            lint_env = parsed["environments"]["lint"]
+            features = lint_env["features"] if isinstance(lint_env, dict) else lint_env
+            assert "shipit-lexd" in features
+            assert splice.extract_env_member(
+                out, "lint", _LEXD
+            ) == iunits.env_member_token("lint", _LEXD)
+
+
+# --------------------------------------------------------------------------
 # The lint-check units (Step 3) — lefthook caller + pixi [tasks] block
 # --------------------------------------------------------------------------
 
@@ -177,17 +404,16 @@ def test_load_units_includes_lefthook_and_pixi_task_block():
     # The managed pixi TASKS block stays the thin task lines ONLY; the linter
     # deps ride in their own sibling `[feature.lint.dependencies]` block (ADP00,
     # docs/legacy-prd/adoption.md — amending the lint PRD's task-line-only
-    # decision), tested below. `provision-lexd` invokes the binary's provision subcommand
-    # (ADP00-WS03), so no provisioning script is ever distributed. `changelog`
-    # is the release-notes tool's thin caller (TOL01-WS06, ADR-0039: pixi tasks
-    # are one-line callers of the verb). Each task
-    # invokes the PINNED launcher `./bin/shipit`, never a bare PATH `shipit`
+    # decision), tested below. `changelog` is the release-notes tool's thin caller
+    # (TOL01-WS06, ADR-0039: pixi tasks are one-line callers of the verb). The
+    # `provision-lexd` task is GONE (ARF02-WS06, ADR-0066): lexd rides the managed
+    # `shipit-lexd` feature from the Artifact channel, not a bespoke fetcher. Each
+    # task invokes the PINNED launcher `./bin/shipit`, never a bare PATH `shipit`
     # (#481, ADR-0033: hooks/tasks ride the repo's pin, PATH is never consulted).
     assert pixi.desired_inner() == (
         'changelog = "./bin/shipit changelog"\n'
         'lint = "./bin/shipit lint"\n'
-        'logs = "./bin/shipit logs"\n'
-        'provision-lexd = "./bin/shipit provision lexd"'
+        'logs = "./bin/shipit logs"'
     )
 
 
@@ -291,9 +517,11 @@ def test_load_units_includes_the_lint_env_blocks():
     assert envs.kind == "block"
     assert envs.dest == "pixi.toml"
     assert envs.anchor == "[environments]"
-    assert tomllib.loads(envs.desired_inner()) == {"lint": ["lint"]}
+    # The lint env composes the managed `shipit-lexd` feature so lexd resolves
+    # from the Artifact channel (ARF02-WS06, ADR-0066).
+    assert tomllib.loads(envs.desired_inner()) == {"lint": ["lint", "shipit-lexd"]}
 
-    # Five sibling blocks in ONE consumer file: their marker fences must be
+    # Six sibling blocks in ONE consumer file: their marker fences must be
     # pairwise distinct or extract/splice would bleed across regions.
     fences = {
         units[k].open_marker
@@ -303,9 +531,29 @@ def test_load_units_includes_the_lint_env_blocks():
             iunits.PIXI_LINT_DEPS_KEY,
             iunits.PIXI_ENVS_KEY,
             iunits.PIXI_LAUNCHER_DEPS_KEY,
+            iunits.PIXI_LEXD_KEY,
         )
     }
-    assert len(fences) == 5
+    assert len(fences) == 6
+
+
+def test_load_units_includes_the_managed_lexd_feature_block():
+    # ARF02-WS06 (ADR-0066): `provision lexd` retired. lexd is a conda dependency
+    # pinned in a shipit-reserved feature carrying the Artifact channel, a fresh
+    # EOF-appended table (anchor-less) wired into the lint env by the environments
+    # block. The consumer cannot drift its lexd version — fleet uniformity moved
+    # from a compiled binary constant to this managed block (ADR-0047).
+    units = {u.key: u for u in iunits.load_units()}
+    lexd = units[iunits.PIXI_LEXD_KEY]
+    assert lexd.kind == "block"
+    assert lexd.dest == "pixi.toml"
+    assert lexd.anchor is None  # a fresh reserved feature table appends at EOF
+    block = tomllib.loads(lexd.desired_inner())
+    feature = block["feature"]["shipit-lexd"]
+    assert feature["channels"] == [
+        "https://storage.googleapis.com/shipit-artifacts-public/lex-fmt/lex"
+    ]
+    assert feature["dependencies"] == {"lexd": "==0.19.10"}
 
 
 def test_load_units_includes_the_launcher_deps_block():
@@ -363,8 +611,15 @@ def test_packaged_lint_env_agrees_with_shipits_own_manifest():
     assert own["feature"]["lint"]["dependencies"] == deps
 
     envs = tomllib.loads(iunits.data_bytes("pixi-lint-env-block.toml").decode("utf-8"))
-    assert envs == {"lint": ["lint"]}
+    assert envs == {"lint": ["lint", "shipit-lexd"]}
     assert own["environments"]["lint"] == envs["lint"]
+
+    # The managed lexd feature (ARF02-WS06, ADR-0066) dogfoods byte-for-byte:
+    # shipit's own `[feature.shipit-lexd]` carries the packaged block verbatim, so
+    # a self-install reconciles to a noop and the fleet's lexd pin/channel are
+    # exactly what shipit lints itself with.
+    lexd = tomllib.loads(iunits.data_bytes("pixi-lexd-block.toml").decode("utf-8"))
+    assert own["feature"]["shipit-lexd"] == lexd["feature"]["shipit-lexd"]
 
 
 def test_shipits_own_pixi_manifest_reconciles_to_noop():
@@ -386,6 +641,7 @@ def test_shipits_own_pixi_manifest_reconciles_to_noop():
         iunits.PIXI_ENVS_KEY,
         iunits.PIXI_LAUNCHER_DEPS_KEY,
         iunits.PIXI_PYTHON_RELEASE_DEPS_KEY,
+        iunits.PIXI_LEXD_KEY,
     ):
         unit = units[key]
         assert irec.consumer_hash(root, unit) == unit.desired_hash(), key
@@ -2968,7 +3224,7 @@ def test_a_consumer_test_task_in_the_tasks_table_is_the_key_conflict_guards_case
 
 def test_shipits_own_repo_keeps_its_feature_test_task_authoritative():
     # The dogfood pin: shipit's own full-gate `test` task lives in
-    # [feature.test.tasks] (rust toolchain env + inline lexd provisioning), so
+    # [feature.test.tasks] (for the rust toolchain env), so
     # the reconcile must SKIP the managed caller here — otherwise every fresh
     # Tree's self-install would make bare `pixi run test` ambiguous.
     root = Path(__file__).resolve().parents[1]
@@ -4398,12 +4654,16 @@ def test_fresh_install_delivers_the_lint_environment(tmp_path, rec):
     assert manifest["tasks"]["lint"] == "./bin/shipit lint"
     deps = manifest["feature"]["lint"]["dependencies"]
     assert set(deps) == set(LINT_TOOLS)
-    assert manifest["environments"]["lint"] == ["lint"]
+    # The lint env composes the managed `shipit-lexd` feature (ARF02-WS06) so
+    # lexd resolves from the Artifact channel.
+    assert manifest["environments"]["lint"] == ["lint", "shipit-lexd"]
+    assert manifest["feature"]["shipit-lexd"]["dependencies"] == {"lexd": "==0.19.10"}
 
-    # Both blocks recorded a pristine hash in the manifest...
+    # The blocks recorded a pristine hash in the manifest...
     managed = config.load_managed(config.load(tmp_path / ".shipit.toml"))
     assert iunits.PIXI_LINT_DEPS_KEY in managed
     assert iunits.PIXI_ENVS_KEY in managed
+    assert iunits.PIXI_LEXD_KEY in managed
     # ...and an unchanged re-install is a clean NOOP.
     assert _plan(tmp_path).nothing_to_do
 
@@ -4417,7 +4677,93 @@ def test_lint_env_block_merges_into_an_existing_environments_table(tmp_path, rec
     _apply(tmp_path)
 
     manifest = tomllib.loads((tmp_path / "pixi.toml").read_text())
-    assert manifest["environments"] == {"dev": ["dev"], "lint": ["lint"]}
+    assert manifest["environments"] == {
+        "dev": ["dev"],
+        "lint": ["lint", "shipit-lexd"],
+    }
+
+
+def test_lint_env_merges_lexd_into_a_consumer_owned_lint_env(tmp_path, rec):
+    # ARF02-WS06 regression (codex MAJOR on #1062): a consumer that ALREADY
+    # declares `[environments] lint` must still get the managed `shipit-lexd`
+    # feature wired into that env. Under the old whole-block splice the managed
+    # `lint` key collided with the consumer's and the block was skipped — leaving
+    # the lint env WITHOUT lexd while `provision lexd` was simultaneously retired,
+    # so lint broke on that consumer with no fallback (ADR-0066). The env is now a
+    # MEMBERSHIP merge: shipit owns only `shipit-lexd`'s presence, the consumer's
+    # own base features are preserved, and the merge is idempotent.
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    (tmp_path / "pixi.toml").write_text(
+        '[workspace]\nname = "acme"\nchannels = ["conda-forge"]\n'
+        'platforms = ["osx-arm64"]\n\n[environments]\nlint = ["lint"]\n'
+    )
+    _apply(tmp_path)
+
+    manifest = tomllib.loads((tmp_path / "pixi.toml").read_text())  # valid TOML
+    # lexd is now composed into the consumer's lint env (append, not replace)...
+    assert manifest["environments"]["lint"] == ["lint", "shipit-lexd"]
+    # ...and the reserved feature it composes landed, so lexd resolves from the
+    # Artifact channel rather than the retired `provision lexd`.
+    assert manifest["feature"]["shipit-lexd"]["dependencies"] == {"lexd": "==0.19.10"}
+    assert manifest["feature"]["shipit-lexd"]["channels"] == [
+        "https://storage.googleapis.com/shipit-artifacts-public/lex-fmt/lex"
+    ]
+    # The membership was recorded pristine, so an unchanged re-install is a NOOP —
+    # the merge never re-fires and never duplicates the `lint` key.
+    assert _plan(tmp_path).nothing_to_do
+
+
+def test_lint_env_table_form_install_preserves_solve_group(tmp_path, rec):
+    # T1 end-to-end: a real install into a consumer whose lint env is a table with
+    # solve-group keeps that key while wiring lexd in.
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    (tmp_path / "pixi.toml").write_text(
+        '[workspace]\nname = "acme"\nchannels = ["conda-forge"]\n'
+        'platforms = ["osx-arm64"]\n\n[environments]\n'
+        'lint = { features = ["lint"], solve-group = "shared" }\n'
+    )
+    _apply(tmp_path)
+
+    lint_env = tomllib.loads((tmp_path / "pixi.toml").read_text())["environments"][
+        "lint"
+    ]
+    assert lint_env == {"features": ["lint", "shipit-lexd"], "solve-group": "shared"}
+    assert _plan(tmp_path).nothing_to_do
+
+
+def test_lint_env_unsupported_form_is_surfaced_not_looped(tmp_path, rec):
+    # T2 end-to-end: a lint env in a form shipit cannot merge into is classified an
+    # OVERRIDE (surfaced), NEVER an ADD the write can't apply and re-proposes every
+    # run, and the consumer's env is left verbatim.
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    (tmp_path / "pixi.toml").write_text(
+        '[workspace]\nname = "acme"\nchannels = ["conda-forge"]\n'
+        'platforms = ["osx-arm64"]\n\n[environments]\nlint = { features = "lint" }\n'
+    )
+    plan = _plan(tmp_path)
+    env_decisions = [d for d in plan.decisions if d.unit.key == iunits.PIXI_ENVS_KEY]
+    assert [d.action for d in env_decisions] == [irec.OVERRIDE]
+
+    _apply(tmp_path)
+    # The unsupported env is left exactly as the consumer wrote it — never clobbered.
+    assert '{ features = "lint" }' in (tmp_path / "pixi.toml").read_text()
+
+
+def test_lint_env_membership_preserves_a_consumer_extra_feature(tmp_path, rec):
+    # The consumer's OTHER features in the lint env are their own config
+    # (ADR-0047): the membership merge appends `shipit-lexd` and keeps them, never
+    # rewriting the env to the packaged default.
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    (tmp_path / "pixi.toml").write_text(
+        '[workspace]\nname = "acme"\nchannels = ["conda-forge"]\n'
+        'platforms = ["osx-arm64"]\n\n[feature.house.dependencies]\nblack = "*"\n\n'
+        '[environments]\nlint = ["lint", "house"]\n'
+    )
+    _apply(tmp_path)
+
+    manifest = tomllib.loads((tmp_path / "pixi.toml").read_text())
+    assert manifest["environments"]["lint"] == ["lint", "house", "shipit-lexd"]
+    assert _plan(tmp_path).nothing_to_do
 
 
 def test_consumer_edit_to_lint_deps_block_surfaces_as_override(tmp_path, rec):
@@ -4483,11 +4829,12 @@ def test_fresh_consumer_without_pixi_manifest_gets_a_valid_seed(tmp_path, rec):
     assert manifest["tasks"]["lint"] == "./bin/shipit lint"
     assert manifest["tasks"]["test"] == "./bin/shipit test"
     assert set(manifest["feature"]["lint"]["dependencies"]) == set(LINT_TOOLS)
-    assert manifest["environments"]["lint"] == ["lint"]
+    assert manifest["environments"]["lint"] == ["lint", "shipit-lexd"]
+    assert manifest["feature"]["shipit-lexd"]["dependencies"] == {"lexd": "==0.19.10"}
     # ...and the launcher's uv (#758): the managed tasks all ride ./bin/shipit.
     assert "uv" in manifest["dependencies"]
 
-    # The seed is scaffold, not a managed unit: only the five block units are
+    # The seed is scaffold, not a managed unit: only the six block units are
     # recorded, so the [workspace] table is consumer-owned from here on.
     managed = config.load_managed(config.load(tmp_path / ".shipit.toml"))
     pixi_keys = {k for k in managed if k.startswith("pixi.toml")}
@@ -4497,6 +4844,7 @@ def test_fresh_consumer_without_pixi_manifest_gets_a_valid_seed(tmp_path, rec):
         iunits.PIXI_LINT_DEPS_KEY,
         iunits.PIXI_ENVS_KEY,
         iunits.PIXI_LAUNCHER_DEPS_KEY,
+        iunits.PIXI_LEXD_KEY,
     }
 
     # The PR body tells the merger the table was seeded and is theirs to edit.

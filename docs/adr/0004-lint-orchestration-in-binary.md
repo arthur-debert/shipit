@@ -26,10 +26,15 @@ templated tasks) and `§7` (lint checks: one definition, hard).
   conda-forge, so the anticipated npm path is unnecessary — every linter is a
   pinned conda-forge dep in `[feature.lint.dependencies]` (`pixi.toml`: ruff,
   shellcheck, go-shfmt, yamllint, prettier 3.8.\*, markdownlint-cli 0.49.\*,
-  lefthook). The one exception is **lexd** (not on conda-forge), fetched at a pin
-  by `tools/provision-lexd.sh` (v0.18.4 from the `lex-fmt/lex` GitHub release,
-  with checksum pinning); the `lint`/`fmt` tasks `depends-on = ["provision-lexd"]`
-  so CI and the hook provision it identically.
+  lefthook). The one exception **was** **lexd** (not on conda-forge), fetched at
+  a pin by `tools/provision-lexd.sh` (v0.18.4 from the `lex-fmt/lex` GitHub
+  release, with checksum pinning); the `lint`/`fmt` tasks
+  `depends-on = ["provision-lexd"]` so CI and the hook provisioned it identically.
+  **Superseded by ADR-0066 (ARF02-WS06):** `lexd` now rides the Artifact channel
+  as an ordinary conda dependency in a managed `[feature.shipit-lexd]` pixi block
+  (locked and sha256-verified via `pixi.lock`, like every other linter); the
+  `provision` module/verb, the `provision-lexd` task, and `tools/provision-lexd.sh`
+  are gone. The rest of this ADR's decision (lint logic in the binary) stands.
 - **Check vs fix.** Lint is CHECK-ONLY by default (release's scar: a
   formatter under `--all-files` silently rewrites untouched files). `--fix` is the
   opt-in formatter pass, exposed as `pixi run fmt`; only tools with a safe

@@ -118,26 +118,6 @@ def test_version_handles_unresolved_build(capsys, monkeypatch):
     assert "unknown" in out.lower()
 
 
-def test_help_lists_provision(capsys):
-    rc = cli.main(["--help"])
-    assert rc == 0
-    assert "provision" in capsys.readouterr().out
-
-
-def test_provision_help_lists_lexd(capsys):
-    rc = cli.main(["provision", "--help"])
-    assert rc == 0
-    assert "lexd" in capsys.readouterr().out
-
-
-def test_provision_lexd_help(capsys):
-    rc = cli.main(["provision", "lexd", "--help"])
-    assert rc == 0
-    out = capsys.readouterr().out
-    assert "--json" in out
-    assert "pixi env" in out
-
-
 def test_help_lists_tree(capsys):
     rc = cli.main(["--help"])
     assert rc == 0

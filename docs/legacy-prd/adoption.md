@@ -24,8 +24,11 @@ Two further problems compound it:
   calls the legacy release repo's reusable workflows.
 - A set of consumer-facing breakages is *already known* (the managed lefthook
   assumes a lint environment consumers don't have; the linter binaries have no
-  consumer delivery path; lexd has no delivery path; `shipit lint` has no rust
-  leg; the lex-mirror hook deletes the managed AGENTS.md block). Discovering
+  consumer delivery path; lexd has no delivery path (later solved by the
+  Artifact channel — lexd rides `pixi.lock` as a managed conda dep, ADR-0066,
+  superseding the provision-subcommand approach this PRD proposed); `shipit
+  lint` has no rust leg; the lex-mirror hook deletes the managed AGENTS.md
+  block). Discovering
   these one agent-run at a time would burn exactly the tokens and momentum the
   disciplined approach is meant to protect.
 
@@ -71,7 +74,7 @@ every run; a goal reached while fighting the tooling is a failed adoption run.
 4. As the portfolio owner, I want every consumer pinned to the same tool versions from one packaged source, so that a version bump is one edit that rolls the fleet on the next install reconcile.
 5. As a CI job, I want the consumer environment fully declared in the repo's manifest, so that `setup-pixi --locked` reproduces the laptop environment exactly and laptop/CI parity is structural.
 6. As a consumer repo maintainer, I want the managed `lefthook.yml` to work on a stock consumer, so that my first commit after install doesn't fail on repo-specific scripts or missing environments.
-7. As a consumer repo maintainer, I want lexd provisioned by a shipit subcommand at a fleet-pinned version, so that the lex Lang works in my repo without me tracking a binary that isn't on conda-forge.
+7. As a consumer repo maintainer, I want lexd provisioned by a shipit subcommand at a fleet-pinned version, so that the lex Lang works in my repo without me tracking a binary that isn't on conda-forge. (Superseded by ADR-0066: lexd is now delivered as a managed pixi dependency block from the Artifact channel, resolved through `pixi.lock`; no subcommand.)
 8. As a rust consumer repo, I want `shipit lint` to carry rust Langs (clippy, rustfmt), so that commit/push checks cover my primary toolchain from day one of adoption.
 9. As a lex-using consumer, I want the lex-mirror hook to preserve the shipit-managed AGENTS.md block, so that my first `.lex` edit doesn't silently strip the agent contract.
 10. As a coordinator agent in a consumer repo, I want a documented, supported way to have shipit on PATH, so that the bootstrap launcher resolves without improvisation.
@@ -123,6 +126,10 @@ every run; a goal reached while fighting the tooling is a failed adoption run.
   fetch logic live in the binary, consistent with lint-orchestration-in-binary
   (ADR-0004); the managed environment block invokes it as a task. No distributed
   script to reconcile. External fetch goes through the exec seam (ADR-0028).
+  **Superseded by ADR-0066 (ARF02-WS06):** the `provision` verb was retired —
+  lexd now rides the Artifact channel as an ordinary managed conda dependency
+  (`[feature.shipit-lexd]`), resolved and sha256-verified through `pixi.lock`,
+  so there is no subcommand and no bespoke fetch.
 - **The managed `lefthook.yml` becomes consumer-generic**: no references to
   shipit-repo-local scripts; every invoked task/environment is satisfied by the
   managed blocks. The lex-mirror leg is not part of the managed variant (repos
@@ -196,7 +203,9 @@ every run; a goal reached while fighting the tooling is a failed adoption run.
   extension/toolchain, hard-fail on findings, `--fix` opt-in where applicable).
 - **The provision subcommand** keeps a pure decision core (version pin, target
   resolution, idempotence) tested in isolation; the fetch/exec boundary is
-  injected per the one-exec-seam contract and faked in tests.
+  injected per the one-exec-seam contract and faked in tests. (Superseded by
+  ADR-0066: the provision subcommand was deleted; lexd now resolves as a managed
+  conda dep via `pixi.lock`, so there is no bespoke core or exec boundary to test.)
 - **Adoption itself is evidence-verified, not unit-tested**: the per-repo
   checklist's verified-by column is the test plan; `shipit logs --flow` and eval
   records are the observations. A checklist step without observed evidence is
