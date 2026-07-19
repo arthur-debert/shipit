@@ -113,7 +113,7 @@ def _declared_signals(root: Path) -> set[str]:
     from ..tools import registry as toolchain_registry
 
     try:
-        cfg = load_config(Path(root))
+        cfg = load_config(root)
         artifacts = config.load_artifacts(cfg)
         entries = config.load_toolchains(cfg)
     except config.ConfigError:
@@ -149,7 +149,7 @@ def _declared_endpoints(root: Path) -> frozenset[str]:
     as :func:`_declared_signals`.
     """
     try:
-        cfg = load_config(Path(root))
+        cfg = load_config(root)
         artifacts = config.load_artifacts(cfg)
     except config.ConfigError:
         return frozenset()
@@ -168,23 +168,38 @@ def _declared_platforms(root: Path) -> frozenset[str]:
     invocation. This reads that platform list from the consumer's ``pixi.toml``
     (``[workspace]``, or the legacy ``[project]`` alias).
 
-    Degrades to the seed defaults (:data:`shipit.install.units.PIXI_SEED_PLATFORMS`)
-    when the consumer has no ``pixi.toml``, an unparseable one, or no platform
-    list — exactly the set the install seed writes for a virgin repo, so a fresh
-    install's plan-time scope matches the platforms it is about to seed and a
-    re-install reconciles to a clean noop.
+    The scope is the repo's OWN declaration, so an EXISTING manifest names only
+    what it names:
+
+    - NO ``pixi.toml`` (or an unparseable one) degrades to the seed defaults
+      (:data:`shipit.install.units.PIXI_SEED_PLATFORMS`) — exactly the set a
+      fresh install is about to SEED (:func:`shipit.install.units.pixi_manifest_seed`),
+      so the virgin-repo plan's lexd scope matches the platforms it writes and a
+      re-install reconciles to a clean noop (the seed set carries no ``win-64``);
+    - a PRESENT, parsed manifest that declares no ``platforms`` list is NOT a
+      virgin repo — it gets ``frozenset()``, never the seed defaults, because
+      emitting a target for a platform the manifest never declared is the exact
+      #1072 dangling-selector warning this scoping removes (the reviewer's
+      existing-manifest shape). An EXPLICIT list wins verbatim, including an
+      explicitly empty ``platforms = []`` (the consumer declared none).
+
+    A ``[workspace]``/``[project]`` that is a scalar rather than a table (invalid
+    schema, but valid TOML) is treated as no platform source, never crashed on.
     """
     default = frozenset(install_units.PIXI_SEED_PLATFORMS)
-    pixi = Path(root) / install_units.PIXI_FILE
+    pixi = root / install_units.PIXI_FILE
     try:
         data = tomllib.loads(pixi.read_text(encoding="utf-8"))
     except (OSError, tomllib.TOMLDecodeError):
         return default
     for table in ("workspace", "project"):
-        platforms = data.get(table, {}).get("platforms")
-        if isinstance(platforms, list) and platforms:
+        table_data = data.get(table)
+        if not isinstance(table_data, dict):
+            continue  # absent, or a malformed scalar — not a platform source
+        platforms = table_data.get("platforms")
+        if isinstance(platforms, list):
             return frozenset(str(p) for p in platforms)
-    return default
+    return frozenset()
 
 
 def _artifact_dep_units(root: Path, *, is_private=gh.repo_is_private) -> list[Unit]:

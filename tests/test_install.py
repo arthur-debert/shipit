@@ -3258,6 +3258,87 @@ def test_non_conda_repo_gets_no_packager_block(tmp_path):
     assert iunits.PIXI_RUST_RELEASE_DEPS_KEY in keys
 
 
+def test_rust_conda_migration_moves_rattler_build_in_one_reconcile(tmp_path, rec):
+    # #1071 MAJOR (codex): an EXISTING rust+conda repo pinned to the pre-#1071
+    # shipit still carries `rattler-build` INSIDE its old rust-release-deps
+    # managed span. Reconciling to v1.4.2 must, in ONE pass, UPDATE that block to
+    # drop rattler-build AND ADD the new conda-packager block that now owns it.
+    # Before the fix, `_pixi_key_conflicts` saw rattler-build already in
+    # [dependencies] and skipped the packager as a first-splice duplicate — but
+    # the key sits inside ANOTHER managed block this same plan rewrites, so the
+    # one reconcile stranded the repo with NO packager (removed from the rust
+    # block, never added to the conda block) until a second reconcile.
+    old_rust_inner = (
+        'cargo-edit = "0.13.11.*"\nwasm-pack = "0.15.*"\nrattler-build = "0.69.*"'
+    )
+    old_pristine = config.content_hash(old_rust_inner.encode("utf-8"))
+    (tmp_path / "pixi.toml").write_text(
+        "[workspace]\n"
+        'name = "acme"\n'
+        'channels = ["conda-forge"]\n'
+        'platforms = ["linux-64"]\n'
+        "\n"
+        "[dependencies]\n"
+        f"{iunits.PIXI_RUST_RELEASE_DEPS_OPEN}\n"
+        f"{old_rust_inner}\n"
+        f"{iunits.PIXI_RUST_RELEASE_DEPS_CLOSE}\n"
+    )
+    (tmp_path / ".shipit.toml").write_text(
+        "[artifacts.cli]\n"
+        'build = ["rust"]\n'
+        'endpoints = ["gh-release", "conda"]\n'
+        "\n"
+        "[managed]\n"
+        f'"{iunits.PIXI_RUST_RELEASE_DEPS_KEY}" = "{old_pristine}"\n'
+    )
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+
+    units = iunits.load_units(
+        toolchains=frozenset({iunits.TOOLCHAIN_RUST}),
+        endpoints=frozenset({"conda"}),
+        platforms=frozenset({"linux-64"}),
+    )
+    retired = irec.load_retired()
+    state = irec.gather(tmp_path, units, retired)
+    plan = irec.reconcile(units, retired, state)
+
+    # The packager is NOT a first-splice conflict: its key is migrating out of
+    # the rust block, which this same plan updates away.
+    assert plan.pixi_key_conflicts == ()
+    conda = next(
+        d for d in plan.decisions if d.unit.key == iunits.PIXI_CONDA_PACKAGER_KEY
+    )
+    assert conda.action == irec.ADD
+    rust = next(
+        d for d in plan.decisions if d.unit.key == iunits.PIXI_RUST_RELEASE_DEPS_KEY
+    )
+    assert rust.action == irec.UPDATE  # a clean migration, not a flagged override
+
+    iapply.apply(plan, iapply.MODE_TREE)
+
+    # ONE pass lands the end state: valid TOML (tomllib REFUSES a duplicate key,
+    # so a successful parse proves rattler-build is not doubled), the packager
+    # pinned in the conda span and gone from the rust block.
+    text = (tmp_path / "pixi.toml").read_text(encoding="utf-8")
+    manifest = tomllib.loads(text)
+    assert manifest["dependencies"]["rattler-build"] == "0.69.*"
+    conda_inner = splice.extract_block(
+        text, iunits.PIXI_CONDA_PACKAGER_OPEN, iunits.PIXI_CONDA_PACKAGER_CLOSE
+    )
+    rust_inner = splice.extract_block(
+        text, iunits.PIXI_RUST_RELEASE_DEPS_OPEN, iunits.PIXI_RUST_RELEASE_DEPS_CLOSE
+    )
+    # Parse each span's own keys (the block bodies carry `rattler-build` in prose
+    # COMMENTS, so a substring check would false-match — assert on TOML keys).
+    assert tomllib.loads(conda_inner)["rattler-build"] == "0.69.*"
+    rust_keys = tomllib.loads(rust_inner)
+    assert "rattler-build" not in rust_keys
+    assert rust_keys["cargo-edit"] == "0.13.11.*"
+    # The packager is now a tracked managed unit.
+    managed = config.load_managed(config.load(tmp_path / ".shipit.toml"))
+    assert iunits.PIXI_CONDA_PACKAGER_KEY in managed
+
+
 def test_declared_platforms_reads_the_workspace_table(tmp_path):
     # #1072: the lexd block scopes its targets to the consumer's declared
     # `[workspace].platforms`, read here off the consumer's pixi.toml.
@@ -3275,13 +3356,40 @@ def test_declared_platforms_reads_the_legacy_project_alias(tmp_path):
     assert verb._declared_platforms(tmp_path) == frozenset({"linux-64"})
 
 
-def test_declared_platforms_falls_back_to_seed_defaults(tmp_path):
-    # No pixi.toml, or one with no platform list, degrades to the seed defaults —
-    # exactly what the install seed writes for a virgin repo, so a fresh install's
-    # plan-time lexd scope matches the platforms it is about to seed (a clean noop).
+def test_declared_platforms_absent_pixi_uses_the_seed_defaults(tmp_path):
+    # NO pixi.toml → the seed defaults, because a fresh install is about to SEED
+    # a manifest carrying exactly PIXI_SEED_PLATFORMS: the plan-time lexd scope
+    # then matches the platforms it writes (a clean noop), and the seed set has
+    # no win-64, so a virgin repo never emits a paused-platform target.
     assert verb._declared_platforms(tmp_path) == frozenset(iunits.PIXI_SEED_PLATFORMS)
+    assert "win-64" not in iunits.PIXI_SEED_PLATFORMS
+
+
+def test_declared_platforms_present_manifest_without_platforms_is_empty(tmp_path):
+    # #1072 MAJOR (codex): a PRESENT, parsed manifest that declares no platforms
+    # list is NOT a virgin repo — it must NOT inherit the seed defaults, or the
+    # lexd block would emit targets the manifest never declared (the exact
+    # dangling-selector warning this scoping removes). It gets frozenset() → no
+    # targets. (The reviewer's `test_existing_pixi_manifest_is_never_seeded`
+    # shape: an existing `[workspace]` with only a name.)
     (tmp_path / "pixi.toml").write_text('[workspace]\nname = "acme"\n')
-    assert verb._declared_platforms(tmp_path) == frozenset(iunits.PIXI_SEED_PLATFORMS)
+    assert verb._declared_platforms(tmp_path) == frozenset()
+
+
+def test_declared_platforms_trusts_an_explicit_empty_list(tmp_path):
+    # An EXPLICIT `platforms = []` is the consumer declaring none — trusted
+    # verbatim, never falling through to the seed defaults and re-dangling them.
+    (tmp_path / "pixi.toml").write_text('[workspace]\nname = "acme"\nplatforms = []\n')
+    assert verb._declared_platforms(tmp_path) == frozenset()
+
+
+def test_declared_platforms_ignores_a_scalar_workspace_table(tmp_path):
+    # agy robustness: a valid-TOML-but-invalid-schema manifest whose [workspace]
+    # is a scalar (`workspace = "foo"`) must not crash the platform read on a
+    # `.get` against a string — the scalar is no platform source, so it degrades
+    # to no declared platforms rather than an AttributeError mid-install.
+    (tmp_path / "pixi.toml").write_text('workspace = "foo"\n')
+    assert verb._declared_platforms(tmp_path) == frozenset()
 
 
 def test_declared_platforms_degrades_on_unparseable_pixi(tmp_path):
@@ -3289,6 +3397,25 @@ def test_declared_platforms_degrades_on_unparseable_pixi(tmp_path):
     # never itself fails install (the manifest's own errors surface elsewhere).
     (tmp_path / "pixi.toml").write_text("this is not = valid = toml\n")
     assert verb._declared_platforms(tmp_path) == frozenset(iunits.PIXI_SEED_PLATFORMS)
+
+
+def test_existing_manifest_without_platforms_emits_no_lexd_target(tmp_path):
+    # #1072 MAJOR (codex), end to end: an EXISTING consumer manifest with a
+    # `[workspace]` but no `platforms` list yields a lexd block with NO `[target]`
+    # tables — the install pipeline reads `_declared_platforms` (frozenset() for
+    # this shape) and `lexd_block` generates a target only for a DECLARED
+    # platform, so nothing dangles and pixi warns on no selector. Before the fix
+    # the manifest inherited the seed defaults and emitted linux/osx targets the
+    # workspace never declared (the dangling-selector class #1072 removes).
+    (tmp_path / "pixi.toml").write_text('[workspace]\nname = "acme"\n')
+    platforms = verb._declared_platforms(tmp_path)
+    assert platforms == frozenset()
+    units = {u.key: u for u in iunits.load_units(platforms=platforms)}
+    feature = tomllib.loads(units[iunits.PIXI_LEXD_KEY].desired_inner())["feature"][
+        "shipit-lexd"
+    ]
+    assert "target" not in feature  # no undeclared selectors → no pixi warning
+    assert "dependencies" not in feature
 
 
 def _plan_with_toolchains(root, toolchains: frozenset) -> irec.Plan:

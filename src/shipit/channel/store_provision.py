@@ -670,7 +670,10 @@ def verify(
     publishes no ``win-64/repodata.json``, so probing the fixed all-of-served set
     reports a correctly-provisioned channel NOT ready — a false negative (the
     sibling of the #1072 lexd-target bug on the store-verify surface). Ignored
-    under ``noarch`` (a data artifact fans out to no platform subdir at all).
+    under ``noarch`` (a data artifact fans out to no platform subdir at all). An
+    explicitly EMPTY ``subdirs`` is REFUSED (a :class:`ProvisionError`), never
+    read as "probe nothing": the conjunctions would pass vacuously — pass
+    ``None`` for the full served set instead.
 
     ``noarch`` (ADR-0076) switches the object probe from the per-platform
     ``subdirs`` sweep to a SINGLE :data:`~shipit.channel.buckets.NOARCH_SUBDIR`
@@ -717,6 +720,19 @@ def verify(
         probe_subdirs: Sequence[str] = (buckets.NOARCH_SUBDIR,)
     elif subdirs is not None:
         probe_subdirs = tuple(subdirs)
+        if not probe_subdirs:
+            # An explicitly EMPTY scope is a caller bug, not "probe nothing": the
+            # `all(...)` conjunctions below would pass VACUOUSLY (a green verdict
+            # over zero subdirs) and then `subdir_objs[0]` would crash. The CLI
+            # never reaches here (it maps its own empty projection to None, the
+            # full-served default), but a direct caller can — refuse it loudly
+            # rather than mint a meaningless all-pass. Pass ``subdirs=None`` for
+            # the conservative full served set.
+            raise ProvisionError(
+                "store verify: subdirs= is an empty sequence — a scoped probe "
+                "needs at least one served subdir; pass subdirs=None for the "
+                "full served set"
+            )
     else:
         probe_subdirs = buckets.SERVED_SUBDIRS
     subdir_objs = [f"{subdir}/{obj}" for subdir in probe_subdirs]
@@ -830,11 +846,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_ver.add_argument(
         "--manifest",
-        default=".shipit.toml",
-        help="the repo's .shipit.toml, whose conda-endpoint artifacts' declared "
-        "platforms scope the probed subdirs to what the channel actually "
-        "publishes (#1076); default: .shipit.toml in the current directory. A "
-        "missing/conda-less manifest falls back to the full served set.",
+        default=None,
+        help="OPT-IN scoping (#1076): the path to the TARGET repo's .shipit.toml, "
+        "whose conda-endpoint artifacts' declared platforms scope the probed "
+        "subdirs to what that channel actually publishes. Off by default — the "
+        "probe covers the full served set — because --repo names an arbitrary "
+        "<owner>/<repo> and silently scoping it from an ambient .shipit.toml in "
+        "the current directory could probe a NARROWER set than the target "
+        "publishes and pass a channel that is missing a subdir (a false-ready). "
+        "Point this at the manifest that belongs to --repo to opt into scoping; "
+        "a missing/conda-less manifest falls back to the full served set.",
     )
     args = parser.parse_args(argv)
 
@@ -852,11 +873,21 @@ def main(argv: list[str] | None = None) -> int:
                 + f"\n  private: gs://{report.private_bucket} (reader {report.reader_sa})",
             )
             return 0
-        # Scope the per-platform probe to the subdirs THIS repo publishes (#1076):
-        # a repo shipping fewer platforms (no windows) publishes no win-64
-        # repodata, so probing the fixed all-of-served set false-negs its channel.
-        # Skipped under --noarch (a data artifact fans out to no platform subdir).
-        subdirs = None if args.noarch else _repo_served_subdirs(args.manifest)
+        # Scope the per-platform probe to the subdirs the TARGET repo publishes
+        # (#1076): a repo shipping fewer platforms (no windows) publishes no
+        # win-64 repodata, so probing the fixed all-of-served set false-negs its
+        # channel. Scoping is OPT-IN via an explicit --manifest naming the target
+        # repo's own .shipit.toml: --repo is an arbitrary <owner>/<repo>, so
+        # scoping silently from an ambient .shipit.toml could probe a NARROWER set
+        # than the target publishes and pass a channel missing a subdir (a
+        # false-ready, the dangerous direction). Absent --manifest — and under
+        # --noarch (a data artifact fans out to no platform subdir) — the probe
+        # stays the conservative full served set.
+        subdirs = (
+            None
+            if (args.noarch or args.manifest is None)
+            else _repo_served_subdirs(args.manifest)
+        )
         vreport = verify(
             args.project,
             args.repo,

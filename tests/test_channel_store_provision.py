@@ -667,6 +667,19 @@ def test_verify_refuses_empty_project_or_repo():
         sp.verify("p", "", runner=_verify_runner(), http_get=lambda url: 200)
 
 
+def test_verify_refuses_an_empty_subdirs_sequence():
+    # codex minor (#1076): an explicitly EMPTY scope is a caller bug, not "probe
+    # nothing" — the `all(...)` conjunctions would pass VACUOUSLY (green over zero
+    # subdirs) and then crash at `subdir_objs[0]`. verify refuses it up front with
+    # ProvisionError; a scoped caller with nothing to probe passes subdirs=None
+    # for the full served set. (The CLI never reaches here — it maps its own empty
+    # projection to None — but a direct caller can.)
+    with pytest.raises(sp.ProvisionError, match="empty sequence"):
+        sp.verify(
+            "p", "r", subdirs=(), runner=_verify_runner(), http_get=lambda url: 200
+        )
+
+
 def test_verify_turns_a_network_failure_into_a_clean_refusal(monkeypatch):
     # A DNS/TLS/connectivity failure (URLError) or timeout during the authless
     # GET is NOT a status verdict — the DEFAULT HTTP seam (_http_status) raises
@@ -700,6 +713,55 @@ def test_main_requires_project_and_subcommand():
         sp.main([])
     with pytest.raises(SystemExit):
         sp.main(["--project", "p"])  # no subcommand
+
+
+def test_verify_cli_scopes_only_with_an_explicit_manifest(tmp_path, monkeypatch):
+    # #1076 MAJOR (codex): `--repo` names an ARBITRARY <owner>/<repo>, so the CLI
+    # must NOT silently scope its probe from an ambient `.shipit.toml` in the cwd
+    # — a narrower ambient manifest could probe fewer subdirs than the target
+    # publishes and pass a channel that is actually missing one (a false-ready,
+    # the dangerous direction). Scoping is OPT-IN via an explicit --manifest;
+    # absent it, the probe stays the conservative full served set (subdirs=None).
+    seen: dict[str, object] = {}
+
+    def _capture(project, repo, *, obj="repodata.json", noarch=False, subdirs=None):
+        seen["subdirs"] = subdirs
+        return sp.VerifyReport(
+            public_get_200=True,
+            private_get_403=True,
+            private_scoped_read_ok=True,
+            public_ubla_on=True,
+            private_ubla_on=True,
+            private_no_public_binding=True,
+        )
+
+    monkeypatch.setattr(sp, "verify", _capture)
+    # A NARROWER ambient manifest sits in the cwd (linux-only), but the target
+    # --repo is a different repo and --manifest is NOT passed.
+    (tmp_path / ".shipit.toml").write_text(
+        '[artifacts.lexd]\nbuild = ["rust"]\n'
+        'platforms = ["linux-x86_64"]\nendpoints = ["gh-release", "conda"]\n'
+    )
+    monkeypatch.chdir(tmp_path)
+
+    rc = sp.main(["--project", "p", "verify", "--repo", "other/repo"])
+    assert rc == 0
+    assert seen["subdirs"] is None  # unscoped — the ambient manifest was ignored
+
+    # Opting in with an explicit --manifest DOES scope, to that manifest's subdirs.
+    rc = sp.main(
+        [
+            "--project",
+            "p",
+            "verify",
+            "--repo",
+            "other/repo",
+            "--manifest",
+            str(tmp_path / ".shipit.toml"),
+        ]
+    )
+    assert rc == 0
+    assert seen["subdirs"] == ("linux-64",)
 
 
 def test_main_renders_a_checked_gcloud_failure_as_error_not_traceback(

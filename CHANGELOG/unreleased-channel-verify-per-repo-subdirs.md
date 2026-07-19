@@ -9,7 +9,11 @@
   new pure `release.publish.conda_served_subdirs(artifacts)` projects the repo's
   conda-endpoint artifacts' platforms onto the served subdirs (the same
   platform→triple→subdir derivation the publish stage uses); `verify` takes a
-  `subdirs` probe set, and the `verify` CLI derives it from the repo's
-  `.shipit.toml` (`--manifest`, default `.shipit.toml`), falling back to the full
-  served set when no conda producer is declared. The same wrong-axis family as
+  `subdirs` probe set (an explicitly empty one is refused, never a vacuous
+  all-pass), and the `verify` CLI derives it from the TARGET repo's `.shipit.toml`
+  only when the operator OPTS IN with an explicit `--manifest` — `--repo` is an
+  arbitrary `<owner>/<repo>`, so silently scoping from an ambient `.shipit.toml`
+  could probe a narrower set than the target publishes and pass a channel missing
+  a subdir (a false-ready). Absent `--manifest` (and for a conda-less manifest),
+  the probe stays the conservative full served set. The same wrong-axis family as
   #1072, on the channel-readiness surface.
