@@ -243,7 +243,14 @@ def _main(argv: list[str] | None = None) -> int:
             )
             return 2
 
-    subdir = host_conda_subdir()  # native — so pixi can install it here
+    try:
+        subdir = host_conda_subdir()  # native — so pixi can install it here
+    except RuntimeError as exc:
+        # Unmapped host (Windows / Intel-mac / anything off the mapped unix set):
+        # the round trip can't run here. A clean skip (message + rc 0), never an
+        # uncaught traceback — this is a documented standalone entry point.
+        print(f"skipping: {exc} — unsupported host", file=sys.stderr)
+        return 0
     with tempfile.TemporaryDirectory(prefix="conda-roundtrip-") as tmp:
         root = Path(tmp)
         channel = root / "channel"
@@ -268,6 +275,16 @@ def _main(argv: list[str] | None = None) -> int:
         # stage — the exact defect the executable round trip is meant to catch.
         out = subprocess.run([str(staged)], capture_output=True, text=True, timeout=30)
         print(f"binary output: {out.stdout.strip()!r}")
+        if out.returncode != 0:
+            # A GENUINE run failure — the staged tool resolved but won't execute.
+            # Fail loudly (non-zero); distinct from the unmapped-host skip above,
+            # which is an intentional rc-0. The round trip did not hold.
+            print(
+                f"error: staged tool {staged} exited {out.returncode}: "
+                f"{out.stderr.strip()!r}",
+                file=sys.stderr,
+            )
+            return 1
     return 0
 
 

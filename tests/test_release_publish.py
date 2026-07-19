@@ -3108,6 +3108,8 @@ def _load_roundtrip_harness():
         Path(__file__).resolve().parent.parent / "tools" / "conda_channel_roundtrip.py"
     )
     spec = importlib.util.spec_from_file_location("conda_channel_roundtrip", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"could not load the round-trip harness from {path}")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -3266,6 +3268,25 @@ def test_conda_file_channel_roundtrip_resolves_and_stages_the_binary(tmp_path):
     ran = subprocess.run([str(staged)], capture_output=True, text=True, timeout=30)
     assert ran.returncode == 0, f"staged tool exited {ran.returncode}: {ran.stderr!r}"
     assert "hi" in ran.stdout
+
+
+def test_roundtrip_main_skips_cleanly_on_an_unmapped_host(monkeypatch, capsys):
+    """The standalone harness entry point (`_main`) SKIPs cleanly on an unmapped
+    host — a message and rc 0, never an uncaught `RuntimeError`/traceback. The
+    real tests skip via pytest; the runnable `__main__` path must skip too, so
+    running `python tools/conda_channel_roundtrip.py` on Windows/Intel-mac does
+    not crash. Needs no real tools: the unmapped-host branch returns before any
+    build/resolve. `shutil.which` is stubbed truthy so the tool-presence gate
+    passes and `_HOST_SUBDIR` is emptied so every host is unmapped."""
+    roundtrip = _load_roundtrip_harness()
+    monkeypatch.setattr(roundtrip.shutil, "which", lambda _tool: "/usr/bin/stub")
+    monkeypatch.setattr(roundtrip, "_HOST_SUBDIR", {})
+
+    rc = roundtrip._main([])
+
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "skipping" in err and "unsupported host" in err
 
 
 def test_conda_secret_pair_mirrors_the_derivation_authority():
