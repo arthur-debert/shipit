@@ -145,10 +145,16 @@ def _copy_into(
     (``src.resolve()``) must stay inside ``prefix_res`` before its bytes are read;
     ``src.is_dir()``/``is_file()`` follow symlinks, so a directory symlink is
     entered EXACTLY as a dereferencing copy would enter it — but only after its
-    resolved target is proven in-prefix, and ``visited`` (resolved dirs) breaks any
-    symlink cycle. A regular file is copied from its resolved real path with its
-    source mode reasserted (the exec-bit round trip the DoD asserts), applied
-    uniformly to every file whether the entry is a lone file or a directory tree.
+    resolved target is proven in-prefix. ``visited`` is the RECURSION STACK (the
+    resolved dirs active on the CURRENT descent path, not a global seen-set): a dir
+    is added before descending and removed as the descent unwinds, so a true CYCLE
+    (a dir reachable from within itself) still terminates, while a shared target
+    reachable via two different symlinks (a DAG) is copied in FULL at each location
+    rather than the second being skipped as "already visited". A regular file is
+    copied from its resolved real path with its source mode reasserted (the exec-bit
+    round trip the DoD asserts), applied uniformly to every file whether the entry
+    is a lone file or a directory tree; a copied directory gets its source mode/mtime
+    restored (``copystat``) so a ``0o700`` tree is not flattened to the umask default.
     Anything else (a broken symlink, a socket/fifo) is refused — not shippable.
     """
     real = src.resolve()
@@ -161,11 +167,17 @@ def _copy_into(
         )
     if src.is_dir():
         if real in visited:
-            return  # a symlink cycle back to an already-copied dir — stop
+            return  # a cycle back to a dir active on THIS path — stop the descent
         visited.add(real)
-        dst.mkdir(parents=True, exist_ok=True)
-        for child in sorted(src.iterdir()):
-            _copy_into(child, dst / child.name, prefix_res, entry, visited)
+        try:
+            dst.mkdir(parents=True, exist_ok=True)
+            for child in sorted(src.iterdir()):
+                _copy_into(child, dst / child.name, prefix_res, entry, visited)
+            shutil.copystat(real, dst)  # restore the source dir's mode/mtime
+        finally:
+            # Pop as the descent unwinds: `visited` scopes to the current path only,
+            # so a DAG (two symlinks to one target) copies fully at BOTH dests.
+            visited.discard(real)
     elif src.is_file():
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(real, dst)  # copies the resolved in-prefix bytes + mode
@@ -292,10 +304,11 @@ def stage(
     one caller than another) and the one staging root (``<root>/resources``), then
     copies each entry in declaration order. Returns the completed :class:`StagedFile`
     list (for the verb's report and tests). Raises :class:`StagingError` on a bad
-    feature, a resolved prefix that escapes ``.pixi/envs``, a staging root that
-    itself escapes the checkout (a symlinked ``resources``), or the first entry
-    whose source is not materialized, whose source symlink escapes the prefix, or
-    whose dest is not a strict descendant of the staging root — a build step that
+    feature, a resolved prefix that escapes ``.pixi/envs``, a staging root that does
+    not resolve to exactly ``<root>/resources`` (a symlinked ``resources``
+    redirecting into the checkout root, ``.git``, or off the tree), or the first
+    entry whose source is not materialized, whose source symlink escapes the prefix,
+    or whose dest is not a strict descendant of the staging root — a build step that
     must stop, never a partial silent success.
 
     ``feature`` selects a named pixi feature/env; ``None`` (the default) targets
@@ -314,16 +327,22 @@ def stage(
             f"refusing to stage; check the --feature value"
         )
     # The single bounded destination space: <root>/resources. Its RESOLVED path
-    # anchors every per-entry strict-descendant check; if `resources` is itself a
-    # symlink out of the checkout, refuse the whole stage rather than let a dest
-    # ride it beyond the tree.
+    # anchors every per-entry strict-descendant check, so it must be EXACTLY
+    # `<root>/resources` — a real directory (or not yet created), never a symlink
+    # redirecting elsewhere. A committed `resources` → `.`/`.git`/`/outside` would
+    # otherwise make the "strict descendant of the staging root" bound point AT the
+    # checkout root, the git metadata, or off the tree — reopening the very
+    # data-loss class the bound closes. Requiring identity (not merely "inside the
+    # checkout") refuses all of those, restoring the deleted denylist's protection
+    # with one invariant.
     staging_root_res = (root / _STAGING_ROOT).resolve()
-    if not staging_root_res.is_relative_to(root_res):
+    if staging_root_res != root_res / _STAGING_ROOT:
         raise StagingError(
-            f"the staging root `{_STAGING_ROOT}/` resolves outside the checkout "
-            f"({root_res}) — a symlinked `{_STAGING_ROOT}` must not steer staging "
-            f"beyond the tree; make `{_STAGING_ROOT}` a real directory in the "
-            f"checkout"
+            f"the staging root `{_STAGING_ROOT}/` must be a real directory at "
+            f"{root_res / _STAGING_ROOT} but resolves to {staging_root_res} — a "
+            f"symlinked `{_STAGING_ROOT}` redirecting into the checkout root, "
+            f"`.git`, or outside the tree is refused; make `{_STAGING_ROOT}` a real "
+            f"directory in the checkout"
         )
     staged: list[StagedFile] = []
     for entry in entries:

@@ -164,7 +164,7 @@ def test_missing_source_points_at_install(tmp_path):
         )
 
 
-def test_symlinked_parent_escape_is_refused_and_touches_nothing(tmp_path):
+def test_symlinked_staging_root_out_of_tree_is_refused_and_touches_nothing(tmp_path):
     prefix = _prefix(tmp_path)
     _plant(prefix / "bin" / "lexd-lsp", "x", mode=0o755)
     outside = tmp_path.parent / "outside-escape-target"
@@ -173,13 +173,36 @@ def test_symlinked_parent_escape_is_refused_and_touches_nothing(tmp_path):
     # the checkout, even though the dest string itself is clean/relative.
     (tmp_path / "resources").symlink_to(outside, target_is_directory=True)
 
-    with pytest.raises(staging.StagingError, match="outside the checkout"):
+    with pytest.raises(staging.StagingError, match="must be a real directory"):
         staging.stage(
             tmp_path,
             [config.StageEntry("lexd-lsp", "bin/lexd-lsp", "resources/lexd-lsp")],
         )
     # The escape was refused BEFORE any write — nothing landed through the symlink.
     assert not (outside / "lexd-lsp").exists()
+
+
+@pytest.mark.parametrize("target", [".", ".git"])
+def test_symlinked_staging_root_redirecting_into_the_checkout_is_refused(
+    tmp_path, target
+):
+    # A `resources` -> `.`/`.git` symlink resolves INSIDE the checkout, so a mere
+    # "inside the tree" check would pass and let the strict-descendant bound point at
+    # the checkout root or git metadata. Requiring the staging root to resolve to
+    # EXACTLY <root>/resources refuses the redirect and protects those dirs.
+    prefix = _prefix(tmp_path)
+    _plant(prefix / "bin" / "lexd-lsp", "x", mode=0o755)
+    gitdir = tmp_path / ".git"
+    gitdir.mkdir()
+    (gitdir / "HEAD").write_text("ref: refs/heads/main", encoding="utf-8")
+    (tmp_path / "resources").symlink_to(tmp_path / target, target_is_directory=True)
+
+    with pytest.raises(staging.StagingError, match="must be a real directory"):
+        staging.stage(
+            tmp_path,
+            [config.StageEntry("lexd-lsp", "bin/lexd-lsp", "resources/lexd-lsp")],
+        )
+    assert (gitdir / "HEAD").read_text(encoding="utf-8") == "ref: refs/heads/main"
 
 
 # --------------------------------------------------------------------------
@@ -326,9 +349,33 @@ def test_in_prefix_directory_symlink_is_followed_and_copied(tmp_path):
     assert result.is_dir is True
 
 
+def test_two_symlinks_to_the_same_dir_a_dag_copy_fully_at_both_dests(tmp_path):
+    # Two DIFFERENT in-prefix directory symlinks pointing at the SAME target is a
+    # DAG, not a cycle. A global visited-set would copy the first and skip the
+    # second (leaving it empty) — a silently incomplete bundle. The recursion-stack
+    # scope (pop on unwind) copies the shared target in FULL at both destinations.
+    prefix = _prefix(tmp_path)
+    tree = prefix / "share" / "pkg" / "data"
+    _plant(tree / "real.txt", "real")
+    shared = prefix / "share" / "pkg" / "shared"
+    _plant(shared / "payload.txt", "PAYLOAD")
+    (tree / "one").symlink_to(shared, target_is_directory=True)
+    (tree / "two").symlink_to(shared, target_is_directory=True)
+
+    staging.stage(
+        tmp_path, [config.StageEntry("pkg", "share/pkg/data", "resources/data")]
+    )
+
+    base = tmp_path / "resources" / "data"
+    assert (base / "one" / "payload.txt").read_text() == "PAYLOAD"
+    assert (base / "two" / "payload.txt").read_text() == "PAYLOAD", (
+        "the second symlink to a shared dir must copy in full, not be skipped"
+    )
+
+
 def test_symlink_cycle_in_the_source_tree_terminates(tmp_path):
     # A directory symlink that points back to an ancestor (a cycle) must not loop
-    # forever: the visited-set of resolved dirs stops it, and the copy completes.
+    # forever: the recursion-stack of resolved dirs stops it, and the copy completes.
     prefix = _prefix(tmp_path)
     tree = prefix / "share" / "pkg" / "data"
     _plant(tree / "real.txt", "real")
@@ -341,6 +388,21 @@ def test_symlink_cycle_in_the_source_tree_terminates(tmp_path):
 
     assert (tmp_path / "resources" / "data" / "real.txt").read_text() == "real"
     assert result.is_dir is True
+
+
+def test_directory_mode_is_preserved(tmp_path):
+    # copystat restores the source dir's mode, so a 0o700 tree is not flattened to
+    # the umask default in the shipped bundle (the round-3 dir-metadata minor).
+    prefix = _prefix(tmp_path)
+    tree = prefix / "share" / "pkg" / "secret"
+    _plant(tree / "f.txt", "x")
+    tree.chmod(0o700)
+
+    staging.stage(
+        tmp_path, [config.StageEntry("pkg", "share/pkg/secret", "resources/secret")]
+    )
+
+    assert (tmp_path / "resources" / "secret").stat().st_mode & 0o777 == 0o700
 
 
 def test_directory_tree_preserves_per_file_exec_bit(tmp_path):

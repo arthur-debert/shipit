@@ -69,11 +69,13 @@ def run(path: str | None = None, *, feature: str | None = None) -> int:
 def format_staged(staged: list[staging.StagedFile]) -> str:
     """The per-copy report: one line per staged file/dir, off the result.
 
-    An empty stage (no `[stage]` map, or a map that copied nothing) says so
-    plainly rather than printing a bare header that pretends work happened.
+    An empty stage says so plainly rather than printing a bare header that pretends
+    work happened — covering all three ways the copy list comes back empty: no
+    `.shipit.toml`, a config with no `[stage]` table, or a `[stage]` map that
+    declared nothing to copy.
     """
     if not staged:
-        return "stage: nothing to stage — no [stage] map declared."
+        return "stage: nothing to stage — the [stage] map is absent or empty."
     lines = [f"stage: copied {len(staged)} item(s) from the env prefix:"]
     for item in staged:
         kind = "dir " if item.is_dir else "file"
