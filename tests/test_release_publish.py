@@ -3275,11 +3275,15 @@ def test_roundtrip_main_skips_cleanly_on_an_unmapped_host(monkeypatch, capsys):
     host — a message and rc 0, never an uncaught `RuntimeError`/traceback. The
     real tests skip via pytest; the runnable `__main__` path must skip too, so
     running `python tools/conda_channel_roundtrip.py` on Windows/Intel-mac does
-    not crash. Needs no real tools: the unmapped-host branch returns before any
-    build/resolve. `shutil.which` is stubbed truthy so the tool-presence gate
-    passes and `_HOST_SUBDIR` is emptied so every host is unmapped."""
+    not crash. The unmapped-host skip must win REGARDLESS of installed tools, so
+    this forces the harder case: `_HOST_SUBDIR` emptied (every host unmapped) AND
+    `shutil.which` -> None (tools ALSO absent). rc must be 0 with the
+    unsupported-host message — never the tool-missing rc 2 — proving the host
+    skip is checked before the tool-presence gate. The `which` stub takes
+    `*args, **kwargs` to match the stdlib `which(cmd, mode=…, path=…)` signature
+    while the global patch is live."""
     roundtrip = _load_roundtrip_harness()
-    monkeypatch.setattr(roundtrip.shutil, "which", lambda _tool: "/usr/bin/stub")
+    monkeypatch.setattr(roundtrip.shutil, "which", lambda *args, **kwargs: None)
     monkeypatch.setattr(roundtrip, "_HOST_SUBDIR", {})
 
     rc = roundtrip._main([])

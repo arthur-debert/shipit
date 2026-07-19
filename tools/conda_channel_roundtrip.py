@@ -235,6 +235,17 @@ def _main(argv: list[str] | None = None) -> int:
     parser.add_argument("--binary", default="roundtrip-demo")
     args = parser.parse_args(argv)
 
+    # The unsupported-host check comes FIRST: a host the round trip can't run on
+    # (Windows / Intel-mac / anything off the mapped unix set) is a clean skip
+    # (message + rc 0, never a traceback) REGARDLESS of which tools are installed
+    # — the host, not a missing tool, is why it can't run. Ordering this after
+    # the tool-presence loop would misreport such a host as a tool-missing rc 2.
+    try:
+        subdir = host_conda_subdir()  # native — so pixi can install it here
+    except RuntimeError as exc:
+        print(f"skipping: {exc} — unsupported host", file=sys.stderr)
+        return 0
+
     for tool in ("rattler-build", "pixi"):
         if shutil.which(tool) is None:
             print(
@@ -243,14 +254,6 @@ def _main(argv: list[str] | None = None) -> int:
             )
             return 2
 
-    try:
-        subdir = host_conda_subdir()  # native — so pixi can install it here
-    except RuntimeError as exc:
-        # Unmapped host (Windows / Intel-mac / anything off the mapped unix set):
-        # the round trip can't run here. A clean skip (message + rc 0), never an
-        # uncaught traceback — this is a documented standalone entry point.
-        print(f"skipping: {exc} — unsupported host", file=sys.stderr)
-        return 0
     with tempfile.TemporaryDirectory(prefix="conda-roundtrip-") as tmp:
         root = Path(tmp)
         channel = root / "channel"
