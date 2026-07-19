@@ -47,11 +47,29 @@ CHANNEL_HOST = "https://storage.googleapis.com"
 
 #: The CLOSED set of conda subdirs the channel serves (ADR-0064: osx-arm64,
 #: linux-64, linux-aarch64, win-64 — no osx-64, no musl). The SoT for "which
-#: subdirs exist", shared by the producer (``release.publish.CONDA_SUBDIRS``
+#: PER-PLATFORM subdirs exist", shared by the producer (``release.publish.CONDA_SUBDIRS``
 #: maps each release triple ONTO one of these; a drift test pins their value set
 #: to this) and the store provisioner (:func:`shipit.channel.store_provision.verify`
 #: probes ``repodata.json`` under EACH of these). Repodata is PER-SUBDIR, so a
 #: root-level probe would miss the real channel layout / a partial publish — the
 #: readiness gate (docs/spec/artifact-channel.md §3) checks all of these, and so
 #: does ``verify``.
+#:
+#: This is the PLATFORM set ONLY; :data:`NOARCH_SUBDIR` is a distinct,
+#: always-present subdir that a TOOL artifact never fans out to and the pause
+#: subtraction (ADR-0071) never touches — deliberately NOT a member here so the
+#: producer↔provisioner drift test (which pins this set to ``CONDA_SUBDIRS``'s
+#: per-platform values) stays exact.
 SERVED_SUBDIRS: tuple[str, ...] = ("osx-arm64", "linux-64", "linux-aarch64", "win-64")
+
+#: The single platform-independent conda subdir cross-repo DATA artifacts ride
+#: (ADR-0076): a ``noarch: generic`` ``.conda`` published to ``noarch/``, which
+#: every conda client reads alongside the platform subdir it resolves. UNLIKE
+#: the per-platform :data:`SERVED_SUBDIRS`, ``noarch`` is ONE subdir with no
+#: OS×arch fan-out and no ``win-64`` analogue to pause: a served data artifact is
+#: present when its ``noarch/`` package resolves — a single probe, never a
+#: per-platform sweep and never subject to the ADR-0071 pause subtraction. Kept
+#: OUT of ``SERVED_SUBDIRS`` on purpose (the producer maps triples only onto the
+#: platform set; a data artifact has no triple), so the two are separate SoTs the
+#: producer, provisioner, and readiness gate all import.
+NOARCH_SUBDIR: str = "noarch"

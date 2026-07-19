@@ -154,6 +154,23 @@ rust = "1.96.*"
 # the full gate runs; docker itself is host-provided (GH runners and dev
 # machines carry it) — the smoke skips, loudly, when the daemon is absent.
 act = "0.2.*"
+# The conda producer's packager (ADR-0064/0076): the REAL conda-repackage tests
+# in tests/test_release_publish.py drive an ACTUAL `rattler-build build` — the
+# faked seam hid all the original conda-producer bugs (#1050/#1053 lesson), so
+# the noarch producer path (ADR-0076) is exercised end-to-end here. Pinned to
+# the same minor line the managed rust-release-deps block ships
+# (`0.69.*`, src/shipit/data/pixi-rust-release-deps-block.toml) so the test runs
+# the version releases run; a real-build test `skipif`s loudly when the binary
+# is absent from an unusual host env.
+rattler-build = "0.69.*"
+# Lets the REAL conda-repackage test read the built `.conda` (a zip of
+# zstd-compressed tars) and assert its file layout — the recipe-copy class of
+# bug (#1049) is exactly a "wrong files in the package" defect, so the real
+# test verifies the payload lands under `share/<pkg>/` with no rattler-build
+# scaffolding swept in. Test-only; the producer path itself needs no zstd lib.
+# Pinned to the minor line pixi.lock already resolves (`0.25.0`), matching the
+# file's pinned-dependency pattern so a lock refresh stays deterministic.
+zstandard = "0.25.*"
 
 [feature.test.tasks]
 # The full-gate suite, THROUGH the test verb (TOL01-WS01, ADR-0039): the task is a
