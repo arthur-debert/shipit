@@ -109,6 +109,15 @@ def _insert_under_anchor(text: str, anchor: str, block: str) -> str:
 #: it verbatim. Mirrors :data:`SETTINGS_MALFORMED` for the JSON-hook variant.
 ENV_MEMBER_MALFORMED = "\x00shipit-pixi-env-malformed\x00"
 
+#: Sentinel inner for an ``env`` that EXISTS but in a form this splicer cannot
+#: safely merge into (its features are not a plain list, or the assignment text
+#: can't be located to edit — e.g. a top-level dotted key with no ``[environments]``
+#: header). Distinct from "absent": if the read said "absent" here, the reconcile
+#: would decide an ADD the write can't apply and re-propose it forever. Reading it
+#: as present-but-divergent (OVERRIDE) surfaces the env for a human and STOPS the
+#: non-converging loop — the write leaves such a manifest verbatim (T2 fix).
+ENV_MEMBER_UNSUPPORTED = "\x00shipit-pixi-env-unsupported\x00"
+
 
 def _env_features(spec: object) -> list[str] | None:
     """The feature list an ``[environments]`` entry composes, or ``None``.
@@ -121,19 +130,60 @@ def _env_features(spec: object) -> list[str] | None:
     return [str(f) for f in feats] if isinstance(feats, list) else None
 
 
+def _table_header(stripped_line: str) -> str:
+    """A TOML table-header line reduced to its bare ``[table]`` form.
+
+    A valid header may carry a trailing inline comment or whitespace
+    (``[environments]  # my envs``); comparing the raw line to ``"[environments]"``
+    would miss it and the merge would never find the table (T3). Truncating at the
+    header's own closing ``]`` normalizes both — a non-header line (no ``]``) is
+    returned unchanged so the caller's ``startswith("[")`` gate still decides.
+    """
+    close = stripped_line.find("]")
+    return stripped_line[: close + 1] if close != -1 else stripped_line
+
+
+def _locate_env_assignment(text: str, env: str) -> tuple[int, int] | None:
+    """The ``(value_start, value_end)`` offsets of ``env``'s value under
+    ``[environments]``, or ``None`` when no inline-value assignment can be located.
+
+    Used by BOTH the read (can this env be merged into?) and the write, so the
+    reconcile never decides an ADD the splice cannot apply."""
+    lines = text.splitlines(keepends=True)
+    in_table = False
+    key = re.compile(
+        rf"""^\s*(?:{re.escape(env)}|"{re.escape(env)}"|'{re.escape(env)}')\s*=\s*"""
+    )
+    offset = 0
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("[") and not stripped.startswith("[["):
+            in_table = _table_header(stripped) == "[environments]"
+        elif in_table:
+            m = key.match(line)
+            if m:
+                value_start = offset + m.end()
+                value_end = _value_end(text, value_start)
+                return None if value_end == value_start else (value_start, value_end)
+        offset += len(line)
+    return None
+
+
 def extract_env_member(text: str, env: str, required: Sequence[str]) -> str | None:
     """The managed membership token when ``env`` composes every ``required`` feature.
 
-    In lockstep with :func:`splice_env_member`, three outcomes:
+    In lockstep with :func:`splice_env_member`, four outcomes:
 
       - the ``env`` entry composes all ``required`` features -> the canonical
         token (NOOP by hash — the managed invariant already holds).
       - empty file, no ``[environments]`` table, no ``env`` entry, or an ``env``
-        that is MISSING a required feature -> ``None`` ("absent" -> ADD; the write
-        creates the entry or merges the missing feature into it).
-      - **unparseable pixi.toml** -> a non-``None`` sentinel read as
-        present-but-divergent (OVERRIDE): a malformed manifest is a CONFLICT to
-        surface, never a file the reconcile silently rewrites.
+        MISSING a required feature that the write CAN merge into -> ``None``
+        ("absent" -> ADD; the write creates the entry or appends the feature).
+      - an ``env`` that exists in a form the write cannot merge into (features not
+        a plain list, or the assignment can't be located) -> the UNSUPPORTED
+        sentinel, read as present-but-divergent (OVERRIDE) so the reconcile
+        surfaces it instead of proposing an ADD that never applies (T2).
+      - **unparseable pixi.toml** -> the MALFORMED sentinel, likewise OVERRIDE.
     """
     if not text.strip():
         return None
@@ -144,11 +194,17 @@ def extract_env_member(text: str, env: str, required: Sequence[str]) -> str | No
     environments = manifest.get("environments")
     spec = environments.get(env) if isinstance(environments, dict) else None
     if spec is None:
-        return None
+        return None  # env absent → ADD-create (the write always creates cleanly)
     features = _env_features(spec)
-    if features is None or any(r not in features for r in required):
-        return None
-    return env_member_token(env, required)
+    if features is None:
+        return ENV_MEMBER_UNSUPPORTED  # present, but not a form we can merge into
+    if all(r in features for r in required):
+        return env_member_token(env, required)  # already satisfied → NOOP
+    # Missing a required feature: the write must append it — but only if the
+    # assignment text is locatable. Otherwise surface it rather than loop.
+    if _locate_env_assignment(text, env) is None:
+        return ENV_MEMBER_UNSUPPORTED
+    return None
 
 
 def _toml_string(value: str) -> str:
@@ -157,10 +213,9 @@ def _toml_string(value: str) -> str:
     return f'"{escaped}"'
 
 
-def _render_features(features: Sequence[str], as_table: bool) -> str:
-    """Render a feature list back in the form the consumer used (list or table)."""
-    array = "[" + ", ".join(_toml_string(f) for f in features) + "]"
-    return f"{{ features = {array} }}" if as_table else array
+def _render_array(features: Sequence[str]) -> str:
+    """A feature list as an inline TOML array."""
+    return "[" + ", ".join(_toml_string(f) for f in features) + "]"
 
 
 def _value_end(text: str, start: int) -> int:
@@ -195,38 +250,38 @@ def _value_end(text: str, start: int) -> int:
     return start  # unbalanced — leave the value untouched
 
 
-def _replace_env_features(
-    text: str, env: str, features: Sequence[str], as_table: bool
-) -> str | None:
-    """Rewrite ``env``'s feature list under ``[environments]`` in place.
+#: The ``features = [...]`` key WITHIN an inline env table — matched as a real key
+#: (preceded by ``{``/``,``/start, never mid-identifier) so only the array is
+#: rewritten and every sibling key (``solve-group``, ``no-default-feature``, …) is
+#: preserved verbatim (T1).
+_TABLE_FEATURES_KEY = re.compile(r"(?<![\w-])features\s*=\s*")
 
-    Preserves everything but the one value it rewrites. Returns ``None`` when the
-    assignment is not the inline form this splicer edits (so the caller can leave
-    the file untouched rather than corrupt it)."""
-    lines = text.splitlines(keepends=True)
-    in_table = False
-    key = re.compile(
-        rf"""^\s*(?:{re.escape(env)}|"{re.escape(env)}"|'{re.escape(env)}')\s*=\s*"""
-    )
-    offset = 0
-    for line in lines:
-        header = line.strip()
-        if header.startswith("[") and not header.startswith("[["):
-            in_table = header == "[environments]"
-        elif in_table:
-            m = key.match(line)
-            if m:
-                value_start = offset + m.end()
-                value_end = _value_end(text, value_start)
-                if value_end == value_start:
-                    return None  # not a bracketed inline value — do not edit
-                return (
-                    text[:value_start]
-                    + _render_features(features, as_table)
-                    + text[value_end:]
-                )
-        offset += len(line)
-    return None
+
+def _merge_env_features(
+    text: str, env: str, features: Sequence[str], is_table: bool
+) -> str | None:
+    """Rewrite ONLY ``env``'s feature array under ``[environments]`` in place.
+
+    List form (``lint = ["lint"]``) rewrites the whole value. Table form
+    (``lint = { features = ["lint"], solve-group = "s" }``) rewrites ONLY the
+    ``features`` array, leaving every other inline-table key untouched (T1).
+    Returns ``None`` when nothing can be safely located (the caller then leaves the
+    file verbatim; the read path already classified it UNSUPPORTED)."""
+    located = _locate_env_assignment(text, env)
+    if located is None:
+        return None
+    value_start, value_end = located
+    if not is_table:
+        return text[:value_start] + _render_array(features) + text[value_end:]
+    table = text[value_start:value_end]
+    key_match = _TABLE_FEATURES_KEY.search(table)
+    if key_match is None:
+        return None
+    array_start = value_start + key_match.end()
+    array_end = _value_end(text, array_start)
+    if array_end == array_start:
+        return None
+    return text[:array_start] + _render_array(features) + text[array_end:]
 
 
 def splice_env_member(
@@ -241,12 +296,12 @@ def splice_env_member(
       - ``env`` exists and already composes every ``required`` feature -> return
         unchanged (idempotent NOOP).
       - ``env`` exists but MISSES a required feature -> append the missing one(s)
-        to the consumer's own list, preserving their other features.
+        to the consumer's own list, preserving their other features (and, in the
+        table form, every other inline-table key — T1).
 
     Fail-safe like :func:`splice_settings_hook`: an unparseable manifest, or an
-    ``env`` in a form this splicer does not edit, is returned verbatim (the read
-    path classified the first as an OVERRIDE conflict; the second stays the
-    consumer's own).
+    ``env`` in a form this splicer cannot merge into, is returned verbatim (the
+    read path already classified it as an OVERRIDE conflict to surface).
     """
     stripped = text.strip()
     if stripped:
@@ -260,17 +315,17 @@ def splice_env_member(
     environments = manifest.get("environments")
     spec = environments.get(env) if isinstance(environments, dict) else None
     if spec is None:
-        line = f"{env} = {_render_features(stock_features, as_table=False)}"
+        line = f"{env} = {_render_array(stock_features)}"
         return _insert_under_anchor(text, "[environments]", line)
     features = _env_features(spec)
     if features is None:
-        return text  # a form this splicer does not edit → leave it the consumer's own
+        return text  # a form this splicer cannot merge into → leave it verbatim
     missing = [r for r in required if r not in features]
     if not missing:
         return text  # the managed invariant already holds — idempotent NOOP
     merged = list(features) + missing
-    replaced = _replace_env_features(text, env, merged, as_table=isinstance(spec, dict))
-    return text if replaced is None else replaced
+    result = _merge_env_features(text, env, merged, is_table=isinstance(spec, dict))
+    return text if result is None else result
 
 
 # --------------------------------------------------------------------------

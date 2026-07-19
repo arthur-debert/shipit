@@ -29,6 +29,7 @@ from .errors import InstallError, SelfCertError
 from .reconcile import DELETE, KEEP, Plan, consumer_inner, format_lefthook_conflict
 from .splice import (
     ENV_MEMBER_MALFORMED,
+    ENV_MEMBER_UNSUPPORTED,
     SETTINGS_MALFORMED,
     remove_retired_hooks,
     splice_block,
@@ -264,9 +265,10 @@ def consumer_snapshot(root: Path, unit: Unit) -> str:
     """The consumer's current text for a unit — captured BEFORE any overwrite."""
     if unit.kind == "block":
         inner = consumer_inner(root, unit)
-        if inner in (SETTINGS_MALFORMED, ENV_MEMBER_MALFORMED):
-            # A malformed settings.json / pixi.toml has no clean managed region;
-            # surface the whole file so the OVERRIDE diff shows the real content.
+        if inner in (SETTINGS_MALFORMED, ENV_MEMBER_MALFORMED, ENV_MEMBER_UNSUPPORTED):
+            # A malformed settings.json / pixi.toml, or an env in a form shipit
+            # cannot merge into, has no clean managed region; surface the whole
+            # file so the OVERRIDE diff shows the real content.
             dest = root / unit.dest
             return (
                 dest.read_text(encoding="utf-8", errors="replace")

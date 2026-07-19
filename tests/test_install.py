@@ -244,6 +244,60 @@ def test_extract_env_member_reads_membership_as_present_or_absent():
     )
 
 
+def test_splice_env_member_table_form_preserves_every_sibling_key():
+    # T1 (codex MAJOR): a table-form env carries more than `features` — merging
+    # lexd must rewrite ONLY the features array and leave every sibling key intact
+    # (dropping solve-group / no-default-feature would silently change solving).
+    text = (
+        "[environments]\n"
+        'lint = { features = ["lint"], solve-group = "shared", '
+        "no-default-feature = true }\n"
+    )
+    spec = tomllib.loads(
+        splice.splice_env_member(text, "lint", _STOCK_LINT_ENV, _LEXD)
+    )["environments"]["lint"]
+    assert spec["features"] == ["lint", "shipit-lexd"]
+    assert spec["solve-group"] == "shared"
+    assert spec["no-default-feature"] is True
+
+
+def test_splice_env_member_finds_a_commented_environments_header():
+    # T3 (copilot): a valid `[environments]` header with a trailing inline comment
+    # must still be located, or lexd never injects and the reconcile never
+    # converges (a phantom ADD every run).
+    text = '[environments]  # my envs\nlint = ["lint"]\n'
+    out = splice.splice_env_member(text, "lint", _STOCK_LINT_ENV, _LEXD)
+    assert _lint_features(out) == ["lint", "shipit-lexd"]
+    # ...and the read now agrees it is satisfied — the loop is closed.
+    assert splice.extract_env_member(out, "lint", _LEXD) == iunits.env_member_token(
+        "lint", _LEXD
+    )
+
+
+def test_env_member_unsupported_form_surfaces_instead_of_looping():
+    # T2 (copilot): an env in a form the splicer cannot merge into must NOT read as
+    # "absent" — that would decide an ADD the write can't apply and re-propose it
+    # forever. It reads as the UNSUPPORTED sentinel (→ OVERRIDE, surfaced) and the
+    # write leaves the file verbatim.
+    not_a_list = '[environments]\nlint = { features = "lint" }\n'
+    assert (
+        splice.extract_env_member(not_a_list, "lint", _LEXD)
+        == splice.ENV_MEMBER_UNSUPPORTED
+    )
+    assert (
+        splice.splice_env_member(not_a_list, "lint", _STOCK_LINT_ENV, _LEXD)
+        == not_a_list
+    )
+    # A top-level dotted key (no `[environments]` header to splice under) is also
+    # unlocatable → surfaced, not silently re-proposed.
+    dotted = 'environments.lint = ["lint"]\n'
+    assert (
+        splice.extract_env_member(dotted, "lint", _LEXD)
+        == splice.ENV_MEMBER_UNSUPPORTED
+    )
+    assert splice.splice_env_member(dotted, "lint", _STOCK_LINT_ENV, _LEXD) == dotted
+
+
 # --------------------------------------------------------------------------
 # The lint-check units (Step 3) — lefthook caller + pixi [tasks] block
 # --------------------------------------------------------------------------
@@ -4568,6 +4622,42 @@ def test_lint_env_merges_lexd_into_a_consumer_owned_lint_env(tmp_path, rec):
     # The membership was recorded pristine, so an unchanged re-install is a NOOP —
     # the merge never re-fires and never duplicates the `lint` key.
     assert _plan(tmp_path).nothing_to_do
+
+
+def test_lint_env_table_form_install_preserves_solve_group(tmp_path, rec):
+    # T1 end-to-end: a real install into a consumer whose lint env is a table with
+    # solve-group keeps that key while wiring lexd in.
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    (tmp_path / "pixi.toml").write_text(
+        '[workspace]\nname = "acme"\nchannels = ["conda-forge"]\n'
+        'platforms = ["osx-arm64"]\n\n[environments]\n'
+        'lint = { features = ["lint"], solve-group = "shared" }\n'
+    )
+    _apply(tmp_path)
+
+    lint_env = tomllib.loads((tmp_path / "pixi.toml").read_text())["environments"][
+        "lint"
+    ]
+    assert lint_env == {"features": ["lint", "shipit-lexd"], "solve-group": "shared"}
+    assert _plan(tmp_path).nothing_to_do
+
+
+def test_lint_env_unsupported_form_is_surfaced_not_looped(tmp_path, rec):
+    # T2 end-to-end: a lint env in a form shipit cannot merge into is classified an
+    # OVERRIDE (surfaced), NEVER an ADD the write can't apply and re-proposes every
+    # run, and the consumer's env is left verbatim.
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    (tmp_path / "pixi.toml").write_text(
+        '[workspace]\nname = "acme"\nchannels = ["conda-forge"]\n'
+        'platforms = ["osx-arm64"]\n\n[environments]\nlint = { features = "lint" }\n'
+    )
+    plan = _plan(tmp_path)
+    env_decisions = [d for d in plan.decisions if d.unit.key == iunits.PIXI_ENVS_KEY]
+    assert [d.action for d in env_decisions] == [irec.OVERRIDE]
+
+    _apply(tmp_path)
+    # The unsupported env is left exactly as the consumer wrote it — never clobbered.
+    assert '{ features = "lint" }' in (tmp_path / "pixi.toml").read_text()
 
 
 def test_lint_env_membership_preserves_a_consumer_extra_feature(tmp_path, rec):
