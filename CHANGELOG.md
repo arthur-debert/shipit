@@ -4,6 +4,8 @@
 
 ## Unreleased
 
+## 1.4.1 - 2026-07-19
+
 - cascade: the generated `shipit-artifact-cascade.yml` receive workflow now
   passes shipit's own strict yamllint and invokes the launcher through the `--`
   separator (#1057). The generator's foreign-dispatch guard echo was shortened
