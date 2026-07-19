@@ -314,9 +314,14 @@ shipit = { path = ".", editable = true }
 verify-spawn = "python -m shipit.spawn.dogfood"
 
 [environments]
-# >>> shipit-managed environments (do not edit; regenerate via `shipit install`) >>>
+# The lint env composes the managed `shipit-lexd` feature (ARF02-WS06, ADR-0066),
+# so lexd rides pixi.lock from the Artifact channel. `shipit install` treats this
+# membership as a managed invariant (ADR-0047) and MERGES `shipit-lexd` into
+# whatever `lint` env a consumer declares — appending it, preserving the
+# consumer's own base features — rather than owning the whole line behind a marker
+# fence (which a consumer-authored `lint` env would collide with, leaving lexd
+# unwired). shipit carries the composed form verbatim so its self-install NOOPs.
 lint = ["lint", "shipit-lexd"]
-# <<< shipit-managed environments <<<
 # The full-gate test env: default feature (core linters + pytest + shipit editable)
 # plus the `test` feature's Rust toolchain AND its `test` task, so the hermeticity
 # invariance gate runs its rust/lex cases instead of skipping them (#532). It is the

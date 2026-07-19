@@ -22,6 +22,9 @@ their event array, with shipit's OWN managed entries protected by their
 from __future__ import annotations
 
 import json
+import re
+import tomllib
+from collections.abc import Sequence
 
 from .units import (
     BLOCK_CLOSE,
@@ -30,6 +33,7 @@ from .units import (
     MANAGED_HOOK_COMMAND_MARKER,
     SETTINGS_HOOK_MARKER,
     canonical_hook_entry,
+    env_member_token,
 )
 
 
@@ -84,6 +88,189 @@ def _insert_under_anchor(text: str, anchor: str, block: str) -> str:
     base = text.rstrip("\n")
     sep = "\n\n" if base else ""
     return f"{base}{sep}{anchor}\n{block}\n"
+
+
+# --------------------------------------------------------------------------
+# Environment-membership merge — pixi `[environments]` (the FMT_ENV_MEMBER variant)
+#
+# The lint env must COMPOSE the managed `shipit-lexd` feature (ADR-0066: the
+# fleet-uniform lexd gate), but WHICH base features the env carries is the
+# consumer's own config (ADR-0047). A plain marker block cannot express that: it
+# owns the whole `lint = [...]` line, so a consumer who already declares
+# `[environments] lint` collides on the key and the block is skipped — leaving
+# lexd unwired (lint breaks with no `provision` fallback). This variant owns ONLY
+# `shipit-lexd`'s MEMBERSHIP in the env's feature list — like the JSON-hook
+# variant owns just shipit's one entry in a consumer-owned hooks array — so the
+# consumer's other features merge through untouched and the merge is idempotent.
+# --------------------------------------------------------------------------
+
+#: Sentinel inner for a pixi.toml that exists but is unparseable — read as
+#: present-but-divergent (OVERRIDE, surfaced for a human), and the write preserves
+#: it verbatim. Mirrors :data:`SETTINGS_MALFORMED` for the JSON-hook variant.
+ENV_MEMBER_MALFORMED = "\x00shipit-pixi-env-malformed\x00"
+
+
+def _env_features(spec: object) -> list[str] | None:
+    """The feature list an ``[environments]`` entry composes, or ``None``.
+
+    pixi accepts either a bare list (``lint = ["lint"]``) or a table
+    (``lint = { features = ["lint"] }``); both forms yield the list here. A form
+    this splicer does not edit (a non-list ``features``) yields ``None``.
+    """
+    feats = spec.get("features") if isinstance(spec, dict) else spec
+    return [str(f) for f in feats] if isinstance(feats, list) else None
+
+
+def extract_env_member(text: str, env: str, required: Sequence[str]) -> str | None:
+    """The managed membership token when ``env`` composes every ``required`` feature.
+
+    In lockstep with :func:`splice_env_member`, three outcomes:
+
+      - the ``env`` entry composes all ``required`` features -> the canonical
+        token (NOOP by hash — the managed invariant already holds).
+      - empty file, no ``[environments]`` table, no ``env`` entry, or an ``env``
+        that is MISSING a required feature -> ``None`` ("absent" -> ADD; the write
+        creates the entry or merges the missing feature into it).
+      - **unparseable pixi.toml** -> a non-``None`` sentinel read as
+        present-but-divergent (OVERRIDE): a malformed manifest is a CONFLICT to
+        surface, never a file the reconcile silently rewrites.
+    """
+    if not text.strip():
+        return None
+    try:
+        manifest = tomllib.loads(text)
+    except tomllib.TOMLDecodeError:
+        return ENV_MEMBER_MALFORMED
+    environments = manifest.get("environments")
+    spec = environments.get(env) if isinstance(environments, dict) else None
+    if spec is None:
+        return None
+    features = _env_features(spec)
+    if features is None or any(r not in features for r in required):
+        return None
+    return env_member_token(env, required)
+
+
+def _toml_string(value: str) -> str:
+    """``value`` as a TOML basic string (the only escaping a feature name needs)."""
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def _render_features(features: Sequence[str], as_table: bool) -> str:
+    """Render a feature list back in the form the consumer used (list or table)."""
+    array = "[" + ", ".join(_toml_string(f) for f in features) + "]"
+    return f"{{ features = {array} }}" if as_table else array
+
+
+def _value_end(text: str, start: int) -> int:
+    """The offset just past the (possibly multi-line) inline value at ``start``.
+
+    Walks one balanced ``[...]``/``{...}`` value, honoring quoted strings so a
+    bracket inside a string never miscounts. Returns ``start`` unchanged when the
+    value is not a bracketed inline value (a form this splicer leaves alone).
+    """
+    if start >= len(text) or text[start] not in "[{":
+        return start
+    depth = 0
+    quote: str | None = None
+    i = start
+    while i < len(text):
+        ch = text[i]
+        if quote is not None:
+            if ch == "\\" and quote == '"':
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+        elif ch in "\"'":
+            quote = ch
+        elif ch in "[{":
+            depth += 1
+        elif ch in "]}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return start  # unbalanced — leave the value untouched
+
+
+def _replace_env_features(
+    text: str, env: str, features: Sequence[str], as_table: bool
+) -> str | None:
+    """Rewrite ``env``'s feature list under ``[environments]`` in place.
+
+    Preserves everything but the one value it rewrites. Returns ``None`` when the
+    assignment is not the inline form this splicer edits (so the caller can leave
+    the file untouched rather than corrupt it)."""
+    lines = text.splitlines(keepends=True)
+    in_table = False
+    key = re.compile(
+        rf"""^\s*(?:{re.escape(env)}|"{re.escape(env)}"|'{re.escape(env)}')\s*=\s*"""
+    )
+    offset = 0
+    for line in lines:
+        header = line.strip()
+        if header.startswith("[") and not header.startswith("[["):
+            in_table = header == "[environments]"
+        elif in_table:
+            m = key.match(line)
+            if m:
+                value_start = offset + m.end()
+                value_end = _value_end(text, value_start)
+                if value_end == value_start:
+                    return None  # not a bracketed inline value — do not edit
+                return (
+                    text[:value_start]
+                    + _render_features(features, as_table)
+                    + text[value_end:]
+                )
+        offset += len(line)
+    return None
+
+
+def splice_env_member(
+    text: str, env: str, stock_line: str, required: Sequence[str]
+) -> str:
+    """Ensure ``env`` composes every ``required`` feature, merging (never replacing).
+
+    Owns ONLY the ``required`` features' membership in ``env``:
+
+      - no ``env`` entry yet -> create it from ``stock_line`` (the packaged
+        default, e.g. ``lint = ["lint", "shipit-lexd"]``) under ``[environments]``.
+      - ``env`` exists and already composes every ``required`` feature -> return
+        unchanged (idempotent NOOP).
+      - ``env`` exists but MISSES a required feature -> append the missing one(s)
+        to the consumer's own list, preserving their other features.
+
+    Fail-safe like :func:`splice_settings_hook`: an unparseable manifest, or an
+    ``env`` in a form this splicer does not edit, is returned verbatim (the read
+    path classified the first as an OVERRIDE conflict; the second stays the
+    consumer's own).
+    """
+    stripped = text.strip()
+    if stripped:
+        try:
+            manifest = tomllib.loads(text)
+        except tomllib.TOMLDecodeError:
+            return text  # malformed → preserve, never clobber (conflict surfaced)
+    else:
+        manifest = {}
+    stock_features = tomllib.loads(stock_line).get(env, [])
+    environments = manifest.get("environments")
+    spec = environments.get(env) if isinstance(environments, dict) else None
+    if spec is None:
+        line = f"{env} = {_render_features(stock_features, as_table=False)}"
+        return _insert_under_anchor(text, "[environments]", line)
+    features = _env_features(spec)
+    if features is None:
+        return text  # a form this splicer does not edit → leave it the consumer's own
+    missing = [r for r in required if r not in features]
+    if not missing:
+        return text  # the managed invariant already holds — idempotent NOOP
+    merged = list(features) + missing
+    replaced = _replace_env_features(text, env, merged, as_table=isinstance(spec, dict))
+    return text if replaced is None else replaced
 
 
 # --------------------------------------------------------------------------
