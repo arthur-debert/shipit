@@ -1186,20 +1186,29 @@ def load_artifacts(cfg: dict) -> tuple[Artifact, ...]:
 # The [artifact-deps] map — cross-repo Artifact-channel consumption (ARF01-WS02)
 # --------------------------------------------------------------------------
 #
-# The CONSUMER side of the Artifact channel (ADR-0064/0065, #952). A downstream
-# repo declares a cross-repo artifact-pinned dependency as
-# `[artifact-deps.<pkg>]`, and `shipit install` PROJECTS it into a managed pixi
-# block (:mod:`shipit.install.artifactdeps`) so pixi resolves/locks/fetches it
-# like any other dependency and a `version` bump re-resolves transparently:
+# The CONSUMER side of the Artifact channel (ADR-0064/0065/0077, #952, #1092).
+# Under conda-direct the declaration is split by OWNERSHIP:
 #
 #     [artifact-deps.lexd-lsp]
-#     repo    = "lex-fmt/lex"    # the PRODUCING repo (owner/name)
-#     version = "0.19.3"         # a conda/pixi version match-spec
-#     # feature = "lint"         # optional: the pixi feature/env to target
+#     repo = "lex-fmt/lex"        # the PRODUCING repo (owner/name) — the SOLE input
+#     # feature = "lint"          # optional: the pixi feature/env to target
+#
+#     [feature.shipit-artifacts.dependencies]   # (or shipit-artifacts-<feature>)
+#     lexd-lsp = "0.19.3"         # the CONSUMER-OWNED version pin
+#
+# `[artifact-deps.<pkg>] { repo }` is the sole input from which `shipit install`
+# derives and PROJECTS a managed channel block (:mod:`shipit.install.artifactdeps`
+# — `[feature.shipit-artifacts]` `channels`, plus a private-tier `[s3-options]`);
+# the URL is never restated. The VERSION is NOT declared here (ADR-0077): the
+# consumer pins the package as an ordinary pixi dependency in the SAME feature
+# that carries the channel — `[feature.shipit-artifacts[-<feature>].dependencies]`
+# — so pixi resolves the pin against the derived channel, `pixi.lock` records it,
+# and a generic bot (`pixi update` / Renovate) bumps it. A stray `version` here is
+# refused loudly (NO backwards compat — see :func:`_parse_artifact_dep`).
 #
 # The section KEY doubles as the conda package name — it names the package (a
 # tool artifact installs a binary, a data artifact installs files), NOT an
-# executable contract. Only cross-repo artifact pins live here; ordinary
+# executable contract. Only cross-repo artifact references live here; ordinary
 # conda-forge deps stay consumer-authored in pixi. The access TIER (public /
 # private) is DERIVED from the producing repo's visibility at projection time
 # (ADR-0065), never declared here — one less thing to drift. A public producing
@@ -1209,11 +1218,12 @@ def load_artifacts(cfg: dict) -> tuple[Artifact, ...]:
 
 #: The per-entry keys `[artifact-deps.<pkg>]` accepts; anything else is a typo
 #: that dies at parse (the same closed-registry philosophy as `_KNOWN_TABLES`).
-#: Under conda-direct (ADR-0077) `repo` is the sole REQUIRED input — the block
-#: shrinks to its `{ repo }` channel-derivation fact. `version` stays ACCEPTED
-#: but optional and unprojected (the consumer-owned `[dependencies]` pin replaces
-#: it); it is the per-consumer migration surface until Cascade is removed with it.
-_ARTIFACT_DEP_KEYS = ("repo", "version", "feature")
+#: Under conda-direct (ADR-0077) `repo` is the sole channel-derivation input and
+#: `feature` the optional target — the block is JUST its `{ repo }` reference. A
+#: `version` here is NOT accepted (the pin is consumer-owned, in the artifact's
+#: pixi feature); it is caught with a migration-pointing message before this
+#: closed-key check, so the reject names the fix, not a bare "unknown key".
+_ARTIFACT_DEP_KEYS = ("repo", "feature")
 
 #: The shape a `[artifact-deps.<pkg>]` section KEY — which doubles as the conda
 #: package name — must take: conda's package-name vocabulary (LOWERCASE letters,
@@ -1253,22 +1263,18 @@ class ArtifactDep:
       Under conda-direct (ADR-0077) this ``{ repo }`` is the SOLE required input:
       it is the single fact from which shipit projects the managed
       ``channels``/``[s3-options]`` block, and it never restates the URL.
-    - ``version`` is OPTIONAL and no longer projected. Under conda-direct the
-      version is CONSUMER-OWNED — a plain ``[dependencies] <pkg> = "…"`` line
-      pinned by ``pixi.lock`` and bumped by ``pixi update`` / a generic bot — so
-      the projection ignores it (:mod:`shipit.install.artifactdeps` emits no pin).
-      It is still ACCEPTED (``None`` when absent) as the per-consumer migration
-      surface: an un-migrated repo that still carries ``version`` here parses, and
-      the release-side Cascade (:mod:`shipit.release.cascade_receive`) still bumps
-      it, until Cascade is removed with the field (ADR-0077 task 3 — the coupled
-      bundle this collapse hands to a generic dependency bot).
     - ``feature`` is the OPTIONAL pixi feature/env the projection targets;
       ``None`` targets the default environment.
+
+    There is deliberately NO ``version`` field (ADR-0077): the version is
+    CONSUMER-OWNED, pinned as an ordinary pixi dependency in the SAME feature that
+    carries the derived channel (``[feature.shipit-artifacts[-<feature>]``
+    ``.dependencies].<pkg>``), resolved against the channel by ``pixi.lock`` and
+    bumped by a generic bot. A ``version`` key here is refused loudly at parse.
     """
 
     package: str
     repo: str
-    version: str | None = None
     feature: str | None = None
 
 
@@ -1281,12 +1287,12 @@ def _parse_artifact_dep(package: str, spec: object) -> ArtifactDep:
     slug parser (:func:`shipit.identity.repo_from_slug`) so a non-``owner/name``
     value is refused here, not discovered when the channel URL is derived.
 
-    Under conda-direct (ADR-0077) ``{ repo }`` alone is a complete declaration:
-    ``version`` is optional and unprojected (the consumer owns it as a plain
-    ``[dependencies]`` pin), so a bare ``[artifact-deps.<pkg>] { repo }`` parses.
-    A ``version`` that IS present must still be a non-empty string — a stray
-    ``version = ""`` is a typo, not "conda-direct" — so the migration surface
-    stays loud on garbage while accepting its own absence.
+    Under conda-direct (ADR-0077) ``{ repo }`` (plus an optional ``feature``) is
+    the WHOLE declaration — the version is consumer-owned, in the artifact's pixi
+    feature, not here. A legacy ``version`` key is refused loudly BEFORE the
+    closed-key check, with a migration-pointing message (NO backwards compat: the
+    old shape is not silently accepted-and-ignored, which would de-provision the
+    pin on the next ``shipit install``).
     """
     where = f"[artifact-deps].{package}"
     if not _CONDA_PKG_KEY_RE.match(package):
@@ -1298,6 +1304,16 @@ def _parse_artifact_dep(package: str, spec: object) -> ArtifactDep:
     if not isinstance(spec, dict):
         raise ConfigError(
             f'{where} must be a table, e.g. {{ repo = "owner/name" }}; got {spec!r}'
+        )
+    if "version" in spec:
+        raise ConfigError(
+            f"{where}.version is no longer allowed (conda-direct, ADR-0077): the "
+            f"version is consumer-owned. Remove it here and declare the pin in the "
+            f"artifact's pixi feature — the SAME feature that carries the derived "
+            f"channel — e.g. `[feature.shipit-artifacts.dependencies] {package} = "
+            f'"{spec["version"]}"` (or `[feature.shipit-artifacts-<feature>'
+            f".dependencies]` for a named `feature`), so `pixi.lock` resolves it "
+            f"against the channel and a generic bot bumps it."
         )
     _reject_unknown_keys(where, spec, _ARTIFACT_DEP_KEYS)
 
@@ -1312,16 +1328,6 @@ def _parse_artifact_dep(package: str, spec: object) -> ArtifactDep:
     except ValueError as exc:
         raise ConfigError(f"{where}.repo: {exc}") from exc
 
-    version = spec.get("version")
-    if version is not None and (not isinstance(version, str) or not version):
-        raise ConfigError(
-            f"{where}.version, when present, must be a non-empty version "
-            f'match-spec string, e.g. "0.19.3" or "0.19.*"; got {version!r}. '
-            f"Under conda-direct (ADR-0077) the version is consumer-owned — "
-            f'prefer a plain `[dependencies] {package} = "…"` pin over declaring '
-            f"it here."
-        )
-
     feature = spec.get("feature")
     if feature is not None:
         if not isinstance(feature, str) or not _FEATURE_NAME_RE.match(feature):
@@ -1330,9 +1336,7 @@ def _parse_artifact_dep(package: str, spec: object) -> ArtifactDep:
                 f"'.', '-', '_'); got {feature!r}"
             )
 
-    return ArtifactDep(
-        package=package, repo=canonical, version=version, feature=feature
-    )
+    return ArtifactDep(package=package, repo=canonical, feature=feature)
 
 
 def load_artifact_deps(cfg: dict) -> tuple[ArtifactDep, ...]:

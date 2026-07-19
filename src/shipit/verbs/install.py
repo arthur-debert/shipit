@@ -43,7 +43,6 @@ from pathlib import Path
 import click
 
 from .. import config, events, gh, git, identity, sessionstore
-from ..channel import cascade_receive
 from ..install import artifactdeps
 from ..install import units as install_units
 from ..install.apply import (
@@ -215,8 +214,12 @@ def _artifact_dep_units(root: Path, *, is_private=gh.repo_is_private) -> list[Un
     (construction-is-validation — a MALFORMED entry fails loudly HERE, exactly
     like the toolchain/artifact maps, so ``shipit install`` aborts rather than
     projecting a broken block), and the pure network-free projection core
-    (:func:`shipit.install.artifactdeps.project`) turns the resolved pins into
-    managed blocks the reconcile then treats like any other.
+    (:func:`shipit.install.artifactdeps.project`) turns the resolved ``{ repo }``
+    references into managed CHANNEL blocks (conda-direct, ADR-0077: derived
+    location only — the version is consumer-owned in the artifact's pixi feature)
+    the reconcile then treats like any other. Before projecting, the
+    consumer-owned pins are required present (:func:`_require_consumer_pins`) so a
+    channel is never projected with no dependency to resolve.
 
     The ONLY network read is the producing repo's VISIBILITY (``gh.repo_is_private``,
     injectable for tests) — the access tier is DERIVED from it (ADR-0065), never
@@ -238,6 +241,7 @@ def _artifact_dep_units(root: Path, *, is_private=gh.repo_is_private) -> list[Un
     deps = config.load_artifact_deps(cfg)
     if not deps:
         return []
+    _require_consumer_pins(root, deps)
     visibility: dict[str, bool] = {}
     resolved = []
     for dep in deps:
@@ -246,12 +250,42 @@ def _artifact_dep_units(root: Path, *, is_private=gh.repo_is_private) -> list[Un
         resolved.append(
             (dep, artifactdeps.channel_url(dep.repo, private=visibility[dep.repo]))
         )
-    # The consumer half also carries the receive-workflow (ARF01-WS07 #956): a
-    # repo that declares a cross-repo pin gets the managed workflow that, on the
-    # producer's release cascade, bumps the pin and opens a draft PR. Delivered
-    # ONLY when `[artifact-deps]` exist, so a repo with no pin never carries a
-    # dead cascade workflow; reconciled like every other whole-file unit.
-    return [cascade_receive.receive_workflow_unit(), *artifactdeps.project(resolved)]
+    return artifactdeps.project(resolved)
+
+
+def _require_consumer_pins(root: Path, deps) -> None:
+    """Assert every ``[artifact-deps.<pkg>]`` has its consumer-owned version pin
+    in the artifact's pixi feature — the fail-safe half of conda-direct (ADR-0077).
+
+    The projection derives only the CHANNEL; the version is consumer-owned and
+    must live at ``[feature.<pin_feature>.dependencies].<pkg>`` (the SAME feature
+    the channel lands in — see :func:`shipit.install.artifactdeps.pin_feature`), so
+    pixi resolves the pin against the channel. A declared artifact with NO such pin
+    would make ``shipit install`` project a channel with nothing to resolve — a
+    silent de-provision / resolve-nothing. So a missing pin fails LOUD and
+    actionable HERE, naming the exact table to add. A ``pixi.toml`` that is absent
+    or unparseable degrades silently (like the rest of install's read boundary):
+    the reconcile has no manifest to splice into either, and warns downstream.
+    """
+    pixi = root / install_units.PIXI_FILE
+    try:
+        manifest = tomllib.loads(pixi.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return
+    missing = artifactdeps.missing_pins(deps, manifest)
+    if not missing:
+        return
+    lines = [
+        f"`[artifact-deps.{dep.package}]` (from {dep.repo}) has no consumer-owned "
+        f'version pin: add `{table}` `{dep.package} = "<version>"` to pixi.toml'
+        for dep, table in missing
+    ]
+    raise config.ConfigError(
+        "conda-direct (ADR-0077): the version of a cross-repo artifact is "
+        "consumer-owned and must be pinned in the SAME pixi feature that carries "
+        "its derived channel, so pixi resolves the pin against the channel. "
+        "Missing pin(s):\n  - " + "\n  - ".join(lines)
+    )
 
 
 @click.command(name="install")

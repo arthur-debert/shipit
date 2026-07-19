@@ -14,10 +14,17 @@ The contract is split by OWNERSHIP (ADR-0077, the conda-direct collapse):
   ``[s3-options]``) block; the URL is never restated, the one fact that has never
   drifted.
 - **version is consumer-owned** — NOT projected. The consumer pins the package as
-  an ordinary ``[dependencies] <pkg> = "…"`` line that ``pixi.lock`` records and a
-  generic bot (``pixi update`` / Renovate) bumps, resolved against the channels
-  this projection emits. No version pin lives in a shipit-managed block anymore;
-  the projected feature block carries channels only.
+  an ordinary pixi dependency in the SAME feature that carries the derived channel
+  — ``[feature.shipit-artifacts.dependencies].<pkg>`` for the default target, or
+  ``[feature.shipit-artifacts-<feature>.dependencies].<pkg>`` for a named
+  ``feature`` — so pixi sees the channel when it resolves the pin, ``pixi.lock``
+  records it, and a generic bot (``pixi update`` / Renovate) bumps it. Co-locating
+  the pin with its channel in one feature is load-bearing: a pin in root
+  ``[dependencies]`` (pixi's default feature) would leak into environments that
+  carry no artifact channel and could not resolve (ADR-0077 review). No version
+  pin lives in a shipit-managed block anymore; the projected feature block carries
+  channels only, and :func:`missing_pins` asserts the consumer's pin exists before
+  install projects a channel with no dependency to resolve.
 
 Two halves, kept apart so the projection stays a PURE, network-free core:
 
@@ -195,8 +202,47 @@ def channel_url(repo_slug: str, *, private: bool) -> str:
 
 
 def _feature_name(feature: str | None) -> str:
-    """The reserved pixi feature name a target's channel+pins land in."""
+    """The reserved pixi feature name a target's channel lands in — and the SAME
+    feature the consumer authors the version pin into (conda-direct, ADR-0077)."""
     return DEFAULT_FEATURE if feature is None else f"{DEFAULT_FEATURE}-{feature}"
+
+
+def pin_feature(feature: str | None) -> str:
+    """The pixi feature a consumer authors the version pin into for a target — the
+    SAME reserved feature that carries the derived channel, so pixi resolves the
+    pin against that channel (ADR-0077). ``[feature.<pin_feature>.dependencies]``
+    is where ``<pkg> = "…"`` goes; public so the error/validation glue and docs
+    name the exact table."""
+    return _feature_name(feature)
+
+
+def missing_pins(
+    deps: Sequence[ArtifactDep], manifest: dict
+) -> list[tuple[ArtifactDep, str]]:
+    """The deps whose consumer-owned version pin is ABSENT from ``manifest`` — the
+    pure fail-safe core of the conda-direct contract (ADR-0077).
+
+    For each ``[artifact-deps.<pkg>] { repo, feature }`` the consumer must declare
+    a matching pin at ``[feature.<pin_feature(feature)>.dependencies].<pkg>`` — the
+    same feature the channel is projected into. Returns ``(dep, table)`` for every
+    dep missing that pin (``table`` is the ``[feature.….dependencies]`` header the
+    caller names in a loud, actionable error), in declaration order. ``manifest``
+    is the parsed ``pixi.toml`` dict; a projection that emitted a channel with no
+    dependency to resolve would silently resolve nothing, so the verb glue raises
+    on a non-empty result rather than de-provisioning the artifact.
+    """
+    features = manifest.get("feature", {})
+    features = features if isinstance(features, dict) else {}
+    absent: list[tuple[ArtifactDep, str]] = []
+    for dep in deps:
+        fname = pin_feature(dep.feature)
+        table = features.get(fname, {})
+        table = table if isinstance(table, dict) else {}
+        pins = table.get("dependencies", {})
+        pins = pins if isinstance(pins, dict) else {}
+        if dep.package not in pins:
+            absent.append((dep, f"[feature.{_toml_key(fname)}.dependencies]"))
+    return absent
 
 
 def env_name(feature: str | None) -> str:

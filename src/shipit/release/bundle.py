@@ -75,10 +75,12 @@ functions the entries carry:
   the scar-#2 guard is skipped). The per-target native binary the extension
   bundles (the ``lexd-lsp`` LSP, tree-sitter wasm) rides the **Artifact channel**
   (ARF01, ADR-0064/0066): it is published by its producing repo as a
-  per-platform **conda package** and consumed here through an ``[artifact-deps]``
-  pin, which ``shipit install`` projects into the managed pixi env so pixi
+  per-platform **conda package** and consumed here through an
+  ``[artifact-deps.<pkg>] { repo }`` reference, from which ``shipit install``
+  projects the managed CHANNEL into the pixi env (conda-direct, ADR-0077 — the
+  version is a consumer-owned pin in the artifact's feature) so pixi
   resolves/fetches THIS leg's platform build into
-  ``<root>/.pixi/envs/<env>/bin/<pkg>``. The vsix artifact names which pins to
+  ``<root>/.pixi/envs/<env>/bin/<pkg>``. The vsix artifact names which packages to
   stage and where in the extension layout via the optional ``bundle.stage`` map
   (``{ "lexd-lsp" = "resources/lexd-lsp" }``); :func:`_stage_vsix_natives`
   COPIES each materialized binary into the leg dir before ``vsce package`` (never

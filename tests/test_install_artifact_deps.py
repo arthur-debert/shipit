@@ -11,8 +11,8 @@ Coverage: the URL derivation and its public/private tier gate; the projected
 block structure (conda-direct, ADR-0077: DERIVED channels only — no version pin)
 and its TOML validity when spliced into a seeded manifest; the idempotent
 reconcile-to-noop and the single-UPDATE on a derived-channel change; the
-invariance of the projection to the (unprojected, consumer-owned) version; and a
-drift guard tying the consumer bucket to the producer's.
+fail-safe `missing_pins` check that the consumer-owned pin is co-located with the
+channel; and a drift guard tying the consumer bucket to the producer's.
 """
 
 import tomllib
@@ -28,13 +28,10 @@ from shipit.install import units as iunits
 from shipit.verbs import install as verb
 
 
-def _dep(package="lexd", repo="lex-fmt/lex", version=None, feature=None):
-    # conda-direct (ADR-0077): the version is consumer-owned and NOT projected, so
-    # the default declaration carries none. A few tests still pass an explicit
-    # `version` to prove the projection IGNORES it.
-    return config.ArtifactDep(
-        package=package, repo=repo, version=version, feature=feature
-    )
+def _dep(package="lexd", repo="lex-fmt/lex", feature=None):
+    # conda-direct (ADR-0077): `{ repo }` (+ optional feature) is the whole
+    # declaration — the version is consumer-owned in the artifact's pixi feature.
+    return config.ArtifactDep(package=package, repo=repo, feature=feature)
 
 
 # --------------------------------------------------------------------------
@@ -505,19 +502,6 @@ def test_reconcile_to_noop_after_projection_is_idempotent():
         )
 
 
-def test_projection_is_invariant_to_the_unprojected_version():
-    # conda-direct (ADR-0077): the version is consumer-owned and NOT projected, so
-    # two declarations differing ONLY in `version` project a byte-identical
-    # managed block. A consumer bumping their `[dependencies]` pin therefore never
-    # churns the shipit-managed pixi block — the block carries the derived
-    # LOCATION and nothing that a version bump can move.
-    a = _project([_dep(version="0.19.3")])
-    b = _project([_dep(version="0.20.0")])
-    assert [u.key for u in a] == [u.key for u in b]
-    for ua, ub in zip(a, b, strict=True):
-        assert ua.desired_inner() == ub.desired_inner()
-
-
 def test_channel_change_is_a_single_update():
     # A change to the DERIVED channel set (a repo re-point) IS a real block
     # change: the feature block's channels differ, so the reconcile decides a
@@ -594,12 +578,69 @@ def test_producer_consumer_and_provisioner_share_one_bucket_source_of_truth():
 
 
 # --------------------------------------------------------------------------
+# Pin co-location (ADR-0077) — the consumer-owned pin lives in the SAME feature
+# as the derived channel; `missing_pins` is the pure fail-safe check.
+# --------------------------------------------------------------------------
+
+
+def test_pin_feature_is_the_channels_feature():
+    # The pin's feature IS the reserved feature that carries the channel, so a
+    # pin declared there resolves against it (default + named).
+    assert ad.pin_feature(None) == "shipit-artifacts"
+    assert ad.pin_feature("tools") == "shipit-artifacts-tools"
+
+
+def test_missing_pins_flags_a_dep_with_no_colocated_pin():
+    manifest = tomllib.loads(
+        '[feature.shipit-artifacts.dependencies]\nlexd = "0.19.3"\n'
+    )
+    # lexd is pinned in the channel's feature -> present; lexd-lsp is not.
+    absent = ad.missing_pins([_dep(package="lexd"), _dep(package="lexd-lsp")], manifest)
+    assert [d.package for d, _ in absent] == ["lexd-lsp"]
+    (_, table) = absent[0]
+    assert table == "[feature.shipit-artifacts.dependencies]"
+
+
+def test_missing_pins_is_feature_scoped():
+    # A pin in the default feature does NOT satisfy a named-feature target — the
+    # channel for `feature="tools"` lives in `shipit-artifacts-tools`.
+    manifest = tomllib.loads(
+        '[feature.shipit-artifacts.dependencies]\nlexd = "0.19.3"\n'
+    )
+    absent = ad.missing_pins([_dep(package="lexd", feature="tools")], manifest)
+    assert [t for _, t in absent] == ["[feature.shipit-artifacts-tools.dependencies]"]
+
+
+def test_missing_pins_quotes_a_dotted_feature_table():
+    manifest = tomllib.loads('[workspace]\nname = "c"\n')
+    absent = ad.missing_pins(
+        [_dep(package="ruamel.yaml", feature="tools.v2")], manifest
+    )
+    assert absent[0][1] == '[feature."shipit-artifacts-tools.v2".dependencies]'
+
+
+def test_missing_pins_empty_when_all_pins_present():
+    manifest = tomllib.loads(
+        "[feature.shipit-artifacts.dependencies]\n"
+        'lexd = "0.19.3"\n'
+        "[feature.shipit-artifacts-tools.dependencies]\n"
+        'lexd-lsp = "0.20.0"\n'
+    )
+    deps = [_dep(package="lexd"), _dep(package="lexd-lsp", feature="tools")]
+    assert ad.missing_pins(deps, manifest) == []
+
+
+# --------------------------------------------------------------------------
 # The verb glue — `_artifact_dep_units` (visibility injected; no network)
 # --------------------------------------------------------------------------
 
 
 def _write_config(root, text):
     (root / config.CONFIG_NAME).write_text(text, encoding="utf-8")
+
+
+def _write_pixi(root, text):
+    (root / "pixi.toml").write_text(text, encoding="utf-8")
 
 
 def test_verb_projects_public_deps_resolving_visibility_once_per_repo(tmp_path):
@@ -609,10 +650,16 @@ def test_verb_projects_public_deps_resolving_visibility_once_per_repo(tmp_path):
         tmp_path,
         "[artifact-deps.lexd]\n"
         'repo = "lex-fmt/lex"\n'
-        'version = "0.19.3"\n'
         "[artifact-deps.lexd-lsp]\n"
-        'repo = "lex-fmt/lex"\n'
-        'version = "0.19.3"\n',
+        'repo = "lex-fmt/lex"\n',
+    )
+    # conda-direct: the consumer owns the pins, co-located with the channel in the
+    # artifact's feature. `_artifact_dep_units` requires them present.
+    _write_pixi(
+        tmp_path,
+        "[feature.shipit-artifacts.dependencies]\n"
+        'lexd = "0.19.3"\n'
+        'lexd-lsp = "0.19.3"\n',
     )
     calls = []
 
@@ -621,10 +668,8 @@ def test_verb_projects_public_deps_resolving_visibility_once_per_repo(tmp_path):
         return False
 
     units = verb._artifact_dep_units(tmp_path, is_private=fake_is_private)
+    # No cascade receive-workflow anymore (conda-direct removed the rail).
     assert {u.key for u in units} == {
-        # The consumer half also carries the receive-workflow (ARF01-WS07), only
-        # ever delivered when `[artifact-deps]` are declared.
-        ".github/workflows/shipit-artifact-cascade.yml",
         "pixi.toml#shipit-artifacts",
         ad.ENVIRONMENTS_KEY,
     }
@@ -648,9 +693,9 @@ def test_verb_projects_a_private_producing_repo_over_s3(tmp_path):
     # [s3-options] block (was refused with a WS04 pointer in WS02).
     from shipit.verbs import install as verb
 
-    _write_config(
-        tmp_path,
-        '[artifact-deps.phos-tool]\nrepo = "phos/private"\nversion = "1.0"\n',
+    _write_config(tmp_path, '[artifact-deps.phos-tool]\nrepo = "phos/private"\n')
+    _write_pixi(
+        tmp_path, '[feature.shipit-artifacts.dependencies]\nphos-tool = "1.0"\n'
     )
     units = verb._artifact_dep_units(tmp_path, is_private=lambda slug: True)
     keys = {u.key for u in units}
@@ -659,14 +704,62 @@ def test_verb_projects_a_private_producing_repo_over_s3(tmp_path):
     assert "s3://shipit-artifacts-private/phos/private" in feat.desired_inner()
 
 
-def test_verb_fails_loud_on_a_malformed_entry(tmp_path):
+def test_verb_fails_loud_when_the_consumer_pin_is_missing(tmp_path):
+    # The fail-safe (ADR-0077, Major 2): a declared artifact-dep with NO
+    # consumer-owned pin in the artifact's feature must NOT silently project a
+    # channel with nothing to resolve — it fails loud, naming the exact table.
+    from shipit.verbs import install as verb
+
+    _write_config(tmp_path, '[artifact-deps.lexd]\nrepo = "lex-fmt/lex"\n')
+    _write_pixi(tmp_path, '[workspace]\nname = "c"\n')  # no pin
+    with pytest.raises(
+        config.ConfigError,
+        match=r"no consumer-owned version pin.*feature\.shipit-artifacts\.dependencies",
+    ):
+        verb._artifact_dep_units(tmp_path, is_private=lambda slug: False)
+
+
+def test_verb_requires_the_pin_in_the_named_features_dependency_table(tmp_path):
+    # A named `feature` scopes BOTH the channel and the pin into
+    # `shipit-artifacts-<F>` — a pin in the default feature does not satisfy it.
     from shipit.verbs import install as verb
 
     _write_config(
         tmp_path,
-        '[artifact-deps.lexd]\nrepo = "not-a-slug"\nversion = "1.0"\n',
+        '[artifact-deps.lexd]\nrepo = "lex-fmt/lex"\nfeature = "tools"\n',
     )
+    # Pin in the WRONG (default) feature → still missing for the named target.
+    _write_pixi(tmp_path, '[feature.shipit-artifacts.dependencies]\nlexd = "0.19.3"\n')
+    with pytest.raises(
+        config.ConfigError,
+        match=r"feature\.shipit-artifacts-tools\.dependencies",
+    ):
+        verb._artifact_dep_units(tmp_path, is_private=lambda slug: False)
+    # Pin in the RIGHT feature → projects cleanly.
+    _write_pixi(
+        tmp_path, '[feature.shipit-artifacts-tools.dependencies]\nlexd = "0.19.3"\n'
+    )
+    units = verb._artifact_dep_units(tmp_path, is_private=lambda slug: False)
+    assert "pixi.toml#shipit-artifacts-tools" in {u.key for u in units}
+
+
+def test_verb_fails_loud_on_a_malformed_entry(tmp_path):
+    from shipit.verbs import install as verb
+
+    _write_config(tmp_path, '[artifact-deps.lexd]\nrepo = "not-a-slug"\n')
     with pytest.raises(config.ConfigError):
+        verb._artifact_dep_units(tmp_path, is_private=lambda slug: False)
+
+
+def test_verb_rejects_the_legacy_version_shape(tmp_path):
+    # NO backwards compat: a legacy `{ repo, version }` errors at parse, before any
+    # projection or de-provision.
+    from shipit.verbs import install as verb
+
+    _write_config(
+        tmp_path, '[artifact-deps.lexd]\nrepo = "lex-fmt/lex"\nversion = "0.19.3"\n'
+    )
+    with pytest.raises(config.ConfigError, match=r"version is no longer allowed"):
         verb._artifact_dep_units(tmp_path, is_private=lambda slug: False)
 
 

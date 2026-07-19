@@ -1727,10 +1727,8 @@ def test_vsix_without_an_npm_leg_refuses(tmp_path):
 # --------------------------------------------------------------------------
 
 
-def _dep(package, *, repo="lex-fmt/lex", version="0.19.3", feature=None):
-    return config.ArtifactDep(
-        package=package, repo=repo, version=version, feature=feature
-    )
+def _dep(package, *, repo="lex-fmt/lex", feature=None):
+    return config.ArtifactDep(package=package, repo=repo, feature=feature)
 
 
 def _materialize_dep_bin(tmp_path, dep, *, target=LINUX):
