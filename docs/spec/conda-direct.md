@@ -21,11 +21,11 @@ The one axis that has **never** drifted is the channel *location* — the only f
 
 ## 3. Decision (the one fork)
 
-The `[artifact-deps]` DSL, the managed-block pin ownership, and Cascade are **one coupled bundle** whose only load-bearing justification is **cross-repo pin governance** (auto-bump on release + enforced fleet-uniform pins).
+The **version-pin half** of `[artifact-deps]`, the managed-block **pin** ownership, and Cascade are **one coupled bundle** whose only load-bearing justification is **cross-repo pin governance** (auto-bump on release + enforced fleet-uniform pins). Note what is *not* in this bundle: the `[artifact-deps.<pkg>] { repo }` declaration and the managed `channels`/`[s3-options]` block it projects — that is the derived-location glue (kept, §4), not pin governance.
 
-**Decision: hand pin governance to pixi + a generic bot (Renovate/Dependabot).** `pixi.lock` is the record; a standard bot opens version-bump PRs. This deletes all three layers and lands us at conda-direct.
+**Decision: hand pin governance to pixi + a generic bot (Renovate/Dependabot).** `pixi.lock` is the record; a standard bot opens version-bump PRs. This removes those three layers — the `[artifact-deps]` declaration **shrinks to its `{ repo }` channel-derivation input**, and the version becomes a plain consumer-owned dep — landing us at conda-direct.
 
-**One carve-out:** the `lexd` **lint-tool** uniformity (every repo must run the identical linter version) *is* genuine fleet governance — a different concern from *consuming an artifact*. Keep the managed block **for that one tool only**; it does not drag the DSL along.
+**One carve-out:** the `lexd` **lint-tool** uniformity (every repo must run the identical linter version) *is* genuine fleet governance — a different concern from *consuming an artifact*. Keep the managed **version-pin** block **for that one tool only**. This is distinct from the managed **channel/`[s3-options]`** block, which stays for *every* artifact consumer (it carries no pin — only the derived location).
 
 ## 4. The cut line (from the layer-by-layer pass)
 
@@ -67,7 +67,7 @@ Reference table (stable — changes only when an artifact or consumer is added/r
 
 ## 7. What this supersedes
 
-- **ADR-0064** — keep the conda-channel concept; supersede the `[artifact-deps]` DSL and the derived-after-gh-release repackage requirement.
+- **ADR-0064** — keep the conda-channel concept **and** the `[artifact-deps.<pkg>] { repo }` channel-derivation declaration + its managed `channels`/`[s3-options]` projection; supersede only the **version-pin/governance** half of `[artifact-deps]` and the derived-after-gh-release repackage requirement.
 - **ADR-0067** — supersede (Cascade removed).
 - **ADR-0070/0071** — the selector/RC-guard survive (they protect the fan-out); the readiness-gate/served-subdir bookkeeping is superseded by resolve-time availability.
 - **ADR-0065** — unchanged (two-tier buckets).
@@ -83,5 +83,5 @@ Every step is verified by a **real local run** (a real `.conda`, a real `pixi lo
 2. Consumer: shrink `[artifact-deps.<pkg>]` to its `{ repo }` channel-derivation input (shipit keeps projecting the managed `channels`/`[s3-options]` block — URL stays derived); move the **version** out to a normal consumer-owned conda dependency pinned by `pixi.lock`.
 3. Remove Cascade; adopt `pixi update` / a generic bump bot.
 4. Remove the readiness-gate/served-subdir bookkeeping; `pixi lock` is the availability oracle.
-5. Retain the managed block **only** for the `lexd` lint-tool uniformity; drop it for artifact consumption.
+5. Retain the managed **version-pin** block **only** for the `lexd` lint-tool uniformity. For artifact consumption, keep the managed **channel/`[s3-options]`** projection (derived from `{ repo }`) but carry **no version pin** in a managed block.
 6. Migrate each producer, then each consumer, one by one — each verified by a real local run.
