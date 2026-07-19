@@ -55,8 +55,8 @@ from ._context import NoAmbientRepoError
 #: misconfigured central Tree root, a refused/failed
 #: Tree removal (CLI02-WS03), and the constrained dev-cycle write path's two
 #: refusals (an out-of-vocabulary event name, an emission that failed past
-#: validation — CLI02-WS05), and the
-#: changelog refusals (empty release, invalid version, unsyncable tree —
+#: validation — CLI02-WS05), and the changelog refusals (empty release,
+#: invalid version, unsyncable tree —
 #: TOL01-WS06), and the fleet sweep's refusals (a missing source checkout, an
 #: unresolvable candidate build, a selector outside the declared portfolio —
 #: TOL01-WS07), and the review path's precondition refusals (a bad commit

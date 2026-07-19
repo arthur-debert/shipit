@@ -274,6 +274,44 @@ def test_splice_env_member_finds_a_commented_environments_header():
     )
 
 
+def test_splice_env_member_creates_under_a_commented_header_no_duplicate_table():
+    # Round-4 M1 (codex): the CREATE path (env absent) must ALSO honor a
+    # comment-suffixed `[environments]` header and insert `lint` UNDER it — never
+    # append a SECOND `[environments]` table (invalid TOML / lost envs).
+    text = '[environments]  # my envs\ndev = ["dev"]\n'
+    out = splice.splice_env_member(text, "lint", _STOCK_LINT_ENV, _LEXD)
+    assert out.count("[environments]") == 1  # no duplicate header
+    assert tomllib.loads(out)["environments"] == {  # valid TOML
+        "dev": ["dev"],
+        "lint": ["lint", "shipit-lexd"],
+    }
+
+
+def test_splice_env_member_table_form_ignores_a_dotted_features_subkey():
+    # Round-4 M2 (codex): a dotted sub-key `metadata.features` must NOT be mistaken
+    # for the env's own top-level `features` — only the real one gets lexd, and the
+    # dotted sub-table is preserved untouched.
+    text = '[environments]\nlint = { metadata.features = ["x"], features = ["lint"] }\n'
+    spec = tomllib.loads(
+        splice.splice_env_member(text, "lint", _STOCK_LINT_ENV, _LEXD)
+    )["environments"]["lint"]
+    assert spec["features"] == ["lint", "shipit-lexd"]
+    assert spec["metadata"] == {"features": ["x"]}
+
+
+def test_splice_env_member_table_form_ignores_features_inside_a_string_value():
+    # A sibling STRING value that literally contains `features = [` must not be
+    # mistaken for the key — the verify step rejects any edit that changes it.
+    text = (
+        '[environments]\nlint = { note = "features = [nope]", features = ["lint"] }\n'
+    )
+    spec = tomllib.loads(
+        splice.splice_env_member(text, "lint", _STOCK_LINT_ENV, _LEXD)
+    )["environments"]["lint"]
+    assert spec["features"] == ["lint", "shipit-lexd"]
+    assert spec["note"] == "features = [nope]"
+
+
 def test_env_member_unsupported_form_surfaces_instead_of_looping():
     # T2 (copilot): an env in a form the splicer cannot merge into must NOT read as
     # "absent" — that would decide an ADD the write can't apply and re-propose it
@@ -296,6 +334,57 @@ def test_env_member_unsupported_form_surfaces_instead_of_looping():
         == splice.ENV_MEMBER_UNSUPPORTED
     )
     assert splice.splice_env_member(dotted, "lint", _STOCK_LINT_ENV, _LEXD) == dotted
+
+    # `environments` present but not a table at all → cannot place an env in it.
+    not_a_table = 'environments = "oops"\n'
+    assert (
+        splice.extract_env_member(not_a_table, "lint", _LEXD)
+        == splice.ENV_MEMBER_UNSUPPORTED
+    )
+    assert (
+        splice.splice_env_member(not_a_table, "lint", _STOCK_LINT_ENV, _LEXD)
+        == not_a_table
+    )
+
+    # CREATE where a dotted `environments.dev` already opened the table (no header
+    # to insert under; an EOF `[environments]` append would be a duplicate-table
+    # TOML error) → the verify step rejects it, so it surfaces rather than corrupts.
+    dotted_sibling = 'environments.dev = ["dev"]\n'
+    assert (
+        splice.extract_env_member(dotted_sibling, "lint", _LEXD)
+        == splice.ENV_MEMBER_UNSUPPORTED
+    )
+    out = splice.splice_env_member(dotted_sibling, "lint", _STOCK_LINT_ENV, _LEXD)
+    assert out == dotted_sibling  # left verbatim, never a broken duplicate table
+
+
+def test_splice_env_member_never_emits_invalid_toml_for_exotic_forms():
+    # The fail-loud floor: across a spread of exotic/edge inputs the splicer either
+    # produces VALID TOML with lexd wired, or leaves the input byte-for-byte — it
+    # NEVER emits something tomllib can't parse.
+    cases = [
+        '[environments]\nlint = ["lint"]\n',
+        '[environments]  # c\nlint = ["lint", "extra"]\n',
+        '[environments]\nlint = { features = ["lint"], solve-group = "s" }\n',
+        '[environments]\nlint = { metadata.features = ["x"], features = ["lint"] }\n',
+        '[environments]\nlint = [\n  "lint",\n]\n',
+        '[environments]\nlint = { features = "lint" }\n',  # unsupported
+        'environments.lint = ["lint"]\n',  # dotted, unlocatable
+        'environments = "oops"\n',  # not a table
+        "",  # empty
+        '[workspace]\nname = "a"\n',  # absent env → create
+    ]
+    for text in cases:
+        out = splice.splice_env_member(text, "lint", _STOCK_LINT_ENV, _LEXD)
+        parsed = tomllib.loads(out)  # always parseable — raises if it corrupted it
+        if out != text:
+            # When it DID edit, the env now composes lexd and re-reads as satisfied.
+            lint_env = parsed["environments"]["lint"]
+            features = lint_env["features"] if isinstance(lint_env, dict) else lint_env
+            assert "shipit-lexd" in features
+            assert splice.extract_env_member(
+                out, "lint", _LEXD
+            ) == iunits.env_member_token("lint", _LEXD)
 
 
 # --------------------------------------------------------------------------
