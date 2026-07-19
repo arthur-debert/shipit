@@ -1,0 +1,53 @@
+# Managed by shipit; do not edit. Regenerate via `shipit install`.
+#
+# Artifact-channel cascade RECEIVE (ARF01-WS07): when an upstream this repo
+# pins in `.shipit.toml [artifact-deps]` publishes a release, shipit's fan-out
+# fires an `upstream-release` repository_dispatch here. This workflow bumps the
+# matching pins, re-renders the managed pixi block, re-solves `pixi.lock`, and
+# opens a DRAFT bump PR that rides the normal review loop.
+name: shipit-artifact-cascade
+on:
+  repository_dispatch:
+    types: [upstream-release]
+permissions:
+  contents: write
+  pull-requests: write
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: prefix-dev/setup-pixi@v0.9.6
+        with:
+          pixi-version: v0.71.0
+          locked: true
+      - name: Bump artifact-deps and open the draft PR
+        env:
+          # The client payload rides ENV, never a `${{ }}` splice into `run:`
+          # (shell-injection safe). Token: the ambient Actions token
+          # (`github.token`, the fleet convention — see wf-prepare.yml's
+          # `secrets.RELEASE_TOKEN || github.token`) by default; set
+          # SHIPIT_CASCADE_TOKEN to a PAT if the bump PR must trigger CI.
+          GH_TOKEN: ${{ secrets.SHIPIT_CASCADE_TOKEN || github.token }}
+          UPSTREAM: ${{ github.event.client_payload.upstream }}
+          VERSION: ${{ github.event.client_payload.version }}
+        run: |
+          # The `upstream-release` event is SHARED with the pre-existing
+          # notify-downstreams rail (ADR-0067 reuses its dispatch rail), whose
+          # payload is `{repo, tag, version, artifact}` — no `upstream` key. A
+          # repo that is BOTH a notify-downstreams downstream AND declares
+          # `[artifact-deps]` receives both payloads on this one event; a foreign
+          # (notify-downstreams) payload leaves UPSTREAM empty. Skip it as a
+          # clean no-op rather than calling `shipit channel receive ""` (which
+          # rightly errors on an empty --upstream) — so the foreign dispatch is
+          # inert, never a red workflow run or a corrupt bump.
+          if [ -z "$UPSTREAM" ]; then
+            echo "no client_payload.upstream — foreign dispatch (e.g. notify-downstreams); nothing to bump."
+            exit 0
+          fi
+          git config user.name "shipit-cascade[bot]"
+          git config user.email "shipit-cascade@users.noreply.github.com"
+          pixi run --locked -- ./bin/shipit channel receive \
+            --upstream "$UPSTREAM" --version "$VERSION"

@@ -333,39 +333,57 @@ def _toml_key(name: str) -> str:
     return name if _BARE_KEY_RE.fullmatch(name) else f'"{name}"'
 
 
+def feature_anchor(feature: str | None) -> str:
+    """The ``[feature.<X>]`` TOML table header the channel block MERGES under —
+    the SAME table the consumer authors the version pin's ``.dependencies``
+    sub-table into (``pin_feature``). Public so tests/callers name the exact
+    anchor."""
+    return f"[feature.{_toml_key(_feature_name(feature))}]"
+
+
 def _feature_block(
     feature: str | None, resolved: Sequence[tuple[ArtifactDep, str]]
 ) -> str:
-    """The inner text of one target's managed feature block: its channel URLs
-    ONLY, under the reserved ``shipit-artifacts*`` feature.
+    """The inner text of one target's managed feature block: its ``channels``
+    KEY LINE ONLY, MERGED under the reserved ``shipit-artifacts*`` feature table.
 
     Under conda-direct (ADR-0077) the block carries the DERIVED location and
-    nothing else — no version pin. The version is consumer-owned: a plain
-    ``[dependencies] <pkg> = "…"`` line the consumer authors and ``pixi.lock``
-    pins, resolved against THESE channels (pixi unions a feature's channels into
-    every environment the feature is wired into). So the projection emits the
-    channels and stops — it never restates a URL and never owns a pin.
+    nothing else — no version pin, and (since #1094 review) no ``[feature.<X>]``
+    HEADER either: the consumer authors the version pin in that SAME feature
+    (``[feature.<X>.dependencies].<pkg>``), so the ``[feature.<X>]`` table already
+    exists and an anchor-LESS block redeclaring it would be seen as a table
+    conflict and SKIPPED — leaving the pin with no channel. So the block emits
+    just ``channels = [...]`` and is ANCHORED under ``[feature.<X>]`` (see
+    :func:`_feature_unit`): it MERGES its channels into the shared feature table
+    the same way the ``[environments]`` block merges its env wiring (ADR-0066's
+    shared-by-design → merge, not conflict). pixi then unions the feature's
+    channels into every environment the feature is wired into, and resolves the
+    co-located pin against them.
 
     Deterministic: channels de-duped in first-seen order (several deps from the
     same producing repo share one channel).
     """
-    name = _toml_key(_feature_name(feature))
     urls: list[str] = []
     for _, url in resolved:
         if url not in urls:
             urls.append(url)
-    return "\n".join(
-        [
-            f"[feature.{name}]",
-            f"channels = {_toml_str_list(urls)}",
-        ]
-    )
+    return f"channels = {_toml_str_list(urls)}"
 
 
 def _feature_unit(
     feature: str | None, resolved: Sequence[tuple[ArtifactDep, str]]
 ) -> Unit:
-    """One EOF-appended managed block for a target's dedicated feature."""
+    """One managed block MERGING a target's derived ``channels`` INTO its shared
+    ``[feature.<X>]`` table.
+
+    ANCHORED under ``[feature.<X>]`` (not EOF-appended): the consumer co-locates
+    the version pin in the SAME table (``[feature.<X>.dependencies]``), so that
+    table pre-exists and an anchor-less redeclaration would trip the
+    table-conflict guard and skip the channel (#1094 review, Major 1). Anchoring
+    makes the reconcile MERGE ``channels`` under the existing header (creating the
+    header at EOF if the consumer wrote only the ``.dependencies`` sub-table) —
+    the same shared-by-design merge the ``[environments]`` unit uses.
+    """
     name = _feature_name(feature)
     return Unit(
         key=f"{PIXI_FILE}#{name}",
@@ -377,9 +395,11 @@ def _feature_unit(
             f"(do not edit; regenerate via `shipit install`) >>>"
         ),
         close_marker=f"# <<< shipit-managed artifact-dep feature `{name}` <<<",
-        # No anchor: a fresh reserved `[feature.<name>]` table appends at EOF,
-        # so it never re-declares a table the consumer already owns.
-        anchor=None,
+        # Anchored under the shared `[feature.<name>]` table so the channels MERGE
+        # in (never a redeclaration the table-conflict guard would skip); the
+        # anchor header is created at EOF if only the consumer's `.dependencies`
+        # sub-table exists (splice._insert_under_anchor).
+        anchor=feature_anchor(feature),
     )
 
 

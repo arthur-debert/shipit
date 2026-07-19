@@ -16,6 +16,7 @@ channel; and a drift guard tying the consumer bucket to the producer's.
 """
 
 import tomllib
+from pathlib import Path
 
 import pytest
 
@@ -26,6 +27,14 @@ from shipit.install import reconcile as irec
 from shipit.install import splice
 from shipit.install import units as iunits
 from shipit.verbs import install as verb
+
+#: The stale Cascade receive-workflow a consumer that already installed it still
+#: carries — retired by conda-direct (ADR-0077). The fixture is the last delivered
+#: version (a pristine hash in retired-files.toml).
+_CASCADE_WORKFLOW_DEST = ".github/workflows/shipit-artifact-cascade.yml"
+_CASCADE_PRISTINE = (
+    Path(__file__).parent / "data" / "shipit-artifact-cascade-pristine.yml"
+)
 
 
 def _dep(package="lexd", repo="lex-fmt/lex", feature=None):
@@ -89,14 +98,18 @@ def test_default_target_projects_a_feature_and_a_default_env_wiring():
         ad.ENVIRONMENTS_KEY,
     }
     feat = next(u for u in units if u.key == "pixi.toml#shipit-artifacts")
+    # The channel block MERGES into the shared `[feature.shipit-artifacts]` table
+    # (anchored), so the header is the ANCHOR and the inner is the channels line
+    # only — never a table redeclaration (#1094 review, Major 1).
+    assert feat.anchor == "[feature.shipit-artifacts]"
     inner = feat.desired_inner()
-    assert "[feature.shipit-artifacts]" in inner
+    assert "[feature" not in inner  # header lives in the anchor, not the block
     assert (
-        'channels = ["https://storage.googleapis.com/'
-        'shipit-artifacts-public/lex-fmt/lex"]' in inner
+        inner == 'channels = ["https://storage.googleapis.com/'
+        'shipit-artifacts-public/lex-fmt/lex"]'
     )
-    # conda-direct (ADR-0077): channels only — no version pin, no dependencies
-    # table (the consumer owns the version as a plain `[dependencies]` pin).
+    # conda-direct (ADR-0077): channels only — no version pin (the consumer owns
+    # the version as a co-located `[feature.<X>.dependencies]` pin).
     assert "dependencies" not in inner
     env = next(u for u in units if u.key == ad.ENVIRONMENTS_KEY)
     assert env.anchor == "[environments]"
@@ -153,8 +166,11 @@ def test_dotted_feature_names_are_emitted_as_quoted_toml_keys():
     # names still flow through the projection's quoting.)
     units = _project([_dep(package="ruamel.yaml", feature="tools.v2")])
     feat = next(u for u in units if u.key == "pixi.toml#shipit-artifacts-tools.v2")
+    # The dotted feature name is quoted in the ANCHOR header the channel merges
+    # under (the block inner is just the channels line).
+    assert feat.anchor == '[feature."shipit-artifacts-tools.v2"]'
     inner = feat.desired_inner()
-    assert '[feature."shipit-artifacts-tools.v2"]' in inner
+    assert "[feature" not in inner
     assert "dependencies" not in inner
     env = next(u for u in units if u.key == ad.ENVIRONMENTS_KEY)
     assert (
@@ -191,9 +207,8 @@ def test_bare_safe_feature_names_stay_unquoted():
     # the common case reads cleanly and existing manifests do not churn.
     units = _project([_dep(package="lexd", feature="tools")])
     feat = next(u for u in units if u.key == "pixi.toml#shipit-artifacts-tools")
-    inner = feat.desired_inner()
-    assert "[feature.shipit-artifacts-tools]" in inner
-    assert '[feature."' not in inner  # the bare feature header is not quoted
+    assert feat.anchor == "[feature.shipit-artifacts-tools]"  # bare, unquoted
+    assert ad.feature_anchor("tools") == "[feature.shipit-artifacts-tools]"
     env = next(u for u in units if u.key == ad.ENVIRONMENTS_KEY)
     assert env.desired_inner() == 'shipit-artifacts-tools = ["shipit-artifacts-tools"]'
 
@@ -409,6 +424,66 @@ def test_an_unrelated_consumer_feature_table_is_no_conflict(tmp_path):
     assert feat.action == irec.ADD
 
 
+def _reconcile_public(root, deps):
+    units = ad.project([(d, ad.channel_url(d.repo, private=False)) for d in deps])
+    state = irec.gather(root, units, irec.load_retired())
+    return units, irec.reconcile(units, irec.load_retired(), state)
+
+
+def test_channel_merges_into_the_shared_feature_table_not_skipped(tmp_path):
+    # Major 1 (#1094 review): the consumer co-locates the pin in
+    # `[feature.shipit-artifacts.dependencies]`, so `[feature.shipit-artifacts]`
+    # pre-exists. The channel block must MERGE its `channels` under that shared
+    # table (anchored), NOT be skipped as a table redeclaration — else the pin has
+    # no channel. End-to-end: no table conflict, the block ADDs, and the applied
+    # manifest carries BOTH the consumer pin and the merged channel.
+    (tmp_path / "AGENTS.md").write_text("# Downstream\n")
+    (tmp_path / "pixi.toml").write_text(
+        iunits.pixi_manifest_seed("downstream")
+        + '\n[feature.shipit-artifacts.dependencies]\nlexd = "0.19.3"\n'
+    )
+    _units, plan = _reconcile_public(tmp_path, [_dep(package="lexd")])
+    assert plan.pixi_table_conflicts == ()
+    feat = next(d for d in plan.decisions if d.unit.key == "pixi.toml#shipit-artifacts")
+    assert feat.action == irec.ADD
+    iapply.apply(plan, iapply.MODE_TREE)
+
+    parsed = tomllib.loads((tmp_path / "pixi.toml").read_text(encoding="utf-8"))
+    shared = parsed["feature"]["shipit-artifacts"]
+    # Pin (consumer) AND channel (merged) co-exist in the one feature table.
+    assert shared["dependencies"]["lexd"] == "0.19.3"
+    assert shared["channels"] == [
+        "https://storage.googleapis.com/shipit-artifacts-public/lex-fmt/lex"
+    ]
+    # Idempotent: a re-reconcile reads the merged channels as the block's own.
+    _again, again = _reconcile_public(tmp_path, [_dep(package="lexd")])
+    feat2 = next(
+        d for d in again.decisions if d.unit.key == "pixi.toml#shipit-artifacts"
+    )
+    assert feat2.action == irec.NOOP
+
+
+def test_dotted_feature_channel_merges_with_its_colocated_pin(tmp_path):
+    # The merge holds for a dotted (quoted) feature name too: the consumer's pin
+    # lives in `[feature."shipit-artifacts-tools.v2".dependencies]`, and the
+    # channel merges under the quoted `[feature."shipit-artifacts-tools.v2"]`.
+    (tmp_path / "AGENTS.md").write_text("# Downstream\n")
+    (tmp_path / "pixi.toml").write_text(
+        iunits.pixi_manifest_seed("downstream")
+        + '\n[feature."shipit-artifacts-tools.v2".dependencies]\nlexd = "0.19.3"\n'
+    )
+    deps = [_dep(package="lexd", feature="tools.v2")]
+    _units, plan = _reconcile_public(tmp_path, deps)
+    assert plan.pixi_table_conflicts == ()
+    iapply.apply(plan, iapply.MODE_TREE)
+    parsed = tomllib.loads((tmp_path / "pixi.toml").read_text(encoding="utf-8"))
+    shared = parsed["feature"]["shipit-artifacts-tools.v2"]
+    assert shared["dependencies"]["lexd"] == "0.19.3"
+    assert shared["channels"] == [
+        "https://storage.googleapis.com/shipit-artifacts-public/lex-fmt/lex"
+    ]
+
+
 def test_toml_table_headers_return_verbatim_text_and_split_segments():
     # A dotted segment is quoted at emission (_toml_key). The parser returns the
     # VERBATIM header (for a faithful conflict report) plus the split segments
@@ -424,31 +499,20 @@ def test_toml_table_headers_return_verbatim_text_and_split_segments():
     assert irec._toml_table_headers("[[x]]\nk = 1\n") == ()
 
 
-def test_table_conflict_reports_the_quoted_header_for_a_dotted_name(tmp_path):
-    # Display fidelity (copilot round 2): a dotted name is quoted at emission, so
-    # the reported clash must PRESERVE the quoting — a bare
-    # `feature.shipit-artifacts-tools.v2` is a different, nested table in TOML and
-    # would send the user to delete the wrong one. A dotted `feature` projects
-    # the reserved `shipit-artifacts-tools.v2` feature (dotted → quoted); a
-    # consumer that already declares that table exercises the report end-to-end.
-    (tmp_path / "pixi.toml").write_text(
-        iunits.pixi_manifest_seed("downstream")
-        + '\n[feature."shipit-artifacts-tools.v2"]\nchannels = []\n'
-    )
-    units = ad.project(
-        [(_dep(feature="tools.v2"), ad.channel_url("lex-fmt/lex", private=False))]
-    )
-    state = irec.gather(tmp_path, units, irec.load_retired())
-    plan = irec.reconcile(units, irec.load_retired(), state)
-
+def test_s3_options_table_conflict_reports_the_quoted_header(tmp_path):
+    # Display fidelity (copilot round 2), now exercised via the ONLY anchor-less
+    # unit left — the private-tier `[s3-options.<bucket>]` block. A consumer who
+    # hand-declares that table (the manual runbook) gets a table conflict whose
+    # reported header PRESERVES the exact form, so the warning names the real
+    # table to delete. (The feature/channel block is now anchored — it MERGES, so
+    # it can no longer produce a table conflict; see the merge tests above.)
+    (tmp_path / "pixi.toml").write_text(_CONSUMER_PIXI_WITH_MANUAL_S3)
+    _units, plan = _reconcile_private(tmp_path)
     conflict = next(
-        c
-        for c in plan.pixi_table_conflicts
-        if c.unit_key == "pixi.toml#shipit-artifacts-tools.v2"
+        c for c in plan.pixi_table_conflicts if c.unit_key == ad.S3_OPTIONS_KEY
     )
-    assert conflict.tables == ('feature."shipit-artifacts-tools.v2"',)
-    # The user-facing warning names the real, quoted table path.
-    assert '[feature."shipit-artifacts-tools.v2"]' in verb.format_plan_warnings(plan)
+    assert conflict.tables == ("s3-options.shipit-artifacts-private",)
+    assert "[s3-options.shipit-artifacts-private]" in verb.format_plan_warnings(plan)
 
 
 def test_table_declared_matches_only_the_full_leaf_path():
@@ -763,12 +827,39 @@ def test_verb_rejects_the_legacy_version_shape(tmp_path):
         verb._artifact_dep_units(tmp_path, is_private=lambda slug: False)
 
 
-def test_verb_degrades_on_a_generally_unreadable_manifest(tmp_path):
+def test_verb_fails_loud_when_pixi_toml_is_absent(tmp_path):
+    # Major 2 / copilot (#1094 review): a repo that declares `[artifact-deps]` but
+    # has NO pixi.toml must NOT silently project a channel with no pin — the absent
+    # manifest is treated as empty, so every declared dep reads as missing.
+    from shipit.verbs import install as verb
+
+    _write_config(tmp_path, '[artifact-deps.lexd]\nrepo = "lex-fmt/lex"\n')
+    # no pixi.toml written
+    with pytest.raises(
+        config.ConfigError,
+        match=r"no consumer-owned version pin.*feature\.shipit-artifacts\.dependencies",
+    ):
+        verb._artifact_dep_units(tmp_path, is_private=lambda slug: False)
+
+
+def test_verb_fails_loud_when_pixi_toml_is_unparseable(tmp_path):
+    # An unparseable pixi.toml is likewise treated as empty (all pins missing) —
+    # NOT a silent pass that would project a channel with nothing to resolve.
+    from shipit.verbs import install as verb
+
+    _write_config(tmp_path, '[artifact-deps.lexd]\nrepo = "lex-fmt/lex"\n')
+    _write_pixi(tmp_path, "this is not valid toml = = =\n")
+    with pytest.raises(config.ConfigError, match=r"no consumer-owned version pin"):
+        verb._artifact_dep_units(tmp_path, is_private=lambda slug: False)
+
+
+def test_verb_degrades_on_an_unreadable_shipit_toml(tmp_path):
+    # A generally-unreadable `.shipit.toml` degrades to no artifact units (gather
+    # warns), it does not crash install — the artifact-dep read is not the place a
+    # broken top-level config surfaces.
     from shipit.verbs import install as verb
 
     _write_config(tmp_path, "this is not valid toml = = =\n")
-    # An unreadable manifest degrades to no artifact units (gather warns), it
-    # does not crash install here.
     assert verb._artifact_dep_units(tmp_path, is_private=lambda slug: False) == []
 
 
@@ -807,3 +898,52 @@ def test_materialized_bin_path_is_target_aware_for_windows(tmp_path):
     assert ad.materialized_bin_path(tmp_path, dep, target="x86_64-pc-windows-msvc") == (
         tmp_path / ".pixi/envs/default/Scripts/lexd-lsp.exe"
     )
+
+
+# --------------------------------------------------------------------------
+# Cascade retirement (ADR-0077) — the stale receive-workflow is deleted from a
+# consumer that already installed it (the pristine-leftover-removal pattern).
+# --------------------------------------------------------------------------
+
+
+def test_retirement_deletes_the_stale_cascade_workflow(tmp_path):
+    # A consumer that installed the (now-removed) Cascade receive-workflow still
+    # carries a pristine copy once its managed unit leaves the catalog. The
+    # retired-files pass DELETES it end-to-end (gather -> reconcile -> apply).
+    (tmp_path / "AGENTS.md").write_text("# Downstream\n")
+    victim = tmp_path / _CASCADE_WORKFLOW_DEST
+    victim.parent.mkdir(parents=True)
+    victim.write_bytes(_CASCADE_PRISTINE.read_bytes())
+
+    retired = irec.load_retired()
+    state = irec.gather(tmp_path, [], retired)
+    plan = irec.reconcile([], retired, state)
+    decision = next(d for d in plan.retired if d.retired.path == _CASCADE_WORKFLOW_DEST)
+    assert decision.action == irec.DELETE
+    iapply.apply(plan, iapply.MODE_TREE)
+    assert not victim.exists()
+
+
+def test_retirement_keeps_a_locally_edited_cascade_workflow(tmp_path):
+    # Safety: a consumer who HAND-EDITED the stale workflow (content matches no
+    # known pristine hash) keeps it, warned — never a destroyed local edit.
+    (tmp_path / "AGENTS.md").write_text("# Downstream\n")
+    victim = tmp_path / _CASCADE_WORKFLOW_DEST
+    victim.parent.mkdir(parents=True)
+    victim.write_text("name: my-own-edited-workflow\n")
+
+    retired = irec.load_retired()
+    state = irec.gather(tmp_path, [], retired)
+    plan = irec.reconcile([], retired, state)
+    decision = next(d for d in plan.retired if d.retired.path == _CASCADE_WORKFLOW_DEST)
+    assert decision.action == irec.KEEP
+    iapply.apply(plan, iapply.MODE_TREE)
+    assert victim.exists()
+
+
+def test_cascade_retirement_hashes_match_the_pristine_fixture():
+    # The manifest entry's pristine hash covers the delivered workflow content, so
+    # the delete actually fires for a real consumer (not a stale/typo'd hash).
+    retired = {r.path: r for r in irec.load_retired()}
+    entry = retired[_CASCADE_WORKFLOW_DEST]
+    assert config.content_hash(_CASCADE_PRISTINE.read_bytes()) in entry.pristine_hashes

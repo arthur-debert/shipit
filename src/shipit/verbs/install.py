@@ -263,15 +263,20 @@ def _require_consumer_pins(root: Path, deps) -> None:
     pixi resolves the pin against the channel. A declared artifact with NO such pin
     would make ``shipit install`` project a channel with nothing to resolve — a
     silent de-provision / resolve-nothing. So a missing pin fails LOUD and
-    actionable HERE, naming the exact table to add. A ``pixi.toml`` that is absent
-    or unparseable degrades silently (like the rest of install's read boundary):
-    the reconcile has no manifest to splice into either, and warns downstream.
+    actionable HERE, naming the exact table to add.
+
+    An ABSENT or unparseable ``pixi.toml`` is treated as an EMPTY manifest — so
+    EVERY declared ``[artifact-deps]`` reads as a missing pin and the SAME loud
+    error fires (#1094 review, Major 2). Degrading silently here would be the exact
+    resolve-nothing this check exists to stop: a repo that declares a cross-repo
+    artifact but carries no manifest (or a broken one) to pin it in must hear it,
+    not project a channel into a manifest with no dependency to resolve.
     """
     pixi = root / install_units.PIXI_FILE
     try:
         manifest = tomllib.loads(pixi.read_text(encoding="utf-8"))
     except (OSError, tomllib.TOMLDecodeError):
-        return
+        manifest = {}  # absent/invalid -> every declared pin is missing (loud)
     missing = artifactdeps.missing_pins(deps, manifest)
     if not missing:
         return
