@@ -338,8 +338,12 @@ def decide_fragment_gate(
     * ``base_ref`` is not :data:`GATED_BASE_REF` — a WS PR to an epic branch is
       exempt.
     * the :data:`SKIP_CHANGELOG_LABEL` label is present.
-    * a ``CHANGELOG/unreleased-*.md`` path was added or modified in the diff
-      (amending your own fragment across review rounds counts).
+    * a ``CHANGELOG/unreleased-*.md`` path was ADDED in the diff. The diff is
+      the merge-base ``base...HEAD`` (:func:`shipit.git.added_paths_since`,
+      ``--diff-filter=A``), so a fragment the PR introduces counts even when
+      amended across review rounds (the base never had it → still a net add),
+      while merely modifying, deleting, or renaming a fragment already present
+      on the base does NOT — that adds no new release note.
 
     Fails (``ok=False``) when the base is ``main``, no skip label is set, and
     the diff carries no fragment — or when the diff is unavailable (``None``),
@@ -484,6 +488,9 @@ def run_check_fragment(
     The seams are injectable for tests: ``base_ref`` / ``labels`` override the
     env reads, ``changed_paths_fn`` (``(base_ref, cwd) -> paths | None``) the git
     boundary — mirroring the ``ci plan`` injection pattern (:func:`shipit.verbs.ci.run`).
+    The default boundary is :func:`shipit.git.added_paths_since` (``--diff-filter=A``
+    against ``origin/<base>``): only a fragment the PR ADDS satisfies the gate, so
+    modifying/deleting/renaming a pre-existing base fragment cannot.
     """
     root = Path(path or ".").resolve()
     if base_ref is None:
@@ -491,7 +498,7 @@ def run_check_fragment(
     if labels is None:
         labels = _pr_labels(os.environ.get("GITHUB_EVENT_PATH"))
     fetch = changed_paths_fn or (
-        lambda ref, cwd: git.changed_paths_since(f"origin/{ref}", cwd=cwd)
+        lambda ref, cwd: git.added_paths_since(f"origin/{ref}", cwd=cwd)
     )
     verdict = decide_fragment_gate(
         base_ref=base_ref,

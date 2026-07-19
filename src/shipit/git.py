@@ -752,6 +752,31 @@ def changed_paths_since(base_ref: str, *, cwd: str) -> list[str] | None:
     return [line for line in res.stdout.splitlines() if line.strip()]
 
 
+def added_paths_since(base_ref: str, *, cwd: str) -> list[str] | None:
+    """The paths this branch ADDED since diverging from ``base_ref`` — the
+    three-dot ``git diff --name-only --diff-filter=A <base_ref>...HEAD``.
+
+    Same merge-base endpoint as :func:`changed_paths_since`, but restricted to
+    status ``A`` (added). Because the endpoint is the merge base, a file the
+    branch introduces is status ``A`` even when amended across review rounds
+    (the base never had it), while a file that already existed on ``base_ref``
+    and is only modified, deleted, or renamed is ``M``/``D``/``R`` and excluded.
+    The changelog fragment gate (:func:`shipit.verbs.changelog.run_check_fragment`)
+    needs exactly that: a fragment the PR *adds*, never a pre-existing base
+    fragment it merely touches or removes.
+
+    A probe like its sibling: ``None`` when git cannot answer (unknown ref, a
+    shallow clone missing the merge-base, not a checkout) — a diff the caller
+    could not verify.
+    """
+    res = _probe(
+        ["diff", "--name-only", "--diff-filter=A", f"{base_ref}...HEAD"], cwd=cwd
+    )
+    if res.rc != 0:
+        return None
+    return [line for line in res.stdout.splitlines() if line.strip()]
+
+
 # --------------------------------------------------------------------------
 # mutations — thin typed functions (install / Tree creation / review reuse)
 # --------------------------------------------------------------------------

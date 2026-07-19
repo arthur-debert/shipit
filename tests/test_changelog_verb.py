@@ -528,9 +528,12 @@ def test_fragment_gate_passes_when_a_fragment_is_added():
     assert "unreleased-feature.md" in verdict.message
 
 
-def test_fragment_gate_passes_when_a_fragment_is_modified():
-    # Amending your own fragment across review rounds (a MODIFIED path) counts —
-    # the diff-filter is AM, and the pure gate only sees the path either way.
+def test_fragment_gate_is_status_agnostic_the_boundary_filters():
+    # The pure decision passes for any fragment path handed to it — it does not
+    # know a path's git status. The add-only guarantee (a modified/deleted base
+    # fragment must NOT satisfy the gate) lives in the runner's default boundary
+    # (git.added_paths_since, --diff-filter=A), pinned in
+    # test_run_check_fragment_default_boundary_filters_to_added below.
     verdict = _fragment_gate("main", [], ["CHANGELOG/unreleased-feature.md"])
     assert verdict.ok
 
@@ -577,6 +580,41 @@ def test_run_check_fragment_passes_when_the_diff_adds_a_fragment(tmp_path, capsy
     )
     assert rc == 0
     assert "OK" in capsys.readouterr().out
+
+
+def test_run_check_fragment_default_boundary_filters_to_added(
+    tmp_path, capsys, monkeypatch
+):
+    # With no injected changed_paths_fn, the runner's default boundary must be
+    # git.added_paths_since — i.e. it diffs origin/<base> with --diff-filter=A,
+    # so a regression dropping the filter (and letting a deleted/modified base
+    # fragment satisfy the gate) is caught here. Pins the git argv.
+    from shipit import git
+    from shipit.execrun import ExecResult
+
+    seen = {}
+
+    def fake_probe(argv, *, cwd):
+        seen["argv"], seen["cwd"] = argv, cwd
+        return ExecResult(
+            argv=("git",),
+            rc=0,
+            stdout="CHANGELOG/unreleased-x.md\n",
+            stderr="",
+            duration_ms=1,
+        )
+
+    monkeypatch.setattr(git, "_probe", fake_probe)
+    rc = verb.run_check_fragment(str(tmp_path), base_ref="main", labels=[])
+
+    assert rc == 0
+    assert "OK" in capsys.readouterr().out
+    assert seen["argv"] == [
+        "diff",
+        "--name-only",
+        "--diff-filter=A",
+        "origin/main...HEAD",
+    ]
 
 
 def test_pr_labels_reads_the_event_payload(tmp_path):

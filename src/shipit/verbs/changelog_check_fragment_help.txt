@@ -18,8 +18,10 @@ The check PASSES (exit 0), requiring no fragment, when any of:
   chore-only PRs that legitimately need no release note
 
 Otherwise it requires the PR's own diff (the three-dot merge-base diff against
-`origin/main`) to add or modify at least one `CHANGELOG/unreleased-*.md`
-fragment, and exits non-zero when none is found.
+`origin/main`, `--diff-filter=A`) to ADD at least one `CHANGELOG/unreleased-*.md`
+fragment, and exits non-zero when none is found. A fragment the PR introduces
+counts even when amended across review rounds (the base never had it); merely
+modifying, deleting, or renaming a fragment already on `main` does not.
 
 Wire it as a required, PR-only lane in `.shipit.toml` (`local = false`, so it
 runs in CI but never on a laptop commit/push). The base-branch and label gating

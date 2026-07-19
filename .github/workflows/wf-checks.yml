@@ -101,6 +101,12 @@ jobs:
     continue-on-error: ${{ !matrix.required }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          # Full history, like the plan job: a diff-dependent lane (e.g. the
+          # `changelog` fragment gate) diffs the PR against origin/<base>, and a
+          # shallow clone leaves that merge-base ref unresolvable — the gate then
+          # reads the diff as unavailable and refuses. lint/test are unaffected.
+          fetch-depth: 0
       - uses: prefix-dev/setup-pixi@v0.9.6
         with:
           # Lockstep with the Layer 0 bootstrap's PIXI_PIN — see the plan job.

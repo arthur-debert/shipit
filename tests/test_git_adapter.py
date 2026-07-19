@@ -1104,3 +1104,36 @@ def test_changed_paths_since_answers_none_when_git_cannot(monkeypatch):
         lambda args, *, cwd: _fail("fatal: bad revision 'origin/gone...HEAD'", rc=128),
     )
     assert git.changed_paths_since("origin/gone", cwd="/tree") is None
+
+
+def test_added_paths_since_filters_to_added_in_the_three_dot_diff(monkeypatch):
+    # The changelog fragment gate's boundary (#1073): same merge-base endpoint
+    # as changed_paths_since, but --diff-filter=A — only paths the branch ADDED,
+    # so touching/deleting a pre-existing base fragment can never satisfy it.
+    seen = {}
+
+    def fake(args, *, cwd):
+        seen["args"], seen["cwd"] = args, cwd
+        return _ok("CHANGELOG/unreleased-x.md\n")
+
+    monkeypatch.setattr(git, "_probe", fake)
+    paths = git.added_paths_since("origin/main", cwd="/tree")
+    assert seen["args"] == [
+        "diff",
+        "--name-only",
+        "--diff-filter=A",
+        "origin/main...HEAD",
+    ]
+    assert seen["cwd"] == "/tree"
+    assert paths == ["CHANGELOG/unreleased-x.md"]
+
+
+def test_added_paths_since_answers_none_when_git_cannot(monkeypatch):
+    # Same fail-safe as its sibling: an unresolvable ref / shallow clone is
+    # None, which the required gate turns into a loud refusal (never a pass).
+    monkeypatch.setattr(
+        git,
+        "_probe",
+        lambda args, *, cwd: _fail("fatal: bad revision 'origin/gone...HEAD'", rc=128),
+    )
+    assert git.added_paths_since("origin/gone", cwd="/tree") is None
