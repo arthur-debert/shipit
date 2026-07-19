@@ -838,8 +838,11 @@ def _stub_install_pipeline(monkeypatch, *, hooks_activated, hooks_detail=""):
     from shipit.install import reconcile as reconcile_mod
     from shipit.install import units as units_mod
 
-    monkeypatch.setattr(reconcile_mod, "detect_toolchains", lambda root: ())
-    monkeypatch.setattr(units_mod, "load_units", lambda *, toolchains: ())
+    monkeypatch.setattr(reconcile_mod, "detect_toolchains", lambda root: frozenset())
+    # `default_installer` now derives the catalog exactly as `shipit install`
+    # does — toolchains UNION declared signals, plus declared endpoints and
+    # platforms (#1071/#1072) — so the stub accepts the same keyword surface.
+    monkeypatch.setattr(units_mod, "load_units", lambda **kwargs: ())
     monkeypatch.setattr(reconcile_mod, "load_retired", lambda: ())
     monkeypatch.setattr(reconcile_mod, "load_retired_hooks", lambda: ())
     monkeypatch.setattr(reconcile_mod, "gather", lambda *a, **k: None)
@@ -876,6 +879,47 @@ def test_default_installer_accepts_activated_or_no_op_hooks(
     # True (activated) and None (nothing to activate) are both success.
     _stub_install_pipeline(monkeypatch, hooks_activated=hooks_activated)
     create_mod.default_installer(tmp_path)  # does not raise
+
+
+def test_default_installer_delivers_the_endpoint_gated_conda_packager(
+    tmp_path, monkeypatch
+):
+    # copilot review (#1071): repo CREATION must derive the managed catalog the
+    # same way `shipit install` does — threading the scaffold's DECLARED endpoints
+    # (and platforms, #1072), not toolchains alone — or a freshly-created conda
+    # producer would miss the endpoint-gated conda-packager block and its initial
+    # managed baseline would be incomplete. This drives the REAL gather/reconcile/
+    # apply (only the lefthook-activation boundary is stubbed, since no binary
+    # exists in the test env and creation fails closed on a dormant hook) over a
+    # scaffolded conda tree-sitter repo and asserts the packager landed.
+    from shipit import config
+    from shipit.install import apply as apply_mod
+    from shipit.install import units as units_mod
+
+    monkeypatch.setattr(
+        apply_mod,
+        "_activate_hooks",
+        lambda root: execrun.ExecResult(
+            argv=("lefthook", "install"), rc=0, stdout="", stderr="", duration_ms=1
+        ),
+    )
+    (tmp_path / "grammar.js").write_text("module.exports = grammar({});\n")
+    (tmp_path / ".shipit.toml").write_text(
+        "[toolchains]\n"
+        '"." = "tree-sitter"\n'
+        "[artifacts.grammar]\n"
+        'build = ["tree-sitter"]\n'
+        'bundle = { composition = "tarball" }\n'
+        'endpoints = ["gh-release", "conda"]\n'
+    )
+
+    create_mod.default_installer(tmp_path)
+
+    text = (tmp_path / "pixi.toml").read_text(encoding="utf-8")
+    assert units_mod.PIXI_CONDA_PACKAGER_OPEN in text
+    # And it is a tracked managed unit in the created baseline.
+    managed = config.load_managed(config.load(tmp_path / ".shipit.toml"))
+    assert units_mod.PIXI_CONDA_PACKAGER_KEY in managed
 
 
 # --------------------------------------------------------------------------

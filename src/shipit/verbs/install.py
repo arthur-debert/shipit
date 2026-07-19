@@ -37,6 +37,7 @@ from __future__ import annotations
 import difflib
 import logging
 import sys
+import tomllib
 from pathlib import Path
 
 import click
@@ -44,6 +45,7 @@ import click
 from .. import config, events, gh, git, identity, sessionstore
 from ..channel import cascade_receive
 from ..install import artifactdeps
+from ..install import units as install_units
 from ..install.apply import (
     MODE_LOCAL,
     MODE_PR,
@@ -111,7 +113,7 @@ def _declared_signals(root: Path) -> set[str]:
     from ..tools import registry as toolchain_registry
 
     try:
-        cfg = load_config(Path(root))
+        cfg = load_config(root)
         artifacts = config.load_artifacts(cfg)
         entries = config.load_toolchains(cfg)
     except config.ConfigError:
@@ -128,6 +130,76 @@ def _declared_signals(root: Path) -> set[str]:
         if tc is not None and tc.provisions_signal is not None:
             signals.add(tc.provisions_signal)
     return signals
+
+
+def _declared_endpoints(root: Path) -> frozenset[str]:
+    """Distribution endpoints declared across the consumer's ``[artifacts.*]``
+    map (#1071).
+
+    The endpoint-gated managed pixi blocks (:data:`shipit.install.units.ENDPOINT_UNITS`
+    — currently the conda packager) ride a declared ENDPOINT, not a toolchain:
+    ``rattler-build`` is the ``conda`` endpoint's packager, so it must ship
+    wherever ANY artifact names ``conda`` (regardless of its composition or
+    build toolchain), the #1071 gap where a non-rust conda producer got no
+    packager. Returns the union of every artifact's ``endpoints`` list.
+
+    Degrades to ``frozenset()`` when the config is absent or unparseable — the
+    endpoint augmentation never itself fails install (the config's own parse
+    errors surface on the verbs that read the map, not here), the same posture
+    as :func:`_declared_signals`.
+    """
+    try:
+        cfg = load_config(root)
+        artifacts = config.load_artifacts(cfg)
+    except config.ConfigError:
+        return frozenset()
+    endpoints: set[str] = set()
+    for artifact in artifacts:
+        endpoints.update(artifact.endpoints)
+    return frozenset(endpoints)
+
+
+def _declared_platforms(root: Path) -> frozenset[str]:
+    """The consumer's declared pixi ``[workspace].platforms`` (#1072).
+
+    The managed lexd block scopes its ``[target]`` tables to the platforms the
+    workspace actually declares (:func:`shipit.install.units.lexd_block`) — a
+    ``[target]`` selector for an undeclared platform makes pixi warn on every
+    invocation. This reads that platform list from the consumer's ``pixi.toml``
+    (``[workspace]``, or the legacy ``[project]`` alias).
+
+    The scope is the repo's OWN declaration, so an EXISTING manifest names only
+    what it names:
+
+    - NO ``pixi.toml`` (or an unparseable one) degrades to the seed defaults
+      (:data:`shipit.install.units.PIXI_SEED_PLATFORMS`) — exactly the set a
+      fresh install is about to SEED (:func:`shipit.install.units.pixi_manifest_seed`),
+      so the virgin-repo plan's lexd scope matches the platforms it writes and a
+      re-install reconciles to a clean noop (the seed set carries no ``win-64``);
+    - a PRESENT, parsed manifest that declares no ``platforms`` list is NOT a
+      virgin repo — it gets ``frozenset()``, never the seed defaults, because
+      emitting a target for a platform the manifest never declared is the exact
+      #1072 dangling-selector warning this scoping removes (the reviewer's
+      existing-manifest shape). An EXPLICIT list wins verbatim, including an
+      explicitly empty ``platforms = []`` (the consumer declared none).
+
+    A ``[workspace]``/``[project]`` that is a scalar rather than a table (invalid
+    schema, but valid TOML) is treated as no platform source, never crashed on.
+    """
+    default = frozenset(install_units.PIXI_SEED_PLATFORMS)
+    pixi = root / install_units.PIXI_FILE
+    try:
+        data = tomllib.loads(pixi.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return default
+    for table in ("workspace", "project"):
+        table_data = data.get(table)
+        if not isinstance(table_data, dict):
+            continue  # absent, or a malformed scalar — not a platform source
+        platforms = table_data.get("platforms")
+        if isinstance(platforms, list):
+            return frozenset(str(p) for p in platforms)
+    return frozenset()
 
 
 def _artifact_dep_units(root: Path, *, is_private=gh.repo_is_private) -> list[Unit]:
@@ -347,7 +419,19 @@ def run(
         # and a declared tree-sitter [toolchains] leg needs its own CLI, which no
         # manifest can signal at all (#890).
         toolchains = detect_toolchains(root_path) | _declared_signals(root_path)
-        units = load_units(toolchains=toolchains)
+        # The conda packager (rattler-build) is gated on a declared ENDPOINT,
+        # not a toolchain (#1071): a repo declaring a `conda` endpoint on any
+        # artifact gets it regardless of its build toolchain, so a non-rust
+        # conda producer (a tree-sitter `tarball` grammar) is no longer starved
+        # of its packager.
+        endpoints = _declared_endpoints(root_path)
+        # The managed lexd block's `[target]` set is scoped to the consumer's
+        # declared platforms (#1072): a target selector for a platform the
+        # workspace does not declare makes pixi warn on every invocation.
+        platforms = _declared_platforms(root_path)
+        units = load_units(
+            toolchains=toolchains, endpoints=endpoints, platforms=platforms
+        )
         # The consumer half of the Artifact channel (ARF01-WS02 #952): project
         # the repo's `[artifact-deps]` declarations into managed pixi blocks the
         # reconcile then treats like any other. Malformed entries fail loud here;

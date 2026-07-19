@@ -31,10 +31,15 @@ from collections.abc import Sequence
 from .. import execrun
 
 #: argv head → (what the head needed, the managed pixi block that delivers it,
-#: the toolchain signal that block rides). One row per tool the managed pixi
-#: surface provisions for the release stages — the pixi-managed rows of the
-#: TOL02-WS17 inventory (docs/dev/release-tool-provisioning.md), kept in
-#: lockstep with the drift guard (tests/test_tool_provisioning_guard.py).
+#: the PROVISIONING SIGNAL that block rides — a toolchain (``rust``/``node``/…,
+#: :data:`shipit.install.units.TOOLCHAIN_UNITS`) for a block gated on a build
+#: language, or a declared distribution ENDPOINT (``conda``,
+#: :data:`shipit.install.units.ENDPOINT_UNITS`) for a block gated on where the
+#: artifact ships (#1071 — ``rattler-build`` rides the ``conda`` endpoint, not
+#: any toolchain). One row per tool the managed pixi surface provisions for the
+#: release stages — the pixi-managed rows of the TOL02-WS17 inventory
+#: (docs/dev/release-tool-provisioning.md), kept in lockstep with the drift
+#: guard (tests/test_tool_provisioning_guard.py).
 _MANAGED_TOOLS: dict[str, tuple[str, str, str]] = {
     "cargo": (
         "the rust toolchain (conda-forge `rust` carries cargo)",
@@ -61,8 +66,8 @@ _MANAGED_TOOLS: dict[str, tuple[str, str, str]] = {
         "rattler-build (the conda endpoint's packager — repackages a final "
         "release binary into a `.conda` and pushes+reindexes the Artifact "
         "channel)",
-        "pixi.toml#shipit-rust-release-deps",
-        "rust",
+        "pixi.toml#shipit-conda-packager",
+        "conda",
     ),
 }
 
@@ -88,7 +93,7 @@ def missing_tool_remedy(argv: Sequence[str], cause: str) -> str | None:
     return (
         f"`{argv[0]}` is not provisioned on this runner — this stage needs "
         f"{need}. It rides the shipit-managed pixi surface for {signal} "
-        f"repos (the `{block}` block, pinned from conda-forge) and is never "
+        f"producers (the `{block}` block, pinned from conda-forge) and is never "
         f"installed at release run time — this repo's shipit pin/managed set "
         f"is stale. Reconcile with a COMMITTING install (`shipit install "
         f"--pr` opens the reconcile draft PR; `shipit install --local` "

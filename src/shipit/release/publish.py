@@ -1569,6 +1569,38 @@ def conda_assets(
     return assets
 
 
+def conda_served_subdirs(artifacts: Sequence[config.Artifact]) -> tuple[str, ...]:
+    """The served conda subdirs a repo's conda producer ACTUALLY publishes (#1076).
+
+    The union, over the repo's conda-endpoint build-bearing artifacts, of each
+    declared release platform (none declared → the default linux lane, exactly as
+    :func:`shipit.release.preflight._matrix` expands it) mapped through its target
+    triple to a SERVED subdir — an unserved platform (osx-64, musl) drops out via
+    :func:`conda_subdir` returning ``None``. Returned in
+    :data:`shipit.channel.buckets.SERVED_SUBDIRS` order. Pure (a config
+    projection, no I/O).
+
+    This is the SAME platform→triple→subdir derivation the publish stage uses
+    (:func:`conda_assets` / :func:`conda_subdir`), so a channel's readiness check
+    (:func:`shipit.channel.store_provision.verify`) can probe exactly the subdirs
+    its own publish writes — never the FIXED all-of-served set, which false-negs a
+    repo that ships fewer platforms (e.g. lexd has no windows, so its channel can
+    never satisfy a win-64 probe; #1076, the sibling of the #1072 lexd fix on the
+    store-verify surface).
+    """
+    from . import preflight  # lazy — avoid a publish<->preflight import cycle
+
+    found: set[str] = set()
+    for artifact in artifacts:
+        if "conda" not in artifact.endpoints or not artifact.build:
+            continue
+        for platform in artifact.platforms or (preflight.DEFAULT_PLATFORM,):
+            subdir = conda_subdir(preflight.PLATFORM_MATRIX[platform].target)
+            if subdir is not None:
+                found.add(subdir)
+    return tuple(s for s in buckets.SERVED_SUBDIRS if s in found)
+
+
 def conda_package_name(artifact: config.Artifact) -> str:
     """The conda package name for ``artifact`` — the consumer's
     ``[artifact-deps.<key>]`` key (ADR-0064: the key doubles as the conda
