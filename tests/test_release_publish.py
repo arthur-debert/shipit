@@ -3080,6 +3080,162 @@ def test_conda_noarch_wasm_pack_real_repackage_builds_a_generic_conda(tmp_path):
     assert any("noarch" in a for a in published.actions)
 
 
+# --------------------------------------------------------------------------
+# Per-platform REAL build (#1053) — the faked `_CondaBuildRecorder` seam hid the
+# 4 producer bugs (#1049 ×3 + #1052). These drive the REAL `rattler-build build`
+# through the actual producer (`_publish_conda`), faking only the S3 publish, so
+# a 5th bug can't hide behind an empty `.conda`.
+# --------------------------------------------------------------------------
+
+#: subdir → triple (reverse of publish.CONDA_SUBDIRS) — to stage the release
+#: archive for a chosen served subdir.
+_SUBDIR_TRIPLE = {
+    subdir: triple for triple, subdir in publish_mod.CONDA_SUBDIRS.items()
+}
+
+
+def _load_roundtrip_harness():
+    """The `tools/conda_channel_roundtrip.py` harness, loaded by path (`tools/`
+    is not an importable package). Reused for its host-subdir helper and the
+    file:// resolve step."""
+    import importlib.util
+
+    path = (
+        Path(__file__).resolve().parent.parent / "tools" / "conda_channel_roundtrip.py"
+    )
+    spec = importlib.util.spec_from_file_location("conda_channel_roundtrip", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _conda_tool_artifact():
+    """A single-binary TOOL artifact (`lex`) declaring the conda endpoint — the
+    per-platform triple→subdir path (`_publish_conda`), NOT the noarch path."""
+    return _artifacts({"lex": {"build": ["rust"], "endpoints": ["conda"]}})[0]
+
+
+def _prebuilt_tool_archive(dist, artifact, triple, binary):
+    """Stage a `<artifact>-<triple>.tar.gz` release archive whose binary is
+    WRAPPED in a top-level `<artifact>-<triple>/` dir — the exact release-stage
+    shape (`bundle._compose_archive`) that rattler-build STRIPS on extraction
+    (#1049). A tiny shell script stands in for the prebuilt binary."""
+    top = dist / f"{artifact}-{triple}"
+    top.mkdir(parents=True, exist_ok=True)
+    (top / binary).write_text("#!/bin/sh\necho hi\n", encoding="utf-8")
+    with tarfile.open(dist / f"{artifact}-{triple}.tar.gz", "w:gz") as tf:
+        tf.add(top, arcname=top.name)
+
+
+@pytest.mark.skipif(
+    shutil.which("rattler-build") is None,
+    reason="rattler-build not on PATH (present in the `test` env; a bare host skips)",
+)
+def test_conda_per_platform_real_repackage_cross_target_builds_a_conda(tmp_path):
+    """REAL end-to-end PER-PLATFORM build (#1053; the seam that hid the 4 producer
+    bugs): an actual `rattler-build build`, through the real producer
+    (`_publish_conda`), repackages a prebuilt-binary release archive — binary
+    wrapped in a top-level `<artifact>-<triple>/` dir rattler-build STRIPS
+    (#1049) — into a genuine per-platform `.conda` for a NON-NATIVE target subdir
+    (the cross-platform relink class #1052). Asserts the `.conda` lands in the
+    target subdir with the binary at `bin/lex` (and NOTHING else swept in) and
+    the recipe carries the no-relink guard. Only the S3 publish is faked.
+
+    Spot-check (acceptance): reverting fix #1049 (rendering the copy source as the
+    `<artifact>-<triple>/lex` prefix instead of the bare `lex`) makes this real
+    build fail with `cp: lex-<triple>/lex: No such file or directory`, since
+    rattler-build strips the wrapper dir — exactly the bug the faked seam missed.
+    """
+    roundtrip = _load_roundtrip_harness()
+    # A NON-native served subdir, so the build is a real cross-compilation (the
+    # #1052 environment). Restricted to the unix subdirs (bin/lex layout);
+    # win-64's Scripts/.exe layout is out of scope for this fixture.
+    host = roundtrip.host_conda_subdir()
+    target = next(s for s in ("osx-arm64", "linux-64", "linux-aarch64") if s != host)
+    triple = _SUBDIR_TRIPLE[target]
+
+    dist = _staged_assets(tmp_path, [])
+    _prebuilt_tool_archive(dist, "lex", triple, "lex")
+
+    run_cmd = _RealBuildFakePublish()
+    req = _request(tmp_path, _conda_tool_artifact(), env=CONDA_CREDS, run_cmd=run_cmd)
+
+    published = publish_mod._publish_conda(req)
+
+    # Exactly one real build, for the non-native target subdir.
+    builds = [c for c in run_cmd.calls if c[0][:2] == ("rattler-build", "build")]
+    assert len(builds) == 1
+    (build_argv, _, _) = builds[0]
+    assert build_argv[build_argv.index("--target-platform") + 1] == target
+
+    # A genuine `.conda` landed under the target subdir, and the prebuilt binary
+    # is at bin/lex — the `<artifact>-<triple>/` wrapper stripped (#1049), with
+    # NONE of rattler-build's build scaffolding swept in.
+    channel = req.assets_dir / publish_mod.CONDA_CHANNEL_SCRATCH / "lex" / target
+    built = list(channel.glob("*.conda"))
+    assert len(built) == 1, f"expected one {target} .conda, got {built}"
+    assert sorted(_conda_package_files(built[0])) == ["bin/lex"]
+
+    # The rendered recipe carries the no-relink guard (#1052): rattler-build's
+    # default binary_relocation would need a per-OS relink toolchain the single
+    # cross-platform runner lacks and would break the sign stage's signature.
+    recipe = yaml.safe_load(
+        Path(build_argv[build_argv.index("--recipe") + 1]).read_text()
+    )
+    assert recipe["build"]["dynamic_linking"]["binary_relocation"] is False
+
+    # The (faked) publish carried that real per-platform package to the channel.
+    (pub_argv, _, _) = next(
+        c for c in run_cmd.calls if c[0][:2] == ("rattler-build", "publish")
+    )
+    assert any(a.endswith(".conda") for a in pub_argv)
+    assert any(target in a for a in published.actions)
+
+
+@pytest.mark.skipif(
+    shutil.which("rattler-build") is None or shutil.which("pixi") is None,
+    reason="rattler-build + pixi needed for the file:// round trip (both in `test`)",
+)
+def test_conda_file_channel_roundtrip_resolves_and_stages_the_binary(tmp_path):
+    """The ADR-0064 file:// round trip, automated (#1053): the REAL producer
+    (`_publish_conda`) builds a per-platform `.conda` for the HOST's native
+    subdir into a scratch channel, then a PLAIN `[workspace]` pixi project
+    (`channels = [file://…]`, NOT the GCS-hardcoded `[artifact-deps]` projection)
+    resolves + installs it, and the prebuilt binary stages at the env prefix's
+    `bin/lex`. Only the S3 publish is faked. This is the loop ARF02 Steps 1/2
+    (#1078 noarch UNION layout, #1079 the staging tool) run against."""
+    roundtrip = _load_roundtrip_harness()
+    # NATIVE subdir — a foreign-subdir package resolves but will not install here.
+    native = roundtrip.host_conda_subdir()
+    triple = _SUBDIR_TRIPLE[native]
+
+    dist = _staged_assets(tmp_path, [])
+    _prebuilt_tool_archive(dist, "lex", triple, "lex")
+
+    run_cmd = _RealBuildFakePublish()
+    req = _request(tmp_path, _conda_tool_artifact(), env=CONDA_CREDS, run_cmd=run_cmd)
+    publish_mod._publish_conda(req)
+
+    # The producer's scratch output-dir IS a valid file:// channel tree
+    # (`<subdir>/repodata.json` + `.conda`, indexed by the build).
+    channel = req.assets_dir / publish_mod.CONDA_CHANNEL_SCRATCH / "lex"
+    assert list((channel / native).glob("*.conda")), "producer built no .conda"
+
+    staged = roundtrip.resolve_from_file_channel(
+        channel_dir=channel,
+        package="lex",
+        version="1.2.3",
+        binary="lex",
+        scratch=tmp_path,
+    )
+
+    # The prebuilt binary staged on PATH at the resolved env prefix — the exact
+    # bytes we shipped in the release archive, proving the full round trip.
+    assert staged.exists()
+    assert (staged.parent.name, staged.name) == ("bin", "lex")
+    assert "echo hi" in staged.read_text(encoding="utf-8")
+
+
 def test_conda_secret_pair_mirrors_the_derivation_authority():
     """conda's write-cred pair IS its `secretreq.ENDPOINT_SECRETS` entry — the
     one derivation authority gh-setup syncs and preflight validates."""
