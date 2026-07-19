@@ -55,20 +55,25 @@ switch), one adapter per name of :data:`shipit.config.ENDPOINTS`:
   cross-repo). Fires on REAL releases only: the plan skips it on any
   prerelease (and the RC guard on a live-fire cut), so an rc/beta notifies
   no one.
-- **conda** (a *derived* endpoint, ARF01-WS01 #950, ADR-0064/0065) — the
-  Artifact channel's producer. Like brew it consumes the FINAL release assets
-  by their known names (``<artifact>-<triple>.tar.gz``/``.zip``, never a scrape
-  — asset names drift, ADR-0064) and runs after gh-release. For each staged
-  archive whose target triple maps to a supported conda subdir
+- **conda** (a *derived* endpoint, ARF01-WS01 #950, ADR-0064/0065; conda-direct
+  ADR-0077) — the Artifact channel's producer. It packages the artifact's
+  staged BUILD OUTPUT directly into a ``.conda`` (conda-direct, ADR-0077): the
+  served subdirs, their target triples, and the staged archive names are
+  DERIVED from the artifact's own declared ``platforms`` (the causal single
+  source) — ``<artifact>-<triple>.tar.gz``/``.zip`` names are CONSTRUCTED from
+  that declaration (:func:`conda_assets`), never reverse-engineered from a
+  staged filename, and the build output is present from the bundle stage with
+  NO gh-release dependency (gh-release only uploads the SAME staged tree). For
+  each declared platform whose triple maps to a supported conda subdir
   (:data:`CONDA_SUBDIRS` — osx-arm64/linux-64/linux-aarch64/win-64 ONLY; no
-  osx-64, no musl, matching today's ``provision`` refusal) it renders a
-  minimal ``rattler-build`` recipe that repackages the prebuilt binary into a
-  versioned ``.conda`` (no compilation — a single runner produces every
-  subdir), then ``rattler-build publish``es the built packages to the
-  producing repo's per-repo channel — ``s3://<bucket>/<owner/name>`` over GCS's
-  S3-interop endpoint (ADR-0065) — which uploads AND reindexes the remote
-  channel's ``repodata.json`` in one step. Per-repo channel roots make each
-  repo the sole writer of its own repodata, so cross-repo index races are
+  osx-64, no musl, matching today's ``provision`` refusal) whose archive is
+  staged, it renders a minimal ``rattler-build`` recipe that repackages the
+  prebuilt binary into a versioned ``.conda`` (no compilation — a single runner
+  produces every subdir), then ``rattler-build publish``es the built packages
+  to the producing repo's per-repo channel — ``s3://<bucket>/<owner/name>``
+  over GCS's S3-interop endpoint (ADR-0065) — which uploads AND reindexes the
+  remote channel's ``repodata.json`` in one step. Per-repo channel roots make
+  each repo the sole writer of its own repodata, so cross-repo index races are
   structurally impossible (ADR-0064). rc-INCLUSIVE: unlike brew/notify it is
   NOT ``stable_only`` (prereleases publish for manual pin-testing, ADR-0064),
   but it IS external, so a ``-release-rc`` live-fire rehearsal stays
@@ -79,8 +84,10 @@ switch), one adapter per name of :data:`shipit.config.ENDPOINTS`:
   (ADR-0076,
   :func:`_publish_conda_noarch`): ONE ``noarch: generic`` ``.conda`` published
   to the channel's ``noarch/`` subdir, which every conda client reads alongside
-  its platform subdir (no consumer change). The per-platform triple→subdir path
-  (:data:`CONDA_SUBDIRS`) is untouched — the two modes are additive.
+  its platform subdir (no consumer change) — its archive name is likewise
+  CONSTRUCTED from the artifact + version (:func:`conda_noarch_asset_name`),
+  already direct. The per-platform triple→subdir path (:data:`CONDA_SUBDIRS`) is
+  untouched — the two modes are additive.
 - **zed** (a *derived*, stable-only endpoint, TOL03-WS02 #973, ADR-0068) — the
   Zed-extension registry endpoint. A Zed extension "publishes" only when a PR
   into the foreign, review-gated ``zed-industries/extensions`` monorepo (bump
@@ -643,19 +650,20 @@ def plan(
     the unusable selections (unknown name, undeclared name, a deselected
     gh-release) before any of this.
 
-    Cross-endpoint invariant: an unskipped brew, notify-downstreams, OR conda
-    dispatch REQUIRES an unskipped gh-release in the same plan. brew's formula
-    points at ``releases/download/<tag>/…`` assets that only gh-release creates
-    and uploads, so brew alone would push a tap formula referencing a release
-    this run never produced; notify-downstreams tells the downstream repos to
-    rebuild against this release, so notifying without a landed gh-release
-    points them at a release that never existed; conda publishes a versioned
-    ``.conda`` to the channel for a release consumers can then pin, so a channel
-    package without a landed gh-release advertises a release that never existed.
-    Every derived endpoint is checked against the UNSKIPPED set (a prerelease
-    or live-fire cut that skips it never trips the invariant). gh-release is
-    itself idempotent-resumable, so a repair run simply lists it alongside the
-    derived endpoint.
+    Cross-endpoint invariant: an unskipped brew OR notify-downstreams dispatch
+    REQUIRES an unskipped gh-release in the same plan. brew's formula points at
+    ``releases/download/<tag>/…`` assets that only gh-release creates and
+    uploads, so brew alone would push a tap formula referencing a release this
+    run never produced; notify-downstreams tells the downstream repos to rebuild
+    against this release, so notifying without a landed gh-release points them at
+    a release that never existed. conda is NOT bound by this invariant
+    (conda-direct, ADR-0077): it packages the staged BUILD OUTPUT directly into
+    a ``.conda`` — the bundle stage produces that archive locally and gh-release
+    only uploads the same tree — so conda has no dependency on gh-release and a
+    conda-only plan is valid. Each bound derived endpoint is checked against the
+    UNSKIPPED set (a prerelease or live-fire cut that skips it never trips the
+    invariant). gh-release is itself idempotent-resumable, so a repair run simply
+    lists it alongside the derived endpoint.
     """
     if selector is not None:
         _check_selector(selector, artifacts)
@@ -700,15 +708,10 @@ def plan(
             "downstreams target lands on GitHub before they are notified (both "
             "endpoints are idempotent — a resume converges, nothing is duplicated)"
         )
-    if "conda" in live and "gh-release" not in live:
-        raise ReleaseError(
-            "publish plan invalid — a conda endpoint publishes a versioned "
-            "`.conda` to the Artifact channel for a release consumers can pin, "
-            "but no unskipped gh-release endpoint is planned: declare "
-            "`gh-release` so the release the channel package represents lands on "
-            "GitHub before it is published (both endpoints are idempotent — a "
-            "resume converges, nothing is duplicated)"
-        )
+    # conda is deliberately NOT bound to gh-release (conda-direct, ADR-0077): it
+    # packages the staged build output directly, so a conda-only plan is valid —
+    # the release-before-derived ordering constraint that once required an
+    # unskipped gh-release for conda is removed.
     return tuple(dispatches)
 
 
@@ -1497,11 +1500,6 @@ def _publish_notify_downstreams(req: PublishRequest) -> Published:
 # conda (derived) — the Artifact channel producer
 # --------------------------------------------------------------------------
 
-#: The conda-archive extensions the release stage produces per platform — the
-#: mac/linux tarball and the windows zip (:data:`PLATFORM_MATRIX` ext_archive
-#: values). :func:`conda_assets` strips exactly these to recover the triple.
-CONDA_ASSET_EXTS: tuple[str, ...] = (".tar.gz", ".zip")
-
 #: The conda package-name vocabulary (ADR-0064): lowercase letters, digits,
 #: ``.``, ``_``, ``-``. :func:`conda_package_name` rejects anything else loudly
 #: — a scoped wasm-pack identity (``@scope/name``) or a spaced ``product-name``
@@ -1540,32 +1538,45 @@ def conda_subdir(triple: str) -> str | None:
 
 
 def conda_assets(
-    artifact_name: str, names: Sequence[str]
+    artifact: config.Artifact, staged: Sequence[str]
 ) -> dict[str, tuple[str, str]]:
-    """``{subdir: (triple, asset_name)}`` for the artifact's staged release
-    archives whose triple maps to a SERVED conda subdir. Pure.
+    """``{subdir: (triple, asset_name)}`` for the artifact's DECLARED platforms
+    whose triple maps to a SERVED conda subdir AND whose staged build-output
+    archive is present. Pure.
 
-    The archive names are the release stage's KNOWN names
-    (``<artifact>-<triple>.tar.gz`` / ``.zip`` — the brew-archive convention),
-    never a scrape by pattern (ADR-0064: asset names drift between releases).
-    An archive whose triple is unserved (:func:`conda_subdir` → ``None``) is
-    dropped, so an osx-64 or musl tarball never lands a package. A triple can
-    map to at most one subdir, so the result is keyed by subdir without
-    collision; iteration over ``names`` sorted keeps it deterministic.
+    conda-direct (ADR-0077): the subdir, triple and archive name are DERIVED
+    from the artifact's own ``platforms`` declaration (the causal single
+    source) — never reverse-engineered from a staged filename. For each declared
+    platform (none declared → the default linux lane, exactly as
+    :func:`shipit.release.preflight._matrix` expands it) the release-stage
+    archive name is CONSTRUCTED from :data:`shipit.release.preflight.PLATFORM_MATRIX`
+    (``<artifact>-<triple><ext_archive>`` — ``.tar.gz``, or ``.zip`` on windows —
+    the same ``<name>-<target>`` shape :func:`shipit.release.bundle._compose_archive`
+    stages), and the entry is included only when that archive is actually staged
+    under the assets tree (``staged`` is the staged asset-name listing). This is
+    the SAME platform→triple→subdir derivation :func:`conda_served_subdirs`
+    projects, so the subdirs a repo publishes and the ones its readiness check
+    probes agree by construction.
+
+    An unserved platform (osx-64, musl → :func:`conda_subdir` ``None``) drops
+    out — no invented subdir, matching today's ``provision`` refusal. A
+    served-but-unbuilt platform (its constructed archive absent from ``staged``)
+    drops out too, so a partial matrix publishes exactly what it built and never
+    points ``rattler-build`` at a source archive that is not there. A triple maps
+    to at most one subdir, so the result is keyed by subdir without collision.
     """
-    prefix = f"{artifact_name}-"
+    from . import preflight  # lazy — avoid a publish<->preflight import cycle
+
+    present = set(staged)
     assets: dict[str, tuple[str, str]] = {}
-    for name in sorted(names):
-        if not name.startswith(prefix):
-            continue
-        ext = next((e for e in CONDA_ASSET_EXTS if name.endswith(e)), None)
-        if ext is None:
-            continue
-        triple = name[len(prefix) : -len(ext)]
-        subdir = conda_subdir(triple)
+    for platform in artifact.platforms or (preflight.DEFAULT_PLATFORM,):
+        spec = preflight.PLATFORM_MATRIX[platform]
+        subdir = conda_subdir(spec.target)
         if subdir is None:
             continue
-        assets[subdir] = (triple, name)
+        name = f"{artifact.name}-{spec.target}{spec.ext_archive}"
+        if name in present:
+            assets[subdir] = (spec.target, name)
     return assets
 
 
@@ -1984,14 +1995,18 @@ def _publish_conda_noarch(
 
 
 def _publish_conda(req: PublishRequest) -> Published:
-    """Repackage the final release archives into ``.conda`` packages and
-    push+reindex them to the producing repo's per-repo Artifact channel. See
-    the module docstring's conda entry.
+    """Repackage the artifact's staged build-output archives into ``.conda``
+    packages and push+reindex them to the producing repo's per-repo Artifact
+    channel. See the module docstring's conda entry.
 
-    Derived-stage contract (mirrors brew): runs only after gh-release staged
-    the assets, so every ``.conda`` is built from the exact bytes the release
-    shipped. One ``rattler-build build`` per served subdir renders into a local
-    channel tree (rattler-build indexes each subdir on build), then one
+    conda-direct (ADR-0077): the ``.conda`` is packaged directly from the staged
+    BUILD OUTPUT. The served subdirs, their triples, and the archive names are
+    DERIVED from the artifact's declared ``platforms`` (:func:`conda_assets`, the
+    causal single source) — never reverse-engineered from a staged filename — and
+    the build output is present from the bundle stage with NO gh-release
+    dependency (gh-release only uploads the SAME staged tree). One
+    ``rattler-build build`` per served+staged subdir renders into a local channel
+    tree (rattler-build indexes each subdir on build), then one
     ``rattler-build publish`` uploads AND reindexes the remote S3 channel in a
     single step. Idempotent-resumable: ``--force`` re-uploads and re-indexes,
     so a repair run converges (ADR-0009 phase 2). The S3 endpoint/region are
@@ -2023,15 +2038,16 @@ def _publish_conda(req: PublishRequest) -> Published:
     if conda_noarch_eligible(req.artifact):
         return _publish_conda_noarch(req, key_id=key_id, secret_key=secret_key)
     package = conda_package_name(req.artifact)
-    assets = conda_assets(req.artifact.name, release_assets(req.assets_dir))
+    assets = conda_assets(req.artifact, release_assets(req.assets_dir))
     if not assets:
         served = ", ".join(sorted(CONDA_SUBDIRS.values()))
         raise ReleaseError(
-            f"[artifacts.{req.artifact.name}] conda: no release archive maps to "
-            f"a served conda subdir ({served}) under {req.assets_dir} — the "
-            f"endpoint repackages the release stage's known "
-            f"`{req.artifact.name}-<triple>.tar.gz`/`.zip` archives; an "
-            f"unserved-only set (osx-64 / musl) publishes nothing"
+            f"[artifacts.{req.artifact.name}] conda: no declared platform maps "
+            f"to a served conda subdir ({served}) with a staged build-output "
+            f"archive under {req.assets_dir} — the endpoint packages the staged "
+            f"`{req.artifact.name}-<triple>.tar.gz`/`.zip` archives derived from "
+            f"the artifact's `platforms` declaration; an unserved-only set "
+            f"(osx-64 / musl) or an unbuilt matrix publishes nothing"
         )
     binary = integrity_mod.expected_main_binary(req.artifact)
     # Namespace both scratch trees by artifact: `assets_dir` is the stage-wide

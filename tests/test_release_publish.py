@@ -611,12 +611,13 @@ def test_plan_selector_undeclared_endpoint_is_loud():
 
 def test_plan_selector_derived_endpoint_without_its_base_is_refused():
     """Selecting a derived endpoint whose base is absent from the plan is
-    REFUSED, not silently repaired — ADR-0009's release-before-derived
-    ordering holds under the selector (the conda→gh-release invariant)."""
-    artifacts = _artifacts({"lexd": {"endpoints": ["conda", "crates"]}})
-    with pytest.raises(ReleaseError, match="a conda endpoint publishes"):
+    REFUSED, not silently repaired — ADR-0009's release-before-derived ordering
+    holds under the selector (brew's gh-release invariant; conda is exempt under
+    conda-direct, ADR-0077, so brew carries this coverage now)."""
+    artifacts = _artifacts({"lexd": {"endpoints": ["brew", "crates"]}})
+    with pytest.raises(ReleaseError, match="a brew endpoint renders"):
         publish_mod.plan(
-            artifacts, prerelease=True, live_fire=False, selector=["conda"]
+            artifacts, prerelease=False, live_fire=False, selector=["brew"]
         )
 
 
@@ -2237,24 +2238,66 @@ def test_conda_subdir_maps_served_and_drops_unserved():
     assert publish_mod.conda_subdir(MUSL) is None  # musl unserved
 
 
-def test_conda_assets_selects_served_archives_by_known_name():
-    """The endpoint repackages the release stage's KNOWN archive names
-    (`<artifact>-<triple>.tar.gz`/`.zip`), not a scrape: served triples land
-    under their subdir; unserved archives and non-archives are dropped."""
-    names = [
+def test_conda_assets_derives_served_subdirs_from_the_platforms_declaration():
+    """conda-direct (ADR-0077): the served subdir/triple/name are DERIVED from
+    the artifact's declared `platforms` (the causal single source) and the
+    archive name is CONSTRUCTED (`<artifact>-<triple><ext>`), then included only
+    when that archive is STAGED — never reverse-engineered from a filename.
+    Unserved declared lanes (osx-64, musl) and served lanes whose archive is
+    absent both drop out."""
+    artifact = _artifacts(
+        {
+            "lex": {
+                "endpoints": ["conda"],
+                "platforms": [
+                    "darwin-arm64",  # served — staged
+                    "linux-x86_64",  # served — staged
+                    "windows-x86_64",  # served — staged (.zip)
+                    "linux-arm64",  # served — NOT staged, drops out
+                    "darwin-x86_64",  # unserved (osx-64), drops out
+                    "linux-x86_64-musl",  # unserved (musl), drops out
+                ],
+            }
+        }
+    )[0]
+    staged = [
         f"lex-{MAC_ARM}.tar.gz",
         f"lex-{LINUX}.tar.gz",
         f"lex-{WIN}.zip",
-        f"lex-{MAC_X64}.tar.gz",  # osx-64 — unserved, dropped
-        f"lex-{MUSL}.tar.gz",  # musl — unserved, dropped
-        "lex-1.0.0.whatever",  # not an archive
-        "sibling-x86_64-pc-windows-msvc.zip",  # other artifact's prefix
+        f"lex-{MAC_X64}.tar.gz",  # osx-64 staged but UNDECLARED-served → not packaged
+        f"lex-{MUSL}.tar.gz",  # musl staged but unserved → not packaged
+        "sibling-x86_64-pc-windows-msvc.zip",  # other artifact's prefix — ignored
     ]
-    assets = publish_mod.conda_assets("lex", names)
+    assets = publish_mod.conda_assets(artifact, staged)
     assert assets == {
         "osx-arm64": (MAC_ARM, f"lex-{MAC_ARM}.tar.gz"),
         "linux-64": (LINUX, f"lex-{LINUX}.tar.gz"),
         "win-64": (WIN, f"lex-{WIN}.zip"),
+    }
+
+
+def test_conda_assets_ignores_a_staged_archive_for_an_undeclared_platform():
+    """The `platforms` declaration is authoritative: a served-triple archive
+    staged for a platform the artifact does NOT declare is never packaged (the
+    causal-declaration property — the subdir set is the declaration, not the
+    staged tree)."""
+    artifact = _artifacts(
+        {"lex": {"endpoints": ["conda"], "platforms": ["linux-x86_64"]}}
+    )[0]
+    staged = [f"lex-{LINUX}.tar.gz", f"lex-{MAC_ARM}.tar.gz"]
+    assert publish_mod.conda_assets(artifact, staged) == {
+        "linux-64": (LINUX, f"lex-{LINUX}.tar.gz"),
+    }
+
+
+def test_conda_assets_defaults_undeclared_platforms_to_the_linux_lane():
+    """An artifact declaring no `platforms` defaults to the single linux lane
+    (as preflight expands it), so it packages only linux-64 when that archive is
+    staged."""
+    artifact = _artifacts({"lex": {"endpoints": ["conda"]}})[0]
+    staged = [f"lex-{LINUX}.tar.gz", f"lex-{MAC_ARM}.tar.gz"]
+    assert publish_mod.conda_assets(artifact, staged) == {
+        "linux-64": (LINUX, f"lex-{LINUX}.tar.gz"),
     }
 
 
@@ -2430,7 +2473,24 @@ def _conda_request(tmp_path, *, env=None, assets=None, ghio=None):
             f"lex-{MAC_X64}.tar.gz",  # unserved — never packaged
         ],
     )
-    artifact = _artifacts({"lex": {"build": ["rust"], "endpoints": ["conda"]}})[0]
+    # conda-direct (ADR-0077): the served subdirs are DERIVED from the artifact's
+    # declared `platforms`, not reverse-engineered from staged filenames — so the
+    # fixture declares the four lanes whose archives it stages (darwin-x86_64 is
+    # served-less → its staged archive is never packaged).
+    artifact = _artifacts(
+        {
+            "lex": {
+                "build": ["rust"],
+                "endpoints": ["conda"],
+                "platforms": [
+                    "darwin-arm64",
+                    "linux-x86_64",
+                    "windows-x86_64",
+                    "darwin-x86_64",
+                ],
+            }
+        }
+    )[0]
     run_cmd = _CondaBuildRecorder()
     req = _request(
         tmp_path,
@@ -2564,12 +2624,13 @@ def test_conda_scratch_is_namespaced_per_artifact(tmp_path):
 
 
 def test_conda_without_served_archives_refuses(tmp_path):
-    """An unserved-only asset set (osx-64 / musl) publishes nothing — a loud
+    """No declared platform maps to a served subdir with a staged archive (the
+    only staged archives here are the unserved osx-64 / musl lanes) — a loud
     refusal, never a silent empty publish."""
     req, _ = _conda_request(
         tmp_path, assets=[f"lex-{MAC_X64}.tar.gz", f"lex-{MUSL}.tar.gz"]
     )
-    with pytest.raises(ReleaseError, match="no release archive maps to a served"):
+    with pytest.raises(ReleaseError, match="no declared platform maps"):
         publish_mod._publish_conda(req)
 
 
@@ -3117,8 +3178,26 @@ def _load_roundtrip_harness():
 
 def _conda_tool_artifact():
     """A single-binary TOOL artifact (`lex`) declaring the conda endpoint — the
-    per-platform triple→subdir path (`_publish_conda`), NOT the noarch path."""
-    return _artifacts({"lex": {"build": ["rust"], "endpoints": ["conda"]}})[0]
+    per-platform triple→subdir path (`_publish_conda`), NOT the noarch path.
+
+    Declares all four SERVED lanes (conda-direct, ADR-0077): the subdirs are
+    derived from `platforms`, so a real-build test staging one lane's archive
+    still gets exactly that lane's `.conda` (the other three declared lanes have
+    no staged archive and drop out)."""
+    return _artifacts(
+        {
+            "lex": {
+                "build": ["rust"],
+                "endpoints": ["conda"],
+                "platforms": [
+                    "darwin-arm64",
+                    "linux-x86_64",
+                    "linux-arm64",
+                    "windows-x86_64",
+                ],
+            }
+        }
+    )[0]
 
 
 def _prebuilt_tool_archive(dist, artifact, triple, binary):
@@ -3320,24 +3399,29 @@ def test_plan_prerelease_keeps_conda_but_a_live_fire_skips_it():
     assert {d.adapter.name: d.skip for d in live}["conda"] == publish_mod.SKIP_RC_GUARD
 
 
-def test_plan_conda_alone_refuses_without_an_unskipped_gh_release():
-    """conda inherits the gh-release-must-exist invariant (ADR-0064): a channel
-    package for a version with no landed GitHub release advertises a release
-    that never existed — a hard plan refusal, mirroring brew/notify."""
+def test_plan_conda_alone_is_valid_without_a_gh_release():
+    """conda-direct (ADR-0077): conda packages the staged build output directly,
+    so it has NO gh-release dependency — a conda-only plan is VALID (the
+    release-before-derived ordering constraint that once required an unskipped
+    gh-release for conda is removed). brew/notify keep their gh-release
+    invariant; conda does not."""
     artifacts = _artifacts({"lex": {"endpoints": ["conda"]}})
-    with pytest.raises(ReleaseError, match="a conda endpoint publishes"):
-        publish_mod.plan(artifacts, prerelease=False, live_fire=False)
-
-
-def test_plan_conda_live_fire_skip_never_trips_the_gh_release_invariant():
-    """The invariant reads the UNSKIPPED set: a -release-rc live-fire skips
-    conda (external), so a plan without a separate gh-release still holds —
-    conda publishes nothing to strand."""
-    artifacts = _artifacts({"lex": {"endpoints": ["gh-release", "conda"]}})
-    dispatched = publish_mod.plan(artifacts, prerelease=True, live_fire=True)
+    dispatched = publish_mod.plan(artifacts, prerelease=False, live_fire=False)
     verdicts = {d.adapter.name: d.skip for d in dispatched}
-    assert verdicts["conda"] == publish_mod.SKIP_RC_GUARD
-    assert verdicts["gh-release"] is None
+    assert verdicts == {"conda": None}  # planned, unskipped, no gh-release needed
+
+
+def test_plan_conda_direct_needs_no_gh_release_even_selected_alone():
+    """The selector can pick conda ALONE (no gh-release) and the plan stands —
+    conda-direct means no derived-without-base refusal for conda (contrast
+    brew/notify, still refused). A prerelease keeps conda (rc-inclusive)."""
+    artifacts = _artifacts({"lex": {"endpoints": ["conda", "crates"]}})
+    dispatched = publish_mod.plan(
+        artifacts, prerelease=True, live_fire=False, selector=["conda"]
+    )
+    verdicts = {d.adapter.name: d.skip for d in dispatched}
+    assert verdicts["conda"] is None
+    assert verdicts["crates"] == publish_mod.SKIP_SELECTOR
 
 
 def test_missing_rattler_build_gets_the_reconcile_remedy(tmp_path, monkeypatch, capsys):
@@ -3355,6 +3439,7 @@ def test_missing_rattler_build_gets_the_reconcile_remedy(tmp_path, monkeypatch, 
 [artifacts.lex]
 build = ["rust"]
 endpoints = ["gh-release", "conda"]
+platforms = ["darwin-arm64"]
 """,
         assets=[f"lex-{MAC_ARM}.tar.gz"],
     )
