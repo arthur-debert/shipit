@@ -1,0 +1,34 @@
+`shipit stage` copies a consumer's resolved conda files into its shipped bundle.
+
+It is the app-consumer half of conda-direct (#1079) and the manifest-driven
+replacement for the legacy cross-repo `fetch-deps`. After `shipit install`
+(or `pixi install`) resolves a conda dependency and pixi extracts it into the env
+prefix, an app that embeds those files needs them under `resources/` so its
+bundler (electron-builder, vsce, …) ships them. This step is that copy.
+
+The manifest is the `.shipit.toml` `[stage]` map. Each `[stage.<pkg>]` table names
+a conda package and maps a source path IN THE ENV PREFIX to a destination UNDER
+the checkout:
+
+    [stage.lexd-lsp]
+    "bin/lexd-lsp" = "resources/lexd-lsp"          # a tool binary
+
+    [stage.tree-sitter-lex]
+    "share/tree-sitter-lex/tree-sitter-lex.wasm" = "resources/tree-sitter-lex.wasm"
+    "share/tree-sitter-lex/queries"              = "resources/queries"   # a directory
+
+A tool artifact lives at `bin/<tool>`, a data artifact under `share/<pkg>/…`
+(ADR-0076). Both files and directories are copied; a file keeps its mode, so a
+tool binary stays executable in the shipped bundle. The copy is durable and
+idempotent — re-running replaces a prior stage rather than refusing it.
+
+This step COPIES an already-resolved env; it never fetches. A source that is not
+materialized in the prefix is a hard error pointing at `shipit install`, and a
+destination that would escape the checkout (an absolute/`..` path, or a symlinked
+parent) is refused. It is deliberately separate from the release-time, transient
+vsix `bundle.stage` map: the two share only the env-prefix resolver and the
+checkout-escape guard.
+
+Run it from the repo root (or pass the path). `--feature` stages from a named pixi
+feature/env's prefix instead of the default env. A repo with no `[stage]` map is a
+clean no-op.

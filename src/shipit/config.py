@@ -54,6 +54,7 @@ _KNOWN_TABLES = {
     "toolchains",
     "artifacts",
     "artifact-deps",
+    "stage",
     "lanes",
 }
 _ESCAPE_HATCH_TABLES = {"project", "custom"}
@@ -1327,6 +1328,131 @@ def load_artifact_deps(cfg: dict) -> tuple[ArtifactDep, ...]:
             "[artifact-deps] must be a table of `<pkg>` artifact declarations"
         )
     return tuple(_parse_artifact_dep(str(name), spec) for name, spec in section.items())
+
+
+# --------------------------------------------------------------------------
+# The [stage] map — app-consumer stage-from-prefix (conda-direct #1079)
+# --------------------------------------------------------------------------
+#
+# The APP-consumer half of conda-direct (ADR-0077, docs/spec/conda-direct.md §2:
+# "Staging — only for app-type consumers"): after `pixi install`/`shipit install`
+# resolves a conda dep and extracts it into the env prefix, an app that SHIPS the
+# embedded files needs them copied into its bundle (`resources/`). This map is the
+# manifest-driven mirror of the legacy `fetch-deps`/`deps.json` (ADR-0076), with
+# only the SOURCE axis swapped: a gh-release download becomes a read of the already
+# -resolved env prefix (`shipit.staging` does the copy). It is DISTINCT from the
+# vsix `bundle.stage` map (config §BundleSpec): that is release-time, transient
+# (unstaged after `vsce package`), single-binary, and keyed on `[artifact-deps]`;
+# THIS is a durable, standalone, files-and-dirs copy keyed on the source path.
+#
+#     [stage.tree-sitter-lex]                    # the conda package the files come from
+#     "share/tree-sitter-lex/tree-sitter-lex.wasm" = "resources/tree-sitter-lex.wasm"
+#     "share/tree-sitter-lex/queries"              = "resources/queries"      # a DIR
+#
+#     [stage.lexd-lsp]
+#     "bin/lexd-lsp" = "resources/lexd-lsp"        # a tool binary (exec bit kept)
+#
+# The section KEY names the conda package (the same `[artifact-deps]`/conda-package
+# vocabulary), grouping a consumer's per-package subset; each entry maps a
+# SOURCE-in-prefix POSIX path (relative to `<root>/.pixi/envs/<env>` — `bin/<tool>`
+# for a tool, `share/<pkg>/…` for a data artifact) to a DEST-under-resources POSIX
+# path (relative to the checkout root). Both are checkout/prefix-relative and refused
+# if they escape (:func:`_reject_path_escape`), the same guard the vsix stage dest
+# takes.
+
+
+@dataclass(frozen=True)
+class StageEntry:
+    """One resolved ``[stage.<pkg>]`` copy: a source-in-prefix → dest-under-root
+    pair, tagged with the conda package it belongs to (conda-direct #1079).
+
+    Construction is validation (ADR-0030): :func:`_parse_stage_table` refuses a
+    malformed entry loudly before this value exists, so :mod:`shipit.staging` gets
+    a well-formed copy list.
+
+    - ``package`` is the ``[stage.<pkg>]`` section key AND the conda package name —
+      the package whose extracted files this entry copies (organizes a consumer's
+      per-package subset; it is NOT re-resolved against ``[artifact-deps]``, since
+      under conda-direct the version is a plain consumer-owned dep, not a managed
+      pin).
+    - ``source`` is a POSIX path RELATIVE TO THE ENV PREFIX (``bin/<tool>`` for a
+      tool artifact, ``share/<pkg>/…`` for a data artifact) — the file or directory
+      pixi extracted; refused if it escapes the prefix.
+    - ``dest`` is a POSIX path RELATIVE TO THE CHECKOUT ROOT (e.g.
+      ``resources/tree-sitter-lex.wasm``) the file/dir is copied to; refused if it
+      escapes the checkout.
+    """
+
+    package: str
+    source: str
+    dest: str
+
+
+def _parse_stage_table(package: str, spec: object) -> tuple[StageEntry, ...]:
+    """One ``[stage.<pkg>]`` table into ordered typed :class:`StageEntry` values.
+
+    Loud at the boundary (ADR-0030): the section key must be a valid conda package
+    identifier (:data:`_CONDA_PKG_KEY_RE`, the same shape ``[artifact-deps.<pkg>]``
+    and the vsix ``stage`` map take), and each ``source = dest`` pair must map a
+    non-empty prefix-relative source path to a non-empty checkout-relative dest
+    path — both refused if they escape (:func:`_reject_path_escape`). A repeated
+    source key cannot reach here: ``tomllib`` rejects a duplicate table key before
+    the parse runs. An empty table is refused — a ``[stage.<pkg>]`` header that
+    stages nothing is a mistake, not an intent.
+    """
+    where = f"[stage].{package}"
+    if not _CONDA_PKG_KEY_RE.match(package):
+        raise ConfigError(
+            f"{where}: the section key is the conda package name and must be a "
+            f"valid conda package identifier (LOWERCASE letters, digits, '.', "
+            f"'-', '_'); got {package!r}"
+        )
+    if not isinstance(spec, dict) or not spec:
+        raise ConfigError(
+            f"{where} must be a non-empty table mapping a source-in-prefix path to "
+            f'a destination under the checkout, e.g. {{ "bin/lexd-lsp" = '
+            f'"resources/lexd-lsp" }}; got {spec!r}'
+        )
+    entries: list[StageEntry] = []
+    for source, dest in spec.items():
+        src = str(source)
+        if not src:
+            raise ConfigError(f"{where}: a source path must be non-empty")
+        _reject_path_escape(f"{where}.{src!r} (source)", src)
+        if not isinstance(dest, str) or not dest:
+            raise ConfigError(
+                f"{where}.{src!r}: destination must be a non-empty checkout-relative "
+                f'path, e.g. "resources/lexd-lsp"; got {dest!r}'
+            )
+        _reject_path_escape(f"{where}.{src!r} (dest)", dest)
+        entries.append(
+            StageEntry(
+                package=package,
+                source=str(PurePosixPath(src)),
+                dest=str(PurePosixPath(dest)),
+            )
+        )
+    return tuple(entries)
+
+
+def load_stage(cfg: dict) -> tuple[StageEntry, ...]:
+    """Parse the ``[stage]`` map (already loaded) into typed :class:`StageEntry`
+    values, in DECLARATION order across packages then entries (conda-direct #1079).
+
+    ``()`` when the table is absent — a repo that stages nothing (a tool-only
+    consumer, or shipit itself) has no copy list. Malformed shapes raise
+    :class:`ConfigError` naming the offending entry (construction is validation,
+    ADR-0030). The per-package section key doubles as the conda package name.
+    """
+    section = cfg.get("stage", {})
+    if not isinstance(section, dict):
+        raise ConfigError(
+            "[stage] must be a table of `<pkg>` stage-from-prefix declarations"
+        )
+    entries: list[StageEntry] = []
+    for package, table in section.items():
+        entries.extend(_parse_stage_table(str(package), table))
+    return tuple(entries)
 
 
 # --------------------------------------------------------------------------
