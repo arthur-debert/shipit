@@ -43,6 +43,7 @@ from ..review.diff import ReviewError
 from ..review.groundtruth import FixtureError
 from ..session.resume import ResumeError
 from ..spawn.subagent import SpawnError
+from ..staging import StagingError
 from ..tree.layout import LayoutError
 from ..tree.removal import RemovalError
 from ._context import NoAmbientRepoError
@@ -69,7 +70,9 @@ from ._context import NoAmbientRepoError
 #: composition over missing build outputs, an unresolvable assert-bundle
 #: expected name — TOL02-WS03), and the Artifact-channel cascade's refusals (a
 #: malformed dispatch payload, an `[artifact-deps]` entry the surgical bump
-#: cannot locate — ARF01-WS07). Extended deliberately, one entry per new
+#: cannot locate — ARF01-WS07), and the stage-from-prefix step's refusals (a
+#: source not materialized in the env prefix, a destination that escapes the
+#: checkout — conda-direct #1079). Extended deliberately, one entry per new
 #: domain refusal, as verbs adopt the shell.
 KNOWN_ERRORS: tuple[type[Exception], ...] = (
     execrun.ExecError,
@@ -80,6 +83,7 @@ KNOWN_ERRORS: tuple[type[Exception], ...] = (
     NoAmbientRepoError,
     NotReady,
     SpawnError,
+    StagingError,
     InstallError,
     OpportunityError,
     LayoutError,

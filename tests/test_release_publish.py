@@ -27,7 +27,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from shipit import config, execrun
+from shipit import config, execrun, staging
 from shipit.release import ReleaseError
 from shipit.release import brew as brew_mod
 from shipit.release import publish as publish_mod
@@ -3347,6 +3347,78 @@ def test_conda_file_channel_roundtrip_resolves_and_stages_the_binary(tmp_path):
     ran = subprocess.run([str(staged)], capture_output=True, text=True, timeout=30)
     assert ran.returncode == 0, f"staged tool exited {ran.returncode}: {ran.stderr!r}"
     assert "hi" in ran.stdout
+
+
+@pytest.mark.skipif(
+    shutil.which("rattler-build") is None or shutil.which("pixi") is None,
+    reason="rattler-build + pixi needed for the file:// round trip (both in `test`)",
+)
+def test_conda_roundtrip_stage_from_prefix_copies_binary_into_resources(tmp_path):
+    """The T3 (#1079) DoD as a REAL local run: after the producer builds a genuine
+    per-platform `.conda` and pixi resolves it into a scratch env prefix (the same
+    round trip the test above proves), `shipit.staging.stage` — the generic
+    stage-from-prefix step — copies the resolved `bin/lex` into the consumer's
+    `resources/`, and the file lands there with its EXECUTABLE BIT intact.
+
+    This is the loop conda-direct T3 replaces `fetch-deps` with: source axis = the
+    resolved env prefix (not a gh-release download), manifest = the `[stage]` map.
+    Only the S3 publish is faked; the `.conda`, the pixi resolve, and the copy are
+    all real. Directory + non-exec-file staging and the escape/idempotency guards
+    are unit-tested in test_staging.py against a constructed prefix."""
+    roundtrip = _load_roundtrip_harness()
+    try:
+        native = roundtrip.host_conda_subdir()
+    except RuntimeError as exc:
+        pytest.skip(str(exc))
+    triple = _SUBDIR_TRIPLE[native]
+
+    dist = _staged_assets(tmp_path, [])
+    _prebuilt_tool_archive(dist, "lex", triple, "lex")
+
+    run_cmd = _RealBuildFakePublish()
+    req = _request(tmp_path, _conda_tool_artifact(), env=CONDA_CREDS, run_cmd=run_cmd)
+    publish_mod._publish_conda(req)
+
+    channel = req.assets_dir / publish_mod.CONDA_CHANNEL_SCRATCH / "lex"
+    staged_bin = roundtrip.resolve_from_file_channel(
+        channel_dir=channel,
+        package="lex",
+        version="1.2.3",
+        binary="lex",
+        scratch=tmp_path,
+    )
+    assert staged_bin.stat().st_mode & 0o111, "precondition: resolved binary runnable"
+
+    # The scratch project root the harness resolved into IS the consumer checkout:
+    # `staging.stage` resolves its env prefix as `<root>/.pixi/envs/default`, the
+    # exact prefix the harness staged `bin/lex` under.
+    root = tmp_path / "resolve"
+    assert (root / ".pixi" / "envs" / "default" / "bin" / "lex").exists()
+
+    entry = config.StageEntry(package="lex", source="bin/lex", dest="resources/lex")
+    result = staging.stage(root, [entry])
+
+    dest = root / "resources" / "lex"
+    assert dest.is_file(), "the resolved binary was not copied under resources/"
+    assert dest.read_text(encoding="utf-8") == staged_bin.read_text(encoding="utf-8")
+    # The executable bit survived the prefix -> resources copy (the DoD): a
+    # mode-0644 `resources/lex` the app ships would be a non-runnable LSP.
+    assert dest.stat().st_mode & 0o111, (
+        f"staged {dest} lost its exec bit (mode {oct(dest.stat().st_mode)}) — the "
+        f"shipped bundle would carry a non-runnable binary"
+    )
+    ran = subprocess.run([str(dest)], capture_output=True, text=True, timeout=30)
+    assert ran.returncode == 0 and "hi" in ran.stdout
+    # The reported StagedFile matches what landed.
+    assert result == [
+        staging.StagedFile(
+            package="lex",
+            source="bin/lex",
+            dest="resources/lex",
+            is_dir=False,
+            executable=True,
+        )
+    ]
 
 
 def test_roundtrip_main_skips_cleanly_on_an_unmapped_host(monkeypatch, capsys):
