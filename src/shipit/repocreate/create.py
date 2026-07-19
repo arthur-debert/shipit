@@ -145,9 +145,16 @@ def default_installer(root: Path) -> None:
     Runs the unchanged gather → reconcile → apply pipeline in ``MODE_TREE``:
     the managed catalog is written into the working tree (no commit — creation
     owns the single root commit) and the installed hooks are activated. The
-    toolchain catalog is signal-conditional off the tracked Cargo manifest, so
-    the scaffold must already be ``git add``-ed when this runs (creation stages
-    before installing) for the managed Rust block to ship.
+    catalog is derived exactly as the ``shipit install`` verb derives it, so a
+    freshly-created repo gets the SAME conditional blocks a reconcile would: the
+    toolchain blocks off the tracked manifests UNIONed with the ``.shipit.toml``
+    declaration signals (a wasm-pack composition's node leg, a tree-sitter/lua
+    ``[toolchains]`` leg — a grammar has no manifest to detect), the
+    endpoint-gated conda packager off a declared ``conda`` endpoint (#1071 — so
+    a created conda producer is not starved of ``rattler-build``), and the lexd
+    ``[target]`` set scoped to the scaffold's declared platforms (#1072). The
+    scaffold must already be ``git add``-ed when this runs (creation stages
+    before installing) for the manifest-detected signals to ship.
 
     ``MODE_TREE`` degrades a failed ``lefthook install`` to a warning
     (``hooks_activated is False``) rather than aborting — right for install's
@@ -167,9 +174,16 @@ def default_installer(root: Path) -> None:
         reconcile,
     )
     from ..install.units import load_units
+    from ..verbs.install import (
+        _declared_endpoints,
+        _declared_platforms,
+        _declared_signals,
+    )
 
-    toolchains = detect_toolchains(root)
-    units = load_units(toolchains=toolchains)
+    toolchains = detect_toolchains(root) | _declared_signals(root)
+    endpoints = _declared_endpoints(root)
+    platforms = _declared_platforms(root)
+    units = load_units(toolchains=toolchains, endpoints=endpoints, platforms=platforms)
     retired = load_retired()
     retired_hooks = load_retired_hooks()
     state = gather(root, units, retired, retired_hooks)

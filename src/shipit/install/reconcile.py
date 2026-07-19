@@ -666,6 +666,45 @@ def format_pixi_key_conflict(conflict: PixiKeyConflict) -> str:
     )
 
 
+def _managed_block_keys(
+    text: str, units: Sequence[Unit], consumer_hashes: Mapping[str, str | None]
+) -> dict[str, frozenset[str]]:
+    """Anchor → the keys currently declared inside a PRESENT shipit-managed
+    block's marker span in the consumer's ``pixi.toml``.
+
+    These keys are shipit-OWNED, not hand-written consumer pins: this same
+    reconcile rewrites (or retires) the block that carries them. A marker-absent
+    block whose first-splice key coincides with one of these is a managed-block
+    MIGRATION — the key moving from one managed block to another in one pass
+    (#1071: ``rattler-build`` moving out of the rust release-deps block into the
+    new conda-packager block) — which :func:`_pixi_key_conflicts` must NOT
+    mistake for a duplicate over a genuine consumer pin, or it would skip the
+    RECEIVING block and, with the same plan removing the key from the DONOR
+    block, strand the repo with no packager until a second reconcile.
+
+    Best-effort and fail-open like the caller: only ``FMT_MARKERS`` pixi block
+    units whose markers are PRESENT are read, and an unparseable managed span
+    contributes nothing.
+    """
+    by_anchor: dict[str, set[str]] = {}
+    for unit in units:
+        if unit.kind != "block" or unit.dest != PIXI_FILE or unit.anchor is None:
+            continue
+        if unit.fmt != FMT_MARKERS:
+            continue
+        if consumer_hashes.get(unit.key) is None:
+            continue  # marker-absent: no present span whose keys to project
+        inner = extract_block(text, unit.open_marker, unit.close_marker)
+        if inner is None:
+            continue
+        try:
+            block = tomllib.loads(inner)
+        except tomllib.TOMLDecodeError:
+            continue
+        by_anchor.setdefault(unit.anchor, set()).update(block.keys())
+    return {anchor: frozenset(keys) for anchor, keys in by_anchor.items()}
+
+
 def _pixi_key_conflicts(
     root: Path, units: Sequence[Unit], consumer_hashes: Mapping[str, str | None]
 ) -> tuple[PixiKeyConflict, ...]:
@@ -676,14 +715,23 @@ def _pixi_key_conflicts(
     TOML hears it from pixi, not from a guard that only inspects). Only
     marker-absent (ADD-bound) pixi block units are checked — see
     :class:`PixiKeyConflict`.
+
+    A clash is a duplicate over a CONSUMER-owned key, so keys currently living
+    inside ANOTHER present managed block's span (:func:`_managed_block_keys`)
+    are excluded: the manifest is projected through the pending managed-block
+    updates first, so a key migrating between two managed blocks in one pass
+    (#1071) does not read as a first-splice conflict and strand the receiving
+    block for a whole extra reconcile.
     """
     path = root / PIXI_FILE
     if not path.is_file():
         return ()
     try:
-        manifest = tomllib.loads(path.read_text(encoding="utf-8"))
+        text = path.read_text(encoding="utf-8")
+        manifest = tomllib.loads(text)
     except (tomllib.TOMLDecodeError, OSError, UnicodeDecodeError):
         return ()
+    managed_keys = _managed_block_keys(text, units, consumer_hashes)
     conflicts: list[PixiKeyConflict] = []
     for unit in units:
         if unit.kind != "block" or unit.dest != PIXI_FILE or unit.anchor is None:
@@ -705,7 +753,8 @@ def _pixi_key_conflicts(
             table = table.get(part) if isinstance(table, dict) else None
         if not isinstance(table, dict):
             continue  # the anchor table does not exist yet — nothing to clash
-        clashes = tuple(sorted(k for k in block_keys if k in table))
+        owned = managed_keys.get(unit.anchor, frozenset())
+        clashes = tuple(sorted(k for k in block_keys if k in table and k not in owned))
         if clashes:
             conflicts.append(
                 PixiKeyConflict(unit_key=unit.key, anchor=unit.anchor, keys=clashes)

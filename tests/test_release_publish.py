@@ -2256,6 +2256,67 @@ def test_conda_assets_selects_served_archives_by_known_name():
     }
 
 
+def test_conda_served_subdirs_projects_the_repos_own_platforms():
+    # #1076: the served subdirs a repo PUBLISHES are its conda-endpoint artifacts'
+    # declared platforms mapped through their triples — NOT the fixed all-of-served
+    # set. lexd's shape (linux x86_64/aarch64 + darwin-arm64, NO windows) yields
+    # exactly three subdirs, in SERVED_SUBDIRS order, with no win-64.
+    artifacts = _artifacts(
+        {
+            "lexd": {
+                "build": ["rust"],
+                "platforms": ["linux-x86_64", "linux-arm64", "darwin-arm64"],
+                "endpoints": ["gh-release", "conda"],
+            }
+        }
+    )
+    assert publish_mod.conda_served_subdirs(artifacts) == (
+        "osx-arm64",
+        "linux-64",
+        "linux-aarch64",
+    )
+    assert "win-64" not in publish_mod.conda_served_subdirs(artifacts)
+
+
+def test_conda_served_subdirs_drops_unserved_and_non_conda():
+    # An unserved platform (osx-64/darwin-x86_64, musl) drops out via conda_subdir;
+    # a non-conda artifact contributes nothing; a win-64-declaring conda artifact
+    # keeps win-64.
+    artifacts = _artifacts(
+        {
+            "cli": {
+                "build": ["rust"],
+                "platforms": ["darwin-x86_64", "linux-x86_64-musl", "windows-x86_64"],
+                "endpoints": ["gh-release", "conda"],
+            },
+            "other": {
+                "build": ["rust"],
+                "platforms": ["linux-arm64"],
+                "endpoints": ["gh-release"],  # no conda → contributes nothing
+            },
+        }
+    )
+    # Only the served windows platform survives from the conda artifact; the
+    # gh-release-only artifact's linux-aarch64 is NOT counted.
+    assert publish_mod.conda_served_subdirs(artifacts) == ("win-64",)
+
+
+def test_conda_served_subdirs_defaults_empty_platforms_to_the_linux_lane():
+    # A conda artifact with no explicit platforms defaults to the linux lane
+    # (preflight.DEFAULT_PLATFORM = linux-x86_64 → linux-64), exactly as the
+    # release matrix expands it.
+    artifacts = _artifacts(
+        {"lex": {"build": ["rust"], "endpoints": ["gh-release", "conda"]}}
+    )
+    assert publish_mod.conda_served_subdirs(artifacts) == ("linux-64",)
+
+
+def test_conda_served_subdirs_empty_without_a_conda_producer():
+    # A repo with no conda endpoint publishes no channel subdirs at all.
+    artifacts = _artifacts({"cli": {"build": ["rust"], "endpoints": ["gh-release"]}})
+    assert publish_mod.conda_served_subdirs(artifacts) == ()
+
+
 def test_conda_package_name_is_the_lowercased_main_binary():
     """The conda package name doubles as the consumer's `[artifact-deps.<key>]`
     key (ADR-0064) — the artifact's main-binary name, lowercased to the conda
@@ -3067,9 +3128,10 @@ def test_plan_conda_live_fire_skip_never_trips_the_gh_release_invariant():
 
 
 def test_missing_rattler_build_gets_the_reconcile_remedy(tmp_path, monkeypatch, capsys):
-    """A missing `rattler-build` (the rust-release-deps block absent from the
+    """A missing `rattler-build` (the conda-packager block absent from the
     runner) names the block's COMMITTING install reconcile — never a raw 127,
-    the #801 translation applied to the conda endpoint."""
+    the #801 translation applied to the conda endpoint (block re-gated onto the
+    conda endpoint in #1071)."""
     _publish_repo(
         tmp_path,
         monkeypatch,
@@ -3109,7 +3171,7 @@ endpoints = ["gh-release", "conda"]
     assert rc == 1
     err = capsys.readouterr().err
     assert "[artifacts.lex] conda:" in err
-    assert "pixi.toml#shipit-rust-release-deps" in err
+    assert "pixi.toml#shipit-conda-packager" in err
     assert "`shipit install --pr`" in err
 
 

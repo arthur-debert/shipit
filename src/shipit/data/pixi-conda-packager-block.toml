@@ -1,0 +1,22 @@
+# The conda ENDPOINT's packager (ARF01-WS01 #950, ADR-0064/0070; re-gated
+# #1071). `shipit release publish`'s conda endpoint runs `rattler-build build`
+# to repackage a final release binary into a `.conda` and `rattler-build
+# publish` to push+reindex the producing repo's per-repo Artifact channel.
+# rattler-build is the ENDPOINT's tool, not a toolchain tool — so this block is
+# delivered iff the repo declares a `conda` endpoint on ANY `[artifacts.*]`
+# (any composition — a rust binary, a tree-sitter `tarball` grammar, a future
+# python/lua producer), toolchain-INDEPENDENT. Its former home was the rust
+# release-deps block (rust repos were the first conda producers, WS03/ARF02),
+# which starved a NON-rust conda producer of its packager — the #1071 seed
+# failure (tree-sitter-lex declared conda but `publish` died `No such file …
+# rattler-build`). rattler-build is on conda-forge, so it anchors in the
+# DEFAULT env's [dependencies] — the wf-release stages execute shipit via bare
+# `pixi run --locked ./bin/shipit`, so the packager must be on THAT run's PATH.
+# Provisioned under setup-pixi's lockfile-keyed cache (the #582 doctrine: the
+# release run NEVER installs at run time — publish fails loudly naming this
+# reconcile instead). Pinned to the minor line (`0.69.*` — conda match-spec);
+# seed-validated at 0.69 against the live channel (#1049 — 0.68.* panicked
+# during the S3 upload: `opendal-core 0.57.0 … concurrent tasks executed with
+# no executor`, even with correct AWS_* creds). A bump is one data edit, rolled
+# out on each consumer's next `shipit install` reconcile.
+rattler-build = "0.69.*"

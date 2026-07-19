@@ -275,10 +275,11 @@ PROVISIONING: dict[str, tuple[Provisioned, ...]] = {
             note="the conda endpoint's packager (ARF01-WS01 #950, ADR-0064): "
             "`rattler-build build`/`publish` repackage a final release binary "
             "into a `.conda` and push+reindex the Artifact channel; rides the "
-            "rust-release-deps block (rust signal — the walking-skeleton "
-            "producer lex-fmt/lex is rust), pinned 0.69.* from conda-forge, "
-            "seed-validated at 0.69 against the live channel (#1049 — 0.68.* "
-            "panicked during the S3 upload)",
+            "conda-packager block (`pixi.toml#shipit-conda-packager`, gated on "
+            "a declared `conda` ENDPOINT — #1071 re-gate off the rust signal so "
+            "a non-rust conda producer gets it too), pinned 0.69.* from "
+            "conda-forge, seed-validated at 0.69 against the live channel "
+            "(#1049 — 0.68.* panicked during the S3 upload)",
         ),
     ),
     "vsce": (
@@ -496,7 +497,10 @@ def test_pins_agree_with_their_one_authority():
     rust_release = _block_toml("pixi-rust-release-deps-block.toml")
     assert _row("cargo", "cargo-edit").pin == rust_release["cargo-edit"]
     assert _row("wasm-pack", "wasm-pack").pin == rust_release["wasm-pack"]
-    assert _row("rattler-build", "rattler-build").pin == rust_release["rattler-build"]
+    # rattler-build was re-gated onto the conda ENDPOINT (#1071), so its pin's
+    # one authority is the conda-packager block, not the rust-release-deps one.
+    conda_packager = _block_toml("pixi-conda-packager-block.toml")
+    assert _row("rattler-build", "rattler-build").pin == conda_packager["rattler-build"]
     rust_toolchain = _block_toml("pixi-rust-release-toolchain-block.toml")
     assert _row("cargo", "cargo").pin == rust_toolchain["rust"]
     assert (
@@ -528,9 +532,14 @@ def test_remedy_map_agrees_with_the_managed_units():
     # remediation text; each must be a real catalog unit key riding the named
     # toolchain signal, or the remedy sends the operator to a block that the
     # reconcile will never deliver.
+    # A managed block is delivered off a toolchain signal (TOOLCHAIN_UNITS) OR,
+    # since #1071, a declared ENDPOINT (ENDPOINT_UNITS — the conda packager); a
+    # remedy may name either, so the cross-check spans both catalogs.
+    rows = {
+        key: sig for key, sig, *_ in (*iunits.TOOLCHAIN_UNITS, *iunits.ENDPOINT_UNITS)
+    }
     for head, (_need, block, signal) in provisioning._MANAGED_TOOLS.items():
         assert head in PROVISIONING, head
-        rows = {key: sig for key, sig, *_ in iunits.TOOLCHAIN_UNITS}
         assert rows.get(block) == signal, (head, block, signal)
 
 

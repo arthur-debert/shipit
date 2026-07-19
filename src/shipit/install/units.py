@@ -18,6 +18,7 @@ from importlib import resources
 from pathlib import Path
 
 from .. import config
+from ..channel import buckets
 
 AGENTS_FILE = "AGENTS.md"
 AGENTS_KEY = "AGENTS.md#shipit-block"
@@ -154,11 +155,19 @@ PIXI_ENVS_ANCHOR = "[environments]"
 # fleet uniformity). shipit's own pixi.toml carries the block verbatim (its Tree
 # provisioning self-installs); a drift test (tests/test_install.py) asserts the
 # packaged block agrees with shipit's own reserved feature (the dogfood
-# guarantee). win-64 is unserved under the Windows build pause (#895, ADR-0071),
-# so a win-64 lint solve fails closed with no fallback.
+# guarantee). The block's `[target]` set is GENERATED per-repo (:func:`lexd_block`,
+# #1072) — see its comment; win-64 is served but owner-paused (#895, ADR-0071), so
+# a win-64-DECLARING repo's lint solve fails closed with no fallback.
 PIXI_LEXD_KEY = "pixi.toml#shipit-lexd"
 PIXI_LEXD_OPEN = "# >>> shipit-managed lexd feature (do not edit; regenerate via `shipit install`) >>>"
 PIXI_LEXD_CLOSE = "# <<< shipit-managed lexd feature <<<"
+#: The fleet-pinned lexd version (ARF02-WS06, ADR-0066/0047), exact-pinned (`==`)
+#: so fleet uniformity is a single version, never a resolved range. THE single
+#: source of the pin: :func:`lexd_block` stamps it into every generated
+#: `[feature.shipit-lexd.target.<plat>.dependencies]` table, and a drift test
+#: pins it to shipit's own manifest. A bump is this one edit, rolled fleet-wide on
+#: each consumer's next `shipit install` reconcile.
+LEXD_PIN = "==0.19.10"
 
 # The UNCONDITIONAL launcher-deps block (#758, closed by TOL02-WS17 #794):
 # `uv` for the pinned ADR-0033 `bin/shipit` launcher, in the DEFAULT env's
@@ -334,6 +343,43 @@ TOOLCHAIN_UNITS = (
     ),
 )
 
+# The CONDITIONAL conda-endpoint packager block (#1071, ADR-0064/0070). Unlike
+# the per-toolchain blocks above, this one is gated on a declared distribution
+# ENDPOINT, not a toolchain: `rattler-build` (`rattler-build build`/`publish`)
+# is the conda endpoint's packager, so it must ride wherever a repo declares a
+# `conda` endpoint on ANY `[artifacts.*]` — a rust binary, a tree-sitter
+# `tarball` grammar, a future python/lua producer — toolchain-INDEPENDENT. It
+# used to live in the rust release-deps block (rust repos were the first conda
+# producers), which starved a non-rust conda producer of its packager (the
+# #1071 seed failure: tree-sitter-lex declared conda but `publish` died
+# `No such file … rattler-build`). It anchors in the DEFAULT env's
+# [dependencies] — the wf-release stages run shipit via bare
+# `pixi run --locked ./bin/shipit`, so the packager must be on THAT run's PATH —
+# beside the release-side toolchain blocks. Delivered by :func:`load_units`
+# only when the caller passes the `conda` endpoint signal (`endpoints=`),
+# detected from the consumer's `[artifacts.*]` endpoint declarations
+# (:func:`shipit.verbs.install._declared_endpoints`). Provisioning rides
+# pixi/conda-forge under setup-pixi's lockfile-keyed cache (the #582 doctrine);
+# the publish verb never installs at run time — it fails loudly naming this
+# reconcile instead (:mod:`shipit.release.provisioning`).
+ENDPOINT_CONDA = "conda"
+PIXI_CONDA_PACKAGER_KEY = "pixi.toml#shipit-conda-packager"
+PIXI_CONDA_PACKAGER_OPEN = "# >>> shipit-managed conda packager (do not edit; regenerate via `shipit install`) >>>"
+PIXI_CONDA_PACKAGER_CLOSE = "# <<< shipit-managed conda packager <<<"
+PIXI_CONDA_PACKAGER_ANCHOR = PIXI_NODE_DEPS_ANCHOR  # [dependencies]
+# (unit key, endpoint signal, open, close, anchor, packaged data file) — the
+# endpoint-gated catalog rows :func:`load_units` appends per declared endpoint.
+ENDPOINT_UNITS = (
+    (
+        PIXI_CONDA_PACKAGER_KEY,
+        ENDPOINT_CONDA,
+        PIXI_CONDA_PACKAGER_OPEN,
+        PIXI_CONDA_PACKAGER_CLOSE,
+        PIXI_CONDA_PACKAGER_ANCHOR,
+        "pixi-conda-packager-block.toml",
+    ),
+)
+
 #: The name of the managed lint environment the env block above defines
 #: (``pixi-lint-env-block.toml``: ``lint = ["lint"]``) — where the fleet-pinned
 #: toolchain (including ``lefthook``) lives on every consumer. Callers that must
@@ -396,6 +442,35 @@ def pixi_manifest_seed(name: str) -> str:
         f"channels = [{channels}]\n"
         f"platforms = [{platforms}]\n"
     )
+
+
+def lexd_block(platforms: frozenset[str]) -> str:
+    """The managed ``[feature.shipit-lexd]`` block, its ``[target]`` set GENERATED
+    per-repo (#1072).
+
+    The block header (feature table + channel + the explanatory comment) is the
+    packaged ``pixi-lexd-block.toml`` verbatim; the per-platform lexd pin tables
+    are generated as **(the repo's declared platforms) ∩ the channel's closed
+    served set** (:data:`shipit.channel.buckets.SERVED_SUBDIRS`), emitted in the
+    served set's canonical order and pinned at :data:`LEXD_PIN`.
+
+    Scoping to the repo's OWN platforms is the #1072 fix: a static all-of-served
+    set emitted a ``[target.win-64.dependencies]`` table on every consumer, but no
+    repo currently declares ``win-64`` (Windows paused, #895), so pixi warned
+    (``target selector 'win-64' does not match … the platforms supported by the
+    workspace``) on every invocation — fleet-wide noise. A repo now carries a
+    ``win-64`` target ONLY when it declares ``win-64`` (keeping the ADR-0071
+    fail-closed for a real Windows consumer), and none otherwise. The served-set
+    intersection is the #1068 half (a platform outside the set — osx-64 — carries
+    no lexd dep, so its lint env still solves).
+    """
+    header = data_bytes("pixi-lexd-block.toml").decode("utf-8").rstrip("\n")
+    lines = [header]
+    for plat in buckets.SERVED_SUBDIRS:
+        if plat in platforms:
+            lines.append(f"[feature.shipit-lexd.target.{plat}.dependencies]")
+            lines.append(f'lexd = "{LEXD_PIN}"')
+    return "\n".join(lines) + "\n"
 
 
 # The HAR01 agent harness (docs/legacy-prd/har01-coordinator-guard-and-role-prompts.md):
@@ -707,7 +782,12 @@ def walk_files(node, prefix: str = ""):
             yield rel, child.read_bytes()
 
 
-def load_units(*, toolchains: frozenset[str] = frozenset()) -> list[Unit]:
+def load_units(
+    *,
+    toolchains: frozenset[str] = frozenset(),
+    endpoints: frozenset[str] = frozenset(),
+    platforms: frozenset[str] = frozenset(PIXI_SEED_PLATFORMS),
+) -> list[Unit]:
     """The managed set, in a stable order (skills, then the AGENTS block, then bootstrap).
 
     ``toolchains`` (#547 Layer 1) names the conditional per-toolchain pixi dep
@@ -717,7 +797,20 @@ def load_units(*, toolchains: frozenset[str] = frozenset()) -> list[Unit]:
     (:func:`shipit.install.reconcile.detect_toolchains`), or
     :data:`TOOLCHAIN_TREE_SITTER`, unioned off the consumer's DECLARED
     tree-sitter toolchain leg (#890 — no manifest signals a grammar;
-    :func:`shipit.verbs.install._declared_signals`). The zero-arg call
+    :func:`shipit.verbs.install._declared_signals`).
+
+    ``endpoints`` (#1071) names the conditional per-ENDPOINT pixi blocks —
+    currently only :data:`ENDPOINT_CONDA`, delivering the conda packager
+    (``rattler-build``) — gated on the consumer's declared distribution
+    endpoints (:func:`shipit.verbs.install._declared_endpoints`) rather than a
+    toolchain, so a NON-rust conda producer gets its packager too.
+
+    ``platforms`` (#1072) is the consumer's declared ``[workspace].platforms``
+    (:func:`shipit.verbs.install._declared_platforms`); it scopes the managed
+    lexd block's ``[target]`` set to the repo's OWN served platforms
+    (:func:`lexd_block`), so pixi never warns about a target selector for a
+    platform the workspace does not declare. Defaults to :data:`PIXI_SEED_PLATFORMS`
+    (the seeded default set — what a virgin repo receives), so the zero-arg call
     returns the unconditional catalog — which since #794 includes the
     launcher-deps block (uv for the pinned ``bin/shipit``, #758): every
     consumer's managed tasks resolve through the launcher, so its
@@ -893,7 +986,7 @@ def load_units(*, toolchains: frozenset[str] = frozenset()) -> list[Unit]:
             key=PIXI_LEXD_KEY,
             dest=PIXI_FILE,
             kind="block",
-            content=data_bytes("pixi-lexd-block.toml"),
+            content=lexd_block(platforms).encode("utf-8"),
             open_marker=PIXI_LEXD_OPEN,
             close_marker=PIXI_LEXD_CLOSE,
             anchor=None,
@@ -924,6 +1017,25 @@ def load_units(*, toolchains: frozenset[str] = frozenset()) -> list[Unit]:
     # places each right after the anchor header; coexistence is fine).
     for key, signal, open_marker, close_marker, anchor, data_file in TOOLCHAIN_UNITS:
         if signal in toolchains:
+            units.append(
+                Unit(
+                    key=key,
+                    dest=PIXI_FILE,
+                    kind="block",
+                    content=data_bytes(data_file),
+                    open_marker=open_marker,
+                    close_marker=close_marker,
+                    anchor=anchor,
+                )
+            )
+
+    # The conditional per-ENDPOINT blocks (#1071): the conda packager
+    # (rattler-build) rides wherever the consumer declares a `conda` endpoint —
+    # a different axis from the toolchain signal above, so a non-rust conda
+    # producer gets it too. A [dependencies] sibling of the release-side
+    # toolchain blocks; a rust+conda repo splices it exactly once beside them.
+    for key, signal, open_marker, close_marker, anchor, data_file in ENDPOINT_UNITS:
+        if signal in endpoints:
             units.append(
                 Unit(
                     key=key,

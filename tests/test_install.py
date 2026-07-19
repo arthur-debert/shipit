@@ -58,8 +58,13 @@ def _exec_result(rc: int, stdout: str = "", stderr: str = "") -> execrun.ExecRes
 
 
 def _plan(root) -> irec.Plan:
-    """gather → reconcile: the typed pipeline up to (and excluding) any write."""
-    units = iunits.load_units()
+    """gather → reconcile: the typed pipeline up to (and excluding) any write.
+
+    Mirrors ``run()``: the managed lexd block's `[target]` set is scoped to the
+    consumer's declared platforms (#1072), so the plan reads them from the root
+    exactly as the real verb does.
+    """
+    units = iunits.load_units(platforms=verb._declared_platforms(Path(root)))
     retired = irec.load_retired()
     retired_hooks = irec.load_retired_hooks()
     state = irec.gather(Path(root), units, retired, retired_hooks)
@@ -504,18 +509,36 @@ LINT_TOOLS = (
     "lefthook",
 )
 
-# The managed lexd dependency is PLATFORM-SCOPED (#1068): pixi `[target]` tables
-# pin lexd on the channel's CLOSED SERVED SET — `buckets.SERVED_SUBDIRS`, the
-# single source of truth (osx-arm64/linux-64/linux-aarch64 AND win-64) — and
-# NOWHERE else. A platform OUTSIDE that set (osx-64, musl, …) carries no lexd dep
-# and its lint env solves; win-64 (served but owner-paused, #895/ADR-0071) keeps
-# its dep and FAILS CLOSED at solve time (no channel candidate). The old blanket
-# `[feature.shipit-lexd.dependencies]` applied lexd to every platform, breaking
-# install-reconcile on osx-64 repos. Sourced from `SERVED_SUBDIRS` so the test
-# and the packaged block can never drift apart.
+# The managed lexd dependency is PLATFORM-SCOPED (#1068) via pixi `[target]`
+# tables, and the target set is GENERATED per-repo as (the repo's declared
+# `[workspace].platforms`) ∩ the channel's CLOSED SERVED SET (#1072) —
+# `buckets.SERVED_SUBDIRS` (osx-arm64/linux-64/linux-aarch64 AND win-64), the
+# single source of truth. A platform OUTSIDE the served set (osx-64, musl, …)
+# carries no lexd dep and its lint env solves (#1068); a served platform the repo
+# does NOT declare emits no target either (#1072 — else pixi warns on every run).
+# win-64 (served but owner-paused, #895/ADR-0071) keeps its dep — and FAILS CLOSED
+# at solve — ONLY for a repo that declares win-64. `_lexd_targets` mirrors
+# `units.lexd_block`'s generation so the test and the packaged block never drift.
 LEXD_SERVED_SUBDIRS = buckets.SERVED_SUBDIRS
-_LEXD_PIN = {"lexd": "==0.19.10"}
-LEXD_SCOPED_TARGET = {sub: {"dependencies": _LEXD_PIN} for sub in LEXD_SERVED_SUBDIRS}
+_LEXD_PIN = {"lexd": iunits.LEXD_PIN}
+
+
+def _lexd_targets(platforms) -> dict:
+    """The expected `[feature.shipit-lexd.target]` map for a repo declaring
+    ``platforms`` (#1072): the fleet pin under each served subdir the repo
+    declares, in the served set's canonical order — (platforms ∩ SERVED_SUBDIRS).
+    """
+    want = set(platforms)
+    return {
+        sub: {"dependencies": _LEXD_PIN}
+        for sub in buckets.SERVED_SUBDIRS
+        if sub in want
+    }
+
+
+# The FULL served-set target map (every served subdir, win-64 included) — the
+# scope a repo that declares ALL served platforms receives.
+LEXD_SCOPED_TARGET = _lexd_targets(buckets.SERVED_SUBDIRS)
 
 
 def test_load_units_includes_the_lint_env_blocks():
@@ -557,6 +580,9 @@ def test_load_units_includes_the_managed_lexd_feature_block():
     # EOF-appended table (anchor-less) wired into the lint env by the environments
     # block. The consumer cannot drift its lexd version — fleet uniformity moved
     # from a compiled binary constant to this managed block (ADR-0047).
+    #
+    # The zero-arg catalog uses the seed default platforms (PIXI_SEED_PLATFORMS —
+    # no win-64), so the default lexd block carries exactly those served targets.
     units = {u.key: u for u in iunits.load_units()}
     lexd = units[iunits.PIXI_LEXD_KEY]
     assert lexd.kind == "block"
@@ -569,15 +595,48 @@ def test_load_units_includes_the_managed_lexd_feature_block():
     ]
     # The lexd pin is PLATFORM-SCOPED via `[target]` tables (#1068) — no blanket
     # `[dependencies]` that would break a solve on a platform outside the served
-    # set (osx-64). DRIFT GUARD: the target subdirs are EXACTLY the channel's
-    # closed served set (`buckets.SERVED_SUBDIRS`), the single source of truth —
-    # win-64 INCLUDED, so a win-64 consumer keeps a lexd dep and fails closed
-    # (ADR-0071) instead of solving without lexd. If the served set changes and
-    # the packaged block does not (or vice versa), this fails.
+    # set (osx-64). The default catalog scopes to the SEED platforms, which omit
+    # win-64 — so no dangling win-64 target (#1072).
     assert "dependencies" not in feature
-    assert set(feature["target"]) == set(buckets.SERVED_SUBDIRS)
-    assert "win-64" in feature["target"]
-    assert feature["target"] == LEXD_SCOPED_TARGET
+    assert feature["target"] == _lexd_targets(iunits.PIXI_SEED_PLATFORMS)
+    assert "win-64" not in feature["target"]
+
+
+def test_lexd_block_targets_are_repo_platforms_intersect_served():
+    # #1072 DRIFT GUARD: the generated `[target]` set is EXACTLY (the repo's
+    # declared platforms) ∩ the channel's closed served set — the single source of
+    # truth (`buckets.SERVED_SUBDIRS`). If the served set changes and the generator
+    # does not (or vice versa), the intersection below fails by name.
+    def _targets(platforms):
+        block = tomllib.loads(iunits.lexd_block(frozenset(platforms)))
+        return block["feature"]["shipit-lexd"]["target"]
+
+    # (a) A repo WITHOUT win-64 gets NO win-64 target — the #1072 fix: pixi emits
+    # no dangling-selector warning because every target matches a declared platform.
+    no_win = _targets({"linux-64", "osx-arm64", "linux-aarch64"})
+    assert "win-64" not in no_win
+    assert set(no_win) == {"linux-64", "osx-arm64", "linux-aarch64"}
+
+    # (b) A repo that DECLARES win-64 keeps the win-64 target — fails closed at
+    # solve (ADR-0071), the served-but-paused invariant preserved.
+    with_win = _targets({"linux-64", "win-64"})
+    assert set(with_win) == {"linux-64", "win-64"}
+    assert with_win["win-64"] == {"dependencies": {"lexd": iunits.LEXD_PIN}}
+
+    # (c) A platform OUTSIDE the served set (osx-64) carries no target — #1068.
+    unserved = _targets({"osx-64", "osx-arm64"})
+    assert set(unserved) == {"osx-arm64"}
+
+    # (d) A repo declaring EVERY served platform gets the full set (win-64 too).
+    assert set(_targets(buckets.SERVED_SUBDIRS)) == set(buckets.SERVED_SUBDIRS)
+
+    # No blanket dep in any case — only `[target]` tables.
+    assert (
+        "dependencies"
+        not in tomllib.loads(iunits.lexd_block(frozenset({"linux-64"})))["feature"][
+            "shipit-lexd"
+        ]
+    )
 
 
 def test_load_units_includes_the_launcher_deps_block():
@@ -639,11 +698,20 @@ def test_packaged_lint_env_agrees_with_shipits_own_manifest():
     assert own["environments"]["lint"] == envs["lint"]
 
     # The managed lexd feature (ARF02-WS06, ADR-0066) dogfoods byte-for-byte:
-    # shipit's own `[feature.shipit-lexd]` carries the packaged block verbatim, so
-    # a self-install reconciles to a noop and the fleet's lexd pin/channel are
-    # exactly what shipit lints itself with.
-    lexd = tomllib.loads(iunits.data_bytes("pixi-lexd-block.toml").decode("utf-8"))
-    assert own["feature"]["shipit-lexd"] == lexd["feature"]["shipit-lexd"]
+    # shipit's own `[feature.shipit-lexd]` carries the GENERATED block for shipit's
+    # OWN declared platforms (#1072 — the target set is per-repo), so a self-install
+    # reconciles to a noop and the fleet's lexd pin/channel are exactly what shipit
+    # lints itself with. shipit declares no win-64, so its block has NO win-64
+    # target and pixi warns on none of shipit's own pixi runs (the #1072 report).
+    own_platforms = frozenset(own["workspace"]["platforms"])
+    generated = tomllib.loads(iunits.lexd_block(own_platforms))
+    assert own["feature"]["shipit-lexd"] == generated["feature"]["shipit-lexd"]
+    assert "win-64" not in own["feature"]["shipit-lexd"]["target"]
+    # The pin single-sources through LEXD_PIN.
+    assert all(
+        t["dependencies"]["lexd"] == iunits.LEXD_PIN
+        for t in own["feature"]["shipit-lexd"]["target"].values()
+    )
 
 
 def test_shipits_own_pixi_manifest_reconciles_to_noop():
@@ -654,10 +722,14 @@ def test_shipits_own_pixi_manifest_reconciles_to_noop():
     root = Path(__file__).resolve().parents[1]
     # shipit's own tracked pyproject.toml signals the python toolchain (#801),
     # so the real install's catalog includes the python release-deps block —
-    # dogfooded verbatim like every other managed pixi block.
+    # dogfooded verbatim like every other managed pixi block. The lexd block is
+    # scoped to shipit's OWN declared platforms (#1072), exactly as `run()` does.
     units = {
         u.key: u
-        for u in iunits.load_units(toolchains=frozenset({iunits.TOOLCHAIN_PYTHON}))
+        for u in iunits.load_units(
+            toolchains=frozenset({iunits.TOOLCHAIN_PYTHON}),
+            platforms=verb._declared_platforms(root),
+        )
     }
     for key in (
         iunits.PIXI_KEY,
@@ -2519,18 +2591,15 @@ def test_toolchain_block_units_have_the_right_shape():
     # pinned to 0.15.* (#846: conda-forge never carried a 0.13 build). NOT
     # here: the wasm32 target std (#853) — a sysroot component, it rides the
     # toolchain block below so a consumer-owned `rust` pin skips it too.
-    # rattler-build rides HERE too (ARF01-WS01 #950): the conda endpoint's
-    # packager, on conda-forge in the DEFAULT release env, pinned 0.69.*
-    # (seed-validated against the live channel; 0.68.* panicked during the S3
-    # upload, #1049) — rust-signal-delivered for the walking-skeleton
-    # producer (lex-fmt/lex → lexd).
+    # rattler-build does NOT ride here anymore (#1071): the conda endpoint's
+    # packager was re-gated onto the conda ENDPOINT (its own conda-packager
+    # block below), so a rust repo with no conda endpoint no longer carries it.
     rust_release = units[iunits.PIXI_RUST_RELEASE_DEPS_KEY]
     assert rust_release.dest == "pixi.toml"
     assert rust_release.anchor == "[dependencies]"
     assert tomllib.loads(rust_release.desired_inner()) == {
         "cargo-edit": "0.13.11.*",
         "wasm-pack": "0.15.*",
-        "rattler-build": "0.69.*",
     }
 
     # The rust RELEASE toolchain (#801, TOL02-WS17 hole 1): cargo itself in
@@ -2583,6 +2652,127 @@ def test_toolchain_block_units_have_the_right_shape():
         )
     }
     assert len(fences) == 8
+
+
+def test_conda_packager_block_is_gated_on_the_conda_endpoint(tmp_path):
+    # #1071: rattler-build is the conda ENDPOINT's packager, not a toolchain
+    # tool. It is delivered off the `endpoints=` signal, never the toolchain
+    # one — so the zero-arg catalog and a toolchain-only catalog both omit it,
+    # and it appears iff the conda endpoint is declared.
+    base = {u.key for u in iunits.load_units()}
+    assert iunits.PIXI_CONDA_PACKAGER_KEY not in base
+
+    every_toolchain = {
+        u.key
+        for u in iunits.load_units(
+            toolchains=frozenset(
+                {
+                    iunits.TOOLCHAIN_RUST,
+                    iunits.TOOLCHAIN_GO,
+                    iunits.TOOLCHAIN_NODE,
+                    iunits.TOOLCHAIN_PYTHON,
+                    iunits.TOOLCHAIN_TREE_SITTER,
+                    iunits.TOOLCHAIN_LUA,
+                }
+            )
+        )
+    }
+    # No toolchain signal — however many — delivers the conda packager.
+    assert iunits.PIXI_CONDA_PACKAGER_KEY not in every_toolchain
+
+    # The conda endpoint signal adds EXACTLY the packager block.
+    with_conda = {
+        u.key for u in iunits.load_units(endpoints=frozenset({iunits.ENDPOINT_CONDA}))
+    }
+    assert with_conda - base == {iunits.PIXI_CONDA_PACKAGER_KEY}
+
+
+def test_conda_packager_block_has_the_right_shape():
+    units = {
+        u.key: u
+        for u in iunits.load_units(endpoints=frozenset({iunits.ENDPOINT_CONDA}))
+    }
+    packager = units[iunits.PIXI_CONDA_PACKAGER_KEY]
+    assert packager.dest == "pixi.toml"
+    # rattler-build must be on the DEFAULT env PATH — the wf-release stages run
+    # shipit via bare `pixi run --locked ./bin/shipit`, so it anchors under
+    # [dependencies], a sibling of the release-side toolchain blocks.
+    assert packager.anchor == "[dependencies]"
+    assert tomllib.loads(packager.desired_inner()) == {"rattler-build": "0.69.*"}
+    # Its fence is distinct from the [dependencies] siblings it can coexist with,
+    # or extract/splice would bleed across regions (the sibling-block rule).
+    release = {
+        u.key: u
+        for u in iunits.load_units(
+            toolchains=frozenset({iunits.TOOLCHAIN_RUST, iunits.TOOLCHAIN_NODE}),
+            endpoints=frozenset({iunits.ENDPOINT_CONDA}),
+        )
+    }
+    fences = {
+        release[k].open_marker
+        for k in (
+            iunits.PIXI_CONDA_PACKAGER_KEY,
+            iunits.PIXI_RUST_RELEASE_DEPS_KEY,
+            iunits.PIXI_RUST_RELEASE_TOOLCHAIN_KEY,
+            iunits.PIXI_NODE_DEPS_KEY,
+            iunits.PIXI_LAUNCHER_DEPS_KEY,
+        )
+    }
+    assert len(fences) == 5
+
+
+def test_rust_conda_repo_provisions_rattler_build_exactly_once():
+    # #1071: a rust+conda repo gets rattler-build ONLY via the conda-packager
+    # block — the rust release-deps block no longer carries it, so there is no
+    # duplicate `rattler-build` key across the two [dependencies] blocks (which
+    # would be a pixi key-conflict / broken manifest).
+    rust_release = tomllib.loads(
+        iunits.data_bytes("pixi-rust-release-deps-block.toml").decode("utf-8")
+    )
+    assert "rattler-build" not in rust_release
+    packager = tomllib.loads(
+        iunits.data_bytes("pixi-conda-packager-block.toml").decode("utf-8")
+    )
+    assert packager == {"rattler-build": "0.69.*"}
+
+
+def test_conda_packager_coexists_with_rust_release_block_under_dependencies():
+    # A rust+conda repo splices BOTH the rust release-deps block and the conda
+    # packager block under the ONE [dependencies] header — sibling regions, no
+    # bleed, and the merged table carries rattler-build EXACTLY once.
+    units = {
+        u.key: u
+        for u in iunits.load_units(
+            toolchains=frozenset({iunits.TOOLCHAIN_RUST}),
+            endpoints=frozenset({iunits.ENDPOINT_CONDA}),
+        )
+    }
+    release = units[iunits.PIXI_RUST_RELEASE_DEPS_KEY]
+    packager = units[iunits.PIXI_CONDA_PACKAGER_KEY]
+
+    text = '[workspace]\nname = "acme"\n'
+    for unit in (release, packager):
+        text = splice.splice_block(
+            text,
+            unit.desired_inner(),
+            unit.open_marker,
+            unit.close_marker,
+            unit.anchor,
+        )
+
+    assert (
+        splice.extract_block(text, release.open_marker, release.close_marker)
+        == release.desired_inner()
+    )
+    assert (
+        splice.extract_block(text, packager.open_marker, packager.close_marker)
+        == packager.desired_inner()
+    )
+    headers = [ln for ln in text.splitlines() if ln.strip() == "[dependencies]"]
+    assert len(headers) == 1
+    merged = tomllib.loads(text)["dependencies"]
+    assert merged["rattler-build"] == "0.69.*"
+    assert merged["cargo-edit"] == "0.13.11.*"
 
 
 def test_rust_release_toolchain_pin_agrees_with_the_rust_lint_block():
@@ -2943,6 +3133,289 @@ def test_lua_toolchain_delivers_the_lint_block(tmp_path):
     assert signals == {iunits.TOOLCHAIN_LUA}
     keys = {u.key for u in iunits.load_units(toolchains=signals)}
     assert iunits.PIXI_LUA_DEPS_KEY in keys
+
+
+def test_declared_endpoints_unions_conda_across_artifacts(tmp_path):
+    # #1071: the endpoint gate is the UNION of every artifact's endpoints, so a
+    # `conda` declared on ANY [artifacts.*] fires the packager — here a second
+    # artifact carries it while the first is gh-release-only.
+    (tmp_path / ".shipit.toml").write_text(
+        "[artifacts.cli]\n"
+        'build = ["rust"]\n'
+        'endpoints = ["gh-release"]\n'
+        "[artifacts.grammar]\n"
+        'build = ["tree-sitter"]\n'
+        'bundle = { composition = "tarball" }\n'
+        'endpoints = ["gh-release", "conda"]\n'
+    )
+    assert verb._declared_endpoints(tmp_path) == frozenset({"gh-release", "conda"})
+
+
+def test_declared_endpoints_empty_without_a_conda_endpoint(tmp_path):
+    # A gh-release-only repo declares no conda endpoint, so no packager block —
+    # unchanged from before the re-gate.
+    (tmp_path / ".shipit.toml").write_text(
+        '[artifacts.cli]\nbuild = ["rust"]\nendpoints = ["gh-release"]\n'
+    )
+    assert "conda" not in verb._declared_endpoints(tmp_path)
+
+
+def test_declared_endpoints_empty_without_config(tmp_path):
+    # No .shipit.toml → no endpoints; the augmentation never itself fails
+    # install (an absent map is a missing MAP, not this function's concern).
+    assert verb._declared_endpoints(tmp_path) == frozenset()
+
+
+def test_declared_endpoints_empty_on_unparseable_config(tmp_path):
+    # Malformed TOML degrades to no endpoints here — the config's own parse
+    # error surfaces on the verbs that read the map, not this augmentation.
+    (tmp_path / ".shipit.toml").write_text("this is not = valid = toml\n")
+    assert verb._declared_endpoints(tmp_path) == frozenset()
+
+
+def test_non_rust_conda_producer_gets_the_packager_block(tmp_path):
+    # End to end at the install seam (#1071, the ARF02 seed failure): a
+    # tree-sitter grammar (tarball composition, NO rust) declaring a `conda`
+    # endpoint gets the conda-packager block — so `release publish`'s conda
+    # stage has rattler-build. Before the re-gate the packager rode the rust
+    # signal ONLY, so this non-rust producer got nothing and `publish` died
+    # `No such file … rattler-build`.
+    root = _git_repo(tmp_path)
+    (root / "grammar.js").write_text("module.exports = grammar({});\n")
+    (root / ".shipit.toml").write_text(
+        "[toolchains]\n"
+        '"." = "tree-sitter"\n'
+        "[artifacts.tree-sitter]\n"
+        'build = ["tree-sitter"]\n'
+        'bundle = { composition = "tarball" }\n'
+        'endpoints = ["gh-release", "conda"]\n'
+    )
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+
+    toolchains = irec.detect_toolchains(root) | verb._declared_signals(root)
+    endpoints = verb._declared_endpoints(root)
+    assert iunits.TOOLCHAIN_RUST not in toolchains
+    assert "conda" in endpoints
+    keys = {
+        u.key for u in iunits.load_units(toolchains=toolchains, endpoints=endpoints)
+    }
+    assert iunits.PIXI_CONDA_PACKAGER_KEY in keys
+    # And no rust release-deps block, since there's no rust signal.
+    assert iunits.PIXI_RUST_RELEASE_DEPS_KEY not in keys
+
+
+def test_conda_packager_reconcile_is_not_current_without_it(tmp_path):
+    # The reconcile actually PLANS the packager delivery for a conda producer
+    # whose pixi.toml lacks it — the managed set is NOT "current" (the #1071
+    # symptom was `shipit install` reporting nothing-to-do, so rattler-build
+    # was never added). The rust release-deps block (present for a rust
+    # producer) does NOT satisfy the packager's own key.
+    root = _git_repo(tmp_path)
+    (root / "grammar.js").write_text("module.exports = grammar({});\n")
+    (root / ".shipit.toml").write_text(
+        "[toolchains]\n"
+        '"." = "tree-sitter"\n'
+        "[artifacts.tree-sitter]\n"
+        'build = ["tree-sitter"]\n'
+        'bundle = { composition = "tarball" }\n'
+        'endpoints = ["gh-release", "conda"]\n'
+    )
+    (root / "pixi.toml").write_text(
+        '[workspace]\nname = "acme"\nchannels = ["conda-forge"]\n'
+        'platforms = ["linux-64"]\n'
+    )
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+
+    toolchains = irec.detect_toolchains(root) | verb._declared_signals(root)
+    endpoints = verb._declared_endpoints(root)
+    units = iunits.load_units(toolchains=toolchains, endpoints=endpoints)
+    retired = irec.load_retired()
+    state = irec.gather(root, units, retired)
+    plan = irec.reconcile(units, retired, state)
+    added = {d.unit.key for d in plan.decisions if d.action == irec.ADD}
+    assert iunits.PIXI_CONDA_PACKAGER_KEY in added
+
+
+def test_non_conda_repo_gets_no_packager_block(tmp_path):
+    # The control: a rust repo with NO conda endpoint no longer carries
+    # rattler-build at all (it publishes no `.conda`) — the deliberate side of
+    # the #1071 re-gate. It keeps its rust release-deps block, sans packager.
+    root = _git_repo(tmp_path)
+    (root / "Cargo.toml").write_text("[package]\n")
+    (root / ".shipit.toml").write_text(
+        '[artifacts.cli]\nbuild = ["rust"]\nendpoints = ["gh-release"]\n'
+    )
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+
+    toolchains = irec.detect_toolchains(root) | verb._declared_signals(root)
+    endpoints = verb._declared_endpoints(root)
+    assert toolchains == {iunits.TOOLCHAIN_RUST}
+    assert "conda" not in endpoints
+    keys = {
+        u.key for u in iunits.load_units(toolchains=toolchains, endpoints=endpoints)
+    }
+    assert iunits.PIXI_CONDA_PACKAGER_KEY not in keys
+    assert iunits.PIXI_RUST_RELEASE_DEPS_KEY in keys
+
+
+def test_rust_conda_migration_moves_rattler_build_in_one_reconcile(tmp_path, rec):
+    # #1071 MAJOR (codex): an EXISTING rust+conda repo pinned to the pre-#1071
+    # shipit still carries `rattler-build` INSIDE its old rust-release-deps
+    # managed span. Reconciling to v1.4.2 must, in ONE pass, UPDATE that block to
+    # drop rattler-build AND ADD the new conda-packager block that now owns it.
+    # Before the fix, `_pixi_key_conflicts` saw rattler-build already in
+    # [dependencies] and skipped the packager as a first-splice duplicate — but
+    # the key sits inside ANOTHER managed block this same plan rewrites, so the
+    # one reconcile stranded the repo with NO packager (removed from the rust
+    # block, never added to the conda block) until a second reconcile.
+    old_rust_inner = (
+        'cargo-edit = "0.13.11.*"\nwasm-pack = "0.15.*"\nrattler-build = "0.69.*"'
+    )
+    old_pristine = config.content_hash(old_rust_inner.encode("utf-8"))
+    (tmp_path / "pixi.toml").write_text(
+        "[workspace]\n"
+        'name = "acme"\n'
+        'channels = ["conda-forge"]\n'
+        'platforms = ["linux-64"]\n'
+        "\n"
+        "[dependencies]\n"
+        f"{iunits.PIXI_RUST_RELEASE_DEPS_OPEN}\n"
+        f"{old_rust_inner}\n"
+        f"{iunits.PIXI_RUST_RELEASE_DEPS_CLOSE}\n"
+    )
+    (tmp_path / ".shipit.toml").write_text(
+        "[artifacts.cli]\n"
+        'build = ["rust"]\n'
+        'endpoints = ["gh-release", "conda"]\n'
+        "\n"
+        "[managed]\n"
+        f'"{iunits.PIXI_RUST_RELEASE_DEPS_KEY}" = "{old_pristine}"\n'
+    )
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+
+    units = iunits.load_units(
+        toolchains=frozenset({iunits.TOOLCHAIN_RUST}),
+        endpoints=frozenset({"conda"}),
+        platforms=frozenset({"linux-64"}),
+    )
+    retired = irec.load_retired()
+    state = irec.gather(tmp_path, units, retired)
+    plan = irec.reconcile(units, retired, state)
+
+    # The packager is NOT a first-splice conflict: its key is migrating out of
+    # the rust block, which this same plan updates away.
+    assert plan.pixi_key_conflicts == ()
+    conda = next(
+        d for d in plan.decisions if d.unit.key == iunits.PIXI_CONDA_PACKAGER_KEY
+    )
+    assert conda.action == irec.ADD
+    rust = next(
+        d for d in plan.decisions if d.unit.key == iunits.PIXI_RUST_RELEASE_DEPS_KEY
+    )
+    assert rust.action == irec.UPDATE  # a clean migration, not a flagged override
+
+    iapply.apply(plan, iapply.MODE_TREE)
+
+    # ONE pass lands the end state: valid TOML (tomllib REFUSES a duplicate key,
+    # so a successful parse proves rattler-build is not doubled), the packager
+    # pinned in the conda span and gone from the rust block.
+    text = (tmp_path / "pixi.toml").read_text(encoding="utf-8")
+    manifest = tomllib.loads(text)
+    assert manifest["dependencies"]["rattler-build"] == "0.69.*"
+    conda_inner = splice.extract_block(
+        text, iunits.PIXI_CONDA_PACKAGER_OPEN, iunits.PIXI_CONDA_PACKAGER_CLOSE
+    )
+    rust_inner = splice.extract_block(
+        text, iunits.PIXI_RUST_RELEASE_DEPS_OPEN, iunits.PIXI_RUST_RELEASE_DEPS_CLOSE
+    )
+    # Parse each span's own keys (the block bodies carry `rattler-build` in prose
+    # COMMENTS, so a substring check would false-match — assert on TOML keys).
+    assert tomllib.loads(conda_inner)["rattler-build"] == "0.69.*"
+    rust_keys = tomllib.loads(rust_inner)
+    assert "rattler-build" not in rust_keys
+    assert rust_keys["cargo-edit"] == "0.13.11.*"
+    # The packager is now a tracked managed unit.
+    managed = config.load_managed(config.load(tmp_path / ".shipit.toml"))
+    assert iunits.PIXI_CONDA_PACKAGER_KEY in managed
+
+
+def test_declared_platforms_reads_the_workspace_table(tmp_path):
+    # #1072: the lexd block scopes its targets to the consumer's declared
+    # `[workspace].platforms`, read here off the consumer's pixi.toml.
+    (tmp_path / "pixi.toml").write_text(
+        '[workspace]\nname = "acme"\nplatforms = ["osx-arm64", "win-64"]\n'
+    )
+    assert verb._declared_platforms(tmp_path) == frozenset({"osx-arm64", "win-64"})
+
+
+def test_declared_platforms_reads_the_legacy_project_alias(tmp_path):
+    # pixi accepts `[project]` as a `[workspace]` alias — both carry platforms.
+    (tmp_path / "pixi.toml").write_text(
+        '[project]\nname = "acme"\nplatforms = ["linux-64"]\n'
+    )
+    assert verb._declared_platforms(tmp_path) == frozenset({"linux-64"})
+
+
+def test_declared_platforms_absent_pixi_uses_the_seed_defaults(tmp_path):
+    # NO pixi.toml → the seed defaults, because a fresh install is about to SEED
+    # a manifest carrying exactly PIXI_SEED_PLATFORMS: the plan-time lexd scope
+    # then matches the platforms it writes (a clean noop), and the seed set has
+    # no win-64, so a virgin repo never emits a paused-platform target.
+    assert verb._declared_platforms(tmp_path) == frozenset(iunits.PIXI_SEED_PLATFORMS)
+    assert "win-64" not in iunits.PIXI_SEED_PLATFORMS
+
+
+def test_declared_platforms_present_manifest_without_platforms_is_empty(tmp_path):
+    # #1072 MAJOR (codex): a PRESENT, parsed manifest that declares no platforms
+    # list is NOT a virgin repo — it must NOT inherit the seed defaults, or the
+    # lexd block would emit targets the manifest never declared (the exact
+    # dangling-selector warning this scoping removes). It gets frozenset() → no
+    # targets. (The reviewer's `test_existing_pixi_manifest_is_never_seeded`
+    # shape: an existing `[workspace]` with only a name.)
+    (tmp_path / "pixi.toml").write_text('[workspace]\nname = "acme"\n')
+    assert verb._declared_platforms(tmp_path) == frozenset()
+
+
+def test_declared_platforms_trusts_an_explicit_empty_list(tmp_path):
+    # An EXPLICIT `platforms = []` is the consumer declaring none — trusted
+    # verbatim, never falling through to the seed defaults and re-dangling them.
+    (tmp_path / "pixi.toml").write_text('[workspace]\nname = "acme"\nplatforms = []\n')
+    assert verb._declared_platforms(tmp_path) == frozenset()
+
+
+def test_declared_platforms_ignores_a_scalar_workspace_table(tmp_path):
+    # agy robustness: a valid-TOML-but-invalid-schema manifest whose [workspace]
+    # is a scalar (`workspace = "foo"`) must not crash the platform read on a
+    # `.get` against a string — the scalar is no platform source, so it degrades
+    # to no declared platforms rather than an AttributeError mid-install.
+    (tmp_path / "pixi.toml").write_text('workspace = "foo"\n')
+    assert verb._declared_platforms(tmp_path) == frozenset()
+
+
+def test_declared_platforms_degrades_on_unparseable_pixi(tmp_path):
+    # A malformed pixi.toml degrades to the seed defaults here — the platform read
+    # never itself fails install (the manifest's own errors surface elsewhere).
+    (tmp_path / "pixi.toml").write_text("this is not = valid = toml\n")
+    assert verb._declared_platforms(tmp_path) == frozenset(iunits.PIXI_SEED_PLATFORMS)
+
+
+def test_existing_manifest_without_platforms_emits_no_lexd_target(tmp_path):
+    # #1072 MAJOR (codex), end to end: an EXISTING consumer manifest with a
+    # `[workspace]` but no `platforms` list yields a lexd block with NO `[target]`
+    # tables — the install pipeline reads `_declared_platforms` (frozenset() for
+    # this shape) and `lexd_block` generates a target only for a DECLARED
+    # platform, so nothing dangles and pixi warns on no selector. Before the fix
+    # the manifest inherited the seed defaults and emitted linux/osx targets the
+    # workspace never declared (the dangling-selector class #1072 removes).
+    (tmp_path / "pixi.toml").write_text('[workspace]\nname = "acme"\n')
+    platforms = verb._declared_platforms(tmp_path)
+    assert platforms == frozenset()
+    units = {u.key: u for u in iunits.load_units(platforms=platforms)}
+    feature = tomllib.loads(units[iunits.PIXI_LEXD_KEY].desired_inner())["feature"][
+        "shipit-lexd"
+    ]
+    assert "target" not in feature  # no undeclared selectors → no pixi warning
+    assert "dependencies" not in feature
 
 
 def _plan_with_toolchains(root, toolchains: frozenset) -> irec.Plan:
@@ -4679,11 +5152,13 @@ def test_fresh_install_delivers_the_lint_environment(tmp_path, rec):
     deps = manifest["feature"]["lint"]["dependencies"]
     assert set(deps) == set(LINT_TOOLS)
     # The lint env composes the managed `shipit-lexd` feature (ARF02-WS06) so
-    # lexd resolves from the Artifact channel — platform-scoped to the served
-    # subdirs (#1068), never a blanket dep.
+    # lexd resolves from the Artifact channel — platform-scoped to the repo's own
+    # served platforms (#1068/#1072), never a blanket dep. This consumer declares
+    # only osx-arm64, so the block carries exactly that one served target — no
+    # dangling win-64 selector (#1072).
     assert manifest["environments"]["lint"] == ["lint", "shipit-lexd"]
     assert "dependencies" not in manifest["feature"]["shipit-lexd"]
-    assert manifest["feature"]["shipit-lexd"]["target"] == LEXD_SCOPED_TARGET
+    assert manifest["feature"]["shipit-lexd"]["target"] == _lexd_targets({"osx-arm64"})
 
     # The blocks recorded a pristine hash in the manifest...
     managed = config.load_managed(config.load(tmp_path / ".shipit.toml"))
@@ -4718,10 +5193,15 @@ def test_install_on_a_consumer_declaring_an_unserved_platform_delivers_scoped_le
     feature = manifest["feature"]["shipit-lexd"]
     # lexd is delivered ONLY under the served-subdir `[target]` tables — never a
     # blanket `[dependencies]` and never a target for the unserved osx-64, so that
-    # platform has no lexd requirement and its lint-env solve is satisfiable.
+    # platform has no lexd requirement and its lint-env solve is satisfiable. The
+    # consumer declares three served platforms (+ osx-64) and no win-64, so the
+    # target set is exactly those three served — no dangling win-64 selector (#1072).
     assert "dependencies" not in feature
-    assert feature["target"] == LEXD_SCOPED_TARGET
+    assert feature["target"] == _lexd_targets(
+        {"linux-64", "linux-aarch64", "osx-64", "osx-arm64"}
+    )
     assert "osx-64" not in feature["target"]
+    assert "win-64" not in feature["target"]
     # The membership was recorded pristine, so an unchanged re-install is a NOOP.
     assert _plan(tmp_path).nothing_to_do
 
@@ -4766,11 +5246,15 @@ def test_upgrade_replaces_blanket_lexd_block_with_scoped_targets(tmp_path, rec):
     feature = tomllib.loads((tmp_path / "pixi.toml").read_text())["feature"][
         "shipit-lexd"
     ]
-    # The blanket dep is fully REPLACED by the served-set `[target]` tables — the
-    # every-platform key does not survive the migration.
+    # The blanket dep is fully REPLACED by the repo's served-platform `[target]`
+    # tables — the every-platform key does not survive the migration. The consumer
+    # declares three served platforms (+ osx-64) and no win-64.
     assert "dependencies" not in feature
-    assert feature["target"] == LEXD_SCOPED_TARGET
+    assert feature["target"] == _lexd_targets(
+        {"linux-64", "linux-aarch64", "osx-64", "osx-arm64"}
+    )
     assert "osx-64" not in feature["target"]
+    assert "win-64" not in feature["target"]
     # Exactly ONE managed block remains (the swap replaced, never appended).
     assert (tmp_path / "pixi.toml").read_text().count(iunits.PIXI_LEXD_OPEN) == 1
     # The migration settled: an unchanged re-install is a NOOP.
@@ -4785,9 +5269,12 @@ def test_scoped_lexd_manifest_is_accepted_by_real_pixi(tmp_path, rec):
     # against the rendered manifest of an osx-64-declaring consumer: `pixi info`
     # loads and validates the manifest (parses every `[feature.shipit-lexd.target.
     # <subdir>.dependencies]` table) WITHOUT a network solve. If pixi could not
-    # parse the scoped targets it exits non-zero; a valid manifest exits 0 (a
-    # win-64 target-selector warning on a workspace that omits win-64 is expected
-    # and non-fatal). A full channel solve stays out of scope — no network in CI.
+    # parse the scoped targets it exits non-zero; a valid manifest exits 0. A full
+    # channel solve stays out of scope — no network in CI.
+    #
+    # #1072: this consumer omits win-64, and the generated block now emits NO
+    # win-64 target for it, so pixi must NOT warn about a dangling win-64 selector
+    # — the exact fleet-wide noise this fix removes. Asserted below.
     (tmp_path / "AGENTS.md").write_text("# Acme\n")
     (tmp_path / "pixi.toml").write_text(
         '[workspace]\nname = "acme"\nchannels = ["conda-forge"]\n'
@@ -4808,6 +5295,34 @@ def test_scoped_lexd_manifest_is_accepted_by_real_pixi(tmp_path, rec):
     assert proc.returncode == 0, combined
     assert "Cannot solve" not in combined
     assert "No candidates" not in combined
+    # #1072: no dangling target-selector warning for the undeclared win-64.
+    assert "does not match any of the platforms" not in combined
+    assert "target selector" not in combined
+
+
+def test_install_on_a_win64_declaring_consumer_keeps_the_win64_target(tmp_path, rec):
+    # #1072 fail-closed half: a consumer that DECLARES win-64 KEEPS the win-64
+    # `[target]` table — so its win-64 lint solve finds no channel candidate (the
+    # pause, #895) and FAILS CLOSED (ADR-0071), never silently solving without
+    # lexd. The #1072 fix only DROPS win-64 for repos that don't declare it.
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    (tmp_path / "pixi.toml").write_text(
+        '[workspace]\nname = "acme"\nchannels = ["conda-forge"]\n'
+        'platforms = ["linux-64", "osx-arm64", "linux-aarch64", "win-64"]\n\n'
+        '[tasks]\ntest = "pytest"\n'
+    )
+    _apply(tmp_path)
+
+    feature = tomllib.loads((tmp_path / "pixi.toml").read_text())["feature"][
+        "shipit-lexd"
+    ]
+    # All four served platforms are declared, so the block carries the full served
+    # target set — win-64 INCLUDED (the fail-closed dep).
+    assert feature["target"] == LEXD_SCOPED_TARGET
+    assert "win-64" in feature["target"]
+    assert feature["target"]["win-64"] == {"dependencies": {"lexd": iunits.LEXD_PIN}}
+    # Pristine-recorded, so an unchanged re-install is a clean NOOP.
+    assert _plan(tmp_path).nothing_to_do
 
 
 def test_lint_env_block_merges_into_an_existing_environments_table(tmp_path, rec):
@@ -4846,8 +5361,9 @@ def test_lint_env_merges_lexd_into_a_consumer_owned_lint_env(tmp_path, rec):
     assert manifest["environments"]["lint"] == ["lint", "shipit-lexd"]
     # ...and the reserved feature it composes landed, so lexd resolves from the
     # Artifact channel rather than the retired `provision lexd` — platform-scoped
-    # to the served subdirs (#1068).
-    assert manifest["feature"]["shipit-lexd"]["target"] == LEXD_SCOPED_TARGET
+    # to the repo's own served platforms (#1068/#1072). This consumer declares
+    # only osx-arm64.
+    assert manifest["feature"]["shipit-lexd"]["target"] == _lexd_targets({"osx-arm64"})
     assert manifest["feature"]["shipit-lexd"]["channels"] == [
         "https://storage.googleapis.com/shipit-artifacts-public/lex-fmt/lex"
     ]
@@ -4973,9 +5489,14 @@ def test_fresh_consumer_without_pixi_manifest_gets_a_valid_seed(tmp_path, rec):
     assert manifest["tasks"]["test"] == "./bin/shipit test"
     assert set(manifest["feature"]["lint"]["dependencies"]) == set(LINT_TOOLS)
     assert manifest["environments"]["lint"] == ["lint", "shipit-lexd"]
-    # lexd is platform-scoped to the served subdirs (#1068), never a blanket dep.
+    # lexd is platform-scoped (#1068/#1072), never a blanket dep. The seeded
+    # workspace declares PIXI_SEED_PLATFORMS (no win-64), so the lexd block carries
+    # exactly those served targets and pixi warns on no dangling selector.
     assert "dependencies" not in manifest["feature"]["shipit-lexd"]
-    assert manifest["feature"]["shipit-lexd"]["target"] == LEXD_SCOPED_TARGET
+    assert manifest["feature"]["shipit-lexd"]["target"] == _lexd_targets(
+        iunits.PIXI_SEED_PLATFORMS
+    )
+    assert "win-64" not in manifest["feature"]["shipit-lexd"]["target"]
     # ...and the launcher's uv (#758): the managed tasks all ride ./bin/shipit.
     assert "uv" in manifest["dependencies"]
 
