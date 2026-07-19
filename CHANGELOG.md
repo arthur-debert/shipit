@@ -14,6 +14,9 @@
   workflow and runs the shipped yamllint config over it, so a >120-char line or
   a dropped separator can't silently return. Consumers no longer need a
   `[lint].ignore` for the generated file.
+
+## 1.4.0 - 2026-07-19
+
 - release: the `conda` derived endpoint gains a **noarch mode** so cross-repo
   DATA artifacts (the tree-sitter grammar, the wasm build) ride the Artifact
   channel as `noarch: generic` conda packages (ARF02-WS07, ADR-0076; #1064). An
