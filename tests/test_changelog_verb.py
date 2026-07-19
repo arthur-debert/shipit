@@ -465,24 +465,52 @@ def test_render_current_matches_the_verb_render(tmp_path):
 # --------------------------------------------------------------------------
 
 
+def _boom_presence() -> bool:
+    raise AssertionError("CHANGELOG/ must not be read on an exempt base")
+
+
 def test_fragment_gate_passes_off_a_pr():
-    # Empty base ref = not a PR context (laptop/lefthook): the gate never blocks,
-    # regardless of whether a fragment is present.
-    verdict = verb.decide_fragment_gate(base_ref="", has_unreleased_fragment=False)
+    # Empty base ref = not a PR context (laptop/lefthook): the gate never blocks
+    # and never reads CHANGELOG/ — the presence thunk raises to prove it.
+    verdict = verb.decide_fragment_gate(
+        base_ref="", has_unreleased_fragment=_boom_presence
+    )
     assert verdict.ok
     assert "not a PR" in verdict.message
 
 
 def test_fragment_gate_passes_on_a_non_main_base():
     # A WS PR targets an epic branch, not main: exempt (the umbrella PR to main
-    # carries the fragment). The presence bool is irrelevant off a main base.
-    verdict = verb.decide_fragment_gate(base_ref="ADP02", has_unreleased_fragment=False)
+    # carries the fragment). The presence thunk is never invoked off a main base.
+    verdict = verb.decide_fragment_gate(
+        base_ref="ADP02", has_unreleased_fragment=_boom_presence
+    )
     assert verdict.ok
     assert "not 'main'" in verdict.message
 
 
+def test_fragment_gate_presence_thunk_is_lazy_only_read_when_gated():
+    # The presence read is a THUNK the pure decision calls only on the gated
+    # branch (base == main), never before the base short-circuits — so an exempt
+    # run issues no filesystem read at all. Record calls.
+    calls: list[str] = []
+
+    def _presence() -> bool:
+        calls.append("read")
+        return True
+
+    verb.decide_fragment_gate(base_ref="", has_unreleased_fragment=_presence)
+    verb.decide_fragment_gate(base_ref="ADP02", has_unreleased_fragment=_presence)
+    assert calls == []
+    # Gated (base == main): now it IS consulted.
+    verb.decide_fragment_gate(base_ref="main", has_unreleased_fragment=_presence)
+    assert calls == ["read"]
+
+
 def test_fragment_gate_passes_when_a_fragment_is_present():
-    verdict = verb.decide_fragment_gate(base_ref="main", has_unreleased_fragment=True)
+    verdict = verb.decide_fragment_gate(
+        base_ref="main", has_unreleased_fragment=lambda: True
+    )
     assert verdict.ok
     assert "OK" in verdict.message
 
@@ -490,7 +518,9 @@ def test_fragment_gate_passes_when_a_fragment_is_present():
 def test_fragment_gate_fails_on_main_with_no_fragment():
     # The exact empty-release condition, asked at PR time: base main + no
     # unreleased fragment fails, and the message points at the cut's own refusal.
-    verdict = verb.decide_fragment_gate(base_ref="main", has_unreleased_fragment=False)
+    verdict = verb.decide_fragment_gate(
+        base_ref="main", has_unreleased_fragment=lambda: False
+    )
     assert not verdict.ok
     assert "no CHANGELOG/unreleased-*.md fragment present" in verdict.message
     assert "empty cut" in verdict.message
@@ -558,3 +588,17 @@ def test_run_check_fragment_read_tree_seam_is_injectable(tmp_path, capsys):
     rc = verb.run_check_fragment(str(root), base_ref="main", read_tree=lambda _r: stub)
     assert rc == 0
     assert "OK" in capsys.readouterr().out
+
+
+def test_run_check_fragment_does_not_read_the_tree_on_exempt_bases(tmp_path, capsys):
+    # The runner defers the tree read behind the base short-circuit: an exempt
+    # run (empty base, or a non-main base) must PASS without invoking read_tree,
+    # so an inaccessible/non-UTF-8 fragment can never fail a run needing none.
+    def _boom(_root):
+        raise AssertionError("read_tree must not be invoked on an exempt base")
+
+    root = _tree(tmp_path)
+    assert verb.run_check_fragment(str(root), base_ref="", read_tree=_boom) == 0
+    assert "not a PR" in capsys.readouterr().out
+    assert verb.run_check_fragment(str(root), base_ref="epic", read_tree=_boom) == 0
+    assert "not 'main'" in capsys.readouterr().out

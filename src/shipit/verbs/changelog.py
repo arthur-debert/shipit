@@ -306,15 +306,20 @@ class FragmentGate:
 def decide_fragment_gate(
     *,
     base_ref: str,
-    has_unreleased_fragment: bool,
+    has_unreleased_fragment: Callable[[], bool],
 ) -> FragmentGate:
     """The PURE fragment-gate decision (issue #1073), env/fs reads injected.
 
-    Given the PR's base ref and whether the current checkout's ``CHANGELOG/``
-    holds any unreleased fragment, decide whether the PR may merge. This is the
-    SAME question the cut asks (:func:`shipit.changelog.plan_coalesce` refuses an
-    empty release) — asked at PR time so a missing fragment fails before merge,
-    not at the next cut once every PR is already in.
+    Given the PR's base ref and a THUNK reporting whether the current checkout's
+    ``CHANGELOG/`` holds any unreleased fragment, decide whether the PR may merge.
+    This is the SAME question the cut asks (:func:`shipit.changelog.plan_coalesce`
+    refuses an empty release) — asked at PR time so a missing fragment fails
+    before merge, not at the next cut once every PR is already in.
+
+    ``has_unreleased_fragment`` is a thunk, invoked ONLY on the branch that needs
+    it — the base short-circuits first — so an exempt run (empty base or a
+    non-``main`` base) never reads ``CHANGELOG/`` at all, and an inaccessible or
+    non-UTF-8 fragment can never fail a run that requires no fragment.
 
     Passes (``ok=True``) when any of:
 
@@ -322,7 +327,7 @@ def decide_fragment_gate(
       gate never blocks local work.
     * ``base_ref`` is not :data:`GATED_BASE_REF` — a WS PR to an epic branch is
       exempt.
-    * ``has_unreleased_fragment`` is True — ``CHANGELOG/`` holds ≥1 unreleased
+    * ``has_unreleased_fragment()`` is True — ``CHANGELOG/`` holds ≥1 unreleased
       fragment, so the release will have notes to cut.
 
     Fails (``ok=False``) only when the base is ``main`` and ``CHANGELOG/`` holds
@@ -339,7 +344,7 @@ def decide_fragment_gate(
             "fragment required (only PRs to "
             f"{GATED_BASE_REF} are gated)",
         )
-    if has_unreleased_fragment:
+    if has_unreleased_fragment():
         return FragmentGate(
             True,
             f"changelog: OK — {core.CHANGELOG_DIR}/ has an unreleased fragment",
@@ -427,7 +432,10 @@ def run_check_fragment(
     discovery, both for tests (mirroring the seam-injection style of the other
     runners). The default ``read_tree`` is :func:`_read_tree` over the resolved
     root; the fragment-presence bool is simply whether its fragment set is
-    non-empty.
+    non-empty. The read is wrapped as a THUNK the pure decision calls only on the
+    gated branch (base == ``main``), so an exempt run (empty base, or a
+    non-``main`` base) never reads or decodes ``CHANGELOG/`` — an inaccessible or
+    non-UTF-8 fragment cannot fail a run that requires no fragment.
     """
     read_tree = read_tree or _read_tree
     root = _resolve_root(Path(path or ".").resolve(), repo_root=git.repo_root)
@@ -435,7 +443,7 @@ def run_check_fragment(
         base_ref = os.environ.get("GITHUB_BASE_REF", "")
     verdict = decide_fragment_gate(
         base_ref=base_ref,
-        has_unreleased_fragment=bool(read_tree(root).fragments),
+        has_unreleased_fragment=lambda: bool(read_tree(root).fragments),
     )
     print(verdict.message)
     logger.info(
