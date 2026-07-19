@@ -4,6 +4,40 @@
 
 ## Unreleased
 
+## 1.4.0 - 2026-07-19
+
+- release: the `conda` derived endpoint gains a **noarch mode** so cross-repo
+  DATA artifacts (the tree-sitter grammar, the wasm build) ride the Artifact
+  channel as `noarch: generic` conda packages (ARF02-WS07, ADR-0076; #1064). An
+  artifact whose composition produces a single platform-independent archive (the
+  `tarball` composition — `<artifact>.tar.gz`, no triple) repackages that one
+  archive into ONE `noarch: generic` `.conda` published to the channel's
+  `noarch/` subdir, which every conda client reads alongside its platform subdir,
+  so no consumer change is needed. The per-platform tool-artifact path
+  (`CONDA_SUBDIRS`, triple→subdir fan-out) is untouched — the modes are additive.
+  The recipe extracts into a `payload/` subdir and copies only that into
+  `$PREFIX/share/<package>/`, so rattler-build's build scaffolding is never swept
+  into the package, and it carries no `--target-platform` (rattler-build refuses
+  it for noarch — the recipe's `noarch: generic` drives it). `noarch` is a
+  distinct always-present subdir (`buckets.NOARCH_SUBDIR`), NOT a member of the
+  per-platform served set: the store `verify --noarch` readiness probe is a
+  single `noarch/repodata.json` resolve, never a per-platform sweep and never
+  subject to the ADR-0071 `win-64` pause subtraction. Covered by a REAL
+  end-to-end repackage test that drives an actual `rattler-build build` (the
+  #1050/#1053 do-not-fake lesson).
+- gh-setup: required-check auto-discovery no longer invents a phantom
+  `<caller> / run` context that bricks rulesets (#1056). Static discovery (the
+  no-runs onboarding path) now DROPS any job whose reported check name is
+  statically unpredictable — a `strategy.matrix` job (it reports `id (values)`,
+  never the bare id) or a `${{ … }}` display name — instead of guessing its job
+  id, warning loudly (stderr + WARNING) on every drop. The guard is
+  per-workflow: gh-setup writes the ruleset only when EVERY PR workflow still
+  contributes at least one certain context; if any is left with zero, discovery
+  REFUSES to write (rc 1, an actionable error demanding explicit `--checks` with
+  a per-workflow certain/dropped breakdown) rather than silently write a weaker
+  rule. On `lex-fmt/lex` this yields exactly `check`, `checks / plan`,
+  `Documentation`, `WASM build` with zero human input, and never the phantom
+  `checks / run`. `--checks` override and runs-based discovery are unchanged.
 - lint: `shipit provision lexd` is retired — `lexd` now rides the public
   Artifact channel as an ordinary conda dependency, resolved through `pixi.lock`
   and integrity-checked by pixi's sha256 (ARF02-WS06, ADR-0066/0071; #1005). The
