@@ -104,7 +104,7 @@ switch), one adapter per name of :data:`shipit.config.ENDPOINTS`:
   ()``). External / RC-guarded (a ``-release-rc`` cut renders nothing —
   gh-release only) and stable-only (the registry serves stable versions, so a
   prerelease renders no entry). needs_repo: the submodule rev names the source
-  ``owner/name`` @ tag. Unlike brew/notify/conda it does NOT require an
+  ``owner/name`` @ tag. Unlike brew/notify it does NOT require an
   unskipped gh-release in the plan — it references the ``release prepare`` tag
   (ADR-0041), not gh-release assets, so a zed-only map is valid.
 
@@ -585,7 +585,8 @@ def _check_selector(
     - deselecting ``gh-release`` when it is declared: it is the Release, not a
       distribution channel (ADR-0009 partial-release prevention). A repo that
       declares no gh-release has none to deselect — the derived-endpoint
-      invariants below still refuse a conda/brew/notify that would strand.
+      invariants below still refuse a brew/notify that would strand (conda is
+      conda-direct and needs no gh-release, ADR-0077).
     """
     declared = {name for artifact in artifacts for name in artifact.endpoints}
     unknown = [name for name in selector if adapter_for(name) is None]
@@ -2400,7 +2401,7 @@ ZED = EndpointAdapter(
     # external: a `-release-rc` live-fire cut is gh-release-only. needs_repo:
     # the submodule rev names github.com/<owner/name>@<tag>. Renders the manual
     # PR coordinates only — no cross-repo push, no secret (ADR-0068). It does
-    # NOT require an unskipped gh-release in the plan (unlike brew/notify/conda):
+    # NOT require an unskipped gh-release in the plan (unlike brew/notify):
     # it references the `release prepare` tag, not gh-release assets.
     stable_only=True,
     stable_skip_reason=SKIP_ZED_PRERELEASE,

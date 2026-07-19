@@ -2264,7 +2264,7 @@ def test_conda_assets_derives_served_subdirs_from_the_platforms_declaration():
         f"lex-{MAC_ARM}.tar.gz",
         f"lex-{LINUX}.tar.gz",
         f"lex-{WIN}.zip",
-        f"lex-{MAC_X64}.tar.gz",  # osx-64 staged but UNDECLARED-served → not packaged
+        f"lex-{MAC_X64}.tar.gz",  # osx-64 staged but unserved → not packaged
         f"lex-{MUSL}.tar.gz",  # musl staged but unserved → not packaged
         "sibling-x86_64-pc-windows-msvc.zip",  # other artifact's prefix — ignored
     ]
@@ -2476,7 +2476,7 @@ def _conda_request(tmp_path, *, env=None, assets=None, ghio=None):
     # conda-direct (ADR-0077): the served subdirs are DERIVED from the artifact's
     # declared `platforms`, not reverse-engineered from staged filenames — so the
     # fixture declares the four lanes whose archives it stages (darwin-x86_64 is
-    # served-less → its staged archive is never packaged).
+    # unserved (osx-64) → its staged archive is never packaged).
     artifact = _artifacts(
         {
             "lex": {
