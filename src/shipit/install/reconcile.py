@@ -1257,7 +1257,21 @@ def plan_claude_skills_link(root: Path) -> ClaudeSkillsLink:
     shipit never deletes a consumer's ``.claude/skills``; there is no
     content-hash retirement of ``.claude/skills/*`` (which would also delete the
     byte-identical ``.agents/skills`` copy and the ``.shipit-skills`` source).
+
+    A symlinked PARENT component (a consumer who symlinks ``.claude`` itself)
+    BLOCKS before any ``is_dir``/``rglob`` read would follow it outside the repo —
+    the same containment stance as :func:`symlinked_dest_component`.
     """
+    parent = symlinked_dest_component(root, str(Path(CLAUDE_SKILLS_DIR).parent))
+    if parent is not None:
+        return ClaudeSkillsLink(
+            LINK_BLOCKED,
+            reason=(
+                f"a parent of {CLAUDE_SKILLS_DIR} is a symlink ({parent}) — shipit "
+                f"will not create or read through it. Remove the symlink and re-run "
+                f"to adopt the managed link"
+            ),
+        )
     link = root / CLAUDE_SKILLS_DIR
     if link.is_symlink():
         if str(link.readlink()) == CLAUDE_SKILLS_LINK_TARGET:

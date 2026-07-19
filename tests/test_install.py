@@ -1360,6 +1360,28 @@ def test_install_blocks_a_wrong_target_claude_skills_symlink(tmp_path, rec):
     assert str((tmp_path / ".claude" / "skills").readlink()) == "../somewhere-else"
 
 
+def test_install_blocks_a_symlinked_claude_parent(tmp_path, rec):
+    """#1088 review: a consumer who symlinks a PARENT of `.claude/skills` (e.g.
+    `.claude` itself) BLOCKS — plan_claude_skills_link must not `is_dir`/`rglob`
+    THROUGH the parent link, outside the repo. (The same symlinked `.claude` also
+    trips the general symlinked-dest guard on `.claude/settings.json` etc., so the
+    whole install fails closed too — belt and suspenders.)"""
+    external = tmp_path.parent / f"{tmp_path.name}-external-claude"
+    external.mkdir()
+    (tmp_path / ".claude").symlink_to(external, target_is_directory=True)
+
+    plan = _plan(tmp_path)
+    # The link decision blocks WITHOUT reading through the parent symlink.
+    assert plan.claude_skills_link.action == irec.LINK_BLOCKED
+    assert not plan.claude_skills_link.is_work
+    assert "parent" in plan.claude_skills_link.reason
+    # Install fails closed (the .claude/settings.json symlinked-dest guard), and
+    # nothing is ever created through the parent link.
+    with pytest.raises(InstallError):
+        _apply(tmp_path, iapply.MODE_TREE)
+    assert not (external / "skills").exists()
+
+
 def test_shipits_own_skills_reconcile_to_noop():
     """The dogfood drift check (the WS01 / lint-config pattern): shipit
     self-installs at Tree provisioning, so its own committed `.agents/skills/*`

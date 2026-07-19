@@ -34,6 +34,7 @@ from .reconcile import (
     consumer_inner,
     format_lefthook_conflict,
     format_symlinked_dest,
+    symlinked_dest_component,
 )
 from .splice import (
     ENV_MEMBER_MALFORMED,
@@ -208,6 +209,19 @@ def ensure_claude_skills_link(root: Path, link: ClaudeSkillsLink) -> bool:
     if not link.is_work:  # NOOP / BLOCKED — nothing structural to do
         return False
     dest = root / CLAUDE_SKILLS_DIR
+    # TOCTOU re-check: a PARENT component turned into a symlink in the gather→apply
+    # window (e.g. `.claude` became a link) would make `symlink_to` write outside
+    # the repo. Stand down rather than create through it (a re-run re-plans a BLOCK).
+    parent_link = symlinked_dest_component(root, str(Path(CLAUDE_SKILLS_DIR).parent))
+    if parent_link is not None:
+        logger.warning(
+            "claude skills link skipped — a parent of %s became a symlink (%s) in "
+            "the gather→apply window; left untouched",
+            CLAUDE_SKILLS_DIR,
+            parent_link,
+            extra={"root": str(root), "path": CLAUDE_SKILLS_DIR},
+        )
+        return False
     if dest.is_symlink() or dest.exists():
         # Something occupied the path in the gather→apply window. Never clobber:
         # a correct managed symlink is a silent NOOP, anything else is left as-is
@@ -808,12 +822,15 @@ def reject_symlinked_dests(plan: Plan) -> None:
     (:mod:`shipit.verbs.install`), so a symlink-bearing but otherwise-empty plan
     cannot slip past a mode's no-op return.
 
-    A whole-file unit whose dest crosses a consumer symlink (a linked leaf, or a
-    linked parent dir) would have its ``dest.write_bytes`` FOLLOW the link and
-    overwrite the target OUTSIDE the repo (#1088 review). Unlike the lefthook
-    refusal — which only guards PUBLISHING a config, so ``MODE_TREE`` warns — the
-    containment breach happens on the raw filesystem write, so EVERY mode
-    (``MODE_TREE`` included) refuses. The fix is the operator's: remove the
+    A managed unit of ANY kind whose dest crosses a consumer symlink (a linked
+    leaf, or a linked parent dir) would write THROUGH the link and overwrite the
+    target OUTSIDE the repo (#1088 review): a whole-file unit via
+    ``dest.write_bytes``, a block/splice unit via ``dest.read_text`` +
+    ``dest.write_text`` — both follow a symlinked component identically, so the
+    host being consumer-owned does not make the external write safe. Unlike the
+    lefthook refusal — which only guards PUBLISHING a config, so ``MODE_TREE``
+    warns — the containment breach happens on the raw filesystem write, so EVERY
+    mode (``MODE_TREE`` included) refuses. The fix is the operator's: remove the
     symlink and re-run to receive a real copy. A plain :class:`InstallError` (an
     operator-fixable state), never a :class:`SelfCertError`."""
     if plan.symlinked_dests:
