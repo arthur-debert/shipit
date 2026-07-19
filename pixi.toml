@@ -158,10 +158,11 @@ act = "0.2.*"
 # in tests/test_release_publish.py drive an ACTUAL `rattler-build build` — the
 # faked seam hid all the original conda-producer bugs (#1050/#1053 lesson), so
 # the noarch producer path (ADR-0076) is exercised end-to-end here. Pinned to
-# the same minor line the managed rust-release-deps block ships
-# (`0.69.*`, src/shipit/data/pixi-rust-release-deps-block.toml) so the test runs
-# the version releases run; a real-build test `skipif`s loudly when the binary
-# is absent from an unusual host env.
+# the same minor line the managed conda-packager block ships
+# (`0.69.*`, src/shipit/data/pixi-conda-packager-block.toml — the #1071 re-gate
+# moved rattler-build off the rust signal onto the conda endpoint) so the test
+# runs the version releases run; a real-build test `skipif`s loudly when the
+# binary is absent from an unusual host env.
 rattler-build = "0.69.*"
 # Lets the REAL conda-repackage test read the built `.conda` (a zip of
 # zstd-compressed tars) and assert its file layout — the recipe-copy class of

@@ -61,8 +61,8 @@ _MANAGED_TOOLS: dict[str, tuple[str, str, str]] = {
         "rattler-build (the conda endpoint's packager — repackages a final "
         "release binary into a `.conda` and pushes+reindexes the Artifact "
         "channel)",
-        "pixi.toml#shipit-rust-release-deps",
-        "rust",
+        "pixi.toml#shipit-conda-packager",
+        "conda",
     ),
 }
 

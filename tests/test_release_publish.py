@@ -3067,9 +3067,10 @@ def test_plan_conda_live_fire_skip_never_trips_the_gh_release_invariant():
 
 
 def test_missing_rattler_build_gets_the_reconcile_remedy(tmp_path, monkeypatch, capsys):
-    """A missing `rattler-build` (the rust-release-deps block absent from the
+    """A missing `rattler-build` (the conda-packager block absent from the
     runner) names the block's COMMITTING install reconcile — never a raw 127,
-    the #801 translation applied to the conda endpoint."""
+    the #801 translation applied to the conda endpoint (block re-gated onto the
+    conda endpoint in #1071)."""
     _publish_repo(
         tmp_path,
         monkeypatch,
@@ -3109,7 +3110,7 @@ endpoints = ["gh-release", "conda"]
     assert rc == 1
     err = capsys.readouterr().err
     assert "[artifacts.lex] conda:" in err
-    assert "pixi.toml#shipit-rust-release-deps" in err
+    assert "pixi.toml#shipit-conda-packager" in err
     assert "`shipit install --pr`" in err
 
 

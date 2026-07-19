@@ -2519,18 +2519,15 @@ def test_toolchain_block_units_have_the_right_shape():
     # pinned to 0.15.* (#846: conda-forge never carried a 0.13 build). NOT
     # here: the wasm32 target std (#853) — a sysroot component, it rides the
     # toolchain block below so a consumer-owned `rust` pin skips it too.
-    # rattler-build rides HERE too (ARF01-WS01 #950): the conda endpoint's
-    # packager, on conda-forge in the DEFAULT release env, pinned 0.69.*
-    # (seed-validated against the live channel; 0.68.* panicked during the S3
-    # upload, #1049) — rust-signal-delivered for the walking-skeleton
-    # producer (lex-fmt/lex → lexd).
+    # rattler-build does NOT ride here anymore (#1071): the conda endpoint's
+    # packager was re-gated onto the conda ENDPOINT (its own conda-packager
+    # block below), so a rust repo with no conda endpoint no longer carries it.
     rust_release = units[iunits.PIXI_RUST_RELEASE_DEPS_KEY]
     assert rust_release.dest == "pixi.toml"
     assert rust_release.anchor == "[dependencies]"
     assert tomllib.loads(rust_release.desired_inner()) == {
         "cargo-edit": "0.13.11.*",
         "wasm-pack": "0.15.*",
-        "rattler-build": "0.69.*",
     }
 
     # The rust RELEASE toolchain (#801, TOL02-WS17 hole 1): cargo itself in
@@ -2583,6 +2580,127 @@ def test_toolchain_block_units_have_the_right_shape():
         )
     }
     assert len(fences) == 8
+
+
+def test_conda_packager_block_is_gated_on_the_conda_endpoint(tmp_path):
+    # #1071: rattler-build is the conda ENDPOINT's packager, not a toolchain
+    # tool. It is delivered off the `endpoints=` signal, never the toolchain
+    # one — so the zero-arg catalog and a toolchain-only catalog both omit it,
+    # and it appears iff the conda endpoint is declared.
+    base = {u.key for u in iunits.load_units()}
+    assert iunits.PIXI_CONDA_PACKAGER_KEY not in base
+
+    every_toolchain = {
+        u.key
+        for u in iunits.load_units(
+            toolchains=frozenset(
+                {
+                    iunits.TOOLCHAIN_RUST,
+                    iunits.TOOLCHAIN_GO,
+                    iunits.TOOLCHAIN_NODE,
+                    iunits.TOOLCHAIN_PYTHON,
+                    iunits.TOOLCHAIN_TREE_SITTER,
+                    iunits.TOOLCHAIN_LUA,
+                }
+            )
+        )
+    }
+    # No toolchain signal — however many — delivers the conda packager.
+    assert iunits.PIXI_CONDA_PACKAGER_KEY not in every_toolchain
+
+    # The conda endpoint signal adds EXACTLY the packager block.
+    with_conda = {
+        u.key for u in iunits.load_units(endpoints=frozenset({iunits.ENDPOINT_CONDA}))
+    }
+    assert with_conda - base == {iunits.PIXI_CONDA_PACKAGER_KEY}
+
+
+def test_conda_packager_block_has_the_right_shape():
+    units = {
+        u.key: u
+        for u in iunits.load_units(endpoints=frozenset({iunits.ENDPOINT_CONDA}))
+    }
+    packager = units[iunits.PIXI_CONDA_PACKAGER_KEY]
+    assert packager.dest == "pixi.toml"
+    # rattler-build must be on the DEFAULT env PATH — the wf-release stages run
+    # shipit via bare `pixi run --locked ./bin/shipit`, so it anchors under
+    # [dependencies], a sibling of the release-side toolchain blocks.
+    assert packager.anchor == "[dependencies]"
+    assert tomllib.loads(packager.desired_inner()) == {"rattler-build": "0.69.*"}
+    # Its fence is distinct from the [dependencies] siblings it can coexist with,
+    # or extract/splice would bleed across regions (the sibling-block rule).
+    release = {
+        u.key: u
+        for u in iunits.load_units(
+            toolchains=frozenset({iunits.TOOLCHAIN_RUST, iunits.TOOLCHAIN_NODE}),
+            endpoints=frozenset({iunits.ENDPOINT_CONDA}),
+        )
+    }
+    fences = {
+        release[k].open_marker
+        for k in (
+            iunits.PIXI_CONDA_PACKAGER_KEY,
+            iunits.PIXI_RUST_RELEASE_DEPS_KEY,
+            iunits.PIXI_RUST_RELEASE_TOOLCHAIN_KEY,
+            iunits.PIXI_NODE_DEPS_KEY,
+            iunits.PIXI_LAUNCHER_DEPS_KEY,
+        )
+    }
+    assert len(fences) == 5
+
+
+def test_rust_conda_repo_provisions_rattler_build_exactly_once():
+    # #1071: a rust+conda repo gets rattler-build ONLY via the conda-packager
+    # block — the rust release-deps block no longer carries it, so there is no
+    # duplicate `rattler-build` key across the two [dependencies] blocks (which
+    # would be a pixi key-conflict / broken manifest).
+    rust_release = tomllib.loads(
+        iunits.data_bytes("pixi-rust-release-deps-block.toml").decode("utf-8")
+    )
+    assert "rattler-build" not in rust_release
+    packager = tomllib.loads(
+        iunits.data_bytes("pixi-conda-packager-block.toml").decode("utf-8")
+    )
+    assert packager == {"rattler-build": "0.69.*"}
+
+
+def test_conda_packager_coexists_with_rust_release_block_under_dependencies():
+    # A rust+conda repo splices BOTH the rust release-deps block and the conda
+    # packager block under the ONE [dependencies] header — sibling regions, no
+    # bleed, and the merged table carries rattler-build EXACTLY once.
+    units = {
+        u.key: u
+        for u in iunits.load_units(
+            toolchains=frozenset({iunits.TOOLCHAIN_RUST}),
+            endpoints=frozenset({iunits.ENDPOINT_CONDA}),
+        )
+    }
+    release = units[iunits.PIXI_RUST_RELEASE_DEPS_KEY]
+    packager = units[iunits.PIXI_CONDA_PACKAGER_KEY]
+
+    text = '[workspace]\nname = "acme"\n'
+    for unit in (release, packager):
+        text = splice.splice_block(
+            text,
+            unit.desired_inner(),
+            unit.open_marker,
+            unit.close_marker,
+            unit.anchor,
+        )
+
+    assert (
+        splice.extract_block(text, release.open_marker, release.close_marker)
+        == release.desired_inner()
+    )
+    assert (
+        splice.extract_block(text, packager.open_marker, packager.close_marker)
+        == packager.desired_inner()
+    )
+    headers = [ln for ln in text.splitlines() if ln.strip() == "[dependencies]"]
+    assert len(headers) == 1
+    merged = tomllib.loads(text)["dependencies"]
+    assert merged["rattler-build"] == "0.69.*"
+    assert merged["cargo-edit"] == "0.13.11.*"
 
 
 def test_rust_release_toolchain_pin_agrees_with_the_rust_lint_block():
@@ -2943,6 +3061,129 @@ def test_lua_toolchain_delivers_the_lint_block(tmp_path):
     assert signals == {iunits.TOOLCHAIN_LUA}
     keys = {u.key for u in iunits.load_units(toolchains=signals)}
     assert iunits.PIXI_LUA_DEPS_KEY in keys
+
+
+def test_declared_endpoints_unions_conda_across_artifacts(tmp_path):
+    # #1071: the endpoint gate is the UNION of every artifact's endpoints, so a
+    # `conda` declared on ANY [artifacts.*] fires the packager — here a second
+    # artifact carries it while the first is gh-release-only.
+    (tmp_path / ".shipit.toml").write_text(
+        "[artifacts.cli]\n"
+        'build = ["rust"]\n'
+        'endpoints = ["gh-release"]\n'
+        "[artifacts.grammar]\n"
+        'build = ["tree-sitter"]\n'
+        'bundle = { composition = "tarball" }\n'
+        'endpoints = ["gh-release", "conda"]\n'
+    )
+    assert verb._declared_endpoints(tmp_path) == frozenset({"gh-release", "conda"})
+
+
+def test_declared_endpoints_empty_without_a_conda_endpoint(tmp_path):
+    # A gh-release-only repo declares no conda endpoint, so no packager block —
+    # unchanged from before the re-gate.
+    (tmp_path / ".shipit.toml").write_text(
+        '[artifacts.cli]\nbuild = ["rust"]\nendpoints = ["gh-release"]\n'
+    )
+    assert "conda" not in verb._declared_endpoints(tmp_path)
+
+
+def test_declared_endpoints_empty_without_config(tmp_path):
+    # No .shipit.toml → no endpoints; the augmentation never itself fails
+    # install (an absent map is a missing MAP, not this function's concern).
+    assert verb._declared_endpoints(tmp_path) == frozenset()
+
+
+def test_declared_endpoints_empty_on_unparseable_config(tmp_path):
+    # Malformed TOML degrades to no endpoints here — the config's own parse
+    # error surfaces on the verbs that read the map, not this augmentation.
+    (tmp_path / ".shipit.toml").write_text("this is not = valid = toml\n")
+    assert verb._declared_endpoints(tmp_path) == frozenset()
+
+
+def test_non_rust_conda_producer_gets_the_packager_block(tmp_path):
+    # End to end at the install seam (#1071, the ARF02 seed failure): a
+    # tree-sitter grammar (tarball composition, NO rust) declaring a `conda`
+    # endpoint gets the conda-packager block — so `release publish`'s conda
+    # stage has rattler-build. Before the re-gate the packager rode the rust
+    # signal ONLY, so this non-rust producer got nothing and `publish` died
+    # `No such file … rattler-build`.
+    root = _git_repo(tmp_path)
+    (root / "grammar.js").write_text("module.exports = grammar({});\n")
+    (root / ".shipit.toml").write_text(
+        "[toolchains]\n"
+        '"." = "tree-sitter"\n'
+        "[artifacts.tree-sitter]\n"
+        'build = ["tree-sitter"]\n'
+        'bundle = { composition = "tarball" }\n'
+        'endpoints = ["gh-release", "conda"]\n'
+    )
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+
+    toolchains = irec.detect_toolchains(root) | verb._declared_signals(root)
+    endpoints = verb._declared_endpoints(root)
+    assert iunits.TOOLCHAIN_RUST not in toolchains
+    assert "conda" in endpoints
+    keys = {
+        u.key for u in iunits.load_units(toolchains=toolchains, endpoints=endpoints)
+    }
+    assert iunits.PIXI_CONDA_PACKAGER_KEY in keys
+    # And no rust release-deps block, since there's no rust signal.
+    assert iunits.PIXI_RUST_RELEASE_DEPS_KEY not in keys
+
+
+def test_conda_packager_reconcile_is_not_current_without_it(tmp_path):
+    # The reconcile actually PLANS the packager delivery for a conda producer
+    # whose pixi.toml lacks it — the managed set is NOT "current" (the #1071
+    # symptom was `shipit install` reporting nothing-to-do, so rattler-build
+    # was never added). The rust release-deps block (present for a rust
+    # producer) does NOT satisfy the packager's own key.
+    root = _git_repo(tmp_path)
+    (root / "grammar.js").write_text("module.exports = grammar({});\n")
+    (root / ".shipit.toml").write_text(
+        "[toolchains]\n"
+        '"." = "tree-sitter"\n'
+        "[artifacts.tree-sitter]\n"
+        'build = ["tree-sitter"]\n'
+        'bundle = { composition = "tarball" }\n'
+        'endpoints = ["gh-release", "conda"]\n'
+    )
+    (root / "pixi.toml").write_text(
+        '[workspace]\nname = "acme"\nchannels = ["conda-forge"]\n'
+        'platforms = ["linux-64"]\n'
+    )
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+
+    toolchains = irec.detect_toolchains(root) | verb._declared_signals(root)
+    endpoints = verb._declared_endpoints(root)
+    units = iunits.load_units(toolchains=toolchains, endpoints=endpoints)
+    retired = irec.load_retired()
+    state = irec.gather(root, units, retired)
+    plan = irec.reconcile(units, retired, state)
+    added = {d.unit.key for d in plan.decisions if d.action == irec.ADD}
+    assert iunits.PIXI_CONDA_PACKAGER_KEY in added
+
+
+def test_non_conda_repo_gets_no_packager_block(tmp_path):
+    # The control: a rust repo with NO conda endpoint no longer carries
+    # rattler-build at all (it publishes no `.conda`) — the deliberate side of
+    # the #1071 re-gate. It keeps its rust release-deps block, sans packager.
+    root = _git_repo(tmp_path)
+    (root / "Cargo.toml").write_text("[package]\n")
+    (root / ".shipit.toml").write_text(
+        '[artifacts.cli]\nbuild = ["rust"]\nendpoints = ["gh-release"]\n'
+    )
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+
+    toolchains = irec.detect_toolchains(root) | verb._declared_signals(root)
+    endpoints = verb._declared_endpoints(root)
+    assert toolchains == {iunits.TOOLCHAIN_RUST}
+    assert "conda" not in endpoints
+    keys = {
+        u.key for u in iunits.load_units(toolchains=toolchains, endpoints=endpoints)
+    }
+    assert iunits.PIXI_CONDA_PACKAGER_KEY not in keys
+    assert iunits.PIXI_RUST_RELEASE_DEPS_KEY in keys
 
 
 def _plan_with_toolchains(root, toolchains: frozenset) -> irec.Plan:

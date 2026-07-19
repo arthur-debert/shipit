@@ -130,6 +130,33 @@ def _declared_signals(root: Path) -> set[str]:
     return signals
 
 
+def _declared_endpoints(root: Path) -> frozenset[str]:
+    """Distribution endpoints declared across the consumer's ``[artifacts.*]``
+    map (#1071).
+
+    The endpoint-gated managed pixi blocks (:data:`shipit.install.units.ENDPOINT_UNITS`
+    — currently the conda packager) ride a declared ENDPOINT, not a toolchain:
+    ``rattler-build`` is the ``conda`` endpoint's packager, so it must ship
+    wherever ANY artifact names ``conda`` (regardless of its composition or
+    build toolchain), the #1071 gap where a non-rust conda producer got no
+    packager. Returns the union of every artifact's ``endpoints`` list.
+
+    Degrades to ``frozenset()`` when the config is absent or unparseable — the
+    endpoint augmentation never itself fails install (the config's own parse
+    errors surface on the verbs that read the map, not here), the same posture
+    as :func:`_declared_signals`.
+    """
+    try:
+        cfg = load_config(Path(root))
+        artifacts = config.load_artifacts(cfg)
+    except config.ConfigError:
+        return frozenset()
+    endpoints: set[str] = set()
+    for artifact in artifacts:
+        endpoints.update(artifact.endpoints)
+    return frozenset(endpoints)
+
+
 def _artifact_dep_units(root: Path, *, is_private=gh.repo_is_private) -> list[Unit]:
     """The managed pixi blocks projected from the consumer's ``[artifact-deps]``
     declarations (ARF01-WS02 #952), or ``[]`` when none are declared.
@@ -347,7 +374,13 @@ def run(
         # and a declared tree-sitter [toolchains] leg needs its own CLI, which no
         # manifest can signal at all (#890).
         toolchains = detect_toolchains(root_path) | _declared_signals(root_path)
-        units = load_units(toolchains=toolchains)
+        # The conda packager (rattler-build) is gated on a declared ENDPOINT,
+        # not a toolchain (#1071): a repo declaring a `conda` endpoint on any
+        # artifact gets it regardless of its build toolchain, so a non-rust
+        # conda producer (a tree-sitter `tarball` grammar) is no longer starved
+        # of its packager.
+        endpoints = _declared_endpoints(root_path)
+        units = load_units(toolchains=toolchains, endpoints=endpoints)
         # The consumer half of the Artifact channel (ARF01-WS02 #952): project
         # the repo's `[artifact-deps]` declarations into managed pixi blocks the
         # reconcile then treats like any other. Malformed entries fail loud here;

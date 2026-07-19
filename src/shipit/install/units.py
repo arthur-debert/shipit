@@ -334,6 +334,43 @@ TOOLCHAIN_UNITS = (
     ),
 )
 
+# The CONDITIONAL conda-endpoint packager block (#1071, ADR-0064/0070). Unlike
+# the per-toolchain blocks above, this one is gated on a declared distribution
+# ENDPOINT, not a toolchain: `rattler-build` (`rattler-build build`/`publish`)
+# is the conda endpoint's packager, so it must ride wherever a repo declares a
+# `conda` endpoint on ANY `[artifacts.*]` — a rust binary, a tree-sitter
+# `tarball` grammar, a future python/lua producer — toolchain-INDEPENDENT. It
+# used to live in the rust release-deps block (rust repos were the first conda
+# producers), which starved a non-rust conda producer of its packager (the
+# #1071 seed failure: tree-sitter-lex declared conda but `publish` died
+# `No such file … rattler-build`). It anchors in the DEFAULT env's
+# [dependencies] — the wf-release stages run shipit via bare
+# `pixi run --locked ./bin/shipit`, so the packager must be on THAT run's PATH —
+# beside the release-side toolchain blocks. Delivered by :func:`load_units`
+# only when the caller passes the `conda` endpoint signal (`endpoints=`),
+# detected from the consumer's `[artifacts.*]` endpoint declarations
+# (:func:`shipit.verbs.install._declared_endpoints`). Provisioning rides
+# pixi/conda-forge under setup-pixi's lockfile-keyed cache (the #582 doctrine);
+# the publish verb never installs at run time — it fails loudly naming this
+# reconcile instead (:mod:`shipit.release.provisioning`).
+ENDPOINT_CONDA = "conda"
+PIXI_CONDA_PACKAGER_KEY = "pixi.toml#shipit-conda-packager"
+PIXI_CONDA_PACKAGER_OPEN = "# >>> shipit-managed conda packager (do not edit; regenerate via `shipit install`) >>>"
+PIXI_CONDA_PACKAGER_CLOSE = "# <<< shipit-managed conda packager <<<"
+PIXI_CONDA_PACKAGER_ANCHOR = PIXI_NODE_DEPS_ANCHOR  # [dependencies]
+# (unit key, endpoint signal, open, close, anchor, packaged data file) — the
+# endpoint-gated catalog rows :func:`load_units` appends per declared endpoint.
+ENDPOINT_UNITS = (
+    (
+        PIXI_CONDA_PACKAGER_KEY,
+        ENDPOINT_CONDA,
+        PIXI_CONDA_PACKAGER_OPEN,
+        PIXI_CONDA_PACKAGER_CLOSE,
+        PIXI_CONDA_PACKAGER_ANCHOR,
+        "pixi-conda-packager-block.toml",
+    ),
+)
+
 #: The name of the managed lint environment the env block above defines
 #: (``pixi-lint-env-block.toml``: ``lint = ["lint"]``) — where the fleet-pinned
 #: toolchain (including ``lefthook``) lives on every consumer. Callers that must
@@ -707,7 +744,11 @@ def walk_files(node, prefix: str = ""):
             yield rel, child.read_bytes()
 
 
-def load_units(*, toolchains: frozenset[str] = frozenset()) -> list[Unit]:
+def load_units(
+    *,
+    toolchains: frozenset[str] = frozenset(),
+    endpoints: frozenset[str] = frozenset(),
+) -> list[Unit]:
     """The managed set, in a stable order (skills, then the AGENTS block, then bootstrap).
 
     ``toolchains`` (#547 Layer 1) names the conditional per-toolchain pixi dep
@@ -717,8 +758,14 @@ def load_units(*, toolchains: frozenset[str] = frozenset()) -> list[Unit]:
     (:func:`shipit.install.reconcile.detect_toolchains`), or
     :data:`TOOLCHAIN_TREE_SITTER`, unioned off the consumer's DECLARED
     tree-sitter toolchain leg (#890 — no manifest signals a grammar;
-    :func:`shipit.verbs.install._declared_signals`). The zero-arg call
-    returns the unconditional catalog — which since #794 includes the
+    :func:`shipit.verbs.install._declared_signals`).
+
+    ``endpoints`` (#1071) names the conditional per-ENDPOINT pixi blocks —
+    currently only :data:`ENDPOINT_CONDA`, delivering the conda packager
+    (``rattler-build``) — gated on the consumer's declared distribution
+    endpoints (:func:`shipit.verbs.install._declared_endpoints`) rather than a
+    toolchain, so a NON-rust conda producer gets its packager too. The zero-arg
+    call returns the unconditional catalog — which since #794 includes the
     launcher-deps block (uv for the pinned ``bin/shipit``, #758): every
     consumer's managed tasks resolve through the launcher, so its
     prerequisite is signal-independent.
@@ -924,6 +971,25 @@ def load_units(*, toolchains: frozenset[str] = frozenset()) -> list[Unit]:
     # places each right after the anchor header; coexistence is fine).
     for key, signal, open_marker, close_marker, anchor, data_file in TOOLCHAIN_UNITS:
         if signal in toolchains:
+            units.append(
+                Unit(
+                    key=key,
+                    dest=PIXI_FILE,
+                    kind="block",
+                    content=data_bytes(data_file),
+                    open_marker=open_marker,
+                    close_marker=close_marker,
+                    anchor=anchor,
+                )
+            )
+
+    # The conditional per-ENDPOINT blocks (#1071): the conda packager
+    # (rattler-build) rides wherever the consumer declares a `conda` endpoint —
+    # a different axis from the toolchain signal above, so a non-rust conda
+    # producer gets it too. A [dependencies] sibling of the release-side
+    # toolchain blocks; a rust+conda repo splices it exactly once beside them.
+    for key, signal, open_marker, close_marker, anchor, data_file in ENDPOINT_UNITS:
+        if signal in endpoints:
             units.append(
                 Unit(
                     key=key,
