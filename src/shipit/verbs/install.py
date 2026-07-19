@@ -37,6 +37,7 @@ from __future__ import annotations
 import difflib
 import logging
 import sys
+import tomllib
 from pathlib import Path
 
 import click
@@ -44,6 +45,7 @@ import click
 from .. import config, events, gh, git, identity, sessionstore
 from ..channel import cascade_receive
 from ..install import artifactdeps
+from ..install import units as install_units
 from ..install.apply import (
     MODE_LOCAL,
     MODE_PR,
@@ -155,6 +157,34 @@ def _declared_endpoints(root: Path) -> frozenset[str]:
     for artifact in artifacts:
         endpoints.update(artifact.endpoints)
     return frozenset(endpoints)
+
+
+def _declared_platforms(root: Path) -> frozenset[str]:
+    """The consumer's declared pixi ``[workspace].platforms`` (#1072).
+
+    The managed lexd block scopes its ``[target]`` tables to the platforms the
+    workspace actually declares (:func:`shipit.install.units.lexd_block`) — a
+    ``[target]`` selector for an undeclared platform makes pixi warn on every
+    invocation. This reads that platform list from the consumer's ``pixi.toml``
+    (``[workspace]``, or the legacy ``[project]`` alias).
+
+    Degrades to the seed defaults (:data:`shipit.install.units.PIXI_SEED_PLATFORMS`)
+    when the consumer has no ``pixi.toml``, an unparseable one, or no platform
+    list — exactly the set the install seed writes for a virgin repo, so a fresh
+    install's plan-time scope matches the platforms it is about to seed and a
+    re-install reconciles to a clean noop.
+    """
+    default = frozenset(install_units.PIXI_SEED_PLATFORMS)
+    pixi = Path(root) / install_units.PIXI_FILE
+    try:
+        data = tomllib.loads(pixi.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return default
+    for table in ("workspace", "project"):
+        platforms = data.get(table, {}).get("platforms")
+        if isinstance(platforms, list) and platforms:
+            return frozenset(str(p) for p in platforms)
+    return default
 
 
 def _artifact_dep_units(root: Path, *, is_private=gh.repo_is_private) -> list[Unit]:
@@ -380,7 +410,13 @@ def run(
         # conda producer (a tree-sitter `tarball` grammar) is no longer starved
         # of its packager.
         endpoints = _declared_endpoints(root_path)
-        units = load_units(toolchains=toolchains, endpoints=endpoints)
+        # The managed lexd block's `[target]` set is scoped to the consumer's
+        # declared platforms (#1072): a target selector for a platform the
+        # workspace does not declare makes pixi warn on every invocation.
+        platforms = _declared_platforms(root_path)
+        units = load_units(
+            toolchains=toolchains, endpoints=endpoints, platforms=platforms
+        )
         # The consumer half of the Artifact channel (ARF01-WS02 #952): project
         # the repo's `[artifact-deps]` declarations into managed pixi blocks the
         # reconcile then treats like any other. Malformed entries fail loud here;
