@@ -14,10 +14,12 @@ prerelease flag re-asserted, brew's unchanged-formula no-op push — reads
 off recorded invocations. Prior art: the bundle stage's recorder tests.
 """
 
+import functools
 import io
 import itertools
 import json
 import shutil
+import subprocess
 import tarfile
 import zipfile
 from pathlib import Path
@@ -3094,10 +3096,12 @@ _SUBDIR_TRIPLE = {
 }
 
 
+@functools.cache
 def _load_roundtrip_harness():
     """The `tools/conda_channel_roundtrip.py` harness, loaded by path (`tools/`
     is not an importable package). Reused for its host-subdir helper and the
-    file:// resolve step."""
+    file:// resolve step. Cached so the module is evaluated once per session
+    however many tests call it."""
     import importlib.util
 
     path = (
@@ -3122,7 +3126,12 @@ def _prebuilt_tool_archive(dist, artifact, triple, binary):
     (#1049). A tiny shell script stands in for the prebuilt binary."""
     top = dist / f"{artifact}-{triple}"
     top.mkdir(parents=True, exist_ok=True)
-    (top / binary).write_text("#!/bin/sh\necho hi\n", encoding="utf-8")
+    staged = top / binary
+    staged.write_text("#!/bin/sh\necho hi\n", encoding="utf-8")
+    # A prebuilt binary is executable; the recipe `cp`s it verbatim, so a
+    # non-exec source would stage a `bin/<binary>` a consumer cannot run — the
+    # permission regression the round trip must be able to catch.
+    staged.chmod(staged.stat().st_mode | 0o755)
     with tarfile.open(dist / f"{artifact}-{triple}.tar.gz", "w:gz") as tf:
         tf.add(top, arcname=top.name)
 
@@ -3149,8 +3158,13 @@ def test_conda_per_platform_real_repackage_cross_target_builds_a_conda(tmp_path)
     roundtrip = _load_roundtrip_harness()
     # A NON-native served subdir, so the build is a real cross-compilation (the
     # #1052 environment). Restricted to the unix subdirs (bin/lex layout);
-    # win-64's Scripts/.exe layout is out of scope for this fixture.
-    host = roundtrip.host_conda_subdir()
+    # win-64's Scripts/.exe layout is out of scope for this fixture. Skip cleanly
+    # (not error) on an unmapped host — Windows/Intel-mac can't anchor the round
+    # trip, matching #1053's "skip cleanly when unsupported" acceptance.
+    try:
+        host = roundtrip.host_conda_subdir()
+    except RuntimeError as exc:
+        pytest.skip(str(exc))
     target = next(s for s in ("osx-arm64", "linux-64", "linux-aarch64") if s != host)
     triple = _SUBDIR_TRIPLE[target]
 
@@ -3206,7 +3220,12 @@ def test_conda_file_channel_roundtrip_resolves_and_stages_the_binary(tmp_path):
     (#1078 noarch UNION layout, #1079 the staging tool) run against."""
     roundtrip = _load_roundtrip_harness()
     # NATIVE subdir — a foreign-subdir package resolves but will not install here.
-    native = roundtrip.host_conda_subdir()
+    # Skip cleanly (not error) on an unmapped host (Windows/Intel-mac), matching
+    # #1053's "skip cleanly when unsupported" acceptance.
+    try:
+        native = roundtrip.host_conda_subdir()
+    except RuntimeError as exc:
+        pytest.skip(str(exc))
     triple = _SUBDIR_TRIPLE[native]
 
     dist = _staged_assets(tmp_path, [])
@@ -3234,6 +3253,19 @@ def test_conda_file_channel_roundtrip_resolves_and_stages_the_binary(tmp_path):
     assert staged.exists()
     assert (staged.parent.name, staged.name) == ("bin", "lex")
     assert "echo hi" in staged.read_text(encoding="utf-8")
+
+    # And it is actually RUNNABLE from that prefix, not merely present: the
+    # executable bit survived the archive → recipe `cp` → `.conda` → pixi-stage
+    # round trip (a mode-0644 `bin/lex` a consumer can't invoke would fail here).
+    # Executed DIRECTLY via its own +x/shebang — never `/bin/sh <path>`, which
+    # would mask a non-executable stage.
+    assert staged.stat().st_mode & 0o111, (
+        f"staged {staged} is not executable (mode {oct(staged.stat().st_mode)}) — "
+        f"a consumer resolving this package could not run it"
+    )
+    ran = subprocess.run([str(staged)], capture_output=True, text=True, timeout=30)
+    assert ran.returncode == 0, f"staged tool exited {ran.returncode}: {ran.stderr!r}"
+    assert "hi" in ran.stdout
 
 
 def test_conda_secret_pair_mirrors_the_derivation_authority():

@@ -53,6 +53,13 @@ from pathlib import Path
 # The served conda subdir keyed by the host's (system, machine). Mirrors
 # publish.CONDA_SUBDIRS (triple → subdir) reduced to the host axis — kept local
 # so the harness has no import-time dependency on a live release request.
+#
+# Only the unix hosts of the served set are mapped. win-64 IS served but stages
+# under a ``Scripts/<binary>.exe`` layout the harness's bin/<binary> fixture does
+# not model, and Intel-mac (osx-64) is not in the served set at all — so on those
+# hosts `host_conda_subdir()` raises and callers (the __main__ path, the tests)
+# treat the raise as "skip cleanly, this host can't run the round trip" rather
+# than guessing an unsupported subdir.
 _HOST_SUBDIR = {
     ("Darwin", "arm64"): "osx-arm64",
     ("Darwin", "aarch64"): "osx-arm64",
@@ -65,8 +72,10 @@ _HOST_SUBDIR = {
 def host_conda_subdir() -> str:
     """The conda subdir of the machine running this process — the ONLY subdir a
     ``pixi install`` here can actually stage (a cross-subdir package resolves but
-    will not install on a foreign host). Raises on an unmapped host rather than
-    guessing a subdir the round trip cannot honour."""
+    will not install on a foreign host). Raises ``RuntimeError`` on an unmapped
+    host (Windows, Intel mac, or any host outside the mapped unix set) rather
+    than guessing a subdir the round trip cannot honour; callers catch that to
+    SKIP cleanly on a host where the harness cannot run."""
     key = (platform.system(), platform.machine())
     subdir = _HOST_SUBDIR.get(key)
     if subdir is None:  # pragma: no cover — CI/dev hosts are the mapped four
@@ -105,15 +114,18 @@ def resolve_from_file_channel(
     channel_url = channel_dir.resolve().as_uri()
     subdir = host_conda_subdir()
     # A PLAIN channel+dep manifest — never the [artifact-deps] projection, which
-    # hard-codes the GCS host and so cannot point at a file:// channel.
+    # hard-codes the GCS host and so cannot point at a file:// channel. The dep
+    # key and constraint are rendered as QUOTED TOML strings (json.dumps): a
+    # dotted conda package name (`foo.bar`) is a single bare key here, not a TOML
+    # dotted-key path, and a CLI-supplied version can't inject unescaped TOML.
     manifest = (
         f"[workspace]\n"
         f'name = "conda-roundtrip"\n'
         f"channels = [{json.dumps(channel_url)}]\n"
-        f'platforms = ["{subdir}"]\n'
+        f"platforms = [{json.dumps(subdir)}]\n"
         f"\n"
         f"[dependencies]\n"
-        f'{package} = "=={version}"\n'
+        f"{json.dumps(package)} = {json.dumps(f'=={version}')}\n"
     )
     (proj / "pixi.toml").write_text(manifest, encoding="utf-8")
     subprocess.run(
@@ -162,9 +174,14 @@ def build_tool_channel(
     from shipit.release.publish import render_conda_recipe
 
     work = channel_dir.parent
+    channel_dir.mkdir(parents=True, exist_ok=True)
     stage = work / f"{package}-{subdir}"
     stage.mkdir(parents=True, exist_ok=True)
-    (stage / binary).write_bytes(binary_body)
+    staged_binary = stage / binary
+    staged_binary.write_bytes(binary_body)
+    # A prebuilt tool is executable; the recipe `cp`s it verbatim, so a non-exec
+    # source stages a package whose `bin/<binary>` a consumer cannot run.
+    staged_binary.chmod(staged_binary.stat().st_mode | 0o111)
     archive = work / f"{package}-{subdir}.tar.gz"
     with tarfile.open(archive, "w:gz") as tf:
         tf.add(stage, arcname=stage.name)
@@ -246,9 +263,10 @@ def _main(argv: list[str] | None = None) -> int:
             scratch=root,
         )
         print(f"staged: {staged}")
-        out = subprocess.run(
-            ["/bin/sh", str(staged)], capture_output=True, text=True, timeout=30
-        )
+        # Run the staged tool DIRECTLY (via its own +x bit / shebang), never
+        # `/bin/sh <path>`: invoking through a shell would mask a non-executable
+        # stage — the exact defect the executable round trip is meant to catch.
+        out = subprocess.run([str(staged)], capture_output=True, text=True, timeout=30)
         print(f"binary output: {out.stdout.strip()!r}")
     return 0
 
