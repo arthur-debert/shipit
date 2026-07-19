@@ -44,6 +44,22 @@ reconcile as an OVERRIDE. Duplication is cheap (small markdown) and is paid at
 the projection, not the source — the same content lands under both discovery
 dirs.
 
+**Because writes are bytes-only, a symlinked destination is a containment
+breach, and install fails closed on it.** `dest.write_bytes` (and the
+`consumer_hash` read) FOLLOW a symlink in ANY destination path component — a
+linked leaf, or a linked parent dir such as a consumer's pre-migration
+`.claude/skills/coordinating -> …`. Writing through it would overwrite the
+link's target **outside the repo**. So whole-file reconciliation detects a
+symlinked component from the consumer root down to the leaf
+(`reconcile.symlinked_dests`), excludes that unit from the write set, and
+**every** applying mode refuses before any write (`apply.reject_symlinked_dests`)
+— `MODE_TREE` included, unlike the lefthook publish guard, because the breach is
+the raw filesystem write, not a config publish. Shipit never auto-unlinks a
+consumer's symlink (that would destroy an intentional layout); the operator
+removes it and re-runs to receive a real copy. This is a general whole-file-unit
+guarantee, not skills-specific — but this PR is what first writes into
+consumer-hand-wired discovery dirs, so it lands here.
+
 ### No `retired-files.toml` entries for `.shipit-skills/*`
 
 Retirement is content-hash **global** (`reconcile.py` `decide_retired`): a

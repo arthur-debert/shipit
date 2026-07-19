@@ -415,9 +415,17 @@ def test_managed_skill_files_are_in_the_delivered_lint_set(staged):
     assert ".claude/skills/grill-me-with-docs/SKILL.md" in paths
     assert ".agents/skills/grill-me-with-docs/SKILL.md" in paths
     assert ".claude/skills/to-spec/SKILL.md" in paths
-    # The delivered ignore no longer blanket-exempts the managed skills tree.
-    ignore = (staged / ".markdownlintignore").read_text().splitlines()
-    assert ".shipit-skills/" not in {line.strip() for line in ignore}
+    # The delivered ignore exempts NEITHER the source-only store NOR either
+    # projected discovery dir — the projected skill markdown is linted at both
+    # dests in every consumer (#1088). This non-skip guard is the backstop for
+    # the skip-if-no-binary real markdownlint tests below.
+    ignore = {
+        line.strip()
+        for line in (staged / ".markdownlintignore").read_text().splitlines()
+    }
+    assert ".shipit-skills/" not in ignore
+    assert ".claude/skills/" not in ignore
+    assert ".agents/skills/" not in ignore
 
 
 @pytest.mark.skipif(shutil.which("markdownlint") is None, reason="no markdownlint")

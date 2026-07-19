@@ -1282,7 +1282,13 @@ def test_every_store_skill_projects_to_both_surfaces():
     dirs as byte-identical whole-file units — `.claude/skills/<rel>` (Claude Code)
     and `.agents/skills/<rel>` (agy/codex) — with distinct, non-colliding keys.
     Nothing is emitted at the source-only `.shipit-skills/` store."""
-    units = {u.key: u for u in iunits.load_units() if u.kind == "file"}
+    file_units = [u for u in iunits.load_units() if u.kind == "file"]
+    # Collect keys as a LIST first: a dict would silently coalesce a collision,
+    # so the [managed]-table key uniqueness the fan-out promises would go
+    # unchecked. Assert no two units share a key before indexing by it.
+    keys = [u.key for u in file_units]
+    assert len(keys) == len(set(keys)), "colliding managed keys among file units"
+    units = {u.key: u for u in file_units}
     store = list(iunits.walk_files(iunits.skills_root()))
     assert store, "the fundamental skill store is empty"
     for rel, content in store:
@@ -1304,8 +1310,9 @@ def test_shipits_own_skills_reconcile_to_noop():
     and `.agents/skills/*` must be BYTE-IDENTICAL copies of the managed units —
     the #1088 migration replaced the hand-committed symlinks with real copies, so
     a skill-store edit is one source change mirrored into both projected dirs (or
-    this test fails). A symlink here would hash to a non-`sha256:` sentinel and
-    fail immediately."""
+    this test fails). NO destination path component (parent dirs included, not
+    just the leaf) may be a symlink — the pre-migration layout linked the parent
+    slug dir, which the containment guard now refuses."""
     skill_units = [
         u
         for u in iunits.load_units()
@@ -1315,11 +1322,50 @@ def test_shipits_own_skills_reconcile_to_noop():
     ]
     assert skill_units, "no projected skill units to check"
     for unit in skill_units:
-        dest = REPO_ROOT / unit.dest
-        assert not dest.is_symlink(), (
-            f"{unit.dest} is still a symlink (#1088 migration)"
+        # Check the WHOLE dest path, root..leaf — a linked parent slug dir
+        # (`.claude/skills/coordinating -> ...`) is exactly the pre-migration
+        # shape, and a leaf-only `is_symlink()` would miss it.
+        component = irec.symlinked_dest_component(REPO_ROOT, unit.dest)
+        assert component is None, (
+            f"{component} is a symlink (#1088 migration must leave real copies)"
         )
         assert irec.consumer_hash(REPO_ROOT, unit) == unit.desired_hash(), unit.key
+
+
+def test_install_refuses_to_write_through_a_symlinked_dest_component(tmp_path, rec):
+    """#1088 review (critical): a consumer whose discovery dir is a SYMLINK to an
+    external directory must never have that target overwritten. A whole-file
+    unit's write (`dest.write_bytes`) follows a symlink in ANY path component, so
+    the projection would write THROUGH a linked parent, outside the repo. Install
+    surfaces the conflict, excludes the unit from the write set, and fails closed
+    in EVERY applying mode (MODE_TREE included) before any write."""
+    external = tmp_path.parent / f"{tmp_path.name}-external-skills"
+    external.mkdir()
+    sentinel = external / "SKILL.md"
+    sentinel.write_text("EXTERNAL — must never be touched\n")
+
+    # `.claude/skills/coordinating` -> the external dir (the pre-migration
+    # symlink shape); the projected `.claude/skills/coordinating/SKILL.md` would
+    # resolve into it.
+    link_parent = tmp_path / ".claude" / "skills"
+    link_parent.mkdir(parents=True)
+    (link_parent / "coordinating").symlink_to(external, target_is_directory=True)
+
+    victim_key = ".claude/skills/coordinating/SKILL.md"
+    plan = _plan(tmp_path)
+    # The symlinked-dest unit is surfaced (naming the offending component) and
+    # excluded from the write set — never a phantom NOOP/OVERRIDE.
+    flagged = {sd.unit_key: sd for sd in plan.symlinked_dests}
+    assert victim_key in flagged
+    assert flagged[victim_key].component == ".claude/skills/coordinating"
+    assert all(d.unit.key != victim_key for d in plan.writes)
+
+    # Every applying mode refuses BEFORE any write — the raw filesystem write is
+    # the breach, so MODE_TREE fails closed too (unlike the lefthook publish guard).
+    with pytest.raises(InstallError, match="symlinked destination"):
+        _apply(tmp_path, iapply.MODE_TREE)
+    # The external target is byte-for-byte untouched.
+    assert sentinel.read_text() == "EXTERNAL — must never be touched\n"
 
 
 # --------------------------------------------------------------------------

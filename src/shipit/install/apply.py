@@ -26,7 +26,14 @@ from .. import buildid, config, execrun, gh, git, pixienv
 from ..changelog import CHANGELOG_FILE
 from . import selfcert
 from .errors import InstallError, SelfCertError
-from .reconcile import DELETE, KEEP, Plan, consumer_inner, format_lefthook_conflict
+from .reconcile import (
+    DELETE,
+    KEEP,
+    Plan,
+    consumer_inner,
+    format_lefthook_conflict,
+    format_symlinked_dest,
+)
 from .splice import (
     ENV_MEMBER_MALFORMED,
     ENV_MEMBER_UNSUPPORTED,
@@ -753,6 +760,29 @@ def reject_lefthook_conflicts(plan: Plan, mode: str) -> None:
         )
 
 
+def reject_symlinked_dests(plan: Plan) -> None:
+    """Fail closed on a symlinked destination component BEFORE any write — the
+    single guard shared by :func:`apply` and the verb's no-op shortcut
+    (:mod:`shipit.verbs.install`), so a symlink-bearing but otherwise-empty plan
+    cannot slip past a mode's no-op return.
+
+    A whole-file unit whose dest crosses a consumer symlink (a linked leaf, or a
+    linked parent dir) would have its ``dest.write_bytes`` FOLLOW the link and
+    overwrite the target OUTSIDE the repo (#1088 review). Unlike the lefthook
+    refusal — which only guards PUBLISHING a config, so ``MODE_TREE`` warns — the
+    containment breach happens on the raw filesystem write, so EVERY mode
+    (``MODE_TREE`` included) refuses. The fix is the operator's: remove the
+    symlink and re-run to receive a real copy. A plain :class:`InstallError` (an
+    operator-fixable state), never a :class:`SelfCertError`."""
+    if plan.symlinked_dests:
+        raise InstallError(
+            "symlinked destination — refusing to write a managed file through a "
+            "consumer symlink (it would overwrite the link's target, outside "
+            "this repo):\n"
+            + "\n".join(f"  {format_symlinked_dest(sd)}" for sd in plan.symlinked_dests)
+        )
+
+
 def apply(
     plan: Plan,
     mode: str = MODE_TREE,
@@ -821,6 +851,7 @@ def apply(
     if mode == MODE_PR and pr_body is None:
         raise ValueError("MODE_PR needs the pr_body renderer")
     reject_lefthook_conflicts(plan, mode)
+    reject_symlinked_dests(plan)
     activate = activate_hooks or _activate_hooks
     started = time.monotonic()
     root = Path(plan.root)

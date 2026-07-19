@@ -1120,6 +1120,74 @@ def consumer_inner(root: Path, unit: Unit) -> str | None:
     return extract_block(text, unit.open_marker, unit.close_marker)
 
 
+@dataclass(frozen=True)
+class SymlinkedDest:
+    """A whole-file unit whose destination crosses a consumer-owned symlink.
+
+    ``component`` is the repo-relative path of the SHALLOWEST symlinked path
+    element (from the consumer root down to the leaf) — the containment breach
+    point the operator must remove before install can write the unit.
+    """
+
+    unit_key: str
+    dest: str  # the unit's declared dest (repo-relative)
+    component: str  # the symlinked path element (repo-relative)
+
+
+def symlinked_dest_component(root: Path, dest: str) -> str | None:
+    """The shallowest symlinked component of ``dest`` under ``root``, or None.
+
+    Walks every path element from the consumer root down to the leaf. A
+    whole-file unit's write (:func:`shipit.install.apply.write_unit` ->
+    ``dest.write_bytes``) and its hash read (:func:`consumer_hash` ->
+    ``dest.read_bytes``) both FOLLOW a symlink in ANY path component, so a
+    symlinked element — a linked leaf, or a linked parent dir — would let an
+    install write THROUGH the link, over whatever it targets OUTSIDE the repo.
+    Returns the offending element's repo-relative path so the caller fails
+    closed on it; shipit never writes through a consumer's symlink (ADR-0077).
+    """
+    current = root
+    for part in Path(dest).parts:
+        current = current / part
+        if current.is_symlink():
+            return str(current.relative_to(root))
+    return None
+
+
+def symlinked_dests(root: Path, units: Sequence[Unit]) -> tuple[SymlinkedDest, ...]:
+    """Every whole-file unit whose dest crosses a consumer symlink (fail-closed).
+
+    Block units are excluded: they splice into a consumer-owned host file
+    (``AGENTS.md``, ``pixi.toml``) whose symlinking is the consumer's own
+    business, and the splice reads+rewrites that one file rather than writing a
+    fresh path shipit owns. Only whole-file units carry the path-containment
+    guarantee this guard protects.
+    """
+    found: list[SymlinkedDest] = []
+    for u in units:
+        if u.kind != "file":
+            continue
+        component = symlinked_dest_component(root, u.dest)
+        if component is not None:
+            found.append(
+                SymlinkedDest(unit_key=u.key, dest=u.dest, component=component)
+            )
+    return tuple(found)
+
+
+def format_symlinked_dest(sd: SymlinkedDest) -> str:
+    """The one actionable message for a symlinked-dest conflict — used verbatim
+    by the working-tree/dry-run stderr warning and the fail-closed error, so the
+    two surfaces can never drift."""
+    leaf = "" if sd.component == sd.dest else f" (writing {sd.dest} would follow it)"
+    return (
+        f"{sd.component} is a symlink{leaf} — shipit refuses to write the managed "
+        f"unit {sd.unit_key} through it (it would overwrite the link's target, "
+        f"outside this repo). Remove the symlink and re-run `shipit install` to "
+        f"receive a real copy"
+    )
+
+
 def consumer_hash(root: Path, unit: Unit) -> str | None:
     """The hash of a unit's current content in the consumer, or ``None`` if absent."""
     if unit.kind == "block":
@@ -1197,6 +1265,12 @@ class ConsumerState:
     # pristine map on an unreadable manifest (the degraded-but-continuing
     # path): no readable policy means no decline.
     declines: tuple[str, ...] = ()
+    # Whole-file units whose dest crosses a consumer symlink (#1088 review):
+    # read here (the ONE read boundary) so the reconcile's fail-closed decision
+    # stays pure over this state. A symlinked dest component would make an
+    # install write THROUGH the link, outside the repo — the containment breach
+    # every mode refuses.
+    symlinked_dests: tuple[SymlinkedDest, ...] = ()
 
 
 def gather(
@@ -1280,6 +1354,7 @@ def gather(
         pixi_table_conflicts=_pixi_table_conflicts(root, units, consumer_hashes),
         changelog_stale=_changelog_stale(root),
         declines=declines,
+        symlinked_dests=symlinked_dests(root, units),
     )
 
 
@@ -1410,6 +1485,13 @@ class Plan:
     # silently ignored — usually a typo, occasionally a toolchain-conditional
     # unit whose signal manifest this repo does not track.
     decline_unmatched: tuple[str, ...] = ()
+    # Whole-file units whose dest crosses a consumer symlink (#1088 review):
+    # their decisions are EXCLUDED (a symlinked read would hash the link's
+    # target, not shipit's dest) and EVERY mode fails closed on this record
+    # before any write (:func:`shipit.install.apply.reject_symlinked_dests`) —
+    # the containment guarantee is mode-independent, unlike the lefthook publish
+    # refusal. Every surface warns off this record.
+    symlinked_dests: tuple[SymlinkedDest, ...] = ()
 
     @property
     def writes(self) -> tuple[Decision, ...]:
@@ -1524,6 +1606,10 @@ def reconcile(
         {c.unit_key for c in state.pixi_key_conflicts}
         | {c.unit_key for c in state.pixi_task_conflicts}
         | {c.unit_key for c in state.pixi_table_conflicts}
+        # A symlinked-dest unit's decision would be read THROUGH the link (its
+        # hash is the target's, not the dest's), so exclude it outright — apply
+        # fails closed on the record below before any write reaches the link.
+        | {sd.unit_key for sd in state.symlinked_dests}
     )
     decline_set = set(state.declines)
     unit_keys = {u.key for u in units}
@@ -1565,6 +1651,7 @@ def reconcile(
         rerender_changelog=state.changelog_stale,
         declined=declined,
         decline_unmatched=decline_unmatched,
+        symlinked_dests=state.symlinked_dests,
     )
     logger.debug(
         "reconcile plan decided",
@@ -1623,6 +1710,12 @@ def reconcile(
             "pixi table conflict: %s",
             format_pixi_table_conflict(bc),
             extra={"root": state.root, "unit": bc.unit_key, "tables": bc.tables},
+        )
+    for sd in result.symlinked_dests:
+        logger.warning(
+            "symlinked dest: %s",
+            format_symlinked_dest(sd),
+            extra={"root": state.root, "unit": sd.unit_key, "component": sd.component},
         )
     if result.nothing_to_do:
         logger.debug(
