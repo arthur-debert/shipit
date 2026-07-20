@@ -26,6 +26,23 @@ pristine = [
 ]
 
 [[retired]]
+# The artifact-pinned Cascade RECEIVE workflow (ARF01-WS07). conda-direct
+# (ADR-0077, #1092) removes the bespoke artifact-dep version-bump rail: a
+# consumer's version is a plain pixi dependency bumped by `pixi update` / a
+# generic bot, so shipit no longer delivers this workflow. Its managed unit is
+# gone, but a consumer that already installed it keeps a stale pristine copy once
+# the unit leaves the catalog — this entry retires it for the clean delete (a
+# locally edited copy is surfaced and kept, never destroyed). Hashes are every
+# distinct delivered version from arthur-debert/shipit git history:
+#   a77618c… — initial ARF01 receive workflow (#967)
+#   6aef510… — yamllint-clean + `pixi run -- …` separator (#1057)
+path = ".github/workflows/shipit-artifact-cascade.yml"
+pristine = [
+  "sha256:a77618cbdc7fb9cbc1ce0295ab581e0139cd04d04a9d3776a280c0e5fd7dd45c",
+  "sha256:6aef5106883b88c049fdcdc7277540274bc8b948024f30986ad74fbf91b80418",
+]
+
+[[retired]]
 # Renamed to `skills/planning/SKILL.md`.
 path = "skills/shipit-planning/SKILL.md"
 pristine = [

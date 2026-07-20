@@ -752,7 +752,12 @@ def _pixi_key_conflicts(
         except tomllib.TOMLDecodeError:  # pragma: no cover — packaged data
             continue
         table: object = manifest
-        for part in unit.anchor.strip().strip("[]").split("."):
+        # Split the anchor honoring TOML quoting: a dotted quoted segment
+        # (`[feature."shipit-artifacts-tools.v2"]`) is ONE literal name, not a
+        # key-path — a naive `.split(".")` would walk the wrong table and miss a
+        # real key clash (#1094 round-3). Reuses `_split_toml_key`, the same
+        # quote-aware splitter the table-conflict guard uses.
+        for part in _split_toml_key(unit.anchor.strip().strip("[]")):
             table = table.get(part) if isinstance(table, dict) else None
         if not isinstance(table, dict):
             continue  # the anchor table does not exist yet — nothing to clash
@@ -987,13 +992,20 @@ def _toml_table_headers(inner: str) -> tuple[tuple[str, tuple[str, ...]], ...]:
     ``".".join(segments)`` keeps the quoting: a bare ``s3-options.my.bucket`` is
     a DIFFERENT (nested) table in TOML and would misdirect the fix.
 
+    A TRAILING COMMENT is honored: ``[feature.x]  # owned by consumer`` is a valid
+    TOML header, so the scan strips a trailing ``# …`` (respecting a ``#`` inside a
+    quoted key, which is a literal, not a comment) before the ``]`` check — else an
+    explicitly-commented consumer header would be missed and
+    :func:`_table_redeclared` would misread the explicit table as re-openable and
+    clobber it (#1094 round-4).
+
     Only plain-table headers matter to the redeclaration guard: array-of-tables
     (``[[...]]``) declarations stack rather than clash, and the projection emits
     none anyway.
     """
     headers: list[tuple[str, tuple[str, ...]]] = []
     for line in inner.splitlines():
-        stripped = line.strip()
+        stripped = _strip_toml_comment(line).strip()
         if (
             not stripped.startswith("[")
             or stripped.startswith("[[")
@@ -1003,6 +1015,25 @@ def _toml_table_headers(inner: str) -> tuple[tuple[str, tuple[str, ...]], ...]:
         raw = stripped[1:-1].strip()
         headers.append((raw, _split_toml_key(raw)))
     return tuple(headers)
+
+
+def _strip_toml_comment(line: str) -> str:
+    """``line`` with any trailing TOML ``# …`` comment removed — quote-aware.
+
+    A ``#`` inside a quoted string (``[feature."a#b"]``) is a literal char, not a
+    comment start, so the scan tracks single/double quote state and truncates at
+    the FIRST unquoted ``#``. A line that is wholly a comment returns ``""``.
+    """
+    quote: str | None = None
+    for i, ch in enumerate(line):
+        if quote is not None:
+            if ch == quote:
+                quote = None
+        elif ch in "\"'":
+            quote = ch
+        elif ch == "#":
+            return line[:i]
+    return line
 
 
 def _table_declared(manifest: Mapping[str, object], path: tuple[str, ...]) -> bool:
@@ -1025,6 +1056,43 @@ def _table_declared(manifest: Mapping[str, object], path: tuple[str, ...]) -> bo
     return isinstance(table, dict)
 
 
+def _table_redeclared(
+    manifest: Mapping[str, object],
+    consumer_headers: frozenset[tuple[str, ...]],
+    segs: tuple[str, ...],
+) -> bool:
+    """Whether appending a top-level ``[segs]`` header would REDECLARE a table the
+    consumer already defines — honoring TOML's implicit-super-table rule.
+
+    TOML lets you re-open a super-table created ONLY implicitly by a deeper header
+    (``[a.b]`` then ``[a]`` is VALID), but forbids redefining a table declared
+    EXPLICITLY (a literal ``[a]`` header, or a dotted/inline definition). So
+    ``[segs]`` is a real redeclaration iff the table is present AND is not a
+    purely-implicit super-table:
+
+    - an EXACT ``[segs]`` header the consumer wrote → redeclaration (skip);
+    - present but explained SOLELY by a deeper ``[segs.…]`` header → implicit
+      super-table, re-openable → NOT a redeclaration (the conda-direct consumer's
+      ``[feature.shipit-artifacts.dependencies]`` pin makes ``feature.shipit-artifacts``
+      exist implicitly; splicing the managed ``[feature.shipit-artifacts]`` channel
+      block after it is valid TOML — #1094 round-3);
+    - present with NEITHER (a dotted/inline definition like
+      ``feature.shipit-artifacts.channels = […]``) → conservatively a
+      redeclaration (skip rather than risk an unparseable splice).
+
+    ``consumer_headers`` is the set of the consumer manifest's EXPLICIT
+    ``[header]`` segment-tuples (:func:`_toml_table_headers` over the raw text).
+    """
+    if not _table_declared(manifest, segs):
+        return False
+    if segs in consumer_headers:
+        return True  # explicit [segs] header → real redeclaration
+    has_deeper = any(
+        h[: len(segs)] == segs and len(h) > len(segs) for h in consumer_headers
+    )
+    return not has_deeper
+
+
 def _pixi_table_conflicts(
     root: Path, units: Sequence[Unit], consumer_hashes: Mapping[str, str | None]
 ) -> tuple[PixiTableConflict, ...]:
@@ -1036,16 +1104,22 @@ def _pixi_table_conflicts(
     duplicate-KEY risk is the key-conflict guard's, and its own header (an
     ``[environments]`` say) is the consumer's own table it merges into. An
     anchor-less block whose EOF-appended header names a table the consumer
-    already declares would make pixi.toml unparseable on the ADD splice, so the
-    reconcile skips it (:class:`PixiTableConflict`).
+    already declares EXPLICITLY would make pixi.toml unparseable on the ADD
+    splice, so the reconcile skips it (:class:`PixiTableConflict`). A table the
+    consumer created only IMPLICITLY via a deeper header (the conda-direct pin's
+    ``[feature.shipit-artifacts.dependencies]`` making ``feature.shipit-artifacts``
+    exist) is re-openable per TOML, so the managed ``[feature.shipit-artifacts]``
+    channel block merges in cleanly and is NOT skipped (:func:`_table_redeclared`).
     """
     path = root / PIXI_FILE
     if not path.is_file():
         return ()
     try:
-        manifest = tomllib.loads(path.read_text(encoding="utf-8"))
+        text = path.read_text(encoding="utf-8")
+        manifest = tomllib.loads(text)
     except (tomllib.TOMLDecodeError, OSError, UnicodeDecodeError):
         return ()
+    consumer_headers = frozenset(segs for _, segs in _toml_table_headers(text))
     conflicts: list[PixiTableConflict] = []
     for unit in units:
         if unit.kind != "block" or unit.dest != PIXI_FILE or unit.anchor is not None:
@@ -1055,7 +1129,7 @@ def _pixi_table_conflicts(
         clashes = tuple(
             raw
             for raw, segments in _toml_table_headers(unit.desired_inner())
-            if _table_declared(manifest, segments)
+            if _table_redeclared(manifest, consumer_headers, segments)
         )
         if clashes:
             conflicts.append(PixiTableConflict(unit_key=unit.key, tables=clashes))

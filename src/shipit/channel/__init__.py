@@ -10,12 +10,11 @@ home in the binary. Its modules are:
   and verifies the access model live;
 - :mod:`.buckets` — the ONE repo-internal source of truth for the two
   access-tier bucket names, shared by the producer endpoint, the consumer
-  projection, and the store provisioner (ADR-0065); and
-- :mod:`.cascade_receive` — the consumer-side half of the artifact-pinned
-  Cascade (ADR-0067): on an ``upstream-release`` dispatch it bumps the matching
-  ``[artifact-deps]`` pins, re-renders the managed pixi block, re-solves the
-  lock, and opens a draft bump PR.
+  projection, and the store provisioner (ADR-0065).
 
-Producer-endpoint and consumer-projection concerns are OTHER work streams of
-ARF01 and do NOT live here.
+Under conda-direct (ADR-0077) there is no artifact-pinned Cascade: a consumer's
+version pin is an ordinary pixi dependency bumped by ``pixi update`` / a generic
+bot, so the bespoke receive/bump rail was removed. Producer-endpoint and
+consumer-projection concerns are OTHER work streams of ARF01 and do NOT live
+here.
 """

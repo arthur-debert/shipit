@@ -27,7 +27,6 @@ from collections.abc import Callable
 
 from .. import execrun
 from ..changelog import ChangelogError
-from ..channel.cascade_receive import CascadeError
 from ..config import ConfigError
 from ..events import EventNotRecordedError, UnknownEventError
 from ..fleetsweep import SweepError
@@ -68,9 +67,7 @@ from ._context import NoAmbientRepoError
 #: stages' refusals (a no-op bump, a manifest a projection cannot rewrite,
 #: a prepare outside a checkout / on a detached HEAD — TOL02-WS01; a bundle
 #: composition over missing build outputs, an unresolvable assert-bundle
-#: expected name — TOL02-WS03), and the Artifact-channel cascade's refusals (a
-#: malformed dispatch payload, an `[artifact-deps]` entry the surgical bump
-#: cannot locate — ARF01-WS07), and the stage-from-prefix step's refusals (a
+#: expected name — TOL02-WS03), and the stage-from-prefix step's refusals (a
 #: source not materialized in the env prefix, a destination that escapes the
 #: checkout — conda-direct #1079). Extended deliberately, one entry per new
 #: domain refusal, as verbs adopt the shell.
@@ -97,7 +94,6 @@ KNOWN_ERRORS: tuple[type[Exception], ...] = (
     FixtureError,
     ResumeError,
     CreationError,
-    CascadeError,
 )
 
 
