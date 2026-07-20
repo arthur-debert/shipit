@@ -2154,9 +2154,12 @@ def _publish_conda(req: PublishRequest) -> Published:
 #: only RENDERS the row + submodule coordinates for that manual PR.
 ZED_REGISTRY = "zed-industries/extensions"
 
-#: The Zed extension manifest the endpoint reads the extension id from — the
-#: same file the ``zed`` bundle composition ships as the tarball's required core
-#: (:data:`shipit.release.bundle.ZED_PAYLOAD`).
+#: The Zed extension manifest the endpoint reads the extension id from. This is
+#: ENDPOINT knowledge, not payload knowledge: the Zed registry row is keyed by
+#: the id, so the adapter must read it. What the zed BUNDLE ships is
+#: producer-declared (``bundle.payload``, ADR-0077/#1092) and unknown here —
+#: an extension declares this manifest in its payload or its registry row would
+#: name a package that does not carry it.
 ZED_MANIFEST = "extension.toml"
 
 #: The scratch subdir under the staged assets tree the zed adapter renders the

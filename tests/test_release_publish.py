@@ -2678,7 +2678,11 @@ def _noarch_artifact():
         {
             "grammar": {
                 "build": ["tree-sitter"],
-                "bundle": {"composition": "tarball"},
+                "bundle": {
+                    "composition": "tarball",
+                    "leg": "tree-sitter",
+                    "payload": [{"path": "src", "required": True}],
+                },
                 "endpoints": ["conda"],
             }
         }
@@ -2710,7 +2714,11 @@ def test_conda_noarch_eligible_for_every_platform_independent_composition():
         {
             "ext": {
                 "build": ["tree-sitter"],
-                "bundle": {"composition": "zed"},
+                "bundle": {
+                    "composition": "zed",
+                    "leg": "tree-sitter",
+                    "payload": [{"path": "src", "required": True}],
+                },
                 "endpoints": ["conda"],
             }
         }
@@ -2784,7 +2792,11 @@ def test_conda_noarch_package_name_flattens_a_scoped_wasm_identity():
         {
             "x": {
                 "build": ["tree-sitter"],
-                "bundle": {"composition": "tarball"},
+                "bundle": {
+                    "composition": "tarball",
+                    "leg": "tree-sitter",
+                    "payload": [{"path": "src", "required": True}],
+                },
                 "endpoints": ["conda"],
                 "product-name": "my grammar",
             }

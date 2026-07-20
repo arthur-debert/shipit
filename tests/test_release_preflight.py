@@ -224,7 +224,7 @@ def test_tarball_bundles_but_does_not_assert_a_binary():
 [artifacts.parser]
 build = ["tree-sitter"]
 platforms = ["linux-x86_64"]
-bundle = { composition = "tarball" }
+bundle = { composition = "tarball", leg = "tree-sitter", payload = [{ path = "src", required = true }] }
 endpoints = ["gh-release", "notify-downstreams"]
 downstreams = ["lex-fmt/vscode"]
 """

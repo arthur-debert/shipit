@@ -15,7 +15,8 @@ signing the signer's). Prior art: the prepare stage's recorder tests.
 
 import json
 import os
-from pathlib import Path
+import tarfile
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -1079,26 +1080,56 @@ def test_electron_refuses_a_source_that_is_the_bundle_output_tree(tmp_path):
 
 
 # --------------------------------------------------------------------------
-# tarball — the generated-parser contract (TOL02-WS16 #792)
+# tarball / zed — the PRODUCER-DECLARED payload (#1092, ADR-0077)
+#
+# shipit no longer knows what a tree-sitter grammar or a Zed extension
+# contains: the producer's `.shipit.toml` lists its own payload, and the
+# composition tars exactly that under the declared leg.
 # --------------------------------------------------------------------------
 
+#: The grammar payload tree-sitter-lex declares — the generated `src/`, a
+#: BUILD-PRODUCED wasm at the leg root, and the when-present grammar files
+#: including a NESTED path. Once producer-declared, this list is config, not
+#: shipit source.
+GRAMMAR_PAYLOAD = [
+    {"path": "src", "required": True},
+    {"path": "tree-sitter-lex.wasm", "required": True},
+    {"path": "queries"},
+    {"path": "grammar.js"},
+    {"path": "shared/embedded-grammars.json"},
+]
 
-def _tarball_artifact():
+
+def _tarball_artifact(payload=None, leg="tree-sitter"):
     (artifact,) = _artifacts(
-        {"parser": {"build": ["tree-sitter"], "bundle": {"composition": "tarball"}}}
+        {
+            "parser": {
+                "build": ["tree-sitter"],
+                "bundle": {
+                    "composition": "tarball",
+                    "leg": leg,
+                    "payload": payload if payload is not None else GRAMMAR_PAYLOAD,
+                },
+            }
+        }
     )
     return artifact
 
 
-def test_tarball_tars_the_generated_parser_payload_present(tmp_path):
+def test_tarball_tars_exactly_the_declared_payload_that_is_present(tmp_path):
+    # Declaration order IS tar member order; when-present entries that are
+    # absent ship nothing (no empty dirs), and a build-produced file at the leg
+    # root rides beside the committed sources.
     artifact = _tarball_artifact()
     entries = _entries({".": "tree-sitter"})
     (tmp_path / "src").mkdir()
     (tmp_path / "src/parser.c").write_text("/* generated */")
+    (tmp_path / "tree-sitter-lex.wasm").write_bytes(b"\x00asm")
     (tmp_path / "queries").mkdir()
     (tmp_path / "queries/highlights.scm").write_text(";; hi")
-    (tmp_path / "grammar.js").write_text("module.exports = grammar({});")
-    # binding.gyp / package.json / bindings absent — ship only what is present.
+    (tmp_path / "shared").mkdir()
+    (tmp_path / "shared/embedded-grammars.json").write_text("{}")
+    # grammar.js absent — a when-present entry ships nothing.
     recorder = RunRecorder()
 
     composed = bundle_mod.TARBALL.compose(
@@ -1115,8 +1146,9 @@ def test_tarball_tars_the_generated_parser_payload_present(tmp_path):
                 "-C",
                 str(tmp_path),
                 "src",
+                "tree-sitter-lex.wasm",
                 "queries",
-                "grammar.js",
+                "shared/embedded-grammars.json",
             ),
             tmp_path,
         )
@@ -1125,11 +1157,10 @@ def test_tarball_tars_the_generated_parser_payload_present(tmp_path):
     assert composed == bundle_mod.Composed("parser", "tarball", ("parser.tar.gz",))
 
 
-def test_tarball_reads_the_tree_sitter_leg_subdir(tmp_path):
-    # The payload is collected under the tree-sitter leg's path, not the root.
-    (artifact,) = _artifacts(
-        {"parser": {"build": ["tree-sitter"], "bundle": {"composition": "tarball"}}}
-    )
+def test_tarball_reads_the_declared_leg_subdir(tmp_path):
+    # The payload is collected under the DECLARED leg's [toolchains] path, not
+    # the root and not a leg name hardcoded in shipit.
+    artifact = _tarball_artifact(payload=[{"path": "src", "required": True}])
     entries = _entries({"grammar": "tree-sitter"})
     (tmp_path / "grammar/src").mkdir(parents=True)
     (tmp_path / "grammar/src/parser.c").write_text("/* generated */")
@@ -1137,7 +1168,7 @@ def test_tarball_reads_the_tree_sitter_leg_subdir(tmp_path):
 
     bundle_mod.TARBALL.compose(_request(tmp_path, artifact, entries, run_cmd=recorder))
 
-    ((argv, cwd),) = recorder.calls
+    ((argv, _cwd),) = recorder.calls
     assert argv == (
         "tar",
         "-czf",
@@ -1148,22 +1179,38 @@ def test_tarball_reads_the_tree_sitter_leg_subdir(tmp_path):
     )
 
 
-def test_tarball_without_generated_src_refuses(tmp_path):
-    # The tarball ships the `tree-sitter generate` output — no src/ means the
-    # parser was never generated (run `shipit build` first), a hard fail.
+def test_tarball_missing_required_payload_refuses(tmp_path):
+    # A REQUIRED entry that is absent is a loud bundle-stage failure — the
+    # build never ran (or the declaration is wrong), never a quiet archive
+    # missing its core. The message names every missing entry.
     artifact = _tarball_artifact()
+    entries = _entries({".": "tree-sitter"})
+    (tmp_path / "queries").mkdir()  # only a when-present entry exists
     recorder = RunRecorder()
-    with pytest.raises(ReleaseError, match="no generated parser"):
+
+    with pytest.raises(ReleaseError) as excinfo:
         bundle_mod.TARBALL.compose(
-            _request(
-                tmp_path, artifact, _entries({".": "tree-sitter"}), run_cmd=recorder
-            )
+            _request(tmp_path, artifact, entries, run_cmd=recorder)
         )
+
+    message = str(excinfo.value)
+    assert "required payload missing" in message
+    assert "src" in message and "tree-sitter-lex.wasm" in message
     assert recorder.calls == []  # nothing ran, nothing written
 
 
-def test_tarball_rerun_unlinks_the_stale_archive(tmp_path):
+def test_tarball_without_the_declared_leg_refuses(tmp_path):
+    # The declared leg must be mapped in [toolchains] — never a quiet skip.
     artifact = _tarball_artifact()
+    entries = _entries({".": "rust"})  # no tree-sitter leg mapped
+    with pytest.raises(ReleaseError, match="needs a .* tree-sitter leg"):
+        bundle_mod.TARBALL.compose(
+            _request(tmp_path, artifact, entries, run_cmd=RunRecorder())
+        )
+
+
+def test_tarball_rerun_unlinks_the_stale_archive(tmp_path):
+    artifact = _tarball_artifact(payload=[{"path": "src", "required": True}])
     entries = _entries({".": "tree-sitter"})
     (tmp_path / "src").mkdir()
     (tmp_path / "src/parser.c").write_text("/* generated */")
@@ -1180,121 +1227,142 @@ def test_tarball_rerun_unlinks_the_stale_archive(tmp_path):
     assert stale.read_bytes() == b"FRESH"  # the stale archive was replaced
 
 
-# --------------------------------------------------------------------------
-# zed — the Zed-extension tarball (TOL03-WS02 #973, ADR-0068)
-# --------------------------------------------------------------------------
-
-
-def _zed_artifact():
+def test_zed_is_the_same_declared_payload_composition(tmp_path):
+    # `zed` keeps its own registry name (the zed PUBLISH endpoint pairs with
+    # it, ADR-0068) but shares the tarball's declared-payload compose: the
+    # extension repo lists extension.toml + its committed shared/ assets, and
+    # shipit ships exactly that from the declared leg — no built-in Zed layout.
     (artifact,) = _artifacts(
-        {"zed-lex": {"build": ["rust"], "bundle": {"composition": "zed"}}}
+        {
+            "zed-lex": {
+                "build": ["rust"],
+                "bundle": {
+                    "composition": "zed",
+                    "leg": "rust",
+                    "payload": [
+                        {"path": "extension.toml", "required": True},
+                        {"path": "shared"},
+                        {"path": "languages"},
+                        {"path": "Cargo.toml"},
+                    ],
+                },
+            }
+        }
     )
-    return artifact
-
-
-def test_zed_tars_the_committed_extension_payload_present(tmp_path):
-    # The zed tarball ships extension.toml + the committed shared/ grammar
-    # assets + the language/source files that are present — a COMMITTED local
-    # copy, never a cross-repo grammar fetch (ADR-0068).
-    artifact = _zed_artifact()
-    entries = _entries({".": "rust"})
-    (tmp_path / "extension.toml").write_text('id = "lex"\nname = "Lex"\n')
-    (tmp_path / "shared").mkdir()
-    (tmp_path / "shared/highlights.scm").write_text(";; committed grammar asset")
-    (tmp_path / "languages").mkdir()
-    (tmp_path / "languages/config.toml").write_text('name = "Lex"')
-    (tmp_path / "Cargo.toml").write_text("[package]\nname = 'zed-lex'")
-    # grammars/ src/ LICENSE README absent — ship only what is present.
+    entries = _entries({"extension": "rust"})
+    (tmp_path / "extension").mkdir()
+    (tmp_path / "extension/extension.toml").write_text('id = "lex"\n')
+    (tmp_path / "extension/shared").mkdir()
+    (tmp_path / "extension/shared/g.scm").write_text(";; committed grammar asset")
+    # languages/ and Cargo.toml absent — ship only what is present.
     recorder = RunRecorder()
 
     composed = bundle_mod.ZED.compose(
         _request(tmp_path, artifact, entries, run_cmd=recorder)
     )
 
-    archive = tmp_path / "dist" / "zed-lex.tar.gz"
     assert recorder.calls == [
         (
             (
                 "tar",
                 "-czf",
-                str(archive),
+                str(tmp_path / "dist" / "zed-lex.tar.gz"),
                 "-C",
-                str(tmp_path),
+                str(tmp_path / "extension"),
                 "extension.toml",
                 "shared",
-                "languages",
-                "Cargo.toml",
             ),
             tmp_path,
         )
     ]
-    # Platform-independent: no `-<target>` suffix — every leg composes one name.
+    # The Composed label is the artifact's own composition, not a hardcoded one.
     assert composed == bundle_mod.Composed("zed-lex", "zed", ("zed-lex.tar.gz",))
 
 
-def test_zed_reads_the_rust_leg_subdir(tmp_path):
-    # The extension source is located under the rust leg's path, not forced to
-    # the root — a repo whose extension sits in a subdir bundles from there.
-    artifact = _zed_artifact()
-    entries = _entries({"extension": "rust"})
-    (tmp_path / "extension").mkdir()
-    (tmp_path / "extension/extension.toml").write_text('id = "lex"\n')
-    (tmp_path / "extension/shared").mkdir()
-    (tmp_path / "extension/shared/g.scm").write_text(";; asset")
-    recorder = RunRecorder()
-
-    bundle_mod.ZED.compose(_request(tmp_path, artifact, entries, run_cmd=recorder))
-
-    ((argv, _cwd),) = recorder.calls
-    assert argv == (
-        "tar",
-        "-czf",
-        str(tmp_path / "dist" / "zed-lex.tar.gz"),
-        "-C",
-        str(tmp_path / "extension"),
-        "extension.toml",
-        "shared",
+def test_zed_missing_required_payload_refuses(tmp_path):
+    (artifact,) = _artifacts(
+        {
+            "zed-lex": {
+                "build": ["rust"],
+                "bundle": {
+                    "composition": "zed",
+                    "leg": "rust",
+                    "payload": [
+                        {"path": "extension.toml", "required": True},
+                        {"path": "shared"},
+                    ],
+                },
+            }
+        }
     )
-
-
-def test_zed_without_extension_manifest_refuses(tmp_path):
-    # extension.toml is the required core — a tree without it holds no Zed
-    # extension, a hard fail (never a quiet empty archive).
-    artifact = _zed_artifact()
     entries = _entries({".": "rust"})
     (tmp_path / "shared").mkdir()  # assets but no manifest
     recorder = RunRecorder()
-    with pytest.raises(ReleaseError, match="no .*extension.toml"):
+    with pytest.raises(ReleaseError, match="required payload missing"):
         bundle_mod.ZED.compose(_request(tmp_path, artifact, entries, run_cmd=recorder))
     assert recorder.calls == []  # nothing ran, nothing written
 
 
-def test_zed_without_a_rust_leg_refuses(tmp_path):
-    # The extension is a Rust crate; the composition needs the rust leg to
-    # locate it (never a quiet skip).
-    artifact = _zed_artifact()
-    entries = _entries({".": "tree-sitter"})  # no rust leg mapped
-    with pytest.raises(ReleaseError, match="needs a .* rust leg"):
-        bundle_mod.ZED.compose(
-            _request(tmp_path, artifact, entries, run_cmd=RunRecorder())
+def test_declared_payload_composes_a_real_tarball_holding_exactly_the_payload(
+    tmp_path,
+):
+    # NOT a recorder: this runs the REAL `tar` through the real exec seam and
+    # reads the ACTUAL archive back, so the member list is the shipped bytes'
+    # own — the declaration→archive contract end to end.
+    artifact = _tarball_artifact()
+    entries = _entries({"grammar": "tree-sitter"})
+    leg = tmp_path / "grammar"
+    (leg / "src").mkdir(parents=True)
+    (leg / "src/parser.c").write_text("/* generated */")
+    (leg / "tree-sitter-lex.wasm").write_bytes(b"\x00asm\x01")
+    (leg / "queries").mkdir()
+    (leg / "queries/highlights.scm").write_text(";; hi")
+    (leg / "shared").mkdir()
+    (leg / "shared/embedded-grammars.json").write_text('{"lex": true}')
+    (leg / "shared/NOT-DECLARED.txt").write_text("must not ship")
+    (leg / "node_modules").mkdir()  # undeclared: must not ship
+    (leg / "node_modules/junk.js").write_text("// junk")
+    # grammar.js absent — a when-present entry ships nothing.
+
+    def _real_run(argv, cwd):
+        return execrun.run([str(a) for a in argv], cwd=cwd)
+
+    composed = bundle_mod.TARBALL.compose(
+        _request(tmp_path, artifact, entries, run_cmd=_real_run)
+    )
+
+    archive = tmp_path / "dist" / composed.outputs[0]
+    with tarfile.open(archive, "r:gz") as tar:
+        # macOS bsdtar writes an AppleDouble `._<name>` sidecar per member when
+        # the file carries extended attributes (a local-run artifact of the host
+        # tar, not of the payload declaration — the release legs run GNU tar on
+        # Linux). Filtered so the assertion is about the DECLARATION, on any host.
+        members = sorted(
+            name
+            for name in tar.getnames()
+            if not PurePosixPath(name).name.startswith("._")
         )
+    # Exactly the declared payload — the undeclared siblings beside it
+    # (shared/NOT-DECLARED.txt, node_modules/) are absent, and the declaration's
+    # nested path arrived as a nested member.
+    assert members == [
+        "queries",
+        "queries/highlights.scm",
+        "shared/embedded-grammars.json",
+        "src",
+        "src/parser.c",
+        "tree-sitter-lex.wasm",
+    ]
+    with tarfile.open(archive, "r:gz") as tar:
+        wasm = tar.extractfile("tree-sitter-lex.wasm")
+        assert wasm is not None and wasm.read() == b"\x00asm\x01"
 
 
-def test_zed_rerun_unlinks_the_stale_archive(tmp_path):
-    artifact = _zed_artifact()
-    entries = _entries({".": "rust"})
-    (tmp_path / "extension.toml").write_text('id = "lex"\n')
-    dist = tmp_path / "dist"
-    dist.mkdir()
-    stale = dist / "zed-lex.tar.gz"
-    stale.write_bytes(b"STALE")
-
-    def _tar_writes(argv, cwd):
-        Path(argv[2]).write_bytes(b"FRESH")
-
-    recorder = RunRecorder({"tar": _tar_writes})
-    bundle_mod.ZED.compose(_request(tmp_path, artifact, entries, run_cmd=recorder))
-    assert stale.read_bytes() == b"FRESH"  # the stale archive was replaced
+def test_declared_payload_compositions_share_one_compose(tmp_path):
+    # The registry says so structurally: both entries carry declared_payload
+    # and route to the same function — so the two can never drift apart.
+    assert bundle_mod.declared_payload_names() == ("tarball", "zed")
+    assert bundle_mod.TARBALL.compose is bundle_mod.ZED.compose
 
 
 # --------------------------------------------------------------------------

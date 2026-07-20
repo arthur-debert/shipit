@@ -584,6 +584,30 @@ class BuildTarget:
 
 
 @dataclass(frozen=True)
+class PayloadEntry:
+    """One ``bundle.payload`` entry — a path the declared-payload compositions
+    (``tarball``, ``zed``) put in the archive (#1092, ADR-0077).
+
+    ``path`` is repo-relative POSIX, resolved against the ``bundle.leg``
+    toolchain leg's directory (so the leg's ``[toolchains]`` path is the one
+    source of that prefix, never restated here); it may be a file, a directory,
+    or a NESTED path (``shared/embedded-grammars.json``), and it may name a
+    BUILD-PRODUCED file as readily as a committed one — the bundle stage runs
+    after build.
+
+    ``required`` is the required-vs-when-present distinction. Default FALSE
+    (when present): most payload entries are optional by nature — a grammar has
+    queries or it does not, and an absent one ships nothing rather than an empty
+    dir. A ``required = true`` entry that is absent at compose time is a LOUD
+    bundle-stage failure (:func:`shipit.release.bundle._compose_declared_payload`).
+    A payload with NO required entry is refused at parse: it could compose an
+    empty archive, which must never be a quiet outcome."""
+
+    path: str
+    required: bool = False
+
+
+@dataclass(frozen=True)
 class BundleSpec:
     """An artifact's declared bundle step — the optional composition that
     combines toolchain outputs into the unsigned distributable, run by
@@ -627,6 +651,17 @@ class BundleSpec:
     resolved against the parsed ``[artifact-deps]`` at compose time (a key naming
     an undeclared pin is a loud refusal there). ``()`` = a vsix that stages no
     native (the base per-platform ``vsce package`` alone).
+
+    ``leg`` / ``payload`` are the DECLARED-PAYLOAD compositions' contract
+    (``tarball``, ``zed`` — :attr:`shipit.release.bundle.Composition.declared_payload`;
+    #1092, ADR-0077). ``leg`` names the ``[toolchains]`` toolchain whose leg
+    directory the payload is collected under; ``payload`` is the ordered list of
+    :class:`PayloadEntry` the archive ships. Together they say "which files make
+    up my package" — a PRODUCER-REPO fact, so it lives in the producer's own
+    ``.shipit.toml`` and shipit knows nothing about what a tree-sitter grammar or
+    a Zed extension contains. BOTH are REQUIRED by every declared-payload
+    composition and refused for every other one (whose archive contents are the
+    registry's business — archive's binary+docs, wheel's sdist).
     """
 
     composition: str
@@ -635,6 +670,8 @@ class BundleSpec:
     scope: str | None = None
     wasm_target: str | None = None
     stage: tuple[tuple[str, str], ...] = ()
+    leg: str | None = None
+    payload: tuple[PayloadEntry, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -888,6 +925,77 @@ def _parse_vsix_stage(where: str, value: object) -> tuple[tuple[str, str], ...]:
     return tuple(pairs)
 
 
+#: The example a `bundle.payload` refusal points at — one required entry plus a
+#: when-present one, the shape every declared-payload artifact writes.
+_PAYLOAD_EXAMPLE = 'payload = [{ path = "src", required = true }, { path = "queries" }]'
+
+
+def _parse_payload(where: str, value: object) -> tuple[PayloadEntry, ...]:
+    """The ``bundle.payload`` list into typed :class:`PayloadEntry` values, in
+    DECLARATION order (which is tar member order — the producer's list is the
+    archive's list).
+
+    Loud at the boundary (ADR-0030): every failure names the offending index or
+    key and what was expected. Each entry is a table with a repo-relative
+    ``path`` and an optional boolean ``required``; a bare string is NOT accepted,
+    because required-vs-when-present is the one thing a payload entry must state
+    unambiguously and a shorthand would hide it.
+
+    At least ONE entry must be ``required = true``: an all-optional payload can
+    compose an EMPTY archive on a tree where nothing was built, and shipping an
+    empty package quietly is exactly the failure this declaration exists to
+    prevent. That is a parse-time invariant, not a runtime surprise."""
+    if not isinstance(value, list) or not value:
+        raise ConfigError(
+            f"{where}.payload: must be a non-empty list of entry tables, e.g. "
+            f"{_PAYLOAD_EXAMPLE}; got {value!r}"
+        )
+    entries: list[PayloadEntry] = []
+    seen: set[str] = set()
+    for index, item in enumerate(value):
+        at = f"{where}.payload[{index}]"
+        if not isinstance(item, dict):
+            raise ConfigError(
+                f"{at}: must be a table naming its path (and, for the package's "
+                f'core, `required = true`), e.g. {{ path = "src", required = '
+                f"true }}; got {item!r}"
+            )
+        _reject_unknown_keys(at, item, ("path", "required"))
+        path = item.get("path")
+        if not isinstance(path, str) or not path:
+            raise ConfigError(
+                f"{at}.path must be a non-empty repo-relative path under the "
+                f"`{where}.leg` leg — a file, a directory, or a nested path, e.g. "
+                f'"src", "grammar.js", "shared/embedded-grammars.json"; '
+                f"got {path!r}"
+            )
+        _reject_path_escape(f"{at}.path", path)
+        required = item.get("required", False)
+        if not isinstance(required, bool):
+            raise ConfigError(
+                f"{at}.required must be a boolean (absent = the entry ships "
+                f"WHEN PRESENT); got {required!r}"
+            )
+        normalized = str(PurePosixPath(path))
+        if normalized in seen:
+            # A repeated path would tar the same member twice and leave the two
+            # `required` values in silent conflict — a declaration mistake.
+            raise ConfigError(
+                f"{at}.path: `{normalized}` is already declared earlier in "
+                f"{where}.payload; each payload path appears once"
+            )
+        seen.add(normalized)
+        entries.append(PayloadEntry(path=normalized, required=required))
+    if not any(entry.required for entry in entries):
+        raise ConfigError(
+            f"{where}.payload: no entry declares `required = true` — an "
+            f"all-when-present payload can compose an EMPTY archive, which is "
+            f"never a quiet outcome. Mark the package's core entry (the one "
+            f"whose absence means the build never ran), e.g. {_PAYLOAD_EXAMPLE}"
+        )
+    return tuple(entries)
+
+
 def _parse_bundle(where: str, spec: object) -> BundleSpec:
     from .release import bundle as bundle_registry  # lazy — config stays import-light
 
@@ -911,14 +1019,26 @@ def _parse_bundle(where: str, spec: object) -> BundleSpec:
         )
     # The accepted key set is composition-specific: only wasm-pack names
     # scope/wasm-target (option_keys), so a `scope` on archive is a loud
-    # unknown-key here. command/source stay in the set for EVERY composition so
-    # a registry-assembled composition rejects them with the specific "applies
-    # only to a declared bundler" message below (not a generic unknown-key).
+    # unknown-key here. command/source and leg/payload stay in the set for EVERY
+    # composition so a composition that does not take them rejects them with the
+    # specific "applies only to ..." message below (not a generic unknown-key).
     _reject_unknown_keys(
         f"{where}.bundle",
         spec,
-        ("composition", "command", "source", *entry.option_keys),
+        ("composition", "command", "source", "leg", "payload", *entry.option_keys),
     )
+    if not entry.declared_payload:
+        # Registry-assembled contents (archive's binary+docs, wheel's sdist):
+        # WHAT goes in is the composition's business, so a payload declaration
+        # here is dead config — refused loudly rather than silently ignored.
+        declared = ", ".join(bundle_registry.declared_payload_names())
+        for key in ("leg", "payload"):
+            if key in spec:
+                raise ConfigError(
+                    f"{where}.bundle: `{key}` applies only to compositions whose "
+                    f"archive contents are producer-declared ({declared}); "
+                    f"composition `{composition}` assembles its own payload"
+                )
     # `stage` (vsix's native-binary staging map) is gated to the composition
     # that names it via option_keys — the unknown-key check above already
     # rejects it on any other composition, so parsing it here is safe.
@@ -973,6 +1093,45 @@ def _parse_bundle(where: str, spec: object) -> BundleSpec:
                 f"run a declared bundler (mac-app, tauri); composition "
                 f"`{composition}` assembles its own commands"
             )
+    leg: str | None = None
+    payload: tuple[PayloadEntry, ...] = ()
+    if entry.declared_payload:
+        # tarball/zed: "which files make up my package" is a PRODUCER-REPO fact
+        # (#1092, ADR-0077), so the declaration must carry it — and say which
+        # toolchain leg the paths are relative to. NO fallback to a shipit-side
+        # list: an undeclared payload is a loud, migration-pointing refusal.
+        from .tools import registry  # lazy — config stays import-light
+
+        # The MIGRATION message fires on either key being absent, naming both:
+        # a config predating the declaration has neither, and leading with "no
+        # `leg`" alone would send the reader down a partial fix.
+        missing = [key for key in ("leg", "payload") if key not in spec]
+        if missing:
+            raise ConfigError(
+                f"{where}.bundle: composition `{composition}` ships a "
+                f"PRODUCER-DECLARED payload and is missing "
+                f"{' and '.join(f'`{key}`' for key in missing)}. shipit no "
+                f"longer carries a built-in file list for `{composition}` "
+                f"(#1092, ADR-0077): the repo states its own contents, so "
+                f"shipping one more file is a config edit, not a shipit "
+                f"release. Declare the [toolchains] leg the paths are relative "
+                f'to plus the files, e.g. leg = "tree-sitter" and '
+                f"{_PAYLOAD_EXAMPLE}"
+            )
+        leg = spec["leg"]
+        if not isinstance(leg, str) or not leg:
+            raise ConfigError(
+                f"{where}.bundle.leg must be a non-empty [toolchains] toolchain "
+                f'name — the leg the payload paths are relative to, e.g. "tree-'
+                f'sitter"; got {leg!r}'
+            )
+        if registry.toolchain(leg) is None:
+            known = ", ".join(registry.names())
+            raise ConfigError(
+                f"{where}.bundle.leg: unknown toolchain `{leg}`; known "
+                f"toolchains: {known}"
+            )
+        payload = _parse_payload(f"{where}.bundle", spec["payload"])
     # wasm-pack's optional scope/wasm-target — non-empty strings when present
     # (already gated to this composition by the option_keys unknown-key check).
     scope = spec.get("scope")
@@ -988,6 +1147,8 @@ def _parse_bundle(where: str, spec: object) -> BundleSpec:
         scope=scope,
         wasm_target=wasm_target,
         stage=stage,
+        leg=leg,
+        payload=payload,
     )
 
 

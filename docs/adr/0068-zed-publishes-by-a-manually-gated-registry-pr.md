@@ -63,7 +63,9 @@ deciding.
 
 ## Consequences
 
-- `lex-fmt/zed-lex` declares `bundle = { composition = "zed" }` and
+- `lex-fmt/zed-lex` declares a `zed` bundle with its own payload (ADR-0077,
+  #1092 — the extension states which files it ships: `leg = "rust"`, `payload =
+  [{ path = "extension.toml", required = true }, { path = "shared" }, …]`) and
   `endpoints = ["gh-release", "zed"]`; a `-release-rc` cut produces the
   gh-release only (the RC guard skips `zed`), and a stable cut additionally
   renders the registry coordinates. Preflight/secrets derive the `zed` endpoint

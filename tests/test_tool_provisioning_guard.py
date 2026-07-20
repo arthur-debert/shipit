@@ -353,7 +353,6 @@ _NON_ARGV_LITERALS = frozenset(
         "deb",  # tauri linux bundle-format subdir (_TAURI_LINUX_FORMATS)
         "description",
         "dispatch",
-        "extension.toml",  # zed extension manifest — ZED_PAYLOAD core (ADR-0068)
         "gh-release",
         "homepage/repository",
         "init.lua",  # lua bump adapter's leg-relative edit_path (a filename, not a tool)
@@ -370,7 +369,6 @@ _NON_ARGV_LITERALS = frozenset(
         "release",
         "rust",
         "scope",
-        "src",
         "stage",  # vsix's native-staging option key (bundle.py VSIX option_keys)
         "success",
         "v",
