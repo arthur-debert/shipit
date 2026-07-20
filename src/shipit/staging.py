@@ -20,8 +20,10 @@ TRANSIENT (unstaged after `vsce package`), single-binary, per-target, and keyed 
 (the app ships it), STANDALONE (a build step, not release compose), copies files
 AND directories, and is keyed on the source path. The two share only the
 security-sensitive primitives — the prefix resolver
-(:func:`shipit.install.artifactdeps.env_prefix`) and the checkout-escape guard
-(:func:`shipit.config._reject_path_escape`, applied at parse) — never duplicated.
+(:func:`shipit.install.artifactdeps.env_prefix`), the checkout-escape guard
+(:func:`shipit.config._reject_path_escape`, applied at parse), and the
+refuse-links walk (:mod:`shipit.fspath`, shared with the release lane's
+declared-payload guard) — never duplicated.
 
 Because this copy is DURABLE and its blast radius is the whole checkout, safety is
 STRUCTURAL rather than a growing denylist of dangerous vectors. Two invariants make
@@ -39,9 +41,10 @@ the danger classes unreachable by construction:
    instead of resolving each node and re-checking that it stayed in-bounds (a
    whack-a-mole against symlink, then junction, then bind-mount…), the copy REFUSES
    any node whose component is a redirect — a POSIX symlink OR a Windows directory
-   junction / reparse point (:func:`_is_link`, ``is_symlink() or is_junction()``,
-   which ``is_symlink`` alone misses) — and copies only real files and real
-   directories. With no link ever followed, containment is AUTOMATIC: a tree of
+   junction / reparse point (:func:`shipit.fspath.is_link`, ``is_symlink() or
+   is_junction()``, which ``is_symlink`` alone misses) — and copies only real
+   files and real directories. With no link ever followed, containment is
+   AUTOMATIC: a tree of
    real entries under the prefix physically cannot leave it, so there is no cycle to
    guard, no visited set, no resolved-path re-check. The security anchors are hardened
    the same way: the ``.pixi``/``.pixi/envs`` env-prefix chain and the ``resources``
@@ -69,6 +72,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from .config import _FEATURE_NAME_RE, _STAGING_ROOT, StageEntry, path_escapes
+from .fspath import first_link_component, is_link
 from .install.artifactdeps import env_prefix
 
 logger = logging.getLogger("shipit.staging")
@@ -135,21 +139,6 @@ def _reject_unbounded_dest(
         )
 
 
-def _is_link(path: Path) -> bool:
-    """True if ``path``'s final component is a REDIRECT — a POSIX symlink or a
-    Windows directory junction / mount-point reparse point.
-
-    Uses lstat/reparse-tag inspection (``is_symlink`` OR ``is_junction`` — the
-    latter is what catches an NTFS junction that ``is_symlink`` reports ``False``
-    for, the round-5 critical). Deliberately NOT a ``realpath``-divergence compare:
-    that would misclassify a real directory whose ON-DISK CASE differs from the
-    referenced name (``Resources`` reached via ``resources`` on a case-insensitive
-    FS, where ``os.path.normcase`` is a no-op on darwin) as a redirect. Asking the
-    component's own nature is case-agnostic. A non-existent path is not a link.
-    """
-    return path.is_symlink() or path.is_junction()
-
-
 def _reject_link_components(
     base: Path, parts: tuple[str, ...], what: str, entry: StageEntry | None = None
 ) -> None:
@@ -157,20 +146,22 @@ def _reject_link_components(
     link/junction — so a redirect anywhere along a source or anchor path is caught,
     not only its leaf.
 
-    Staging never follows a link (:func:`_is_link`); refusing the whole chain means
-    a real tree of real components physically cannot leave ``base``, making the
-    resolved-path containment check redundant for what it copies.
+    Staging never follows a link (:func:`shipit.fspath.is_link`); refusing the whole
+    chain means a real tree of real components physically cannot leave ``base``,
+    making the resolved-path containment check redundant for what it copies. The
+    walk itself is :func:`shipit.fspath.first_link_component` — shared with the
+    release lane's declared-payload guard so the two never drift; only the refusal
+    MESSAGE (which config key its reader must fix) is staging's own.
     """
-    cur = base
-    for part in parts:
-        cur = cur / part
-        if _is_link(cur):
-            ctx = f"[stage.{entry.package}] " if entry is not None else ""
-            raise StagingError(
-                f"{ctx}{what} component {part!r} is a symlink or junction ({cur}) — "
-                f"staging refuses to FOLLOW links; it copies only real files and "
-                f"real directories, so a redirect cannot steer the copy out of tree"
-            )
+    offender = first_link_component(base, parts)
+    if offender is not None:
+        ctx = f"[stage.{entry.package}] " if entry is not None else ""
+        raise StagingError(
+            f"{ctx}{what} component {offender.name!r} is a symlink or junction "
+            f"({offender}) — staging refuses to FOLLOW links; it copies only real "
+            f"files and real directories, so a redirect cannot steer the copy out "
+            f"of tree"
+        )
 
 
 def _reject_source_escape(entry: StageEntry) -> None:
@@ -198,7 +189,7 @@ def _copy_into(src: Path, dst: Path, entry: StageEntry) -> None:
     """Recursively copy ``src`` → ``dst``, copying ONLY real files and directories.
 
     No link is ever followed: ``src`` (and every child) is refused if it is a
-    symlink/junction (:func:`_is_link`), so ``is_dir()``/``is_file()`` are
+    symlink/junction (:func:`shipit.fspath.is_link`), so ``is_dir()``/``is_file()`` are
     unambiguous and the whole copied subtree is physically inside the env prefix —
     containment is structural, needing no resolved-path re-check, no cycle guard,
     no visited set. A regular file is copied with its source mode reasserted (the
@@ -207,7 +198,7 @@ def _copy_into(src: Path, dst: Path, entry: StageEntry) -> None:
     mode/mtime restored (``copystat``) so a ``0o700`` tree is not flattened to the
     umask default. A special file (socket/fifo) is refused — not shippable.
     """
-    if _is_link(src):
+    if is_link(src):
         raise StagingError(
             f"[stage.{entry.package}] source node {src.name!r} under {entry.source!r} "
             f"is a symlink or junction ({src}) — staging refuses to follow links out "
@@ -237,11 +228,11 @@ def _copy_into(src: Path, dst: Path, entry: StageEntry) -> None:
 def _remove_if_present(path: Path) -> None:
     """Remove a prior stage at ``path`` (real dir tree, or a file/link), if any.
 
-    A link (symlink or junction, :func:`_is_link`) is UNLINKED, never ``rmtree``d —
+    A link (symlink or junction, :func:`shipit.fspath.is_link`) is UNLINKED, never ``rmtree``d —
     removing the redirect, never deleting through it into its target's contents.
     """
     if os.path.lexists(path):
-        if path.is_dir() and not _is_link(path):
+        if path.is_dir() and not is_link(path):
             shutil.rmtree(path)
         else:
             path.unlink()
@@ -289,7 +280,7 @@ def _stage_one(
     dst = root / entry.dest
     _reject_unbounded_dest(staging_root_res, dst, entry)
     src_is_dir = src.is_dir()
-    if os.path.lexists(dst) and dst.is_dir() and not _is_link(dst) and not src_is_dir:
+    if os.path.lexists(dst) and dst.is_dir() and not is_link(dst) and not src_is_dir:
         raise StagingError(
             f"[stage.{entry.package}] destination {entry.dest!r} already exists as a "
             f"directory but source {entry.source!r} is a file — refusing to wipe a "
@@ -380,14 +371,14 @@ def stage(
         )
     # The single bounded destination space: <root>/resources — the anchor of every
     # per-entry strict-descendant check. The `resources` component must itself be a
-    # REAL directory (link/junction-free, :func:`_is_link`) whose realpath stays in
+    # REAL directory (link/junction-free, :func:`shipit.fspath.is_link`) whose realpath stays in
     # the checkout, so a `resources` link/junction to `.`/`.git`/outside cannot point
     # the bound at the checkout root, git metadata, or off the tree. Refusing the
     # component by its OWN nature (not a resolved-path string compare) accepts a real
     # dir even when its on-disk case differs (`Resources` on a case-insensitive FS),
     # and — unlike `is_symlink` alone — a Windows junction is caught too.
     staging_root = root / _STAGING_ROOT
-    if _is_link(staging_root):
+    if is_link(staging_root):
         raise StagingError(
             f"the staging root `{_STAGING_ROOT}/` must be a real directory in the "
             f"checkout, not a symlink or junction — `{staging_root}` is a link (it "

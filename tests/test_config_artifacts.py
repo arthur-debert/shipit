@@ -155,7 +155,7 @@ def test_downstreams_parse_with_the_notify_endpoint(tmp_path):
     (artifact,) = _load(
         "[artifacts.parser]\n"
         'build = ["tree-sitter"]\n'
-        'bundle = { composition = "tarball" }\n'
+        'bundle = { composition = "tarball", leg = "tree-sitter", payload = [{ path = "src", required = true }] }\n'
         'endpoints = ["gh-release", "notify-downstreams"]\n'
         'downstreams = ["lex-fmt/vscode", "lex-fmt/nvim", "lex-fmt/lexed"]\n'
     )
@@ -170,7 +170,7 @@ def test_notify_endpoint_without_downstreams_is_refused():
         _load(
             "[artifacts.parser]\n"
             'build = ["tree-sitter"]\n'
-            'bundle = { composition = "tarball" }\n'
+            'bundle = { composition = "tarball", leg = "tree-sitter", payload = [{ path = "src", required = true }] }\n'
             'endpoints = ["gh-release", "notify-downstreams"]\n'
         )
 
@@ -181,7 +181,7 @@ def test_downstreams_without_the_notify_endpoint_is_refused():
         _load(
             "[artifacts.parser]\n"
             'build = ["tree-sitter"]\n'
-            'bundle = { composition = "tarball" }\n'
+            'bundle = { composition = "tarball", leg = "tree-sitter", payload = [{ path = "src", required = true }] }\n'
             'endpoints = ["gh-release"]\n'
             'downstreams = ["lex-fmt/vscode"]\n'
         )
@@ -238,7 +238,7 @@ def test_tarball_with_multiple_platforms_is_refused():
         _load(
             "[artifacts.parser]\n"
             'build = ["tree-sitter"]\n'
-            'bundle = { composition = "tarball" }\n'
+            'bundle = { composition = "tarball", leg = "tree-sitter", payload = [{ path = "src", required = true }] }\n'
             'platforms = ["linux-x86_64", "darwin-arm64"]\n'
         )
 
@@ -248,7 +248,7 @@ def test_tarball_with_a_single_platform_is_allowed():
     (artifact,) = _load(
         "[artifacts.parser]\n"
         'build = ["tree-sitter"]\n'
-        'bundle = { composition = "tarball" }\n'
+        'bundle = { composition = "tarball", leg = "tree-sitter", payload = [{ path = "src", required = true }] }\n'
         'platforms = ["linux-x86_64"]\n'
     )
     assert artifact.platforms == ("linux-x86_64",)
@@ -260,7 +260,7 @@ def test_tarball_with_no_platforms_is_allowed():
     (artifact,) = _load(
         "[artifacts.parser]\n"
         'build = ["tree-sitter"]\n'
-        'bundle = { composition = "tarball" }\n'
+        'bundle = { composition = "tarball", leg = "tree-sitter", payload = [{ path = "src", required = true }] }\n'
     )
     assert artifact.platforms == ()
 
@@ -591,6 +591,233 @@ def test_wasm_pack_options_are_rejected_on_other_compositions(key):
             'build = ["rust"]\n'
             f'bundle = {{ composition = "archive", {key} = "web" }}\n'
         )
+
+
+# --------------------------------------------------------------------------
+# tarball/zed `leg` + `payload` — the producer-declared payload (#1092)
+#
+# "Which files make up my package" is a PRODUCER-REPO fact: the declaration
+# lives here, not in shipit's source. These pin the parse contract the compose
+# inherits (shipit/release/bundle.py::_compose_declared_payload).
+# --------------------------------------------------------------------------
+
+
+def _payload_toml(payload: str, composition: str = "tarball") -> str:
+    return (
+        "[artifacts.parser]\n"
+        'build = ["tree-sitter"]\n'
+        "[artifacts.parser.bundle]\n"
+        f'composition = "{composition}"\n'
+        'leg = "tree-sitter"\n'
+        f"payload = {payload}\n"
+    )
+
+
+def test_payload_parses_to_ordered_typed_entries():
+    # Declaration order is preserved (it is tar member order); `required`
+    # defaults to False — a when-present entry, the common case.
+    (artifact,) = _load(
+        _payload_toml(
+            "[\n"
+            '  { path = "src", required = true },\n'
+            '  { path = "tree-sitter-lex.wasm", required = true },\n'
+            '  { path = "queries" },\n'
+            '  { path = "shared/embedded-grammars.json" },\n'
+            "]"
+        )
+    )
+    assert artifact.bundle == config.BundleSpec(
+        composition="tarball",
+        leg="tree-sitter",
+        payload=(
+            config.PayloadEntry(path="src", required=True),
+            # A BUILD-PRODUCED file at the leg root sits beside committed
+            # sources, and a NESTED path is expressible — the shape
+            # lex-fmt/tree-sitter-lex needs.
+            config.PayloadEntry(path="tree-sitter-lex.wasm", required=True),
+            config.PayloadEntry(path="queries", required=False),
+            config.PayloadEntry(path="shared/embedded-grammars.json", required=False),
+        ),
+    )
+
+
+def test_zed_takes_the_same_declaration():
+    # `zed` is the same declared-payload contract under its own registry name.
+    (artifact,) = _load(
+        "[artifacts.zed-lex]\n"
+        'build = ["rust"]\n'
+        "[artifacts.zed-lex.bundle]\n"
+        'composition = "zed"\n'
+        'leg = "rust"\n'
+        'payload = [{ path = "extension.toml", required = true }, { path = "shared" }]\n'
+    )
+    assert artifact.bundle == config.BundleSpec(
+        composition="zed",
+        leg="rust",
+        payload=(
+            config.PayloadEntry(path="extension.toml", required=True),
+            config.PayloadEntry(path="shared", required=False),
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("declared", "named"),
+    [
+        # The LEGACY shape (a config predating the declaration) has neither key
+        # — the message names both, so the reader is not sent down a partial fix.
+        ("", "`leg` and `payload`"),
+        ('leg = "tree-sitter"', "`payload`"),
+        ('payload = [{ path = "src", required = true }]', "`leg`"),
+    ],
+)
+def test_declared_payload_keys_are_required_with_a_migration_pointer(declared, named):
+    # NO backwards compatibility (ADR-0077): a config predating the declaration
+    # is a LOUD failure naming what to write, never a silent fallback to the old
+    # shipit-side file list.
+    with pytest.raises(config.ConfigError) as exc:
+        _load(
+            "[artifacts.parser]\n"
+            'build = ["tree-sitter"]\n'
+            "[artifacts.parser.bundle]\n"
+            'composition = "tarball"\n' + (f"{declared}\n" if declared else "")
+        )
+    message = str(exc.value)
+    assert f"is missing {named}" in message
+    assert "no longer carries a built-in file list" in message
+    assert 'payload = [{ path = "src", required = true }' in message
+
+
+def test_payload_leg_must_be_a_non_empty_string():
+    with pytest.raises(config.ConfigError, match=r"bundle\.leg must be a non-empty"):
+        _load(
+            _payload_toml('[{ path = "src", required = true }]').replace(
+                'leg = "tree-sitter"', 'leg = ""'
+            )
+        )
+
+
+def test_payload_leg_names_a_known_toolchain():
+    # A typo'd leg dies at parse, not at the bundle stage on a release runner.
+    with pytest.raises(config.ConfigError, match="unknown toolchain `treesitter`"):
+        _load(
+            "[artifacts.parser]\n"
+            'build = ["tree-sitter"]\n'
+            'bundle = { composition = "tarball", leg = "treesitter", payload = '
+            '[{ path = "src", required = true }] }\n'
+        )
+
+
+def test_payload_with_no_required_entry_is_refused():
+    # An all-when-present payload can compose an EMPTY archive — never a quiet
+    # outcome, so the invariant is enforced at parse.
+    with pytest.raises(config.ConfigError, match="no entry declares `required"):
+        _load(_payload_toml('[{ path = "queries" }, { path = "grammar.js" }]'))
+
+
+def test_payload_must_be_a_non_empty_list():
+    with pytest.raises(config.ConfigError, match="non-empty list of entry tables"):
+        _load(_payload_toml("[]"))
+
+
+def test_payload_entry_must_be_a_table_not_a_bare_string():
+    # No string shorthand: required-vs-when-present is the one thing an entry
+    # must state unambiguously, and a shorthand would hide it.
+    with pytest.raises(config.ConfigError, match=r"payload\[1\]: must be a table"):
+        _load(_payload_toml('[{ path = "src", required = true }, "queries"]'))
+
+
+def test_payload_entry_unknown_key_names_itself_and_the_known_set():
+    with pytest.raises(config.ConfigError, match="unknown key `optional`") as exc:
+        _load(_payload_toml('[{ path = "src", optional = true }]'))
+    assert "payload[0]: unknown key `optional`; known keys: path, required" in str(
+        exc.value
+    )
+
+
+def test_payload_entry_path_must_be_a_non_empty_string():
+    with pytest.raises(config.ConfigError, match=r"payload\[0\]\.path must be"):
+        _load(_payload_toml('[{ path = "", required = true }]'))
+
+
+def test_payload_entry_required_must_be_a_boolean():
+    with pytest.raises(config.ConfigError, match=r"payload\[0\]\.required must be"):
+        _load(_payload_toml('[{ path = "src", required = "yes" }]'))
+
+
+@pytest.mark.parametrize("path", ["/etc/passwd", "../outside", "..", "C:/x", "a\\b"])
+def test_payload_entry_path_may_not_escape_the_checkout(path):
+    # The same guard `bundle.source` and the vsix stage dest take: a payload
+    # path is joined to the leg dir and READ, so an escape would tar a file
+    # outside the checkout into a published artifact.
+    # TOML LITERAL strings ('...'): a basic string would eat the `\b` as an
+    # escape and never deliver a backslash to the guard.
+    with pytest.raises(config.ConfigError, match="repo-relative POSIX path"):
+        _load(_payload_toml(f"[{{ path = '{path}', required = true }}]"))
+
+
+def test_duplicate_payload_path_is_refused():
+    # Two entries for one path would tar the member twice and leave the two
+    # `required` values in silent conflict.
+    with pytest.raises(config.ConfigError, match="already declared earlier"):
+        _load(
+            _payload_toml(
+                '[{ path = "src", required = true }, { path = "./src" }]',
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    "second", ["src/parser.c", "src/tree_sitter/parser.h"], ids=["child", "descendant"]
+)
+def test_payload_paths_that_overlap_an_earlier_entry_are_refused(second):
+    # A directory operand ships its whole tree, so `src` + `src/parser.c` is the
+    # duplicate-member defect wearing a different spelling — tar adds that file
+    # once recursively and once by name. One member, declared once.
+    with pytest.raises(config.ConfigError) as excinfo:
+        _load(
+            _payload_toml(
+                f'[{{ path = "src", required = true }}, {{ path = "{second}" }}]',
+            )
+        )
+    message = str(excinfo.value)
+    assert "overlaps `src`" in message
+
+
+def test_payload_overlap_is_compared_by_component_not_string_prefix():
+    # `srcfoo` merely SPELLS like it starts with `src`; it is a different member
+    # and a naive prefix compare would falsely collide the two.
+    artifacts = _load(
+        _payload_toml(
+            '[{ path = "src", required = true }, { path = "srcfoo" }]',
+        )
+    )
+    assert [entry.path for entry in artifacts[0].bundle.payload] == ["src", "srcfoo"]
+
+
+def test_payload_overlap_is_refused_in_either_declaration_order():
+    # The ancestor may be declared SECOND — same duplicate members, same refusal.
+    with pytest.raises(config.ConfigError, match="overlaps `src/parser.c`"):
+        _load(
+            _payload_toml(
+                '[{ path = "src/parser.c", required = true }, { path = "src" }]',
+            )
+        )
+
+
+@pytest.mark.parametrize("key", ["leg", "payload"])
+def test_leg_and_payload_are_rejected_on_other_compositions(key):
+    # archive/wheel/... assemble their own contents (binary+docs, sdist) — a
+    # payload declaration there is dead config, refused with the specific
+    # message naming the compositions that DO take it.
+    value = '"rust"' if key == "leg" else '[{ path = "src", required = true }]'
+    with pytest.raises(config.ConfigError, match=f"`{key}` applies only to") as exc:
+        _load(
+            "[artifacts.x]\n"
+            'build = ["rust"]\n'
+            f'bundle = {{ composition = "archive", {key} = {value} }}\n'
+        )
+    assert "producer-declared (tarball, zed)" in str(exc.value)
 
 
 # --------------------------------------------------------------------------
