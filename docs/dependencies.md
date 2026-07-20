@@ -17,11 +17,15 @@ not rebuild the old model from it.
 
 ## Out — these are dead
 
-Compositions and per-artifact-type special-casing · Cascade and any automatic cross-repo
-version bumping · `fetch-deps`, `deps.json`, `lex-deps.json`, and any
-download-from-a-GitHub-release step · readiness gates, served-subdir bookkeeping,
-`channel verify` · a `version` key in `[artifact-deps]` · the same version written down in
-two places.
+Per-dependency-type special-casing — a cross-repo dependency's payload does not depend on
+what kind of thing it is · Cascade and any automatic cross-repo version bumping ·
+`fetch-deps`, `deps.json`, `lex-deps.json`, and any download-from-a-GitHub-release step ·
+readiness gates, served-subdir bookkeeping, `channel verify` · a `version` key in
+`[artifact-deps]` · the same version written down in two places.
+
+(Not in scope here: how a repo *builds and releases its own* artifacts — the `vsix` /
+`deb` / `tauri` / `archive` bundle compositions are a separate, live concern. This file is
+only about one repo depending on another repo's output.)
 
 Anything that uses or even mentions those is wrong. The version lives in exactly one
 place: the consumer's `pixi.toml`.
