@@ -1431,7 +1431,11 @@ def test_declared_payload_operands_can_never_be_read_as_tar_options(tmp_path):
     # config boundary has no business rejecting a legal filename — so the
     # operands must be fenced off from the option list. Without the `--`,
     # `--checkpoint-action=exec=…` is a command GNU tar runs on the release
-    # runner. REAL tar, real filenames: the exploit is attempted, not mocked.
+    # runner. REAL tar, real filenames: the exploit is attempted, not mocked —
+    # and the argv assertion below makes the test discriminating on ANY host,
+    # since the release legs run GNU tar while a local darwin run gets bsdtar
+    # (libarchive has no `--checkpoint-action`, so only the Linux leg would
+    # actually fire the injected command).
     leg = tmp_path / "grammar"
     (leg / "src").mkdir(parents=True)
     (leg / "src/parser.c").write_text("/* generated */")
@@ -1445,8 +1449,12 @@ def test_declared_payload_operands_can_never_be_read_as_tar_options(tmp_path):
         ]
     )
 
+    seen = []
+
     def _real_run(argv, cwd):
-        return execrun.run([str(a) for a in argv], cwd=cwd)
+        argv = [str(a) for a in argv]
+        seen.append(argv)
+        return execrun.run(argv, cwd=cwd)
 
     composed = bundle_mod.TARBALL.compose(
         _request(
@@ -1456,6 +1464,14 @@ def test_declared_payload_operands_can_never_be_read_as_tar_options(tmp_path):
 
     # No command ran: the injected `exec=` never fired anywhere under the tree.
     assert list(tmp_path.rglob("pwned")) == []
+    # The structural reason it cannot, on any tar: every payload operand sits
+    # AFTER the end-of-options `--`, so none of them is reachable as a flag.
+    (argv,) = seen
+    assert argv[argv.index("--") + 1 :] == [
+        "src",
+        "--checkpoint=1",
+        "--checkpoint-action=exec=touch pwned",
+    ]
     # And the dash-named files were archived as the plain MEMBERS they are.
     archive = tmp_path / "dist" / composed.outputs[0]
     with tarfile.open(archive, "r:gz") as tar:

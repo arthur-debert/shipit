@@ -30,6 +30,7 @@ import yaml
 from shipit import config, execrun, staging
 from shipit.release import ReleaseError
 from shipit.release import brew as brew_mod
+from shipit.release import bundle as bundle_mod
 from shipit.release import publish as publish_mod
 from shipit.release import secretreq as secretreq_mod
 from shipit.verbs import release as release_verb
@@ -3729,50 +3730,50 @@ def _zed_bundled_artifacts(*, leg="rust", payload=None, leg_name="rust"):
     )
 
 
-def test_zed_reads_the_manifest_from_the_declared_bundle_leg(tmp_path):
-    """The bundle and the endpoint must describe ONE extension: the manifest is
-    read from the leg the bundle archived, not from a leg name restated here. A
-    non-root leg is where the two would diverge — the endpoint used to look in
-    the first `rust` leg's dir regardless of the declaration."""
-    artifact = _zed_bundled_artifacts()[0]
-    (tmp_path / "extension").mkdir()
-    _write_zed_manifest(tmp_path / "extension", ext_id="lex")
-    # A decoy at the ROOT: an endpoint reading the wrong dir would find this one
-    # and publish coordinates for an extension the archive never carried.
-    _write_zed_manifest(tmp_path, ext_id="decoy")
-    req = _request(
-        tmp_path,
-        artifact,
-        entries=_entries({"extension": "rust"}),
-        version="1.2.3",
-        repo="lex-fmt/zed-lex",
+def test_zed_bundle_and_endpoint_read_the_same_declared_leg(tmp_path):
+    """CROSS-STAGE: the archive the tag ships and the registry row the endpoint
+    renders describe ONE extension, so both stages must resolve the SAME
+    directory from the SAME declaration. The endpoint used to look in the first
+    `rust` leg regardless of what the bundle declared, so a non-rust declared leg
+    is exactly where the two diverged — the archive came from `grammar/` while
+    the row was keyed by whatever `extension.toml` sat in the rust leg.
+    """
+    artifact = _zed_bundled_artifacts(leg="tree-sitter", leg_name="tree-sitter")[0]
+    (tmp_path / "grammar").mkdir()
+    _write_zed_manifest(tmp_path / "grammar", ext_id="lex")
+    (tmp_path / "grammar" / "shared").mkdir()
+    # A decoy in the rust leg: whichever stage reads the undeclared dir keys its
+    # output to an extension the other stage never saw.
+    (tmp_path / "crate").mkdir()
+    _write_zed_manifest(tmp_path / "crate", ext_id="decoy")
+    entries = _entries({"grammar": "tree-sitter", "crate": "rust"})
+    recorder = SeamRecorder()
+
+    bundle_mod.ZED.compose(
+        bundle_mod.ComposeRequest(
+            artifact=artifact,
+            entries=entries,
+            root=tmp_path,
+            out_dir=tmp_path / "dist",
+            target="x86_64-unknown-linux-gnu",
+            run_cmd=recorder,
+            build_target=None,
+            artifact_deps=(),
+        )
+    )
+    published = publish_mod._publish_zed(
+        _request(tmp_path, artifact, entries=entries, repo="lex-fmt/zed-lex")
     )
 
-    published = publish_mod._publish_zed(req)
-
+    # The bundle tarred from the declared leg…
+    ((argv, *_rest),) = recorder.calls
+    assert argv[argv.index("-C") + 1] == str(tmp_path / "grammar")
+    # …and the endpoint read its manifest from that same dir — not the decoy.
     assert "for lex 1.2.3" in published.actions[0]
     assert "decoy" not in published.actions[0]
     assert (
         tmp_path / "dist" / publish_mod.ZED_SCRATCH / "lex.extensions-toml"
     ).is_file()
-
-
-def test_zed_follows_a_declared_leg_that_is_not_rust(tmp_path):
-    """`bundle.leg` names any [toolchains] toolchain since #1092 — the endpoint
-    follows the declaration, so a non-rust leg is read from ITS directory."""
-    artifact = _zed_bundled_artifacts(leg="tree-sitter", leg_name="tree-sitter")[0]
-    (tmp_path / "grammar").mkdir()
-    _write_zed_manifest(tmp_path / "grammar", ext_id="lex")
-    req = _request(
-        tmp_path,
-        artifact,
-        entries=_entries({"grammar": "tree-sitter", ".": "rust"}),
-        version="1.2.3",
-        repo="lex-fmt/zed-lex",
-    )
-
-    published = publish_mod._publish_zed(req)
-    assert "for lex 1.2.3" in published.actions[0]
 
 
 def test_zed_refuses_a_declaration_that_omits_the_manifest(tmp_path):
