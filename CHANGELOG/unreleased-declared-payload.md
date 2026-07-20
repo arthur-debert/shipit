@@ -18,4 +18,20 @@
   a silent fallback to the old shipit-side list. A `payload` in which no entry is
   `required = true` is refused too — an all-when-present payload could compose an
   empty archive, which is never a quiet outcome. `leg`/`payload` on any other
-  composition is refused (those assemble their own contents).
+  composition is refused (those assemble their own contents). Two payload entries
+  that name the same archive member — the same path, or one containing the other
+  (`src` plus `src/parser.c`, which a directory operand already ships) — are
+  refused: each member is declared exactly once.
+- **The declared payload is untrusted data.** A payload path that traverses a
+  symlink or junction is refused at the bundle stage, naming the offending
+  component: the bundle archives only real files and real directories, so a
+  committed redirect can never steer the archive at a file outside the leg (the
+  same refuse-links model `shipit stage` uses, now shared between them). Payload
+  operands are also fenced from `tar`'s option list, so a path that is spelled
+  like a flag is always read as a path.
+- release/publish: the `zed` endpoint reads `extension.toml` from the leg the
+  `zed` **bundle declared**, not from a hardcoded `rust` leg, and refuses a
+  declaration that does not carry that manifest as a required payload entry — the
+  archive and the rendered registry row always describe one extension. An
+  artifact with the `zed` endpoint and no bundle still reads the crate's `rust`
+  leg.

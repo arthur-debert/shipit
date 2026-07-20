@@ -930,6 +930,19 @@ def _parse_vsix_stage(where: str, value: object) -> tuple[tuple[str, str], ...]:
 _PAYLOAD_EXAMPLE = 'payload = [{ path = "src", required = true }, { path = "queries" }]'
 
 
+def _paths_overlap(left: tuple[str, ...], right: tuple[str, ...]) -> bool:
+    """Whether two normalized POSIX paths name the same archive member or one
+    contains the other — compared by PATH COMPONENT, never by string prefix.
+
+    Components are what containment is actually made of: ``src`` contains
+    ``src/parser.c`` but has nothing to do with ``srcfoo``, which a naive
+    ``startswith`` would collide. Equality is the ancestor case with an empty
+    tail, so one comparison answers both.
+    """
+    shorter, longer = sorted((left, right), key=len)
+    return longer[: len(shorter)] == shorter
+
+
 def _parse_payload(where: str, value: object) -> tuple[PayloadEntry, ...]:
     """The ``bundle.payload`` list into typed :class:`PayloadEntry` values, in
     DECLARATION order (which is tar member order — the producer's list is the
@@ -951,7 +964,7 @@ def _parse_payload(where: str, value: object) -> tuple[PayloadEntry, ...]:
             f"{_PAYLOAD_EXAMPLE}; got {value!r}"
         )
     entries: list[PayloadEntry] = []
-    seen: set[str] = set()
+    seen: set[tuple[str, ...]] = set()
     for index, item in enumerate(value):
         at = f"{where}.payload[{index}]"
         if not isinstance(item, dict):
@@ -977,14 +990,23 @@ def _parse_payload(where: str, value: object) -> tuple[PayloadEntry, ...]:
                 f"WHEN PRESENT); got {required!r}"
             )
         normalized = str(PurePosixPath(path))
-        if normalized in seen:
+        parts = PurePosixPath(normalized).parts
+        overlap = next((p for p in seen if _paths_overlap(parts, p)), None)
+        if overlap is not None:
             # A repeated path would tar the same member twice and leave the two
-            # `required` values in silent conflict — a declaration mistake.
+            # `required` values in silent conflict — and an ANCESTOR is the same
+            # defect wearing a different spelling: tar adds a directory operand
+            # RECURSIVELY, so `src` followed by `src/parser.c` archives that file
+            # twice. Both break the one-member-once invariant, so both are the
+            # same declaration mistake.
+            joined = str(PurePosixPath(*overlap))
             raise ConfigError(
-                f"{at}.path: `{normalized}` is already declared earlier in "
-                f"{where}.payload; each payload path appears once"
+                f"{at}.path: `{normalized}` overlaps `{joined}`, already declared "
+                f"earlier in {where}.payload — a directory entry ships its whole "
+                f"tree, so each archive member is declared exactly once; drop "
+                f"whichever of the two is redundant"
             )
-        seen.add(normalized)
+        seen.add(parts)
         entries.append(PayloadEntry(path=normalized, required=required))
     if not any(entry.required for entry in entries):
         raise ConfigError(

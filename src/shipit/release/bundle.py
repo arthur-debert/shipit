@@ -162,8 +162,14 @@ functions the entries carry:
   failure, never a quiet empty archive (the config boundary already refuses a
   payload with no required entry). Both are platform-independent (declared
   source, no per-OS variant — no ``-<target>`` suffix), so every matrix leg
-  composes the identical bytes under the one unqualified name. The two names
-  differ only in the ENDPOINT story they pair with: ``zed``'s tag IS the
+  composes the identical bytes under the one unqualified name. Because the
+  payload is producer-declared it is UNTRUSTED DATA steering a read of the
+  release runner: a path that traverses a link is REFUSED rather than followed
+  (:func:`_payload_operands`, the model :mod:`shipit.staging` uses on the other
+  declared-path surface, shared via :mod:`shipit.fspath`), and the operands are
+  fenced from ``tar``'s option list with ``--`` so a path spelled like a flag can
+  never become one. The two names differ only in the ENDPOINT story they pair
+  with: ``zed``'s tag IS the
   release, and the ``zed`` publish endpoint (``release/publish.py``) renders the
   ``zed-industries/extensions`` registry coordinates for a manually-gated PR
   (ADR-0068), never a cross-repo push.
@@ -190,9 +196,10 @@ import os
 import shutil
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from .. import config, execrun
+from ..fspath import first_link_component
 from ..install import artifactdeps
 from ..tools import e2e as e2e_mod
 from . import ReleaseError
@@ -467,6 +474,86 @@ def _compose_wheel(req: ComposeRequest) -> Composed:
     return Composed(req.artifact.name, "wheel", (*wheels, *sdists))
 
 
+def _payload_operands(
+    artifact_name: str, spec: config.BundleSpec, leg_dir: Path
+) -> list[str]:
+    """The declared payload's tar operands — the entries PRESENT under
+    ``leg_dir``, in declaration order — after proving every declared path is a
+    real, in-leg path.
+
+    The payload is producer-declared, so these paths are UNTRUSTED DATA that end
+    up steering a read of the release runner's filesystem. The guard is
+    structural, the same answer :mod:`shipit.staging` gives on the other
+    declared-path surface — links are REFUSED, never followed
+    (:func:`shipit.fspath.first_link_component`) — because the escape is not in
+    the SPELLING and no lexical check can see it: ``leak/passwd`` is a
+    well-formed relative path, and if ``leak`` is a committed ``leak -> /etc``
+    then ``exists()`` follows it and tar archives the host's file into a
+    published artifact. With no link on the chain, a path of real components
+    physically cannot leave ``leg_dir``, so containment is automatic rather than
+    checked vector by vector; the resolved-containment assert below is a belt on
+    that invariant, not the thing holding it up.
+
+    Every declared entry is walked, INCLUDING a when-present one that turns out
+    absent: a redirect in a payload declaration is a defect in the declaration
+    whether or not it resolves to anything today, and finding it only on the day
+    the file appears is the quiet outcome this stage refuses. A missing REQUIRED
+    entry is the loud build-never-ran failure (all names at once, so one run
+    reports the whole gap).
+    """
+    leg_dir_res = leg_dir.resolve()
+    for entry in spec.payload:
+        where = f"[artifacts.{artifact_name}] {spec.composition} composition"
+        if config.path_escapes(entry.path):
+            # Belt for a hand-built BundleSpec: the config boundary already
+            # applies this predicate at parse (`_parse_payload`), but the leg
+            # join would DISCARD the leg for an absolute path or climb out of it
+            # with `..`, so the refuse-links model's "the base is the leg"
+            # precondition is re-asserted where the read actually happens.
+            raise ReleaseError(
+                f"{where}: payload path {entry.path!r} is not a leg-relative "
+                f"path — no leading '/', no '\\', no drive letter, no '..' "
+                f"segment; the payload lives inside the `{spec.leg}` leg"
+            )
+        parts = PurePosixPath(entry.path).parts
+        offender = first_link_component(leg_dir_res, parts)
+        if offender is not None:
+            raise ReleaseError(
+                f"{where}: payload path {entry.path!r} traverses a symlink or "
+                f"junction at {offender} — the bundle refuses to FOLLOW links "
+                f"out of the `{spec.leg}` leg; it archives only real files and "
+                f"real directories, so a redirect can never steer the archive "
+                f"at a file outside the checkout"
+            )
+        candidate = leg_dir_res.joinpath(*parts)
+        if candidate == leg_dir_res or not candidate.is_relative_to(leg_dir_res):
+            # Unreachable while the two guards above hold — kept as the explicit
+            # statement of the invariant they exist to produce.
+            raise ReleaseError(
+                f"{where}: payload path {entry.path!r} resolves to {candidate}, "
+                f"outside the `{spec.leg}` leg ({leg_dir_res}); every payload "
+                f"member is a strict descendant of its leg"
+            )
+    missing = [
+        entry.path
+        for entry in spec.payload
+        if entry.required and not leg_dir_res.joinpath(entry.path).exists()
+    ]
+    if missing:
+        raise ReleaseError(
+            f"[artifacts.{artifact_name}] {spec.composition} composition: "
+            f"required payload missing under {leg_dir} — "
+            f"{', '.join(missing)}; the bundle stage composes BUILD OUTPUTS "
+            f"(run `shipit build` first) and ships exactly the declared "
+            f"`bundle.payload`, never a quiet empty archive"
+        )
+    return [
+        entry.path
+        for entry in spec.payload
+        if leg_dir_res.joinpath(entry.path).exists()
+    ]
+
+
 def _compose_declared_payload(req: ComposeRequest) -> Composed:
     """The declared-payload tarball (``tarball`` / ``zed``): ``<name>.tar.gz``
     of the artifact's own ``bundle.payload`` entries, collected under its
@@ -500,20 +587,7 @@ def _compose_declared_payload(req: ComposeRequest) -> Composed:
         )
     leg = _leg_for(req.artifact, req.entries, spec.leg, spec.composition)
     leg_dir = req.root if leg.path in (".", "") else req.root / leg.path
-    missing = [
-        entry.path
-        for entry in spec.payload
-        if entry.required and not (leg_dir / entry.path).exists()
-    ]
-    if missing:
-        raise ReleaseError(
-            f"[artifacts.{req.artifact.name}] {spec.composition} composition: "
-            f"required payload missing under {leg_dir} — "
-            f"{', '.join(missing)}; the bundle stage composes BUILD OUTPUTS "
-            f"(run `shipit build` first) and ships exactly the declared "
-            f"`bundle.payload`, never a quiet empty archive"
-        )
-    present = [entry.path for entry in spec.payload if (leg_dir / entry.path).exists()]
+    present = _payload_operands(req.artifact.name, spec, leg_dir)
     archive = f"{req.artifact.name}.tar.gz"
     archive_path = req.out_dir / archive
     req.out_dir.mkdir(parents=True, exist_ok=True)
@@ -522,7 +596,13 @@ def _compose_declared_payload(req: ComposeRequest) -> Composed:
         # the fresh tree (the archive/mac-app recreate-from-clean contract).
         archive_path.unlink()
     req.run_cmd(
-        ["tar", "-czf", str(archive_path), "-C", str(leg_dir), *present],
+        # `--` ends the option list: every operand after it is a PATH, whatever
+        # it is spelled like. Without it a declared `--checkpoint-action=exec=…`
+        # is parsed by GNU tar as an OPTION and runs a command on the release
+        # runner. The operands are producer-declared, so they are DATA and must
+        # never be able to become argv flags — the same reason the guard above
+        # refuses links rather than trusting their spelling.
+        ["tar", "-czf", str(archive_path), "-C", str(leg_dir), "--", *present],
         req.root,
     )
     return Composed(req.artifact.name, spec.composition, (archive,))

@@ -1145,6 +1145,7 @@ def test_tarball_tars_exactly_the_declared_payload_that_is_present(tmp_path):
                 str(archive),
                 "-C",
                 str(tmp_path),
+                "--",
                 "src",
                 "tree-sitter-lex.wasm",
                 "queries",
@@ -1175,6 +1176,7 @@ def test_tarball_reads_the_declared_leg_subdir(tmp_path):
         str(tmp_path / "dist" / "parser.tar.gz"),
         "-C",
         str(tmp_path / "grammar"),
+        "--",
         "src",
     )
 
@@ -1269,6 +1271,7 @@ def test_zed_is_the_same_declared_payload_composition(tmp_path):
                 str(tmp_path / "dist" / "zed-lex.tar.gz"),
                 "-C",
                 str(tmp_path / "extension"),
+                "--",
                 "extension.toml",
                 "shared",
             ),
@@ -1356,6 +1359,127 @@ def test_declared_payload_composes_a_real_tarball_holding_exactly_the_payload(
     with tarfile.open(archive, "r:gz") as tar:
         wasm = tar.extractfile("tree-sitter-lex.wasm")
         assert wasm is not None and wasm.read() == b"\x00asm\x01"
+
+
+def test_declared_payload_refuses_a_path_through_a_symlink(tmp_path):
+    # The payload is PRODUCER-declared, so a repo can commit a symlink and name a
+    # path THROUGH it: `leak/secret.txt` is lexically spotless, and `exists()`
+    # follows `leak -> ../outside`, so the guard has to be about the filesystem,
+    # not the spelling. REAL tar through the real exec seam: if the guard were
+    # missing, the host file would land in a published artifact.
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("HOST SECRET")
+    leg = tmp_path / "grammar"
+    (leg / "src").mkdir(parents=True)
+    (leg / "src/parser.c").write_text("/* generated */")
+    (leg / "leak").symlink_to(outside, target_is_directory=True)
+    # The vector is live — the outside file IS reachable through the symlink.
+    assert (leg / "leak/secret.txt").read_text() == "HOST SECRET"
+
+    artifact = _tarball_artifact(
+        payload=[
+            {"path": "src", "required": True},
+            {"path": "leak/secret.txt"},
+        ]
+    )
+    entries = _entries({"grammar": "tree-sitter"})
+
+    def _real_run(argv, cwd):
+        return execrun.run([str(a) for a in argv], cwd=cwd)
+
+    with pytest.raises(ReleaseError) as excinfo:
+        bundle_mod.TARBALL.compose(
+            _request(tmp_path, artifact, entries, run_cmd=_real_run)
+        )
+
+    message = str(excinfo.value)
+    assert "symlink or junction" in message
+    assert "leak" in message  # names the offending component
+    # Nothing was composed: no archive exists to have leaked anything.
+    assert not (tmp_path / "dist" / "parser.tar.gz").exists()
+
+
+def test_declared_payload_refuses_a_symlink_leaf_even_when_optional(tmp_path):
+    # The refusal is about the DECLARATION, not about what the entry resolves to
+    # today: a when-present entry whose leaf is itself a redirect is refused, so
+    # the defect surfaces now rather than on the day the target appears.
+    outside = tmp_path / "outside"
+    (outside / "queries").mkdir(parents=True)
+    leg = tmp_path / "grammar"
+    (leg / "src").mkdir(parents=True)
+    (leg / "queries").symlink_to(outside / "queries", target_is_directory=True)
+    artifact = _tarball_artifact(
+        payload=[{"path": "src", "required": True}, {"path": "queries"}]
+    )
+    recorder = RunRecorder()
+
+    with pytest.raises(ReleaseError, match="symlink or junction"):
+        bundle_mod.TARBALL.compose(
+            _request(
+                tmp_path,
+                artifact,
+                _entries({"grammar": "tree-sitter"}),
+                run_cmd=recorder,
+            )
+        )
+    assert recorder.calls == []  # refused before tar ever ran
+
+
+def test_declared_payload_operands_can_never_be_read_as_tar_options(tmp_path):
+    # A repo may COMMIT a file whose name looks like a GNU tar option — the
+    # config boundary has no business rejecting a legal filename — so the
+    # operands must be fenced off from the option list. Without the `--`,
+    # `--checkpoint-action=exec=…` is a command GNU tar runs on the release
+    # runner. REAL tar, real filenames: the exploit is attempted, not mocked.
+    leg = tmp_path / "grammar"
+    (leg / "src").mkdir(parents=True)
+    (leg / "src/parser.c").write_text("/* generated */")
+    (leg / "--checkpoint=1").write_text("innocent bytes")
+    (leg / "--checkpoint-action=exec=touch pwned").write_text("innocent bytes")
+    artifact = _tarball_artifact(
+        payload=[
+            {"path": "src", "required": True},
+            {"path": "--checkpoint=1"},
+            {"path": "--checkpoint-action=exec=touch pwned"},
+        ]
+    )
+
+    def _real_run(argv, cwd):
+        return execrun.run([str(a) for a in argv], cwd=cwd)
+
+    composed = bundle_mod.TARBALL.compose(
+        _request(
+            tmp_path, artifact, _entries({"grammar": "tree-sitter"}), run_cmd=_real_run
+        )
+    )
+
+    # No command ran: the injected `exec=` never fired anywhere under the tree.
+    assert list(tmp_path.rglob("pwned")) == []
+    # And the dash-named files were archived as the plain MEMBERS they are.
+    archive = tmp_path / "dist" / composed.outputs[0]
+    with tarfile.open(archive, "r:gz") as tar:
+        members = {
+            name
+            for name in tar.getnames()
+            if not PurePosixPath(name).name.startswith("._")
+        }
+    assert "--checkpoint=1" in members
+    assert "--checkpoint-action=exec=touch pwned" in members
+
+
+def test_declared_payload_refuses_a_leg_relative_escape_at_runtime(tmp_path):
+    # Belt for a hand-built BundleSpec (a test, or a caller bypassing the
+    # loader): the parse boundary already refuses `..`, and so does the read.
+    spec = config.BundleSpec(
+        composition="tarball",
+        leg="tree-sitter",
+        payload=(config.PayloadEntry(path="../outside", required=True),),
+    )
+    (tmp_path / "outside").mkdir()
+    (tmp_path / "grammar").mkdir()
+    with pytest.raises(ReleaseError, match="not a leg-relative path"):
+        bundle_mod._payload_operands("parser", spec, tmp_path / "grammar")
 
 
 def test_declared_payload_compositions_share_one_compose(tmp_path):

@@ -2157,9 +2157,9 @@ ZED_REGISTRY = "zed-industries/extensions"
 #: The Zed extension manifest the endpoint reads the extension id from. This is
 #: ENDPOINT knowledge, not payload knowledge: the Zed registry row is keyed by
 #: the id, so the adapter must read it. What the zed BUNDLE ships is
-#: producer-declared (``bundle.payload``, ADR-0077/#1092) and unknown here —
-#: an extension declares this manifest in its payload or its registry row would
-#: name a package that does not carry it.
+#: producer-declared (``bundle.payload``, ADR-0077/#1092) and unknown here — so
+#: the endpoint REQUIRES the declaration to carry this manifest as a required
+#: entry (:func:`_zed_manifest_leg`), rather than assuming it.
 ZED_MANIFEST = "extension.toml"
 
 #: The scratch subdir under the staged assets tree the zed adapter renders the
@@ -2249,6 +2249,57 @@ def render_zed_registry_entry(*, ext_id: str, version: str, repo: str, tag: str)
     )
 
 
+#: The leg an endpoint-only Zed artifact (no ``bundle``) reads its manifest
+#: from — a Zed extension is a Rust crate compiled to WASM, so ``rust`` is the
+#: leg its checks already run against (TOL03). This is the ONLY case that has no
+#: declaration to follow: when the artifact HAS a zed bundle, the leg comes from
+#: that declaration (:func:`_zed_manifest_leg`), never from this constant.
+ZED_ENDPOINT_ONLY_LEG = "rust"
+
+
+def _zed_manifest_leg(artifact: config.Artifact) -> str:
+    """The ``[toolchains]`` toolchain whose leg dir holds the extension's
+    ``extension.toml`` — the artifact's OWN ``bundle.leg`` whenever it declares a
+    zed bundle.
+
+    The bundle and the endpoint must read the SAME directory: the archive the
+    tag ships and the registry row the endpoint renders describe one extension,
+    so an endpoint that hunted for the manifest in a leg the bundle never
+    archived would publish coordinates for a package that does not carry them.
+    Since #1092 the composition's leg is producer-declared (any ``[toolchains]``
+    leg, not necessarily ``rust``), so the endpoint follows the declaration
+    rather than restating a guess — the same restatement-drift ADR-0077 targets.
+
+    The manifest is also required to be IN that payload, and required there: a
+    registry row keyed by an id read from a file the archive omits is the same
+    divergence one step later. Both refusals are loud here, at the endpoint
+    boundary that depends on them.
+    """
+    spec = artifact.bundle
+    if spec is None or spec.composition != "zed":
+        # Endpoint-only artifact: no zed bundle declares a leg, so the endpoint
+        # reads the crate leg it has always read. Deliberately not a fallback for
+        # a DECLARED bundle — that case is answered by the declaration.
+        return ZED_ENDPOINT_ONLY_LEG
+    if not any(entry.path == ZED_MANIFEST and entry.required for entry in spec.payload):
+        raise ReleaseError(
+            f"[artifacts.{artifact.name}] zed: `bundle.payload` does not declare "
+            f"`{ZED_MANIFEST}` as a required entry — the registry row is keyed by "
+            f"the extension id read from that manifest, so an archive that may "
+            f"omit it would publish coordinates for a package that does not "
+            f'carry it. Add {{ path = "{ZED_MANIFEST}", required = true }}'
+        )
+    if spec.leg is None:
+        # Unreachable through the config boundary (a zed bundle carries leg +
+        # payload or the parse refuses it); loud rather than a leg of `None`.
+        raise ReleaseError(
+            f"[artifacts.{artifact.name}] zed: the declared bundle carries no "
+            f"`bundle.leg` — the endpoint reads its manifest from the leg the "
+            f"bundle archived"
+        )
+    return spec.leg
+
+
 def _publish_zed(req: PublishRequest) -> Published:
     """Render the ``zed-industries/extensions`` registry coordinates for the
     manually-gated publish PR (ADR-0068). See the module docstring's zed entry.
@@ -2257,7 +2308,9 @@ def _publish_zed(req: PublishRequest) -> Published:
     gh-release shipped it, so this endpoint does the ONE remaining thing shipit
     can own without touching the foreign registry — render the exact
     ``extensions.toml`` row + submodule rev (the extension id read from
-    ``extension.toml`` under the rust leg, the bumped version, the release tag)
+    ``extension.toml`` under the leg the zed BUNDLE declared — :func:`_zed_manifest_leg`,
+    so the row and the archive describe one extension — the bumped version, the
+    release tag)
     into a scratch subdir and report the coordinates. It performs NO cross-repo
     write and needs NO token; opening the PR into ``zed-industries/extensions``
     is a maintainer-gated human step.
@@ -2274,7 +2327,7 @@ def _publish_zed(req: PublishRequest) -> Published:
             f"registry submodule points at github.com/<owner/name> @ <tag>, so "
             f"an unresolved repo is a hard error, never a null-source row"
         )
-    leg = _leg_for(req.artifact, req.entries, "rust", "zed")
+    leg = _leg_for(req.artifact, req.entries, _zed_manifest_leg(req.artifact), "zed")
     manifest = _leg_dir(req.root, leg) / ZED_MANIFEST
     try:
         text = manifest.read_text(encoding="utf-8")

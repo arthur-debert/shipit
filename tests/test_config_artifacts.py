@@ -767,6 +767,44 @@ def test_duplicate_payload_path_is_refused():
         )
 
 
+@pytest.mark.parametrize(
+    "second", ["src/parser.c", "src/tree_sitter/parser.h"], ids=["child", "descendant"]
+)
+def test_payload_paths_that_overlap_an_earlier_entry_are_refused(second):
+    # A directory operand ships its whole tree, so `src` + `src/parser.c` is the
+    # duplicate-member defect wearing a different spelling — tar adds that file
+    # once recursively and once by name. One member, declared once.
+    with pytest.raises(config.ConfigError) as excinfo:
+        _load(
+            _payload_toml(
+                f'[{{ path = "src", required = true }}, {{ path = "{second}" }}]',
+            )
+        )
+    message = str(excinfo.value)
+    assert "overlaps `src`" in message
+
+
+def test_payload_overlap_is_compared_by_component_not_string_prefix():
+    # `srcfoo` merely SPELLS like it starts with `src`; it is a different member
+    # and a naive prefix compare would falsely collide the two.
+    artifacts = _load(
+        _payload_toml(
+            '[{ path = "src", required = true }, { path = "srcfoo" }]',
+        )
+    )
+    assert [entry.path for entry in artifacts[0].bundle.payload] == ["src", "srcfoo"]
+
+
+def test_payload_overlap_is_refused_in_either_declaration_order():
+    # The ancestor may be declared SECOND — same duplicate members, same refusal.
+    with pytest.raises(config.ConfigError, match="overlaps `src/parser.c`"):
+        _load(
+            _payload_toml(
+                '[{ path = "src/parser.c", required = true }, { path = "src" }]',
+            )
+        )
+
+
 @pytest.mark.parametrize("key", ["leg", "payload"])
 def test_leg_and_payload_are_rejected_on_other_compositions(key):
     # archive/wheel/... assemble their own contents (binary+docs, sdist) — a

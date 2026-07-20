@@ -3707,6 +3707,133 @@ def test_zed_refuses_a_missing_extension_manifest(tmp_path):
         publish_mod._publish_zed(req)
 
 
+def _zed_bundled_artifacts(*, leg="rust", payload=None, leg_name="rust"):
+    """A zed artifact that DECLARES its bundle — the shape the endpoint has to
+    follow, rather than assuming the crate leg."""
+    return _artifacts(
+        {
+            "zed-lex": {
+                "build": [leg_name],
+                "endpoints": ["gh-release", "zed"],
+                "bundle": {
+                    "composition": "zed",
+                    "leg": leg,
+                    "payload": payload
+                    or [
+                        {"path": "extension.toml", "required": True},
+                        {"path": "shared"},
+                    ],
+                },
+            }
+        }
+    )
+
+
+def test_zed_reads_the_manifest_from_the_declared_bundle_leg(tmp_path):
+    """The bundle and the endpoint must describe ONE extension: the manifest is
+    read from the leg the bundle archived, not from a leg name restated here. A
+    non-root leg is where the two would diverge — the endpoint used to look in
+    the first `rust` leg's dir regardless of the declaration."""
+    artifact = _zed_bundled_artifacts()[0]
+    (tmp_path / "extension").mkdir()
+    _write_zed_manifest(tmp_path / "extension", ext_id="lex")
+    # A decoy at the ROOT: an endpoint reading the wrong dir would find this one
+    # and publish coordinates for an extension the archive never carried.
+    _write_zed_manifest(tmp_path, ext_id="decoy")
+    req = _request(
+        tmp_path,
+        artifact,
+        entries=_entries({"extension": "rust"}),
+        version="1.2.3",
+        repo="lex-fmt/zed-lex",
+    )
+
+    published = publish_mod._publish_zed(req)
+
+    assert "for lex 1.2.3" in published.actions[0]
+    assert "decoy" not in published.actions[0]
+    assert (
+        tmp_path / "dist" / publish_mod.ZED_SCRATCH / "lex.extensions-toml"
+    ).is_file()
+
+
+def test_zed_follows_a_declared_leg_that_is_not_rust(tmp_path):
+    """`bundle.leg` names any [toolchains] toolchain since #1092 — the endpoint
+    follows the declaration, so a non-rust leg is read from ITS directory."""
+    artifact = _zed_bundled_artifacts(leg="tree-sitter", leg_name="tree-sitter")[0]
+    (tmp_path / "grammar").mkdir()
+    _write_zed_manifest(tmp_path / "grammar", ext_id="lex")
+    req = _request(
+        tmp_path,
+        artifact,
+        entries=_entries({"grammar": "tree-sitter", ".": "rust"}),
+        version="1.2.3",
+        repo="lex-fmt/zed-lex",
+    )
+
+    published = publish_mod._publish_zed(req)
+    assert "for lex 1.2.3" in published.actions[0]
+
+
+def test_zed_refuses_a_declaration_that_omits_the_manifest(tmp_path):
+    """The registry row is keyed by the id read from extension.toml, so a
+    payload that may not carry that manifest would publish coordinates for a
+    package that does not hold them — refused at the endpoint boundary, even
+    though the manifest happens to sit on disk right now."""
+    artifact = _zed_bundled_artifacts(payload=[{"path": "shared", "required": True}])[0]
+    _write_zed_manifest(tmp_path, ext_id="lex")
+    req = _request(
+        tmp_path,
+        artifact,
+        entries=_entries({".": "rust"}),
+        version="1.2.3",
+        repo="lex-fmt/zed-lex",
+    )
+
+    with pytest.raises(ReleaseError) as excinfo:
+        publish_mod._publish_zed(req)
+    message = str(excinfo.value)
+    assert "does not declare `extension.toml` as a required entry" in message
+    assert not (tmp_path / "dist" / publish_mod.ZED_SCRATCH).exists()
+
+
+def test_zed_refuses_a_manifest_declared_only_when_present(tmp_path):
+    """Declared but OPTIONAL is the same divergence one step later: the archive
+    may omit the manifest the row is keyed by."""
+    artifact = _zed_bundled_artifacts(
+        payload=[{"path": "shared", "required": True}, {"path": "extension.toml"}]
+    )[0]
+    _write_zed_manifest(tmp_path, ext_id="lex")
+    req = _request(
+        tmp_path,
+        artifact,
+        entries=_entries({".": "rust"}),
+        version="1.2.3",
+        repo="lex-fmt/zed-lex",
+    )
+    with pytest.raises(ReleaseError, match="as a required entry"):
+        publish_mod._publish_zed(req)
+
+
+def test_zed_endpoint_only_artifact_reads_the_crate_leg(tmp_path):
+    """An artifact with the zed ENDPOINT and no bundle declares no leg, so the
+    endpoint reads the rust leg a Zed extension crate lives in. This is the one
+    case with no declaration to follow — never a fallback for a declared one."""
+    artifact = _zed_artifacts()[0]  # endpoints only, no bundle
+    assert artifact.bundle is None
+    (tmp_path / "crate").mkdir()
+    _write_zed_manifest(tmp_path / "crate", ext_id="lex")
+    req = _request(
+        tmp_path,
+        artifact,
+        entries=_entries({"crate": "rust"}),
+        version="1.2.3",
+        repo="lex-fmt/zed-lex",
+    )
+    published = publish_mod._publish_zed(req)
+    assert "for lex 1.2.3" in published.actions[0]
+
+
 def test_zed_declares_no_secret_and_is_a_derived_stable_only_endpoint():
     """The endpoint renders the manual-PR coordinates and never pushes into the
     foreign registry, so it declares NO secret — its `secretreq.ENDPOINT_SECRETS`
