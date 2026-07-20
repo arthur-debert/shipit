@@ -58,7 +58,8 @@ _MANAGED_TOOLS: dict[str, tuple[str, str, str]] = {
     ),
     "tree-sitter": (
         "the tree-sitter CLI (conda-forge `tree-sitter-cli` — `tree-sitter "
-        "generate` at build, the corpus `tree-sitter test` lane)",
+        "generate` at build, `tree-sitter build --wasm` in the tarball "
+        "composition, the corpus `tree-sitter test` lane)",
         "pixi.toml#shipit-tree-sitter-release-deps",
         "tree-sitter",
     ),

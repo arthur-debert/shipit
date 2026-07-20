@@ -371,8 +371,12 @@ _NON_ARGV_LITERALS = frozenset(
         "rust",
         "scope",
         "src",
+        # tree-sitter parser-name metadata sources, filenames not tools
+        # (bundle.py _PARSER_NAME_SOURCES, #1078)
+        "src/grammar.json",
         "stage",  # vsix's native-staging option key (bundle.py VSIX option_keys)
         "success",
+        "tree-sitter.json",
         "v",
         "windows",
     }

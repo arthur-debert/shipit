@@ -50,7 +50,7 @@ the runner its block pins; the DEFAULT pixi env is the PATH that run sees):
 | `go` | build (`go build`) | runner image (ubuntu images still carry Go) | floats | none (see holes) |
 | `pytest` | test lane (not a release stage) | consumer env | consumer's | — |
 | `busted` | test lane (the lua toolchain's test slot, TOL03-WS01 #972) | consumer env (a luarocks package NOT on conda-forge — like pytest it rides the consumer's own env, never a release stage; no managed block, no `provisions_signal`) | consumer's | — |
-| `tree-sitter` (`tree-sitter-cli`) | test lane (corpus tests, `tree-sitter test`); build (`tree-sitter generate`); bundle (tarball composition reads the generate output) | pixi-managed (`pixi.toml#shipit-tree-sitter-release-deps`, #890 — delivered on the DECLARED tree-sitter `[toolchains]` leg, `Toolchain.provisions_signal`: no manifest signals a grammar, the wasm-pack→node-deps union mechanics) | `0.25.*` (parity with the grammar consumer's `tree-sitter-cli` devDependency line — the generated parser follows the CLI's minor line, bump both together) | `test_missing_tree_sitter_gets_the_reconcile_remedy` (build-stage remedy, the #890 death site), `test_tree_sitter_toolchain_delivers_the_cli_block` |
+| `tree-sitter` (`tree-sitter-cli`) | test lane (corpus tests, `tree-sitter test`); build (`tree-sitter generate`); bundle (tarball composition tars the generate output AND runs `tree-sitter build --wasm`, #1078 — see hole 8 for the wasm backend) | pixi-managed (`pixi.toml#shipit-tree-sitter-release-deps`, #890 — delivered on the DECLARED tree-sitter `[toolchains]` leg, `Toolchain.provisions_signal`: no manifest signals a grammar, the wasm-pack→node-deps union mechanics) | `0.25.*` (parity with the grammar consumer's `tree-sitter-cli` devDependency line — the generated parser follows the CLI's minor line, bump both together) | `test_missing_tree_sitter_gets_the_reconcile_remedy` (build-stage remedy, the #890 death site), `test_tree_sitter_toolchain_delivers_the_cli_block` |
 | `twine` | publish (pypi endpoint) | pixi-managed (`pixi.toml#shipit-python-release-deps`, #801 — the python toolchain signal, closed hole 2) | `6.2.*` | `test_missing_twine_gets_the_reconcile_remedy` |
 | `ruby` | publish (brew formula `ruby -c` syntax check) | runner image (ubuntu) | floats | — |
 | `rattler-build` | publish (conda endpoint — `rattler-build build` repackages a final release binary into a `.conda`, `rattler-build publish` pushes+reindexes the per-repo Artifact channel; ARF01-WS01 #950, ADR-0064) | pixi-managed (`pixi.toml#shipit-conda-packager`, conda-ENDPOINT signal — #1071 re-gated it off the rust signal so a NON-rust conda producer, e.g. tree-sitter's `tarball` grammar, gets its packager too; delivered iff any `[artifacts.*]` declares a `conda` endpoint, `_declared_endpoints`) | `0.69.*` (seed-validated at 0.69 against the live channel, #1049 — 0.68.* panicked during the S3 upload) | `test_missing_rattler_build_gets_the_reconcile_remedy`, `test_non_rust_conda_producer_gets_the_packager_block` |
@@ -130,6 +130,21 @@ to one line each) so the guard notes' numbering stays stable:
    #788 wasm-pack mechanics), pinned `0.25.*` in parity with the consumer's
    own devDependency line; a missing CLI at build fails loudly naming the
    reconcile.
+8. **OPEN (#1078): the `tree-sitter build --wasm` backend.** The tarball
+   composition now BUILDS the WebAssembly parser, not just tars the generate
+   output, so the tree-sitter leg needs a wasm backend as well as the CLI:
+   `tree-sitter build --wasm` compiles through emscripten on PATH, else
+   Docker. The managed `pixi.toml#shipit-tree-sitter-release-deps` block
+   provisions `tree-sitter-cli` ONLY — the backend is currently
+   **runner-image** (the GH-hosted ubuntu runner's ambient Docker), exactly
+   what the legacy `tree-sitter.yml@v3` job relied on. That is an unpinned,
+   undeclared dependency: a runner image dropping Docker breaks the bundle
+   stage with no reconcile remedy to name. Closing it means adding
+   `emscripten` to the managed block so the backend is pixi-managed and
+   pinned like every other release tool. A missing backend does at least fail
+   LOUDLY today — the composition hard-errors when the build produces no
+   `tree-sitter-<parser>.wasm` rather than shipping a source-only tarball
+   (`test_tarball_wasm_not_produced_refuses`).
 
 With holes 1–3 closed, a stock consumer needs ZERO consumer-side
 provisioning to traverse prepare → publish: every release-stage tool is

@@ -1102,12 +1102,17 @@ def _wasm_build(wasm_name="tree-sitter-lex.wasm"):
     return _build
 
 
-def _tree_sitter_grammar(leg_dir, *, name="tree-sitter-lex"):
-    """A minimal generated-grammar tree under `leg_dir`: the required `src/` +
-    the `package.json` the wasm parser-name is derived from."""
+def _tree_sitter_grammar(leg_dir, *, name="lex", package_name=None):
+    """A minimal generated-grammar tree under `leg_dir`, shaped like the real
+    lex-fmt/tree-sitter-lex checkout: the required `src/` carrying the
+    generated `src/grammar.json` the wasm parser-name is read from FIRST, plus
+    the legacy npm manifest carrying the same name in its prefixed form."""
     (leg_dir / "src").mkdir(parents=True, exist_ok=True)
     (leg_dir / "src/parser.c").write_text("/* generated */")
-    (leg_dir / "package.json").write_text(json.dumps({"name": name}))
+    (leg_dir / "src/grammar.json").write_text(json.dumps({"name": name}))
+    (leg_dir / "package.json").write_text(
+        json.dumps({"name": package_name or f"tree-sitter-{name}"})
+    )
 
 
 def test_tarball_builds_the_wasm_and_ships_the_union(tmp_path):
@@ -1220,34 +1225,130 @@ def test_tarball_wasm_not_produced_refuses(tmp_path):
     assert not (tmp_path / "dist" / "parser.tar.gz").exists()
 
 
-def test_tarball_nonconforming_package_name_refuses(tmp_path):
-    # The wasm output name is derived from package.json `name`; a name not of
-    # the `tree-sitter-<parser>` form cannot name the file, a loud refusal
-    # BEFORE the build runs.
+def test_tarball_unsafe_parser_name_refuses(tmp_path):
+    # The parser name becomes a FILENAME the composition writes and unlinks, so
+    # a name carrying a path separator (a scoped npm name, a `..` traversal)
+    # is a loud refusal BEFORE the build runs — never an unlink outside the leg.
     artifact = _tarball_artifact()
     entries = _entries({".": "tree-sitter"})
-    _tree_sitter_grammar(tmp_path, name="my-grammar")
+    _tree_sitter_grammar(tmp_path, name="../../escape")
     recorder = RunRecorder({"tree-sitter": _wasm_build()})
-    with pytest.raises(ReleaseError, match="does not start with `tree-sitter-`"):
+    with pytest.raises(ReleaseError, match="not a bare grammar identifier"):
         bundle_mod.TARBALL.compose(
             _request(tmp_path, artifact, entries, run_cmd=recorder)
         )
     assert recorder.calls == []  # name refused before the build
 
 
-def test_tarball_missing_package_json_refuses(tmp_path):
-    # No package.json → no parser name to derive → hard refusal (a tree-sitter
-    # grammar ships one).
+def test_tarball_non_node_grammar_without_package_json_bundles(tmp_path):
+    # A valid tree-sitter grammar need not ship an npm manifest: the parser
+    # name comes from the GENERATED `src/grammar.json` (always present — the
+    # composition already requires src/), so a non-Node grammar bundles fine.
+    # Requiring package.json here would have regressed repos that bundled
+    # before the wasm build landed (#1085 review).
     artifact = _tarball_artifact()
     entries = _entries({".": "tree-sitter"})
     (tmp_path / "src").mkdir()
     (tmp_path / "src/parser.c").write_text("/* generated */")
+    (tmp_path / "src/grammar.json").write_text(json.dumps({"name": "lex"}))
     recorder = RunRecorder({"tree-sitter": _wasm_build()})
-    with pytest.raises(ReleaseError, match="package.json"):
+
+    composed = bundle_mod.TARBALL.compose(
+        _request(tmp_path, artifact, entries, run_cmd=recorder)
+    )
+
+    assert composed == bundle_mod.Composed("parser", "tarball", ("parser.tar.gz",))
+    build_call, tar_call = recorder.calls
+    assert build_call == (("tree-sitter", "build", "--wasm"), tmp_path)
+    # The wasm rides under the generated grammar's name; no package.json to tar.
+    assert tar_call[0][-2:] == ("tree-sitter-lex.wasm", "src")
+
+
+def test_tarball_parser_name_precedence_across_metadata(tmp_path):
+    # `src/grammar.json` (generated) wins; `tree-sitter.json` is next; the
+    # legacy npm manifest is the last resort, its `tree-sitter-` prefix stripped.
+
+    def _parser_name(**files):
+        leg = tmp_path / str(len(list(tmp_path.iterdir())))
+        (leg / "src").mkdir(parents=True)
+        for rel, payload in files.items():
+            (leg / rel).write_text(json.dumps(payload))
+        return bundle_mod._tree_sitter_parser_name(leg, "parser")
+
+    assert (
+        _parser_name(
+            **{
+                "src/grammar.json": {"name": "generated"},
+                "tree-sitter.json": {"grammars": [{"name": "config"}]},
+                "package.json": {"name": "tree-sitter-npm"},
+            }
+        )
+        == "generated"
+    )
+    assert (
+        _parser_name(
+            **{
+                "tree-sitter.json": {"grammars": [{"name": "config"}]},
+                "package.json": {"name": "tree-sitter-npm"},
+            }
+        )
+        == "config"
+    )
+    assert _parser_name(**{"package.json": {"name": "tree-sitter-npm"}}) == "npm"
+
+
+def test_tarball_no_parser_name_anywhere_refuses(tmp_path):
+    # Every metadata source absent or nameless → no parser name to derive →
+    # hard refusal naming where it looked, before any build.
+    artifact = _tarball_artifact()
+    entries = _entries({".": "tree-sitter"})
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src/parser.c").write_text("/* generated */")
+    (tmp_path / "package.json").write_text(json.dumps(["not", "an", "object"]))
+    recorder = RunRecorder({"tree-sitter": _wasm_build()})
+    with pytest.raises(ReleaseError, match="no parser name in"):
         bundle_mod.TARBALL.compose(
             _request(tmp_path, artifact, entries, run_cmd=recorder)
         )
     assert recorder.calls == []
+
+
+def test_tarball_restores_a_committed_wasm(tmp_path):
+    # The wasm is OUR compile output and is unlinked after tarring — but a repo
+    # that COMMITTED one must get it back byte-for-byte, not have the release
+    # silently delete a tracked file and dirty the checkout (#1085 review).
+    artifact = _tarball_artifact()
+    entries = _entries({".": "tree-sitter"})
+    _tree_sitter_grammar(tmp_path)
+    committed = tmp_path / "tree-sitter-lex.wasm"
+    committed.write_bytes(b"COMMITTED")
+    recorder = RunRecorder({"tree-sitter": _wasm_build()})
+
+    bundle_mod.TARBALL.compose(_request(tmp_path, artifact, entries, run_cmd=recorder))
+
+    assert committed.read_bytes() == b"COMMITTED"  # restored, not clobbered
+    # No stash residue left behind in the leg dir.
+    assert not list(tmp_path.glob("*.shipit-stashed"))
+
+
+def test_tarball_removes_the_stale_archive_before_a_failing_build(tmp_path):
+    # The old archive goes BEFORE the build, so a composition that hard-fails
+    # leaves no obsolete source-only tarball in out_dir looking usable (#1085).
+    artifact = _tarball_artifact()
+    entries = _entries({".": "tree-sitter"})
+    _tree_sitter_grammar(tmp_path)
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    stale = dist / "parser.tar.gz"
+    stale.write_bytes(b"STALE")
+    recorder = RunRecorder()  # no effect → the build emits no wasm → hard fail
+
+    with pytest.raises(ReleaseError, match="produced no tree-sitter-lex.wasm"):
+        bundle_mod.TARBALL.compose(
+            _request(tmp_path, artifact, entries, run_cmd=recorder)
+        )
+
+    assert not stale.exists()  # the stale artifact did not survive the failure
 
 
 def test_tarball_rerun_unlinks_the_stale_archive(tmp_path):

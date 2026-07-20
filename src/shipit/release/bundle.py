@@ -194,6 +194,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -508,35 +509,107 @@ TREE_SITTER_PAYLOAD: tuple[str, ...] = (
 )
 
 
+def _name_from_grammar_json(data: object) -> str | None:
+    """The bare grammar name from a generated ``src/grammar.json``."""
+    if isinstance(data, dict) and isinstance(name := data.get("name"), str):
+        return name
+    return None
+
+
+def _name_from_tree_sitter_json(data: object) -> str | None:
+    """The bare grammar name from the modern ``tree-sitter.json`` config — its
+    FIRST ``grammars`` entry, the one a single-grammar repo declares."""
+    if not isinstance(data, dict):
+        return None
+    grammars = data.get("grammars")
+    if not (isinstance(grammars, list) and grammars):
+        return None
+    first = grammars[0]
+    if isinstance(first, dict) and isinstance(name := first.get("name"), str):
+        return name
+    return None
+
+
+def _name_from_package_json(data: object) -> str | None:
+    """The bare grammar name from the legacy npm manifest, which carries it
+    PREFIXED (``tree-sitter-lex``) where the tree-sitter metadata carries it
+    bare. A manifest whose name breaks the convention yields nothing rather
+    than a bogus parser name — the next source, or the hard error, decides."""
+    if not (isinstance(data, dict) and isinstance(name := data.get("name"), str)):
+        return None
+    prefix = "tree-sitter-"
+    return name[len(prefix) :] if name.startswith(prefix) else None
+
+
+#: Where the parser name is read from, in PRECEDENCE order. The generated
+#: ``src/grammar.json`` leads: ``tree-sitter generate`` always writes it and the
+#: composition already hard-requires ``src/``, so it costs no new input and is
+#: the same metadata the CLI names its own output off. ``tree-sitter.json`` (the
+#: modern config) is next, and the legacy npm manifest last — a valid
+#: non-Node grammar ships NO ``package.json``, so requiring one would break
+#: repositories that bundled fine before (#1085 review).
+_PARSER_NAME_SOURCES: tuple[tuple[str, Callable[[object], str | None]], ...] = (
+    ("src/grammar.json", _name_from_grammar_json),
+    ("tree-sitter.json", _name_from_tree_sitter_json),
+    ("package.json", _name_from_package_json),
+)
+
+#: A parser name rides straight into a FILENAME the composition writes and then
+#: unlinks (``tree-sitter-<parser>.wasm``), so only a bare grammar identifier is
+#: safe: a path separator (a scoped npm name like ``@scope/x``) or a ``..``
+#: traversal could resolve outside the leg dir and unlink the wrong file.
+_PARSER_NAME_RE = re.compile(r"\A[A-Za-z0-9_][A-Za-z0-9_.-]*\Z")
+
+
 def _tree_sitter_parser_name(leg_dir: Path, artifact_name: str) -> str:
     """The bare parser name the ``tree-sitter-<parser>.wasm`` output carries,
-    derived from ``package.json`` ``.name`` by stripping the ``tree-sitter-``
-    prefix (the legacy ``tree-sitter.yml@v3`` "Resolve parser name" step). A
-    non-conforming or absent name is a HARD failure, never a silent skip:
-    ``tree-sitter build --wasm`` names the file off the grammar, so a wrong
-    name would make the bundle look empty at the consumer's install, the worst
-    place to discover it. Pure but for the one ``package.json`` read."""
-    pkg = leg_dir / "package.json"
-    if not pkg.is_file():
-        raise ReleaseError(
-            f"[artifacts.{artifact_name}] tarball composition: no {pkg} — the "
-            f"wasm bundle names its file `tree-sitter-<parser>.wasm` off the "
-            f"grammar's package.json `name`; a tree-sitter grammar ships one"
-        )
-    try:
-        name = json.loads(pkg.read_text()).get("name")
-    except (ValueError, OSError) as exc:
-        raise ReleaseError(
-            f"[artifacts.{artifact_name}] tarball composition: could not read "
-            f"the parser name from {pkg}: {exc}"
-        ) from exc
-    if not isinstance(name, str) or not name.startswith("tree-sitter-"):
-        raise ReleaseError(
-            f"[artifacts.{artifact_name}] tarball composition: package.json "
-            f"name {name!r} does not start with `tree-sitter-`, so the wasm "
-            f"output name cannot be derived (convention: `tree-sitter-<parser>`)"
-        )
-    return name[len("tree-sitter-") :]
+    read from the first of :data:`_PARSER_NAME_SOURCES` that yields one (the
+    legacy ``tree-sitter.yml@v3`` "Resolve parser name" step, widened past its
+    npm-only lookup). No source yielding a name is a HARD failure, never a
+    silent skip: ``tree-sitter build --wasm`` names the file off the grammar,
+    so a wrong name would make the bundle look empty at the consumer's install,
+    the worst place to discover it. Pure but for the metadata reads."""
+    for rel, extract in _PARSER_NAME_SOURCES:
+        path = leg_dir / rel
+        if not path.is_file():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (ValueError, OSError) as exc:
+            raise ReleaseError(
+                f"[artifacts.{artifact_name}] tarball composition: could not "
+                f"read the parser name from {path}: {exc}"
+            ) from exc
+        name = extract(data)
+        if name is None:
+            continue
+        if not _PARSER_NAME_RE.match(name):
+            raise ReleaseError(
+                f"[artifacts.{artifact_name}] tarball composition: parser name "
+                f"{name!r} from {path} is not a bare grammar identifier, so it "
+                f"cannot safely name the `tree-sitter-<parser>.wasm` output"
+            )
+        return name
+    raise ReleaseError(
+        f"[artifacts.{artifact_name}] tarball composition: no parser name in "
+        f"{leg_dir} — the wasm bundle names its file `tree-sitter-<parser>.wasm` "
+        f"off the grammar, looked for in "
+        f"{', '.join(rel for rel, _ in _PARSER_NAME_SOURCES)}"
+    )
+
+
+def _stash_committed_wasm(wasm_path: Path) -> Path | None:
+    """Move a PRE-EXISTING ``tree-sitter-<parser>.wasm`` aside so the build
+    starts clean, returning where it went — ``None`` when there was nothing
+    there (the normal case: the wasm is a compile output). The composition
+    builds this exact name and unlinks it again afterwards, so a repo that
+    committed one would otherwise have it destroyed by a release; the caller
+    restores it in its ``finally``."""
+    if not wasm_path.is_file():
+        return None
+    stashed = wasm_path.with_name(wasm_path.name + ".shipit-stashed")
+    wasm_path.replace(stashed)
+    return stashed
 
 
 def _compose_tarball(req: ComposeRequest) -> Composed:
@@ -577,8 +650,17 @@ def _compose_tarball(req: ComposeRequest) -> Composed:
     parser = _tree_sitter_parser_name(leg_dir, req.artifact.name)
     wasm_name = f"tree-sitter-{parser}.wasm"
     wasm_path = leg_dir / wasm_name
-    # Rebuild fresh — never tar a stale wasm from a prior run.
-    wasm_path.unlink(missing_ok=True)
+    archive = f"{req.artifact.name}.tar.gz"
+    archive_path = req.out_dir / archive
+    # Drop the previous archive BEFORE the build, not after it succeeds: a
+    # composition that hard-fails below must not leave the last run's tarball
+    # sitting in out_dir looking like a fresh, usable artifact (#1085 review).
+    archive_path.unlink(missing_ok=True)
+    # Rebuild fresh — never tar a stale wasm from a prior run. A wasm the repo
+    # COMMITTED is moved aside instead of clobbered and restored below: the
+    # composition builds this name and removes it again, so clobbering would
+    # silently destroy a tracked file and leave the checkout dirty.
+    stashed = _stash_committed_wasm(wasm_path)
     try:
         req.run_cmd(["tree-sitter", "build", "--wasm"], leg_dir)
         if not wasm_path.is_file():
@@ -595,13 +677,7 @@ def _compose_tarball(req: ComposeRequest) -> Composed:
         present = [wasm_name] + [
             name for name in TREE_SITTER_PAYLOAD if (leg_dir / name).exists()
         ]
-        archive = f"{req.artifact.name}.tar.gz"
-        archive_path = req.out_dir / archive
         req.out_dir.mkdir(parents=True, exist_ok=True)
-        if archive_path.exists():
-            # tar -czf truncates, but an unlink keeps the rerun's artifact
-            # exactly the fresh tree (the archive recreate-from-clean contract).
-            archive_path.unlink()
         req.run_cmd(
             ["tar", "-czf", str(archive_path), "-C", str(leg_dir), *present],
             req.root,
@@ -609,8 +685,11 @@ def _compose_tarball(req: ComposeRequest) -> Composed:
     finally:
         # A compile output, not a checked-in file: leave the leg dir clean
         # whether the tar succeeded or a hard-fail exited early (ADR-0009: only
-        # the declared archive under out_dir survives a composition).
+        # the declared archive under out_dir survives a composition) — and give
+        # a committed wasm back exactly as it was found.
         wasm_path.unlink(missing_ok=True)
+        if stashed is not None:
+            stashed.replace(wasm_path)
     return Composed(req.artifact.name, "tarball", (archive,))
 
 
