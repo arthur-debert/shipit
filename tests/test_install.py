@@ -3224,12 +3224,27 @@ def test_declared_signals_empty_without_config(tmp_path):
     assert verb._declared_signals(tmp_path) == set()
 
 
-def test_declared_signals_empty_on_unparseable_config(tmp_path):
-    # Malformed TOML degrades to no extra signals here — the config's own
-    # parse error surfaces on the verbs that read the map, not the toolchain
-    # augmentation (issue #788).
+def test_declared_signals_refuses_an_unparseable_config(tmp_path):
+    # #1101: a config the tool cannot parse is NOT a config declaring nothing.
+    # Degrading to set() here dropped exactly the units the artifacts gate while
+    # install reported success, so the parse error propagates instead.
     (tmp_path / ".shipit.toml").write_text("this is not = valid = toml\n")
-    assert verb._declared_signals(tmp_path) == set()
+    with pytest.raises(config.ConfigError, match=r"malformed"):
+        verb._declared_signals(tmp_path)
+
+
+def test_declared_signals_refuses_an_unparseable_artifact_map(tmp_path):
+    # The #1101 live shape: valid TOML whose [artifacts] map fails to parse (a
+    # tarball bundle predating the #1092 producer-declared payload). The
+    # migration-pointing message is the actionable fact — it must reach the user.
+    (tmp_path / ".shipit.toml").write_text(
+        "[artifacts.grammar]\n"
+        'build = ["tree-sitter"]\n'
+        'bundle = { composition = "tarball" }\n'
+        'endpoints = ["gh-release", "conda"]\n'
+    )
+    with pytest.raises(config.ConfigError, match=r"missing `leg` and `payload`"):
+        verb._declared_signals(tmp_path)
 
 
 def test_wasm_pack_composition_delivers_the_node_deps_block(tmp_path):
@@ -3358,11 +3373,12 @@ def test_declared_endpoints_empty_without_config(tmp_path):
     assert verb._declared_endpoints(tmp_path) == frozenset()
 
 
-def test_declared_endpoints_empty_on_unparseable_config(tmp_path):
-    # Malformed TOML degrades to no endpoints here — the config's own parse
-    # error surfaces on the verbs that read the map, not this augmentation.
+def test_declared_endpoints_refuses_an_unparseable_config(tmp_path):
+    # #1101, the endpoint half: an unparseable config reading as "no endpoints"
+    # silently un-manages the conda-packager block. Refuse instead.
     (tmp_path / ".shipit.toml").write_text("this is not = valid = toml\n")
-    assert verb._declared_endpoints(tmp_path) == frozenset()
+    with pytest.raises(config.ConfigError, match=r"malformed"):
+        verb._declared_endpoints(tmp_path)
 
 
 def test_non_rust_conda_producer_gets_the_packager_block(tmp_path):
@@ -3426,6 +3442,45 @@ def test_conda_packager_reconcile_is_not_current_without_it(tmp_path):
     plan = irec.reconcile(units, retired, state)
     added = {d.unit.key for d in plan.decisions if d.action == irec.ADD}
     assert iunits.PIXI_CONDA_PACKAGER_KEY in added
+
+
+def test_install_refuses_an_unparseable_artifact_map(tmp_path, rec, capsys):
+    # #1101 regression, end to end — the live lex-fmt/tree-sitter-lex shape: a
+    # `tarball` bundle declared before #1092 made `leg`/`payload` producer-owned.
+    # `load_artifacts` refuses it, and install used to swallow that into an EMPTY
+    # unit set: the repo reconciled as if it declared no signals and no endpoints,
+    # dropping the very blocks its artifacts gate (unit absence never DELETES a
+    # block — removal rides the retired list — so they stay on disk and go stale)
+    # while the command exited 0. Now the parse error refuses the run.
+    root = _git_repo(tmp_path)
+    (root / "grammar.js").write_text("module.exports = grammar({});\n")
+    (root / ".shipit.toml").write_text(
+        "[toolchains]\n"
+        '"." = "tree-sitter"\n'
+        "[artifacts.tree-sitter]\n"
+        'build = ["tree-sitter"]\n'
+        'bundle = { composition = "tarball" }\n'
+        'endpoints = ["gh-release", "conda"]\n'
+    )
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+
+    rc = verb.run(str(root), local=True)
+    assert rc == 1
+
+    captured = capsys.readouterr()
+    out, err = captured.out, captured.err
+    # The migration-pointing ConfigError text IS the fix instruction, so it must
+    # reach the user rather than being logged as a degraded path.
+    assert "missing `leg` and `payload`" in err
+    # It refused BEFORE any plan: the two units the empty-set reconcile would have
+    # dropped are named nowhere, and nothing was written, committed, or hooked.
+    # (The control — the same repo with a declared payload DOES get both blocks —
+    # is test_non_rust_conda_producer_gets_the_packager_block above.)
+    assert iunits.PIXI_TREE_SITTER_DEPS_KEY not in out
+    assert iunits.PIXI_CONDA_PACKAGER_KEY not in out
+    assert not (root / "pixi.toml").exists()
+    assert rec.calls == []
+    assert rec.hook_activations == []
 
 
 def test_non_conda_repo_gets_no_packager_block(tmp_path):

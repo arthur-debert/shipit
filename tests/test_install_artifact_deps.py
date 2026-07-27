@@ -954,14 +954,16 @@ def test_verb_fails_loud_when_pixi_toml_is_not_utf8(tmp_path):
         verb._artifact_dep_units(tmp_path, is_private=lambda slug: False)
 
 
-def test_verb_degrades_on_an_unreadable_shipit_toml(tmp_path):
-    # A generally-unreadable `.shipit.toml` degrades to no artifact units (gather
-    # warns), it does not crash install — the artifact-dep read is not the place a
-    # broken top-level config surfaces.
+def test_verb_refuses_an_unreadable_shipit_toml(tmp_path):
+    # #1101: an unreadable `.shipit.toml` fails LOUD, it no longer degrades to no
+    # artifact units. install now has ONE answer for a config it cannot parse —
+    # the same refusal `_declared_signals` raises on the same file earlier in the
+    # run — rather than two, and a broken config never reads as "declares nothing".
     from shipit.verbs import install as verb
 
     _write_config(tmp_path, "this is not valid toml = = =\n")
-    assert verb._artifact_dep_units(tmp_path, is_private=lambda slug: False) == []
+    with pytest.raises(config.ConfigError, match=r"malformed"):
+        verb._artifact_dep_units(tmp_path, is_private=lambda slug: False)
 
 
 # --------------------------------------------------------------------------
