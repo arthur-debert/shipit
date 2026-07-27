@@ -1551,9 +1551,10 @@ lint-full = { cmd = "./bin/shipit lint" }
 
 
 def test_stale_provision_matches_across_launcher_and_argv_shapes():
-    """`\\s+` absorbs the launcher-prefix and spacing variation the fleet wrote,
-    and an argv-list task is matched over the command it would run, not per
-    token — the retired verb dies the same way in every one of them."""
+    """The executable's BASENAME absorbs the launcher-prefix and spacing
+    variation the fleet wrote, an argv-list task is matched over the words it
+    would run, and a call after a shell operator is still a call — the retired
+    verb dies the same way in every one of them."""
     manifest = """\
 [workspace]
 name = "shapes"
@@ -1564,12 +1565,100 @@ platforms = ["osx-arm64"]
 spaced = "./bin/shipit  provision   lexd"
 plain = "shipit provision lexd"
 argv = ["./bin/shipit", "provision", "lexd"]
+chained = "mkdir -p build && ./bin/shipit provision lexd && ./bin/shipit test"
+unspaced = "./bin/shipit provision lexd;./bin/shipit test"
 """
     assert {sp.task for sp in irec.stale_provision_tasks(manifest)} == {
         "spaced",
         "plain",
         "argv",
+        "chained",
+        "unspaced",
     }
+
+
+def test_stale_provision_ignores_a_task_that_only_names_the_retired_command():
+    """The match is over WORDS in command position, not a substring of the
+    command text: a task that PRINTS the retired command (the repos narrate
+    ADR-0066, and not only in comments) runs nothing retired. Getting this wrong
+    is not a cosmetic false positive — every applying mode fails closed on a
+    finding, so an `echo` would take `shipit install` down (#1105 review)."""
+    manifest = """\
+[workspace]
+name = "prose"
+channels = ["conda-forge"]
+platforms = ["osx-arm64"]
+
+[tasks]
+explain = "echo 'shipit provision lexd is retired (ADR-0066)'"
+explain-argv = ["echo", "shipit provision lexd is retired"]
+explain-printf = 'printf "%s\\n" "run shipit provision lexd? no: it is retired"'
+explain-bare = "echo shipit provision lexd is retired"
+explain-table = { cmd = "echo 'drop the shipit provision lexd prefix'" }
+unbalanced = "echo 'shipit provision lexd"
+"""
+    assert irec.stale_provision_tasks(manifest) == ()
+
+
+def test_stale_provision_locates_the_line_across_toml_key_spellings():
+    """Every TOML spelling of the same definition resolves to its own line: the
+    `[table.task]` header form, a dotted `tasks.<task>` key under a feature
+    header, and quoted header segments. A shell test inside a multi-line task
+    body (`[ -z "$VAR" ]` — bracketed, but not a key path) must not be read as a
+    table header, or the tasks after it lose their line numbers (#1105 review)."""
+    manifest = """\
+[workspace]
+name = "spellings"
+channels = ["conda-forge"]
+platforms = ["osx-arm64"]
+
+[tasks]
+guarded = '''
+[ -z "$LEXD_HOME" ]
+echo checked
+'''
+after-guard = "./bin/shipit provision lexd"
+
+[tasks.header-form]
+cmd = "./bin/shipit provision lexd"
+
+[feature.lint]
+tasks.dotted = "./bin/shipit provision lexd"
+
+[target."osx-arm64".tasks]
+quoted-header = "./bin/shipit provision lexd"
+"""
+    found = {sp.task: sp for sp in irec.stale_provision_tasks(manifest)}
+    assert set(found) == {"after-guard", "header-form", "dotted", "quoted-header"}
+    # The bracketed shell test on line 8 did not hijack the header tracker: the
+    # task after it is still located inside [tasks].
+    assert found["after-guard"].table == "tasks"
+    assert found["after-guard"].line == 11
+    assert found["header-form"].table == "tasks"
+    assert found["header-form"].line == 13
+    assert found["dotted"].table == "feature.lint.tasks"
+    assert found["dotted"].line == 17
+    assert found["quoted-header"].table == "target.osx-arm64.tasks"
+    assert found["quoted-header"].line == 20
+
+
+def test_stale_provision_walks_a_feature_named_tasks():
+    """The walk collects a `tasks` table AND descends into it, so a feature that
+    happens to be named `tasks` cannot shadow the real task collection nested
+    inside it (#1105 review)."""
+    manifest = """\
+[workspace]
+name = "shadow"
+channels = ["conda-forge"]
+platforms = ["osx-arm64"]
+
+[feature.tasks.tasks]
+lint-full = "./bin/shipit provision lexd && ./bin/shipit lint"
+"""
+    (found,) = irec.stale_provision_tasks(manifest)
+    assert found.task == "lint-full"
+    assert found.table == "feature.tasks.tasks"
+    assert found.line == 7
 
 
 def test_install_refuses_a_consumer_still_calling_the_retired_provision(tmp_path, rec):

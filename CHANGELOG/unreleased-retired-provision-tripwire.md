@@ -5,6 +5,7 @@
   lane tasks (`lint-full`, `test-full`) that live outside every managed block, so
   no reconcile rewrites them: without the tripwire the pin bump lands green and
   the consumer's CI discovers `No such command 'provision'` later. Detection
-  matches the command string inside the parsed tasks — not a task name (one repo
-  carries only the inline `provision lexd &&` prefix) and not prose, so the
-  ADR-0066 comments the fleet's manifests carry are never flagged.
+  reads the parsed tasks' commands and matches a `shipit` executable in shell
+  command position — not a task name (one repo carries only the inline
+  `provision lexd &&` prefix) and not prose, so neither the ADR-0066 comments the
+  fleet's manifests carry nor a task that PRINTS the retired command is flagged.
