@@ -991,6 +991,17 @@ def _parse_payload(where: str, value: object) -> tuple[PayloadEntry, ...]:
             )
         normalized = str(PurePosixPath(path))
         parts = PurePosixPath(normalized).parts
+        if not parts:
+            # `.`, `./`, `./.` all normalize to `.` — an EMPTY component tuple
+            # that names the leg dir itself, not a member. It slips past the
+            # escape/refuse-links guards (nothing to walk) and would later crash
+            # the compose containment check, so construction-is-validation:
+            # refuse it here, at parse, pointing at declaring an explicit member.
+            raise ConfigError(
+                f"{at}.path: `{path}` names the leg directory itself, not a "
+                f"payload member — declare the explicit files or subdirectories "
+                f'to ship, e.g. "src" or "extension.toml"'
+            )
         overlap = next((p for p in seen if _paths_overlap(parts, p)), None)
         if overlap is not None:
             # A repeated path would tar the same member twice and leave the two

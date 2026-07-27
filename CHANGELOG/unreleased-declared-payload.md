@@ -22,13 +22,18 @@
   that name the same archive member — the same path, or one containing the other
   (`src` plus `src/parser.c`, which a directory operand already ships) — are
   refused: each member is declared exactly once.
-- **The declared payload is untrusted data.** A payload path that traverses a
-  symlink or junction is refused at the bundle stage, naming the offending
-  component: the bundle archives only real files and real directories, so a
-  committed redirect can never steer the archive at a file outside the leg (the
-  same refuse-links model `shipit stage` uses, now shared between them). Payload
-  operands are also fenced from `tar`'s option list, so a path that is spelled
-  like a flag is always read as a path.
+- **The declared payload — AND the leg it rides under — are untrusted data.** The
+  bundle stage refuses any symlink or junction on the whole path from the checkout
+  root down: the `bundle.leg` [toolchains] directory itself, then each payload
+  entry, walked one component at a time from the trusted checkout root (never from
+  a base derived by resolving an untrusted path). So a committed `leg -> /etc` or a
+  `leak -> /etc` payload component is refused, naming the offending component,
+  before it can steer the archive at a host file — the bundle archives only real
+  files and real directories, the same refuse-links, anchor-from-root model
+  `shipit stage` uses, now via one shared primitive. Payload operands are also
+  fenced from `tar`'s option list, so a path spelled like a flag is always read as
+  a path. A payload entry of `.` (or `./`, `./.`) — which names the leg dir itself,
+  not a member — is refused at config-parse.
 - release/publish: the `zed` endpoint reads `extension.toml` from the leg the
   `zed` **bundle declared**, not from a hardcoded `rust` leg, and refuses a
   declaration that does not carry that manifest as a required payload entry — the

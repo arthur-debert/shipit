@@ -163,12 +163,15 @@ functions the entries carry:
   payload with no required entry). Both are platform-independent (declared
   source, no per-OS variant — no ``-<target>`` suffix), so every matrix leg
   composes the identical bytes under the one unqualified name. Because the
-  payload is producer-declared it is UNTRUSTED DATA steering a read of the
-  release runner: a path that traverses a link is REFUSED rather than followed
-  (:func:`_payload_operands`, the model :mod:`shipit.staging` uses on the other
-  declared-path surface, shared via :mod:`shipit.fspath`), and the operands are
-  fenced from ``tar``'s option list with ``--`` so a path spelled like a flag can
-  never become one. The two names differ only in the ENDPOINT story they pair
+  payload is producer-declared — AND so is the ``bundle.leg`` it rides under —
+  the whole path is UNTRUSTED DATA steering a read of the release runner, so the
+  refuse-links walk starts at the CHECKOUT ROOT and runs continuously through the
+  leg and then each payload entry: a link anywhere on ``root → leg → entry`` is
+  REFUSED rather than followed (:func:`_payload_operands`, the anchor-from-root
+  model :mod:`shipit.staging` uses on the other declared-path surface, shared via
+  :mod:`shipit.fspath`), so a committed ``leg -> /etc`` can never become the base
+  the payload is collected from. The operands are also fenced from ``tar``'s
+  option list with ``--`` so a path spelled like a flag can never become one. The two names differ only in the ENDPOINT story they pair
   with: ``zed``'s tag IS the
   release, and the ``zed`` publish endpoint (``release/publish.py``) renders the
   ``zed-industries/extensions`` registry coordinates for a manually-gated PR
@@ -475,24 +478,35 @@ def _compose_wheel(req: ComposeRequest) -> Composed:
 
 
 def _payload_operands(
-    artifact_name: str, spec: config.BundleSpec, leg_dir: Path
-) -> list[str]:
-    """The declared payload's tar operands — the entries PRESENT under
-    ``leg_dir``, in declaration order — after proving every declared path is a
-    real, in-leg path.
+    artifact_name: str, spec: config.BundleSpec, root: Path, leg_rel: str
+) -> tuple[Path, list[str]]:
+    """The proven-real leg directory and the declared payload's tar operands —
+    the entries PRESENT under the leg, in declaration order — after proving the
+    WHOLE path from the checkout root down (leg included, then each payload
+    entry) is link-free.
 
-    The payload is producer-declared, so these paths are UNTRUSTED DATA that end
-    up steering a read of the release runner's filesystem. The guard is
-    structural, the same answer :mod:`shipit.staging` gives on the other
-    declared-path surface — links are REFUSED, never followed
-    (:func:`shipit.fspath.first_link_component`) — because the escape is not in
-    the SPELLING and no lexical check can see it: ``leak/passwd`` is a
+    The payload is producer-declared, and so is the ``bundle.leg`` it rides
+    under, so BOTH are UNTRUSTED DATA that end up steering a read of the release
+    runner's filesystem. The guard is structural — links are REFUSED, never
+    followed (:func:`shipit.fspath.first_link_component`) — because the escape is
+    not in the SPELLING and no lexical check can see it: ``leak/passwd`` is a
     well-formed relative path, and if ``leak`` is a committed ``leak -> /etc``
     then ``exists()`` follows it and tar archives the host's file into a
-    published artifact. With no link on the chain, a path of real components
-    physically cannot leave ``leg_dir``, so containment is automatic rather than
-    checked vector by vector; the resolved-containment assert below is a belt on
-    that invariant, not the thing holding it up.
+    published artifact.
+
+    The one trusted base is the CHECKOUT ROOT — never a path derived by
+    ``resolve()``-ing an untrusted value. The refuse-links walk starts there and
+    runs continuously down: FIRST the leg's own components (so a
+    ``[toolchains]`` leg pointed at a committed ``grammar -> /etc`` is refused
+    before it can ever become a base — the round-2 hole, where resolving the leg
+    first made ``/etc`` "trusted"), THEN each payload entry from the now-proven
+    leg dir. With no link anywhere on ``root → leg → entry``, a path of real
+    components physically cannot leave the checkout, so containment is automatic
+    rather than checked vector by vector; the ``is_relative_to`` belts are the
+    explicit statement of that invariant, not the thing holding it up. This is
+    the SAME anchor-from-root discipline :mod:`shipit.staging` applies to its env
+    prefix (:func:`shipit.staging._reject_link_components` on
+    ``prefix.relative_to(root).parts``), via the one shared primitive.
 
     Every declared entry is walked, INCLUDING a when-present one that turns out
     absent: a redirect in a payload declaration is a defect in the declaration
@@ -501,9 +515,32 @@ def _payload_operands(
     entry is the loud build-never-ran failure (all names at once, so one run
     reports the whole gap).
     """
-    leg_dir_res = leg_dir.resolve()
+    where = f"[artifacts.{artifact_name}] {spec.composition} composition"
+    root_res = root.resolve()
+    # The leg is an anchor, not yet a base: walk ITS components from the trusted
+    # checkout root and refuse a link before it is ever resolved. `leg_rel` is
+    # `.`/`` for a root leg (empty parts — nothing to walk) and a repo-relative,
+    # `..`-free path otherwise (the [toolchains] parse guarantees the shape; only
+    # its filesystem nature is untrusted here).
+    leg_parts = PurePosixPath(leg_rel).parts if leg_rel not in (".", "") else ()
+    leg_link = first_link_component(root_res, leg_parts)
+    if leg_link is not None:
+        raise ReleaseError(
+            f"{where}: the `{spec.leg}` leg path {leg_rel!r} traverses a symlink "
+            f"or junction at {leg_link} — the bundle refuses to FOLLOW links out "
+            f"of the checkout; a `[toolchains]` leg must be a real directory, so "
+            f"a committed redirect can never make an out-of-tree dir the base the "
+            f"payload is collected from"
+        )
+    leg_dir_res = root_res.joinpath(*leg_parts)
+    if leg_dir_res != root_res and not leg_dir_res.is_relative_to(root_res):
+        # Unreachable while the leg walk holds (a `..`-free, link-free relative
+        # path stays under root) — the explicit statement of the invariant.
+        raise ReleaseError(
+            f"{where}: the `{spec.leg}` leg {leg_dir_res} resolves outside the "
+            f"checkout ({root_res}); a leg is a real directory inside the tree"
+        )
     for entry in spec.payload:
-        where = f"[artifacts.{artifact_name}] {spec.composition} composition"
         if config.path_escapes(entry.path):
             # Belt for a hand-built BundleSpec: the config boundary already
             # applies this predicate at parse (`_parse_payload`), but the leg
@@ -527,7 +564,7 @@ def _payload_operands(
             )
         candidate = leg_dir_res.joinpath(*parts)
         if candidate == leg_dir_res or not candidate.is_relative_to(leg_dir_res):
-            # Unreachable while the two guards above hold — kept as the explicit
+            # Unreachable while the guards above hold — kept as the explicit
             # statement of the invariant they exist to produce.
             raise ReleaseError(
                 f"{where}: payload path {entry.path!r} resolves to {candidate}, "
@@ -541,17 +578,17 @@ def _payload_operands(
     ]
     if missing:
         raise ReleaseError(
-            f"[artifacts.{artifact_name}] {spec.composition} composition: "
-            f"required payload missing under {leg_dir} — "
+            f"{where}: required payload missing under {leg_dir_res} — "
             f"{', '.join(missing)}; the bundle stage composes BUILD OUTPUTS "
             f"(run `shipit build` first) and ships exactly the declared "
             f"`bundle.payload`, never a quiet empty archive"
         )
-    return [
+    present = [
         entry.path
         for entry in spec.payload
         if leg_dir_res.joinpath(entry.path).exists()
     ]
+    return leg_dir_res, present
 
 
 def _compose_declared_payload(req: ComposeRequest) -> Composed:
@@ -586,8 +623,11 @@ def _compose_declared_payload(req: ComposeRequest) -> Composed:
             f"reached with no `bundle.leg`/`bundle.payload` declaration"
         )
     leg = _leg_for(req.artifact, req.entries, spec.leg, spec.composition)
-    leg_dir = req.root if leg.path in (".", "") else req.root / leg.path
-    present = _payload_operands(req.artifact.name, spec, leg_dir)
+    # The leg base is validated FROM the checkout root (not trusted by resolving
+    # an untrusted [toolchains] path), so `_payload_operands` returns the
+    # proven-real leg dir it walked to — tar's `-C` and the membership checks
+    # then agree on the one link-free directory.
+    leg_dir, present = _payload_operands(req.artifact.name, spec, req.root, leg.path)
     archive = f"{req.artifact.name}.tar.gz"
     archive_path = req.out_dir / archive
     req.out_dir.mkdir(parents=True, exist_ok=True)

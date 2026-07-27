@@ -745,6 +745,16 @@ def test_payload_entry_required_must_be_a_boolean():
         _load(_payload_toml('[{ path = "src", required = "yes" }]'))
 
 
+@pytest.mark.parametrize("path", [".", "./", "./."])
+def test_payload_entry_path_may_not_name_the_leg_dir_itself(path):
+    # `.`/`./`/`./.` all normalize to `.` — an empty component tuple that names
+    # the leg dir, not a member. It slips past the escape / refuse-links guards
+    # (nothing to walk) and would otherwise only blow up at compose, so it must
+    # die at PARSE (construction-is-validation), pointing at an explicit member.
+    with pytest.raises(config.ConfigError, match="names the leg directory itself"):
+        _load(_payload_toml(f"[{{ path = '{path}', required = true }}]"))
+
+
 @pytest.mark.parametrize("path", ["/etc/passwd", "../outside", "..", "C:/x", "a\\b"])
 def test_payload_entry_path_may_not_escape_the_checkout(path):
     # The same guard `bundle.source` and the vsix stage dest take: a payload

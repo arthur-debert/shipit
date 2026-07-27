@@ -1426,6 +1426,56 @@ def test_declared_payload_refuses_a_symlink_leaf_even_when_optional(tmp_path):
     assert recorder.calls == []  # refused before tar ever ran
 
 
+def test_declared_payload_refuses_a_leg_pointed_through_a_symlink(tmp_path):
+    # The leg is ALSO producer-declared, so a repo can commit `grammar -> /etc`,
+    # point a [toolchains] leg at it, and declare a required payload `passwd`.
+    # The round-1 guard resolved the leg FIRST — making the outside dir the
+    # trusted base — so the payload walk saw `/etc/passwd` as entirely real. The
+    # fix walks from the checkout root THROUGH the leg, so the leg's own redirect
+    # is refused before it can ever become a base. REAL tar: if the guard were
+    # missing, the host file would land in a published artifact.
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "passwd").write_text("HOST SECRET")
+    (tmp_path / "grammar").symlink_to(outside, target_is_directory=True)
+    # The vector is live — the host file IS reachable through the leg symlink.
+    assert (tmp_path / "grammar/passwd").read_text() == "HOST SECRET"
+
+    artifact = _tarball_artifact(payload=[{"path": "passwd", "required": True}])
+    entries = _entries({"grammar": "tree-sitter"})
+
+    def _real_run(argv, cwd):
+        return execrun.run([str(a) for a in argv], cwd=cwd)
+
+    with pytest.raises(ReleaseError) as excinfo:
+        bundle_mod.TARBALL.compose(
+            _request(tmp_path, artifact, entries, run_cmd=_real_run)
+        )
+
+    message = str(excinfo.value)
+    assert "symlink or junction" in message
+    assert "grammar" in message  # names the offending LEG component
+    # Nothing was composed: no archive exists to have leaked the host file.
+    assert not (tmp_path / "dist" / "parser.tar.gz").exists()
+
+
+def test_declared_payload_refuses_a_leg_symlink_component_mid_path(tmp_path):
+    # The leg can be a NESTED [toolchains] path; a redirect on any of its
+    # components is refused, not only a leaf leg. `sub` is real, `sub/leg` is the
+    # redirect.
+    outside = tmp_path / "outside"
+    (outside / "src").mkdir(parents=True)
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub/leg").symlink_to(outside, target_is_directory=True)
+    spec = config.BundleSpec(
+        composition="tarball",
+        leg="tree-sitter",
+        payload=(config.PayloadEntry(path="src", required=True),),
+    )
+    with pytest.raises(ReleaseError, match="traverses a symlink or junction"):
+        bundle_mod._payload_operands("parser", spec, tmp_path, "sub/leg")
+
+
 def test_declared_payload_operands_can_never_be_read_as_tar_options(tmp_path):
     # A repo may COMMIT a file whose name looks like a GNU tar option — the
     # config boundary has no business rejecting a legal filename — so the
@@ -1495,7 +1545,7 @@ def test_declared_payload_refuses_a_leg_relative_escape_at_runtime(tmp_path):
     (tmp_path / "outside").mkdir()
     (tmp_path / "grammar").mkdir()
     with pytest.raises(ReleaseError, match="not a leg-relative path"):
-        bundle_mod._payload_operands("parser", spec, tmp_path / "grammar")
+        bundle_mod._payload_operands("parser", spec, tmp_path, "grammar")
 
 
 def test_declared_payload_compositions_share_one_compose(tmp_path):
