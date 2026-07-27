@@ -79,6 +79,22 @@ declare that table twice and make ``pixi.toml`` unparseable, so the block is
 skipped and the consumer's own table stays authoritative
 (:class:`PixiTableConflict`).
 
+Install also runs a RETIRED-COMMAND tripwire over the consumer's pixi tasks
+(#1070, ADR-0066): ``shipit provision lexd`` was deleted with no fallback, but
+a dozen repos still call it from a CONSUMER-AUTHORED lane task
+(``lint-full = { cmd = "./bin/shipit provision lexd && ./bin/shipit lint" }``)
+that lives outside every managed block, so no unit rewrites it and the stale
+call survives a reconcile — surfacing much later as ``No such command
+'provision'`` on a red CI lane. Gather matches the COMMAND STRING (never a task
+name: one repo carries only the inline prefix, with no ``provision-lexd`` task
+at all) against the parsed manifest's tasks, and EVERY applying mode fails
+closed on the finding (:class:`StaleProvisionTask`,
+:func:`shipit.install.apply.reject_stale_provision`) naming the task, its line,
+and the remedy — the managed ``[feature.shipit-lexd]`` block already puts lexd
+on PATH in the lint env, so the fix is deleting the prefix. There is nothing to
+skip here, unlike the pixi conflicts above: the offending task is the
+consumer's own, and only their edit can repair it.
+
 Install also decides a CHANGELOG RE-RENDER (TOL01-WS08 #578): where the
 consumer has adopted the fragment convention (``CHANGELOG/``), a renderer
 change in shipit (a new generated-file header, section fixes) leaves the
@@ -1271,6 +1287,161 @@ def format_symlinked_dest(sd: SymlinkedDest) -> str:
 
 
 # --------------------------------------------------------------------------
+# The retired `provision lexd` tripwire (ARF02-WS06 #1070, ADR-0066)
+# --------------------------------------------------------------------------
+
+#: The retired command, matched as a COMMAND STRING inside a pixi task — never
+#: as a task NAME. ADR-0066 deleted the `provision` verb outright (no fallback),
+#: so any surviving call dies with `No such command 'provision'`. The fleet
+#: wrote the call in two shapes: a `provision-lexd` task of its own, and an
+#: inline `./bin/shipit provision lexd && ./bin/shipit lint` prefix on a
+#: consumer-authored `lint-full`/`test-full` lane task — and at least one repo
+#: (phos-editor/app) carries ONLY the inline prefix, with no `provision-lexd`
+#: task at all, so a task-name check would miss it. `\s+` absorbs the launcher
+#: prefix variations (`./bin/shipit`, `pixi run shipit`) and any spacing.
+RETIRED_PROVISION_RE = re.compile(r"shipit\s+provision\s+lexd\b")
+
+
+@dataclass(frozen=True)
+class StaleProvisionTask:
+    """One consumer pixi task still calling the retired ``shipit provision lexd``.
+
+    ``table`` is the dotted TOML path of the tasks table holding it (``tasks``,
+    ``feature.lint.tasks``), ``line`` the 1-based line of the task's definition
+    in ``pixi.toml`` (0 when the definition line cannot be located — the message
+    then names the table instead), and ``command`` the offending command string
+    as written, so the operator can see exactly which prefix to drop.
+    """
+
+    task: str
+    table: str
+    line: int
+    command: str
+
+
+def _task_commands(spec: object) -> tuple[str, ...]:
+    """Every command string a pixi task definition carries.
+
+    pixi writes a task three ways: a bare string (``t = "cmd"``), an argv list
+    (``t = ["./bin/shipit", "provision", "lexd"]``), or a table with a ``cmd``
+    that is itself either shape. The argv list is JOINED into one string so a
+    command split across arguments still reads as the command it runs — the
+    match is over what the shell would see, not over one token.
+    """
+    if isinstance(spec, str):
+        return (spec,)
+    if isinstance(spec, list):
+        return (" ".join(str(x) for x in spec),)
+    if isinstance(spec, dict):
+        return _task_commands(spec.get("cmd"))
+    return ()
+
+
+def _tasks_tables(node: object, path: tuple[str, ...] = ()) -> list[tuple[str, dict]]:
+    """Every ``tasks`` table in a parsed pixi manifest, with its dotted path.
+
+    A recursive walk rather than two hard-coded lookups: pixi accepts tasks at
+    ``[tasks]``, ``[feature.<name>.tasks]`` and under a ``[target.<platform>]``
+    of either, and a stale command hiding in any of them fails the same way.
+    """
+    if not isinstance(node, dict):
+        return []
+    found: list[tuple[str, dict]] = []
+    for key, value in node.items():
+        if not isinstance(value, dict):
+            continue
+        if key == "tasks":
+            found.append((".".join((*path, "tasks")), value))
+        else:
+            found.extend(_tasks_tables(value, (*path, str(key))))
+    return found
+
+
+def _definition_line(text: str, table: str, task: str) -> int:
+    """The 1-based ``pixi.toml`` line where ``task`` is defined in ``table``.
+
+    Located in the RAW text (tomllib discards positions) by tracking the current
+    table header and matching either the inline ``task = …`` key inside
+    ``[table]`` or the ``[table.task]`` header form. Comment lines are skipped —
+    the fleet's manifests carry prose ABOUT ``provision lexd`` right above the
+    task, and pointing the operator at a comment would be a wrong line number.
+    Returns 0 when nothing matches, which the message renders as the table.
+    """
+    current = ""
+    for number, raw in enumerate(text.splitlines(), 1):
+        line = raw.strip()
+        if line.startswith("#"):
+            continue
+        if line.startswith("[") and "]" in line:
+            current = line[1 : line.index("]")].strip()
+            if current.replace('"', "") == f"{table}.{task}":
+                return number
+            continue
+        if current != table or "=" not in line:
+            continue
+        if line.split("=", 1)[0].strip().strip("\"'") == task:
+            return number
+    return 0
+
+
+def stale_provision_tasks(text: str) -> tuple[StaleProvisionTask, ...]:
+    """Every pixi task in ``text`` still calling the retired ``provision lexd``.
+
+    Pure over the manifest text (:func:`gather` supplies it), and fail-open on
+    an unparseable manifest like its :func:`_pixi_key_conflicts` siblings: the
+    tripwire never turns a malformed pixi.toml into a different error. Matching
+    is over the parsed task COMMANDS only, so prose mentioning the retired verb
+    in a comment is never flagged.
+    """
+    try:
+        manifest = tomllib.loads(text)
+    except tomllib.TOMLDecodeError:
+        return ()
+    found: list[StaleProvisionTask] = []
+    for table, tasks in _tasks_tables(manifest):
+        for task, spec in tasks.items():
+            for command in _task_commands(spec):
+                if RETIRED_PROVISION_RE.search(command):
+                    found.append(
+                        StaleProvisionTask(
+                            task=str(task),
+                            table=table,
+                            line=_definition_line(text, table, str(task)),
+                            command=command,
+                        )
+                    )
+    return tuple(found)
+
+
+def _stale_provision_tasks(root: Path) -> tuple[StaleProvisionTask, ...]:
+    """Gather's read for the retired-command tripwire — no manifest, no finding."""
+    path = root / PIXI_FILE
+    if not path.is_file():
+        return ()
+    try:
+        return stale_provision_tasks(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError):
+        return ()
+
+
+def format_stale_provision(ref: StaleProvisionTask) -> str:
+    """The one actionable message for a retired ``provision lexd`` reference —
+    used verbatim by the dry-run stderr warning and the fail-closed error, so the
+    two surfaces can never drift."""
+    where = f"pixi.toml:{ref.line}" if ref.line else f"pixi.toml [{ref.table}]"
+    return (
+        f"{where}: the '{ref.task}' task runs `{ref.command}`, which calls the "
+        f"RETIRED `shipit provision lexd` — the `provision` verb no longer exists "
+        f'(ADR-0066, no fallback), so this task now fails with "No such command '
+        f"'provision'\". lexd rides the managed [feature.shipit-lexd] block (the "
+        f"public Artifact channel) wired into the lint environment, so it is "
+        f"already on PATH there: drop the `shipit provision lexd &&` prefix (or "
+        f"the whole '{ref.task}' task, if that is all it does) and re-run "
+        f"`shipit install`"
+    )
+
+
+# --------------------------------------------------------------------------
 # The `.claude/skills` structural symlink (issue #1088, ADR-0077)
 # --------------------------------------------------------------------------
 
@@ -1447,6 +1618,13 @@ class ConsumerState:
     # would make an install write THROUGH the link, outside the repo — the
     # containment breach every mode refuses.
     symlinked_dests: tuple[SymlinkedDest, ...] = ()
+    # Consumer pixi tasks still calling the RETIRED `shipit provision lexd`
+    # (#1070, ADR-0066): read here (the ONE read boundary) so the reconcile's
+    # fail-closed decision stays pure over this state. The call sites are
+    # consumer-authored lane tasks outside every managed block, so no unit
+    # rewrites them — the reconcile refuses instead of shipping a repo whose
+    # lint/test lane is already dead.
+    stale_provision: tuple[StaleProvisionTask, ...] = ()
     # The `.claude/skills` structural symlink decision (#1088, ADR-0077): read
     # here (the ONE read boundary) so reconcile stays pure over it. Defaults to
     # NOOP so a synthetic state with no skills carries no phantom work.
@@ -1477,8 +1655,10 @@ def gather(
     (:func:`_pixi_task_conflicts`) and table-redeclaration clashes
     (:func:`_pixi_table_conflicts`), whether the committed ``CHANGELOG.md``
     is stale against the current renderer (:func:`_changelog_stale`, #578),
-    and the declined managed-unit keys (``[managed.decline].keep``, #600 —
-    consumer-owned policy, read alongside the pristine map).
+    the declined managed-unit keys (``[managed.decline].keep``, #600 —
+    consumer-owned policy, read alongside the pristine map), and the consumer
+    pixi tasks still calling the retired ``shipit provision lexd``
+    (:func:`stale_provision_tasks`, #1070).
     """
     root = root.resolve()
     if not root.is_dir():
@@ -1537,6 +1717,7 @@ def gather(
         changelog_stale=_changelog_stale(root),
         declines=declines,
         symlinked_dests=symlinked_dests(root, units),
+        stale_provision=_stale_provision_tasks(root),
         claude_skills_link=plan_claude_skills_link(root),
     )
 
@@ -1676,6 +1857,15 @@ class Plan:
     # guarantee is mode-independent, unlike the lefthook publish refusal. Every
     # surface warns off this record.
     symlinked_dests: tuple[SymlinkedDest, ...] = ()
+    # Consumer pixi tasks still calling the RETIRED `shipit provision lexd`
+    # (#1070, ADR-0066): EVERY applying mode fails closed on this record before
+    # any write (:func:`shipit.install.apply.reject_stale_provision`). Unlike the
+    # pixi conflicts above there is no unit to skip — the call sites are the
+    # consumer's OWN lane tasks, outside every managed block, so nothing shipit
+    # writes can repair them and only the operator's edit can. Refusing at
+    # reconcile is the whole point: otherwise the pin bump lands green and the
+    # consumer's CI discovers `No such command 'provision'` later.
+    stale_provision: tuple[StaleProvisionTask, ...] = ()
     # The `.claude/skills` -> `.agents/skills` structural symlink (#1088,
     # ADR-0077): CREATE (absent path) is a work axis of its own (apply ensures the
     # link; :attr:`nothing_to_do` and :attr:`changed_paths` account for it);
@@ -1854,6 +2044,7 @@ def reconcile(
         declined=declined,
         decline_unmatched=decline_unmatched,
         symlinked_dests=state.symlinked_dests,
+        stale_provision=state.stale_provision,
         claude_skills_link=state.claude_skills_link,
     )
     logger.debug(
@@ -1919,6 +2110,12 @@ def reconcile(
             "symlinked dest: %s",
             format_symlinked_dest(sd),
             extra={"root": state.root, "unit": sd.unit_key, "component": sd.component},
+        )
+    for sp in result.stale_provision:
+        logger.warning(
+            "retired `provision lexd` reference: %s",
+            format_stale_provision(sp),
+            extra={"root": state.root, "task": sp.task, "line": sp.line},
         )
     if result.claude_skills_link.action == LINK_BLOCKED:
         logger.warning(

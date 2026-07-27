@@ -33,6 +33,7 @@ from .reconcile import (
     Plan,
     consumer_inner,
     format_lefthook_conflict,
+    format_stale_provision,
     format_symlinked_dest,
     symlinked_dest_component,
 )
@@ -842,6 +843,35 @@ def reject_symlinked_dests(plan: Plan) -> None:
         )
 
 
+def reject_stale_provision(plan: Plan) -> None:
+    """Fail closed on a consumer pixi task still calling the retired
+    ``shipit provision lexd`` (#1070, ADR-0066) — the single guard shared by
+    :func:`apply` and the verb's no-op shortcut (:mod:`shipit.verbs.install`), so
+    a stale-reference-bearing but otherwise-empty plan (the common shape: the
+    managed set is already current and only the consumer's own lane task is
+    broken) cannot slip past a mode's no-op return.
+
+    The ``provision`` verb was deleted with no fallback, so the task is ALREADY
+    dead — the only question is whether install says so or the consumer's CI
+    does, an hour and a pin bump later. Nothing shipit writes can repair it:
+    the call sites are consumer-authored lane tasks outside every managed block
+    (that is exactly why they survived the retirement), so the remedy is the
+    operator's one-line edit, named per task by :func:`format_stale_provision`.
+    EVERY mode refuses, ``MODE_TREE`` included: the refusal is about the state of
+    the consumer's manifest, not about publishing, so a working-tree refresh
+    that "succeeded" over a dead lane would just relocate the discovery to CI.
+    A plain :class:`InstallError` (an operator-fixable state), never a
+    :class:`SelfCertError`."""
+    if plan.stale_provision:
+        raise InstallError(
+            "retired command in pixi.toml — refusing to reconcile a repo whose "
+            "pixi tasks still call `shipit provision lexd`:\n"
+            + "\n".join(
+                f"  {format_stale_provision(sp)}" for sp in plan.stale_provision
+            )
+        )
+
+
 def apply(
     plan: Plan,
     mode: str = MODE_TREE,
@@ -899,7 +929,9 @@ def apply(
 
     Raises :class:`InstallError` on a domain refusal (``local``/``push`` in
     detached HEAD, a failed self-certification, a lefthook merge conflict with
-    the consumer's local config in any committing mode — #544) and lets a
+    the consumer's local config in any committing mode — #544, a managed dest
+    crossing a consumer symlink, a pixi task still calling the retired
+    ``shipit provision lexd`` — #1070) and lets a
     git/gh boundary
     failure propagate as :class:`~shipit.execrun.ExecError` — both members of
     the CLI error shell's known set. Callers decide nothing here: a no-op plan
@@ -911,6 +943,7 @@ def apply(
         raise ValueError("MODE_PR needs the pr_body renderer")
     reject_lefthook_conflicts(plan, mode)
     reject_symlinked_dests(plan)
+    reject_stale_provision(plan)
     activate = activate_hooks or _activate_hooks
     started = time.monotonic()
     root = Path(plan.root)
