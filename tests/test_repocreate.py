@@ -326,17 +326,14 @@ def test_plan_pixi_manifest_declares_build_task_and_nextest():
     text = {f.path: f.text for f in _plan().files}["pixi.toml"]
     assert 'build = "./bin/shipit build"' in text
     assert "cargo-nextest" in text
-    # The managed lint/test blocks are NOT duplicated by the scaffold.
+    # The managed lint/test blocks are NOT duplicated by the scaffold — and
+    # since #1066 there is no `lint-full` twin either: the managed `lint` task
+    # itself lands in `[feature.lint.tasks]` at install, so the scaffold seeds
+    # NOTHING lint-shaped (see the lane-env regression below).
     assert 'test = "./bin/shipit test"' not in text
     assert 'lint = "./bin/shipit lint"' not in text
-    # The lint lane's provisioned twin IS seeded, in the lint feature (so the
-    # CI lane resolves onto the lint env — see the lane-env regression below).
-    # It is the plain managed `lint` invocation — lexd rides pixi.lock from the
-    # Artifact channel (the managed `shipit-lexd` feature the lint env composes),
-    # so a generated Repo with `.lex` sources resolves lexd without any inline
-    # provisioning (ARF02-WS06, ADR-0066; the retired `provision lexd`).
-    assert 'lint-full = "./bin/shipit lint"' in text
-    assert "[feature.lint.tasks]" in text
+    assert "lint-full" not in text
+    assert "[feature.lint.tasks]" not in text
 
 
 # --------------------------------------------------------------------------
@@ -403,9 +400,10 @@ def test_plan_shipit_manifest_declares_required_lint_and_test_lanes_only():
     lanes = _shipit_toml()["lanes"]
     assert list(lanes) == ["lint", "test"]  # exactly these, in order
     assert "build" not in lanes
-    # The lint lane runs the `lint-full` twin (provisions the lint env); the
-    # test lane rides the managed `test` task directly (its tooling is default).
-    assert lanes["lint"]["run"] == "lint-full"
+    # Both lanes ride the managed task of their own name (#1066 retired the
+    # `lint-full` twin: the managed `lint` task now lives in the lint feature,
+    # so a lane pointed at it already provisions the lint env).
+    assert lanes["lint"]["run"] == "lint"
     assert lanes["test"]["run"] == "test"
     for name in ("lint", "test"):
         assert lanes[name]["required"] is True
@@ -435,22 +433,39 @@ def test_generated_lanes_parse_and_derive_lint_test_commit_push_checks():
 
 
 def test_generated_lint_lane_provisions_the_lint_env_not_default():
-    # Regression (GEN01-WS07 QA, #930): the generated hosted-CI lint lane MUST
-    # run in the `lint` pixi env — where shfmt/prettier/markdownlint/actionlint/
-    # shellcheck/yamllint and the managed rust lint toolchain are provisioned —
-    # not the default env (rust only). `shipit ci plan` keys a lane's env off the
-    # feature that declares its `run` task; the earlier lane pointed at the
-    # managed bare `lint` task (default `[tasks]`) so the runner installed only
-    # the default env and every non-rust lint binary was missing (`FileNotFound`,
-    # rc 127) — green locally only because dev machines carry those tools on PATH
-    # and the hook forces `-e lint`. The lane now runs the `lint-full` twin
-    # declared in `[feature.lint.tasks]`, which resolves onto the `lint` env.
+    # Regression (GEN01-WS07 QA, #930; root-caused by #1066): the generated
+    # hosted-CI lint lane MUST run in the `lint` pixi env — where shfmt/prettier/
+    # markdownlint/actionlint/shellcheck/yamllint and the managed rust lint
+    # toolchain are provisioned — not the default env (rust only). `shipit ci
+    # plan` keys a lane's env off the feature that declares its `run` task, and
+    # the managed `lint` task used to anchor in the default `[tasks]` table, so
+    # the runner installed only the default env and every non-rust lint binary
+    # was missing (`FileNotFound`, rc 127) — green locally only because dev
+    # machines carry those tools on PATH and the hook forces `-e lint`. #930
+    # worked around it with a `lint-full` twin in `[feature.lint.tasks]`; #1066
+    # moved the managed task ITSELF there, so the lane rides `lint` and the twin
+    # is gone. Asserted on the POST-INSTALL manifest — the scaffold seeds no lint
+    # task, the managed block delivers it.
     from shipit import config
+    from shipit.install import splice
+    from shipit.install import units as iunits
     from shipit.tools import lanes as lane_planner
 
-    pixi = tomllib.loads({f.path: f.text for f in _plan().files}["pixi.toml"])
+    scaffold = {f.path: f.text for f in _plan().files}["pixi.toml"]
+    installed = splice.splice_block(
+        scaffold,
+        iunits.data_bytes("pixi-lint-task-block.toml").decode("utf-8").strip("\n"),
+        iunits.PIXI_LINT_TASK_OPEN,
+        iunits.PIXI_LINT_TASK_CLOSE,
+        anchor=iunits.PIXI_LINT_TASKS_ANCHOR,
+    )
+    # …and the managed lint ENVIRONMENT the same install wires (ADR-0066).
+    installed += "\n[environments]\n" + iunits.data_bytes(
+        "pixi-lint-env-block.toml"
+    ).decode("utf-8")
+    pixi = tomllib.loads(installed)
     task_envs = lane_planner.task_env_sets(pixi)
-    assert task_envs["lint-full"] == ("lint",)  # the twin lives in the lint env
+    assert task_envs["lint"] == ("lint",)  # the managed task lives in the lint env
 
     parsed = config.load_lanes(_shipit_toml())
     jobs = lane_planner.plan(parsed, event="pr", task_envs=task_envs)

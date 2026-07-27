@@ -26,8 +26,10 @@ BLOCK_OPEN = "<!-- Managed by shipit; do not edit. Regenerate via shipit install
 BLOCK_CLOSE = "<!-- End shipit-managed block. -->"
 
 # The lint-check units Step 2 deferred to Step 3 (docs/legacy-prd/lint-checks.md). The consumer gets
-# the thin lefthook caller (whole file) and a `lint = "shipit lint"` task BLOCK
-# in its own pixi.toml. The pixi blocks use TOML-comment markers (HTML comments
+# the thin lefthook caller (whole file) and a `lint = "./bin/shipit lint"` task
+# BLOCK in its own pixi.toml — anchored in `[feature.lint.tasks]`, the ONE
+# environment carrying the pinned toolchain (#1066; see PIXI_LINT_TASK_KEY). The
+# pixi blocks use TOML-comment markers (HTML comments
 # are invalid TOML) and anchor under a table header so the managed keys land in
 # the right table on a first install.
 LEFTHOOK_FILE = "lefthook.yml"
@@ -86,9 +88,62 @@ PIXI_OPEN = (
 PIXI_CLOSE = "# <<< shipit-managed tasks <<<"
 PIXI_ANCHOR = "[tasks]"
 
+# The `lint` task (#1066) — the ONE public lint entry point, and the reason it
+# is its OWN block anchored in the lint FEATURE rather than a line in the
+# default-[tasks] block above.
+#
+# A pixi task is reachable from the environments whose features declare it, and
+# the default feature is in every environment — so a `lint` line in [tasks] runs
+# in the DEFAULT env, while the fleet-pinned toolchain it shells out to
+# (PIXI_LINT_DEPS_ANCHOR below) materializes only in the `lint` env. The public,
+# documented `pixi run lint` therefore executed against whatever linter versions
+# the default env happened to resolve, disagreeing with the commit hook
+# (`pixi run -e lint lint`) and the CI lane. That is not theoretical: on
+# 2026-07-19 it misclassified four clean consumer reconcile PRs as prettier debt
+# (default-env prettier 3.9 vs the pinned 3.8), and `shipit lint --fix` run that
+# way reformatted correct files into a state the hook then rejected.
+#
+# Anchoring the task in `[feature.lint.tasks]` declares it in exactly ONE
+# feature; it then exists in exactly ONE environment as long as the manifest
+# composes that feature exactly once — which is what an installed manifest does,
+# and pixi resolves a bare `pixi run <task>` to the single environment defining
+# it. `pixi run lint` (and `pixi run lint --fix`, whose trailing args pixi
+# forwards to the task) therefore run the pinned toolchain with no `-e` and no
+# `pixi shell`. The hooks' explicit `pixi run -e lint lint` pins the environment
+# pixi would select anyway: ONE task, ONE environment, one gate for laptop,
+# hook, and CI. This is the `test` task's shape (see PIXI_TEST_TASK_KEY) applied
+# to lint.
+#
+# WHERE the one-ENVIRONMENT half comes from is worth being exact about, since
+# #1107 has to enforce it. On a FRESH install the packaged `[environments]` seed
+# (PIXI_ENVS_KEY, `pixi-lint-env-block.toml`) writes `lint = ["lint",
+# "shipit-lexd"]`, so the feature is composed once by construction. On an
+# EXISTING consumer environment that same unit is a MEMBERSHIP MERGE, not an
+# owner: it adds `shipit-lexd` and leaves the base features — `lint` among them
+# — as consumer config (ADR-0047; see its `required_features` in load_units).
+# So exactly-once composition is a property of the CONSUMER's manifest that
+# install preserves, never a claim the managed unit can make, and the anchor
+# cannot enforce it either: a consumer that composed the `lint` feature into a
+# second environment, or declared its own `lint` task in another enabled
+# feature, would put the name in two envs and make the bare form ambiguous
+# again — the same latent hole the shipped `test` task carries. Detecting that
+# at reconcile is #1107 (which the existing `PixiTaskConflict` guard cannot
+# cover: it only reads `[tasks]`-anchored units), sequenced after #1105 and
+# #1101 settle install/reconcile.py. It is latent, not live: every portfolio
+# repo composes `lint` into exactly one environment (verified fleet-wide,
+# 2026-07-27).
+PIXI_LINT_TASK_KEY = "pixi.toml#shipit-lint-task"
+PIXI_LINT_TASK_OPEN = (
+    "# >>> shipit-managed lint task (do not edit; regenerate via `shipit install`) >>>"
+)
+PIXI_LINT_TASK_CLOSE = "# <<< shipit-managed lint task <<<"
+PIXI_LINT_TASKS_ANCHOR = "[feature.lint.tasks]"
+
 # The thin `test` caller (TOL01-WS01, ADR-0039): `test = "./bin/shipit test"`
 # in the consumer's default [tasks] — the pinned-launcher form, like the
-# managed `lint` task — so laptop, hook, and CI run the identical verb. Its
+# managed `lint` task (which anchors in the lint FEATURE, not here: its tooling
+# is pinned per-environment, a test suite's is not) — so laptop, hook, and CI run
+# the identical verb. Its
 # OWN block (not a line in the tasks block above) so it can be skipped
 # INDEPENDENTLY: pixi refuses a bare `pixi run test` when a task named `test`
 # exists in several environments, so a consumer whose own manifest already
@@ -968,6 +1023,22 @@ def load_units(
             open_marker=PIXI_TEST_TASK_OPEN,
             close_marker=PIXI_TEST_TASK_CLOSE,
             anchor=PIXI_ANCHOR,
+        )
+    )
+    # The public `lint` entry point (#1066), anchored in the lint FEATURE — the
+    # one an installed manifest composes into a single env, so a bare `pixi run
+    # lint` resolves to the fleet-pinned toolchain rather than the default env's
+    # ambient one. See the PIXI_LINT_TASK_KEY comment for the whole story,
+    # including who owns that composition and what it does not guarantee.
+    units.append(
+        Unit(
+            key=PIXI_LINT_TASK_KEY,
+            dest=PIXI_FILE,
+            kind="block",
+            content=data_bytes("pixi-lint-task-block.toml"),
+            open_marker=PIXI_LINT_TASK_OPEN,
+            close_marker=PIXI_LINT_TASK_CLOSE,
+            anchor=PIXI_LINT_TASKS_ANCHOR,
         )
     )
 

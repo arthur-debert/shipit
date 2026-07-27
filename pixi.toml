@@ -58,19 +58,19 @@ twine = "6.2.*"
 # the pixi env — see [managed.decline] in .shipit.toml.)
 python = "3.13.*"
 
-# The lint toolchain rides in the DEFAULT env (issue #210, option (a)): `shipit
-# install` writes a managed `[tasks] lint = "./bin/shipit lint"` into the default
-# env (the task rides the repo's pinned launcher, not a PATH `shipit` — #481,
-# ADR-0033), and `shipit lint` (verbs/lint.py) SHELLS OUT to these binaries — so
-# they must be
-# on PATH in the default env for the managed task to work as installed. This aligns
-# shipit-self with the standard consumer layout (architecture.lex §5/§7: one lint
-# definition, thin managed tasks) rather than pinning an env-specific override the
-# reconcile would surface as drift forever. The `-e lint` environment keeps its own
-# helper tasks (below) — the lefthook/CI-pinned canonical path — and inherits these
-# same deps through the default feature. lexd itself is NOT here: it rides the
-# managed `[feature.shipit-lexd]` block (from the channel), wired into the lint and
-# test envs (ARF02-WS06, ADR-0066) — the envs that actually run the lex lint leg.
+# The lint toolchain ALSO rides in the DEFAULT env — for the TEST env's sake, not
+# the lint task's (#1066). The managed `lint` task now lives in
+# `[feature.lint.tasks]` (below), so the public `pixi run lint`, the hooks'
+# `pixi run -e lint lint` and CI all resolve to the ONE `lint` environment and the
+# pinned toolchain there; nothing about the lint gate needs a linter in the default
+# env any more (that placement — issue #210, option (a) — is exactly what let a
+# bare `pixi run lint` run against ambient versions, the #1066 defect). What still
+# needs them here is the `test` environment: it composes the default feature, and
+# the hermeticity invariance gate (tests/test_lint.py) drives the REAL binaries —
+# move them into the lint feature and those cases silently `skipif` away. lexd is
+# NOT here: it rides the managed `[feature.shipit-lexd]` block (from the channel),
+# wired into the lint and test envs (ARF02-WS06, ADR-0066) — the envs that actually
+# run the lex lint leg.
 #
 # The linters are required-check-path tools, so they are conda-forge packages PINNED
 # in pixi.lock and CI runs `--locked` (architecture.lex §2) — version bumps arrive as
@@ -119,7 +119,6 @@ CARGO_INCREMENTAL = "0"
 [tasks]
 # >>> shipit-managed tasks (do not edit; regenerate via `shipit install`) >>>
 changelog = "./bin/shipit changelog"
-lint = "./bin/shipit lint"
 logs = "./bin/shipit logs"
 # <<< shipit-managed tasks <<<
 
@@ -207,15 +206,17 @@ test = "./bin/shipit test"
 # (tests/test_install.py) asserts these pins agree with the hand-written
 # default-env toolchain above (the dogfood guarantee). For shipit itself the
 # block is redundant-but-harmless: the same specs already ride in the DEFAULT
-# env (issue #210, option (a)) and the `lint` environment inherits them through
-# the default feature. The feature deliberately does NOT define its own `lint` task:
-# `lint` lives in EXACTLY ONE place — the managed `[tasks] lint = "./bin/shipit lint"` in the
-# default env above — so a bare `pixi run lint` resolves UNAMBIGUOUSLY (a duplicate
-# `lint` in both the default feature and this one is what historically made bare
-# `pixi run lint` ambiguous across default/lint/review; the lefthook `-e lint` pin was
-# the mitigation — see lefthook.yml). `pixi run -e lint lint` runs that same managed
-# task INSIDE the lint env (the canonical, lefthook/CI-pinned path). What stays here is
-# the lexd-dependent helpers (fmt, regen-roles, install-hooks). Since ARF02-WS06
+# env (for the test env's sake — see the header comment there) and the `lint`
+# environment inherits them through the default feature. This feature also carries
+# the managed `lint` TASK (#1066): `lint` lives in EXACTLY ONE place — here — and
+# `[environments]` below composes this feature into EXACTLY ONE env (`lint`, the
+# only entry naming it), so a bare `pixi run lint` resolves UNAMBIGUOUSLY to the
+# env holding the pinned toolchain. Composing this feature into a second
+# environment would break that resolution — hands off. `pixi run -e lint lint`
+# (the lefthook path) pins the env pixi would select anyway, and
+# `pixi run lint --fix` is the fixer on that same pin — one task, one environment,
+# one gate for laptop, hook and CI. Beside it live the lexd-dependent helpers
+# (regen-roles, install-hooks). Since ARF02-WS06
 # (ADR-0066) lexd is an ordinary conda dependency: the lint environment composes the
 # managed `shipit-lexd` feature (see `[environments]` below), so `pixi install` lands
 # lexd from the Artifact channel in `.pixi/envs/lint/` and it is on PATH for every
@@ -248,18 +249,17 @@ lefthook = "2.1.*"
 # <<< shipit-managed lint deps <<<
 
 [feature.lint.tasks]
-fmt = "shipit lint --fix"
-# The lint LANE's run (TOL01-WS05; .shipit.toml [lanes].lint): the same managed
-# `./bin/shipit lint` the hooks ride. Since ARF02-WS06 lexd is a conda dependency
-# of the lint env (the composed `shipit-lexd` feature), so no inline provisioning
-# is needed — a plain `pixi install` puts lexd on PATH. It cannot be named `lint`:
-# that name is the managed fixed-string task in the default [tasks] block, and a
-# second `lint` here would re-create the historical bare-`pixi run lint` ambiguity
-# across environments (see the feature comment above). Defined ONLY in this feature,
-# so it exists in EXACTLY ONE env (lint) and bare `pixi run lint-full` resolves
-# unambiguously — the wf-checks matrix job's `pixi run --locked lint-full` and a
-# laptop run are byte-identical.
-lint-full = "./bin/shipit lint"
+# The ONE lint entry point (#1066) — carried VERBATIM as the managed block so
+# shipit's self-install reconciles to a NOOP. The public `pixi run lint`, the
+# hooks' `pixi run -e lint lint`, the wf-checks matrix job's
+# `pixi run --locked lint` and the fixer `pixi run lint --fix` are now the SAME
+# task in the SAME environment: no `lint-full` twin, no `fmt` alias, nothing that
+# can run the gate against an unpinned toolchain. Since ARF02-WS06 lexd is a
+# conda dependency of this env (the composed `shipit-lexd` feature), so a plain
+# `pixi install` puts it on PATH — no inline provisioning.
+# >>> shipit-managed lint task (do not edit; regenerate via `shipit install`) >>>
+lint = "./bin/shipit lint"
+# <<< shipit-managed lint task <<<
 # One command from a fresh clone to working lint checks (the `--install-hook` equiv):
 # activates the git hooks. lexd rides pixi.lock (the composed `shipit-lexd` feature),
 # so the pre-commit / pre-push `pixi run -e lint lint` the hooks fire find it on PATH

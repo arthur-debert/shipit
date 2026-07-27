@@ -416,11 +416,102 @@ def test_load_units_includes_lefthook_and_pixi_task_block():
     # `shipit-lexd` feature from the Artifact channel, not a bespoke fetcher. Each
     # task invokes the PINNED launcher `./bin/shipit`, never a bare PATH `shipit`
     # (#481, ADR-0033: hooks/tasks ride the repo's pin, PATH is never consulted).
+    # `lint` is NOT here (#1066): the public lint entry point rides its own block
+    # in `[feature.lint.tasks]` — see the test below — because a default-[tasks]
+    # `lint` ran the pinned toolchain's task in the DEFAULT env.
     assert pixi.desired_inner() == (
+        'changelog = "./bin/shipit changelog"\nlogs = "./bin/shipit logs"'
+    )
+
+
+def test_load_units_anchors_the_lint_task_in_the_lint_feature():
+    """The public `pixi run lint` must run the PINNED toolchain (#1066).
+
+    A task in the default `[tasks]` table reaches every environment, so pixi ran
+    it in the DEFAULT env while the fleet-pinned linters materialize only in the
+    `lint` env — the drift that misclassified four clean consumer PRs as prettier
+    debt. Anchoring the task in `[feature.lint.tasks]` puts it in exactly ONE
+    environment, and pixi resolves a bare `pixi run <task>` to the single
+    environment defining it.
+    """
+    units = {u.key: u for u in iunits.load_units()}
+    lint_task = units[iunits.PIXI_LINT_TASK_KEY]
+    assert lint_task.kind == "block"
+    assert lint_task.dest == "pixi.toml"
+    assert lint_task.anchor == "[feature.lint.tasks]"
+    # The PINNED launcher (#481, ADR-0033), never a bare PATH `shipit`.
+    assert lint_task.desired_inner() == 'lint = "./bin/shipit lint"'
+    # And it is the ONLY managed `lint` task: no default-env twin survives.
+    tasks_blocks = [
+        u
+        for u in units.values()
+        if u.dest == iunits.PIXI_FILE
+        and u.anchor in ("[tasks]", "[feature.lint.tasks]")
+    ]
+    defining = [u for u in tasks_blocks if "lint" in tomllib.loads(u.desired_inner())]
+    assert [u.key for u in defining] == [iunits.PIXI_LINT_TASK_KEY]
+
+
+def test_reconcile_migrates_the_lint_task_out_of_the_hostile_default_env(tmp_path):
+    """The #1066 regression: a consumer whose DEFAULT env resolves a CONFLICTING
+    prettier still runs the public `pixi run lint` against the fleet pin.
+
+    The failure this reproduces is a placement bug, not a solver bug — the
+    default env's prettier 3.9 and the lint env's pinned 3.8 want opposite
+    layouts for the same TypeScript, so which ENVIRONMENT the public task runs in
+    decides the verdict. The assertion is therefore on pixi's own task→env
+    routing (:func:`shipit.tools.lanes.task_env_sets`, the resolver the CI lane
+    planner already trusts): after the reconcile the `lint` task must reach
+    EXACTLY the `lint` env, never `default`, with the hostile prettier left
+    untouched where the consumer put it.
+    """
+    from shipit.tools import lanes as lanes_mod
+
+    # The pre-fix consumer state: the managed tasks block carrying `lint` in the
+    # DEFAULT [tasks] table, stamped pristine, plus a conflicting prettier the
+    # consumer's own default env supplies.
+    legacy_inner = (
         'changelog = "./bin/shipit changelog"\n'
         'lint = "./bin/shipit lint"\n'
         'logs = "./bin/shipit logs"'
     )
+    (tmp_path / "pixi.toml").write_text(
+        '[workspace]\nname = "acme"\nchannels = ["conda-forge"]\n'
+        'platforms = ["linux-64"]\n\n'
+        "[dependencies]\n"
+        'prettier = "3.9.*"\n\n'
+        "[tasks]\n"
+        f"{iunits.PIXI_OPEN}\n{legacy_inner}\n{iunits.PIXI_CLOSE}\n",
+        encoding="utf-8",
+    )
+    (tmp_path / config.CONFIG_NAME).write_text(
+        "[managed]\n"
+        f'"{iunits.PIXI_KEY}" = '
+        f'"{config.content_hash(legacy_inner.encode("utf-8"))}"\n',
+        encoding="utf-8",
+    )
+
+    units = iunits.load_units(platforms=frozenset({"linux-64"}))
+    retired = irec.load_retired()
+    plan = irec.reconcile(units, retired, irec.gather(tmp_path, units, retired))
+    # A pristine block migrates cleanly (UPDATE), and the new lint-task block is
+    # an ADD — one reconcile, never a window with both paths live.
+    by_key = {d.unit.key: d for d in plan.decisions}
+    assert by_key[iunits.PIXI_KEY].action == irec.UPDATE
+    assert by_key[iunits.PIXI_LINT_TASK_KEY].action == irec.ADD
+
+    iapply.apply(plan, iapply.MODE_TREE)
+
+    manifest = tomllib.loads((tmp_path / "pixi.toml").read_text(encoding="utf-8"))
+    assert "lint" not in manifest["tasks"]
+    assert manifest["feature"]["lint"]["tasks"]["lint"] == "./bin/shipit lint"
+    # The public command routes to the pinned env — and ONLY that env.
+    assert lanes_mod.task_env_sets(manifest)["lint"] == ("lint",)
+    # The pinned prettier governs it; the consumer's hostile default-env pin is
+    # preserved (shipit never edits consumer-owned deps) but now unreachable
+    # from the lint task.
+    assert manifest["feature"]["lint"]["dependencies"]["prettier"] == "3.8.*"
+    assert manifest["dependencies"]["prettier"] == "3.9.*"
 
 
 def test_load_units_includes_the_thin_test_task_block():
@@ -733,6 +824,7 @@ def test_shipits_own_pixi_manifest_reconciles_to_noop():
     }
     for key in (
         iunits.PIXI_KEY,
+        iunits.PIXI_LINT_TASK_KEY,
         iunits.PIXI_LINT_DEPS_KEY,
         iunits.PIXI_ENVS_KEY,
         iunits.PIXI_LAUNCHER_DEPS_KEY,
@@ -797,7 +889,9 @@ def test_managed_lefthook_is_consumer_generic():
 
     # The invoked task and environment exist in the managed pixi blocks, so a
     # stock consumer satisfies every reference with nothing pre-installed.
-    tasks = tomllib.loads(iunits.data_bytes("pixi-tasks-block.toml").decode("utf-8"))
+    tasks = tomllib.loads(
+        iunits.data_bytes("pixi-lint-task-block.toml").decode("utf-8")
+    )
     assert "lint" in tasks
     envs = tomllib.loads(iunits.data_bytes("pixi-lint-env-block.toml").decode("utf-8"))
     assert "lint" in envs
@@ -5399,8 +5493,10 @@ def test_fresh_install_delivers_the_lint_environment(tmp_path, rec):
     assert manifest["workspace"]["name"] == "acme"
     assert manifest["tasks"]["test"] == "pytest"
     # The managed task, the pinned toolchain, and the environment definition —
-    # everything `pixi run -e lint lint` needs on a stock consumer.
-    assert manifest["tasks"]["lint"] == "./bin/shipit lint"
+    # everything `pixi run lint` needs on a stock consumer. The task anchors in
+    # the lint FEATURE (#1066), so it reaches exactly the env holding the pins.
+    assert manifest["feature"]["lint"]["tasks"]["lint"] == "./bin/shipit lint"
+    assert "lint" not in manifest["tasks"]
     deps = manifest["feature"]["lint"]["dependencies"]
     assert set(deps) == set(LINT_TOOLS)
     # The lint env composes the managed `shipit-lexd` feature (ARF02-WS06) so
@@ -5736,8 +5832,10 @@ def test_fresh_consumer_without_pixi_manifest_gets_a_valid_seed(tmp_path, rec):
     # The seeded required table, named from the consumer root.
     assert manifest["workspace"]["name"] == iunits.workspace_name(tmp_path.name)
     assert manifest["workspace"]["channels"] == list(iunits.PIXI_SEED_CHANNELS)
-    # ...and everything `pixi run -e lint lint` needs, spliced in beneath it.
-    assert manifest["tasks"]["lint"] == "./bin/shipit lint"
+    # ...and everything `pixi run lint` needs, spliced in beneath it — the lint
+    # task in the lint FEATURE (#1066), the test task in the default table.
+    assert manifest["feature"]["lint"]["tasks"]["lint"] == "./bin/shipit lint"
+    assert "lint" not in manifest["tasks"]
     assert manifest["tasks"]["test"] == "./bin/shipit test"
     assert set(manifest["feature"]["lint"]["dependencies"]) == set(LINT_TOOLS)
     assert manifest["environments"]["lint"] == ["lint", "shipit-lexd"]
@@ -5752,13 +5850,14 @@ def test_fresh_consumer_without_pixi_manifest_gets_a_valid_seed(tmp_path, rec):
     # ...and the launcher's uv (#758): the managed tasks all ride ./bin/shipit.
     assert "uv" in manifest["dependencies"]
 
-    # The seed is scaffold, not a managed unit: only the six block units are
+    # The seed is scaffold, not a managed unit: only the block units are
     # recorded, so the [workspace] table is consumer-owned from here on.
     managed = config.load_managed(config.load(tmp_path / ".shipit.toml"))
     pixi_keys = {k for k in managed if k.startswith("pixi.toml")}
     assert pixi_keys == {
         iunits.PIXI_KEY,
         iunits.PIXI_TEST_TASK_KEY,
+        iunits.PIXI_LINT_TASK_KEY,
         iunits.PIXI_LINT_DEPS_KEY,
         iunits.PIXI_ENVS_KEY,
         iunits.PIXI_LAUNCHER_DEPS_KEY,
@@ -5798,7 +5897,7 @@ def test_existing_pixi_manifest_is_never_seeded(tmp_path, rec):
     _apply(tmp_path)
     manifest = tomllib.loads((tmp_path / "pixi.toml").read_text())
     assert manifest["workspace"] == {"name": "acme"}  # untouched
-    assert manifest["tasks"]["lint"] == "./bin/shipit lint"
+    assert manifest["feature"]["lint"]["tasks"]["lint"] == "./bin/shipit lint"
 
 
 def test_seed_never_clobbers_a_manifest_created_after_gather(tmp_path, rec):
@@ -5814,7 +5913,7 @@ def test_seed_never_clobbers_a_manifest_created_after_gather(tmp_path, rec):
 
     manifest = tomllib.loads((tmp_path / "pixi.toml").read_text())
     assert manifest["workspace"] == {"name": "late"}
-    assert manifest["tasks"]["lint"] == "./bin/shipit lint"
+    assert manifest["feature"]["lint"]["tasks"]["lint"] == "./bin/shipit lint"
 
 
 def test_open_install_pr_is_updated_not_recreated(tmp_path, rec, monkeypatch):
@@ -8133,7 +8232,7 @@ def test_override_summary_uses_the_unit_key(tmp_path, rec):
     # <summary> names the block, not the shared filename.
     pixi = tmp_path / "pixi.toml"
     pixi.write_text(
-        pixi.read_text().replace('lint = "./bin/shipit lint"', 'lint = "true"')
+        pixi.read_text().replace('logs = "./bin/shipit logs"', 'logs = "true"')
     )
     _apply(tmp_path, iapply.MODE_PR)
     assert f"<code>{iunits.PIXI_KEY}</code>" in rec.pr_body
@@ -8165,7 +8264,7 @@ def test_fresh_install_on_a_truly_stock_consumer(stock_consumer, rec):
     assert iunits.BLOCK_OPEN in agents
     manifest = tomllib.loads((stock_consumer / "pixi.toml").read_text())
     assert manifest["workspace"]["name"] == "stock"  # the seeded table
-    assert "lint" in manifest["tasks"]
+    assert "lint" in manifest["feature"]["lint"]["tasks"]  # #1066: the pinned env
     settings = json.loads((stock_consumer / ".claude" / "settings.json").read_text())
     assert set(settings["hooks"]) == {
         "PreToolUse",

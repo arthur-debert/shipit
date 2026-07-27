@@ -26,7 +26,7 @@ LANES_TOML = """
 "crates/wasm" = "rust"
 
 [lanes.lint]
-run = "lint-full"
+run = "lint"
 required = true
 local = true
 
@@ -37,7 +37,7 @@ scope = "crates/wasm"
 
 PIXI_TOML = """
 [feature.lint.tasks]
-lint-full = "./bin/shipit lint"
+lint = "./bin/shipit lint"
 
 [feature.test.tasks]
 build = "./bin/shipit build"
@@ -71,7 +71,7 @@ def test_plan_emits_the_matrix_as_single_line_json_on_stdout(laned_repo, capsys)
     assert json.loads(out) == [
         {
             "name": "lint",
-            "run": "lint-full",
+            "run": "lint",
             "runner": "ubuntu-latest",
             "required": True,
             "envs": "lint",
