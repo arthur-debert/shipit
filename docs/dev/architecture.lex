@@ -229,14 +229,16 @@ the durable code is one slim versioned package; and configuration is explicit.
     lefthook stays dumb).
 
     ONE task, ONE environment: the managed `lint` task is declared in the pixi
-    `lint` FEATURE, so it exists in exactly one environment and the public
-    `pixi run lint`, the fixer `pixi run lint --fix`, the hook's explicit
-    `pixi run -e lint lint` and the CI lint lane all execute it against the same
-    fleet-pinned toolchain. Declaring it in the default `[tasks]` table instead
-    would put it in EVERY environment — including the default one, whose linter
-    versions are whatever that env happens to resolve — so the public command
-    would silently gate on a different toolchain than the checks it claims to
-    reproduce (issue #1066, ADR-0004).
+    `lint` FEATURE, which the managed `[environments]` unit composes into exactly
+    one environment — so the public `pixi run lint`, the fixer
+    `pixi run lint --fix`, the hook's explicit `pixi run -e lint lint` and the CI
+    lint lane all execute it against the same fleet-pinned toolchain. Declaring it
+    in the default `[tasks]` table instead would put it in EVERY environment —
+    including the default one, whose linter versions are whatever that env happens
+    to resolve — so the public command would silently gate on a different toolchain
+    than the checks it claims to reproduce (issue #1066, ADR-0004). A manifest that
+    composes the lint feature into a SECOND environment breaks the resolution the
+    same way; refusing that at reconcile is issue #1107.
 
     They are hard-fail checks: a missing tool exits non-zero, never skips. CI runs the
     SAME `pixi run` invocations as the local pre-commit hook, so "CI is the

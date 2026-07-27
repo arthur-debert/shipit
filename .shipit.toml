@@ -156,6 +156,13 @@ endpoints = ["gh-release"]
 # environment — so the planner resolves this lane onto the `lint` env and the
 # CI job, the hooks and a laptop `pixi run lint` are byte-identical. The twin is
 # gone: a second name for the same gate is a second thing to drift.
+#
+# The job's own invocation is BARE (`pixi run --locked <run>`; the planner feeds
+# the resolved env to setup-pixi, it does not pass `-e`), so the one-env
+# invariant in pixi.toml is load-bearing for CI as well as for the laptop: a
+# second environment composing the lint feature would make this lane ambiguous.
+# That is a property of every lane, not of this one — the `test` task's shape is
+# identical.
 [lanes.lint]
 run = "lint"
 required = true
@@ -283,7 +290,7 @@ version = "94a56745359c9da3e5d15d563563f73f7d3a61e3"
 ".gitignore#shipit-release-outputs" = "sha256:4a9beb3dea542cd0f1426a298069a506c6ea1fdfb3e852a9d2032dd475dfe143"
 "bin/setup-dev-env.sh" = "sha256:614aafa3d2c8c2b0a01efb6b4420edf5643372339880f6edfe3f23e86d7d39bd"
 agent-start = "sha256:70a2f96788eecbd689412d428a3615193edcd1deaccc730e6976332c612176a6"
-"lefthook.yml" = "sha256:4c5b54232062db9108f36f3c39d27f21dec436bc90d81ba2614ab2c64647fa36"
+"lefthook.yml" = "sha256:30139da378c33ceb61087676bd568745bfd015a7b48f37b147c351030b3f8323"
 ".markdownlint.yaml" = "sha256:b0834c9c810555866987cfec39862265322ef5048e92dac536563f6e21213553"
 ".markdownlintignore" = "sha256:05b151b2b20689c8c8e5e488ac8c5131f62b273101fb60395eb7be1c5d79d101"
 ".yamllint.yaml" = "sha256:d5c3b7b69d0bdd0ce25335e0db50cea2355b3c8ff62f4edbbf2a7d7909a2fd54"

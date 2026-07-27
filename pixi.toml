@@ -208,9 +208,11 @@ test = "./bin/shipit test"
 # block is redundant-but-harmless: the same specs already ride in the DEFAULT
 # env (for the test env's sake — see the header comment there) and the `lint`
 # environment inherits them through the default feature. This feature also carries
-# the managed `lint` TASK (#1066): `lint` lives in EXACTLY ONE place — here — so it
-# exists in EXACTLY ONE environment, and a bare `pixi run lint` resolves
-# UNAMBIGUOUSLY to the env holding the pinned toolchain. `pixi run -e lint lint`
+# the managed `lint` TASK (#1066): `lint` lives in EXACTLY ONE place — here — and
+# `[environments]` below composes this feature into EXACTLY ONE env (`lint`, the
+# only entry naming it), so a bare `pixi run lint` resolves UNAMBIGUOUSLY to the
+# env holding the pinned toolchain. Composing this feature into a second
+# environment would break that resolution — hands off. `pixi run -e lint lint`
 # (the lefthook path) pins the env pixi would select anyway, and
 # `pixi run lint --fix` is the fixer on that same pin — one task, one environment,
 # one gate for laptop, hook and CI. Beside it live the lexd-dependent helpers

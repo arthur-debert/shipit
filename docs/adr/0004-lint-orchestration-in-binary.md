@@ -68,12 +68,19 @@ templated tasks) and `§7` (lint checks: one definition, hard).
   documented `pixi run lint` therefore executed against whatever linter versions
   the default env happened to resolve, disagreeing with the commit hook and the
   CI lane; on 2026-07-19 that misclassified four already-clean consumer PRs as
-  prettier debt (#1066). In the lint feature the task exists in exactly ONE
-  environment, and pixi resolves a bare `pixi run <task>` to the single
-  environment defining it — so `pixi run lint`, `pixi run lint --fix`, the hook's
-  explicitly pinned `pixi run -e lint lint`, and the CI lane are one task, one
-  environment, one gate. The linter-dependency block is its sibling unit
-  (`[feature.lint.dependencies]`, ADP00) — that amendment predates this one.
+  prettier debt (#1066). In the lint feature the task is declared once, and the
+  managed `[environments]` unit composes that feature into exactly ONE
+  environment, so pixi resolves a bare `pixi run <task>` to the single
+  environment defining it — and `pixi run lint`, `pixi run lint --fix`, the
+  hook's explicitly pinned `pixi run -e lint lint`, and the CI lane are one task,
+  one environment, one gate. The one-environment half of that is an invariant of
+  the manifests shipit installs, not a property the anchor can enforce alone: a
+  manifest that composed the lint feature into a second environment, or declared
+  its own `lint` task in another enabled feature, would make the bare form
+  ambiguous again — refusing that at reconcile is #1107, and the same latent hole
+  exists for the `test` task (ADR-0039). The linter-dependency block is its
+  sibling unit (`[feature.lint.dependencies]`, ADP00) — that amendment predates
+  this one.
 
 ## Consequences
 
