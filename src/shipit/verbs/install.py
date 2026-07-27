@@ -52,6 +52,7 @@ from ..install.apply import (
     MODE_TREE,
     InstallResult,
     reject_lefthook_conflicts,
+    reject_stale_provision,
     reject_symlinked_dests,
 )
 from ..install.apply import (
@@ -71,6 +72,7 @@ from ..install.reconcile import (
     format_pixi_key_conflict,
     format_pixi_table_conflict,
     format_pixi_task_conflict,
+    format_stale_provision,
     format_symlinked_dest,
     gather,
     load_retired,
@@ -511,6 +513,13 @@ def run(
             # whose only finding is the symlink (its unit excluded from the write
             # set) still refuses rather than exiting 0.
             reject_symlinked_dests(plan)
+            # Fail closed on a retired `shipit provision lexd` call in EVERY
+            # applying mode (#1070): the consumer's own lane task is already
+            # dead, and no managed write can repair it. Placed before the no-op
+            # shortcut because that is the COMMON shape here — the managed set
+            # is current, so the plan carries no work and would otherwise exit 0
+            # over a repo whose next CI run fails on the retired verb.
+            reject_stale_provision(plan)
         if plan.nothing_to_do or dry_run:
             # Dry-run has NO side effects (no writes, no deletes, no git, no PR);
             # a nothing-to-do plan is a clean no-op either way.
@@ -670,8 +679,10 @@ def format_plan_warnings(plan: Plan) -> str:
     whole-file unit whose dest crosses a consumer symlink (#1088 review — EVERY
     applying mode also fails closed on these in apply/verb; the warning is the
     dry-run surface, worded off the same formatter so the two can never drift),
-    and each declined key that names no unit in this catalog (#600 — a typo must
-    not silently decline nothing)."""
+    each consumer pixi task still calling the retired `shipit provision lexd`
+    (#1070 — likewise a fail-closed in every applying mode, so the warning is the
+    dry-run surface off the same formatter), and each declined key that names no
+    unit in this catalog (#600 — a typo must not silently decline nothing)."""
     lines = []
     if plan.manifest_error is not None:
         lines.append(f"install: ignoring unreadable manifest: {plan.manifest_error}")
@@ -694,6 +705,8 @@ def format_plan_warnings(plan: Plan) -> str:
         lines.append(f"install: pixi block skipped: {format_pixi_table_conflict(bc)}")
     for sd in plan.symlinked_dests:
         lines.append(f"install: symlinked dest: {format_symlinked_dest(sd)}")
+    for sp in plan.stale_provision:
+        lines.append(f"install: retired command: {format_stale_provision(sp)}")
     if plan.claude_skills_link.action == LINK_BLOCKED:
         lines.append(
             f"install: claude skills link: {format_claude_skills_link(plan.claude_skills_link)}"

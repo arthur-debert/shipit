@@ -183,3 +183,33 @@ def test_no_override_event_without_shipit_exec(monkeypatch):
     rc = cli.main(["log", "--help"])
     assert rc == 0
     assert calls == []
+
+
+def test_provision_is_a_tombstone_that_always_refuses_with_the_remedy():
+    # ADR-0066 retired `provision`; #1070's call sites outlived it, in a dozen
+    # consumer-authored pixi lane tasks nothing reconciles. Those tasks already
+    # fail — the tombstone decides WHAT they say when they do. Without it the
+    # operator reads click's `No such command 'provision'`, which names neither
+    # lexd, nor the ADR, nor the one-line edit. It restores nothing: every
+    # invocation exits 1, whatever arguments it is handed.
+    from click.testing import CliRunner
+
+    for argv in (
+        ["provision"],
+        ["provision", "lexd"],  # the fleet's call, verbatim
+        ["provision", "--force", "lexd"],  # options a caller may still pass
+        ["provision", "some-future-thing"],  # the verb generally, not one arg
+    ):
+        result = CliRunner().invoke(cli.root, argv)
+        assert result.exit_code == 1, argv
+        assert "RETIRED (ADR-0066)" in result.output
+        assert "[feature.shipit-lexd]" in result.output
+        assert "Remove this call from your pixi task" in result.output
+
+
+def test_provision_tombstone_is_hidden_from_help(capsys):
+    # A gravestone answers when called; it does not advertise itself. Listing a
+    # retired verb in `shipit --help` reads as an offer to run it.
+    rc = cli.main(["--help"])
+    assert rc == 0
+    assert "provision" not in capsys.readouterr().out

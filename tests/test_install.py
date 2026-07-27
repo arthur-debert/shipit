@@ -1561,6 +1561,258 @@ def test_install_refuses_to_write_through_a_symlinked_block_dest(tmp_path, rec):
 
 
 # --------------------------------------------------------------------------
+# The retired `provision lexd` tripwire (#1070, ADR-0066). The manifests below
+# are the REAL fleet shapes, byte-modeled off the repos the v1.4.1 reconcile
+# surfaced: a bare `provision-lexd` task, a lane-wired `lint-full` in
+# [feature.lint.tasks], and the lane-ONLY shape (phos-editor/app) that carries
+# no `provision-lexd` task at all — the case a task-name check would miss.
+# --------------------------------------------------------------------------
+
+# lex-fmt/mkdocs-lex's shape: a bare task AND two lanes wired to the call, with
+# the surrounding prose that mentions the retired verb in comments.
+FLEET_PIXI = """\
+[workspace]
+name = "mkdocs-lex"
+channels = ["conda-forge"]
+platforms = ["osx-arm64"]
+
+[tasks]
+provision-lexd = "./bin/shipit provision lexd"
+# The wf-checks lane provisions nothing outside pixi, so the lane task
+# provisions it inline: `shipit provision lexd` is idempotent and lands lexd
+# in this (default) env's prefix.
+test-full = "./bin/shipit provision lexd && ./bin/shipit test"
+
+[feature.lint.tasks]
+lint = "./bin/shipit lint"
+lint-full = { cmd = "./bin/shipit provision lexd && ./bin/shipit lint" }
+"""
+
+# phos-editor/app's shape: the inline lane prefix ONLY — no `provision-lexd`
+# task anywhere, so nothing but the COMMAND STRING can find it.
+LANE_ONLY_PIXI = """\
+[workspace]
+name = "phos-app"
+channels = ["conda-forge"]
+platforms = ["osx-arm64"]
+
+[feature.lint.tasks]
+lint-full = { cmd = "./bin/shipit provision lexd && ./bin/shipit lint" }
+"""
+
+
+def test_stale_provision_finds_every_fleet_shape_with_its_task_and_table():
+    """The detection reads the COMMAND inside a parsed pixi task, so it finds the
+    bare task, the lane-wired task, and the lane-only shape alike — each named
+    with the task and table the operator has to edit."""
+    found = {sp.task: sp for sp in irec.stale_provision_tasks(FLEET_PIXI)}
+    assert set(found) == {"provision-lexd", "test-full", "lint-full"}
+    assert found["provision-lexd"].table == "tasks"
+    assert found["test-full"].table == "tasks"
+    assert found["lint-full"].table == "feature.lint.tasks"
+    assert found["lint-full"].command == (
+        "./bin/shipit provision lexd && ./bin/shipit lint"
+    )
+
+    # The lane-only repo: no `provision-lexd` task exists, yet the call is found.
+    (lane_only,) = irec.stale_provision_tasks(LANE_ONLY_PIXI)
+    assert lane_only.task == "lint-full"
+    assert lane_only.table == "feature.lint.tasks"
+
+
+def test_stale_provision_ignores_prose_and_repaired_lanes():
+    """Only task COMMANDS count. A comment quoting the retired verb (every fleet
+    manifest carries one, right above the task) is not a call site, and neither
+    is the repaired lane — otherwise the very edit the message asks for would
+    leave the refusal standing."""
+    repaired = """\
+[workspace]
+name = "repaired"
+channels = ["conda-forge"]
+platforms = ["osx-arm64"]
+
+# lexd rides the managed [feature.shipit-lexd] block now; `shipit provision
+# lexd` is retired (ADR-0066) and this lane no longer calls it.
+[feature.lint.tasks]
+lint-full = { cmd = "./bin/shipit lint" }
+"""
+    assert irec.stale_provision_tasks(repaired) == ()
+    # Fail-open on an unparseable manifest, like the pixi-conflict siblings.
+    assert irec.stale_provision_tasks("[workspace\nname =") == ()
+
+
+def test_stale_provision_reads_every_shape_the_fleet_actually_writes():
+    """The audited fleet shapes, byte-modeled off the 14 live call sites across
+    10 portfolio repos (#1105 round 3). All of them are plain word sequences, so
+    all of them are inside what the check judges: the executable's BASENAME
+    absorbs the launcher-path variation, `&&` segmentation reaches a call behind
+    another command (7 of the 14, one of them a three-command chain), and an
+    argv-list task is read as the exact word sequence pixi execs."""
+    manifest = """\
+[workspace]
+name = "shapes"
+channels = ["conda-forge"]
+platforms = ["osx-arm64"]
+
+[tasks]
+spaced = "./bin/shipit  provision   lexd"
+plain = "shipit provision lexd"
+argv = ["./bin/shipit", "provision", "lexd"]
+chained = "mkdir -p build && ./bin/shipit provision lexd && ./bin/shipit test"
+three-segment = "git submodule update --init comms && ./bin/shipit provision lexd && ./bin/shipit lint"
+unspaced = "./bin/shipit provision lexd;./bin/shipit test"
+assigned = "LEXD_HOME=/tmp/lexd ./bin/shipit provision lexd"
+subshell = "(cd sub && ./bin/shipit provision lexd)"
+multiline = '''
+mkdir -p build
+./bin/shipit provision lexd
+'''
+"""
+    assert {sp.task for sp in irec.stale_provision_tasks(manifest)} == {
+        "spaced",
+        "plain",
+        "argv",
+        "chained",
+        "three-segment",
+        "unspaced",
+        "assigned",
+        "subshell",
+        "multiline",
+    }
+
+
+def test_stale_provision_ignores_a_task_that_only_names_the_retired_command():
+    """A task that PRINTS the retired command runs nothing retired. Getting this
+    wrong is not a cosmetic false positive — every applying mode fails closed on
+    a finding, so an `echo` would take `shipit install` down (#1105 round 1).
+    Quoted prose is declined outright; unquoted prose is read exactly and simply
+    does not run the call, since `echo` is the executable."""
+    manifest = """\
+[workspace]
+name = "prose"
+channels = ["conda-forge"]
+platforms = ["osx-arm64"]
+
+[tasks]
+explain = "echo 'shipit provision lexd is retired (ADR-0066)'"
+explain-argv = ["echo", "shipit provision lexd is retired"]
+explain-bare = "echo shipit provision lexd is retired"
+explain-table = { cmd = "echo 'drop the shipit provision lexd prefix'" }
+narrate = '''
+mkdir -p build
+# ./bin/shipit provision lexd is retired: lexd rides the channel now
+./bin/shipit lint
+'''
+"""
+    assert irec.stale_provision_tasks(manifest) == ()
+
+
+def test_stale_provision_declines_commands_it_cannot_read_exactly():
+    """The soundness boundary (#1105 round 3): a command carrying a quote, a
+    redirect, a backslash escape or a command substitution is NOT judged, because
+    under any of them the words the shell runs are not the words the text splits
+    into. Three review rounds' worth of false positives live in this manifest —
+    every one of them a valid task that a shell-approximating matcher failed
+    `shipit install` closed over. None is a finding; the tombstone verb is what
+    catches a real call hiding in here, where it runs."""
+    manifest = """\
+[workspace]
+name = "unjudgeable"
+channels = ["conda-forge"]
+platforms = ["osx-arm64"]
+
+[tasks]
+quoted-and = "echo '&&' shipit provision lexd"
+quoted-semi = 'echo "note;shipit" provision lexd'
+redirect = "echo > shipit provision lexd"
+redirect-fd = "echo 2>shipit provision lexd"
+substitution = "echo $(shipit provision lexd)"
+backtick = "echo `shipit provision lexd`"
+escaped = "echo shipit\\ provision lexd"
+argv-operator = ["echo", ";", "shipit", "provision", "lexd"]
+argv-quoted = ["echo", "note;shipit", "provision", "lexd"]
+"""
+    assert irec.stale_provision_tasks(manifest) == ()
+
+
+def test_stale_provision_walks_a_feature_named_tasks():
+    """The walk collects a `tasks` table AND descends into it, so a feature that
+    happens to be named `tasks` cannot shadow the real task collection nested
+    inside it (#1105 round 1)."""
+    manifest = """\
+[workspace]
+name = "shadow"
+channels = ["conda-forge"]
+platforms = ["osx-arm64"]
+
+[feature.tasks.tasks]
+lint-full = "./bin/shipit provision lexd && ./bin/shipit lint"
+"""
+    (found,) = irec.stale_provision_tasks(manifest)
+    assert found.task == "lint-full"
+    assert found.table == "feature.tasks.tasks"
+
+
+def test_install_refuses_a_consumer_still_calling_the_retired_provision(tmp_path, rec):
+    """#1070: the call sites are consumer-authored lane tasks OUTSIDE every
+    managed block, so no reconcile rewrites them and the dead call survives a pin
+    bump — surfacing later as a red CI lane, at the `shipit provision` tombstone.
+    Install fails closed instead, in EVERY applying mode (MODE_TREE included),
+    naming the task, its table, and the remedy."""
+    (tmp_path / "pixi.toml").write_text(FLEET_PIXI)
+
+    plan = _plan(tmp_path)
+    flagged = {sp.task: sp for sp in plan.stale_provision}
+    assert set(flagged) == {"provision-lexd", "test-full", "lint-full"}
+
+    with pytest.raises(InstallError, match="retired command in pixi.toml") as excinfo:
+        _apply(tmp_path, iapply.MODE_TREE)
+    message = str(excinfo.value)
+    # The message is actionable on its own: task, table, and the replacement.
+    assert "'lint-full'" in message
+    assert "[feature.lint.tasks]" in message
+    assert "[feature.shipit-lexd]" in message
+    # The refusal happens BEFORE any write — the managed set never landed.
+    assert not (tmp_path / "AGENTS.md").exists()
+
+    # The dry-run surface is worded off the same formatter (never drifts).
+    warnings = verb.format_plan_warnings(plan)
+    assert "install: retired command:" in warnings
+    assert irec.format_stale_provision(flagged["lint-full"]) in warnings
+
+
+def test_stale_provision_refusal_survives_a_no_op_plan():
+    """The COMMON shape is a repo whose managed set is already current: the plan
+    carries no work at all, so a guard placed after the no-op shortcut would exit
+    0 over a dead lane. The refusal reads the record, not the write set."""
+    plan = irec.Plan(
+        root="/repo",
+        decisions=(),
+        retired=(),
+        seeds=(),
+        stale_provision=(
+            irec.StaleProvisionTask(
+                task="lint-full",
+                table="feature.lint.tasks",
+                command="./bin/shipit provision lexd && ./bin/shipit lint",
+            ),
+        ),
+    )
+    assert plan.nothing_to_do
+    with pytest.raises(InstallError, match="retired command in pixi.toml"):
+        iapply.reject_stale_provision(plan)
+
+
+def test_shipits_own_pixi_toml_calls_no_retired_provision():
+    """The dogfood check: shipit self-installs at Tree provisioning, so its own
+    manifest must pass the tripwire it ships. Its comments DO name the retired
+    verb (the ADR-0066 story), which is exactly why the check reads commands."""
+    own = (REPO_ROOT / "pixi.toml").read_text(encoding="utf-8")
+    assert "provision lexd" in own, "expected the ADR-0066 prose to still be there"
+    assert irec.stale_provision_tasks(own) == ()
+
+
+# --------------------------------------------------------------------------
 # The pinned bin/shipit launcher (ADR-0033) — pin-resolve via uv, SHIPIT_EXEC
 # override, pinless refusal. The exec seam is FAKED: a shim `uv` (and shim
 # override targets) planted first on PATH record their argv instead of
