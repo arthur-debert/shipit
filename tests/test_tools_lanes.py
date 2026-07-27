@@ -140,7 +140,7 @@ def test_pixi_task_env_sets_resolve_feature_tasks_to_their_environments():
     pixi = {
         "tasks": {"changelog": "./bin/shipit changelog"},
         "feature": {
-            "lint": {"tasks": {"lint-full": "./bin/shipit lint"}},
+            "lint": {"tasks": {"lint": "./bin/shipit lint"}},
             "test": {"tasks": {"test": "./bin/shipit test"}},
             "shared": {"tasks": {"verify": "verify"}},
         },
@@ -152,7 +152,7 @@ def test_pixi_task_env_sets_resolve_feature_tasks_to_their_environments():
     }
     assert lanes.task_env_sets(pixi) == {
         "changelog": ("default",),
-        "lint-full": ("lint",),
+        "lint": ("lint",),
         "test": ("test",),
         "verify": ("dogfood",),
     }
@@ -162,20 +162,20 @@ def test_pixi_task_commands_resolve_string_and_cmd_table_tasks():
     pixi = {
         "tasks": {"changelog": "./bin/shipit changelog"},
         "feature": {
-            "lint": {"tasks": {"lint-full": {"cmd": "./bin/shipit lint"}}},
+            "lint": {"tasks": {"lint": {"cmd": "./bin/shipit lint"}}},
             "test": {"tasks": {"test": "./bin/shipit test"}},
         },
     }
     assert lanes.task_commands(pixi) == {
         "changelog": "./bin/shipit changelog",
-        "lint-full": "./bin/shipit lint",
+        "lint": "./bin/shipit lint",
         "test": "./bin/shipit test",
     }
 
 
 def test_matrix_carries_env_set_and_cache_descriptors_from_the_planner():
     declared = (
-        _lane("lint", run="lint-full", required=True),
+        _lane("lint", run="lint", required=True),
         _lane("test", run="test rust", required=True),
     )
     toolchains = (
@@ -185,12 +185,12 @@ def test_matrix_carries_env_set_and_cache_descriptors_from_the_planner():
     planned = lanes.plan(
         declared,
         event="pr",
-        task_envs={"lint-full": ("lint",), "test": ("test",)},
+        task_envs={"lint": ("lint",), "test": ("test",)},
         toolchains=toolchains,
     )
     assert planned[0].as_matrix_entry() == {
         "name": "lint",
-        "run": "lint-full",
+        "run": "lint",
         "runner": "ubuntu-latest",
         "required": True,
         "envs": "lint",
@@ -355,11 +355,12 @@ def test_shipits_own_commit_push_checks_are_lint_plus_the_fast_test_set():
         "lint",
         "test",
     ]
-    # Both run thin pixi callers of the shipit verbs (ADR-0039): the lint lane
-    # rides `lint-full` (the provisioned twin of the managed `lint` task — see
-    # pixi.toml [feature.lint.tasks]), the test lane the `test` task itself.
+    # Both run thin pixi callers of the shipit verbs (ADR-0039), each the managed
+    # task of its own name: since #1066 the `lint` task lives in
+    # pixi.toml [feature.lint.tasks], so the lane resolves onto the pinned lint
+    # env with no `lint-full` twin to keep in step.
     by_name = {lane.name: lane for lane in declared}
-    assert by_name["lint"].run == "lint-full"
+    assert by_name["lint"].run == "lint"
     assert by_name["test"].run == "test"
 
 

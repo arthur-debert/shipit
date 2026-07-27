@@ -193,6 +193,8 @@ path = "skills/implementing/SKILL.md"
 pristine = [
   "sha256:fd7d90eff365955e096dbdf2c72ac6bf32a33b12609d7749aa8a544b8cb259a0",
   "sha256:02040db0bd1aedce096473bdbc9d65ec741a81c989f97121fedc242e172a4932",
+  # The fixer is `pixi run lint --fix`, on the pinned lint env (#1066).
+  "sha256:9aad3759cc233430e9d5a896a33ead5c6ae81e71b5a78af35e8b15133ef5cc69",
 ]
 
 [[retired]]
@@ -219,6 +221,8 @@ path = "skills/shepherding-prs/SKILL.md"
 pristine = [
   "sha256:8f627079f3d9846069742dd77cf4987eb550ff9a6c5e575f751ea8edf958ee2b",
   "sha256:b7250030fa91282fa6d7d5a65073363edbc4522e31984dd8983994dcf9a5aa85",
+  # The fixer is `pixi run lint --fix`, on the pinned lint env (#1066).
+  "sha256:fed591f8346731ac2e4bb8de18c5fce0f6edd199c2f3ee5bf1cb036114cd4063",
 ]
 
 [[retired]]

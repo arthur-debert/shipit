@@ -8,10 +8,19 @@ shipit INVERTS release's lefthook-as-orchestrator model. Because pixi has no
 cross-manifest task inheritance (architecture.lex §5), the per-language
 discovery, routing and aggregation cannot live in a pixi task templated into
 each consumer — that is drift on pixi.toml. So it lives HERE, in the binary:
-lefthook is thin (it calls ``pixi run lint``), pixi is thin (it runs
-``shipit lint``), and this service does the real work. CI and the pre-commit hook
-run the IDENTICAL checks because it is ONE binary with ONE config — "both agree"
-is structural, not two transcriptions of the rules drifting apart.
+lefthook is thin (it calls ``pixi run -e lint lint``), pixi is thin (it runs
+``./bin/shipit lint``), and this service does the real work. CI and the pre-commit
+hook run the IDENTICAL checks because it is ONE binary with ONE config — "both
+agree" is structural, not two transcriptions of the rules drifting apart.
+
+That one task lives in the pixi ``lint`` FEATURE, hence in exactly ONE
+environment (#1066, :data:`shipit.install.units.PIXI_LINT_TASK_KEY`), so the
+public ``pixi run lint``, the fixer ``pixi run lint --fix``, the hooks' explicitly
+pinned ``pixi run -e lint lint`` and the CI lane all execute the SAME task against
+the SAME fleet-pinned toolchain. A ``lint`` task in the default ``[tasks]`` table
+would instead run in the DEFAULT environment — against whatever linter versions
+that env happened to resolve — which is exactly how a bare ``pixi run lint``
+once reported prettier debt on four already-clean consumer PRs.
 
 The lint checks are HARD-FAIL (architecture.lex §7): a missing tool exits
 non-zero, it never skips. A clean run is ``0``; any failure is ``1``.
@@ -205,9 +214,9 @@ class Tool:
 
     ``fix`` is the formatter form applied under ``--fix``; ``None`` means the
     tool has no safe in-place fix, so in fix mode it falls back to its check
-    form. The checks NEVER skip a tool — ``shipit lint --fix`` formats what it can
-    AND still checks everything, so it can never pass while a non-fixable leg
-    (shellcheck, yamllint, lexd) is failing.
+    form. The checks NEVER skip a tool — the fixer (``pixi run lint --fix``)
+    formats what it can AND still checks everything, so it can never pass while a
+    non-fixable leg (shellcheck, yamllint, lexd) is failing.
 
     ``per_manifest`` tools speak to a build unit, not a file list (cargo has no
     file-batch form): they run once per tracked manifest directory of their Lang
@@ -1185,7 +1194,7 @@ def detect_rust_skew(pin: str | None, version_output: str | None) -> str | None:
         f"cargo: TOOLCHAIN SKEW — this run resolved cargo {version}, but the "
         f"repo pins rust {pin!r} in pixi.toml, so this rust verdict is not the "
         "canonical one and it WARNS instead of blocking (#602). The pinned-env "
-        "gate is authoritative: run `pixi install`, then `pixi run -e lint lint` "
+        "gate is authoritative: run `pixi install`, then `pixi run lint` "
         "(the same env CI enforces). Fix the env skew rather than bypassing the "
         "hook with --no-verify."
     )

@@ -3,9 +3,9 @@
 # managed `lint` pixi task (`pixi run -e lint lint`). lefthook is intentionally
 # dumb: one definition, run everywhere, so CI and the hooks cannot drift into
 # two transcriptions of the rules. Every task and environment invoked here is
-# satisfied by the shipit-managed pixi.toml blocks (the `[tasks]` line, the lint
-# feature/dependency block, the `[environments]` definition), so the hooks are
-# green on a stock consumer right after `shipit install`. The only repo-local
+# satisfied by the shipit-managed pixi.toml blocks (the `[feature.lint.tasks]`
+# line, the lint feature/dependency block, the `[environments]` definition), so
+# the hooks are green on a stock consumer right after `shipit install`. The only repo-local
 # path referenced is the shipit-managed launcher `./bin/shipit` (covered next) —
 # itself part of the managed set, so a stock consumer has it too; no UNMANAGED
 # repo-local script or path is referenced.
@@ -23,11 +23,15 @@
 # for the lint TOOLCHAIN (ruff/shellcheck/…) — a separate concern from the
 # shipit build — and the manifest-ambiguity dodge below still holds.
 #
-# The `-e lint` is pinned (not bare `pixi run lint`): an inherited
+# The `-e lint` is EXPLICIT, not different: since #1066 the managed `lint` task
+# lives in `[feature.lint.tasks]`, so it exists in exactly one environment and a
+# bare `pixi run lint` already resolves there — the hook and the public command
+# are the same task in the same env. The flag stays because a hook must not
+# depend on that resolution surviving a hostile ambient environment: an inherited
 # `PIXI_PROJECT_MANIFEST` (a commit made from inside another pixi project's
-# activated environment) makes bare `pixi run lint` ambiguous across
-# environments and the hook dies. Pinning the environment removes the
-# ambiguity regardless of the inherited env.
+# activated environment) can point pixi at a manifest whose `lint` resolves
+# elsewhere, and a hook that dies (or lints the wrong tree) at commit time is the
+# worst place to discover it. Naming the environment is the cheap, loud pin.
 #
 # Fail-open when pixi is absent (#482): each leg is guarded by a `command -v
 # pixi` probe that skips (prints a note, `exit 0`) when pixi is not on PATH —

@@ -153,30 +153,6 @@ jobs:
 #: catalog; ``lint``/``test`` still arrive through their managed blocks.
 _BUILD_TASK = "./bin/shipit build"
 
-#: The lint lane's CI-provisioned twin of the managed ``lint`` task, declared in
-#: the generated ``[feature.lint.tasks]`` — the exact fleet pattern shipit's own
-#: repo uses (``lint-full``, "the provisioned twin of the managed `lint` task").
-#: WHY a twin and not the managed bare ``lint``: the ``wf-checks`` lane planner
-#: (``shipit ci plan``) keys a lane's provisioned pixi env off the FEATURE that
-#: declares its ``run`` task. The managed ``lint`` task anchors in the default
-#: ``[tasks]`` table (its tooling — shfmt/prettier/markdownlint/actionlint/…
-#: lives in ``[feature.lint]``, run locally via the hook's ``pixi run -e lint
-#: lint``), so a lane pointed at it provisions the DEFAULT env and the runner
-#: never installs the lint tooling — the lane dies 127 on a stock runner (found
-#: in GEN01-WS07 QA, #930). Declaring the twin in ``[feature.lint.tasks]``
-#: resolves the lane onto the ``lint`` env, where every lint binary (and the
-#: managed rust lint toolchain) is provisioned. It is consumer-owned scaffold
-#: data, NOT a managed-catalog entry; ``lint``/``test`` still arrive through
-#: their managed blocks and the hook keeps using the bare managed ``lint`` task.
-#:
-#: The cmd is the plain managed ``lint`` invocation — the exact shape the fleet's
-#: own ``lint-full`` task uses. lexd (the one lint tool not on conda-forge) reaches
-#: the lint env as an ordinary conda dependency: since ARF02-WS06 (ADR-0066) the
-#: managed ``[feature.shipit-lexd]`` block pins it from the Artifact channel and the
-#: lint environment composes that feature, so a plain ``pixi install`` puts lexd on
-#: PATH — no inline provisioning, no bespoke fetcher (both retired).
-_LINT_LANE_TASK = "./bin/shipit lint"
-
 #: The generated Repo's CI policy: the standard, universal, required lint and
 #: test lanes, rendered into the consumer-owned ``.shipit.toml [lanes]`` (spec
 #: §CI: "the new Repo follows the existing pattern with required lint and test
@@ -192,12 +168,16 @@ _LINT_LANE_TASK = "./bin/shipit lint"
 #: new one). These are stack-neutral universal-seed policy, not a profile
 #: contribution: lint and test are generic Tool verbs, not Rust behavior.
 #:
-#: The lint lane runs ``lint-full`` (NOT the managed bare ``lint`` task) so the
-#: planner provisions the ``lint`` env its tooling needs — see
-#: :data:`_LINT_LANE_TASK`. The test lane's tooling (cargo-nextest, rust) is in
-#: the default env, so it rides the managed ``test`` task directly.
+#: Both lanes run the managed task of their own name. The lint lane used to run a
+#: ``lint-full`` twin because the managed ``lint`` task anchored in the default
+#: ``[tasks]`` table, so the ``wf-checks`` lane planner (which keys a lane's
+#: provisioned pixi env off the FEATURE declaring its ``run`` task) provisioned the
+#: DEFAULT env and the runner never installed the lint tooling — the lane died 127
+#: on a stock runner (GEN01-WS07 QA, #930). #1066 moved the managed task into
+#: ``[feature.lint.tasks]``, which resolves the lane onto the ``lint`` env
+#: directly, so the twin is retired: one task name, one environment, one gate.
 _REQUIRED_LANES: tuple[tuple[str, str], ...] = (
-    ("lint", "lint-full"),
+    ("lint", "lint"),
     ("test", "test"),
 )
 
@@ -241,13 +221,12 @@ def _pixi_manifest(name: ProjectName, deps: dict[str, str]) -> str:
     The ``[workspace]`` table matches ``shipit install``'s own seed
     (name/channels/platforms) so a re-install is a no-op; ``[dependencies]``
     carries the merged profile deps; ``[tasks]`` carries only the universal
-    ``build`` task (managed blocks splice in ``lint``/``test``/… beneath).
-    ``[feature.lint.tasks]`` carries the ``lint-full`` twin (:data:`_LINT_LANE_TASK`,
-    the plain managed ``lint`` invocation) the lint CI lane runs so it provisions
-    the ``lint`` env; the managed lint
-    dependency/environment blocks splice in beneath (``_insert_under_anchor``
-    creates ``[feature.lint.dependencies]``/``[environments]`` at EOF, leaving
-    this ``[feature.lint.tasks]`` table intact).
+    ``build`` task. The managed blocks splice in beneath: ``test`` into
+    ``[tasks]``, and ``lint`` into ``[feature.lint.tasks]`` — the ONE environment
+    carrying the pinned lint toolchain (#1066) — alongside the managed lint
+    dependency/environment blocks (``_insert_under_anchor`` creates
+    ``[feature.lint.tasks]``/``[feature.lint.dependencies]``/``[environments]``
+    at EOF as needed).
     """
     header = (
         "# pixi workspace — the consumer-owned provisioning manifest for this\n"
@@ -262,7 +241,6 @@ def _pixi_manifest(name: ProjectName, deps: dict[str, str]) -> str:
             },
             "dependencies": dict(deps),
             "tasks": {"build": _BUILD_TASK},
-            "feature": {"lint": {"tasks": {"lint-full": _LINT_LANE_TASK}}},
         }
     )
     return header + body

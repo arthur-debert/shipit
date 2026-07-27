@@ -223,10 +223,20 @@ the durable code is one slim versioned package; and configuration is explicit.
 7. The commit/push checks: one definition
 
     There is exactly one definition of these checks, invoked everywhere. lefthook is thin:
-    it calls `pixi run lint` and `pixi run test`. shipit ships the lint tasks
+    it calls `pixi run -e lint lint` and `pixi run test`. shipit ships the lint tasks
     and the linter dependencies; the consumer supplies `test` (the pixi-test
     encapsulation — per-project test differences hide behind one task name, so
     lefthook stays dumb).
+
+    ONE task, ONE environment: the managed `lint` task is declared in the pixi
+    `lint` FEATURE, so it exists in exactly one environment and the public
+    `pixi run lint`, the fixer `pixi run lint --fix`, the hook's explicit
+    `pixi run -e lint lint` and the CI lint lane all execute it against the same
+    fleet-pinned toolchain. Declaring it in the default `[tasks]` table instead
+    would put it in EVERY environment — including the default one, whose linter
+    versions are whatever that env happens to resolve — so the public command
+    would silently gate on a different toolchain than the checks it claims to
+    reproduce (issue #1066, ADR-0004).
 
     They are hard-fail checks: a missing tool exits non-zero, never skips. CI runs the
     SAME `pixi run` invocations as the local pre-commit hook, so "CI is the

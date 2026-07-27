@@ -922,7 +922,9 @@ def format_pr_body(
         lines.append("### Checks activated locally")
         lines.append(
             "`lefthook install` ran where this install was invoked, so its "
-            "`.git/hooks/{pre-commit,pre-push}` fire `pixi run lint` there now. "
+            "`.git/hooks/{pre-commit,pre-push}` fire `pixi run -e lint lint` there "
+            "now — the same task, in the same pinned env, a bare `pixi run lint` "
+            "resolves to. "
             f"Reviewers/mergers: run `{HOOK_RECOVERY_CMD}` on your own checkout "
             "(shipit-self: `pixi run -e lint install-hooks`) to make the checks live "
             "for you too. Activation is idempotent and leaves unrelated hooks intact."

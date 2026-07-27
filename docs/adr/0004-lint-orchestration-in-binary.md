@@ -37,11 +37,15 @@ templated tasks) and `§7` (lint checks: one definition, hard).
   are gone. The rest of this ADR's decision (lint logic in the binary) stands.
 - **Check vs fix.** Lint is CHECK-ONLY by default (release's scar: a
   formatter under `--all-files` silently rewrites untouched files). `--fix` is the
-  opt-in formatter pass, exposed as `pixi run fmt`; only tools with a safe
-  in-place fix participate, the rest still run as checks
-  (`src/shipit/lint.py`, `Tool.fix`, `pixi.toml` `fmt` task).
+  opt-in formatter pass, exposed as `pixi run lint --fix` (pixi forwards the task's
+  trailing args); only tools with a safe in-place fix participate, the rest still
+  run as checks (`src/shipit/lint.py`, `Tool.fix`). The fixer deliberately has NO
+  separate task name — a second entry point is a second thing to drift, and a
+  fixer that can run outside the pinned environment reformats correct files into
+  a state the hook then rejects (#1066).
 - **Whole-tree, NOT staged-only.** Staged-only was deliberately NOT implemented.
-  Both the pre-commit and pre-push hooks call `pixi run lint`, which lints the
+  Both the pre-commit and pre-push hooks call `pixi run -e lint lint` — the same
+  task, in the same environment, a bare `pixi run lint` resolves to — which lints the
   whole tracked tree via `git ls-files` (`lefthook.yml` and
   `src/shipit/data/lefthook.yml`; `lint.py:210-211`). Rationale (stated inline in
   `lefthook.yml`): a green hook then never lies about an unstaged edit. This is a
@@ -50,12 +54,26 @@ templated tasks) and `§7` (lint checks: one definition, hard).
   `LANGS` registry (`lint.py:120`, `lang_for` at `:132`); extensionless scripts
   route by shebang. The optional `[lint]` `.shipit.toml` override was NOT
   implemented — routing is fully zero-config.
-- **Consumer pixi.toml integration is a managed BLOCK.** install splices a
-  marker-delimited block (TOML-comment markers `PIXI_OPEN`/`PIXI_CLOSE`, anchored
-  under `[tasks]`) carrying only the stable `lint = "shipit lint"` line — never a
-  linter-dependency block, since the linters ride in as the shipit package's own
-  deps (`install.py:56-63`, `:190-200`; `src/shipit/data/pixi-tasks-block.toml`).
-  Block-hashed and reconciled by the install algorithm (ADR-0003).
+- **Consumer pixi.toml integration is a managed BLOCK, anchored in the lint
+  FEATURE.** install splices a marker-delimited block (TOML-comment markers
+  `PIXI_LINT_TASK_OPEN`/`_CLOSE`) carrying only the stable
+  `lint = "./bin/shipit lint"` line, block-hashed and reconciled by the install
+  algorithm (ADR-0003). Its anchor is `[feature.lint.tasks]`
+  (`src/shipit/data/pixi-lint-task-block.toml`), **not** the default `[tasks]`
+  table where it originally landed. That placement is load-bearing, not
+  cosmetic: a pixi task is reachable from every environment whose features
+  declare it, and the default feature is in all of them — so a `lint` line in
+  `[tasks]` ran in the DEFAULT environment while the fleet-pinned toolchain the
+  binary shells out to materializes only in the `lint` environment. The public,
+  documented `pixi run lint` therefore executed against whatever linter versions
+  the default env happened to resolve, disagreeing with the commit hook and the
+  CI lane; on 2026-07-19 that misclassified four already-clean consumer PRs as
+  prettier debt (#1066). In the lint feature the task exists in exactly ONE
+  environment, and pixi resolves a bare `pixi run <task>` to the single
+  environment defining it — so `pixi run lint`, `pixi run lint --fix`, the hook's
+  explicitly pinned `pixi run -e lint lint`, and the CI lane are one task, one
+  environment, one gate. The linter-dependency block is its sibling unit
+  (`[feature.lint.dependencies]`, ADP00) — that amendment predates this one.
 
 ## Consequences
 
@@ -65,4 +83,6 @@ templated tasks) and `§7` (lint checks: one definition, hard).
   boundary so it is unit-testable (shipit's pure/boundary split).
 - An unprovisioned linter fails the lint checks loudly rather than quietly skipping, so the
   checks cannot silently weaken.
-- The lint-check definition cannot fork between local and CI: there is one binary, one config.
+- The lint-check definition cannot fork between local and CI: there is one binary, one config,
+  and — since #1066 — one task in one pixi environment, so the public command cannot resolve
+  a different toolchain than the gate it claims to reproduce.
