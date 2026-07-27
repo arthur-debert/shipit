@@ -18,7 +18,7 @@ from . import __version__, buildid, events, logcontext
 from .logsetup import configure_logging, reset_logging
 from .verbs import build as build_verb
 from .verbs import e2e as e2e_verb
-from .verbs import gh_setup, install, lint, logs, opportunities, verify_apps
+from .verbs import gh_setup, install, lint, logs, opportunities, provision, verify_apps
 from .verbs import stage as stage_verb
 from .verbs import test as test_verb
 from .verbs._context import resolve_root_context
@@ -187,6 +187,14 @@ def verify_apps_cmd(repo: str | None, agents: tuple[str, ...]) -> None:
 # command lives with its renderers in verbs/install.py; the domain (plan/apply)
 # is the shipit.install package.
 root.add_command(install.cmd)
+
+
+# The `provision` TOMBSTONE (ADR-0066, #1070): the verb is retired, and this
+# registration exists only so a surviving consumer call site fails with the
+# remedy (lexd rides the Artifact channel; edit the pixi task) instead of
+# click's `No such command 'provision'`. It restores nothing — see
+# verbs/provision.py for why a gravestone is not a compatibility shim.
+root.add_command(provision.cmd)
 
 
 # The app-consumer stage-from-prefix step (conda-direct #1079): copies resolved

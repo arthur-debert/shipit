@@ -119,7 +119,6 @@ from __future__ import annotations
 
 import logging
 import re
-import shlex
 import tomllib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -998,29 +997,6 @@ def _split_toml_key(key: str) -> tuple[str, ...]:
     return tuple(segments)
 
 
-#: One segment of a TOML key path: a bare key, or a quoted one of either flavor.
-_TOML_KEY_SEGMENT = r"(?:[A-Za-z0-9_-]+|\"[^\"]*\"|'[^']*')"
-
-#: A whole TOML key path — segments joined by dots, whitespace allowed around
-#: them (``feature . lint . tasks`` is the same path as ``feature.lint.tasks``).
-_TOML_KEY_PATH_RE = re.compile(rf"{_TOML_KEY_SEGMENT}(?:\s*\.\s*{_TOML_KEY_SEGMENT})*")
-
-
-def _toml_key_path(raw: str) -> tuple[str, ...] | None:
-    """``raw`` as key-path segments, or ``None`` when it is not a TOML key path.
-
-    :func:`_split_toml_key` splits ANY text on its unquoted dots; this validates
-    first, so a raw-text scan can tell a real key path from something that only
-    LOOKS like one inside brackets — a shell test in a multi-line task body
-    (``[ -z "$VAR" ]``) has two segments with no dot between them and is
-    rejected, where the bare split would hand back a plausible-looking table name
-    and derail the scan (#1105 review).
-    """
-    if not _TOML_KEY_PATH_RE.fullmatch(raw.strip()):
-        return None
-    return _split_toml_key(raw)
-
-
 def _toml_table_headers(inner: str) -> tuple[tuple[str, tuple[str, ...]], ...]:
     """Every plain ``[table]`` header in a TOML text, as ``(raw, segments)``.
 
@@ -1313,11 +1289,24 @@ def format_symlinked_dest(sd: SymlinkedDest) -> str:
 # --------------------------------------------------------------------------
 # The retired `provision lexd` tripwire (ARF02-WS06 #1070, ADR-0066)
 # --------------------------------------------------------------------------
+#
+# The tripwire answers ONE question — does this pixi task run
+# `shipit provision lexd`? — and it answers it only for commands it can read
+# EXACTLY. Three review rounds established both halves of that boundary (#1105):
+# the fleet writes the call as plain, unquoted words (14 call sites across 10
+# repos, verified), and every attempt to read the commands it CANNOT read
+# exactly — a substring search, then a hand-split word list, then a shell
+# lexer — shipped a false positive that fails `shipit install` closed over a
+# manifest that was fine (prose in an `echo`, a quoted `'&&'`, a redirect
+# target). So the check declines the commands it cannot read rather than
+# approximating a shell, and `shipit provision` is a TOMBSTONE verb
+# (:mod:`shipit.verbs.provision`) so that a declined call still fails legibly
+# where it runs. The guard is sound; the tombstone makes it safe for it to be
+# incomplete.
 
-#: The retired command's argument words, matched STRUCTURALLY after the
-#: executable — never as a substring of the command text. ADR-0066 deleted the
-#: `provision` verb outright (no fallback), so any surviving call dies with
-#: `No such command 'provision'`. The fleet wrote the call in two shapes: a
+#: The retired command's argument words, matched after the executable — never as
+#: a substring of the command text. ADR-0066 deleted the `provision` verb, so any
+#: surviving call is already dead. The fleet wrote it in two shapes: a
 #: `provision-lexd` task of its own, and an inline
 #: `./bin/shipit provision lexd && ./bin/shipit lint` prefix on a
 #: consumer-authored `lint-full`/`test-full` lane task — and at least one repo
@@ -1325,19 +1314,26 @@ def format_symlinked_dest(sd: SymlinkedDest) -> str:
 #: task at all, so a task-name check would miss it.
 RETIRED_PROVISION_ARGS = ("provision", "lexd")
 
-#: The metacharacters that END one command and open the next, so the word after
-#: one is again in COMMAND position (`… && ./bin/shipit provision lexd`). The set
-#: mirrors `shlex`'s `punctuation_chars=True`, which emits runs of exactly these
-#: as standalone tokens — the same lexing `shipit.harness.policy` splits compound
-#: commands with. A token is an operator only when the LEXER made it one: a
-#: quoted `'&&'` is an argument, and telling the two apart is the whole reason
-#: the lexer runs in non-posix mode (#1105 round 2).
-_SHELL_OPERATOR_CHARS = frozenset("();<>|&")
+#: What makes a shell command UNJUDGEABLE — the constructs under which the words
+#: the shell runs are not the words the text splits into. A quote regroups words
+#: (`echo 'shipit provision lexd is retired'` is one argument, not four), a
+#: redirect's operand is a filename rather than a command (`echo > shipit …`), a
+#: backslash escapes a separator, and `$(`/`` ` `` runs a command the text does
+#: not contain. Reading any of them correctly needs a shell; a command carrying
+#: one is simply not judged.
+_UNJUDGEABLE_CHARS = frozenset("\"'`<>\\")
+
+#: The characters that END a simple command in a QUOTE-FREE command line, so what
+#: follows is a new command. Exact rather than heuristic precisely because the
+#: text is quote-free: with no quoting in play, `;`, `&`, `|` and the subshell
+#: parens can only be syntax. A newline terminates a command too (a multi-line
+#: task body is a script). The fleet needs this: 7 of its 14 call sites are
+#: `&&`-chained behind another command, and one is a three-command chain.
+_COMMAND_SEPARATORS = re.compile(r"[;&|()\n]+")
 
 #: A shell assignment PREFIX (`LEXD_HOME=/tmp ./bin/shipit provision lexd`). POSIX
-#: simple-command grammar puts any number of these before the executable, so a
-#: word in command position that is one leaves the NEXT word in command position
-#: rather than ending the search (#1105 round 2).
+#: simple-command grammar puts any number of these before the executable, so they
+#: are skipped rather than read as the executable.
 _ASSIGNMENT_PREFIX_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 
 
@@ -1346,157 +1342,110 @@ class StaleProvisionTask:
     """One consumer pixi task still calling the retired ``shipit provision lexd``.
 
     ``table`` is the dotted TOML path of the tasks table holding it (``tasks``,
-    ``feature.lint.tasks``), ``line`` the 1-based line of the task's definition
-    in ``pixi.toml`` (0 when the definition line cannot be located — the message
-    then names the table instead), and ``command`` the offending command string
-    as written, so the operator can see exactly which prefix to drop.
+    ``feature.lint.tasks``) and ``command`` the offending command string as
+    written, so the operator can see exactly which prefix to drop. Task plus
+    table locate the edit: a task name is unique within its table and greppable,
+    which is why there is no line number — recovering one means scanning the raw
+    text for TOML positions ``tomllib`` discards, a second hand-rolled parser
+    that produced a defect in every round it existed (#1105 round 3).
     """
 
     task: str
     table: str
-    line: int
     command: str
 
 
 @dataclass(frozen=True)
-class _Word:
-    """One word of a task command, with the provenance the match turns on.
-
-    ``operator`` says the LEXER produced this word as shell syntax (a real ``&&``
-    between two commands) rather than as a literal argument (a quoted ``'&&'``,
-    or any element of an argv list, where no shell ever runs). ``text`` is the
-    word the shell would pass on, quotes removed.
-    """
-
-    text: str
-    operator: bool
-
-
-@dataclass(frozen=True)
 class _TaskCommand:
-    """One command a pixi task runs: its ``text`` as written (what the operator
-    reads in the refusal) and its ``words`` (what the shell would execute).
+    """One command a pixi task runs.
 
-    Keeping the two apart is what makes the match structural: the report quotes
-    the manifest verbatim, while the detection walks WORDS and so can tell an
-    executable from a string argument that merely spells one out.
+    ``text`` is the command as written (what the refusal quotes back). ``argv``
+    is the word sequence when pixi runs the task WITHOUT a shell — a list-form
+    task — and ``None`` for a string-form task, which a shell will interpret.
+    The distinction is the whole matching contract: an argv element is a literal
+    argument (``["echo", ";", "shipit"]`` passes a semicolon, it does not end a
+    command), where a string has to be read as shell text or not at all.
     """
 
     text: str
-    words: tuple[_Word, ...]
-
-
-def _unquote(token: str) -> str:
-    """``token`` with its surrounding quotes removed, if it carries a matched pair.
-
-    The lexer runs in NON-posix mode to keep quoting visible (that is what
-    distinguishes a literal ``'&&'`` from the operator), so the words it hands
-    back still wear their quotes; the match compares what the shell would pass
-    on. A partly-quoted word (``"$REPO"/bin/shipit``) is left alone — its
-    basename already reads correctly.
-    """
-    if len(token) >= 2 and token[0] == token[-1] and token[0] in "\"'":
-        return token[1:-1]
-    return token
-
-
-def _lex_shell(command: str) -> tuple[_Word, ...]:
-    """``command`` lexed the way a shell reads it, operators kept distinguishable.
-
-    ``shlex`` with ``punctuation_chars`` emits runs of shell metacharacters as
-    their own tokens, so ``lexd&&./bin/shipit`` splits at the boundary hiding
-    inside it — but only where the metacharacters are SYNTAX. Non-posix mode is
-    what buys that distinction: quoting survives lexing, so ``'&&'`` comes back
-    quoted and reads as the argument it is, where posix mode would hand back a
-    bare ``&&`` indistinguishable from the operator and flag
-    ``echo '&&' shipit provision lexd`` as a call (#1105 round 2).
-
-    An unlexable command (an unbalanced quote) yields no words and so matches
-    nothing — fail-open like the unparseable manifest in
-    :func:`stale_provision_tasks`. Unlike :mod:`shipit.harness.policy`'s
-    guard, there is no substring fall-back to be conservative with: this is not
-    a permission boundary, and a substring search is the very thing round 1
-    removed.
-    """
-    try:
-        lexer = shlex.shlex(command, posix=False, punctuation_chars=True)
-        lexer.whitespace_split = True
-        tokens = list(lexer)
-    except ValueError:
-        return ()
-    return tuple(
-        _Word(text=token, operator=True)
-        if token and all(ch in _SHELL_OPERATOR_CHARS for ch in token)
-        else _Word(text=_unquote(token), operator=False)
-        for token in tokens
-    )
+    argv: tuple[str, ...] | None
 
 
 def _task_commands(spec: object) -> tuple[_TaskCommand, ...]:
-    """Every command a pixi task definition carries, as text plus shell words.
+    """Every command a pixi task definition carries.
 
     pixi writes a task three ways: a bare string (``t = "cmd"``), an argv list
     (``t = ["./bin/shipit", "provision", "lexd"]``), or a table with a ``cmd``
-    that is itself either shape. A string is LEXED the way a shell reads it
-    (:func:`_lex_shell`); an argv list already IS the word sequence and never
-    reaches a shell, so each element is taken LITERALLY — never re-split, and
-    never read as an operator, since ``["echo", ";", "shipit"]`` passes a
-    semicolon as an argument rather than ending a command (#1105 round 2).
+    that is itself either shape.
     """
     if isinstance(spec, str):
-        return (_TaskCommand(text=spec, words=_lex_shell(spec)),)
+        return (_TaskCommand(text=spec, argv=None),)
     if isinstance(spec, list):
         argv = tuple(str(x) for x in spec)
-        return (
-            _TaskCommand(
-                text=" ".join(argv),
-                words=tuple(_Word(text=arg, operator=False) for arg in argv),
-            ),
-        )
+        return (_TaskCommand(text=" ".join(argv), argv=argv),)
     if isinstance(spec, dict):
         return _task_commands(spec.get("cmd"))
     return ()
 
 
-def _calls_retired_provision(words: Sequence[_Word]) -> bool:
-    """Whether ``words`` RUN ``shipit provision lexd`` (as opposed to naming it).
+def _runs_retired_provision(words: Sequence[str]) -> bool:
+    """Whether ``words`` — ONE simple command — runs the retired call.
 
-    The executable must sit in COMMAND position — the first word, straight after
-    a shell operator, or straight after an assignment prefix (POSIX puts any
-    number of ``VAR=value`` before the executable) — and its basename must be
-    ``shipit``, which absorbs the launcher-path variation the fleet wrote
-    (``./bin/shipit``, a bare ``shipit``). A substring search cannot make that
-    distinction: it flags ``echo 'shipit provision lexd is retired'`` — prose a
-    repo writes about the retirement — and since every applying mode fails
-    closed on a finding, that would take `shipit install` down over an ``echo``
-    (#1105 round 1).
-
-    Command position is deliberately NOT extended through wrapper commands
-    (``env``, ``command``, ``time``, ``pixi run``). Reading those correctly means
-    modelling each wrapper's own option grammar — ``pixi run -e lint shipit …``
-    puts two words of flags between the wrapper and the executable — which is
-    unbounded, where the prefix rule above is the shell's own grammar and needs
-    no such list. No fleet manifest wraps the call (all 12 are a bare or
-    ``&&``-chained ``./bin/shipit``/``shipit``), and a wrapped call still fails
-    the same way it does today, on the consumer's CI (#1105 round 2).
+    The executable is the first word past any assignment prefix, and its
+    BASENAME must be ``shipit``, which is what absorbs the launcher-path
+    variation the fleet wrote (``./bin/shipit``, a bare ``shipit``). Wrapper
+    commands (``env``, ``pixi run``) are deliberately not seen through: that
+    needs each wrapper's own option grammar (``pixi run -e lint shipit …`` puts
+    two words in between), no fleet manifest wraps the call, and the tombstone
+    verb catches a wrapped call where it runs.
     """
-    at_command = True
     for index, word in enumerate(words):
-        if word.operator:
-            at_command = True
-            continue
-        if not at_command:
-            continue
-        if _ASSIGNMENT_PREFIX_RE.match(word.text):
+        if _ASSIGNMENT_PREFIX_RE.match(word):
             continue  # a VAR=value prefix — the executable is still ahead
-        following = words[index + 1 : index + 1 + len(RETIRED_PROVISION_ARGS)]
-        if (
-            PurePosixPath(word.text).name == "shipit"
-            and tuple(w.text for w in following) == RETIRED_PROVISION_ARGS
-        ):
-            return True
-        at_command = False
+        return (
+            PurePosixPath(word).name == "shipit"
+            and tuple(words[index + 1 : index + 1 + len(RETIRED_PROVISION_ARGS)])
+            == RETIRED_PROVISION_ARGS
+        )
     return False
+
+
+def _shell_command_words(segment: str) -> tuple[str, ...]:
+    """One quote-free shell segment's words, with any trailing comment dropped.
+
+    Whitespace splitting IS the shell's word splitting once quoting is out of
+    the picture — that is what the :data:`_UNJUDGEABLE_CHARS` precondition buys.
+    An unquoted ``#`` at the start of a word opens a comment that runs to the end
+    of the line, so the words from there on are not run and are dropped (a task
+    body's own narration about the retirement is a comment, not a call).
+    """
+    words: list[str] = []
+    for word in segment.split():
+        if word.startswith("#"):
+            break
+        words.append(word)
+    return tuple(words)
+
+
+def _calls_retired_provision(command: _TaskCommand) -> bool:
+    """Whether ``command`` RUNS the retired call — or is DECLINED as unreadable.
+
+    An argv list never reaches a shell: it is exactly one simple command whose
+    words are exactly its elements, so it is read directly. A string command is
+    read only when it carries none of :data:`_UNJUDGEABLE_CHARS`; within that
+    set the reading is exact, splitting on the separators into simple commands
+    and checking each. Anything else is DECLINED — no finding, no guess. A
+    declined call is not lost: it dies at the tombstone verb with the same
+    remedy this refusal carries, one CI run later instead of at reconcile time.
+    """
+    if command.argv is not None:
+        return _runs_retired_provision(command.argv)
+    if any(ch in _UNJUDGEABLE_CHARS for ch in command.text) or "$(" in command.text:
+        return False
+    return any(
+        _runs_retired_provision(_shell_command_words(segment))
+        for segment in _COMMAND_SEPARATORS.split(command.text)
+    )
 
 
 def _tasks_tables(
@@ -1510,7 +1459,7 @@ def _tasks_tables(
     descent is UNCONDITIONAL — a ``tasks`` table is collected AND recursed into
     — so a feature or environment that happens to be named ``tasks`` cannot make
     the walk mistake it for the task collection and skip the real
-    ``[feature.tasks.tasks]`` inside it (#1105 review).
+    ``[feature.tasks.tasks]`` inside it (#1105 round 1).
     """
     if not isinstance(node, dict):
         return []
@@ -1524,69 +1473,15 @@ def _tasks_tables(
     return found
 
 
-def _definition_line(text: str, table: tuple[str, ...], task: str) -> int:
-    """The 1-based ``pixi.toml`` line where ``task`` is defined in ``table``.
-
-    Located in the RAW text (tomllib discards positions) by tracking the current
-    table header and matching the task's KEY PATH against it, so every TOML
-    spelling of the same definition lands on the same line: the inline
-    ``task = …`` inside ``[table]``, the ``[table.task]`` header, the dotted
-    ``tasks.task = …`` under ``[feature.x]``, and quoted segments in either
-    (``[target."osx-arm64".tasks]``). Both sides are parsed with the module's
-    TOML key helpers (:func:`_toml_key_path`) rather than string-compared, which
-    is also what keeps a shell test in a task body from hijacking the header
-    tracker: ``[ -z "$VAR" ]`` is not a key path, so it is not a header (#1105
-    round 1). A MULTI-LINE task body is skipped wholesale on top of that, so a
-    line inside it that IS a well-formed key path (a script echoing
-    ``[tasks.lint]``) cannot be read as a header either (#1105 round 2); the
-    delimiter tracking is line-granular, which is all the shape needs — a task
-    body opens with a bare ``'''``/``\"\"\"`` and closes the same way. Comments are
-    stripped — the fleet's manifests carry prose ABOUT ``provision lexd`` right
-    above the task, and pointing the operator at a comment would be a wrong line
-    number. Returns 0 when nothing matches, which the message renders as the
-    table.
-    """
-    target = (*table, task)
-    current: tuple[str, ...] = ()
-    delimiter: str | None = None
-    for number, raw in enumerate(text.splitlines(), 1):
-        if delimiter is not None:  # inside a multi-line value: not TOML syntax
-            if delimiter in raw:
-                delimiter = None
-            continue
-        line = _strip_toml_comment(raw).strip()
-        if not line:
-            continue
-        for candidate in ('"""', "'''"):
-            if line.count(candidate) % 2:
-                delimiter = candidate  # an unclosed multi-line value opens here
-        if line.startswith("[") and line.endswith("]"):
-            inner = line[2:-2] if line.startswith("[[") else line[1:-1]
-            header = _toml_key_path(inner)
-            if header is None:
-                continue  # not a key path — a shell test, not a table header
-            if header == target:
-                return number
-            current = header
-            continue
-        key, separator, _ = line.partition("=")
-        if not separator:
-            continue
-        path = _toml_key_path(key)
-        if path is not None and (*current, *path) == target:
-            return number
-    return 0
-
-
 def stale_provision_tasks(text: str) -> tuple[StaleProvisionTask, ...]:
     """Every pixi task in ``text`` still calling the retired ``provision lexd``.
 
     Pure over the manifest text (:func:`gather` supplies it), and fail-open on
     an unparseable manifest like its :func:`_pixi_key_conflicts` siblings: the
     tripwire never turns a malformed pixi.toml into a different error. Matching
-    is over the parsed task COMMANDS only, and over the command's WORDS at that
-    (:func:`_calls_retired_provision`), so neither a comment nor a string
-    argument that merely spells the retired verb out is a call site.
+    is over the PARSED tasks' commands (:func:`_calls_retired_provision`), so a
+    comment quoting the retired verb — every fleet manifest carries one — is not
+    a call site, and neither is a command the check declines to read.
     """
     try:
         manifest = tomllib.loads(text)
@@ -1596,12 +1491,11 @@ def stale_provision_tasks(text: str) -> tuple[StaleProvisionTask, ...]:
     for table, tasks in _tasks_tables(manifest):
         for task, spec in tasks.items():
             for command in _task_commands(spec):
-                if _calls_retired_provision(command.words):
+                if _calls_retired_provision(command):
                     found.append(
                         StaleProvisionTask(
                             task=str(task),
                             table=".".join(table),
-                            line=_definition_line(text, table, str(task)),
                             command=command.text,
                         )
                     )
@@ -1622,17 +1516,20 @@ def _stale_provision_tasks(root: Path) -> tuple[StaleProvisionTask, ...]:
 def format_stale_provision(ref: StaleProvisionTask) -> str:
     """The one actionable message for a retired ``provision lexd`` reference —
     used verbatim by the dry-run stderr warning and the fail-closed error, so the
-    two surfaces can never drift."""
-    where = f"pixi.toml:{ref.line}" if ref.line else f"pixi.toml [{ref.table}]"
+    two surfaces can never drift.
+
+    Task plus table is the whole location: a task name is unique within its
+    table, so `grep` lands on the edit. It reads better than a line number too —
+    the operator sees WHICH lane is broken, not just where a byte is.
+    """
     return (
-        f"{where}: the '{ref.task}' task runs `{ref.command}`, which calls the "
-        f"RETIRED `shipit provision lexd` — the `provision` verb no longer exists "
-        f'(ADR-0066, no fallback), so this task now fails with "No such command '
-        f"'provision'\". lexd rides the managed [feature.shipit-lexd] block (the "
-        f"public Artifact channel) wired into the lint environment, so it is "
-        f"already on PATH there: drop the `shipit provision lexd &&` prefix (or "
-        f"the whole '{ref.task}' task, if that is all it does) and re-run "
-        f"`shipit install`"
+        f"pixi.toml: the '{ref.task}' task in [{ref.table}] runs `{ref.command}`, "
+        f"which calls the RETIRED `shipit provision lexd` — the `provision` verb "
+        f"is retired (ADR-0066, no fallback), so this task is already dead. lexd "
+        f"rides the managed [feature.shipit-lexd] block (the public Artifact "
+        f"channel) wired into the lint environment, so it is already on PATH "
+        f"there: drop the `shipit provision lexd &&` prefix (or the whole "
+        f"'{ref.task}' task, if that is all it does) and re-run `shipit install`"
     )
 
 
@@ -2310,7 +2207,7 @@ def reconcile(
         logger.warning(
             "retired `provision lexd` reference: %s",
             format_stale_provision(sp),
-            extra={"root": state.root, "task": sp.task, "line": sp.line},
+            extra={"root": state.root, "task": sp.task, "table": sp.table},
         )
     if result.claude_skills_link.action == LINK_BLOCKED:
         logger.warning(

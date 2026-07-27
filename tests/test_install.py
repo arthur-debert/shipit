@@ -1507,18 +1507,15 @@ lint-full = { cmd = "./bin/shipit provision lexd && ./bin/shipit lint" }
 """
 
 
-def test_stale_provision_finds_every_fleet_shape_with_its_task_and_line():
-    """The detection matches the COMMAND STRING inside a parsed pixi task, so it
-    finds the bare task, the lane-wired task, and the lane-only shape alike —
-    each named with the task and the line the operator has to edit."""
+def test_stale_provision_finds_every_fleet_shape_with_its_task_and_table():
+    """The detection reads the COMMAND inside a parsed pixi task, so it finds the
+    bare task, the lane-wired task, and the lane-only shape alike — each named
+    with the task and table the operator has to edit."""
     found = {sp.task: sp for sp in irec.stale_provision_tasks(FLEET_PIXI)}
     assert set(found) == {"provision-lexd", "test-full", "lint-full"}
     assert found["provision-lexd"].table == "tasks"
-    assert found["provision-lexd"].line == 7
     assert found["test-full"].table == "tasks"
-    assert found["test-full"].line == 11  # the task, NOT the comment above it
     assert found["lint-full"].table == "feature.lint.tasks"
-    assert found["lint-full"].line == 15
     assert found["lint-full"].command == (
         "./bin/shipit provision lexd && ./bin/shipit lint"
     )
@@ -1526,7 +1523,7 @@ def test_stale_provision_finds_every_fleet_shape_with_its_task_and_line():
     # The lane-only repo: no `provision-lexd` task exists, yet the call is found.
     (lane_only,) = irec.stale_provision_tasks(LANE_ONLY_PIXI)
     assert lane_only.task == "lint-full"
-    assert lane_only.line == 7
+    assert lane_only.table == "feature.lint.tasks"
 
 
 def test_stale_provision_ignores_prose_and_repaired_lanes():
@@ -1550,11 +1547,13 @@ lint-full = { cmd = "./bin/shipit lint" }
     assert irec.stale_provision_tasks("[workspace\nname =") == ()
 
 
-def test_stale_provision_matches_across_launcher_and_argv_shapes():
-    """The executable's BASENAME absorbs the launcher-prefix and spacing
-    variation the fleet wrote, an argv-list task is matched over the words it
-    would run, and a call after a shell operator is still a call — the retired
-    verb dies the same way in every one of them."""
+def test_stale_provision_reads_every_shape_the_fleet_actually_writes():
+    """The audited fleet shapes, byte-modeled off the 14 live call sites across
+    10 portfolio repos (#1105 round 3). All of them are plain word sequences, so
+    all of them are inside what the check judges: the executable's BASENAME
+    absorbs the launcher-path variation, `&&` segmentation reaches a call behind
+    another command (7 of the 14, one of them a three-command chain), and an
+    argv-list task is read as the exact word sequence pixi execs."""
     manifest = """\
 [workspace]
 name = "shapes"
@@ -1566,27 +1565,34 @@ spaced = "./bin/shipit  provision   lexd"
 plain = "shipit provision lexd"
 argv = ["./bin/shipit", "provision", "lexd"]
 chained = "mkdir -p build && ./bin/shipit provision lexd && ./bin/shipit test"
+three-segment = "git submodule update --init comms && ./bin/shipit provision lexd && ./bin/shipit lint"
 unspaced = "./bin/shipit provision lexd;./bin/shipit test"
 assigned = "LEXD_HOME=/tmp/lexd ./bin/shipit provision lexd"
-quoted-exec = '"./bin/shipit" provision lexd'
+subshell = "(cd sub && ./bin/shipit provision lexd)"
+multiline = '''
+mkdir -p build
+./bin/shipit provision lexd
+'''
 """
     assert {sp.task for sp in irec.stale_provision_tasks(manifest)} == {
         "spaced",
         "plain",
         "argv",
         "chained",
+        "three-segment",
         "unspaced",
         "assigned",
-        "quoted-exec",
+        "subshell",
+        "multiline",
     }
 
 
 def test_stale_provision_ignores_a_task_that_only_names_the_retired_command():
-    """The match is over WORDS in command position, not a substring of the
-    command text: a task that PRINTS the retired command (the repos narrate
-    ADR-0066, and not only in comments) runs nothing retired. Getting this wrong
-    is not a cosmetic false positive — every applying mode fails closed on a
-    finding, so an `echo` would take `shipit install` down (#1105 review)."""
+    """A task that PRINTS the retired command runs nothing retired. Getting this
+    wrong is not a cosmetic false positive — every applying mode fails closed on
+    a finding, so an `echo` would take `shipit install` down (#1105 round 1).
+    Quoted prose is declined outright; unquoted prose is read exactly and simply
+    does not run the call, since `echo` is the executable."""
     manifest = """\
 [workspace]
 name = "prose"
@@ -1596,109 +1602,49 @@ platforms = ["osx-arm64"]
 [tasks]
 explain = "echo 'shipit provision lexd is retired (ADR-0066)'"
 explain-argv = ["echo", "shipit provision lexd is retired"]
-explain-printf = 'printf "%s\\n" "run shipit provision lexd? no: it is retired"'
 explain-bare = "echo shipit provision lexd is retired"
 explain-table = { cmd = "echo 'drop the shipit provision lexd prefix'" }
-unbalanced = "echo 'shipit provision lexd"
+narrate = '''
+mkdir -p build
+# ./bin/shipit provision lexd is retired: lexd rides the channel now
+./bin/shipit lint
+'''
 """
     assert irec.stale_provision_tasks(manifest) == ()
 
 
-def test_stale_provision_reads_a_quoted_operator_as_the_argument_it_is():
-    """A shell operator inside a QUOTED argument is not a command boundary, and
-    an argv element is never shell syntax at all — so neither can smuggle a
-    command position in front of a `shipit` that is only being printed. The
-    lexer keeps quoting visible (non-posix) precisely so `'&&'` and `&&` stay
-    distinguishable; splitting the quote-stripped output cannot tell them apart
-    and fails closed on a legitimate task (#1105 round 2)."""
+def test_stale_provision_declines_commands_it_cannot_read_exactly():
+    """The soundness boundary (#1105 round 3): a command carrying a quote, a
+    redirect, a backslash escape or a command substitution is NOT judged, because
+    under any of them the words the shell runs are not the words the text splits
+    into. Three review rounds' worth of false positives live in this manifest —
+    every one of them a valid task that a shell-approximating matcher failed
+    `shipit install` closed over. None is a finding; the tombstone verb is what
+    catches a real call hiding in here, where it runs."""
     manifest = """\
 [workspace]
-name = "quoted-operators"
+name = "unjudgeable"
 channels = ["conda-forge"]
 platforms = ["osx-arm64"]
 
 [tasks]
 quoted-and = "echo '&&' shipit provision lexd"
 quoted-semi = 'echo "note;shipit" provision lexd'
-quoted-pipe = "echo '|' shipit provision lexd"
-argv-semi = ["echo", "note;shipit", "provision", "lexd"]
+redirect = "echo > shipit provision lexd"
+redirect-fd = "echo 2>shipit provision lexd"
+substitution = "echo $(shipit provision lexd)"
+backtick = "echo `shipit provision lexd`"
+escaped = "echo shipit\\ provision lexd"
 argv-operator = ["echo", ";", "shipit", "provision", "lexd"]
+argv-quoted = ["echo", "note;shipit", "provision", "lexd"]
 """
     assert irec.stale_provision_tasks(manifest) == ()
-
-
-def test_stale_provision_locates_the_line_across_toml_key_spellings():
-    """Every TOML spelling of the same definition resolves to its own line: the
-    `[table.task]` header form, a dotted `tasks.<task>` key under a feature
-    header, and quoted header segments. A shell test inside a multi-line task
-    body (`[ -z "$VAR" ]` — bracketed, but not a key path) must not be read as a
-    table header, or the tasks after it lose their line numbers (#1105 review)."""
-    manifest = """\
-[workspace]
-name = "spellings"
-channels = ["conda-forge"]
-platforms = ["osx-arm64"]
-
-[tasks]
-guarded = '''
-[ -z "$LEXD_HOME" ]
-echo checked
-'''
-after-guard = "./bin/shipit provision lexd"
-
-[tasks.header-form]
-cmd = "./bin/shipit provision lexd"
-
-[feature.lint]
-tasks.dotted = "./bin/shipit provision lexd"
-
-[target."osx-arm64".tasks]
-quoted-header = "./bin/shipit provision lexd"
-"""
-    found = {sp.task: sp for sp in irec.stale_provision_tasks(manifest)}
-    assert set(found) == {"after-guard", "header-form", "dotted", "quoted-header"}
-    # The bracketed shell test on line 8 did not hijack the header tracker: the
-    # task after it is still located inside [tasks].
-    assert found["after-guard"].table == "tasks"
-    assert found["after-guard"].line == 11
-    assert found["header-form"].table == "tasks"
-    assert found["header-form"].line == 13
-    assert found["dotted"].table == "feature.lint.tasks"
-    assert found["dotted"].line == 17
-    assert found["quoted-header"].table == "target.osx-arm64.tasks"
-    assert found["quoted-header"].line == 20
-
-
-def test_stale_provision_line_ignores_toml_syntax_inside_a_task_body():
-    """A multi-line task body is script, not TOML: a line inside it that IS a
-    well-formed header (a heredoc quoting a manifest) must not be read as one,
-    or the message points the operator at a line inside a doc string instead of
-    at the task they have to edit (#1105 round 2)."""
-    manifest = """\
-[workspace]
-name = "multiline"
-channels = ["conda-forge"]
-platforms = ["osx-arm64"]
-
-[feature.lint.tasks]
-narrate = '''
-cat <<'EOF'
-[feature.lint.tasks]
-lint-full = "the retired lane, for the record"
-EOF
-'''
-lint-full = "./bin/shipit provision lexd && ./bin/shipit lint"
-"""
-    (found,) = irec.stale_provision_tasks(manifest)
-    assert found.task == "lint-full"
-    assert found.table == "feature.lint.tasks"
-    assert found.line == 13  # the real task, not line 10 inside the heredoc
 
 
 def test_stale_provision_walks_a_feature_named_tasks():
     """The walk collects a `tasks` table AND descends into it, so a feature that
     happens to be named `tasks` cannot shadow the real task collection nested
-    inside it (#1105 review)."""
+    inside it (#1105 round 1)."""
     manifest = """\
 [workspace]
 name = "shadow"
@@ -1711,7 +1657,6 @@ lint-full = "./bin/shipit provision lexd && ./bin/shipit lint"
     (found,) = irec.stale_provision_tasks(manifest)
     assert found.task == "lint-full"
     assert found.table == "feature.tasks.tasks"
-    assert found.line == 7
 
 
 def test_install_refuses_a_consumer_still_calling_the_retired_provision(tmp_path, rec):
@@ -1719,7 +1664,7 @@ def test_install_refuses_a_consumer_still_calling_the_retired_provision(tmp_path
     managed block, so no reconcile rewrites them and the dead call survives a pin
     bump — surfacing later as `No such command 'provision'` on a red CI lane.
     Install fails closed instead, in EVERY applying mode (MODE_TREE included),
-    naming the task, its line, and the remedy."""
+    naming the task, its table, and the remedy."""
     (tmp_path / "pixi.toml").write_text(FLEET_PIXI)
 
     plan = _plan(tmp_path)
@@ -1729,9 +1674,9 @@ def test_install_refuses_a_consumer_still_calling_the_retired_provision(tmp_path
     with pytest.raises(InstallError, match="retired command in pixi.toml") as excinfo:
         _apply(tmp_path, iapply.MODE_TREE)
     message = str(excinfo.value)
-    # The message is actionable on its own: task, line, and the replacement.
-    assert "pixi.toml:15" in message
+    # The message is actionable on its own: task, table, and the replacement.
     assert "'lint-full'" in message
+    assert "[feature.lint.tasks]" in message
     assert "[feature.shipit-lexd]" in message
     # The refusal happens BEFORE any write — the managed set never landed.
     assert not (tmp_path / "AGENTS.md").exists()
@@ -1755,7 +1700,6 @@ def test_stale_provision_refusal_survives_a_no_op_plan():
             irec.StaleProvisionTask(
                 task="lint-full",
                 table="feature.lint.tasks",
-                line=66,
                 command="./bin/shipit provision lexd && ./bin/shipit lint",
             ),
         ),
