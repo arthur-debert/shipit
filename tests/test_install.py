@@ -1567,6 +1567,8 @@ plain = "shipit provision lexd"
 argv = ["./bin/shipit", "provision", "lexd"]
 chained = "mkdir -p build && ./bin/shipit provision lexd && ./bin/shipit test"
 unspaced = "./bin/shipit provision lexd;./bin/shipit test"
+assigned = "LEXD_HOME=/tmp/lexd ./bin/shipit provision lexd"
+quoted-exec = '"./bin/shipit" provision lexd'
 """
     assert {sp.task for sp in irec.stale_provision_tasks(manifest)} == {
         "spaced",
@@ -1574,6 +1576,8 @@ unspaced = "./bin/shipit provision lexd;./bin/shipit test"
         "argv",
         "chained",
         "unspaced",
+        "assigned",
+        "quoted-exec",
     }
 
 
@@ -1596,6 +1600,29 @@ explain-printf = 'printf "%s\\n" "run shipit provision lexd? no: it is retired"'
 explain-bare = "echo shipit provision lexd is retired"
 explain-table = { cmd = "echo 'drop the shipit provision lexd prefix'" }
 unbalanced = "echo 'shipit provision lexd"
+"""
+    assert irec.stale_provision_tasks(manifest) == ()
+
+
+def test_stale_provision_reads_a_quoted_operator_as_the_argument_it_is():
+    """A shell operator inside a QUOTED argument is not a command boundary, and
+    an argv element is never shell syntax at all — so neither can smuggle a
+    command position in front of a `shipit` that is only being printed. The
+    lexer keeps quoting visible (non-posix) precisely so `'&&'` and `&&` stay
+    distinguishable; splitting the quote-stripped output cannot tell them apart
+    and fails closed on a legitimate task (#1105 round 2)."""
+    manifest = """\
+[workspace]
+name = "quoted-operators"
+channels = ["conda-forge"]
+platforms = ["osx-arm64"]
+
+[tasks]
+quoted-and = "echo '&&' shipit provision lexd"
+quoted-semi = 'echo "note;shipit" provision lexd'
+quoted-pipe = "echo '|' shipit provision lexd"
+argv-semi = ["echo", "note;shipit", "provision", "lexd"]
+argv-operator = ["echo", ";", "shipit", "provision", "lexd"]
 """
     assert irec.stale_provision_tasks(manifest) == ()
 
@@ -1640,6 +1667,32 @@ quoted-header = "./bin/shipit provision lexd"
     assert found["dotted"].line == 17
     assert found["quoted-header"].table == "target.osx-arm64.tasks"
     assert found["quoted-header"].line == 20
+
+
+def test_stale_provision_line_ignores_toml_syntax_inside_a_task_body():
+    """A multi-line task body is script, not TOML: a line inside it that IS a
+    well-formed header (a heredoc quoting a manifest) must not be read as one,
+    or the message points the operator at a line inside a doc string instead of
+    at the task they have to edit (#1105 round 2)."""
+    manifest = """\
+[workspace]
+name = "multiline"
+channels = ["conda-forge"]
+platforms = ["osx-arm64"]
+
+[feature.lint.tasks]
+narrate = '''
+cat <<'EOF'
+[feature.lint.tasks]
+lint-full = "the retired lane, for the record"
+EOF
+'''
+lint-full = "./bin/shipit provision lexd && ./bin/shipit lint"
+"""
+    (found,) = irec.stale_provision_tasks(manifest)
+    assert found.task == "lint-full"
+    assert found.table == "feature.lint.tasks"
+    assert found.line == 13  # the real task, not line 10 inside the heredoc
 
 
 def test_stale_provision_walks_a_feature_named_tasks():

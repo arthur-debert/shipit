@@ -1325,11 +1325,20 @@ def format_symlinked_dest(sd: SymlinkedDest) -> str:
 #: task at all, so a task-name check would miss it.
 RETIRED_PROVISION_ARGS = ("provision", "lexd")
 
-#: The shell operators that END one command and open the next, so the word after
-#: one is again in COMMAND position (`… && ./bin/shipit provision lexd`). Tokens
-#: are split on these before the walk, so `lexd;` and `lexd&&./bin/shipit` read
-#: as the operator-terminated `lexd` they are.
-_SHELL_OPERATOR_RE = re.compile(r"(&&|\|\||[;&|()])")
+#: The metacharacters that END one command and open the next, so the word after
+#: one is again in COMMAND position (`… && ./bin/shipit provision lexd`). The set
+#: mirrors `shlex`'s `punctuation_chars=True`, which emits runs of exactly these
+#: as standalone tokens — the same lexing `shipit.harness.policy` splits compound
+#: commands with. A token is an operator only when the LEXER made it one: a
+#: quoted `'&&'` is an argument, and telling the two apart is the whole reason
+#: the lexer runs in non-posix mode (#1105 round 2).
+_SHELL_OPERATOR_CHARS = frozenset("();<>|&")
+
+#: A shell assignment PREFIX (`LEXD_HOME=/tmp ./bin/shipit provision lexd`). POSIX
+#: simple-command grammar puts any number of these before the executable, so a
+#: word in command position that is one leaves the NEXT word in command position
+#: rather than ending the search (#1105 round 2).
+_ASSIGNMENT_PREFIX_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 
 
 @dataclass(frozen=True)
@@ -1350,6 +1359,20 @@ class StaleProvisionTask:
 
 
 @dataclass(frozen=True)
+class _Word:
+    """One word of a task command, with the provenance the match turns on.
+
+    ``operator`` says the LEXER produced this word as shell syntax (a real ``&&``
+    between two commands) rather than as a literal argument (a quoted ``'&&'``,
+    or any element of an argv list, where no shell ever runs). ``text`` is the
+    word the shell would pass on, quotes removed.
+    """
+
+    text: str
+    operator: bool
+
+
+@dataclass(frozen=True)
 class _TaskCommand:
     """One command a pixi task runs: its ``text`` as written (what the operator
     reads in the refusal) and its ``words`` (what the shell would execute).
@@ -1360,22 +1383,53 @@ class _TaskCommand:
     """
 
     text: str
-    words: tuple[str, ...]
+    words: tuple[_Word, ...]
 
 
-def _shell_words(words: Sequence[str]) -> tuple[str, ...]:
-    """``words`` with any embedded shell operator broken out as its own word.
+def _unquote(token: str) -> str:
+    """``token`` with its surrounding quotes removed, if it carries a matched pair.
 
-    ``shlex`` splits on whitespace only, so ``lexd&&./bin/shipit`` arrives as one
-    word; splitting on the operators recovers the command boundary hiding inside
-    it. Splitting never breaks a word on WHITESPACE, so a quoted argument stays
-    the single word ``shlex`` made of it — a `;` inside prose yields fragments
-    that still carry their spaces and so can never pass for an executable.
+    The lexer runs in NON-posix mode to keep quoting visible (that is what
+    distinguishes a literal ``'&&'`` from the operator), so the words it hands
+    back still wear their quotes; the match compares what the shell would pass
+    on. A partly-quoted word (``"$REPO"/bin/shipit``) is left alone — its
+    basename already reads correctly.
     """
-    out: list[str] = []
-    for word in words:
-        out.extend(part for part in _SHELL_OPERATOR_RE.split(word) if part)
-    return tuple(out)
+    if len(token) >= 2 and token[0] == token[-1] and token[0] in "\"'":
+        return token[1:-1]
+    return token
+
+
+def _lex_shell(command: str) -> tuple[_Word, ...]:
+    """``command`` lexed the way a shell reads it, operators kept distinguishable.
+
+    ``shlex`` with ``punctuation_chars`` emits runs of shell metacharacters as
+    their own tokens, so ``lexd&&./bin/shipit`` splits at the boundary hiding
+    inside it — but only where the metacharacters are SYNTAX. Non-posix mode is
+    what buys that distinction: quoting survives lexing, so ``'&&'`` comes back
+    quoted and reads as the argument it is, where posix mode would hand back a
+    bare ``&&`` indistinguishable from the operator and flag
+    ``echo '&&' shipit provision lexd`` as a call (#1105 round 2).
+
+    An unlexable command (an unbalanced quote) yields no words and so matches
+    nothing — fail-open like the unparseable manifest in
+    :func:`stale_provision_tasks`. Unlike :mod:`shipit.harness.policy`'s
+    guard, there is no substring fall-back to be conservative with: this is not
+    a permission boundary, and a substring search is the very thing round 1
+    removed.
+    """
+    try:
+        lexer = shlex.shlex(command, posix=False, punctuation_chars=True)
+        lexer.whitespace_split = True
+        tokens = list(lexer)
+    except ValueError:
+        return ()
+    return tuple(
+        _Word(text=token, operator=True)
+        if token and all(ch in _SHELL_OPERATOR_CHARS for ch in token)
+        else _Word(text=_unquote(token), operator=False)
+        for token in tokens
+    )
 
 
 def _task_commands(spec: object) -> tuple[_TaskCommand, ...]:
@@ -1383,48 +1437,62 @@ def _task_commands(spec: object) -> tuple[_TaskCommand, ...]:
 
     pixi writes a task three ways: a bare string (``t = "cmd"``), an argv list
     (``t = ["./bin/shipit", "provision", "lexd"]``), or a table with a ``cmd``
-    that is itself either shape. A string is TOKENIZED the way a shell would
-    word-split it; an argv list already IS the word sequence, so it is taken
-    structurally rather than joined and re-split (re-splitting would break an
-    argument that contains spaces into words it never had). An untokenizable
-    string (an unbalanced quote) carries no words and so matches nothing —
-    fail-open like the unparseable manifest in :func:`stale_provision_tasks`.
+    that is itself either shape. A string is LEXED the way a shell reads it
+    (:func:`_lex_shell`); an argv list already IS the word sequence and never
+    reaches a shell, so each element is taken LITERALLY — never re-split, and
+    never read as an operator, since ``["echo", ";", "shipit"]`` passes a
+    semicolon as an argument rather than ending a command (#1105 round 2).
     """
     if isinstance(spec, str):
-        try:
-            words = tuple(shlex.split(spec))
-        except ValueError:
-            words = ()
-        return (_TaskCommand(text=spec, words=_shell_words(words)),)
+        return (_TaskCommand(text=spec, words=_lex_shell(spec)),)
     if isinstance(spec, list):
         argv = tuple(str(x) for x in spec)
-        return (_TaskCommand(text=" ".join(argv), words=_shell_words(argv)),)
+        return (
+            _TaskCommand(
+                text=" ".join(argv),
+                words=tuple(_Word(text=arg, operator=False) for arg in argv),
+            ),
+        )
     if isinstance(spec, dict):
         return _task_commands(spec.get("cmd"))
     return ()
 
 
-def _calls_retired_provision(words: Sequence[str]) -> bool:
+def _calls_retired_provision(words: Sequence[_Word]) -> bool:
     """Whether ``words`` RUN ``shipit provision lexd`` (as opposed to naming it).
 
-    The executable must sit in COMMAND position — first word, or straight after
-    a shell operator — and its basename must be ``shipit``, which is what absorbs
-    the launcher-prefix variation the fleet wrote (``./bin/shipit``, a bare
-    ``shipit``). A substring search cannot make that distinction: it flags
-    ``echo 'shipit provision lexd is retired'`` — prose a repo writes about the
-    retirement — and since every applying mode fails closed on a finding, that
-    would take `shipit install` down over an ``echo`` (#1105 review).
+    The executable must sit in COMMAND position — the first word, straight after
+    a shell operator, or straight after an assignment prefix (POSIX puts any
+    number of ``VAR=value`` before the executable) — and its basename must be
+    ``shipit``, which absorbs the launcher-path variation the fleet wrote
+    (``./bin/shipit``, a bare ``shipit``). A substring search cannot make that
+    distinction: it flags ``echo 'shipit provision lexd is retired'`` — prose a
+    repo writes about the retirement — and since every applying mode fails
+    closed on a finding, that would take `shipit install` down over an ``echo``
+    (#1105 round 1).
+
+    Command position is deliberately NOT extended through wrapper commands
+    (``env``, ``command``, ``time``, ``pixi run``). Reading those correctly means
+    modelling each wrapper's own option grammar — ``pixi run -e lint shipit …``
+    puts two words of flags between the wrapper and the executable — which is
+    unbounded, where the prefix rule above is the shell's own grammar and needs
+    no such list. No fleet manifest wraps the call (all 12 are a bare or
+    ``&&``-chained ``./bin/shipit``/``shipit``), and a wrapped call still fails
+    the same way it does today, on the consumer's CI (#1105 round 2).
     """
     at_command = True
     for index, word in enumerate(words):
-        if _SHELL_OPERATOR_RE.fullmatch(word):
+        if word.operator:
             at_command = True
             continue
+        if not at_command:
+            continue
+        if _ASSIGNMENT_PREFIX_RE.match(word.text):
+            continue  # a VAR=value prefix — the executable is still ahead
+        following = words[index + 1 : index + 1 + len(RETIRED_PROVISION_ARGS)]
         if (
-            at_command
-            and PurePosixPath(word).name == "shipit"
-            and tuple(words[index + 1 : index + 1 + len(RETIRED_PROVISION_ARGS)])
-            == RETIRED_PROVISION_ARGS
+            PurePosixPath(word.text).name == "shipit"
+            and tuple(w.text for w in following) == RETIRED_PROVISION_ARGS
         ):
             return True
         at_command = False
@@ -1466,19 +1534,32 @@ def _definition_line(text: str, table: tuple[str, ...], task: str) -> int:
     ``tasks.task = …`` under ``[feature.x]``, and quoted segments in either
     (``[target."osx-arm64".tasks]``). Both sides are parsed with the module's
     TOML key helpers (:func:`_toml_key_path`) rather than string-compared, which
-    is also what keeps a shell test in a multi-line task body from hijacking the
-    header tracker: ``[ -z "$VAR" ]`` is not a key path, so it is not a header
-    (#1105 review). Comments are stripped — the fleet's manifests carry prose
-    ABOUT ``provision lexd`` right above the task, and pointing the operator at a
-    comment would be a wrong line number. Returns 0 when nothing matches, which
-    the message renders as the table.
+    is also what keeps a shell test in a task body from hijacking the header
+    tracker: ``[ -z "$VAR" ]`` is not a key path, so it is not a header (#1105
+    round 1). A MULTI-LINE task body is skipped wholesale on top of that, so a
+    line inside it that IS a well-formed key path (a script echoing
+    ``[tasks.lint]``) cannot be read as a header either (#1105 round 2); the
+    delimiter tracking is line-granular, which is all the shape needs — a task
+    body opens with a bare ``'''``/``\"\"\"`` and closes the same way. Comments are
+    stripped — the fleet's manifests carry prose ABOUT ``provision lexd`` right
+    above the task, and pointing the operator at a comment would be a wrong line
+    number. Returns 0 when nothing matches, which the message renders as the
+    table.
     """
     target = (*table, task)
     current: tuple[str, ...] = ()
+    delimiter: str | None = None
     for number, raw in enumerate(text.splitlines(), 1):
+        if delimiter is not None:  # inside a multi-line value: not TOML syntax
+            if delimiter in raw:
+                delimiter = None
+            continue
         line = _strip_toml_comment(raw).strip()
         if not line:
             continue
+        for candidate in ('"""', "'''"):
+            if line.count(candidate) % 2:
+                delimiter = candidate  # an unclosed multi-line value opens here
         if line.startswith("[") and line.endswith("]"):
             inner = line[2:-2] if line.startswith("[[") else line[1:-1]
             header = _toml_key_path(inner)
