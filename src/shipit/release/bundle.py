@@ -579,9 +579,9 @@ def _payload_operands(
     if missing:
         raise ReleaseError(
             f"{where}: required payload missing under {leg_dir_res} — "
-            f"{', '.join(missing)}; the bundle stage composes BUILD OUTPUTS "
-            f"(run `shipit build` first) and ships exactly the declared "
-            f"`bundle.payload`, never a quiet empty archive"
+            f"{', '.join(missing)}; the bundle ships exactly the declared "
+            f"`bundle.payload` (run `shipit build` first if these entries are build outputs), "
+            f"never a quiet archive missing its required core"
         )
     present = [
         entry.path
