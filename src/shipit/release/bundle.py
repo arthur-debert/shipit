@@ -580,8 +580,11 @@ def _payload_operands(
         raise ReleaseError(
             f"{where}: required payload missing under {leg_dir_res} — "
             f"{', '.join(missing)}; the bundle ships exactly the declared "
-            f"`bundle.payload` (run `shipit build` first if these entries are build outputs), "
-            f"never a quiet archive missing its required core"
+            f"`bundle.payload`, so a required entry that is absent stops the "
+            f"stage rather than composing a quiet incomplete archive. Check the "
+            f"declaration and the `{spec.leg}` leg: the entry may be misdeclared "
+            f"or under the wrong leg, a committed file may be missing, or — for a "
+            f"build-produced entry — `shipit build` may not have run"
         )
     present = [
         entry.path
