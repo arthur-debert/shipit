@@ -84,16 +84,18 @@ Install also runs a RETIRED-COMMAND tripwire over the consumer's pixi tasks
 a dozen repos still call it from a CONSUMER-AUTHORED lane task
 (``lint-full = { cmd = "./bin/shipit provision lexd && ./bin/shipit lint" }``)
 that lives outside every managed block, so no unit rewrites it and the stale
-call survives a reconcile — surfacing much later as ``No such command
-'provision'`` on a red CI lane. Gather matches the COMMAND STRING (never a task
-name: one repo carries only the inline prefix, with no ``provision-lexd`` task
-at all) against the parsed manifest's tasks, and EVERY applying mode fails
-closed on the finding (:class:`StaleProvisionTask`,
-:func:`shipit.install.apply.reject_stale_provision`) naming the task, its line,
+call survives a reconcile — surfacing much later as a dead call on a red CI
+lane. Gather matches the parsed tasks' COMMANDS (never a task name: one repo
+carries only the inline prefix, with no ``provision-lexd`` task at all), and
+EVERY applying mode fails closed on the finding (:class:`StaleProvisionTask`,
+:func:`shipit.install.apply.reject_stale_provision`) naming the task, its table,
 and the remedy — the managed ``[feature.shipit-lexd]`` block already puts lexd
-on PATH in the lint env, so the fix is deleting the prefix. There is nothing to
-skip here, unlike the pixi conflicts above: the offending task is the
-consumer's own, and only their edit can repair it.
+on PATH in the lint env, so the fix is deleting the prefix. The match is over
+the commands the check can read EXACTLY and DECLINES the rest rather than
+approximating a shell (:func:`_calls_retired_provision`); a declined call still
+fails legibly at the ``shipit provision`` tombstone (:mod:`shipit.verbs.provision`).
+There is nothing to skip here, unlike the pixi conflicts above: the offending
+task is the consumer's own, and only their edit can repair it.
 
 Install also decides a CHANGELOG RE-RENDER (TOL01-WS08 #578): where the
 consumer has adopted the fragment convention (``CHANGELOG/``), a renderer
@@ -1956,7 +1958,9 @@ class Plan:
     # consumer's OWN lane tasks, outside every managed block, so nothing shipit
     # writes can repair them and only the operator's edit can. Refusing at
     # reconcile is the whole point: otherwise the pin bump lands green and the
-    # consumer's CI discovers `No such command 'provision'` later.
+    # consumer's CI discovers the dead call later, at the `shipit provision`
+    # tombstone (:mod:`shipit.verbs.provision`) — the same remedy, an hour and a
+    # pin bump too late.
     stale_provision: tuple[StaleProvisionTask, ...] = ()
     # The `.claude/skills` -> `.agents/skills` structural symlink (#1088,
     # ADR-0077): CREATE (absent path) is a work axis of its own (apply ensures the

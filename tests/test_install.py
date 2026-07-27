@@ -1662,7 +1662,7 @@ lint-full = "./bin/shipit provision lexd && ./bin/shipit lint"
 def test_install_refuses_a_consumer_still_calling_the_retired_provision(tmp_path, rec):
     """#1070: the call sites are consumer-authored lane tasks OUTSIDE every
     managed block, so no reconcile rewrites them and the dead call survives a pin
-    bump — surfacing later as `No such command 'provision'` on a red CI lane.
+    bump — surfacing later as a red CI lane, at the `shipit provision` tombstone.
     Install fails closed instead, in EVERY applying mode (MODE_TREE included),
     naming the task, its table, and the remedy."""
     (tmp_path / "pixi.toml").write_text(FLEET_PIXI)

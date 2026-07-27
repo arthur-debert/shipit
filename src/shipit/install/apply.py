@@ -853,8 +853,10 @@ def reject_stale_provision(plan: Plan) -> None:
 
     The ``provision`` verb was deleted with no fallback, so the task is ALREADY
     dead — the only question is whether install says so or the consumer's CI
-    does, an hour and a pin bump later. Nothing shipit writes can repair it:
-    the call sites are consumer-authored lane tasks outside every managed block
+    does, an hour and a pin bump later, at the ``shipit provision`` tombstone
+    (:mod:`shipit.verbs.provision`, which carries this same remedy for the calls
+    the tripwire declines to judge). Nothing shipit writes can repair it: the
+    call sites are consumer-authored lane tasks outside every managed block
     (that is exactly why they survived the retirement), so the remedy is the
     operator's one-line edit, named per task by :func:`format_stale_provision`.
     EVERY mode refuses, ``MODE_TREE`` included: the refusal is about the state of

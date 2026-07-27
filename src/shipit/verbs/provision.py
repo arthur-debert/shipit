@@ -64,11 +64,13 @@ def cmd(args: tuple[str, ...]) -> None:
 
 @cli_errors
 def run(*args: str) -> int:
-    """Always refuse, with the remedy.
+    """Always refuse, with the remedy: one ``error: …`` line, and return 1.
 
-    Raises :class:`~shipit.install.errors.InstallError` — an operator-fixable
-    state in the consumer's manifest, mapped by the CLI error shell to one
-    `error: …` line + exit 1 (ADR-0030), the same shape the reconcile-time
-    refusal takes. Never returns.
+    That is the DECORATED contract a caller sees. The body raises
+    :class:`~shipit.install.errors.InstallError` — an operator-fixable state in
+    the consumer's manifest — which the :func:`~._errors.cli_errors` shell maps
+    to the stderr line + exit 1 (ADR-0030), so no exception escapes and there is
+    no success return to distinguish it from. The reconcile-time refusal takes
+    that same shape, off the same error type.
     """
     raise InstallError(RETIRED_MESSAGE)
