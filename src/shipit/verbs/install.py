@@ -108,19 +108,26 @@ def _declared_signals(root: Path) -> set[str]:
       (:attr:`shipit.tools.registry.Toolchain.provisions_signal`), delivering
       the ``tree-sitter-cli`` block wherever a tree-sitter leg is declared.
 
-    Degrades to ``set()`` when the config is absent or unparseable — the
-    toolchain augmentation never itself fails install (the config's own parse
-    errors surface on the verbs that read the map, not here).
+    An ABSENT config yields ``set()`` — :func:`~._tool.load_config` reads a
+    missing file as ``{}``, so a repo with no map declares no extra signals and
+    the augmentation is a clean no-op.
+
+    An UNPARSEABLE config, by contrast, REFUSES: the
+    :class:`~shipit.config.ConfigError` propagates to the
+    :func:`~._errors.cli_errors` shell (``error: …`` + exit 1) rather than
+    degrading to ``set()`` (#1101). A config the tool cannot parse is not a
+    config declaring nothing: reading it as empty drops exactly the units its
+    artifacts gate, and unit absence never DELETES a managed block (removal
+    rides the explicit retired list), so the blocks stay on disk, fall out of
+    the managed set, and go stale while install reports success. The parse
+    error is the actionable fact — surfacing it is the whole point.
     """
     from ..release import bundle as bundle_registry  # lazy — keep install import-light
     from ..tools import registry as toolchain_registry
 
-    try:
-        cfg = load_config(root)
-        artifacts = config.load_artifacts(cfg)
-        entries = config.load_toolchains(cfg)
-    except config.ConfigError:
-        return set()
+    cfg = load_config(root)
+    artifacts = config.load_artifacts(cfg)
+    entries = config.load_toolchains(cfg)
     signals: set[str] = set()
     for artifact in artifacts:
         if artifact.bundle is None:
@@ -146,16 +153,13 @@ def _declared_endpoints(root: Path) -> frozenset[str]:
     build toolchain), the #1071 gap where a non-rust conda producer got no
     packager. Returns the union of every artifact's ``endpoints`` list.
 
-    Degrades to ``frozenset()`` when the config is absent or unparseable — the
-    endpoint augmentation never itself fails install (the config's own parse
-    errors surface on the verbs that read the map, not here), the same posture
-    as :func:`_declared_signals`.
+    Same posture as :func:`_declared_signals`: an ABSENT config yields
+    ``frozenset()`` (no map, no endpoints), an UNPARSEABLE one REFUSES — the
+    :class:`~shipit.config.ConfigError` propagates rather than reading as "no
+    endpoints declared" and silently un-managing the packager block (#1101).
     """
-    try:
-        cfg = load_config(root)
-        artifacts = config.load_artifacts(cfg)
-    except config.ConfigError:
-        return frozenset()
+    cfg = load_config(root)
+    artifacts = config.load_artifacts(cfg)
     endpoints: set[str] = set()
     for artifact in artifacts:
         endpoints.update(artifact.endpoints)
@@ -225,19 +229,12 @@ def _artifact_dep_units(root: Path, *, is_private=gh.repo_is_private) -> list[Un
     injectable for tests) — the access tier is DERIVED from it (ADR-0065), never
     declared; it is resolved once per distinct producing repo, and ONLY when a
     dep is actually declared, so a repo with no ``[artifact-deps]`` (shipit's own
-    included) stays fully offline. A generally-unreadable manifest DEGRADES to no
-    artifact units (gather warns about it downstream, matching the rest of
-    install); only a well-formed manifest carrying a malformed ``[artifact-deps]``
-    entry fails loud.
+    included) stays fully offline. An UNPARSEABLE ``.shipit.toml`` fails LOUD here
+    too (#1101) — the same refusal :func:`_declared_signals` already raises on the
+    same file earlier in the run, so install has exactly one answer for a config
+    it cannot parse instead of two.
     """
-    try:
-        cfg = load_config(root)
-    except config.ConfigError:
-        # A generally-unreadable manifest degrades like gather's read boundary —
-        # no artifact units; the warning surfaces there. A malformed
-        # [artifact-deps] entry, by contrast, is a parse error load_config never
-        # raises (it validates only table shape), so it still fails loud below.
-        return []
+    cfg = load_config(root)
     deps = config.load_artifact_deps(cfg)
     if not deps:
         return []
@@ -419,9 +416,11 @@ def run(
 
     Returns an int exit code: 0 on success (a no-op re-run and a dry-run
     included), with runtime failures — the domain's
-    :class:`~shipit.install.errors.InstallError` refusals and any git/gh
-    :class:`~shipit.execrun.ExecError` — mapped to ``error: …`` + exit 1 by the
-    :func:`~._errors.cli_errors` shell.
+    :class:`~shipit.install.errors.InstallError` refusals, an unparseable
+    ``.shipit.toml`` (:class:`~shipit.config.ConfigError`, #1101: a config the
+    tool cannot parse refuses the run, it never reads as declaring nothing) and
+    any git/gh :class:`~shipit.execrun.ExecError` — mapped to ``error: …`` +
+    exit 1 by the :func:`~._errors.cli_errors` shell.
 
     ``activate_hooks`` threads the injectable lefthook boundary through to
     :func:`shipit.install.apply.apply` (tests exercise the activation contract
@@ -463,7 +462,11 @@ def run(
         # Declarations union more signals — a wasm-pack bundle composition needs
         # npm for its `npm pack`, which no tracked manifest signals (issue #788),
         # and a declared tree-sitter [toolchains] leg needs its own CLI, which no
-        # manifest can signal at all (#890).
+        # manifest can signal at all (#890). An UNPARSEABLE `.shipit.toml`
+        # refuses the whole run here (#1101) rather than contributing no
+        # signals: the unit set is what install WRITES, so reading a broken
+        # config as "declares nothing" would silently drop the blocks its
+        # artifacts gate while reporting success.
         toolchains = detect_toolchains(root_path) | _declared_signals(root_path)
         # The conda packager (rattler-build) is gated on a declared ENDPOINT,
         # not a toolchain (#1071): a repo declaring a `conda` endpoint on any
