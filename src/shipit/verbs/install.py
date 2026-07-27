@@ -229,7 +229,7 @@ def _artifact_dep_units(root: Path, *, is_private=gh.repo_is_private) -> list[Un
     injectable for tests) — the access tier is DERIVED from it (ADR-0065), never
     declared; it is resolved once per distinct producing repo, and ONLY when a
     dep is actually declared, so a repo with no ``[artifact-deps]`` (shipit's own
-    included) stays fully offline. An unreadable ``.shipit.toml`` fails LOUD here
+    included) stays fully offline. An UNPARSEABLE ``.shipit.toml`` fails LOUD here
     too (#1101) — the same refusal :func:`_declared_signals` already raises on the
     same file earlier in the run, so install has exactly one answer for a config
     it cannot parse instead of two.

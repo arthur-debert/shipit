@@ -954,8 +954,8 @@ def test_verb_fails_loud_when_pixi_toml_is_not_utf8(tmp_path):
         verb._artifact_dep_units(tmp_path, is_private=lambda slug: False)
 
 
-def test_verb_refuses_an_unreadable_shipit_toml(tmp_path):
-    # #1101: an unreadable `.shipit.toml` fails LOUD, it no longer degrades to no
+def test_verb_refuses_an_unparseable_shipit_toml(tmp_path):
+    # #1101: an unparseable `.shipit.toml` fails LOUD, it no longer degrades to no
     # artifact units. install now has ONE answer for a config it cannot parse —
     # the same refusal `_declared_signals` raises on the same file earlier in the
     # run — rather than two, and a broken config never reads as "declares nothing".
