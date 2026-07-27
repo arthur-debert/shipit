@@ -1,7 +1,7 @@
 - lint: the public `pixi run lint` now runs in the **pinned lint environment**
   (#1066). The managed task moved out of the default `[tasks]` table into
-  `[feature.lint.tasks]`, so it exists in exactly one pixi environment and a
-  bare `pixi run lint` resolves there — the same task, same fleet-pinned
+  `[feature.lint.tasks]`, so it rides the one environment your manifest composes
+  that feature into and a bare `pixi run lint` resolves there — the same task, same fleet-pinned
   toolchain, that the commit/push hooks (`pixi run -e lint lint`) and the CI
   lint lane run. `pixi run lint --fix` is the fixer on that same pin.
 - Why it mattered: a task in `[tasks]` reaches every environment, and the

@@ -104,26 +104,34 @@ PIXI_ANCHOR = "[tasks]"
 # way reformatted correct files into a state the hook then rejected.
 #
 # Anchoring the task in `[feature.lint.tasks]` declares it in exactly ONE
-# feature, and the managed `[environments]` block (PIXI_ENVS_KEY) composes
-# that feature into exactly one environment — so in a managed manifest the task
-# exists in ONE env, and pixi resolves a bare `pixi run <task>` to the single
-# environment defining it. `pixi run lint` (and `pixi run lint --fix`, whose
-# trailing args pixi forwards to the task) therefore run the pinned toolchain
-# with no `-e` and no `pixi shell`. The hooks' explicit `pixi run -e lint lint`
-# pins the environment pixi would select anyway: ONE task, ONE environment, one
-# gate for laptop, hook, and CI. This is the `test` task's shape (see
-# PIXI_TEST_TASK_KEY) applied to lint.
+# feature; it then exists in exactly ONE environment as long as the manifest
+# composes that feature exactly once — which is what an installed manifest does,
+# and pixi resolves a bare `pixi run <task>` to the single environment defining
+# it. `pixi run lint` (and `pixi run lint --fix`, whose trailing args pixi
+# forwards to the task) therefore run the pinned toolchain with no `-e` and no
+# `pixi shell`. The hooks' explicit `pixi run -e lint lint` pins the environment
+# pixi would select anyway: ONE task, ONE environment, one gate for laptop,
+# hook, and CI. This is the `test` task's shape (see PIXI_TEST_TASK_KEY) applied
+# to lint.
 #
-# The one-ENVIRONMENT half of that is an invariant of the manifests shipit
-# installs, not something the anchor can enforce by itself: a consumer that
-# hand-composed the `lint` feature into a second environment, or declared its
-# own `lint` task in another enabled feature, would put the name in two envs and
-# make the bare form ambiguous again — the same latent hole the shipped `test`
-# task carries. Detecting that at reconcile is #1107 (which the existing
-# `PixiTaskConflict` guard cannot cover: it only reads `[tasks]`-anchored
-# units), sequenced after #1105 and #1101 settle install/reconcile.py. It is
-# latent, not live: every portfolio repo composes `lint` into exactly one
-# environment (verified fleet-wide, 2026-07-27).
+# WHERE the one-ENVIRONMENT half comes from is worth being exact about, since
+# #1107 has to enforce it. On a FRESH install the packaged `[environments]` seed
+# (PIXI_ENVS_KEY, `pixi-lint-env-block.toml`) writes `lint = ["lint",
+# "shipit-lexd"]`, so the feature is composed once by construction. On an
+# EXISTING consumer environment that same unit is a MEMBERSHIP MERGE, not an
+# owner: it adds `shipit-lexd` and leaves the base features — `lint` among them
+# — as consumer config (ADR-0047; see its `required_features` in load_units).
+# So exactly-once composition is a property of the CONSUMER's manifest that
+# install preserves, never a claim the managed unit can make, and the anchor
+# cannot enforce it either: a consumer that composed the `lint` feature into a
+# second environment, or declared its own `lint` task in another enabled
+# feature, would put the name in two envs and make the bare form ambiguous
+# again — the same latent hole the shipped `test` task carries. Detecting that
+# at reconcile is #1107 (which the existing `PixiTaskConflict` guard cannot
+# cover: it only reads `[tasks]`-anchored units), sequenced after #1105 and
+# #1101 settle install/reconcile.py. It is latent, not live: every portfolio
+# repo composes `lint` into exactly one environment (verified fleet-wide,
+# 2026-07-27).
 PIXI_LINT_TASK_KEY = "pixi.toml#shipit-lint-task"
 PIXI_LINT_TASK_OPEN = (
     "# >>> shipit-managed lint task (do not edit; regenerate via `shipit install`) >>>"
@@ -1018,10 +1026,10 @@ def load_units(
         )
     )
     # The public `lint` entry point (#1066), anchored in the lint FEATURE — the
-    # one the managed [environments] block composes into a single env, so a bare
-    # `pixi run lint` resolves to the fleet-pinned toolchain rather than the
-    # default env's ambient one. See the PIXI_LINT_TASK_KEY comment for the whole
-    # story, including what that invariant does and does not guarantee.
+    # one an installed manifest composes into a single env, so a bare `pixi run
+    # lint` resolves to the fleet-pinned toolchain rather than the default env's
+    # ambient one. See the PIXI_LINT_TASK_KEY comment for the whole story,
+    # including who owns that composition and what it does not guarantee.
     units.append(
         Unit(
             key=PIXI_LINT_TASK_KEY,

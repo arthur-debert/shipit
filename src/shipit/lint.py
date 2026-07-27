@@ -13,10 +13,12 @@ lefthook is thin (it calls ``pixi run -e lint lint``), pixi is thin (it runs
 hook run the IDENTICAL checks because it is ONE binary with ONE config — "both
 agree" is structural, not two transcriptions of the rules drifting apart.
 
-That one task lives in the pixi ``lint`` FEATURE, which the managed
-``[environments]`` block composes into exactly ONE environment (#1066,
-:data:`shipit.install.units.PIXI_LINT_TASK_KEY`, whose comment records what that
-invariant rests on and what still has to be refused at reconcile), so the
+That one task lives in the pixi ``lint`` FEATURE, which an INSTALLED manifest
+composes into exactly ONE environment (#1066,
+:data:`shipit.install.units.PIXI_LINT_TASK_KEY`, whose comment records who owns
+that composition — the packaged seed on a fresh install, the consumer's own
+``[environments]`` entry thereafter — and what still has to be refused at
+reconcile), so the
 public ``pixi run lint``, the fixer ``pixi run lint --fix``, the hooks' explicitly
 pinned ``pixi run -e lint lint`` and the CI lane all execute the SAME task against
 the SAME fleet-pinned toolchain. A ``lint`` task in the default ``[tasks]`` table

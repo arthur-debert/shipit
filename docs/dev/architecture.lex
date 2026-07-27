@@ -222,17 +222,26 @@ the durable code is one slim versioned package; and configuration is explicit.
 
 7. The commit/push checks: one definition
 
-    There is exactly one definition of these checks, invoked everywhere. lefthook is thin:
-    it calls `pixi run -e lint lint` and `pixi run test`. shipit ships the lint tasks
-    and the linter dependencies; the consumer supplies `test` (the pixi-test
-    encapsulation — per-project test differences hide behind one task name, so
-    lefthook stays dumb).
+    There is exactly one definition of these checks, invoked everywhere. lefthook is
+    thin: the managed caller runs `pixi run -e lint lint` at pre-commit and pre-push
+    (its only check legs; the third leg is the post-commit dev-cycle log event). The
+    `test` lane is the CI face of the same declaration — `commit_push_checks()`
+    derives the commit/push checks from the required∩local lanes, so lint and test
+    are one policy, not two transcriptions, even though the managed hook file wires
+    only lint today. shipit ships the lint tasks and the linter dependencies; the
+    consumer supplies `test` (the pixi-test encapsulation — per-project test
+    differences hide behind one task name, so lefthook stays dumb).
 
     ONE task, ONE environment: the managed `lint` task is declared in the pixi
-    `lint` FEATURE, which the managed `[environments]` unit composes into exactly
-    one environment — so the public `pixi run lint`, the fixer
-    `pixi run lint --fix`, the hook's explicit `pixi run -e lint lint` and the CI
-    lint lane all execute it against the same fleet-pinned toolchain. Declaring it
+    `lint` FEATURE, which an INSTALLED manifest composes exactly once — the packaged
+    `[environments]` seed writes `lint = ["lint", "shipit-lexd"]` for a fresh
+    install, while on an existing consumer environment the managed unit only merges
+    `shipit-lexd` in and the base features stay consumer config (ADR-0047), so the
+    exactly-once composition is a property of the consumer's manifest that install
+    preserves rather than a claim the managed unit makes. Hence the public
+    `pixi run lint`, the fixer `pixi run lint --fix`, the hook's explicit
+    `pixi run -e lint lint` and the CI lint lane all execute it against the same
+    fleet-pinned toolchain. Declaring it
     in the default `[tasks]` table instead would put it in EVERY environment —
     including the default one, whose linter versions are whatever that env happens
     to resolve — so the public command would silently gate on a different toolchain
