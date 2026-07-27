@@ -3289,7 +3289,7 @@ def test_tree_sitter_toolchain_delivers_the_cli_block(tmp_path):
         '"." = "tree-sitter"\n'
         "[artifacts.tree-sitter-demo]\n"
         'build = ["tree-sitter"]\n'
-        'bundle = { composition = "tarball" }\n'
+        'bundle = { composition = "tarball", leg = "tree-sitter", payload = [{ path = "src", required = true }] }\n'
     )
     subprocess.run(["git", "add", "."], cwd=root, check=True)
 
@@ -3337,7 +3337,7 @@ def test_declared_endpoints_unions_conda_across_artifacts(tmp_path):
         'endpoints = ["gh-release"]\n'
         "[artifacts.grammar]\n"
         'build = ["tree-sitter"]\n'
-        'bundle = { composition = "tarball" }\n'
+        'bundle = { composition = "tarball", leg = "tree-sitter", payload = [{ path = "src", required = true }] }\n'
         'endpoints = ["gh-release", "conda"]\n'
     )
     assert verb._declared_endpoints(tmp_path) == frozenset({"gh-release", "conda"})
@@ -3379,7 +3379,7 @@ def test_non_rust_conda_producer_gets_the_packager_block(tmp_path):
         '"." = "tree-sitter"\n'
         "[artifacts.tree-sitter]\n"
         'build = ["tree-sitter"]\n'
-        'bundle = { composition = "tarball" }\n'
+        'bundle = { composition = "tarball", leg = "tree-sitter", payload = [{ path = "src", required = true }] }\n'
         'endpoints = ["gh-release", "conda"]\n'
     )
     subprocess.run(["git", "add", "."], cwd=root, check=True)
@@ -3409,7 +3409,7 @@ def test_conda_packager_reconcile_is_not_current_without_it(tmp_path):
         '"." = "tree-sitter"\n'
         "[artifacts.tree-sitter]\n"
         'build = ["tree-sitter"]\n'
-        'bundle = { composition = "tarball" }\n'
+        'bundle = { composition = "tarball", leg = "tree-sitter", payload = [{ path = "src", required = true }] }\n'
         'endpoints = ["gh-release", "conda"]\n'
     )
     (root / "pixi.toml").write_text(

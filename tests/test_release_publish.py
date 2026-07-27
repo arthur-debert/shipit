@@ -30,6 +30,7 @@ import yaml
 from shipit import config, execrun, staging
 from shipit.release import ReleaseError
 from shipit.release import brew as brew_mod
+from shipit.release import bundle as bundle_mod
 from shipit.release import publish as publish_mod
 from shipit.release import secretreq as secretreq_mod
 from shipit.verbs import release as release_verb
@@ -2678,7 +2679,11 @@ def _noarch_artifact():
         {
             "grammar": {
                 "build": ["tree-sitter"],
-                "bundle": {"composition": "tarball"},
+                "bundle": {
+                    "composition": "tarball",
+                    "leg": "tree-sitter",
+                    "payload": [{"path": "src", "required": True}],
+                },
                 "endpoints": ["conda"],
             }
         }
@@ -2710,7 +2715,11 @@ def test_conda_noarch_eligible_for_every_platform_independent_composition():
         {
             "ext": {
                 "build": ["tree-sitter"],
-                "bundle": {"composition": "zed"},
+                "bundle": {
+                    "composition": "zed",
+                    "leg": "tree-sitter",
+                    "payload": [{"path": "src", "required": True}],
+                },
                 "endpoints": ["conda"],
             }
         }
@@ -2784,7 +2793,11 @@ def test_conda_noarch_package_name_flattens_a_scoped_wasm_identity():
         {
             "x": {
                 "build": ["tree-sitter"],
-                "bundle": {"composition": "tarball"},
+                "bundle": {
+                    "composition": "tarball",
+                    "leg": "tree-sitter",
+                    "payload": [{"path": "src", "required": True}],
+                },
                 "endpoints": ["conda"],
                 "product-name": "my grammar",
             }
@@ -3693,6 +3706,133 @@ def test_zed_refuses_a_missing_extension_manifest(tmp_path):
     )
     with pytest.raises(ReleaseError, match="cannot read"):
         publish_mod._publish_zed(req)
+
+
+def _zed_bundled_artifacts(*, leg="rust", payload=None, leg_name="rust"):
+    """A zed artifact that DECLARES its bundle — the shape the endpoint has to
+    follow, rather than assuming the crate leg."""
+    return _artifacts(
+        {
+            "zed-lex": {
+                "build": [leg_name],
+                "endpoints": ["gh-release", "zed"],
+                "bundle": {
+                    "composition": "zed",
+                    "leg": leg,
+                    "payload": payload
+                    or [
+                        {"path": "extension.toml", "required": True},
+                        {"path": "shared"},
+                    ],
+                },
+            }
+        }
+    )
+
+
+def test_zed_bundle_and_endpoint_read_the_same_declared_leg(tmp_path):
+    """CROSS-STAGE: the archive the tag ships and the registry row the endpoint
+    renders describe ONE extension, so both stages must resolve the SAME
+    directory from the SAME declaration. The endpoint used to look in the first
+    `rust` leg regardless of what the bundle declared, so a non-rust declared leg
+    is exactly where the two diverged — the archive came from `grammar/` while
+    the row was keyed by whatever `extension.toml` sat in the rust leg.
+    """
+    artifact = _zed_bundled_artifacts(leg="tree-sitter", leg_name="tree-sitter")[0]
+    (tmp_path / "grammar").mkdir()
+    _write_zed_manifest(tmp_path / "grammar", ext_id="lex")
+    (tmp_path / "grammar" / "shared").mkdir()
+    # A decoy in the rust leg: whichever stage reads the undeclared dir keys its
+    # output to an extension the other stage never saw.
+    (tmp_path / "crate").mkdir()
+    _write_zed_manifest(tmp_path / "crate", ext_id="decoy")
+    entries = _entries({"grammar": "tree-sitter", "crate": "rust"})
+    recorder = SeamRecorder()
+
+    bundle_mod.ZED.compose(
+        bundle_mod.ComposeRequest(
+            artifact=artifact,
+            entries=entries,
+            root=tmp_path,
+            out_dir=tmp_path / "dist",
+            target="x86_64-unknown-linux-gnu",
+            run_cmd=recorder,
+            build_target=None,
+            artifact_deps=(),
+        )
+    )
+    published = publish_mod._publish_zed(
+        _request(tmp_path, artifact, entries=entries, repo="lex-fmt/zed-lex")
+    )
+
+    # The bundle tarred from the declared leg…
+    ((argv, *_rest),) = recorder.calls
+    assert argv[argv.index("-C") + 1] == str(tmp_path / "grammar")
+    # …and the endpoint read its manifest from that same dir — not the decoy.
+    assert "for lex 1.2.3" in published.actions[0]
+    assert "decoy" not in published.actions[0]
+    assert (
+        tmp_path / "dist" / publish_mod.ZED_SCRATCH / "lex.extensions-toml"
+    ).is_file()
+
+
+def test_zed_refuses_a_declaration_that_omits_the_manifest(tmp_path):
+    """The registry row is keyed by the id read from extension.toml, so a
+    payload that may not carry that manifest would publish coordinates for a
+    package that does not hold them — refused at the endpoint boundary, even
+    though the manifest happens to sit on disk right now."""
+    artifact = _zed_bundled_artifacts(payload=[{"path": "shared", "required": True}])[0]
+    _write_zed_manifest(tmp_path, ext_id="lex")
+    req = _request(
+        tmp_path,
+        artifact,
+        entries=_entries({".": "rust"}),
+        version="1.2.3",
+        repo="lex-fmt/zed-lex",
+    )
+
+    with pytest.raises(ReleaseError) as excinfo:
+        publish_mod._publish_zed(req)
+    message = str(excinfo.value)
+    assert "does not declare `extension.toml` as a required entry" in message
+    assert not (tmp_path / "dist" / publish_mod.ZED_SCRATCH).exists()
+
+
+def test_zed_refuses_a_manifest_declared_only_when_present(tmp_path):
+    """Declared but OPTIONAL is the same divergence one step later: the archive
+    may omit the manifest the row is keyed by."""
+    artifact = _zed_bundled_artifacts(
+        payload=[{"path": "shared", "required": True}, {"path": "extension.toml"}]
+    )[0]
+    _write_zed_manifest(tmp_path, ext_id="lex")
+    req = _request(
+        tmp_path,
+        artifact,
+        entries=_entries({".": "rust"}),
+        version="1.2.3",
+        repo="lex-fmt/zed-lex",
+    )
+    with pytest.raises(ReleaseError, match="as a required entry"):
+        publish_mod._publish_zed(req)
+
+
+def test_zed_endpoint_only_artifact_reads_the_crate_leg(tmp_path):
+    """An artifact with the zed ENDPOINT and no bundle declares no leg, so the
+    endpoint reads the rust leg a Zed extension crate lives in. This is the one
+    case with no declaration to follow — never a fallback for a declared one."""
+    artifact = _zed_artifacts()[0]  # endpoints only, no bundle
+    assert artifact.bundle is None
+    (tmp_path / "crate").mkdir()
+    _write_zed_manifest(tmp_path / "crate", ext_id="lex")
+    req = _request(
+        tmp_path,
+        artifact,
+        entries=_entries({"crate": "rust"}),
+        version="1.2.3",
+        repo="lex-fmt/zed-lex",
+    )
+    published = publish_mod._publish_zed(req)
+    assert "for lex 1.2.3" in published.actions[0]
 
 
 def test_zed_declares_no_secret_and_is_a_derived_stable_only_endpoint():

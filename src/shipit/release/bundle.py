@@ -152,23 +152,30 @@ functions the entries carry:
   ``CFBundleExecutable`` as the darwin anchor. Linux/windows legs ship unsigned.
   Mac/linux/windows targets only (the windows leg's integrity + endpoint land
   with WS11).
-- **tarball** — the generated-parser ``<name>.tar.gz`` (TOL02-WS16 #792,
-  legacy ``tree-sitter.yml@v3``): the tree-sitter leg's generated ``src/``
-  tree plus the grammar/queries/bindings that are present. Platform-
-  independent (generated C source, no per-OS variant — no ``-<target>``
-  suffix), so every matrix leg composes the identical bytes.
-- **zed** — the Zed-extension ``<name>.tar.gz`` (TOL03-WS02 #973, ADR-0068):
-  the extension's committed source under the rust leg (the extension is a Rust
-  crate compiled to WASM) — ``extension.toml`` (the REQUIRED manifest core, its
-  absence meaning this is not a Zed extension) plus the committed ``shared/``
-  grammar assets and the ``languages``/``grammars``/``src``/``Cargo.toml``/
-  ``LICENSE``/``README.md`` that are present. The ``shared/`` grammar is a
-  COMMITTED LOCAL COPY — the composition never fetches a grammar cross-repo, so
-  every leg archives exactly the checked-in bytes. Platform-independent (no
-  per-OS variant — no ``-<target>`` suffix), the tarball shape. The tag this
-  archive rides IS the release; the ``zed`` publish endpoint
-  (``release/publish.py``) renders the ``zed-industries/extensions`` registry
-  coordinates for a manually-gated PR (ADR-0068), never a cross-repo push.
+- **tarball** / **zed** — the DECLARED-PAYLOAD ``<name>.tar.gz`` (#1092,
+  ADR-0077): the artifact's own ``bundle.payload`` list, collected under the
+  ``bundle.leg`` toolchain leg's path. "Which files make up my package" is a
+  PRODUCER-REPO fact, so it is declared in the producer's ``.shipit.toml``, not
+  known here — this module tars what it is told to and knows nothing about
+  grammars or extensions. Each entry rides WHEN PRESENT unless it declares
+  ``required = true``, and a missing REQUIRED entry is a loud bundle-stage
+  failure, never a quiet empty archive (the config boundary already refuses a
+  payload with no required entry). Both are platform-independent (declared
+  source, no per-OS variant — no ``-<target>`` suffix), so every matrix leg
+  composes the identical bytes under the one unqualified name. Because the
+  payload is producer-declared — AND so is the ``bundle.leg`` it rides under —
+  the whole path is UNTRUSTED DATA steering a read of the release runner, so the
+  refuse-links walk starts at the CHECKOUT ROOT and runs continuously through the
+  leg and then each payload entry: a link anywhere on ``root → leg → entry`` is
+  REFUSED rather than followed (:func:`_payload_operands`, the anchor-from-root
+  model :mod:`shipit.staging` uses on the other declared-path surface, shared via
+  :mod:`shipit.fspath`), so a committed ``leg -> /etc`` can never become the base
+  the payload is collected from. The operands are also fenced from ``tar``'s
+  option list with ``--`` so a path spelled like a flag can never become one. The two names differ only in the ENDPOINT story they pair
+  with: ``zed``'s tag IS the
+  release, and the ``zed`` publish endpoint (``release/publish.py``) renders the
+  ``zed-industries/extensions`` registry coordinates for a manually-gated PR
+  (ADR-0068), never a cross-repo push.
 
 Every external command runs through the injected runner — the one Exec seam
 (ADR-0028); the ``cargo`` / ``uv`` / ``wasm-pack`` / ``npm`` / ``tar`` /
@@ -192,9 +199,10 @@ import os
 import shutil
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from .. import config, execrun
+from ..fspath import first_link_component
 from ..install import artifactdeps
 from ..tools import e2e as e2e_mod
 from . import ReleaseError
@@ -469,47 +477,157 @@ def _compose_wheel(req: ComposeRequest) -> Composed:
     return Composed(req.artifact.name, "wheel", (*wheels, *sdists))
 
 
-#: The generated-parser payload the ``tarball`` composition ships — tree-sitter's
-#: conventional layout under the tree-sitter leg's path. ``src`` (the
-#: ``tree-sitter generate`` output: ``parser.c``, the ``tree_sitter/``
-#: headers, ``node-types.json``, ``grammar.json``) is the REQUIRED core — its
-#: absence means the parser was never generated. The rest ride WHEN PRESENT
-#: (the :data:`DOC_FILES` "when present" shape): a grammar declares queries
-#: and bindings or it does not, and an absent one ships nothing rather than an
-#: empty dir. This is the legacy ``tree-sitter.yml@v3`` tarball contract
-#: (generated parser + grammar + queries), assembled shipit-side.
-TREE_SITTER_PAYLOAD: tuple[str, ...] = (
-    "src",
-    "queries",
-    "grammar.js",
-    "package.json",
-    "binding.gyp",
-    "bindings",
-)
+def _payload_operands(
+    artifact_name: str, spec: config.BundleSpec, root: Path, leg_rel: str
+) -> tuple[Path, list[str]]:
+    """The proven-real leg directory and the declared payload's tar operands —
+    the entries PRESENT under the leg, in declaration order — after proving the
+    WHOLE path from the checkout root down (leg included, then each payload
+    entry) is link-free.
 
+    The payload is producer-declared, and so is the ``bundle.leg`` it rides
+    under, so BOTH are UNTRUSTED DATA that end up steering a read of the release
+    runner's filesystem. The guard is structural — links are REFUSED, never
+    followed (:func:`shipit.fspath.first_link_component`) — because the escape is
+    not in the SPELLING and no lexical check can see it: ``leak/passwd`` is a
+    well-formed relative path, and if ``leak`` is a committed ``leak -> /etc``
+    then ``exists()`` follows it and tar archives the host's file into a
+    published artifact.
 
-def _compose_tarball(req: ComposeRequest) -> Composed:
-    """The generated-parser tarball: ``<name>.tar.gz`` of the tree-sitter
-    leg's :data:`TREE_SITTER_PAYLOAD` (the ``tree-sitter generate`` output
-    plus the grammar/queries/bindings, when present). See the module
-    docstring's tarball entry.
+    The one trusted base is the CHECKOUT ROOT — never a path derived by
+    ``resolve()``-ing an untrusted value. The refuse-links walk starts there and
+    runs continuously down: FIRST the leg's own components (so a
+    ``[toolchains]`` leg pointed at a committed ``grammar -> /etc`` is refused
+    before it can ever become a base — the round-2 hole, where resolving the leg
+    first made ``/etc`` "trusted"), THEN each payload entry from the now-proven
+    leg dir. With no link anywhere on ``root → leg → entry``, a path of real
+    components physically cannot leave the checkout, so containment is automatic
+    rather than checked vector by vector; the ``is_relative_to`` belts are the
+    explicit statement of that invariant, not the thing holding it up. This is
+    the SAME anchor-from-root discipline :mod:`shipit.staging` applies to its env
+    prefix (:func:`shipit.staging._reject_link_components` on
+    ``prefix.relative_to(root).parts``), via the one shared primitive.
 
-    A generated parser is platform-independent C source — no per-OS variant —
-    so the archive carries NO ``-<target>`` suffix: every matrix leg that runs
-    it composes the identical bytes under the one name (parity with legacy
-    ``tree-sitter.tar.gz``). ``src`` is required — its absence is a bundle-
-    stage failure (``shipit build`` runs ``tree-sitter generate`` first),
-    never a quiet empty archive.
+    Every declared entry is walked, INCLUDING a when-present one that turns out
+    absent: a redirect in a payload declaration is a defect in the declaration
+    whether or not it resolves to anything today, and finding it only on the day
+    the file appears is the quiet outcome this stage refuses. A missing REQUIRED
+    entry is the loud build-never-ran failure (all names at once, so one run
+    reports the whole gap).
     """
-    leg = _leg_for(req.artifact, req.entries, "tree-sitter", "tarball")
-    leg_dir = req.root if leg.path in (".", "") else req.root / leg.path
-    if not (leg_dir / "src").is_dir():
+    where = f"[artifacts.{artifact_name}] {spec.composition} composition"
+    root_res = root.resolve()
+    # The leg is an anchor, not yet a base: walk ITS components from the trusted
+    # checkout root and refuse a link before it is ever resolved. `leg_rel` is
+    # `.`/`` for a root leg (empty parts — nothing to walk) and a repo-relative,
+    # `..`-free path otherwise (the [toolchains] parse guarantees the shape; only
+    # its filesystem nature is untrusted here).
+    leg_parts = PurePosixPath(leg_rel).parts if leg_rel not in (".", "") else ()
+    leg_link = first_link_component(root_res, leg_parts)
+    if leg_link is not None:
         raise ReleaseError(
-            f"[artifacts.{req.artifact.name}] tarball composition: no generated "
-            f"parser at {leg_dir / 'src'} — the tarball ships the "
-            f"`tree-sitter generate` output; run `shipit build` first"
+            f"{where}: the `{spec.leg}` leg path {leg_rel!r} traverses a symlink "
+            f"or junction at {leg_link} — the bundle refuses to FOLLOW links out "
+            f"of the checkout; a `[toolchains]` leg must be a real directory, so "
+            f"a committed redirect can never make an out-of-tree dir the base the "
+            f"payload is collected from"
         )
-    present = [name for name in TREE_SITTER_PAYLOAD if (leg_dir / name).exists()]
+    leg_dir_res = root_res.joinpath(*leg_parts)
+    if leg_dir_res != root_res and not leg_dir_res.is_relative_to(root_res):
+        # Unreachable while the leg walk holds (a `..`-free, link-free relative
+        # path stays under root) — the explicit statement of the invariant.
+        raise ReleaseError(
+            f"{where}: the `{spec.leg}` leg {leg_dir_res} resolves outside the "
+            f"checkout ({root_res}); a leg is a real directory inside the tree"
+        )
+    for entry in spec.payload:
+        if config.path_escapes(entry.path):
+            # Belt for a hand-built BundleSpec: the config boundary already
+            # applies this predicate at parse (`_parse_payload`), but the leg
+            # join would DISCARD the leg for an absolute path or climb out of it
+            # with `..`, so the refuse-links model's "the base is the leg"
+            # precondition is re-asserted where the read actually happens.
+            raise ReleaseError(
+                f"{where}: payload path {entry.path!r} is not a leg-relative "
+                f"path — no leading '/', no '\\', no drive letter, no '..' "
+                f"segment; the payload lives inside the `{spec.leg}` leg"
+            )
+        parts = PurePosixPath(entry.path).parts
+        offender = first_link_component(leg_dir_res, parts)
+        if offender is not None:
+            raise ReleaseError(
+                f"{where}: payload path {entry.path!r} traverses a symlink or "
+                f"junction at {offender} — the bundle refuses to FOLLOW links "
+                f"out of the `{spec.leg}` leg; it archives only real files and "
+                f"real directories, so a redirect can never steer the archive "
+                f"at a file outside the checkout"
+            )
+        candidate = leg_dir_res.joinpath(*parts)
+        if candidate == leg_dir_res or not candidate.is_relative_to(leg_dir_res):
+            # Unreachable while the guards above hold — kept as the explicit
+            # statement of the invariant they exist to produce.
+            raise ReleaseError(
+                f"{where}: payload path {entry.path!r} resolves to {candidate}, "
+                f"outside the `{spec.leg}` leg ({leg_dir_res}); every payload "
+                f"member is a strict descendant of its leg"
+            )
+    missing = [
+        entry.path
+        for entry in spec.payload
+        if entry.required and not leg_dir_res.joinpath(entry.path).exists()
+    ]
+    if missing:
+        raise ReleaseError(
+            f"{where}: required payload missing under {leg_dir_res} — "
+            f"{', '.join(missing)}; the bundle ships exactly the declared "
+            f"`bundle.payload` (run `shipit build` first if these entries are build outputs), "
+            f"never a quiet archive missing its required core"
+        )
+    present = [
+        entry.path
+        for entry in spec.payload
+        if leg_dir_res.joinpath(entry.path).exists()
+    ]
+    return leg_dir_res, present
+
+
+def _compose_declared_payload(req: ComposeRequest) -> Composed:
+    """The declared-payload tarball (``tarball`` / ``zed``): ``<name>.tar.gz``
+    of the artifact's own ``bundle.payload`` entries, collected under its
+    ``bundle.leg`` toolchain leg's path. See the module docstring's entry.
+
+    The payload is a PRODUCER-REPO fact (#1092, ADR-0077): the producer's
+    ``.shipit.toml`` says which files make up its package, and this function
+    tars exactly those — no shipit-side knowledge of what a tree-sitter grammar
+    or a Zed extension contains, and no shipit release needed to ship one more
+    file. Entries ride WHEN PRESENT; an entry declaring ``required = true`` that
+    is absent is a LOUD bundle-stage failure (the build never ran, or the
+    declaration is wrong), never a quiet empty archive. The config boundary
+    already refuses a payload with no required entry, so a composed archive is
+    never empty by construction.
+
+    The output is platform-independent — no ``-<target>`` suffix — so every
+    matrix leg that runs it composes the identical bytes under the one name
+    (parity with the legacy ``tree-sitter.tar.gz``). The leg indirection means
+    the payload paths are relative to the leg's ``[toolchains]`` path (a repo
+    whose grammar/extension lives in a subdir bundles from there, a root repo
+    from the root) — the path itself is never restated in the bundle spec.
+    """
+    spec = req.artifact.bundle
+    if spec is None or spec.leg is None:
+        # Unreachable through the config boundary (both compositions are
+        # declared_payload, so the parse guarantees leg+payload); loud rather
+        # than a confusing AttributeError if a caller hand-builds an artifact.
+        raise ReleaseError(
+            f"[artifacts.{req.artifact.name}] declared-payload composition "
+            f"reached with no `bundle.leg`/`bundle.payload` declaration"
+        )
+    leg = _leg_for(req.artifact, req.entries, spec.leg, spec.composition)
+    # The leg base is validated FROM the checkout root (not trusted by resolving
+    # an untrusted [toolchains] path), so `_payload_operands` returns the
+    # proven-real leg dir it walked to — tar's `-C` and the membership checks
+    # then agree on the one link-free directory.
+    leg_dir, present = _payload_operands(req.artifact.name, spec, req.root, leg.path)
     archive = f"{req.artifact.name}.tar.gz"
     archive_path = req.out_dir / archive
     req.out_dir.mkdir(parents=True, exist_ok=True)
@@ -518,78 +636,16 @@ def _compose_tarball(req: ComposeRequest) -> Composed:
         # the fresh tree (the archive/mac-app recreate-from-clean contract).
         archive_path.unlink()
     req.run_cmd(
-        ["tar", "-czf", str(archive_path), "-C", str(leg_dir), *present],
+        # `--` ends the option list: every operand after it is a PATH, whatever
+        # it is spelled like. Without it a declared `--checkpoint-action=exec=…`
+        # is parsed by GNU tar as an OPTION and runs a command on the release
+        # runner. The operands are producer-declared, so they are DATA and must
+        # never be able to become argv flags — the same reason the guard above
+        # refuses links rather than trusting their spelling.
+        ["tar", "-czf", str(archive_path), "-C", str(leg_dir), "--", *present],
         req.root,
     )
-    return Composed(req.artifact.name, "tarball", (archive,))
-
-
-#: The Zed-extension payload the ``zed`` composition ships — the extension's
-#: conventional layout under the rust leg's path (a Zed extension is a Rust
-#: crate compiled to WASM). ``extension.toml`` (the manifest naming the
-#: extension id/version and its grammar/language wiring) is the REQUIRED core —
-#: its absence means this is not a Zed extension. The rest ride WHEN PRESENT
-#: (the :data:`DOC_FILES` "when present" shape): ``shared`` is the COMMITTED
-#: local grammar-asset copy (the whole point — no cross-repo grammar fetch);
-#: ``languages``/``grammars`` are the extension's language & grammar configs;
-#: ``src``/``Cargo.toml`` are the Rust extension source when the extension
-#: compiles WASM; ``LICENSE``/``README.md`` are the docs. Assembled shipit-side
-#: from the checked-in tree, never fetched.
-ZED_PAYLOAD: tuple[str, ...] = (
-    "extension.toml",
-    "shared",
-    "languages",
-    "grammars",
-    "src",
-    "Cargo.toml",
-    "LICENSE",
-    "LICENSE.md",
-    "README.md",
-)
-
-
-def _compose_zed(req: ComposeRequest) -> Composed:
-    """The Zed-extension tarball: ``<name>.tar.gz`` of the rust leg's
-    :data:`ZED_PAYLOAD` (``extension.toml`` plus the committed ``shared/``
-    grammar assets and the language/grammar/source files, when present). See
-    the module docstring's zed entry.
-
-    A Zed extension is platform-independent committed source — no per-OS
-    variant — so the archive carries NO ``-<target>`` suffix: every matrix leg
-    that runs it composes the identical bytes (the tarball composition's shape).
-    ``extension.toml`` is REQUIRED — its absence is a bundle-stage failure (the
-    tree does not hold a Zed extension), never a quiet empty archive. The
-    ``shared/`` grammar is bundled as the COMMITTED LOCAL COPY it already is; the
-    composition performs no cross-repo grammar fetch, so the artifact is exactly
-    the checked-in bytes.
-
-    The extension source is located under the ``rust`` leg (the extension is a
-    Rust crate — the same leg its checks run against, TOL03), so a repo whose
-    ``[toolchains]`` rust path is a subdir bundles from there, and a root repo
-    (``"." = "rust"``) from the root.
-    """
-    leg = _leg_for(req.artifact, req.entries, "rust", "zed")
-    leg_dir = req.root if leg.path in (".", "") else req.root / leg.path
-    if not (leg_dir / "extension.toml").is_file():
-        raise ReleaseError(
-            f"[artifacts.{req.artifact.name}] zed composition: no "
-            f"{leg_dir / 'extension.toml'} — the zed tarball ships a Zed "
-            f"extension's committed source (extension.toml + the local shared/ "
-            f"grammar assets); this tree holds no extension manifest"
-        )
-    present = [name for name in ZED_PAYLOAD if (leg_dir / name).exists()]
-    archive = f"{req.artifact.name}.tar.gz"
-    archive_path = req.out_dir / archive
-    req.out_dir.mkdir(parents=True, exist_ok=True)
-    if archive_path.exists():
-        # tar -czf truncates, but an unlink keeps the rerun's artifact exactly
-        # the fresh tree (the archive/tarball recreate-from-clean contract).
-        archive_path.unlink()
-    req.run_cmd(
-        ["tar", "-czf", str(archive_path), "-C", str(leg_dir), *present],
-        req.root,
-    )
-    return Composed(req.artifact.name, "zed", (archive,))
+    return Composed(req.artifact.name, spec.composition, (archive,))
 
 
 #: wasm-pack's default output target when a wasm/npm artifact declares none —
@@ -1322,6 +1378,13 @@ class Composition:
     whose producing command is DECLARED on the artifact (mac-app's bundler)
     rather than registry-assembled — the config boundary validates the
     declaration shape against it (:func:`shipit.config._parse_bundle`).
+    ``declared_payload`` is its sibling for the archive CONTENTS (#1092,
+    ADR-0077): it marks the compositions (``tarball``, ``zed``) whose member
+    list is DECLARED on the artifact (``bundle.leg`` + ``bundle.payload``)
+    rather than hardcoded here. "Which files make up my package" is a
+    producer-repo fact, so the two keys are REQUIRED for these compositions and
+    refused on every other one — the same shape ``declared_command`` gives
+    ``command``/``source``.
     ``signable`` marks the compositions the mac signer can reopen
     (:mod:`shipit.release.sign` — the mac-app leg's reseal payload, the
     archive leg's tarball, TOL02-WS08 #779): the config boundary refuses
@@ -1370,6 +1433,7 @@ class Composition:
     compose: Callable[[ComposeRequest], Composed]
     platforms: tuple[str, ...] = ()
     declared_command: bool = False
+    declared_payload: bool = False
     signable: bool = False
     asserts_binary: bool = True
     platform_independent: bool = False
@@ -1460,24 +1524,34 @@ ELECTRON = Composition(
     # composition-keyed build-time secret (TOL02-WS14 #790).
     signable=True,
 )
-#: tree-sitter's generated-parser tarball (TOL02-WS16 #792) — platform-
-#: independent (the same generated C source on every leg, emitted as one
-#: unqualified ``<name>.tar.gz``), NOT signable (a source tarball has no binary
-#: the mac signer reopens), and NOT binary-asserting (a source ``.tar.gz`` has
-#: no main binary — the scar-#2 guard is skipped for it, like the wheel's
-#: sdist). ``platform_independent`` makes the config boundary refuse it with
-#: >1 ``platforms`` (the unqualified name would collide across legs).
-TARBALL = Composition(
-    "tarball", _compose_tarball, asserts_binary=False, platform_independent=True
-)
-#: the Zed-extension tarball (TOL03-WS02 #973, ADR-0068) — platform-independent
-#: (the same committed extension source on every leg, emitted as one unqualified
-#: ``<name>.tar.gz``), NOT signable (a source tarball has no binary the mac
-#: signer reopens), and NOT binary-asserting (a source ``.tar.gz`` has no main
-#: binary — the scar-#2 guard is skipped, like the tree-sitter tarball and the
+#: the declared-payload source tarball (TOL02-WS16 #792; producer-declared since
+#: #1092/ADR-0077) — the artifact's own ``bundle.payload`` under its
+#: ``bundle.leg``. Platform-independent (the same declared source on every leg,
+#: emitted as one unqualified ``<name>.tar.gz``), NOT signable (a source tarball
+#: has no binary the mac signer reopens), and NOT binary-asserting (a source
+#: ``.tar.gz`` has no main binary — the scar-#2 guard is skipped for it, like the
 #: wheel's sdist). ``platform_independent`` makes the config boundary refuse it
 #: with >1 ``platforms`` (the unqualified name would collide across legs).
-ZED = Composition("zed", _compose_zed, asserts_binary=False, platform_independent=True)
+TARBALL = Composition(
+    "tarball",
+    _compose_declared_payload,
+    asserts_binary=False,
+    platform_independent=True,
+    declared_payload=True,
+)
+#: the Zed-extension tarball (TOL03-WS02 #973, ADR-0068) — the SAME
+#: declared-payload composition as ``tarball`` since #1092 (a Zed extension's
+#: ``extension.toml``/``shared``/``languages`` list is a producer fact, declared
+#: in the extension repo's own ``.shipit.toml``). It keeps its own registry name
+#: because the ``zed`` PUBLISH endpoint pairs with it (ADR-0068, the
+#: manually-gated registry PR); the two entries differ in nothing else.
+ZED = Composition(
+    "zed",
+    _compose_declared_payload,
+    asserts_binary=False,
+    platform_independent=True,
+    declared_payload=True,
+)
 
 #: The CLOSED registry, in a stable order. Adding a composition is adding an
 #: entry here (the toolchain registry's mirror) — never a kind switch.
@@ -1506,6 +1580,13 @@ def signable_names() -> tuple[str, ...]:
     the config boundary's ``sign = true`` refusal message
     (:func:`shipit.config._parse_artifact`)."""
     return tuple(c.name for c in COMPOSITIONS if c.signable)
+
+
+def declared_payload_names() -> tuple[str, ...]:
+    """The composition names whose archive members are producer-declared
+    (``bundle.leg`` + ``bundle.payload``), registry order — for the config
+    boundary's refusal messages (:func:`shipit.config._parse_bundle`)."""
+    return tuple(c.name for c in COMPOSITIONS if c.declared_payload)
 
 
 def platform_independent_names() -> tuple[str, ...]:

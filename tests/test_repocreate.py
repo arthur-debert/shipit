@@ -909,7 +909,7 @@ def test_default_installer_delivers_the_endpoint_gated_conda_packager(
         '"." = "tree-sitter"\n'
         "[artifacts.grammar]\n"
         'build = ["tree-sitter"]\n'
-        'bundle = { composition = "tarball" }\n'
+        'bundle = { composition = "tarball", leg = "tree-sitter", payload = [{ path = "src", required = true }] }\n'
         'endpoints = ["gh-release", "conda"]\n'
     )
 
