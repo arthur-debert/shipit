@@ -7771,20 +7771,111 @@ PRISTINE_COORDINATING_SKILL = (
 )
 
 
+# The versions the manifest lists at each relocated `skills/<rel>` path, pinned as
+# an EXACT closed set — the `skills/<rel>` half of the same authoritative history
+# guard RETIRED_SHIPIT_SKILLS_STORE_HASHES gives the `.shipit-skills/<rel>` half
+# below. A retired entry's hash list is the only thing that makes `shipit install`
+# shed an orphan, so silently dropping a hash, truncating one, or swapping in an
+# unrelated one strands that version in every consumer holding it — exact equality
+# is what catches that, and well-formedness ("looks like a sha256") does not.
+#
+# KNOWN-WRONG DATA, frozen deliberately (#1131). Marked per hash below: six of the
+# eleven entries do not match what git says was delivered at the path — eight
+# listed hashes were never shipped there (seven of them `.shipit-skills/`-era
+# content), and five genuinely-shipped versions are missing. The cause was the
+# very coupling this PR removed: the old `desired_hash() in pristine_hashes`
+# assert went red on each skill edit and was greened by appending the live store
+# hash to the RETIRED entry. Correcting the data changes what `shipit install`
+# DELETES in a consumer — a reconcile behaviour change, not a test fix — so it is
+# its own change. Pinning the drift here keeps it visible and makes the correction
+# a deliberate, reviewed edit instead of a silent one.
+RETIRED_RELOCATED_SKILL_HASHES = {
+    "skills/coordinating/SKILL.md": (
+        "sha256:065a793b117dcfbb1e97fea0a80b405c69995850af9a350061dbcc1f4ea4976a",
+        "sha256:d39855cd948076fd3d25b10ba345efd4e0f6f8eea26fcc546723cc063c4511bc",
+    ),
+    "skills/grill-me-with-docs/ADR-FORMAT.md": (
+        "sha256:f1f36cd3f8d3b6474ddd5855da4e233bfc4ae1a1c5024909ccf11871819a41b2",
+    ),
+    # #1131: missing 886ce0e9…, which WAS delivered here.
+    "skills/grill-me-with-docs/CONTEXT-FORMAT.md": (
+        "sha256:d7f1244807b547de07073244e67279eda8bb0fd681428114bce8452c979ab72c",
+    ),
+    # #1131: missing af2e662a… and bb493824…, which WERE delivered here.
+    "skills/grill-me-with-docs/SKILL.md": (
+        "sha256:a4eefcb8f9af47b5b2f99a85bde5e52c4b2275c6660c964021f6d186f05b72fd",
+        # never shipped at this path — matches no blob at any skills path (#1131)
+        "sha256:a7e8a73594379e378ca2700cd8cb5c8a0b91c32aeaad919b487a52461f1b5c4c",
+        # never shipped here — `.shipit-skills/` content (#1131)
+        "sha256:06428ff9352d2765056d1af43f9a21592b0ea6e59ab7b72f200710678fcdddea",
+    ),
+    "skills/implementing/SKILL.md": (
+        "sha256:fd7d90eff365955e096dbdf2c72ac6bf32a33b12609d7749aa8a544b8cb259a0",
+        "sha256:02040db0bd1aedce096473bdbc9d65ec741a81c989f97121fedc242e172a4932",
+        # never shipped here — `.shipit-skills/` content (#1131)
+        "sha256:9aad3759cc233430e9d5a896a33ead5c6ae81e71b5a78af35e8b15133ef5cc69",
+    ),
+    "skills/lex-primer/SKILL.md": (
+        "sha256:eb7c4d13f980dbbf0fdc81998ce6d8815783af5f13fabb18decb7e834bfddee0",
+        "sha256:ff616c1c447661298fb8e06a8a8a6ce60400d838c7c881b9e8bd526128e32901",
+    ),
+    "skills/planning/SKILL.md": (
+        "sha256:e26fe5ef4bba7d0bffd09f2dbbf61ba9ea8b0a8aa77a50bb794481766f8fa791",
+        "sha256:172678dc99e45431970d2cdd31c6c910622590e7e6893b26026a282fcdc49919",
+        # never shipped here — `.shipit-skills/` content (#1131)
+        "sha256:843d0a0c3dddb6d1ba1b5db6d494e650fdbc40035cb98def47b964d264b8e57c",
+    ),
+    # #1131: missing 3e402469…, which WAS delivered here.
+    "skills/shepherding-prs/SKILL.md": (
+        "sha256:8f627079f3d9846069742dd77cf4987eb550ff9a6c5e575f751ea8edf958ee2b",
+        "sha256:b7250030fa91282fa6d7d5a65073363edbc4522e31984dd8983994dcf9a5aa85",
+        # never shipped here — `.shipit-skills/` content (#1131)
+        "sha256:fed591f8346731ac2e4bb8de18c5fce0f6edd199c2f3ee5bf1cb036114cd4063",
+    ),
+    "skills/shipit-session-status/SKILL.md": (
+        "sha256:4720ad9b381d57c32dfd2aca6cb2a4b338dfa69cac90eedd85a71f7f2f8db962",
+    ),
+    "skills/to-spec/SKILL.md": (
+        "sha256:9f7e5216675070146daabdc0f63ddb8cc8ecf37843ab5d3290354bf57d8097c0",
+        "sha256:c614f7c42621a51dc5c4f9b27d0d74c52e43d87483fc56d45ce9127a8a6e2484",
+        # never shipped here — `.shipit-skills/` content (#1131)
+        "sha256:eafedcd9b9797aa3d9e97ee466e40000cc74de2d86f86e855f6e1e36219d3cce",
+    ),
+    # #1131: missing 2eaa2611…, which WAS delivered here.
+    "skills/to-tickets/SKILL.md": (
+        "sha256:38df45b1560de0e10be3ab8f7ef4113114ee851e3790ac9087b4c9560c7dc6df",
+        "sha256:271ffbaaa98315c752ddf9c2d01e504b041140bdc9c5a21fc7ac152891931b16",
+        # never shipped here — `.shipit-skills/` content (#1131)
+        "sha256:d922c867458135ebf665233149268b25ba8ea3147a59e5b7ffcc9c3748fda3d5",
+        # never shipped here — `.shipit-skills/` content (#1131)
+        "sha256:11419ddc56ed6a6b07cc780b1c38aa5cf20bcdfb89479bda2f4e032a4ea80b57",
+    ),
+}
+
+
 def test_retired_manifest_carries_the_relocated_skill_store():
     # The store moved out of `skills/` to `.shipit-skills/` (#921) and now
     # PROJECTS into the single real `.agents/skills/<rel>` dir (#1088): each of the
     # ELEVEN relocated skills must still be delivered AND have its OLD
-    # `skills/<rel>` path retired, carrying the versions actually shipped there so
-    # a consumer sheds the polluting old copy on install (leaving consumer-authored
-    # `skills/` files alone — not in this manifest).
+    # `skills/<rel>` path retired, carrying the versions delivered there so a
+    # consumer sheds the polluting old copy on install (leaving consumer-authored
+    # `skills/` files alone — not in this manifest). Six of the eleven lists are
+    # known to be wrong about which versions those are; see
+    # RETIRED_RELOCATED_SKILL_HASHES and #1131.
     #
-    # Deliberately NOT asserted: that the CURRENT live hash is one of them. What
-    # shipit shipped at a retired path is a closed historical set, so pinning
-    # today's content to it is a time bomb that goes off on the next skill edit —
-    # and the only way to "fix" a red build then is to append a hash that was never
-    # shipped at `skills/<rel>`. The coordinating fixture's hash below is the real
-    # coverage that the last delivered version is listed.
+    # The hash lists are pinned to an EXACT closed set (dropping, truncating or
+    # swapping one strands that version in a consumer), but the pin is
+    # RETIRED_RELOCATED_SKILL_HASHES — NOT the live store, which is deliberately
+    # not consulted here. What shipit shipped at a retired path is closed, while
+    # the store content is free to move on, so requiring today's hash to be in that
+    # set is a time bomb that goes off on the next skill edit — and the only way to
+    # "fix" a red build then is to append a hash never shipped at `skills/<rel>`.
+    # That is not hypothetical: it is where the drift #1131 tracks came from.
+    # Keyed off the eleven paths, not off the pin's own keys: a pin that lost an
+    # entry would otherwise just check one path fewer, in silence.
+    assert set(RETIRED_RELOCATED_SKILL_HASHES) == {
+        f"skills/{rel}" for rel in RELOCATED_SKILL_STORE_PATHS
+    }
     retired = {r.path: r for r in irec.load_retired()}
     units = {u.key: u for u in iunits.load_units()}
     for rel in RELOCATED_SKILL_STORE_PATHS:
@@ -7792,9 +7883,10 @@ def test_retired_manifest_carries_the_relocated_skill_store():
         old_path = f"skills/{rel}"
         assert new_key in units, f"{new_key} no longer delivered"
         assert old_path in retired, f"{old_path} not retired"
-        entry = retired[old_path]
-        assert entry.pristine_hashes, f"{old_path} retired with no known version"
-        assert all(h.startswith("sha256:") for h in entry.pristine_hashes)
+        assert (
+            retired[old_path].pristine_hashes
+            == RETIRED_RELOCATED_SKILL_HASHES[old_path]
+        )
 
 
 def test_install_deletes_a_pristine_relocated_skill_and_installs_new_store(
@@ -7875,6 +7967,12 @@ def test_retired_manifest_carries_the_shipit_skills_store_history():
     # The history guard for #1115: the eleven delivered `.shipit-skills/<rel>`
     # paths, each with EVERY version shipit shipped there. A consumer stuck on an
     # older pin sheds its copy only if that version's hash is listed.
+    #
+    # Same completeness check as the `skills/<rel>` twin: driving the loop off the
+    # pin's own keys would let a dropped entry shrink the guard unnoticed.
+    assert set(RETIRED_SHIPIT_SKILLS_STORE_HASHES) == {
+        f".shipit-skills/{rel}" for rel in RELOCATED_SKILL_STORE_PATHS
+    }
     retired = {r.path: r for r in irec.load_retired()}
     for path, expected_hashes in RETIRED_SHIPIT_SKILLS_STORE_HASHES.items():
         assert retired[path].pristine_hashes == expected_hashes
