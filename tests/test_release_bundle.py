@@ -1924,6 +1924,7 @@ def test_vsix_packages_per_target_into_the_out_tree(tmp_path):
                 "--",
                 "vsce",
                 "package",
+                "--no-dependencies",
                 "--target",
                 "darwin-arm64",
                 "--out",
@@ -1934,6 +1935,44 @@ def test_vsix_packages_per_target_into_the_out_tree(tmp_path):
     ]
     assert out_path.is_file()
     assert composed == bundle_mod.Composed("ext", "vsix", ("ext-darwin-arm64.vsix",))
+
+
+@pytest.mark.parametrize(
+    ("target", "vt"),
+    [(MAC, "darwin-arm64"), (LINUX, "linux-x64"), (WIN, "win32-x64")],
+)
+def test_vsix_always_packs_with_no_dependencies(tmp_path, target, vt):
+    # `--no-dependencies` is UNCONDITIONAL (#1058) — no bundled-case detection,
+    # no config knob, one code path for every target. shipit's vsix consumers are
+    # esbuild-bundled, so vsce's `npm ls` dependency walk is pure failure surface:
+    # a workspace symlink dep (`"@lex/shared": "file:./shared"`) makes it either
+    # yield an empty file set (a hollow .vsix that looks like a successful build)
+    # or kill the pack outright ("Extension entrypoint(s) missing …"), which is
+    # what blocked lex-fmt/vscode from having any working release path. Pin the
+    # whole constructed argv so a refactor that drops the flag fails loudly.
+    (artifact,) = _artifacts(
+        {"ext": {"build": ["npm"], "bundle": {"composition": "vsix"}}}
+    )
+    entries = _entries({"editors/vscode": "npm"})
+    recorder = RunRecorder({"npm": _vsce_writes_out})
+
+    bundle_mod.VSIX.compose(
+        _request(tmp_path, artifact, entries, target=target, run_cmd=recorder)
+    )
+
+    ((argv, _cwd),) = recorder.calls
+    assert argv == (
+        "npm",
+        "exec",
+        "--",
+        "vsce",
+        "package",
+        "--no-dependencies",
+        "--target",
+        vt,
+        "--out",
+        str(tmp_path / "dist" / f"ext-{vt}.vsix"),
+    )
 
 
 def test_vsix_windows_target_maps_to_win32_x64(tmp_path):
