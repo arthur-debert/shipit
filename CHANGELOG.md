@@ -4,6 +4,22 @@
 
 ## Unreleased
 
+## 1.6.1 - 2026-07-28
+
+- release/bundle: the `vsix` composition now packs with
+  `vsce package --no-dependencies` (#1058). shipit's VS Code consumers are
+  esbuild-**bundled** extensions — their runtime dependencies already ride inside
+  the bundle — so vsce's `npm ls` dependency walk contributes nothing but failure
+  modes. With a workspace symlink dependency (`"@lex/shared": "file:./shared"`)
+  that walk either yields an empty file set, composing a hollow `.vsix` that
+  looks like a successful build, or kills the pack outright with
+  `Extension entrypoint(s) missing …`. The latter is what left `lex-fmt/vscode`
+  with no working release path at all: the argv is constructed inside the
+  composition, so the consumer could not work around it.
+- The flag is **unconditional** — no bundled-case detection, no config knob. One
+  code path and one behaviour to reason about, and the dependency walk has no
+  case in which it helps a bundled extension.
+
 ## 1.6.0 - 2026-07-27
 
 - release/bundle: the `tarball` and `zed` compositions ship a **producer-declared
