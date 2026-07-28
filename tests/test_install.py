@@ -3953,7 +3953,7 @@ def test_rust_conda_migration_moves_rattler_build_in_one_reconcile(tmp_path, rec
     # shipit still carries `rattler-build` INSIDE its old rust-release-deps
     # managed span. Reconciling to v1.4.2 must, in ONE pass, UPDATE that block to
     # drop rattler-build AND ADD the new conda-packager block that now owns it.
-    # Before the fix, `_pixi_key_conflicts` saw rattler-build already in
+    # Before the fix, `_plan_pixi_key_conflicts` saw rattler-build already in
     # [dependencies] and skipped the packager as a first-splice duplicate — but
     # the key sits inside ANOTHER managed block this same plan rewrites, so the
     # one reconcile stranded the repo with NO packager (removed from the rust
@@ -4490,7 +4490,9 @@ def test_shipits_own_repo_keeps_its_feature_test_task_authoritative():
     root = Path(__file__).resolve().parents[1]
     units = iunits.load_units()
     consumer_hashes = {u.key: irec.consumer_hash(root, u) for u in units}
-    conflicts = irec._pixi_task_conflicts(root, units, consumer_hashes)
+    conflicts = irec._pixi_task_conflicts(
+        irec._read_pixi_text(root), units, consumer_hashes
+    )
     assert any(
         c.unit_key == iunits.PIXI_TEST_TASK_KEY and c.task == "test" for c in conflicts
     )

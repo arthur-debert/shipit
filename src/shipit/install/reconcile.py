@@ -725,7 +725,7 @@ def _rewritten_pixi_blocks(
 
 
 def _departing_managed_keys(
-    text: str, units: Sequence[Unit], rewritten: Sequence[Unit]
+    text: str, rewritten: Sequence[Unit]
 ) -> dict[str, frozenset[str]]:
     """Anchor → the keys a present shipit-managed block span DECLARES NOW but
     will NOT declare once this reconcile rewrites it.
@@ -794,7 +794,7 @@ def _plan_pixi_key_conflicts(
     except tomllib.TOMLDecodeError:
         return ()
     managed_keys = _departing_managed_keys(
-        state.pixi_text, units, _rewritten_pixi_blocks(units, state, kept)
+        state.pixi_text, _rewritten_pixi_blocks(units, state, kept)
     )
     consumer_hashes = state.consumer_hashes
     conflicts: list[PixiKeyConflict] = []
@@ -912,11 +912,17 @@ def _enabled_features(manifest: Mapping[str, object]) -> frozenset[str]:
 
 
 def _pixi_task_conflicts(
-    root: Path, units: Sequence[Unit], consumer_hashes: Mapping[str, str | None]
+    pixi_text: str | None,
+    units: Sequence[Unit],
+    consumer_hashes: Mapping[str, str | None],
 ) -> tuple[PixiTaskConflict, ...]:
-    """Gather's task-ambiguity read: first-splice pixi-task name clashes.
+    """Gather's task-ambiguity detection: first-splice pixi-task name clashes.
 
-    Best-effort and fail-open like :func:`_pixi_key_conflicts` (whose
+    Pure over gather's ONE raw read of the manifest (:func:`_read_pixi_text`),
+    like every other pixi guard — so all of them judge the same snapshot rather
+    than re-reading a file that could change between them.
+
+    Best-effort and fail-open like :func:`_plan_pixi_key_conflicts` (whose
     ADD-bound-only rule it shares): no manifest or an unparseable one detects
     nothing. Only ``[tasks]``-anchored pixi block units are checked — a task
     the block would define in the default env clashes with a same-named task
@@ -927,12 +933,11 @@ def _pixi_task_conflicts(
     managed block needlessly. Ambiguity is exactly the task landing in the
     default env (the managed block) AND another env (the enabled feature).
     """
-    path = root / PIXI_FILE
-    if not path.is_file():
+    if pixi_text is None:
         return ()
     try:
-        manifest = tomllib.loads(path.read_text(encoding="utf-8"))
-    except (tomllib.TOMLDecodeError, OSError, UnicodeDecodeError):
+        manifest = tomllib.loads(pixi_text)
+    except tomllib.TOMLDecodeError:
         return ()
     features = manifest.get("feature")
     if not isinstance(features, dict):
@@ -1156,11 +1161,17 @@ def _table_redeclared(
 
 
 def _pixi_table_conflicts(
-    root: Path, units: Sequence[Unit], consumer_hashes: Mapping[str, str | None]
+    pixi_text: str | None,
+    units: Sequence[Unit],
+    consumer_hashes: Mapping[str, str | None],
 ) -> tuple[PixiTableConflict, ...]:
-    """Gather's table-redeclaration read: first-splice duplicate top-level tables.
+    """Gather's table-redeclaration detection: first-splice duplicate top-level
+    tables.
 
-    Best-effort and fail-open like :func:`_pixi_key_conflicts` (whose
+    Pure over gather's ONE raw read of the manifest (:func:`_read_pixi_text`),
+    like :func:`_pixi_task_conflicts` and the two post-plan guards.
+
+    Best-effort and fail-open like :func:`_plan_pixi_key_conflicts` (whose
     ADD-bound-only rule it shares): no manifest or an unparseable one detects
     nothing. Only ANCHOR-LESS pixi block units are checked — an anchored block's
     duplicate-KEY risk is the key-conflict guard's, and its own header (an
@@ -1173,15 +1184,13 @@ def _pixi_table_conflicts(
     exist) is re-openable per TOML, so the managed ``[feature.shipit-artifacts]``
     channel block merges in cleanly and is NOT skipped (:func:`_table_redeclared`).
     """
-    path = root / PIXI_FILE
-    if not path.is_file():
+    if pixi_text is None:
         return ()
     try:
-        text = path.read_text(encoding="utf-8")
-        manifest = tomllib.loads(text)
-    except (tomllib.TOMLDecodeError, OSError, UnicodeDecodeError):
+        manifest = tomllib.loads(pixi_text)
+    except tomllib.TOMLDecodeError:
         return ()
-    consumer_headers = frozenset(segs for _, segs in _toml_table_headers(text))
+    consumer_headers = frozenset(segs for _, segs in _toml_table_headers(pixi_text))
     conflicts: list[PixiTableConflict] = []
     for unit in units:
         if unit.kind != "block" or unit.dest != PIXI_FILE or unit.anchor is not None:
@@ -1526,8 +1535,8 @@ def stale_provision_tasks(text: str) -> tuple[StaleProvisionTask, ...]:
     """Every pixi task in ``text`` still calling the retired ``provision lexd``.
 
     Pure over the manifest text (:func:`gather` supplies it), and fail-open on
-    an unparseable manifest like its :func:`_pixi_key_conflicts` siblings: the
-    tripwire never turns a malformed pixi.toml into a different error. Matching
+    an unparseable manifest like its :func:`_plan_pixi_key_conflicts` siblings:
+    the tripwire never turns a malformed pixi.toml into a different error. Matching
     is over the PARSED tasks' commands (:func:`_calls_retired_provision`), so a
     comment quoting the retired verb — every fleet manifest carries one — is not
     a call site, and neither is a command the check declines to read.
@@ -1600,12 +1609,15 @@ def _plan_stale_provision(
 
 
 def _read_pixi_text(root: Path) -> str | None:
-    """Gather's raw read of the consumer's ``pixi.toml`` — the ONE read the
-    post-plan pixi projections (:func:`_plan_pixi_key_conflicts`,
-    :func:`_plan_stale_provision`) are pure over.
+    """Gather's raw read of the consumer's ``pixi.toml`` — the ONE read EVERY
+    pixi guard is pure over: the two ADD-only detections gather itself makes
+    (:func:`_pixi_task_conflicts`, :func:`_pixi_table_conflicts`) and the two
+    post-plan projections inside :func:`reconcile`
+    (:func:`_plan_pixi_key_conflicts`, :func:`_plan_stale_provision`).
 
+    One read, so no guard can judge a different snapshot than its siblings.
     Fails OPEN like :func:`_read_lefthook_local`: no manifest, or one that cannot
-    be read as text, yields None and every projection over it detects nothing.
+    be read as text, yields None and every guard over it detects nothing.
     """
     path = root / PIXI_FILE
     if not path.is_file():
@@ -1783,21 +1795,22 @@ class ConsumerState:
     # tripwire stays pure over this state.
     lefthook_local_path: str | None = None
     lefthook_local: str | None = None
-    # The consumer's pixi.toml, RAW (#1127/#1081) — read here (the ONE read
-    # boundary) so the two guards that must judge the manifest this reconcile
-    # will LEAVE BEHIND (:func:`_plan_pixi_key_conflicts`,
-    # :func:`_plan_stale_provision`) stay pure over this state, deciding inside
-    # `reconcile()` where the decisions and the decline set exist. None when
-    # there is no readable manifest; both guards then detect nothing.
+    # The consumer's pixi.toml, RAW (#1127/#1081) — gather's ONE read of the
+    # manifest (:func:`_read_pixi_text`), which every pixi guard is pure over:
+    # the two ADD-only fields below derive from it, and the two guards that must
+    # judge the manifest this reconcile will LEAVE BEHIND
+    # (:func:`_plan_pixi_key_conflicts`, :func:`_plan_stale_provision`) project
+    # it inside `reconcile()`, where the decisions and the decline set exist.
+    # None when there is no readable manifest; every guard then detects nothing.
     pixi_text: str | None = None
     # First-splice pixi-task AMBIGUITY clashes (TOL01-WS01): a managed [tasks]
-    # block task also defined by a consumer [feature.*.tasks] table — read
-    # here for the same purity reason.
+    # block task also defined by a consumer [feature.*.tasks] table — derived
+    # here, from `pixi_text`, for the same purity reason.
     pixi_task_conflicts: tuple[PixiTaskConflict, ...] = ()
     # First-splice table-REDECLARATION clashes (ARF01-WS04): an anchor-less
     # managed block whose EOF-appended top-level table (the private-tier
-    # [s3-options.<bucket>]) the consumer already declares by hand — read here
-    # for the same purity reason.
+    # [s3-options.<bucket>]) the consumer already declares by hand — derived
+    # here, from `pixi_text`, for the same purity reason.
     pixi_table_conflicts: tuple[PixiTableConflict, ...] = ()
     # The committed CHANGELOG.md no longer matches the CURRENT renderer's
     # output over CHANGELOG/ (#578) — read here (the ONE read boundary) so the
@@ -1842,10 +1855,11 @@ def gather(
     (:func:`retired_hook_count`, #619), the consumer's committed
     lefthook-local config (#544, the
     merge-conflict tripwire's input), the raw ``pixi.toml`` text
-    (:func:`_read_pixi_text`, #1127/#1081 — the input the two POST-PLAN pixi
-    guards project inside :func:`reconcile`), the pixi manifest's first-splice
-    task-ambiguity clashes (:func:`_pixi_task_conflicts`) and
-    table-redeclaration clashes (:func:`_pixi_table_conflicts`), whether the
+    (:func:`_read_pixi_text`, #1127/#1081 — read ONCE and shared by every pixi
+    guard, including the two POST-PLAN ones that project it inside
+    :func:`reconcile`), the first-splice task-ambiguity clashes
+    (:func:`_pixi_task_conflicts`) and table-redeclaration clashes
+    (:func:`_pixi_table_conflicts`) derived from that text, whether the
     committed ``CHANGELOG.md`` is stale against the current renderer
     (:func:`_changelog_stale`, #578), and the declined managed-unit keys
     (``[managed.decline].keep``, #600 — consumer-owned policy, read alongside
@@ -1889,6 +1903,10 @@ def gather(
 
     lefthook_local_path, lefthook_local = _read_lefthook_local(root)
     consumer_hashes = {u.key: consumer_hash(root, u) for u in units}
+    # ONE read of pixi.toml, shared by every guard over it (#1129 review): the
+    # two ADD-only detections below and, via `state.pixi_text`, the two POST-PLAN
+    # projections inside `reconcile()` — so all four judge the same snapshot.
+    pixi_text = _read_pixi_text(root)
     return ConsumerState(
         root=str(root),
         consumer_hashes=consumer_hashes,
@@ -1902,9 +1920,9 @@ def gather(
         manifest_error=manifest_error,
         lefthook_local_path=lefthook_local_path,
         lefthook_local=lefthook_local,
-        pixi_text=_read_pixi_text(root),
-        pixi_task_conflicts=_pixi_task_conflicts(root, units, consumer_hashes),
-        pixi_table_conflicts=_pixi_table_conflicts(root, units, consumer_hashes),
+        pixi_text=pixi_text,
+        pixi_task_conflicts=_pixi_task_conflicts(pixi_text, units, consumer_hashes),
+        pixi_table_conflicts=_pixi_table_conflicts(pixi_text, units, consumer_hashes),
         changelog_stale=_changelog_stale(root),
         declines=declines,
         symlinked_dests=symlinked_dests(root, units),
