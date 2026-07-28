@@ -35,6 +35,15 @@ edge tool, so it must work from ANY shipit install — including the pinned buil
 consumer repo runs, which carries no extras and has no shipit-local pixi env to
 re-run inside.
 
+**An error message never quotes a credential-bearing body.** The access-tokens
+response IS a live ``ghs_…``, and the messages raised here are printed by
+``verify-apps`` AND logged with ``exc_info=True`` — so when THAT endpoint answers
+unusably (undecodable bytes or truncated JSON beside an intact token), the failure
+reports the body's SIZE and shape, never its text (:func:`_body_detail`,
+:func:`_shape`). Bodies that cannot carry a credential — the installation-metadata
+GET, and any ERROR body, whose request minted nothing — are still quoted, capped
+to one line, because seeing what answered is the whole diagnosis there.
+
 **Three failure kinds, never conflated** (#969). Auth can fail because THIS
 environment cannot produce credentials (:data:`UNCONFIGURED`), because the App is
 genuinely absent from the target's owner (:data:`NOT_INSTALLED`), or because the
@@ -187,22 +196,73 @@ def _excerpt(body: str, limit: int = 200) -> str:
     Response bodies are arbitrary remote text — an HTML error page or a proxy
     dump can run to kilobytes of newlines. The message this feeds is printed to a
     console AND logged, so it is collapsed to one line and truncated.
+
+    Capping is all this does; it is NOT a redaction. Whether a body may be quoted
+    at all is decided before this is reached (:func:`_body_detail`) — never pass
+    it a body that can contain a credential.
     """
     flat = " ".join(body.split())
     return flat if len(flat) <= limit else f"{flat[:limit]}…"
 
 
-def _api_request(path: str, jwt_token: str, *, method: str) -> object:
+def _body_detail(payload: bytes, *, credential_body: bool) -> str:
+    """What an error message is ALLOWED to say about a 2xx body.
+
+    A success body from a credential-bearing endpoint is described by SIZE ONLY,
+    never quoted. ``POST /app/installations/{id}/access_tokens`` answers with a
+    live ``ghs_…``, and invalid bytes ELSEWHERE in that body
+    (``{"token":"ghs_usable","extra":"\\xff"}``) make the disclosure reachable, not
+    hypothetical: the excerpt would carry a usable credential into a
+    :class:`ReviewAuthError` that ``verify_app`` logs with ``exc_info=True`` and
+    that other callers interpolate into printed reports.
+
+    Any OTHER endpoint's unusable body IS quoted (decoded lossily — its text is
+    only ever a message — then flattened and capped by :func:`_excerpt`): seeing
+    that an intercepting proxy answered 200 with an HTML error page is the whole
+    diagnosis there, and no credential can be in it.
+    """
+    if credential_body:
+        return f"{len(payload)} bytes, not quoted (this body carries a credential)"
+    return _excerpt(payload.decode("utf-8", "replace"))
+
+
+def _shape(value: object) -> str:
+    """Describe a JSON value with NO content — its type, plus empty-vs-not for a
+    string.
+
+    For messages about the access-tokens response, which may not quote what it
+    got: ``a dict`` / ``a list`` / ``an empty string`` says enough to diagnose a
+    malformed answer, while ``{'token': ['ghs_usable']}`` would put a credential
+    into a printed report and a log record.
+    """
+    if isinstance(value, str):
+        return "a string" if value else "an empty string"
+    if value is None:
+        return "nothing"
+    return f"a {type(value).__name__}"
+
+
+def _api_request(
+    path: str, jwt_token: str, *, method: str, credential_body: bool
+) -> object:
     """Bearer-JWT call to the GitHub REST API via stdlib urllib → parsed JSON.
 
     The shared core of :func:`_api_get` / :func:`_api_post` (the mock seams).
     Sends ``Authorization: Bearer <jwt>`` plus the versioned Accept headers, and
     raises an :data:`API_ERROR` :class:`ReviewAuthError` on any non-2xx (carrying
     the HTTP status and the response body), timeout, transport failure, OR a 2xx
-    whose body will not decode STRICTLY as UTF-8 JSON (lossy decoding is reserved
-    for the excerpt in the message). At this layer nothing is known about
-    the App itself — a caller that CAN read a status as an App verdict
+    whose body will not decode STRICTLY as UTF-8 JSON. At this layer nothing is
+    known about the App itself — a caller that CAN read a status as an App verdict
     (``installation_id`` reading 404) re-raises with its own kind.
+
+    ``credential_body`` says whether THIS endpoint's success body can contain a
+    credential, and so whether an error message may quote it (see
+    :func:`_body_detail`). It is a REQUIRED keyword, for the same reason
+    :class:`ReviewAuthError`'s ``kind`` is: a new call site must state the answer
+    rather than inherit a default that silently fails open on the next
+    credential-bearing endpoint. An ERROR body is a separate case and is always
+    quoted — that request FAILED, so no token was issued, and the body is the only
+    clue to why.
 
     EVERY exit is either a parsed body or a :class:`ReviewAuthError`: a caller
     like ``verify-apps`` catches exactly that type to reach its UNVERIFIED
@@ -226,9 +286,12 @@ def _api_request(path: str, jwt_token: str, *, method: str) -> object:
         ) as resp:
             payload = resp.read()
     except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", "replace")
+        # An ERROR body is always quotable — the request failed, so GitHub issued
+        # no token — but it is still arbitrary remote text (an HTML incident page
+        # runs to kilobytes), so it goes through the same one-line cap.
+        body = _excerpt(exc.read().decode("utf-8", "replace"))
         raise ReviewAuthError(
-            f"GitHub API {method} {path} failed (HTTP {exc.code}): {body.strip()}",
+            f"GitHub API {method} {path} failed (HTTP {exc.code}): {body}",
             kind=API_ERROR,
             status=exc.code,
         ) from exc
@@ -259,10 +322,12 @@ def _api_request(path: str, jwt_token: str, *, method: str) -> object:
         # garbled byte INSIDE the token string decodes to valid JSON, and a
         # corrupted `ghs_…` would then be minted, used, and reported LIVE. A body
         # that is not UTF-8 is an unusable ANSWER like any other, so it takes the
-        # same API_ERROR exit; only the human-facing excerpt is decoded lossily.
+        # same API_ERROR exit. What the MESSAGE may say about it is
+        # `_body_detail`'s call: the invalid bytes can sit anywhere, including
+        # beside an intact token, so a credential-bearing body is sized, not quoted.
         raise ReviewAuthError(
             f"GitHub API {method} {path} returned a body that is not valid UTF-8 "
-            f"({exc}): {_excerpt(payload.decode('utf-8', 'replace'))}",
+            f"({exc}): {_body_detail(payload, credential_body=credential_body)}",
             kind=API_ERROR,
         ) from exc
     if not raw.strip():
@@ -274,21 +339,33 @@ def _api_request(path: str, jwt_token: str, *, method: str) -> object:
         # GitHub answered, but the answer is unusable, so the App's state stays
         # UNKNOWN. Normalising it here is what keeps the "every exit is a parsed
         # body or a ReviewAuthError" contract true for `verify-apps` (#969).
+        # Same disclosure rule as the decode failure above: a TRUNCATED token
+        # response is unparseable JSON with an intact `ghs_…` still in it, so the
+        # credential-bearing endpoint's body is sized rather than quoted.
         raise ReviewAuthError(
             f"GitHub API {method} {path} returned an unparseable body "
-            f"({exc}): {_excerpt(raw)}",
+            f"({exc}): {_body_detail(payload, credential_body=credential_body)}",
             kind=API_ERROR,
         ) from exc
 
 
 def _api_get(path: str, jwt_token: str) -> object:
-    """``GET <path>`` with a bearer JWT → parsed JSON. The mock seam for step 2."""
-    return _api_request(path, jwt_token, method="GET")
+    """``GET <path>`` with a bearer JWT → parsed JSON. The mock seam for step 2.
+
+    The one GET this makes is ``/repos/{owner}/{repo}/installation`` — installation
+    METADATA, no credential — so an unusable body may be quoted in the error.
+    """
+    return _api_request(path, jwt_token, method="GET", credential_body=False)
 
 
 def _api_post(path: str, jwt_token: str) -> object:
-    """``POST <path>`` with a bearer JWT → parsed JSON. The mock seam for step 3."""
-    return _api_request(path, jwt_token, method="POST")
+    """``POST <path>`` with a bearer JWT → parsed JSON. The mock seam for step 3.
+
+    The one POST this makes is ``/app/installations/{id}/access_tokens``, whose
+    success body IS the ``ghs_…`` credential — so an unusable body is reported by
+    size and never quoted (:func:`_body_detail`).
+    """
+    return _api_request(path, jwt_token, method="POST", credential_body=True)
 
 
 def installation_id(backend: Backend, repo: str, *, jwt: str | None = None) -> int:
@@ -320,8 +397,11 @@ def installation_id(backend: Backend, repo: str, *, jwt: str | None = None) -> i
             ) from exc
         raise
     if not isinstance(resp, dict) or "id" not in resp:
+        # Quotable — installation METADATA carries no credential — but still
+        # arbitrary remote text, so it takes the same one-line cap as a body.
         raise ReviewAuthError(
-            f"Unexpected installation response for {agent!r} on {repo}: {resp!r}",
+            f"Unexpected installation response for {agent!r} on {repo}: "
+            f"{_excerpt(repr(resp))}",
             kind=API_ERROR,
         )
     inst_id = resp["id"]
@@ -335,7 +415,7 @@ def installation_id(backend: Backend, repo: str, *, jwt: str | None = None) -> i
     if isinstance(inst_id, bool) or not isinstance(inst_id, int) or inst_id <= 0:
         raise ReviewAuthError(
             f"Installation response for {agent!r} on {repo} has an unusable 'id' "
-            f"(expected a positive integer): {inst_id!r}",
+            f"(expected a positive integer): {_excerpt(repr(inst_id))}",
             kind=API_ERROR,
         )
     return inst_id
@@ -354,21 +434,35 @@ def installation_auth(backend: Backend, repo: str) -> dict:
     re-grant landed) before it drives a check-run create. Nothing is cached to
     disk. Raises :class:`ReviewAuthError` on any failure, including a 2xx whose
     ``token`` is absent or is not a non-empty string — so the returned mapping is
-    GUARANTEED to carry a usable ``token``.
+    GUARANTEED to carry a usable ``token``. Those failures describe the response's
+    SHAPE and never quote it: this endpoint's body is the credential itself, and
+    the message ends up in a printed report and a log record.
     """
     jwt_token = make_app_jwt(backend)
     inst_id = installation_id(backend, repo, jwt=jwt_token)
     resp = _api_post(f"/app/installations/{inst_id}/access_tokens", jwt_token)
-    token = resp.get("token") if isinstance(resp, dict) else None
+    agent = backend.funnel_agent or backend.name
+    # This is the credential endpoint's body, so the failures below state its
+    # SHAPE and never repr it — the same rule `_body_detail` applies one layer
+    # down. A dump was a reachable disclosure, not a theoretical one: the very
+    # answer that fails this guard can carry a usable `ghs_…` somewhere other than
+    # a plain `token` string (`{"token": ["ghs_usable"]}`), and this message is
+    # printed by `verify-apps` and logged with `exc_info=True`.
+    if not isinstance(resp, dict):
+        raise ReviewAuthError(
+            f"Minting an installation token for {agent!r} on {repo} answered with "
+            f"{_shape(resp)}, not a JSON object carrying a 'token'.",
+            kind=API_ERROR,
+        )
     # Same shape-not-coercion rule as the installation `id` above: a truthy check
     # plus `str()` downstream would render a number or a nested object into a
     # plausible-looking credential and hand it to `gh` as GH_TOKEN. The token is a
     # non-empty JSON string or the answer is unusable.
+    token = resp.get("token")
     if not isinstance(token, str) or not token:
-        agent = backend.funnel_agent or backend.name
         raise ReviewAuthError(
             f"Minting an installation token for {agent!r} on {repo} returned no "
-            f"usable 'token': {resp!r}",
+            f"usable 'token': expected a non-empty string, got {_shape(token)}.",
             kind=API_ERROR,
         )
     return resp

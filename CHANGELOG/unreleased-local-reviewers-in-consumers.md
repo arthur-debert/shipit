@@ -28,3 +28,12 @@
   probe too, rather than escaping as a raw decode error or being coerced into a
   usable-looking value; `verify-apps` reports UNVERIFIED for it instead of
   printing a traceback or a verdict drawn from a corrupted credential.
+- review: an App-auth failure no longer quotes the body of the endpoint that
+  answers with a credential. `POST /app/installations/{id}/access_tokens` returns
+  a live `ghs_…` token, and an unusable answer from it — one invalid byte beside
+  an intact token, or JSON truncated after one — used to be excerpted into the
+  error, which `verify-apps` prints and logs with the traceback attached. Those
+  failures now report the body's size and the response's shape instead. Bodies
+  that cannot carry a credential (the installation-metadata `GET`, and any error
+  body, whose request minted nothing) are still quoted, and every quoted body is
+  capped to one line.

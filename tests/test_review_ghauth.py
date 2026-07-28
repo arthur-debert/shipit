@@ -17,7 +17,13 @@ JWT from the in-memory PEM string. These tests assert exactly that:
     answer that arrives but is unusable (non-JSON body, non-UTF-8 bytes, an `id`
     that is not a positive integer, a `token` that is not a non-empty string) is
     `API_ERROR`, never a raw decode/`int()` exception that would bypass the
-    caller's UNVERIFIED handling, and never coerced into a usable-looking value.
+    caller's UNVERIFIED handling, and never coerced into a usable-looking value;
+    and
+  * no failure of the access-tokens endpoint QUOTES its body. That body is a live
+    `ghs_…`, and the message reaches a printed report and an `exc_info=True` log
+    record, so an unusable answer there is reported by size and shape. The
+    installation GET's body — metadata, no credential — is still quoted, capped
+    to one line.
 
 Every boundary (Doppler, PyJWT, urllib) is mocked — no network, no real LLM, no
 disk.
@@ -257,14 +263,21 @@ def test_installation_auth_raises_without_a_usable_token(
     a downstream `str()` would render `12345` or a nested object into a
     plausible-looking credential and hand it to `gh` as GH_TOKEN. Guaranteeing the
     type here is what lets `installation_token` return the value with no coercion.
+
+    The failure states the SHAPE it got and never reprs the response: this is the
+    credential endpoint's body, and the very answers that fail this guard can
+    still carry a usable `ghs_…` under a non-string `token` (`{"token":
+    ["ghs_x"]}`) — a repr would print and log it.
     """
     _stub_jwt(monkeypatch)
     monkeypatch.setattr(ghauth, "_api_get", lambda path, token: {"id": 42})
     monkeypatch.setattr(ghauth, "_api_post", lambda path, token: resp)
     with pytest.raises(ghauth.ReviewAuthError) as excinfo:
         ghauth.installation_auth(agent_backend.CODEX, "owner/repo")
+    message = str(excinfo.value)
     assert excinfo.value.kind == ghauth.API_ERROR
-    assert "'token'" in str(excinfo.value)
+    assert "'token'" in message
+    assert "ghs_" not in message
 
 
 def test_installation_id_404_is_actionable(monkeypatch, doppler_stub):
@@ -365,7 +378,8 @@ def test_unparseable_success_body_is_an_api_error(monkeypatch):
     UNVERIFIED outcome, so a decode error escaping this layer surfaced as a
     traceback instead of the documented "nothing was determined" report. The most
     likely real shape is an intercepting proxy or an incident page answering 200
-    with HTML.
+    with HTML — and on THIS seam (the installation GET, whose body is metadata)
+    quoting that page is the whole diagnosis, so the body is shown.
     """
     _serve(monkeypatch, b"<html><body>502 Bad Gateway</body></html>")
     with pytest.raises(ghauth.ReviewAuthError) as excinfo:
@@ -417,11 +431,56 @@ def test_invalid_utf8_inside_valid_json_is_an_api_error(monkeypatch):
     """
     _serve(monkeypatch, _CORRUPT_TOKEN_BODY)
     with pytest.raises(ghauth.ReviewAuthError) as excinfo:
-        ghauth._api_get("/x", "signed.jwt.token")
+        ghauth._api_post("/app/installations/42/access_tokens", "signed.jwt.token")
     assert excinfo.value.kind == ghauth.API_ERROR
     assert "not valid UTF-8" in str(excinfo.value)
-    # The excerpt IS decoded lossily — the operator still gets to see the body.
-    assert "ghs_" in str(excinfo.value)
+
+
+#: An access-tokens answer whose token is INTACT and USABLE — the invalid byte is
+#: somewhere else entirely. The strict decode still rejects the body, and the
+#: rejection message must not carry the live credential that came with it.
+_USABLE_TOKEN_WITH_A_BAD_BYTE_ELSEWHERE = (
+    b'{"token":"ghs_usable_credential","extra":"\xff"}'
+)
+
+#: The same endpoint answering with TRUNCATED JSON — unparseable, token intact.
+#: The other half of the class: whatever makes the body unusable, the credential
+#: it carries must not reach the message.
+_TRUNCATED_TOKEN_BODY = b'{"token":"ghs_usable_credential","permi'
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        pytest.param(
+            _USABLE_TOKEN_WITH_A_BAD_BYTE_ELSEWHERE, "not valid UTF-8", id="undecodable"
+        ),
+        pytest.param(_TRUNCATED_TOKEN_BODY, "unparseable", id="truncated"),
+    ],
+)
+def test_a_credential_bearing_body_is_never_quoted(monkeypatch, body, expected):
+    """An unusable access-tokens body is reported by SIZE, never quoted.
+
+    `POST …/access_tokens` answers with a live `ghs_…`, and what makes the body
+    unusable can sit anywhere — one invalid byte in a neighbouring field, or a
+    truncation after the token. Excerpting it put a USABLE credential into the
+    `ReviewAuthError` that `verify_app` logs with `exc_info=True` and that
+    `_auth_failure` interpolates into the printed reason: a live token in the
+    console and in the JSONL log, from a path that is only reporting a fault.
+    The message keeps what diagnoses the fault — which call, what went wrong,
+    how many bytes answered — and drops the content.
+    """
+    _serve(monkeypatch, body)
+    with pytest.raises(ghauth.ReviewAuthError) as excinfo:
+        ghauth._api_post("/app/installations/42/access_tokens", "signed.jwt.token")
+    message = str(excinfo.value)
+    assert excinfo.value.kind == ghauth.API_ERROR
+    assert expected in message
+    assert "ghs_" not in message
+    assert "usable_credential" not in message
+    # Still diagnosable: the failing call and the body's size are named.
+    assert "/app/installations/42/access_tokens" in message
+    assert f"{len(body)} bytes" in message
 
 
 def test_a_corrupted_token_is_never_minted(monkeypatch, doppler_stub):
@@ -438,6 +497,8 @@ def test_a_corrupted_token_is_never_minted(monkeypatch, doppler_stub):
     with pytest.raises(ghauth.ReviewAuthError) as excinfo:
         ghauth.installation_auth(agent_backend.CODEX, "owner/repo")
     assert excinfo.value.kind == ghauth.API_ERROR
+    # …and the refusal does not print the token it refused, corrupt or not.
+    assert "ghs_" not in str(excinfo.value)
 
 
 def test_empty_success_body_stays_none(monkeypatch):
