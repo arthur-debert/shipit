@@ -7586,6 +7586,13 @@ Any further notes about the feature.
 
 </prd-template>
 """
+#: The bytes shipit last DELIVERED at `skills/shipit-grill-with-docs/ADR-FORMAT.md`,
+#: snapshotted from this repo's history. Retired-path tests feed this, not the live
+#: store file: the manifest hash describes what a consumer is holding at the dead
+#: path, and that is frozen even as the store content moves on.
+PRISTINE_GRILL_ADR_FORMAT_SKILL = (
+    Path(__file__).parent / "data" / "grill-adr-format-skill-pristine"
+)
 RETIRED_SKILL_HASHES = {
     "skills/shipit-planning/SKILL.md": (
         "sha256:a16ac4744238b3a5b59da8a887bb6268742fd01a8a285797e0198aba49e44336",
@@ -7752,13 +7759,32 @@ RELOCATED_SKILL_STORE_PATHS = (
 )
 
 
+# The last bytes shipit DELIVERED for the coordinating skill, snapshotted from
+# this repo's history the way the launcher-shim fixtures below are. A retired
+# entry matches on the content a CONSUMER is holding, which is frozen at the last
+# version delivered to that path — so the end-to-end tests feed that pristine
+# snapshot, never the live store file. Reading the live file instead would couple
+# every retired-path test to the next edit of a skill whose content is free to
+# move on (the ADR-FORMAT fixture below is the same fixture for the same reason).
+PRISTINE_COORDINATING_SKILL = (
+    Path(__file__).parent / "data" / "coordinating-skill-pristine"
+)
+
+
 def test_retired_manifest_carries_the_relocated_skill_store():
     # The store moved out of `skills/` to `.shipit-skills/` (#921) and now
     # PROJECTS into the single real `.agents/skills/<rel>` dir (#1088): each of the
-    # ELEVEN relocated skills must still be delivered (its content hash unchanged
-    # by the dest move) AND have its OLD `skills/<rel>` path retired, carrying the
-    # current content hash so a consumer sheds the polluting old copy on install
-    # (leaving consumer-authored `skills/` files alone — not in this manifest).
+    # ELEVEN relocated skills must still be delivered AND have its OLD
+    # `skills/<rel>` path retired, carrying the versions actually shipped there so
+    # a consumer sheds the polluting old copy on install (leaving consumer-authored
+    # `skills/` files alone — not in this manifest).
+    #
+    # Deliberately NOT asserted: that the CURRENT live hash is one of them. What
+    # shipit shipped at a retired path is a closed historical set, so pinning
+    # today's content to it is a time bomb that goes off on the next skill edit —
+    # and the only way to "fix" a red build then is to append a hash that was never
+    # shipped at `skills/<rel>`. The coordinating fixture's hash below is the real
+    # coverage that the last delivered version is listed.
     retired = {r.path: r for r in irec.load_retired()}
     units = {u.key: u for u in iunits.load_units()}
     for rel in RELOCATED_SKILL_STORE_PATHS:
@@ -7766,24 +7792,28 @@ def test_retired_manifest_carries_the_relocated_skill_store():
         old_path = f"skills/{rel}"
         assert new_key in units, f"{new_key} no longer delivered"
         assert old_path in retired, f"{old_path} not retired"
-        assert units[new_key].desired_hash() in retired[old_path].pristine_hashes
+        entry = retired[old_path]
+        assert entry.pristine_hashes, f"{old_path} retired with no known version"
+        assert all(h.startswith("sha256:") for h in entry.pristine_hashes)
 
 
 def test_install_deletes_a_pristine_relocated_skill_and_installs_new_store(
     tmp_path, rec
 ):
     # End-to-end for the store move: a consumer with a pristine copy of the OLD
-    # `skills/coordinating/SKILL.md` sheds it on install, while the same content
-    # is (re)installed at the real `.agents/skills/coordinating/SKILL.md` dir
-    # (#1088). The store at `src/shipit/data/skills/` is the read source (#1115).
+    # `skills/coordinating/SKILL.md` sheds it on install, while the current store
+    # content is (re)installed at the real `.agents/skills/coordinating/SKILL.md`
+    # dir (#1088). The store at `src/shipit/data/skills/` is the read source
+    # (#1115); the VICTIM is the snapshotted last-delivered copy, which is what a
+    # consumer actually holds.
     old_path = "skills/coordinating/SKILL.md"
-    source = SKILL_STORE / "coordinating" / "SKILL.md"
-    assert config.content_hash(source.read_bytes()) in {
+    old_bytes = PRISTINE_COORDINATING_SKILL.read_bytes()
+    assert config.content_hash(old_bytes) in {
         h for r in irec.load_retired() if r.path == old_path for h in r.pristine_hashes
     }
     victim = tmp_path / old_path
     victim.parent.mkdir(parents=True)
-    victim.write_bytes(source.read_bytes())
+    victim.write_bytes(old_bytes)
 
     plan = _plan(tmp_path)
     assert old_path in [d.retired.path for d in plan.retire_deletes]
@@ -7852,10 +7882,18 @@ def test_retired_manifest_carries_the_shipit_skills_store_history():
 
 def test_every_shipit_skills_store_path_is_retired_and_still_delivered():
     # The migration invariant, the same shape as the `skills/<rel>` one above:
-    # each retired `.shipit-skills/<rel>` is still DELIVERED at
-    # `.agents/skills/<rel>`, and its CURRENT content hash is in the retired
-    # entry — so the consumer copy that the pin bump orphans is exactly the one
-    # the reconcile deletes (a rename in effect; the schema cannot say so).
+    # every retired `.shipit-skills/<rel>` is still DELIVERED at
+    # `.agents/skills/<rel>` — a rename in effect, which the schema cannot say, so
+    # the pairing is asserted here instead.
+    #
+    # The retired entry's HASHES are not compared with the live store: what shipit
+    # shipped at `.shipit-skills/<rel>` is closed (nothing is delivered there
+    # again), while the store content keeps moving, so requiring today's hash to be
+    # in that set would fail on the next skill edit and push whoever fixes it into
+    # appending a hash that was never shipped at the retired path. That the
+    # orphaned consumer copy is covered is asserted where it is a fact rather than
+    # a coincidence: the exact-equality history guard above, and the end-to-end
+    # delete below driven by the snapshotted last-delivered bytes.
     retired = {r.path: r for r in irec.load_retired()}
     units = {u.key: u for u in iunits.load_units()}
     for rel in RELOCATED_SKILL_STORE_PATHS:
@@ -7863,7 +7901,6 @@ def test_every_shipit_skills_store_path_is_retired_and_still_delivered():
         new_key = f"{iunits.AGENTS_SKILLS_DIR}/{rel}"
         assert new_key in units, f"{new_key} no longer delivered"
         assert old_path in retired, f"{old_path} not retired"
-        assert units[new_key].desired_hash() in retired[old_path].pristine_hashes
 
 
 def test_no_retired_path_is_live_in_shipits_own_repo():
@@ -7896,12 +7933,16 @@ def test_install_deletes_a_pristine_shipit_skills_store_copy(tmp_path, rec):
     # carrying a PRISTINE `.shipit-skills/coordinating/SKILL.md` sheds it on the
     # reconcile that crosses the pin, while the same content lives on at the real
     # `.agents/skills/` dest — no two divergent copies, no stale instructions the
-    # managed set no longer owns.
+    # managed set no longer owns. The victim is the snapshotted last-delivered
+    # copy (what the orphaned consumer holds), not the live store file.
     old_path = ".shipit-skills/coordinating/SKILL.md"
-    source = SKILL_STORE / "coordinating" / "SKILL.md"
+    old_bytes = PRISTINE_COORDINATING_SKILL.read_bytes()
+    assert config.content_hash(old_bytes) in {
+        h for r in irec.load_retired() if r.path == old_path for h in r.pristine_hashes
+    }
     victim = tmp_path / old_path
     victim.parent.mkdir(parents=True)
-    victim.write_bytes(source.read_bytes())
+    victim.write_bytes(old_bytes)
 
     plan = _plan(tmp_path)
     assert old_path in [d.retired.path for d in plan.retire_deletes]
@@ -7991,15 +8032,16 @@ def test_install_deletes_a_pristine_retired_file(tmp_path, rec):
 
 def test_install_deletes_a_pristine_retired_skill_file(tmp_path, rec):
     # A consumer upgrading across the skill rename sheds the old path when its
-    # content is a known pristine copy, while the new skill path is installed.
+    # content is a known pristine copy, while the new skill path is installed. The
+    # victim is the bytes last DELIVERED at the retired path (snapshotted), which
+    # is what the upgrading consumer holds and what the manifest hash describes —
+    # the live store file is free to diverge from it.
     retired_path = "skills/shipit-grill-with-docs/ADR-FORMAT.md"
-    source = SKILL_STORE / "grill-me-with-docs" / "ADR-FORMAT.md"
-    assert (
-        config.content_hash(source.read_bytes()) in RETIRED_SKILL_HASHES[retired_path]
-    )
+    old_bytes = PRISTINE_GRILL_ADR_FORMAT_SKILL.read_bytes()
+    assert config.content_hash(old_bytes) in RETIRED_SKILL_HASHES[retired_path]
     victim = tmp_path / retired_path
     victim.parent.mkdir(parents=True)
-    victim.write_bytes(source.read_bytes())
+    victim.write_bytes(old_bytes)
 
     plan = _plan(tmp_path)
     assert retired_path in [d.retired.path for d in plan.retire_deletes]
