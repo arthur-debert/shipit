@@ -146,8 +146,10 @@ pristine = [
 
 # The shipit-own skill store moved out of the top-level `skills/` dir (#921):
 # `skills/` collides with the PUBLIC skills convention a repo uses to publish its
-# own skills, so `shipit install` used to pollute a consumer's `skills/`. The
-# store is now `.shipit-skills/` (dedicated, dot-prefixed, non-colliding). These
+# own skills, so `shipit install` used to pollute a consumer's `skills/`. It went
+# to `.shipit-skills/` then, and the delivered dest is now `.agents/skills/` — the
+# ONE real discovery dir every runtime reads (#1088, ADR-0077); the intermediate
+# `.shipit-skills/` copies are themselves retired in the block below (#1115). These
 # entries retire the old `skills/<name>/…` copies shipit previously delivered so
 # a consumer sheds them on the next install — while leaving ANY consumer-authored
 # `skills/` file untouched (it is not in this manifest). Each `pristine` list
@@ -156,7 +158,7 @@ pristine = [
 # edited copy is surfaced and kept, never destroyed.
 
 [[retired]]
-# Moved to `.shipit-skills/coordinating/SKILL.md`.
+# Moved to `.agents/skills/coordinating/SKILL.md`.
 path = "skills/coordinating/SKILL.md"
 pristine = [
   "sha256:065a793b117dcfbb1e97fea0a80b405c69995850af9a350061dbcc1f4ea4976a",
@@ -164,21 +166,21 @@ pristine = [
 ]
 
 [[retired]]
-# Moved to `.shipit-skills/grill-me-with-docs/ADR-FORMAT.md`.
+# Moved to `.agents/skills/grill-me-with-docs/ADR-FORMAT.md`.
 path = "skills/grill-me-with-docs/ADR-FORMAT.md"
 pristine = [
   "sha256:f1f36cd3f8d3b6474ddd5855da4e233bfc4ae1a1c5024909ccf11871819a41b2",
 ]
 
 [[retired]]
-# Moved to `.shipit-skills/grill-me-with-docs/CONTEXT-FORMAT.md`.
+# Moved to `.agents/skills/grill-me-with-docs/CONTEXT-FORMAT.md`.
 path = "skills/grill-me-with-docs/CONTEXT-FORMAT.md"
 pristine = [
   "sha256:d7f1244807b547de07073244e67279eda8bb0fd681428114bce8452c979ab72c",
 ]
 
 [[retired]]
-# Moved to `.shipit-skills/grill-me-with-docs/SKILL.md`.
+# Moved to `.agents/skills/grill-me-with-docs/SKILL.md`.
 path = "skills/grill-me-with-docs/SKILL.md"
 pristine = [
   "sha256:a4eefcb8f9af47b5b2f99a85bde5e52c4b2275c6660c964021f6d186f05b72fd",
@@ -188,7 +190,7 @@ pristine = [
 ]
 
 [[retired]]
-# Moved to `.shipit-skills/implementing/SKILL.md`.
+# Moved to `.agents/skills/implementing/SKILL.md`.
 path = "skills/implementing/SKILL.md"
 pristine = [
   "sha256:fd7d90eff365955e096dbdf2c72ac6bf32a33b12609d7749aa8a544b8cb259a0",
@@ -198,7 +200,7 @@ pristine = [
 ]
 
 [[retired]]
-# Moved to `.shipit-skills/lex-primer/SKILL.md`.
+# Moved to `.agents/skills/lex-primer/SKILL.md`.
 path = "skills/lex-primer/SKILL.md"
 pristine = [
   "sha256:eb7c4d13f980dbbf0fdc81998ce6d8815783af5f13fabb18decb7e834bfddee0",
@@ -206,7 +208,7 @@ pristine = [
 ]
 
 [[retired]]
-# Moved to `.shipit-skills/planning/SKILL.md`.
+# Moved to `.agents/skills/planning/SKILL.md`.
 path = "skills/planning/SKILL.md"
 pristine = [
   "sha256:e26fe5ef4bba7d0bffd09f2dbbf61ba9ea8b0a8aa77a50bb794481766f8fa791",
@@ -216,7 +218,7 @@ pristine = [
 ]
 
 [[retired]]
-# Moved to `.shipit-skills/shepherding-prs/SKILL.md`.
+# Moved to `.agents/skills/shepherding-prs/SKILL.md`.
 path = "skills/shepherding-prs/SKILL.md"
 pristine = [
   "sha256:8f627079f3d9846069742dd77cf4987eb550ff9a6c5e575f751ea8edf958ee2b",
@@ -226,14 +228,14 @@ pristine = [
 ]
 
 [[retired]]
-# Moved to `.shipit-skills/shipit-session-status/SKILL.md`.
+# Moved to `.agents/skills/shipit-session-status/SKILL.md`.
 path = "skills/shipit-session-status/SKILL.md"
 pristine = [
   "sha256:4720ad9b381d57c32dfd2aca6cb2a4b338dfa69cac90eedd85a71f7f2f8db962",
 ]
 
 [[retired]]
-# Moved to `.shipit-skills/to-spec/SKILL.md`.
+# Moved to `.agents/skills/to-spec/SKILL.md`.
 path = "skills/to-spec/SKILL.md"
 pristine = [
   "sha256:9f7e5216675070146daabdc0f63ddb8cc8ecf37843ab5d3290354bf57d8097c0",
@@ -243,7 +245,7 @@ pristine = [
 ]
 
 [[retired]]
-# Moved to `.shipit-skills/to-tickets/SKILL.md`.
+# Moved to `.agents/skills/to-tickets/SKILL.md`.
 path = "skills/to-tickets/SKILL.md"
 pristine = [
   "sha256:38df45b1560de0e10be3ab8f7ef4113114ee851e3790ac9087b4c9560c7dc6df",
@@ -252,6 +254,117 @@ pristine = [
   "sha256:d922c867458135ebf665233149268b25ba8ea3147a59e5b7ffcc9c3748fda3d5",
   # Content also changed by #855 (spec-path placeholder <feature-slug> -> <slug>
   # to match the to-spec producer) in this same train.
+  "sha256:11419ddc56ed6a6b07cc780b1c38aa5cf20bcdfb89479bda2f4e032a4ea80b57",
+]
+
+# The `.shipit-skills/<rel>` copies shipit delivered between #921 and #1088
+# (issue #1115). ADR-0077 made `.agents/skills/<rel>` the ONE real discovery dir
+# and repointed `[managed]` there, but left the previously-delivered
+# `.shipit-skills/` files tracked in every consumer, owned by nobody — stale
+# instructions an agent still reads (the pre-#1066 copies tell the reader to run
+# `shipit lint --fix`, where the current instruction is `pixi run lint --fix`).
+# These eleven entries shed them on the reconcile that crosses the pin.
+#
+# ADR-0077 originally declined this retirement for a real reason: a content-hash
+# retirement is GLOBAL (no producing-repo exemption), and the store's own files
+# ARE the pristine content, so `.shipit-skills/` entries would have deleted
+# shipit's own source store on its self-install. #1115 removes that reason by
+# moving the store to `src/shipit/data/skills/` (ordinary package data — no wheel
+# force-include, no repo-root fallback in `skills_root()`). The repo-root path is
+# now live NOWHERE, so these entries are safe with no special-casing. ADR-0077 is
+# amended, not silently contradicted.
+#
+# The schema cannot express a RENAME: a rename is two independent facts — the
+# entry below retiring the old path, plus the normal unit at `.agents/skills/<rel>`
+# — linked only by this comment and the test invariant in tests/test_install.py.
+# Deleting is the available mechanism.
+#
+# Hashes are every version reachable from arthur-debert/shipit `main` at each
+# path (a full 316-commit walk, not first-parent — main carries merges), so a
+# consumer stuck on any shipped copy still gets the clean delete; a HAND-EDITED
+# copy matches no known version and is kept with a warning, never destroyed.
+
+[[retired]]
+# Delivered at `.agents/skills/coordinating/SKILL.md`.
+path = ".shipit-skills/coordinating/SKILL.md"
+pristine = [
+  "sha256:065a793b117dcfbb1e97fea0a80b405c69995850af9a350061dbcc1f4ea4976a",
+]
+
+[[retired]]
+# Delivered at `.agents/skills/grill-me-with-docs/ADR-FORMAT.md`.
+path = ".shipit-skills/grill-me-with-docs/ADR-FORMAT.md"
+pristine = [
+  "sha256:f1f36cd3f8d3b6474ddd5855da4e233bfc4ae1a1c5024909ccf11871819a41b2",
+]
+
+[[retired]]
+# Delivered at `.agents/skills/grill-me-with-docs/CONTEXT-FORMAT.md`.
+path = ".shipit-skills/grill-me-with-docs/CONTEXT-FORMAT.md"
+pristine = [
+  "sha256:d7f1244807b547de07073244e67279eda8bb0fd681428114bce8452c979ab72c",
+]
+
+[[retired]]
+# Delivered at `.agents/skills/grill-me-with-docs/SKILL.md`.
+path = ".shipit-skills/grill-me-with-docs/SKILL.md"
+pristine = [
+  "sha256:06428ff9352d2765056d1af43f9a21592b0ea6e59ab7b72f200710678fcdddea",
+]
+
+[[retired]]
+# Delivered at `.agents/skills/implementing/SKILL.md`.
+path = ".shipit-skills/implementing/SKILL.md"
+pristine = [
+  "sha256:fd7d90eff365955e096dbdf2c72ac6bf32a33b12609d7749aa8a544b8cb259a0",
+  # The fixer is `pixi run lint --fix`, on the pinned lint env (#1066).
+  "sha256:9aad3759cc233430e9d5a896a33ead5c6ae81e71b5a78af35e8b15133ef5cc69",
+]
+
+[[retired]]
+# Delivered at `.agents/skills/lex-primer/SKILL.md`.
+path = ".shipit-skills/lex-primer/SKILL.md"
+pristine = [
+  "sha256:eb7c4d13f980dbbf0fdc81998ce6d8815783af5f13fabb18decb7e834bfddee0",
+]
+
+[[retired]]
+# Delivered at `.agents/skills/planning/SKILL.md`.
+path = ".shipit-skills/planning/SKILL.md"
+pristine = [
+  "sha256:843d0a0c3dddb6d1ba1b5db6d494e650fdbc40035cb98def47b964d264b8e57c",
+]
+
+[[retired]]
+# Delivered at `.agents/skills/shepherding-prs/SKILL.md`.
+path = ".shipit-skills/shepherding-prs/SKILL.md"
+pristine = [
+  "sha256:8f627079f3d9846069742dd77cf4987eb550ff9a6c5e575f751ea8edf958ee2b",
+  # The fixer is `pixi run lint --fix`, on the pinned lint env (#1066).
+  "sha256:fed591f8346731ac2e4bb8de18c5fce0f6edd199c2f3ee5bf1cb036114cd4063",
+]
+
+[[retired]]
+# Delivered at `.agents/skills/shipit-session-status/SKILL.md`.
+path = ".shipit-skills/shipit-session-status/SKILL.md"
+pristine = [
+  "sha256:4720ad9b381d57c32dfd2aca6cb2a4b338dfa69cac90eedd85a71f7f2f8db962",
+]
+
+[[retired]]
+# Delivered at `.agents/skills/to-spec/SKILL.md`.
+path = ".shipit-skills/to-spec/SKILL.md"
+pristine = [
+  "sha256:eafedcd9b9797aa3d9e97ee466e40000cc74de2d86f86e855f6e1e36219d3cce",
+]
+
+[[retired]]
+# Delivered at `.agents/skills/to-tickets/SKILL.md`.
+path = ".shipit-skills/to-tickets/SKILL.md"
+pristine = [
+  "sha256:d922c867458135ebf665233149268b25ba8ea3147a59e5b7ffcc9c3748fda3d5",
+  # The spec-path placeholder <feature-slug> -> <slug>, matching the to-spec
+  # producer (#855).
   "sha256:11419ddc56ed6a6b07cc780b1c38aa5cf20bcdfb89479bda2f4e032a4ea80b57",
 ]
 

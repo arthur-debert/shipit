@@ -672,10 +672,10 @@ def _restore_caller_branch(
     ADDED is on disk but was never added to the real index — untracked. It is,
     however, in the scratch-index commit now at HEAD, so switching back to a branch that lacks it
     makes git refuse outright (``error: The following untracked working tree files
-    would be removed by checkout: .shipit-skills/…``) and the operator is stranded
+    would be removed by checkout: .agents/skills/…``) and the operator is stranded
     on the scratch branch — the very #777 mode 1 surprise this exists to prevent,
     back again whenever a reconcile adds a new path (the ``skills/`` →
-    ``.shipit-skills/`` store move). Staging those ADDS makes them TRACKED and
+    ``.agents/skills/`` skill-dest move). Staging those ADDS makes them TRACKED and
     index-clean against HEAD, so the switch drops each one: the reconcile lives in
     the PR, not in the caller's tree.
 
