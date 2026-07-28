@@ -23,6 +23,8 @@
   of grepping `"HTTP 404"` out of the rendered message, so an unrelated error
   whose body quotes a 404 can no longer be reported as a missing installation.
   An answer that arrives but is unusable — a success response that is not JSON,
-  is not UTF-8, or carries a non-numeric installation `id` — is reported as a
-  failed probe too, rather than escaping as a raw decode error; `verify-apps`
-  reports UNVERIFIED for it instead of printing a traceback.
+  is not strictly valid UTF-8, or whose installation `id` is not a positive
+  integer or whose `token` is not a non-empty string — is reported as a failed
+  probe too, rather than escaping as a raw decode error or being coerced into a
+  usable-looking value; `verify-apps` reports UNVERIFIED for it instead of
+  printing a traceback or a verdict drawn from a corrupted credential.

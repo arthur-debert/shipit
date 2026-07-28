@@ -14,9 +14,10 @@ JWT from the in-memory PEM string. These tests assert exactly that:
     response STATUS, never grepped out of the message;
   * the 3-hop installation-token flow uses the bearer-JWT urllib seams; and
   * EVERY exit of the transport is a parsed body or a `ReviewAuthError` — an
-    answer that arrives but is unusable (non-JSON body, non-UTF-8 bytes,
-    non-numeric `id`) is `API_ERROR`, never a raw decode/`int()` exception that
-    would bypass the caller's UNVERIFIED handling.
+    answer that arrives but is unusable (non-JSON body, non-UTF-8 bytes, an `id`
+    that is not a positive integer, a `token` that is not a non-empty string) is
+    `API_ERROR`, never a raw decode/`int()` exception that would bypass the
+    caller's UNVERIFIED handling, and never coerced into a usable-looking value.
 
 Every boundary (Doppler, PyJWT, urllib) is mocked — no network, no real LLM, no
 disk.
@@ -236,13 +237,34 @@ def test_installation_auth_returns_token_and_granted_permissions(
     )
 
 
-def test_installation_auth_raises_when_no_token(monkeypatch, doppler_stub):
-    """A response without a `token` is a clean ReviewAuthError, not a silent {}."""
+@pytest.mark.parametrize(
+    "resp",
+    [
+        pytest.param({"permissions": {}}, id="absent"),
+        pytest.param({"token": ""}, id="empty"),
+        pytest.param({"token": None}, id="null"),
+        pytest.param({"token": 12345}, id="number"),
+        pytest.param({"token": {"value": "ghs_x"}}, id="object"),
+        pytest.param(["ghs_x"], id="not-an-object"),
+    ],
+)
+def test_installation_auth_raises_without_a_usable_token(
+    monkeypatch, doppler_stub, resp
+):
+    """A response with no non-empty STRING `token` is a clean ReviewAuthError.
+
+    The same shape-not-coercion rule as the installation `id`: a truthy check plus
+    a downstream `str()` would render `12345` or a nested object into a
+    plausible-looking credential and hand it to `gh` as GH_TOKEN. Guaranteeing the
+    type here is what lets `installation_token` return the value with no coercion.
+    """
     _stub_jwt(monkeypatch)
     monkeypatch.setattr(ghauth, "_api_get", lambda path, token: {"id": 42})
-    monkeypatch.setattr(ghauth, "_api_post", lambda path, token: {"permissions": {}})
-    with pytest.raises(ghauth.ReviewAuthError, match="no\n? *'token'|no 'token'"):
+    monkeypatch.setattr(ghauth, "_api_post", lambda path, token: resp)
+    with pytest.raises(ghauth.ReviewAuthError) as excinfo:
         ghauth.installation_auth(agent_backend.CODEX, "owner/repo")
+    assert excinfo.value.kind == ghauth.API_ERROR
+    assert "'token'" in str(excinfo.value)
 
 
 def test_installation_id_404_is_actionable(monkeypatch, doppler_stub):
@@ -369,12 +391,52 @@ def test_unparseable_body_excerpt_is_one_capped_line(monkeypatch):
 def test_non_utf8_success_body_is_an_api_error(monkeypatch):
     """Undecodable BYTES are the same situation as undecodable JSON.
 
-    The error-body read already decoded with `errors="replace"`; the success read
-    did not, so a garbled 2xx raised `UnicodeDecodeError` past the same seam.
+    The error-body read decodes with `errors="replace"` (its text is only ever a
+    message); the success read must NOT, or a garbled 2xx becomes a parsed answer.
     """
     _serve(monkeypatch, b"\xff\xfe not utf-8 at all")
     with pytest.raises(ghauth.ReviewAuthError) as excinfo:
         ghauth._api_get("/x", "signed.jwt.token")
+    assert excinfo.value.kind == ghauth.API_ERROR
+
+
+#: A real access-tokens answer whose TOKEN STRING carries one invalid byte. The
+#: bytes around it are valid JSON, so replacement decoding leaves a perfectly
+#: parseable body — this is the shape that a lossy read waves through.
+_CORRUPT_TOKEN_BODY = b'{"token":"ghs_\xff","permissions":{"checks":"write"}}'
+
+
+def test_invalid_utf8_inside_valid_json_is_an_api_error(monkeypatch):
+    """The garbled byte is INSIDE a JSON string, so the body still parses.
+
+    Decoding with `errors="replace"` does not fail on this — it substitutes U+FFFD
+    and returns valid JSON, which `json.loads` accepts. The transport must decode
+    STRICTLY so this reaches the caller as API_ERROR; a body that merely puts its
+    invalid bytes outside the JSON (the `\\xff\\xfe …` case above) cannot catch
+    the difference, because it fails at the JSON layer either way.
+    """
+    _serve(monkeypatch, _CORRUPT_TOKEN_BODY)
+    with pytest.raises(ghauth.ReviewAuthError) as excinfo:
+        ghauth._api_get("/x", "signed.jwt.token")
+    assert excinfo.value.kind == ghauth.API_ERROR
+    assert "not valid UTF-8" in str(excinfo.value)
+    # The excerpt IS decoded lossily — the operator still gets to see the body.
+    assert "ghs_" in str(excinfo.value)
+
+
+def test_a_corrupted_token_is_never_minted(monkeypatch, doppler_stub):
+    """The end the strict decode protects: no corrupted `ghs_…` reaches a caller.
+
+    With a lossy read, this access-tokens response parsed into a token whose bytes
+    GitHub never sent (`ghs_�`) and a `checks: write` permission map — so
+    `installation_auth` returned it, `gh` would have authenticated with it, and
+    `verify-apps` would have printed LIVE off a corrupted credential.
+    """
+    _stub_jwt(monkeypatch)
+    monkeypatch.setattr(ghauth, "_api_get", lambda path, token: {"id": 42})
+    _serve(monkeypatch, _CORRUPT_TOKEN_BODY)
+    with pytest.raises(ghauth.ReviewAuthError) as excinfo:
+        ghauth.installation_auth(agent_backend.CODEX, "owner/repo")
     assert excinfo.value.kind == ghauth.API_ERROR
 
 
@@ -385,18 +447,46 @@ def test_empty_success_body_stays_none(monkeypatch):
     assert ghauth._api_get("/x", "signed.jwt.token") is None
 
 
-def test_installation_id_non_numeric_id_is_an_api_error(monkeypatch, doppler_stub):
-    """An `id` that is not a number establishes nothing — API_ERROR, not a crash.
+@pytest.mark.parametrize(
+    "bad_id",
+    [
+        pytest.param("not-a-number", id="text"),
+        pytest.param("42", id="digit-string"),
+        pytest.param(True, id="bool"),
+        pytest.param(42.9, id="float"),
+        pytest.param(0, id="zero"),
+        pytest.param(-7, id="negative"),
+        pytest.param(None, id="null"),
+        pytest.param({"id": 42}, id="object"),
+    ],
+)
+def test_installation_id_rejects_any_non_integer_id(monkeypatch, doppler_stub, bad_id):
+    """An `id` that is not a positive integer establishes nothing — API_ERROR.
 
     Same class as the unparseable body: GitHub answered, but the answer is
-    unusable, so `int()` must not raise `ValueError` past the seam `verify-apps`
-    catches.
+    unusable, so it must arrive at the seam `verify-apps` catches rather than as a
+    raw `ValueError`. `int()` was the wrong gate in BOTH directions — it crashed on
+    the text case and silently ACCEPTED `True` (→ 1) and `42.9` (→ 42), either of
+    which would have addressed the access-token request to a different
+    installation. The shape is validated now, never coerced.
     """
     _stub_jwt(monkeypatch)
-    monkeypatch.setattr(ghauth, "_api_get", lambda path, token: {"id": "not-a-number"})
+    monkeypatch.setattr(ghauth, "_api_get", lambda path, token: {"id": bad_id})
     with pytest.raises(ghauth.ReviewAuthError) as excinfo:
         ghauth.installation_id(
             agent_backend.CODEX, "owner/repo", jwt="signed.jwt.token"
         )
     assert excinfo.value.kind == ghauth.API_ERROR
     assert "not installed" not in str(excinfo.value)
+
+
+def test_installation_id_accepts_a_plain_json_integer(monkeypatch, doppler_stub):
+    """The shape GitHub actually sends still passes, unchanged and untouched."""
+    _stub_jwt(monkeypatch)
+    monkeypatch.setattr(ghauth, "_api_get", lambda path, token: {"id": 42})
+    assert (
+        ghauth.installation_id(
+            agent_backend.CODEX, "owner/repo", jwt="signed.jwt.token"
+        )
+        == 42
+    )

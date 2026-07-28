@@ -199,7 +199,8 @@ def _api_request(path: str, jwt_token: str, *, method: str) -> object:
     Sends ``Authorization: Bearer <jwt>`` plus the versioned Accept headers, and
     raises an :data:`API_ERROR` :class:`ReviewAuthError` on any non-2xx (carrying
     the HTTP status and the response body), timeout, transport failure, OR a 2xx
-    whose body will not decode as UTF-8 JSON. At this layer nothing is known about
+    whose body will not decode STRICTLY as UTF-8 JSON (lossy decoding is reserved
+    for the excerpt in the message). At this layer nothing is known about
     the App itself — a caller that CAN read a status as an App verdict
     (``installation_id`` reading 404) re-raises with its own kind.
 
@@ -223,10 +224,7 @@ def _api_request(path: str, jwt_token: str, *, method: str) -> object:
         with urllib.request.urlopen(  # noqa: S310 - fixed https host
             req, timeout=_HTTP_TIMEOUT
         ) as resp:
-            # Decode defensively, same as the error-body read below: a garbled
-            # byte in a 2xx body is an unparseable ANSWER (API_ERROR), not a
-            # crash — the replacement chars land in the excerpt below.
-            raw = resp.read().decode("utf-8", "replace")
+            payload = resp.read()
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", "replace")
         raise ReviewAuthError(
@@ -251,6 +249,21 @@ def _api_request(path: str, jwt_token: str, *, method: str) -> object:
             ) from exc
         raise ReviewAuthError(
             f"GitHub API {method} {path} failed: {exc}", kind=API_ERROR
+        ) from exc
+    try:
+        raw = payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        # STRICT on the success path, on purpose. `errors="replace"` (what the
+        # error-body read above does) would not fail here — it would substitute
+        # U+FFFD and hand back a body that still parses: a token response with one
+        # garbled byte INSIDE the token string decodes to valid JSON, and a
+        # corrupted `ghs_…` would then be minted, used, and reported LIVE. A body
+        # that is not UTF-8 is an unusable ANSWER like any other, so it takes the
+        # same API_ERROR exit; only the human-facing excerpt is decoded lossily.
+        raise ReviewAuthError(
+            f"GitHub API {method} {path} returned a body that is not valid UTF-8 "
+            f"({exc}): {_excerpt(payload.decode('utf-8', 'replace'))}",
+            kind=API_ERROR,
         ) from exc
     if not raw.strip():
         return None
@@ -289,8 +302,9 @@ def installation_id(backend: Backend, repo: str, *, jwt: str | None = None) -> i
     so it re-raises as :data:`NOT_INSTALLED` (read off the response's STATUS, not
     by grepping the message text). Every other failure keeps the kind it arrived
     with — :data:`UNCONFIGURED` from minting the JWT, :data:`API_ERROR` from the
-    call itself. A 2xx whose body is missing ``id`` or carries a non-numeric one
-    is :data:`API_ERROR` too: an answer arrived, but it establishes nothing.
+    call itself. A 2xx whose body is missing ``id``, or whose ``id`` is anything
+    other than a positive JSON integer (a string, a float, a bool), is
+    :data:`API_ERROR` too: an answer arrived, but it establishes nothing.
     """
     agent = backend.funnel_agent or backend.name
     token = jwt if jwt is not None else make_app_jwt(backend)
@@ -310,17 +324,21 @@ def installation_id(backend: Backend, repo: str, *, jwt: str | None = None) -> i
             f"Unexpected installation response for {agent!r} on {repo}: {resp!r}",
             kind=API_ERROR,
         )
-    try:
-        return int(resp["id"])
-    except (TypeError, ValueError) as exc:
-        # Same class as an unparseable body: GitHub answered with the key but not
-        # with a number. It is still an unusable ANSWER, so it must arrive at the
-        # caller as API_ERROR rather than a raw ValueError (#969).
+    inst_id = resp["id"]
+    # Validate the SHAPE; never coerce. `int()` was a broader gate than the check
+    # it stood for: it turns `True` into 1 and `42.9` into 42, so a malformed
+    # answer would silently address the access-token request to a DIFFERENT
+    # installation instead of being reported as unusable. GitHub's `id` is a JSON
+    # integer, so accept exactly that — `bool` is an `int` subclass in Python, so
+    # it is excluded explicitly. Anything else is an unusable ANSWER and must
+    # reach the caller as API_ERROR, not as a raw ValueError (#969).
+    if isinstance(inst_id, bool) or not isinstance(inst_id, int) or inst_id <= 0:
         raise ReviewAuthError(
-            f"Installation response for {agent!r} on {repo} has a non-numeric "
-            f"'id': {resp['id']!r}",
+            f"Installation response for {agent!r} on {repo} has an unusable 'id' "
+            f"(expected a positive integer): {inst_id!r}",
             kind=API_ERROR,
-        ) from exc
+        )
+    return inst_id
 
 
 def installation_auth(backend: Backend, repo: str) -> dict:
@@ -334,16 +352,23 @@ def installation_auth(backend: Backend, repo: str) -> dict:
     token (e.g. ``{"checks": "write", "pull_requests": "write", …}``), which the
     OBS02 funnel verification harness asserts carries ``checks: write`` (the
     re-grant landed) before it drives a check-run create. Nothing is cached to
-    disk. Raises :class:`ReviewAuthError` on any failure.
+    disk. Raises :class:`ReviewAuthError` on any failure, including a 2xx whose
+    ``token`` is absent or is not a non-empty string — so the returned mapping is
+    GUARANTEED to carry a usable ``token``.
     """
     jwt_token = make_app_jwt(backend)
     inst_id = installation_id(backend, repo, jwt=jwt_token)
     resp = _api_post(f"/app/installations/{inst_id}/access_tokens", jwt_token)
-    if not isinstance(resp, dict) or not resp.get("token"):
+    token = resp.get("token") if isinstance(resp, dict) else None
+    # Same shape-not-coercion rule as the installation `id` above: a truthy check
+    # plus `str()` downstream would render a number or a nested object into a
+    # plausible-looking credential and hand it to `gh` as GH_TOKEN. The token is a
+    # non-empty JSON string or the answer is unusable.
+    if not isinstance(token, str) or not token:
         agent = backend.funnel_agent or backend.name
         raise ReviewAuthError(
             f"Minting an installation token for {agent!r} on {repo} returned no "
-            f"'token': {resp!r}",
+            f"usable 'token': {resp!r}",
             kind=API_ERROR,
         )
     return resp
@@ -354,8 +379,9 @@ def installation_token(backend: Backend, repo: str) -> str:
 
     Orchestrates the three hops: JWT → installation id → ``POST
     /app/installations/{id}/access_tokens`` → the ``ghs_…`` token (the ``token``
-    field of :func:`installation_auth`'s response). Nothing is cached to disk; the
-    token is returned for the caller to inject as ``gh.rest(..., token=...)``.
-    Raises :class:`ReviewAuthError` on any failure.
+    field of :func:`installation_auth`'s response, which has already established
+    that it is a non-empty string — hence no coercion here). Nothing is cached to
+    disk; the token is returned for the caller to inject as
+    ``gh.rest(..., token=...)``. Raises :class:`ReviewAuthError` on any failure.
     """
-    return str(installation_auth(backend, repo)["token"])
+    return installation_auth(backend, repo)["token"]
