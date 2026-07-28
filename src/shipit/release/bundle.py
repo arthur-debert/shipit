@@ -61,12 +61,18 @@ functions the entries carry:
   tree is always removed — only the tarball survives (ADR-0009's barrier: a
   composition writes only its declared artifact under ``out_dir``).
 - **vsix** — a per-target VS Code extension ``.vsix`` via ``npm exec -- vsce
-  package --target <vsce-target> --out <name>-<vsce-target>.vsix`` (the legacy
+  package --no-dependencies --target <vsce-target> --out
+  <name>-<vsce-target>.vsix`` (the legacy
   ``vscode-ext.yml@v3`` per-platform packaging: one ``.vsix`` per platform,
   each carrying that platform's prebuilt native binary). The declared platform
   triple picks the vsce target string (:data:`VSCE_TARGETS`; darwin-arm64 /
   darwin-x64 / linux-x64 / linux-arm64 / alpine-x64 / win32-x64), a triple with
-  no vsce target being a loud refusal. Runs ``vsce`` through ``npm exec`` in the
+  no vsce target being a loud refusal. ``--no-dependencies`` is UNCONDITIONAL
+  (#1058) — never detected, never configurable: shipit's vsix consumers are
+  esbuild-BUNDLED extensions, so their runtime deps ride inside the bundle and
+  vsce's ``npm ls`` dependency walk only adds failure modes (a workspace symlink
+  dep makes it produce a hollow archive or fail the pack outright). Runs ``vsce``
+  through ``npm exec`` in the
   ``npm`` leg (the extension is a node package) — vsce is the consumer's
   ``@vscode/vsce`` devDependency under ``node_modules/.bin``, never a
   fleet-provisioned PATH binary, so the local package context resolves it. A
@@ -1303,14 +1309,21 @@ def _stage_vsix_natives(
 
 def _compose_vsix(req: ComposeRequest) -> Composed:
     """Package the per-target ``.vsix`` via ``npm exec -- vsce package
-    --target``, after staging any declared native binaries. See the module
-    docstring's vsix entry.
+    --no-dependencies --target``, after staging any declared native binaries.
+    See the module docstring's vsix entry.
 
     Runs ``vsce`` through ``npm exec`` in the ``npm`` leg (the extension
     package): vsce is the consumer's ``@vscode/vsce`` devDependency under
     ``node_modules/.bin``, so ``npm exec`` resolves it from the local package
     context — a bare ``vsce`` would not be on ``PATH`` under ``pixi run
-    ./bin/shipit``. Writes the single ``<name>-<vsce-target>.vsix`` straight
+    ./bin/shipit``. ``--no-dependencies`` is passed UNCONDITIONALLY (#1058):
+    shipit's vsix consumers are esbuild-BUNDLED extensions, whose runtime deps
+    already live inside the bundle, so vsce's ``npm ls`` dependency walk is pure
+    failure surface — with a workspace symlink dep it either yields an empty file
+    set (a hollow ``.vsix`` that looks like a successful build) or kills the pack
+    ("Extension entrypoint(s) missing"). No bundled-case detection and no config
+    knob: one code path, not two. Writes the single
+    ``<name>-<vsce-target>.vsix`` straight
     into the bundle output tree; the ``vsce`` output path is stated so a rerun
     overwrites in place (vsce replaces, never appends). The per-target native
     binary the extension bundles (the ``lexd-lsp`` LSP, tree-sitter wasm) is
@@ -1350,6 +1363,15 @@ def _compose_vsix(req: ComposeRequest) -> Composed:
                 "--",
                 "vsce",
                 "package",
+                # UNCONDITIONAL, never detected or configurable (#1058): shipit's
+                # vsix consumers are esbuild-BUNDLED extensions, so their runtime
+                # deps are already inside the bundle and vsce's `npm ls` dependency
+                # walk contributes nothing but failure surface — a workspace
+                # symlink dep (`"@lex/shared": "file:./shared"`) makes that walk
+                # either yield an empty file set (a hollow .vsix that looks like a
+                # successful build) or kill the pack outright ("Extension
+                # entrypoint(s) missing"). One code path, not two.
+                "--no-dependencies",
                 "--target",
                 vt,
                 "--out",
