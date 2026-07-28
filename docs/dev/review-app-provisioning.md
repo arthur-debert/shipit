@@ -63,8 +63,25 @@ adopt local reviews (the #26 rollout).
 
 ## Step 3 — verify
 
+Run `shipit verify-apps` from the target repo (or `shipit verify-apps owner/repo` from
+anywhere). It mints each App's installation token and reads the granted permissions — a
+cheap read that creates no check run. It reports one of three things, and the exit code
+says which:
+
+| exit | verdict | meaning | who fixes it |
+| --- | --- | --- | --- |
+| `0` | `LIVE` | installed on the owner **and** holds `checks: write` | nobody |
+| `1` | `NOT LIVE` | the App is absent from the owner, or its token lacks `checks: write` | the owner — Step 1 / Step 2 above |
+| `2` | `UNVERIFIED` | nothing was checked: this machine cannot mint App credentials, or the probe itself failed | you, here — see below |
+
+`UNVERIFIED` says nothing about the repo. It means the machine you ran it on could not
+produce App credentials (no `doppler` on `PATH`, not logged in, or the key is missing
+from `github/prd`) so GitHub was never asked. Fix that and re-run before drawing any
+conclusion about the Apps.
+
 After the re-grant + re-consent, the App's installation token carries `checks: write`.
-Confirm by minting a token and creating a check run on a throwaway commit:
+The same thing can be confirmed by hand by minting a token and creating a check run on a
+throwaway commit:
 
 - the create-installation-token response's `permissions` now includes `checks: write`;
 - `POST /repos/<owner>/<repo>/check-runs` returns **201** (not 403).
@@ -101,3 +118,53 @@ Concretely, for a new owner: Step 1 is already satisfied (the App permission is
 needed when onboarding a consumer per #26. Re-run the Step 3 harness against that
 consumer's repo to confirm the token now carries `checks: write` and the create returns
 201.
+
+## Opting ONE consumer repo into codex + agy — the whole recipe
+
+A consumer's seeded roster is `copilot` alone, so its PRs get a one-reviewer net. This
+is everything that must be true for `codex` and `agy` to work there. Nothing in it is
+shipit-repo-specific — that was the [#969](https://github.com/arthur-debert/shipit/issues/969)
+bug, and it is fixed: PyJWT rides the base install, and no error points at a pixi env
+that exists only in shipit's own checkout.
+
+**On the machine that drives the review** (local-agent reviews run as a detached child
+process HERE, not in CI — the operator's machine is where the model runs and where the
+App token is minted):
+
+1. **shipit ≥ 1.7.0**, so the install carries PyJWT. Check with
+   `python -c "import jwt"` against the interpreter backing your `shipit`
+   (`uv tool upgrade shipit` if it is a uv tool install).
+2. **`doppler` on `PATH` and logged in** to the `github` project, `prd` config —
+   that is where `CODEX_REVIEW_APP_PRIVATE_KEY` / `CODEX_REVIEW_APP_ID` and the `AGY_…`
+   pair live. The PEM is read into memory and signed there; it is never written to disk.
+3. **The agent CLIs on `PATH`**: `codex` and `agy`. They are what actually produce the
+   review.
+
+**In the consumer repo** (one edit):
+
+```toml
+# .shipit.toml
+[reviewers]
+copilot = {}
+codex = {}
+agy = {}
+```
+
+The `[reviewers]` table is consumer-owned — `shipit install` never rewrites it — so this
+edit survives reconcile. `rerun` defaults off (review-once); add `codex = { rerun = true }`
+to re-review every push.
+
+**Then verify, before relying on it:**
+
+```bash
+shipit verify-apps          # from the repo; expect: LIVE, exit 0
+```
+
+- exit `2` / `UNVERIFIED` → one of the three machine prerequisites above is missing.
+  Nothing is known about the repo yet.
+- exit `1` / `NOT LIVE` → a real gap on the repo's owner: do Step 1 / Step 2 above for
+  that owner. `lex-fmt` and `phos-editor` are already consented (see the table); a new
+  org is not.
+
+Once `verify-apps` reports LIVE, `shipit pr next` requests all three reviewers on the
+repo's PRs like any other roster.

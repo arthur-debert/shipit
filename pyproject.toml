@@ -24,6 +24,15 @@ requires-python = ">=3.13"
 #                  into structured dicts, replacing hand positional parsing.
 #                  Pure-python wheel; its transitive deps (ruamel.yaml,
 #                  xmltodict, Pygments) are pure-python wheels too.
+#   pyjwt[crypto]— sign the RS256 App JWT that authenticates a local-agent review
+#                  (codex/agy) AS its GitHub App, from the in-memory PEM
+#                  (`review/ghauth.py`). NOT optional (#969): the local-reviewer
+#                  path is the PR engine's, not an edge tool, and an extra is
+#                  precisely what a consumer repo's pinned install does not carry
+#                  — which left every consumer PR on a copilot-only review. Its
+#                  crypto backend (`cryptography`) is the one dep here with a
+#                  compiled wheel; prebuilt wheels cover every platform shipit
+#                  targets, so there is still no build step.
 dependencies = [
     "click>=8,<9",
     "PyYAML>=6",
@@ -31,14 +40,8 @@ dependencies = [
     "duckdb>=1",
     "structlog>=25",
     "jc>=1.25",
+    "pyjwt[crypto]>=2.8",
 ]
-
-[project.optional-dependencies]
-# Local-agent review EXECUTION (PRF01-WS07). Posting a review AS a GitHub App
-# needs PyJWT (with its crypto backend) to sign the RS256 app JWT from the
-# in-memory PEM. Optional because most consumers never run a local review — the
-# `review/` package imports `jwt` lazily and raises a clean install hint if absent.
-review = ["pyjwt[crypto]>=2.8"]
 
 [project.scripts]
 shipit = "shipit.cli:main"

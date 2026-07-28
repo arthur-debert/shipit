@@ -325,28 +325,19 @@ lexd = "==0.19.10"
 lexd = "==0.19.10"
 # <<< shipit-managed lexd feature <<<
 
-# The `review` env carries the `review` extra (PyJWT, to sign the App JWT) so the
-# normal `shipit pr review` path AND the opt-in funnel-verification harness can
-# run. It is NON-DEFAULT — never part of `test` / CI / the `lint` (required-check)
-# surface, and off the locked `pixi.lock` check (architecture.lex §2) — because the
-# `review` extra is a PyPI dependency, not a conda-forge pinned tool. An agent env
-# that needs to post a local review provisions the extra here instead of a manual
-# `pip install 'shipit[review]'`. See docs/dev/review-app-provisioning.md.
-[feature.review.pypi-dependencies]
-shipit = { path = ".", editable = true, extras = ["review"] }
-
+# The `review` env carries NO dependency of its own any more (#969): PyJWT — the
+# App-JWT signer — is a BASE shipit dependency now, so `shipit pr review` and
+# `shipit verify-apps` work in every env and, crucially, in a consumer repo's
+# pinned shipit, which has no extras and no `review` env to be redirected into.
+# What remains here is a NAMESPACE for the LIVE, opt-in harness below: it is
+# NON-DEFAULT — never part of `test` / CI / the `lint` (required-check) surface —
+# so a harness that talks to real GitHub can never be picked up by a bare
+# `pixi run`. See docs/dev/review-app-provisioning.md.
 [feature.review.tasks]
 # The LIVE-GitHub review-funnel verification harness — opt-in (needs Doppler App
 # creds + a canary PR), refuses to run without an explicit --repo/--pr. Run e.g.:
 #   pixi run -e review verify-funnel --repo arthur-debert/shipit-canary --pr <N>
 verify-funnel = "python -m shipit.review.funnel_verify"
-# Per-consumer App-liveness verification (INS01): is each local-agent reviewer App
-# installed on the target repo's owner with `checks: write`? A cheap read (mints the
-# App token + inspects granted permissions — NO check-run create). Needs Doppler App
-# creds + PyJWT (the `review` extra), so it lives here, off CI. Exits 0 (all live) / 1
-# (instruct), so a rollout can block on it mechanically. Run e.g.:
-#   pixi run -e review verify-apps arthur-debert/shipit-canary
-verify-apps = "shipit verify-apps"
 
 # The `dogfood` env carries shipit editable (it drives `shipit spawn subagent` as a
 # subprocess) for the OPT-IN, LIVE end-to-end spawn-verification harness. Like

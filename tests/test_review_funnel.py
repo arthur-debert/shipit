@@ -232,22 +232,23 @@ def test_start_detached_still_spawns_when_breadcrumb_create_fails(monkeypatch):
 
 def test_start_detached_as_app_auth_failure_fails_loud_and_does_not_spawn(monkeypatch):
     """#347 (#343 gap 6): an App-auth failure on the SYNCHRONOUS parent path
-    (`ReviewAuthError` — PyJWT absent outside the `review` env, missing Doppler
-    creds, a failed mint) is a PRECONDITION failure, not a best-effort breadcrumb
+    (`ReviewAuthError` — no App credentials on this machine, a failed mint) is a PRECONDITION failure, not a best-effort breadcrumb
     miss: the SAME auth the parent failed to mint is what the as_app child needs
     to post the review and close its run, so proceeding would detach a doomed
     child whose failure is invisible (no breadcrumb ever opened) while the
     request reports a false in-flight. It must propagate — and nothing may spawn."""
-    from shipit.review.ghauth import ReviewAuthError
+    from shipit.review.ghauth import UNCONFIGURED, ReviewAuthError
 
     def no_auth(agent, repo):
-        raise ReviewAuthError("Posting a review as a GitHub App needs PyJWT")
+        raise ReviewAuthError(
+            "Could not source the private key from Doppler", kind=UNCONFIGURED
+        )
 
     monkeypatch.setattr(service.checkrun.ghauth, "installation_token", no_auth)
     monkeypatch.setattr(service, "_resolve_head_sha", lambda pr: "deadbeef")
 
     spawned: list = []
-    with pytest.raises(ReviewAuthError, match="PyJWT"):
+    with pytest.raises(ReviewAuthError, match="Doppler"):
         service.start_detached_review(
             agent_backend.CODEX,
             TARGET,
@@ -260,10 +261,12 @@ def test_start_detached_no_as_app_auth_failure_stays_best_effort(monkeypatch):
     """Without ``as_app`` the review posts as the USER — App auth is only the
     breadcrumb's concern, so a mint failure stays best-effort: the child still
     spawns (with no `--run-id`) and the request reports in-flight."""
-    from shipit.review.ghauth import ReviewAuthError
+    from shipit.review.ghauth import UNCONFIGURED, ReviewAuthError
 
     def no_auth(agent, repo):
-        raise ReviewAuthError("Posting a review as a GitHub App needs PyJWT")
+        raise ReviewAuthError(
+            "Could not source the private key from Doppler", kind=UNCONFIGURED
+        )
 
     monkeypatch.setattr(service.checkrun.ghauth, "installation_token", no_auth)
     monkeypatch.setattr(service, "_resolve_head_sha", lambda pr: "deadbeef")

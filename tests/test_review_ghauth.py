@@ -8,8 +8,10 @@ JWT from the in-memory PEM string. These tests assert exactly that:
     agent-derived key names;
   * the JWT is signed in-memory (PyJWT `encode` receives the PEM string), and the
     code never touches the filesystem;
-  * a missing PyJWT yields a clean `ReviewAuthError` (the install hint), not an
-    ImportError leaking out;
+  * every failure states WHICH KIND it is (#969) — a local credential gap
+    (`UNCONFIGURED`), a genuine absent installation (`NOT_INSTALLED`), or a failed
+    probe (`API_ERROR`) — and the 404 that means NOT_INSTALLED is read off the
+    response STATUS, never grepped out of the message; and
   * the 3-hop installation-token flow uses the bearer-JWT urllib seams.
 
 Every boundary (Doppler, PyJWT, urllib) is mocked — no network, no real LLM, no
@@ -19,6 +21,8 @@ disk.
 from __future__ import annotations
 
 import builtins
+import pathlib
+import urllib.error
 
 import pytest
 
@@ -46,7 +50,12 @@ def doppler_stub(monkeypatch):
 
 
 def _stub_jwt(monkeypatch):
-    """Install a fake `jwt` module whose `encode` records its (payload, key)."""
+    """Swap ghauth's bound `jwt` for a fake whose `encode` records (payload, key).
+
+    Patches the module ATTRIBUTE, not `sys.modules`: since #969 PyJWT is a base
+    dependency imported at ghauth's module top, so the name is already bound by
+    the time a test runs.
+    """
     import types
 
     fake = types.SimpleNamespace()
@@ -59,7 +68,7 @@ def _stub_jwt(monkeypatch):
         return "signed.jwt.token"
 
     fake.encode = encode
-    monkeypatch.setitem(__import__("sys").modules, "jwt", fake)
+    monkeypatch.setattr(ghauth, "jwt", fake)
     return captured
 
 
@@ -107,26 +116,57 @@ def test_make_app_jwt_never_reads_disk(monkeypatch, doppler_stub):
         monkeypatch.setattr(builtins, "open", real_open)
 
 
-def test_make_app_jwt_clean_error_when_pyjwt_absent(monkeypatch, doppler_stub):
-    """A missing PyJWT surfaces a clean ReviewAuthError with the install hint."""
-    real_import = builtins.__import__
+def test_pyjwt_is_a_base_dependency(monkeypatch, doppler_stub):
+    """PyJWT is imported at module top, not lazily behind an install hint (#969).
 
-    def no_jwt(name, *args, **kwargs):
-        if name == "jwt":
-            raise ImportError("No module named 'jwt'")
-        return real_import(name, *args, **kwargs)
+    The whole point of the base-dependency move: a shipit that imports cannot be a
+    shipit that lacks the App-JWT signer, so there is no "missing extra" branch to
+    take and no shipit-local pixi env to redirect a consumer into.
+    """
+    import shipit.review.ghauth as mod
 
-    monkeypatch.setattr(builtins, "__import__", no_jwt)
-    with pytest.raises(ghauth.ReviewAuthError, match="pyjwt"):
+    assert mod.jwt is not None
+    src = pathlib.Path(mod.__file__).read_text()
+    assert "\nimport jwt\n" in src
+    # No remediation may name a pixi env that exists only in shipit's own repo.
+    assert "-e review" not in src
+
+
+def test_signing_failure_is_unconfigured(monkeypatch, doppler_stub):
+    """An unusable PEM is a LOCAL credential gap, not a verdict about any repo."""
+    fake = _stub_jwt(monkeypatch)
+    assert fake is not None
+
+    def boom(payload, key, algorithm):
+        raise ValueError("Could not parse the provided public key.")
+
+    monkeypatch.setattr(ghauth.jwt, "encode", boom)
+    with pytest.raises(ghauth.ReviewAuthError) as excinfo:
         ghauth.make_app_jwt(agent_backend.CODEX)
+    assert excinfo.value.kind == ghauth.UNCONFIGURED
+
+
+def test_doppler_failure_is_unconfigured(monkeypatch):
+    """No credentials to source HERE — nothing was asked of GitHub, so nothing is
+    known about any App: `UNCONFIGURED`, never `NOT_INSTALLED` (#969)."""
+
+    def fail(key: str) -> str:
+        raise ghauth.secretsrc.SecretSourceError("doppler: command not found")
+
+    monkeypatch.setattr(ghauth.secretsrc, "doppler_get", fail)
+    with pytest.raises(ghauth.ReviewAuthError) as excinfo:
+        ghauth.make_app_jwt(agent_backend.CODEX)
+    assert excinfo.value.kind == ghauth.UNCONFIGURED
 
 
 def test_no_funnel_backend_is_a_clean_error(monkeypatch, doppler_stub):
     # A backend with no funnel App (claude) fails loud with an actionable message —
     # the registry-derived key names are never fabricated for it.
     _stub_jwt(monkeypatch)
-    with pytest.raises(ghauth.ReviewAuthError, match="No GitHub App credentials"):
+    with pytest.raises(ghauth.ReviewAuthError) as excinfo:
         ghauth.make_app_jwt(agent_backend.CLAUDE)
+    assert "No GitHub App credentials" in str(excinfo.value)
+    assert excinfo.value.kind == ghauth.UNCONFIGURED
 
 
 def test_doppler_failure_is_normalized(monkeypatch):
@@ -205,10 +245,65 @@ def test_installation_id_404_is_actionable(monkeypatch, doppler_stub):
     _stub_jwt(monkeypatch)
 
     def not_installed(path, token):
-        raise ghauth.ReviewAuthError("GitHub API GET /x failed (HTTP 404): nope")
+        raise ghauth.ReviewAuthError(
+            "GitHub API GET /x failed (HTTP 404): nope",
+            kind=ghauth.API_ERROR,
+            status=404,
+        )
 
     monkeypatch.setattr(ghauth, "_api_get", not_installed)
-    with pytest.raises(ghauth.ReviewAuthError, match="not installed"):
+    with pytest.raises(ghauth.ReviewAuthError) as excinfo:
         ghauth.installation_id(
             agent_backend.CODEX, "owner/repo", jwt="signed.jwt.token"
         )
+    assert "not installed" in str(excinfo.value)
+    # The 404 is promoted to a VERDICT about the App — that is the one status this
+    # layer is entitled to read as one.
+    assert excinfo.value.kind == ghauth.NOT_INSTALLED
+
+
+def test_installation_id_reads_the_status_not_the_message(monkeypatch, doppler_stub):
+    """A 500 whose BODY happens to contain "HTTP 404" is not a not-installed verdict.
+
+    The old check grepped `"HTTP 404" in str(exc)`, so any error text quoting a 404
+    (a proxy page, an upstream error body) read as "the App is not installed" — the
+    same substring-for-structure defect the engine keeps getting bitten by. The
+    branch now reads `exc.status`.
+    """
+    _stub_jwt(monkeypatch)
+
+    def server_error(path, token):
+        raise ghauth.ReviewAuthError(
+            "GitHub API GET /x failed (HTTP 500): upstream said HTTP 404",
+            kind=ghauth.API_ERROR,
+            status=500,
+        )
+
+    monkeypatch.setattr(ghauth, "_api_get", server_error)
+    with pytest.raises(ghauth.ReviewAuthError) as excinfo:
+        ghauth.installation_id(
+            agent_backend.CODEX, "owner/repo", jwt="signed.jwt.token"
+        )
+    assert excinfo.value.kind == ghauth.API_ERROR
+    assert "not installed" not in str(excinfo.value)
+
+
+def test_http_error_carries_kind_and_status(monkeypatch, doppler_stub):
+    """The transport layer reports API_ERROR with the HTTP status attached — it is
+    not entitled to any verdict about the App."""
+
+    class FakeHTTPError(urllib.error.HTTPError):
+        def __init__(self):
+            super().__init__("https://api.github.com/x", 403, "Forbidden", {}, None)
+
+        def read(self):
+            return b'{"message":"Resource not accessible by integration"}'
+
+    def boom(req, timeout):
+        raise FakeHTTPError()
+
+    monkeypatch.setattr(ghauth.urllib.request, "urlopen", boom)
+    with pytest.raises(ghauth.ReviewAuthError) as excinfo:
+        ghauth._api_get("/repos/owner/repo/installation", "signed.jwt.token")
+    assert excinfo.value.kind == ghauth.API_ERROR
+    assert excinfo.value.status == 403

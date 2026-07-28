@@ -349,7 +349,11 @@ def _mint_degraded(backend, repo):
 
 
 def _mint_not_installed(backend, repo):
-    raise ghauth.ReviewAuthError("not installed")
+    raise ghauth.ReviewAuthError("not installed", kind=ghauth.NOT_INSTALLED)
+
+
+def _mint_unconfigured(backend, repo):
+    raise ghauth.ReviewAuthError("no doppler here", kind=ghauth.UNCONFIGURED)
 
 
 def test_verify_apps_verdict_carries_the_run_fields(capsys, caplog):
@@ -357,42 +361,78 @@ def test_verify_apps_verdict_carries_the_run_fields(capsys, caplog):
         rc = verify_apps.run("o/r", mint=_mint_live)
     assert rc == 0
     verdicts = _with_fields(
-        caplog.records, logging.INFO, "repo", "apps", "live", "rc", "duration_ms"
+        caplog.records,
+        logging.INFO,
+        "repo",
+        "apps",
+        "live",
+        "verdict",
+        "rc",
+        "duration_ms",
     )
     assert verdicts and verdicts[0].repo == "o/r" and verdicts[0].rc == 0
     assert verdicts[0].apps > 0 and verdicts[0].live == verdicts[0].apps
-    # An all-live run carries NO not_live_apps field — absent, not null-stuffed.
+    assert verdicts[0].verdict == verify_apps.VERDICT_LIVE
+    # An all-live run carries NO not_live_apps / unverified_apps field — absent,
+    # not null-stuffed.
     assert not hasattr(verdicts[0], "not_live_apps")
+    assert not hasattr(verdicts[0], "unverified_apps")
     # Per-App passes are mechanics: each probe's outcome lands at DEBUG.
     probes = _with_fields(
-        caplog.records, logging.DEBUG, "repo", "agent", "app", "live", "duration_ms"
+        caplog.records, logging.DEBUG, "repo", "agent", "app", "status", "duration_ms"
     )
-    assert len(probes) == verdicts[0].apps and all(p.live for p in probes)
+    assert len(probes) == verdicts[0].apps
+    assert all(p.status == verify_apps.LIVE for p in probes)
 
 
 def test_verify_apps_failing_verdict_names_the_not_live_apps(capsys, caplog):
     with caplog.at_level(logging.DEBUG, logger="shipit.verifyapps"):
         rc = verify_apps.run("o/r", mint=_mint_not_installed)
-    assert rc == 1
+    assert rc == verify_apps.RC_NOT_LIVE
     verdicts = _with_fields(caplog.records, logging.INFO, "rc", "not_live_apps")
     assert verdicts and verdicts[0].rc == 1 and verdicts[0].live == 0
+    assert verdicts[0].verdict == verify_apps.VERDICT_NOT_LIVE
     # The probe raising (App not installed) is the failure path: ERROR + exception.
     errors = _with_fields(
-        caplog.records, logging.ERROR, "repo", "agent", "app", "live", "duration_ms"
+        caplog.records, logging.ERROR, "repo", "agent", "app", "status", "duration_ms"
     )
     assert errors and all(r.exc_info for r in errors)
-    assert all(r.live is False for r in errors)
+    assert all(r.status == verify_apps.NOT_LIVE for r in errors)
+
+
+def test_verify_apps_unverified_run_is_recorded_apart_from_a_gap(capsys, caplog):
+    """#969: "nobody could check" is its own record shape, not a not-live one.
+
+    A rollout reads these records; conflating the two is how a fleet concludes its
+    Apps are missing when only the machine running the check is unconfigured.
+    """
+    with caplog.at_level(logging.DEBUG, logger="shipit.verifyapps"):
+        rc = verify_apps.run("o/r", mint=_mint_unconfigured)
+    assert rc == verify_apps.RC_UNVERIFIED
+    verdicts = _with_fields(caplog.records, logging.INFO, "rc", "unverified_apps")
+    assert verdicts and verdicts[0].verdict == verify_apps.VERDICT_UNVERIFIED
+    assert verdicts[0].live == 0
+    assert not hasattr(verdicts[0], "not_live_apps")
+    # EXPECTED and operator-actionable: a WARNING with the fact, never an ERROR
+    # carrying a traceback.
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+    warnings = _with_fields(
+        caplog.records, logging.WARNING, "repo", "agent", "app", "status"
+    )
+    assert warnings and all(
+        r.status == verify_apps.UNCONFIGURED and r.exc_info is None for r in warnings
+    )
 
 
 def test_verify_apps_degraded_permission_is_a_warning(capsys, caplog):
     with caplog.at_level(logging.DEBUG, logger="shipit.verifyapps"):
         rc = verify_apps.run("o/r", agents=["codex"], mint=_mint_degraded)
-    assert rc == 1
+    assert rc == verify_apps.RC_NOT_LIVE
     # Reachable but missing checks:write — degraded, so WARNING, not ERROR.
     warnings = _with_fields(
-        caplog.records, logging.WARNING, "repo", "agent", "app", "live", "duration_ms"
+        caplog.records, logging.WARNING, "repo", "agent", "app", "status", "duration_ms"
     )
-    assert warnings and warnings[0].live is False
+    assert warnings and warnings[0].status == verify_apps.NOT_LIVE
     assert not [r for r in caplog.records if r.levelno == logging.ERROR]
 
 

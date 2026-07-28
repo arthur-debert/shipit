@@ -593,6 +593,13 @@ Shipit CLI Human Help Draft
             Apps. Use it to confirm that reviewer integrations are ready before
             relying on them in PR flow.
 
+            It distinguishes three outcomes and exits accordingly: 0 when every
+            App is live, 1 when the repo has a real gap (an App is not installed
+            on its owner, or its token lacks `checks: write`), and 2 when nothing
+            could be verified from this machine (no App credentials available, or
+            the probe itself failed). The last is reported as UNVERIFIED, never
+            as NOT LIVE — an App nobody could check is not an App found missing.
+
         1.21. wf
 
             `shipit wf` validates GitHub Actions workflow edits locally.

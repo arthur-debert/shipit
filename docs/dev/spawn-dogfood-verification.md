@@ -15,7 +15,7 @@ lifecycle end-to-end against a **separate scratch checkout** and asserts the sta
 gate the maintainer wants codified.
 
 This is the same shape as the [review-funnel verification harness](./review-app-provisioning.md)
-(`pixi run -e review verify-funnel`): a non-default pixi env/task, excluded from the
+(`pixi run -e review verify-funnel`, the one opt-in task still namespaced there): a non-default pixi env/task, excluded from the
 CI/test gate, that hits live tooling on demand.
 
 ## What it asserts
@@ -136,7 +136,7 @@ Tree is distinct + non-writable.
 
 ### The funnel **capture** reviewer (TRE05-WS04b) — the `review: <agent>-local` gate
 
-The `-e review` funnel (the REQUIRED `codex-local` / `agy-local` reviewers the
+The local-review funnel (the REQUIRED `codex-local` / `agy-local` reviewers the
 readiness engine reads) shares the SAME launch posture but a DIFFERENT result channel:
 the funnel **captures** the agent's structured stdout and posts it AS the bot App
 identity (`adr-<agent>-review[bot]`) onto the `review: <agent>-local` check-run — so
@@ -156,8 +156,8 @@ canary; it spends real tokens and posts real reviews, so it is opt-in, never in 
    posts as the App, and closes the run:
 
    ```sh
-   pixi run -e review shipit pr review request <PR> --reviewer codex-local
-   pixi run -e review shipit pr review request <PR> --reviewer agy-local
+   shipit pr review request <PR> --reviewer codex-local
+   shipit pr review request <PR> --reviewer agy-local
    ```
 
 3. Confirm the three load-bearing facts (the funnel reviews shipit's OWN PRs — the

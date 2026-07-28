@@ -365,7 +365,7 @@ def test_post_as_app_auth_failure_is_actionable(monkeypatch):
     }
 
     def boom(agent, repo):
-        raise post.ghauth.ReviewAuthError("doppler down")
+        raise post.ghauth.ReviewAuthError("doppler down", kind=post.ghauth.UNCONFIGURED)
 
     monkeypatch.setattr(post.ghauth, "installation_token", boom)
     with pytest.raises(RuntimeError, match="Could not authenticate"):
