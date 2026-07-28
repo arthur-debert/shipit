@@ -855,10 +855,14 @@ def reject_stale_provision(plan: Plan) -> None:
     dead — the only question is whether install says so or the consumer's CI
     does, an hour and a pin bump later, at the ``shipit provision`` tombstone
     (:mod:`shipit.verbs.provision`, which carries this same remedy for the calls
-    the tripwire declines to judge). Nothing shipit writes can repair it: the
-    call sites are consumer-authored lane tasks outside every managed block
-    (that is exactly why they survived the retirement), so the remedy is the
-    operator's one-line edit, named per task by :func:`format_stale_provision`.
+    the tripwire declines to judge). Nothing shipit writes can repair what
+    reaches this guard: the reconcile already projected the manifest through its
+    own managed-block rewrites (#1127,
+    :func:`shipit.install.reconcile._plan_stale_provision`), so a call this plan
+    would DELETE never lands in :attr:`Plan.stale_provision` — what survives is
+    consumer text, outside every managed block or inside a DECLINED one, and the
+    remedy is the operator's one-line edit, named per task by
+    :func:`format_stale_provision`.
     EVERY mode refuses, ``MODE_TREE`` included: the refusal is about the state of
     the consumer's manifest, not about publishing, so a working-tree refresh
     that "succeeded" over a dead lane would just relocate the discovery to CI.

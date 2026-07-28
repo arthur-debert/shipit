@@ -8,17 +8,20 @@ conda dependency through `pixi.lock`, delivered by the managed
 
 This is NOT a compatibility shim and restores nothing: it takes any arguments,
 does no work, and always fails. It exists because the call sites outlived the
-verb — a dozen consumer-authored `pixi.toml` lane tasks still run
-`./bin/shipit provision lexd`, outside every managed block, so no reconcile
-rewrites them (#1070). Those tasks already fail; without a tombstone they fail
-as click's `No such command 'provision'`, which tells an operator staring at a
-red CI lane nothing about lexd, ADR-0066, or the one-line edit that fixes it.
+verb — a dozen `pixi.toml` lane tasks still run `./bin/shipit provision lexd`
+(#1070). Most sit inside a shipit-managed `[tasks]` span and the next reconcile
+deletes them, but the `feature.lint.tasks.lint-full` wiring is the consumer's
+own and no reconcile rewrites it (#1127). Those tasks already fail; without a
+tombstone they fail as click's `No such command 'provision'`, which tells an
+operator staring at a red CI lane nothing about lexd, ADR-0066, or the one-line
+edit that fixes it.
 
-The reconcile-time tripwire (`shipit.install.reconcile.stale_provision_tasks`)
-is the FIRST line: it refuses the install before the pin bump lands. It only
-judges the task commands it can read exactly, and declines the rest rather than
-guessing — this tombstone is what makes that narrowing safe, since a declined
-call still lands on this same remedy where it runs, one CI run later.
+The reconcile-time tripwire (`shipit.install.reconcile.stale_provision_tasks`,
+decided post-plan by `_plan_stale_provision`) is the FIRST line for the calls a
+reconcile canNOT repair: it refuses the install before the pin bump lands. It
+only judges the task commands it can read exactly, and declines the rest rather
+than guessing — this tombstone is what makes that narrowing safe, since a
+declined call still lands on this same remedy where it runs, one CI run later.
 """
 
 from __future__ import annotations
