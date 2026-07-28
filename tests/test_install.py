@@ -4482,6 +4482,57 @@ def test_a_consumer_test_task_in_the_tasks_table_is_the_key_conflict_guards_case
     assert iunits.PIXI_TEST_TASK_KEY not in {d.unit.key for d in plan.decisions}
 
 
+def test_gather_reads_pixi_toml_once_and_every_guard_shares_that_snapshot(
+    tmp_path, monkeypatch
+):
+    # The one-read invariant (#1129 review): every pixi guard is pure over
+    # gather's SINGLE `_read_pixi_text`, so none can judge a different snapshot
+    # than its siblings. A stable file cannot prove that — separate reads of an
+    # unchanging file agree. So the source CHANGES: the first read carries both
+    # ADD-only conflict conditions, every later read carries neither. A second
+    # read anywhere in gather would leave the two conflict fields (and
+    # `pixi_text`, the post-plan projections' input) disagreeing about the same
+    # manifest.
+    conflicted = (
+        "[workspace]\n"
+        'channels = ["conda-forge"]\n'
+        'name = "acme"\n'
+        'platforms = ["linux-64"]\n\n'
+        # Redeclares the anchor-less managed lexd block's own table → table conflict.
+        "[feature.shipit-lexd]\n"
+        'platforms = ["linux-64"]\n\n'
+        # An env-enabled feature `test` task → task-ambiguity conflict.
+        "[feature.test.tasks]\n"
+        'test = "cargo nextest run"\n\n'
+        "[environments]\n"
+        'test = ["test"]\n'
+    )
+    clean = iunits.pixi_manifest_seed("acme")
+    (tmp_path / "pixi.toml").write_text(clean)
+
+    reads: list[Path] = []
+
+    def _changing_source(root: Path) -> str:
+        reads.append(root)
+        return conflicted if len(reads) == 1 else clean
+
+    monkeypatch.setattr(irec, "_read_pixi_text", _changing_source)
+    units = iunits.load_units(platforms=frozenset({"linux-64"}))
+    state = irec.gather(tmp_path, units, irec.load_retired())
+
+    assert len(reads) == 1
+    # The snapshot gather carries forward IS the one read — it is what the two
+    # POST-PLAN projections (`_plan_pixi_key_conflicts`, `_plan_stale_provision`)
+    # will project inside `reconcile()`.
+    assert state.pixi_text == conflicted
+    # ...and both ADD-only detections derive from that same snapshot, not from a
+    # re-read (which here would have found the clean seed and detected nothing).
+    assert [c.unit_key for c in state.pixi_task_conflicts] == [
+        iunits.PIXI_TEST_TASK_KEY
+    ]
+    assert [c.unit_key for c in state.pixi_table_conflicts] == [iunits.PIXI_LEXD_KEY]
+
+
 def test_shipits_own_repo_keeps_its_feature_test_task_authoritative():
     # The dogfood pin: shipit's own full-gate `test` task lives in
     # [feature.test.tasks] (for the rust toolchain env), so
