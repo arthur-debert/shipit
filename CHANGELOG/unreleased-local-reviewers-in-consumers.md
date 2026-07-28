@@ -22,3 +22,7 @@
   when there was one. The "App is not installed" branch reads that status instead
   of grepping `"HTTP 404"` out of the rendered message, so an unrelated error
   whose body quotes a 404 can no longer be reported as a missing installation.
+  An answer that arrives but is unusable — a success response that is not JSON,
+  is not UTF-8, or carries a non-numeric installation `id` — is reported as a
+  failed probe too, rather than escaping as a raw decode error; `verify-apps`
+  reports UNVERIFIED for it instead of printing a traceback.

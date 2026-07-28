@@ -131,40 +131,54 @@ that exists only in shipit's own checkout.
 process HERE, not in CI — the operator's machine is where the model runs and where the
 App token is minted):
 
-1. **shipit ≥ 1.7.0**, so the install carries PyJWT. Check with
-   `python -c "import jwt"` against the interpreter backing your `shipit`
-   (`uv tool upgrade shipit` if it is a uv tool install).
-2. **`doppler` on `PATH` and logged in** to the `github` project, `prd` config —
+1. **`doppler` on `PATH` and logged in** to the `github` project, `prd` config —
    that is where `CODEX_REVIEW_APP_PRIVATE_KEY` / `CODEX_REVIEW_APP_ID` and the `AGY_…`
    pair live. The PEM is read into memory and signed there; it is never written to disk.
-3. **The agent CLIs on `PATH`**: `codex` and `agy`. They are what actually produce the
+2. **The agent CLIs on `PATH`**: `codex` and `agy`. They are what actually produce the
    review.
 
-**In the consumer repo** (one edit):
+Note what is NOT on that list: the shipit build. Which shipit runs in a repo is a
+property of the **repo**, not the machine — see the pin below.
 
-```toml
-# .shipit.toml
-[reviewers]
-copilot = {}
-codex = {}
-agy = {}
-```
+**In the consumer repo** (two edits):
 
-The `[reviewers]` table is consumer-owned — `shipit install` never rewrites it — so this
-edit survives reconcile. `rerun` defaults off (review-once); add `codex = { rerun = true }`
-to re-review every push.
+1. **Bump the pin to a shipit build ≥ 1.7.0**, so the build the repo runs carries
+   PyJWT. `.shipit.toml`'s `[shipit].version` is the full commit sha of that build,
+   and the managed `bin/shipit` launcher execs exactly it via `uv` — **`PATH` is never
+   consulted** (ADR-0033). The bump normally arrives as the repo's install-reconcile PR;
+   `shipit install --pr` stamps it.
+
+2. **Add the reviewers to the roster:**
+
+   ```toml
+   # .shipit.toml
+   [reviewers]
+   copilot = {}
+   codex = {}
+   agy = {}
+   ```
+
+   The `[reviewers]` table is consumer-owned — `shipit install` never rewrites it — so
+   this edit survives reconcile. `rerun` defaults off (review-once); add
+   `codex = { rerun = true }` to re-review every push.
 
 **Then verify, before relying on it:**
 
 ```bash
-shipit verify-apps          # from the repo; expect: LIVE, exit 0
+./bin/shipit verify-apps    # from the repo; expect: LIVE, exit 0
 ```
 
-- exit `2` / `UNVERIFIED` → one of the three machine prerequisites above is missing.
-  Nothing is known about the repo yet.
+Go through `./bin/shipit`, not a bare `shipit`: the launcher is what applies the repo's
+pin. A bare `shipit` runs whatever `uv tool` build is on the operator's `PATH`, which
+is a different — and probably older — shipit, so it answers for the wrong build. (That
+build's one remaining job inside a repo is a virgin repo's first `shipit install`, which
+stamps the pin the launcher then needs.)
+
+- exit `2` / `UNVERIFIED` → one of the two machine prerequisites above is missing, or
+  the repo's pin predates 1.7.0. Nothing is known about the repo yet.
 - exit `1` / `NOT LIVE` → a real gap on the repo's owner: do Step 1 / Step 2 above for
   that owner. `lex-fmt` and `phos-editor` are already consented (see the table); a new
   org is not.
 
-Once `verify-apps` reports LIVE, `shipit pr next` requests all three reviewers on the
-repo's PRs like any other roster.
+Once `verify-apps` reports LIVE, `./bin/shipit pr next` requests all three reviewers on
+the repo's PRs like any other roster.

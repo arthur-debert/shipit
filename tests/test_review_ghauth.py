@@ -11,8 +11,12 @@ JWT from the in-memory PEM string. These tests assert exactly that:
   * every failure states WHICH KIND it is (#969) — a local credential gap
     (`UNCONFIGURED`), a genuine absent installation (`NOT_INSTALLED`), or a failed
     probe (`API_ERROR`) — and the 404 that means NOT_INSTALLED is read off the
-    response STATUS, never grepped out of the message; and
-  * the 3-hop installation-token flow uses the bearer-JWT urllib seams.
+    response STATUS, never grepped out of the message;
+  * the 3-hop installation-token flow uses the bearer-JWT urllib seams; and
+  * EVERY exit of the transport is a parsed body or a `ReviewAuthError` — an
+    answer that arrives but is unusable (non-JSON body, non-UTF-8 bytes,
+    non-numeric `id`) is `API_ERROR`, never a raw decode/`int()` exception that
+    would bypass the caller's UNVERIFIED handling.
 
 Every boundary (Doppler, PyJWT, urllib) is mocked — no network, no real LLM, no
 disk.
@@ -307,3 +311,92 @@ def test_http_error_carries_kind_and_status(monkeypatch, doppler_stub):
         ghauth._api_get("/repos/owner/repo/installation", "signed.jwt.token")
     assert excinfo.value.kind == ghauth.API_ERROR
     assert excinfo.value.status == 403
+
+
+class _FakeResponse:
+    """A minimal `urlopen` context manager serving a canned body."""
+
+    def __init__(self, body: bytes):
+        self._body = body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self) -> bytes:
+        return self._body
+
+
+def _serve(monkeypatch, body: bytes) -> None:
+    """Make the bearer-JWT transport return a 2xx carrying `body`."""
+    monkeypatch.setattr(
+        ghauth.urllib.request, "urlopen", lambda req, timeout: _FakeResponse(body)
+    )
+
+
+def test_unparseable_success_body_is_an_api_error(monkeypatch):
+    """A 2xx that is not JSON is API_ERROR — never a raw `JSONDecodeError`.
+
+    `verify-apps` catches `ReviewAuthError` and nothing else to reach its
+    UNVERIFIED outcome, so a decode error escaping this layer surfaced as a
+    traceback instead of the documented "nothing was determined" report. The most
+    likely real shape is an intercepting proxy or an incident page answering 200
+    with HTML.
+    """
+    _serve(monkeypatch, b"<html><body>502 Bad Gateway</body></html>")
+    with pytest.raises(ghauth.ReviewAuthError) as excinfo:
+        ghauth._api_get("/repos/owner/repo/installation", "signed.jwt.token")
+    assert excinfo.value.kind == ghauth.API_ERROR
+    # No verdict is available from an unusable answer, so no status is claimed.
+    assert excinfo.value.status is None
+    assert "unparseable" in str(excinfo.value)
+    # The body is quoted so an operator can see WHAT answered.
+    assert "502 Bad Gateway" in str(excinfo.value)
+
+
+def test_unparseable_body_excerpt_is_one_capped_line(monkeypatch):
+    """The quoted body is flattened and truncated — an error message, not a dump."""
+    _serve(monkeypatch, b"<html>\n" + b"x" * 5000 + b"\n</html>")
+    with pytest.raises(ghauth.ReviewAuthError) as excinfo:
+        ghauth._api_get("/x", "signed.jwt.token")
+    message = str(excinfo.value)
+    assert "\n" not in message
+    assert len(message) < 400
+
+
+def test_non_utf8_success_body_is_an_api_error(monkeypatch):
+    """Undecodable BYTES are the same situation as undecodable JSON.
+
+    The error-body read already decoded with `errors="replace"`; the success read
+    did not, so a garbled 2xx raised `UnicodeDecodeError` past the same seam.
+    """
+    _serve(monkeypatch, b"\xff\xfe not utf-8 at all")
+    with pytest.raises(ghauth.ReviewAuthError) as excinfo:
+        ghauth._api_get("/x", "signed.jwt.token")
+    assert excinfo.value.kind == ghauth.API_ERROR
+
+
+def test_empty_success_body_stays_none(monkeypatch):
+    """An empty 2xx body is still `None`, not an error — the normalization above
+    must not swallow the legitimately-bodiless response."""
+    _serve(monkeypatch, b"   \n")
+    assert ghauth._api_get("/x", "signed.jwt.token") is None
+
+
+def test_installation_id_non_numeric_id_is_an_api_error(monkeypatch, doppler_stub):
+    """An `id` that is not a number establishes nothing — API_ERROR, not a crash.
+
+    Same class as the unparseable body: GitHub answered, but the answer is
+    unusable, so `int()` must not raise `ValueError` past the seam `verify-apps`
+    catches.
+    """
+    _stub_jwt(monkeypatch)
+    monkeypatch.setattr(ghauth, "_api_get", lambda path, token: {"id": "not-a-number"})
+    with pytest.raises(ghauth.ReviewAuthError) as excinfo:
+        ghauth.installation_id(
+            agent_backend.CODEX, "owner/repo", jwt="signed.jwt.token"
+        )
+    assert excinfo.value.kind == ghauth.API_ERROR
+    assert "not installed" not in str(excinfo.value)

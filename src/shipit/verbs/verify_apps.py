@@ -36,9 +36,10 @@ must not treat it as a remote gap.
 
 It only VERIFIES and INSTRUCTS. The actual per-repo App install/consent EXECUTION
 is the ROL01 rollout's job (one sub-issue per repo) — out of scope here — and the
-install-seeds-secrets change is issue #25. ``run``'s exit code separates the same
-three outcomes (0 live / 1 a real remote gap / 2 unverified here), so a rollout
-can branch on it: ``shipit verify-apps owner/repo; echo $?``.
+install-seeds-secrets change is issue #25. ``run``'s exit code collapses those
+four situations into the three ANSWERS a rollout acts on (0 live / 1 a real remote
+gap / 2 unverified here — the two no-verdict situations share code ``2``), so a
+rollout can branch on it: ``shipit verify-apps owner/repo; echo $?``.
 
 The probe is the SAME in-memory App-auth path the funnel itself uses
 (:mod:`shipit.review.ghauth`: Doppler-sourced PEM → in-memory RS256 JWT →
@@ -148,7 +149,7 @@ class AppLiveness:
 
     @property
     def live(self) -> bool:
-        """Whether this App is usable — ``status is LIVE`` and nothing else.
+        """Whether this App is usable — ``status == LIVE`` and nothing else.
 
         Deliberately NOT true for :data:`UNCONFIGURED` / :data:`UNDETERMINED`: an
         unverified App is not a live one. Read :attr:`status` (never ``not live``)
@@ -173,13 +174,16 @@ def _auth_failure(
       * :data:`UNDETERMINED` (``API_ERROR``) — nobody has anything to fix yet; the
         probe failed and should be re-run.
     """
+    # The situations are string constants, so they compare by VALUE (`==`): `is`
+    # would ride CPython's interning of these literals — true today, silently
+    # false the moment a status arrives from a config read or a round-trip.
     status = _KIND_STATUS[exc.kind]
-    if status is NOT_LIVE:
+    if status == NOT_LIVE:
         reason = (
             f"App {slug!r} is not installed on {repo}'s owner. Install the App and "
             f"re-consent per {PROVISIONING_DOC}."
         )
-    elif status is UNCONFIGURED:
+    elif status == UNCONFIGURED:
         reason = (
             f"App {slug!r} was NOT checked: this environment cannot mint App "
             f"credentials, so nothing was asked of GitHub and the App's state on "
@@ -233,7 +237,7 @@ def verify_app(backend: Backend, repo: str, *, mint=None) -> AppLiveness:
             "status": result.status,
             "duration_ms": int((time.monotonic() - started) * 1000),
         }
-        if result.status is UNCONFIGURED:
+        if result.status == UNCONFIGURED:
             # EXPECTED and operator-actionable — no App credentials HERE. Log the
             # fact, not a traceback: the same no-spray posture the reviewer adapter
             # takes for this exact failure, so a consumer running `verify-apps`

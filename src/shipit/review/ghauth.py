@@ -181,16 +181,33 @@ def make_app_jwt(backend: Backend) -> str:
         ) from exc
 
 
+def _excerpt(body: str, limit: int = 200) -> str:
+    """A single-line, length-capped snippet of a response body, for an error message.
+
+    Response bodies are arbitrary remote text — an HTML error page or a proxy
+    dump can run to kilobytes of newlines. The message this feeds is printed to a
+    console AND logged, so it is collapsed to one line and truncated.
+    """
+    flat = " ".join(body.split())
+    return flat if len(flat) <= limit else f"{flat[:limit]}…"
+
+
 def _api_request(path: str, jwt_token: str, *, method: str) -> object:
     """Bearer-JWT call to the GitHub REST API via stdlib urllib → parsed JSON.
 
     The shared core of :func:`_api_get` / :func:`_api_post` (the mock seams).
     Sends ``Authorization: Bearer <jwt>`` plus the versioned Accept headers, and
     raises an :data:`API_ERROR` :class:`ReviewAuthError` on any non-2xx (carrying
-    the HTTP status and the response body), timeout, or transport failure. At this
-    layer nothing is known about the App itself — a caller that CAN read a status
-    as an App verdict (``installation_id`` reading 404) re-raises with its own
-    kind.
+    the HTTP status and the response body), timeout, transport failure, OR a 2xx
+    whose body will not decode as UTF-8 JSON. At this layer nothing is known about
+    the App itself — a caller that CAN read a status as an App verdict
+    (``installation_id`` reading 404) re-raises with its own kind.
+
+    EVERY exit is either a parsed body or a :class:`ReviewAuthError`: a caller
+    like ``verify-apps`` catches exactly that type to reach its UNVERIFIED
+    outcome, so a raw ``JSONDecodeError``/``UnicodeDecodeError`` leaking from a
+    garbled-but-successful answer would surface as a traceback instead of the
+    documented "nothing could be determined" report (#969).
     """
     url = f"{_API_BASE}{path}"
     req = urllib.request.Request(url, method=method)  # noqa: S310 - fixed https host
@@ -206,7 +223,10 @@ def _api_request(path: str, jwt_token: str, *, method: str) -> object:
         with urllib.request.urlopen(  # noqa: S310 - fixed https host
             req, timeout=_HTTP_TIMEOUT
         ) as resp:
-            raw = resp.read().decode("utf-8")
+            # Decode defensively, same as the error-body read below: a garbled
+            # byte in a 2xx body is an unparseable ANSWER (API_ERROR), not a
+            # crash — the replacement chars land in the excerpt below.
+            raw = resp.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", "replace")
         raise ReviewAuthError(
@@ -232,7 +252,20 @@ def _api_request(path: str, jwt_token: str, *, method: str) -> object:
         raise ReviewAuthError(
             f"GitHub API {method} {path} failed: {exc}", kind=API_ERROR
         ) from exc
-    return json.loads(raw) if raw.strip() else None
+    if not raw.strip():
+        return None
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        # A 2xx that is not JSON is the SAME situation as a transport failure —
+        # GitHub answered, but the answer is unusable, so the App's state stays
+        # UNKNOWN. Normalising it here is what keeps the "every exit is a parsed
+        # body or a ReviewAuthError" contract true for `verify-apps` (#969).
+        raise ReviewAuthError(
+            f"GitHub API {method} {path} returned an unparseable body "
+            f"({exc}): {_excerpt(raw)}",
+            kind=API_ERROR,
+        ) from exc
 
 
 def _api_get(path: str, jwt_token: str) -> object:
@@ -256,7 +289,8 @@ def installation_id(backend: Backend, repo: str, *, jwt: str | None = None) -> i
     so it re-raises as :data:`NOT_INSTALLED` (read off the response's STATUS, not
     by grepping the message text). Every other failure keeps the kind it arrived
     with — :data:`UNCONFIGURED` from minting the JWT, :data:`API_ERROR` from the
-    call itself.
+    call itself. A 2xx whose body is missing ``id`` or carries a non-numeric one
+    is :data:`API_ERROR` too: an answer arrived, but it establishes nothing.
     """
     agent = backend.funnel_agent or backend.name
     token = jwt if jwt is not None else make_app_jwt(backend)
@@ -276,7 +310,17 @@ def installation_id(backend: Backend, repo: str, *, jwt: str | None = None) -> i
             f"Unexpected installation response for {agent!r} on {repo}: {resp!r}",
             kind=API_ERROR,
         )
-    return int(resp["id"])
+    try:
+        return int(resp["id"])
+    except (TypeError, ValueError) as exc:
+        # Same class as an unparseable body: GitHub answered with the key but not
+        # with a number. It is still an unusable ANSWER, so it must arrive at the
+        # caller as API_ERROR rather than a raw ValueError (#969).
+        raise ReviewAuthError(
+            f"Installation response for {agent!r} on {repo} has a non-numeric "
+            f"'id': {resp['id']!r}",
+            kind=API_ERROR,
+        ) from exc
 
 
 def installation_auth(backend: Backend, repo: str) -> dict:
