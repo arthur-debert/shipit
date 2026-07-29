@@ -138,8 +138,17 @@ def test_load_declines_rejects_the_dotted_form(tmp_path):
     # a policy that evaporates (#600).
     p = tmp_path / ".shipit.toml"
     p.write_text('[managed]\ndecline.keep = ["bin/shipit"]\n')
-    with pytest.raises(config.ConfigError, match="own header"):
+    with pytest.raises(config.ConfigError, match="own header") as excinfo:
         config.load_declines(config.load(p), p.read_text())
+    # ...and the refusal teaches the RIGHT spelling without showing a wrong one
+    # (#1133): the CLI renders a ConfigError through cli_errors, whose one-line
+    # contract collapses whitespace, so a two-line example inside the message
+    # would reach the operator as the unparseable `[managed.decline] keep = ...`
+    # — a fix instruction that fails the very parse it is teaching. The message
+    # names the two lines in prose instead, which survives the collapse.
+    collapsed = " ".join(str(excinfo.value).split())
+    assert "[managed.decline] keep" not in collapsed
+    assert "TWO lines" in collapsed
 
 
 @pytest.mark.parametrize(

@@ -4236,7 +4236,10 @@ def test_node_block_cannot_be_delivered_when_the_consumer_already_pins_its_keys(
     assert "pixi key conflict" in warnings
     assert "nodejs" in warnings
     assert "delete this repo's own entry" in warnings
-    assert f'[managed.decline] keep = ["{iunits.PIXI_NODE_DEPS_KEY}"]' in warnings
+    # The override is DESCRIBED as two lines, never shown inline (round 1): see
+    # test_the_advertised_decline_remedy_is_never_advertised_as_invalid_toml.
+    assert "[managed.decline]" in warnings
+    assert f'keep = ["{iunits.PIXI_NODE_DEPS_KEY}"]' in warnings
 
 
 def test_a_key_conflicted_block_refuses_instead_of_silently_under_delivering(
@@ -4329,6 +4332,52 @@ def test_key_conflict_refusal_survives_a_no_op_plan(tmp_path, monkeypatch):
     assert not (tmp_path / ".shipit.toml").exists()
     # Dry-run previews without side effects, so it stays warn-only (exit 0).
     assert verb.run(str(tmp_path), dry_run=True) == 0
+
+
+def test_the_advertised_decline_remedy_is_never_advertised_as_invalid_toml(
+    tmp_path, monkeypatch, capsys
+):
+    # #1133 round 1: the refusal advertises the decline as the way out, so the
+    # shape it advertises has to be one that actually works. `[managed.decline]
+    # keep = [...]` on ONE line is not valid TOML, and there is no valid one-line
+    # spelling — load_declines refuses the dotted form outright — so the message
+    # must DESCRIBE the two lines instead of showing them. It cannot merely emit
+    # a `\n`: the loudest surface, the refusal, is rendered by cli_errors, whose
+    # one-stderr-line contract collapses whitespace and would paste the two lines
+    # back together. Asserted on the REAL rendered stderr, not on the formatter,
+    # because the collapse is exactly what a formatter-only check would miss.
+    conflict = irec.PixiKeyConflict(
+        unit_key=iunits.PIXI_NODE_DEPS_KEY,
+        anchor=iunits.PIXI_NODE_DEPS_ANCHOR,
+        keys=("nodejs",),
+    )
+    monkeypatch.setattr(
+        verb,
+        "reconcile",
+        lambda *a, **k: dc_replace(
+            _plan(tmp_path),
+            decisions=(),
+            retired=(),
+            seeds=(),
+            current_pin=None,
+            target_pin=None,
+            pixi_key_conflicts=(conflict,),
+            claude_skills_link=irec.ClaudeSkillsLink(irec.LINK_NOOP),
+        ),
+    )
+    assert verb.run(str(tmp_path)) == 1
+    rendered = capsys.readouterr().err
+    assert "error: pixi key conflict" in rendered
+    # THE regression: no surface may show header and assignment as one unit.
+    assert "[managed.decline] keep" not in rendered
+
+    # And the shape it describes must be the shape the reader accepts — built
+    # here as the two lines the message names, driven through load_declines
+    # itself so the advertised remedy cannot drift from the parser.
+    remedy = f'[managed.decline]\nkeep = ["{iunits.PIXI_NODE_DEPS_KEY}"]\n'
+    assert config.load_declines(tomllib.loads(remedy), remedy) == (
+        iunits.PIXI_NODE_DEPS_KEY,
+    )
 
 
 def test_node_block_delivers_when_the_consumer_has_no_clashing_key(tmp_path):

@@ -711,7 +711,20 @@ def format_pixi_key_conflict(conflict: PixiKeyConflict) -> str:
     the right answer for the overwhelming majority of them (#1116: of 16 colliding
     portfolio repos, 13 carried a stale hand-pin whose own comment named the
     shipit gap the managed block has since closed). The decline is the exception,
-    stated as the exact ``.shipit.toml`` lines to paste."""
+    DESCRIBED rather than offered as a paste-able snippet, because no single-line
+    spelling of it is valid.
+
+    That wording is deliberate (#1133 round 1). The remedy needs two lines — a
+    ``[managed.decline]`` header then its ``keep`` assignment — and there is no
+    one-line alternative: :func:`shipit.config.load_declines` refuses the dotted
+    ``decline.keep`` form outright (it would evaporate on the next re-stamp), so
+    the header is mandatory. Meanwhile the LOUDEST surface this message reaches,
+    the refusal, is rendered by :func:`shipit.verbs._errors.cli_errors`, whose
+    contract collapses the message to ONE stderr line — an embedded snippet comes
+    out as ``[managed.decline] keep = [...]``, which does not parse. An operator
+    pasting that would trade the refusal for a ``.shipit.toml`` parse error and
+    have no way out at all. So the two lines are NAMED in prose, which survives
+    the collapse intact and reads the same on all three surfaces."""
     keys = " and ".join(f"'{k}'" for k in conflict.keys)
     return (
         f"this repo's pixi.toml already declares {keys} in {conflict.anchor}, "
@@ -721,8 +734,11 @@ def format_pixi_key_conflict(conflict: PixiKeyConflict) -> str:
         f"Remedy — pick one: (1) delete this repo's own entry and re-run "
         f"`shipit install` to take the managed pin (usually right: these entries "
         f"are hand-pins shipit's managed set has since taken over); or (2) to "
-        f"keep this repo's own entry, declare the override in .shipit.toml — "
-        f'[managed.decline] keep = ["{conflict.unit_key}"].'
+        f"keep this repo's own entry, declare the override in .shipit.toml as "
+        f"TWO lines — a '[managed.decline]' header on a line of its own, then "
+        f'below it the assignment keep = ["{conflict.unit_key}"] (the header '
+        f"spelling is required: a dotted decline.keep under [managed] is "
+        f"refused, it would not survive install's re-stamp)."
     )
 
 
