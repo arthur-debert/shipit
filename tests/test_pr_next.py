@@ -213,17 +213,19 @@ def test_next_request_act_renders_and_dropped_edge_is_error(
     assert "copilot" in err
 
 
-def test_next_local_auth_failure_reroutes_through_review_env(
-    patched_next, monkeypatch, capsys
-):
-    """A default-env PyJWT miss is internally rerun through pixi's review env.
+def test_next_local_auth_failure_reports_the_remedy(patched_next, monkeypatch, capsys):
+    """A local-review auth failure surfaces its own remedy and stops (#969).
 
-    The actuator still must not render a false requested line from the failed
-    first attempt; it reports the action returned by the review-env rerun.
+    There is no internal reroute any more: `pr next` used to catch this, sniff the
+    message for "PyJWT" / "pixi run -e review", and rerun itself inside a pixi env
+    that exists ONLY in shipit's own repo — so in a consumer repo the reroute
+    failed with `unknown environment 'review'`. PyJWT is a base dependency now, and
+    a genuine auth gap is reported where it happened. What must still hold: no
+    doomed child is detached, and no false "requested" line is rendered.
     """
     from shipit.prstate.reviewers import by_name
     from shipit.review import service
-    from shipit.review.ghauth import ReviewAuthError
+    from shipit.review.ghauth import UNCONFIGURED, ReviewAuthError
 
     monkeypatch.setattr(
         dispatch_mod, "required_adapters", lambda roster: [by_name("codex")]
@@ -242,24 +244,19 @@ def test_next_local_auth_failure_reroutes_through_review_env(
     monkeypatch.setattr(service, "_resolve_head_sha", lambda pr: "deadbeef")
 
     def no_auth(agent, repo):
-        raise ReviewAuthError("Posting a review as a GitHub App needs PyJWT")
+        raise ReviewAuthError(
+            "Could not source the private key from Doppler", kind=UNCONFIGURED
+        )
 
     monkeypatch.setattr(service.checkrun.ghauth, "installation_token", no_auth)
     spawned: list = []
     monkeypatch.setattr(
         service.execrun, "spawn_detached", lambda argv, **_: spawned.append(list(argv))
     )
-    rerouted: list[int] = []
-    monkeypatch.setattr(
-        dispatch_mod,
-        "rerun_pr_next_in_review_env",
-        lambda pr: rerouted.append(pr.number) or "requested review(s): codex",
-    )
 
     rc = cli.main(["pr", "next"])
     out, err = capsys.readouterr()
-    assert rc == 0
-    assert not any(line.startswith("error: ") for line in err.splitlines())
-    assert "action: requested review(s): codex" in out
-    assert rerouted == [42]
+    assert rc != 0
+    assert "Doppler" in err
+    assert "requested review(s)" not in out
     assert spawned == []  # no doomed child was detached

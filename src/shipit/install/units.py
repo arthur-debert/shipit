@@ -562,9 +562,9 @@ AGENTS_DEF_DIR = ".claude/agents"
 #: ``.claude/skills/`` — but rather than DUPLICATE the content there, install
 #: makes ``.claude/skills`` a whole-directory SYMLINK to this dir (see
 #: :data:`CLAUDE_SKILLS_DIR` / :data:`CLAUDE_SKILLS_LINK_TARGET`), so Claude sees
-#: the identical set without a second physical copy. The ``.shipit-skills/``
-#: store is source-only — read by :func:`skills_root`, never a shipped consumer
-#: dest — because no runtime loads that directory.
+#: the identical set without a second physical copy. The
+#: ``src/shipit/data/skills/`` store is source-only — read by :func:`skills_root`,
+#: never a shipped consumer dest — because no runtime loads that directory.
 AGENTS_SKILLS_DIR = ".agents/skills"
 #: The Claude discovery dir, a structural whole-directory symlink install ensures
 #: (NOT a content unit): ``.claude/skills`` -> :data:`CLAUDE_SKILLS_LINK_TARGET`.
@@ -788,26 +788,28 @@ def data_bytes(*parts: str) -> bytes:
 
 
 def skills_root():
-    """The bundled skills store — the read SOURCE, wheel package data or repo root.
+    """The bundled skills store — the read SOURCE, ordinary ``shipit.data`` package data.
 
-    Returns a Traversable (installed wheel) or a :class:`Path` (editable/source
-    checkout, where the store lives at the repo root as ``.shipit-skills/`` — a
-    dedicated, non-colliding dir, force-included into the built wheel as
-    ``shipit/data/skills``). Both honor the ``iterdir`` / ``is_dir`` / ``is_file``
-    / ``read_bytes`` protocol :func:`walk_files` uses. The dot-prefix keeps
-    shipit's OWN skill store from colliding with the public ``skills/`` convention
-    a repo uses to publish its own skills (#921).
+    Returns the ``shipit/data/skills`` Traversable, which resolves the same way in
+    an installed wheel and in a dev checkout (the store is
+    ``src/shipit/data/skills/``, bundled by ``packages = ["src/shipit"]``), so
+    there is no repo-root fallback branch. It honors the ``iterdir`` / ``is_dir``
+    / ``is_file`` / ``read_bytes`` protocol :func:`walk_files` uses.
+
+    The store used to live at the repo root as ``.shipit-skills/`` and be
+    force-included into the wheel (#921). It moved under ``src/`` (#1115) so the
+    repo-root path is live NOWHERE and can be retired fleet-wide: a
+    ``retired-files.toml`` entry matches on content hash globally, with no
+    producing-repo exemption, so a store still sitting at ``.shipit-skills/``
+    would be deleted by shipit's own self-install.
 
     This store is **source-only** (ADR-0077): :func:`load_units` PROJECTS each
     file out of here into the single real discovery dir :data:`AGENTS_SKILLS_DIR`
-    (Claude's :data:`CLAUDE_SKILLS_DIR` is a whole-dir symlink to it) —
-    ``.shipit-skills/`` itself is never a shipped consumer dest, because no agent
-    runtime loads that directory (#1088).
+    (Claude's :data:`CLAUDE_SKILLS_DIR` is a whole-dir symlink to it) — the store
+    dir itself is never a shipped consumer dest, because no agent runtime loads
+    it (#1088).
     """
-    bundled = resources.files("shipit.data").joinpath("skills")
-    if bundled.is_dir():
-        return bundled
-    return Path(__file__).resolve().parents[3] / ".shipit-skills"
+    return resources.files("shipit.data").joinpath("skills")
 
 
 def agents_root():
@@ -902,8 +904,8 @@ def load_units(
     # (`.agents/skills/`). Claude's `.claude/skills` is a whole-directory SYMLINK
     # to it (a STRUCTURAL step install ensures — :func:`plan_claude_skills_link`,
     # not a content unit), so Claude reads the identical set without a second
-    # physical copy. The source-only `.shipit-skills/` store is never a consumer
-    # dest (no runtime loads it). Same `Unit(kind="file")` shape as the agent-defs
+    # physical copy. The source-only `src/shipit/data/skills/` store is never a
+    # consumer dest (no runtime loads it). Same `Unit(kind="file")` shape as the agent-defs
     # fan-out below, so every reconcile/override/retire guarantee carries over.
     for rel, content in walk_files(skills_root()):
         units.append(

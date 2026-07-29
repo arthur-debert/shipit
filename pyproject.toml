@@ -24,6 +24,15 @@ requires-python = ">=3.13"
 #                  into structured dicts, replacing hand positional parsing.
 #                  Pure-python wheel; its transitive deps (ruamel.yaml,
 #                  xmltodict, Pygments) are pure-python wheels too.
+#   pyjwt[crypto]— sign the RS256 App JWT that authenticates a local-agent review
+#                  (codex/agy) AS its GitHub App, from the in-memory PEM
+#                  (`review/ghauth.py`). NOT optional (#969): the local-reviewer
+#                  path is the PR engine's, not an edge tool, and an extra is
+#                  precisely what a consumer repo's pinned install does not carry
+#                  — which left every consumer PR on a copilot-only review. Its
+#                  crypto backend (`cryptography`) is the one dep here with a
+#                  compiled wheel; prebuilt wheels cover every platform shipit
+#                  targets, so there is still no build step.
 dependencies = [
     "click>=8,<9",
     "PyYAML>=6",
@@ -31,14 +40,8 @@ dependencies = [
     "duckdb>=1",
     "structlog>=25",
     "jc>=1.25",
+    "pyjwt[crypto]>=2.8",
 ]
-
-[project.optional-dependencies]
-# Local-agent review EXECUTION (PRF01-WS07). Posting a review AS a GitHub App
-# needs PyJWT (with its crypto backend) to sign the RS256 app JWT from the
-# in-memory PEM. Optional because most consumers never run a local review — the
-# `review/` package imports `jwt` lazily and raises a clean install hint if absent.
-review = ["pyjwt[crypto]>=2.8"]
 
 [project.scripts]
 shipit = "shipit.cli:main"
@@ -55,15 +58,17 @@ packages = ["src/shipit"]
 [tool.hatch.build.targets.wheel.hooks.custom]
 path = "hatch_build.py"
 
-# Vendor the managed skills into the wheel as package data. The store lives at the
-# repo root as `.shipit-skills/` (dot-prefixed and dedicated so shipit's OWN skill
-# set never collides with the public `skills/` convention a repo uses to publish
-# its own skills, #921), so it is force-included rather than re-homed under src/.
-# It is OUTSIDE src/shipit, so this does not collide with the packages= bundling
-# above (no double-add). The wheel dest stays `shipit/data/skills` so
-# `skills_root()`'s bundled lookup is unchanged.
+# The managed skill store needs NO force-include (#1115): it lives at
+# `src/shipit/data/skills/`, so `packages = ["src/shipit"]` above already bundles
+# it as ordinary package data and `skills_root()` reads it through the SAME
+# `shipit.data` resources lookup in a wheel and in a dev checkout. It used to sit
+# at the repo root as `.shipit-skills/` and be force-included here; that residual
+# repo-root path is now retired fleet-wide (retired-files.toml), which is only
+# safe once the source no longer lives there — a content-hash retirement is
+# global, so a store still at `.shipit-skills/` would delete itself on shipit's
+# own self-install.
 #
-# The generated subagent agent-defs are force-included the same way: they live at
+# The generated subagent agent-defs ARE force-included: they live at
 # `.claude/agents/` (where Claude Code reads them for shipit-self) and are vendored
 # into the wheel so `shipit install` can lay them into a consumer's `.claude/agents/`.
 # One source (the regen-roles generator), two readers (shipit-self at the repo
@@ -75,7 +80,6 @@ path = "hatch_build.py"
 # Only the `agents/` subtree is vendored, NOT the whole `.agents/` dir (which also
 # holds `.agents/skills/`, a separate concern).
 [tool.hatch.build.targets.wheel.force-include]
-".shipit-skills" = "shipit/data/skills"
 ".claude/agents" = "shipit/data/agents"
 ".agents/agents" = "shipit/data/agy-agents"
 

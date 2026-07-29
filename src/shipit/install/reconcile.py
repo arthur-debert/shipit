@@ -1708,7 +1708,7 @@ def plan_claude_skills_link(root: Path) -> ClaudeSkillsLink:
 
     shipit never deletes a consumer's ``.claude/skills``; there is no
     content-hash retirement of ``.claude/skills/*`` (which would also delete the
-    byte-identical ``.agents/skills`` copy and the ``.shipit-skills`` source).
+    byte-identical ``.agents/skills`` copy).
 
     A symlinked PARENT component (a consumer who symlinks ``.claude`` itself)
     BLOCKS before any ``is_dir``/``rglob`` read would follow it outside the repo —

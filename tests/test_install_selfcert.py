@@ -413,9 +413,10 @@ def test_managed_skill_files_are_in_the_delivered_lint_set(staged):
     paths = selfcert.delivered_lint_paths(_skill_only_plan(staged))
     assert ".agents/skills/grill-me-with-docs/SKILL.md" in paths
     assert ".agents/skills/to-spec/SKILL.md" in paths
-    # The delivered ignore exempts NEITHER the source-only store NOR the real
-    # `.agents/skills` content dir — the skill markdown is linted in every
-    # consumer. This non-skip guard is the backstop for the skip-if-no-binary
+    # The delivered ignore exempts the real `.agents/skills` content dir NOT AT
+    # ALL — the skill markdown is linted in every consumer. Nor does it exempt the
+    # retired `.shipit-skills/` path a pre-#1088 consumer still carries (#1115).
+    # This non-skip guard is the backstop for the skip-if-no-binary
     # real markdownlint tests below. `.claude/skills` needs NO exemption and gets
     # none: `shipit lint` discovers files via `git ls-files` (lint.py), which
     # yields the whole-dir symlink as ONE non-`.md` entry, so the files under it

@@ -29,8 +29,27 @@ injects the user's token and is awkward to coerce into bearer-JWT auth — so th
 two calls go through stdlib :mod:`urllib.request` here (the ``_api_get`` /
 ``_api_post`` mock seams). Only the final review POST reuses the `gh` boundary
 (with the installation token injected as ``GH_TOKEN``). PyJWT (with its crypto
-backend) does the RS256 signing and is imported LAZILY — it is an OPTIONAL
-dependency (the ``review`` extra), not a hard runtime requirement.
+backend) does the RS256 signing and is a BASE dependency, imported at module top
+like any other (#969): App auth is the PR engine's local-reviewer path, not an
+edge tool, so it must work from ANY shipit install — including the pinned build a
+consumer repo runs, which carries no extras and has no shipit-local pixi env to
+re-run inside.
+
+**An error message never quotes a credential-bearing body.** The access-tokens
+response IS a live ``ghs_…``, and the messages raised here are printed by
+``verify-apps`` AND logged with ``exc_info=True`` — so when THAT endpoint answers
+unusably (undecodable bytes or truncated JSON beside an intact token), the failure
+reports the body's SIZE and shape, never its text (:func:`_body_detail`,
+:func:`_shape`). Bodies that cannot carry a credential — the installation-metadata
+GET, and any ERROR body, whose request minted nothing — are still quoted, capped
+to one line, because seeing what answered is the whole diagnosis there.
+
+**Three failure kinds, never conflated** (#969). Auth can fail because THIS
+environment cannot produce credentials (:data:`UNCONFIGURED`), because the App is
+genuinely absent from the target's owner (:data:`NOT_INSTALLED`), or because the
+probe itself failed and nothing is known (:data:`API_ERROR`).
+:class:`ReviewAuthError` carries which, so a caller like ``verify-apps`` reports
+the operator's real situation instead of collapsing all three into "not live".
 """
 
 from __future__ import annotations
@@ -39,6 +58,8 @@ import json
 import time
 import urllib.error
 import urllib.request
+
+import jwt
 
 from .. import secretsrc
 from ..agent import backend as _agent_backend
@@ -58,12 +79,39 @@ _JWT_IAT_SKEW = 60
 _JWT_TTL = 540
 
 
-class ReviewAuthError(Exception):
-    """App-installation auth failed (missing PyJWT, app not installed, API error,
-    or a Doppler-sourcing failure).
+#: The three kinds of App-auth failure — the DIAGNOSIS, not the prose (#969).
+#: ``UNCONFIGURED``: this environment cannot produce App credentials at all (they
+#: could not be sourced from Doppler, the backend has no App, or the PEM would not
+#: sign). Says NOTHING about the target repo. ``NOT_INSTALLED``: credentials work
+#: and GitHub answered — the App is genuinely absent from the repo's owner (404).
+#: ``API_ERROR``: the probe itself failed (HTTP error, timeout, unparseable
+#: answer), so the App's state is UNKNOWN.
+UNCONFIGURED = "unconfigured"
+NOT_INSTALLED = "not-installed"
+API_ERROR = "api-error"
 
-    Carries an actionable message — the caller prints it and exits nonzero.
+
+class ReviewAuthError(Exception):
+    """App-installation auth failed, carrying WHICH kind of failure it was.
+
+    ``kind`` is one of :data:`UNCONFIGURED`, :data:`NOT_INSTALLED`, or
+    :data:`API_ERROR`. It is a REQUIRED keyword: the three read alike in a message
+    but mean different things to the operator ("configure Doppler here" vs
+    "install the App on that owner" vs "GitHub is unreachable"), and a default
+    would let a new raise site silently inherit someone else's diagnosis — exactly
+    the collapse #969 reports.
+
+    The message is actionable — the caller prints it and exits nonzero.
     """
+
+    def __init__(self, message: str, *, kind: str, status: int | None = None) -> None:
+        super().__init__(message)
+        #: One of :data:`UNCONFIGURED` / :data:`NOT_INSTALLED` / :data:`API_ERROR`.
+        self.kind = kind
+        #: The HTTP status GitHub returned, when the failure came from a response;
+        #: ``None`` otherwise. Carried so callers branch on the CODE rather than
+        #: grepping ``"HTTP 404"`` out of the rendered message.
+        self.status = status
 
 
 def _doppler_keys(backend: Backend) -> dict[str, str]:
@@ -78,25 +126,33 @@ def _doppler_keys(backend: Backend) -> dict[str, str]:
         )
         raise ReviewAuthError(
             f"No GitHub App credentials are configured for backend {backend.name!r}. "
-            f"Known local-review agents: {known}."
+            f"Known local-review agents: {known}.",
+            kind=UNCONFIGURED,
         )
     return {"pem": backend.doppler_pem_key, "app_id": backend.doppler_app_id_key}
 
 
 def _doppler_get(key: str, *, what: str, agent: str) -> str:
     """Source one Doppler secret via :mod:`shipit.secretsrc`, mapping any failure
-    (doppler missing, key absent) to a clean :class:`ReviewAuthError`."""
+    (doppler missing, key absent) to an :data:`UNCONFIGURED` :class:`ReviewAuthError`.
+
+    Both shapes are a LOCAL setup gap — no `doppler` on PATH, no login, no such key
+    — and say nothing about whether the App is installed anywhere, so both carry
+    ``kind=UNCONFIGURED``.
+    """
     try:
         value = secretsrc.doppler_get(key)
     except secretsrc.SecretSourceError as exc:
         raise ReviewAuthError(
             f"Could not source the {what} for the {agent!r} review app from "
-            f"Doppler (key {key!r}): {exc}"
+            f"Doppler (key {key!r}): {exc}",
+            kind=UNCONFIGURED,
         ) from exc
     if not value:
         raise ReviewAuthError(
             f"Doppler returned an empty {what} for the {agent!r} review app "
-            f"(key {key!r})."
+            f"(key {key!r}).",
+            kind=UNCONFIGURED,
         )
     return value
 
@@ -108,21 +164,9 @@ def make_app_jwt(backend: Backend) -> str:
     Sources the backend's app id + private key (PEM) from Doppler (under the key
     names the identity registry defines) via :mod:`shipit.secretsrc` and signs the
     JWT FROM THE IN-MEMORY PEM STRING with PyJWT — the PEM never touches disk.
-    PyJWT (and its crypto backend) is imported lazily; if it is missing, raises
-    :class:`ReviewAuthError` with the install hint.
+    Every failure here is :data:`UNCONFIGURED`: nothing has been asked of GitHub
+    yet, so none of it can speak to whether the App is installed.
     """
-    try:
-        import jwt  # noqa: PLC0415 — lazy: optional `review` extra
-    except ImportError as exc:  # pragma: no cover - exercised only when extra absent
-        raise ReviewAuthError(
-            "Posting a review as a GitHub App needs PyJWT (with its crypto "
-            "backend), which this environment lacks. In a pixi checkout the "
-            "`review` env carries it — re-run the same command there, e.g. "
-            "`pixi run -e review shipit pr next`. Or install it directly: "
-            'pip install "pyjwt[crypto]" (or shipit with the `review` extra: '
-            "pip install 'shipit[review]')."
-        ) from exc
-
     agent = backend.funnel_agent or backend.name
     keys = _doppler_keys(backend)
     app_id = _doppler_get(keys["app_id"], what="app id", agent=agent)
@@ -140,17 +184,91 @@ def make_app_jwt(backend: Backend) -> str:
         return jwt.encode(payload, private_key, algorithm="RS256")
     except Exception as exc:  # noqa: BLE001 - surface any signing failure uniformly
         raise ReviewAuthError(
-            f"Failed to sign the app JWT for {agent!r}: {exc}. If this mentions a "
-            'missing crypto backend, install: pip install "pyjwt[crypto]"'
+            f"Failed to sign the app JWT for {agent!r}: {exc}. The private key "
+            f"Doppler returned is not a usable RSA PEM.",
+            kind=UNCONFIGURED,
         ) from exc
 
 
-def _api_request(path: str, jwt_token: str, *, method: str) -> object:
+def _excerpt(body: str, limit: int = 200) -> str:
+    """A single-line, length-capped snippet of a response body, for an error message.
+
+    Response bodies are arbitrary remote text — an HTML error page or a proxy
+    dump can run to kilobytes of newlines. The message this feeds is printed to a
+    console AND logged, so it is collapsed to one line and truncated.
+
+    Capping is all this does; it is NOT a redaction. Whether a body may be quoted
+    at all is decided before this is reached (:func:`_body_detail`) — never pass
+    it a body that can contain a credential.
+    """
+    flat = " ".join(body.split())
+    return flat if len(flat) <= limit else f"{flat[:limit]}…"
+
+
+def _body_detail(payload: bytes, *, credential_body: bool) -> str:
+    """What an error message is ALLOWED to say about a 2xx body.
+
+    A success body from a credential-bearing endpoint is described by SIZE ONLY,
+    never quoted. ``POST /app/installations/{id}/access_tokens`` answers with a
+    live ``ghs_…``, and invalid bytes ELSEWHERE in that body
+    (``{"token":"ghs_usable","extra":"\\xff"}``) make the disclosure reachable, not
+    hypothetical: the excerpt would carry a usable credential into a
+    :class:`ReviewAuthError` that ``verify_app`` logs with ``exc_info=True`` and
+    that other callers interpolate into printed reports.
+
+    Any OTHER endpoint's unusable body IS quoted (decoded lossily — its text is
+    only ever a message — then flattened and capped by :func:`_excerpt`): seeing
+    that an intercepting proxy answered 200 with an HTML error page is the whole
+    diagnosis there, and no credential can be in it.
+    """
+    if credential_body:
+        return f"{len(payload)} bytes, not quoted (this body carries a credential)"
+    return _excerpt(payload.decode("utf-8", "replace"))
+
+
+def _shape(value: object) -> str:
+    """Describe a JSON value with NO content — its type, plus empty-vs-not for a
+    string.
+
+    For messages about the access-tokens response, which may not quote what it
+    got: ``a dict`` / ``a list`` / ``an empty string`` says enough to diagnose a
+    malformed answer, while ``{'token': ['ghs_usable']}`` would put a credential
+    into a printed report and a log record.
+    """
+    if isinstance(value, str):
+        return "a string" if value else "an empty string"
+    if value is None:
+        return "nothing"
+    return f"a {type(value).__name__}"
+
+
+def _api_request(
+    path: str, jwt_token: str, *, method: str, credential_body: bool
+) -> object:
     """Bearer-JWT call to the GitHub REST API via stdlib urllib → parsed JSON.
 
     The shared core of :func:`_api_get` / :func:`_api_post` (the mock seams).
     Sends ``Authorization: Bearer <jwt>`` plus the versioned Accept headers, and
-    raises :class:`ReviewAuthError` on any non-2xx, including the response body.
+    raises an :data:`API_ERROR` :class:`ReviewAuthError` on any non-2xx (carrying
+    the HTTP status and the response body), timeout, transport failure, OR a 2xx
+    whose body will not decode STRICTLY as UTF-8 JSON. At this layer nothing is
+    known about the App itself — a caller that CAN read a status as an App verdict
+    (``installation_id`` reading 404) re-raises with its own kind.
+
+    ``credential_body`` says whether THIS endpoint's success body can contain a
+    credential, and so whether an error message may quote it (see
+    :func:`_body_detail`). It is a REQUIRED keyword, for the same reason
+    :class:`ReviewAuthError`'s ``kind`` is: a new call site must state the answer
+    rather than inherit a default that silently fails open on the next
+    credential-bearing endpoint. An ERROR body is a separate case and is always
+    quoted — that request FAILED, so no token was issued, and the body is the only
+    clue to why.
+
+    EVERY exit is either a parsed body or a :class:`ReviewAuthError`: a caller
+    like ``verify-apps`` catches exactly that type to reach its UNVERIFIED
+    outcome, so a raw ``JSONDecodeError``/``UnicodeDecodeError`` leaking from a
+    garbled-but-successful answer would surface as a traceback instead of the
+    documented "nothing could be determined" report (#969).
     """
     url = f"{_API_BASE}{path}"
     req = urllib.request.Request(url, method=method)  # noqa: S310 - fixed https host
@@ -166,62 +284,141 @@ def _api_request(path: str, jwt_token: str, *, method: str) -> object:
         with urllib.request.urlopen(  # noqa: S310 - fixed https host
             req, timeout=_HTTP_TIMEOUT
         ) as resp:
-            raw = resp.read().decode("utf-8")
+            payload = resp.read()
     except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", "replace")
+        # An ERROR body is always quotable — the request failed, so GitHub issued
+        # no token — but it is still arbitrary remote text (an HTML incident page
+        # runs to kilobytes), so it goes through the same one-line cap.
+        body = _excerpt(exc.read().decode("utf-8", "replace"))
         raise ReviewAuthError(
-            f"GitHub API {method} {path} failed (HTTP {exc.code}): {body.strip()}"
+            f"GitHub API {method} {path} failed (HTTP {exc.code}): {body}",
+            kind=API_ERROR,
+            status=exc.code,
         ) from exc
     except TimeoutError as exc:
         # socket.timeout is an alias of TimeoutError since Py3.10, so this single
         # clause covers both the direct-timeout and the socket-timeout shapes.
         raise ReviewAuthError(
-            f"GitHub API {method} {path} timed out after {_HTTP_TIMEOUT}s"
+            f"GitHub API {method} {path} timed out after {_HTTP_TIMEOUT}s",
+            kind=API_ERROR,
         ) from exc
     except urllib.error.URLError as exc:
         # A urllib timeout surfaces as URLError wrapping a socket.timeout — treat
         # it the same as the direct TimeoutError case above.
         if isinstance(exc.reason, TimeoutError):
             raise ReviewAuthError(
-                f"GitHub API {method} {path} timed out after {_HTTP_TIMEOUT}s"
+                f"GitHub API {method} {path} timed out after {_HTTP_TIMEOUT}s",
+                kind=API_ERROR,
             ) from exc
-        raise ReviewAuthError(f"GitHub API {method} {path} failed: {exc}") from exc
-    return json.loads(raw) if raw.strip() else None
+        raise ReviewAuthError(
+            f"GitHub API {method} {path} failed: {exc}", kind=API_ERROR
+        ) from exc
+    try:
+        raw = payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        # STRICT on the success path, on purpose. `errors="replace"` (what the
+        # error-body read above does) would not fail here — it would substitute
+        # U+FFFD and hand back a body that still parses: a token response with one
+        # garbled byte INSIDE the token string decodes to valid JSON, and a
+        # corrupted `ghs_…` would then be minted, used, and reported LIVE. A body
+        # that is not UTF-8 is an unusable ANSWER like any other, so it takes the
+        # same API_ERROR exit. What the MESSAGE may say about it is
+        # `_body_detail`'s call: the invalid bytes can sit anywhere, including
+        # beside an intact token, so a credential-bearing body is sized, not quoted.
+        raise ReviewAuthError(
+            f"GitHub API {method} {path} returned a body that is not valid UTF-8 "
+            f"({exc}): {_body_detail(payload, credential_body=credential_body)}",
+            kind=API_ERROR,
+        ) from exc
+    if not raw.strip():
+        return None
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        # A 2xx that is not JSON is the SAME situation as a transport failure —
+        # GitHub answered, but the answer is unusable, so the App's state stays
+        # UNKNOWN. Normalising it here is what keeps the "every exit is a parsed
+        # body or a ReviewAuthError" contract true for `verify-apps` (#969).
+        # Same disclosure rule as the decode failure above: a TRUNCATED token
+        # response is unparseable JSON with an intact `ghs_…` still in it, so the
+        # credential-bearing endpoint's body is sized rather than quoted.
+        raise ReviewAuthError(
+            f"GitHub API {method} {path} returned an unparseable body "
+            f"({exc}): {_body_detail(payload, credential_body=credential_body)}",
+            kind=API_ERROR,
+        ) from exc
 
 
 def _api_get(path: str, jwt_token: str) -> object:
-    """``GET <path>`` with a bearer JWT → parsed JSON. The mock seam for step 2."""
-    return _api_request(path, jwt_token, method="GET")
+    """``GET <path>`` with a bearer JWT → parsed JSON. The mock seam for step 2.
+
+    The one GET this makes is ``/repos/{owner}/{repo}/installation`` — installation
+    METADATA, no credential — so an unusable body may be quoted in the error.
+    """
+    return _api_request(path, jwt_token, method="GET", credential_body=False)
 
 
 def _api_post(path: str, jwt_token: str) -> object:
-    """``POST <path>`` with a bearer JWT → parsed JSON. The mock seam for step 3."""
-    return _api_request(path, jwt_token, method="POST")
+    """``POST <path>`` with a bearer JWT → parsed JSON. The mock seam for step 3.
+
+    The one POST this makes is ``/app/installations/{id}/access_tokens``, whose
+    success body IS the ``ghs_…`` credential — so an unusable body is reported by
+    size and never quoted (:func:`_body_detail`).
+    """
+    return _api_request(path, jwt_token, method="POST", credential_body=True)
 
 
 def installation_id(backend: Backend, repo: str, *, jwt: str | None = None) -> int:
     """The app installation id for ``backend``'s review App on ``repo``'s owner.
 
     ``GET /repos/{owner}/{repo}/installation`` with a bearer JWT (minted here if
-    ``jwt`` isn't supplied) → ``id``. Raises :class:`ReviewAuthError` with an
-    actionable message if the app isn't installed on the repo's owner (404).
+    ``jwt`` isn't supplied) → ``id``.
+
+    This is the ONE layer that can turn an HTTP status into a verdict about the
+    App: a 404 here means the App is genuinely not installed on the repo's owner,
+    so it re-raises as :data:`NOT_INSTALLED` (read off the response's STATUS, not
+    by grepping the message text). Every other failure keeps the kind it arrived
+    with — :data:`UNCONFIGURED` from minting the JWT, :data:`API_ERROR` from the
+    call itself. A 2xx whose body is missing ``id``, or whose ``id`` is anything
+    other than a positive JSON integer (a string, a float, a bool), is
+    :data:`API_ERROR` too: an answer arrived, but it establishes nothing.
     """
     agent = backend.funnel_agent or backend.name
     token = jwt if jwt is not None else make_app_jwt(backend)
     try:
         resp = _api_get(f"/repos/{repo}/installation", token)
     except ReviewAuthError as exc:
-        if "HTTP 404" in str(exc):
+        if exc.status == 404:
             raise ReviewAuthError(
                 f"The {agent!r} review app is not installed on {repo}'s owner. "
-                f"Install the GitHub App on the repo's owner and retry."
+                f"Install the GitHub App on the repo's owner and retry.",
+                kind=NOT_INSTALLED,
+                status=404,
             ) from exc
         raise
     if not isinstance(resp, dict) or "id" not in resp:
+        # Quotable — installation METADATA carries no credential — but still
+        # arbitrary remote text, so it takes the same one-line cap as a body.
         raise ReviewAuthError(
-            f"Unexpected installation response for {agent!r} on {repo}: {resp!r}"
+            f"Unexpected installation response for {agent!r} on {repo}: "
+            f"{_excerpt(repr(resp))}",
+            kind=API_ERROR,
         )
-    return int(resp["id"])
+    inst_id = resp["id"]
+    # Validate the SHAPE; never coerce. `int()` was a broader gate than the check
+    # it stood for: it turns `True` into 1 and `42.9` into 42, so a malformed
+    # answer would silently address the access-token request to a DIFFERENT
+    # installation instead of being reported as unusable. GitHub's `id` is a JSON
+    # integer, so accept exactly that — `bool` is an `int` subclass in Python, so
+    # it is excluded explicitly. Anything else is an unusable ANSWER and must
+    # reach the caller as API_ERROR, not as a raw ValueError (#969).
+    if isinstance(inst_id, bool) or not isinstance(inst_id, int) or inst_id <= 0:
+        raise ReviewAuthError(
+            f"Installation response for {agent!r} on {repo} has an unusable 'id' "
+            f"(expected a positive integer): {_excerpt(repr(inst_id))}",
+            kind=API_ERROR,
+        )
+    return inst_id
 
 
 def installation_auth(backend: Backend, repo: str) -> dict:
@@ -235,16 +432,38 @@ def installation_auth(backend: Backend, repo: str) -> dict:
     token (e.g. ``{"checks": "write", "pull_requests": "write", …}``), which the
     OBS02 funnel verification harness asserts carries ``checks: write`` (the
     re-grant landed) before it drives a check-run create. Nothing is cached to
-    disk. Raises :class:`ReviewAuthError` on any failure.
+    disk. Raises :class:`ReviewAuthError` on any failure, including a 2xx whose
+    ``token`` is absent or is not a non-empty string — so the returned mapping is
+    GUARANTEED to carry a usable ``token``. Those failures describe the response's
+    SHAPE and never quote it: this endpoint's body is the credential itself, and
+    the message ends up in a printed report and a log record.
     """
     jwt_token = make_app_jwt(backend)
     inst_id = installation_id(backend, repo, jwt=jwt_token)
     resp = _api_post(f"/app/installations/{inst_id}/access_tokens", jwt_token)
-    if not isinstance(resp, dict) or not resp.get("token"):
-        agent = backend.funnel_agent or backend.name
+    agent = backend.funnel_agent or backend.name
+    # This is the credential endpoint's body, so the failures below state its
+    # SHAPE and never repr it — the same rule `_body_detail` applies one layer
+    # down. A dump was a reachable disclosure, not a theoretical one: the very
+    # answer that fails this guard can carry a usable `ghs_…` somewhere other than
+    # a plain `token` string (`{"token": ["ghs_usable"]}`), and this message is
+    # printed by `verify-apps` and logged with `exc_info=True`.
+    if not isinstance(resp, dict):
+        raise ReviewAuthError(
+            f"Minting an installation token for {agent!r} on {repo} answered with "
+            f"{_shape(resp)}, not a JSON object carrying a 'token'.",
+            kind=API_ERROR,
+        )
+    # Same shape-not-coercion rule as the installation `id` above: a truthy check
+    # plus `str()` downstream would render a number or a nested object into a
+    # plausible-looking credential and hand it to `gh` as GH_TOKEN. The token is a
+    # non-empty JSON string or the answer is unusable.
+    token = resp.get("token")
+    if not isinstance(token, str) or not token:
         raise ReviewAuthError(
             f"Minting an installation token for {agent!r} on {repo} returned no "
-            f"'token': {resp!r}"
+            f"usable 'token': expected a non-empty string, got {_shape(token)}.",
+            kind=API_ERROR,
         )
     return resp
 
@@ -254,8 +473,9 @@ def installation_token(backend: Backend, repo: str) -> str:
 
     Orchestrates the three hops: JWT → installation id → ``POST
     /app/installations/{id}/access_tokens`` → the ``ghs_…`` token (the ``token``
-    field of :func:`installation_auth`'s response). Nothing is cached to disk; the
-    token is returned for the caller to inject as ``gh.rest(..., token=...)``.
-    Raises :class:`ReviewAuthError` on any failure.
+    field of :func:`installation_auth`'s response, which has already established
+    that it is a non-empty string — hence no coercion here). Nothing is cached to
+    disk; the token is returned for the caller to inject as
+    ``gh.rest(..., token=...)``. Raises :class:`ReviewAuthError` on any failure.
     """
-    return str(installation_auth(backend, repo)["token"])
+    return installation_auth(backend, repo)["token"]

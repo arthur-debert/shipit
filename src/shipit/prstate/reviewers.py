@@ -631,10 +631,12 @@ class _LocalReviewAdapter(ReviewerAdapter):
     `shipit.review` (PRF01-WS07): this adapter's `request` LAZILY imports
     `shipit.review.service`. Since OBS03 the run is ASYNC — `request` detaches the
     agent run and returns IN-FLIGHT rather than blocking for the length of a model
-    run (see `request` for the inverted contract). The import is lazy so the
-    optional `review` extra (pyjwt) is only pulled in when a local review is
-    actually requested. The DETECTION path is fully intact — `detect` reads an
-    existing local-agent review exactly as in release.
+    run (see `request` for the inverted contract). The import is lazy to keep the
+    review engine's import cost off the always-loaded detection path, NOT because
+    it might be absent: since #969 its App-auth dependency (pyjwt) is a base
+    dependency, so `shipit.review` imports wherever shipit runs. The DETECTION path
+    is fully intact — `detect` reads an existing local-agent review exactly as in
+    release.
 
     Detection is the shared rerun-aware base `detect`: review-once (rerun=False)
     counts a non-DISMISSED review by `matches` on any head as done; head-strict
@@ -693,10 +695,9 @@ class _LocalReviewAdapter(ReviewerAdapter):
         blocking model run inside `request`. There is still no `review_requested`
         edge, so a local reviewer is never edge-verified.
 
-        `shipit.review.service` is imported LAZILY here, so the optional `review`
-        extra (pyjwt) is only pulled in when a local review is actually requested —
-        the detection path and every non-local reviewer stay free of that
-        dependency. The agent's per-reviewer `model` / `instructions` / `timeout`
+        `shipit.review.service` is imported LAZILY here, so the review engine's
+        import cost stays off the detection path and off every non-local reviewer.
+        The agent's per-reviewer `model` / `instructions` / `timeout`
         / `dimensions` (the `[reviewers]` options) are read OFF this reviewer's
         Roster `entry` (CLI01-WS04), and the table-level calibrator + nit cap
         OFF `policy` (RVW02-WS04) — values the caller loaded once at the verb
@@ -707,24 +708,17 @@ class _LocalReviewAdapter(ReviewerAdapter):
         a spawn failure — is normalized to `PrStateError`, the one error type the
         `pr review request` CLI renders as a clean message + exit 1, so a request
         never crashes with a raw traceback. An EXPECTED, operator-actionable auth
-        failure (`ReviewAuthError` — e.g. the optional `review` extra / pyjwt is
-        absent) already carries its own install hint, so it is surfaced as that
-        clean message WITHOUT the ERROR-level traceback spray reserved for a
-        genuinely-unexpected crash. (A failure INSIDE the detached child resolves
-        to a visible failed/timed-out check run on the PR, not to this return —
-        that is the whole point of detaching.)
+        failure (`ReviewAuthError` — e.g. this machine holds no App credentials)
+        already carries its own remedy, so it is surfaced as that clean message
+        WITHOUT the ERROR-level traceback spray reserved for a genuinely-unexpected
+        crash. (A failure INSIDE the detached child resolves to a visible
+        failed/timed-out check run on the PR, not to this return — that is the whole
+        point of detaching.)
         """
-        # Lazy: keep the optional `review`/pyjwt import off the detection path
-        # and out of every non-local reviewer. `review` never imports `prstate`,
-        # so this one-way edge has no cycle.
-        try:
-            from ..review import service
-        except ImportError as exc:  # pragma: no cover - only when the extra is absent
-            raise PrStateError(
-                f"{self.funnel_reviewer_name()} review needs the optional `review` "
-                f"extra "
-                f"(pyjwt): install shipit with `pip install 'shipit[review]'`. ({exc})"
-            ) from exc
+        # Lazy: keep the review engine's import cost off the detection path and out
+        # of every non-local reviewer. `review` never imports `prstate`, so this
+        # one-way edge has no cycle.
+        from ..review import service
 
         entry = entry if entry is not None else RosterEntry(name=self.name)
         run_kwargs: dict[str, object] = {"as_app": True}
@@ -748,22 +742,22 @@ class _LocalReviewAdapter(ReviewerAdapter):
             if policy.nit_cap is not None:
                 run_kwargs["nit_cap"] = policy.nit_cap
 
-        # Lazy, same reason as `service` above: `ReviewAuthError` lives in the
-        # optional `review` package, so name it only here — where that package has
-        # just imported cleanly — not at module top on the always-loaded path.
+        # Lazy, same reason as `service` above: keep the review package off the
+        # always-loaded path and name its error only here, where that package has
+        # just imported cleanly.
         from ..review.ghauth import ReviewAuthError
 
         try:
             started = service.start_detached_review(self.backend, pr, **run_kwargs)
         except ReviewAuthError as exc:
-            # An EXPECTED, operator-actionable auth failure (e.g. the `review`
-            # extra / pyjwt is absent) — it already carries a clean install hint.
-            # Surface that hint as the CLI-clean PrStateError; NO traceback spray,
-            # so the operator reads the fix, not a raw `ModuleNotFoundError` dump.
+            # An EXPECTED, operator-actionable auth failure (e.g. this machine holds
+            # no App credentials) — it already carries a clean remedy. Surface that
+            # as the CLI-clean PrStateError; NO traceback spray, so the operator
+            # reads the fix, not a stack dump.
             # The LOG RECORD carries no exc_info and no exception detail — just a
             # DEBUG breadcrumb of the mechanic; this is the EXPECTED path, so the
             # record stays quiet. The RAISED PrStateError below deliberately
-            # interpolates `{exc}` — the exc's actionable install hint belongs in
+            # interpolates `{exc}` — the exc's actionable remedy belongs in
             # the message the operator reads, just not on the log record.
             logger.debug(
                 "reviewer %s: local review auth failed on pr#%s (expected, "
@@ -772,10 +766,10 @@ class _LocalReviewAdapter(ReviewerAdapter):
                 pr.number,
                 extra={"reviewer": self.display_name, "pr": pr.number},
             )
-            # `from None` (not `from exc`): the install hint already rides into the
+            # `from None` (not `from exc`): the remedy already rides into the
             # message via `{exc}`, so severing the chain loses nothing the operator
             # needs while making the no-traceback contract airtight — an uncaught or
-            # downstream-logged raise can never spray the `ModuleNotFoundError` cause.
+            # downstream-logged raise can never spray the underlying cause.
             raise PrStateError(
                 f"{self.funnel_reviewer_name()} review failed on #{pr.number}: {exc}"
             ) from None
