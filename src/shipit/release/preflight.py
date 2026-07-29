@@ -1,71 +1,7 @@
-"""The release preflight planner — pure core (TOL02-WS02, PRD stories 27-29).
+"""The release preflight planner: (artifact map, version, event) -> release plan.
 
-A pure function from (artifact map, resolved version, event) to the
-machine-readable release plan the composed workflow consumes as job outputs —
-the lane planner's release twin (:mod:`shipit.tools.lanes`). YAML never
-re-derives a decision (ADR-0040: the invariants live in the blocks, the chain
-carries zero logic); preflight decides once and everything downstream shares
-the answer — the legacy tauri-app ``should-sign`` lesson: one definition, no
-disagreeing checks. Preflight runs before any toolchain exists and before
-prepare writes history — cheapest checks first (ADR-0009): a missing token
-can never strand a half-released tag.
-
-The plan's five fields (story 27):
-
-- ``artifacts`` — the declared artifact names.
-- ``matrix`` — the OS×arch entries (one per build-bearing artifact ×
-  declared platform; an artifact declaring no platforms builds on the
-  ordinary linux lane): target triple, runner label, per-entry sign flag,
-  archive/binary extensions, packaging arch — the legacy ``setup-matrix``
-  vocabulary, driven by declarations instead of workflow inputs. Opting out
-  of a platform drops its entry, never leaves a dead job.
-- ``stages`` — the live stage subset of ``preflight → prepare → bundle →
-  assert-bundle → sign → publish``: bundle only when some
-  matrix entry actually bundles — a composition that APPLIES to a built
-  platform (a composition matching none of its artifact's platforms is a loud
-  refusal, not a silently dropped stage); assert-bundle only when a bundling
-  entry's composition carries a main binary to check
-  (:attr:`shipit.release.bundle.Composition.asserts_binary` — archive/deb/
-  mac-app, never a source composition like wheel or tarball #792); sign only
-  when declared signing meets a darwin entry (and ``--unsigned`` did not flip
-  it).
-- ``endpoints`` — the post-RC-guard endpoint set: a ``-release-rc`` version
-  plans GH-release-only with every external endpoint dropped from the plan,
-  not filtered later in YAML (story 33's guard consumed as plan shape;
-  enforcement stays central in the publish verb, WS05).
-- ``secrets`` — the required secret names for THIS plan, from the same
-  requirement registries gh-setup syncs (:mod:`shipit.release.secretreq`),
-  scoped to the plan's live endpoints and stages: no sign stage, no Apple
-  names (so an unsigned or non-darwin run checks only what it uses). Plus
-  ``secret_alternatives`` (#746): the plan's either-satisfies requirements —
-  with a live sign stage, the notary credentials (ASC API-key trio OR
-  Apple-ID trio; either complete env trio passes presence validation).
-
-``unsigned=True`` is the explicit break-glass (story 29, CONTEXT.md:
-visible, recorded, never ambient): it flips the plan to the unsigned path
-and is REFUSED (:class:`~shipit.release.ReleaseError`) when the signed plan
-would carry no sign stage — nothing to break-glass. The verb shell logs
-every use as a recorded ``release.unsigned`` event.
-
-Presence validation (story 28) is :func:`missing_secrets` over an injected
-environment mapping: the workflow's caller injects each GitHub secret as a
-same-named env var, so presence-at-preflight proves publish will not starve.
-The verb hard-fails on a non-empty result — declared signing with missing
-signing secrets can never silently ship unsigned. A required name whose EMPTY
-value is legitimately valid (:data:`shipit.release.secretreq.EMPTY_VALID_SECRETS`
-— today APPLE_CERTIFICATE_PASSWORD for a passwordless ``.p12``, #892) is exempt
-from the non-empty demand: preflight defers to the signer's own empty-accepting
-contract rather than refuse a repo the sign stage would sign.
-
-The ``@vN`` pin gate (#917) lives in the shell, not here: the verb enumerates
-the caller's reusable-workflow pins (:func:`shipit.checks.workflow_pin_refs`)
-and resolves each on its publisher (:func:`shipit.gh.workflow_ref_resolves`),
-but the REFUSAL TEXT is this module's pure :func:`missing_pin_refusal` — a
-missing ``@vN`` floating-major branch would otherwise die as a raw GitHub HTTP
-422 at dispatch, so preflight refuses first with the one-command bootstrap.
-
-Pure module: no I/O; the effectful shell is ``shipit release preflight``
-(:mod:`shipit.verbs.release`), rendering text or ``--json`` (ADR-0030).
+Preflight decides once and everything downstream shares the answer; the
+workflow chain re-derives nothing. Pure — no I/O.
 """
 
 from __future__ import annotations
@@ -77,7 +13,6 @@ from ..config import ENDPOINTS, PLATFORMS, Artifact
 from . import ReleaseError, bundle, secretreq
 from .version import ResolvedVersion
 
-#: The release pipeline's stage vocabulary, pipeline order (PRD story 19).
 STAGES: tuple[str, ...] = (
     "preflight",
     "prepare",
@@ -87,27 +22,14 @@ STAGES: tuple[str, ...] = (
     "publish",
 )
 
-#: The events preflight plans for — the composed workflow's dispatch run and
-#: the laptop cut (the PRD's release triggers; both plan identically today,
-#: recorded in the plan so routing and the flow log can tell them apart).
+#: Both plan identically; the plan records which, for routing and the log.
 EVENTS: tuple[str, ...] = ("dispatch", "local")
 
-#: The platform an artifact builds on when it declares none — the fleet's
-#: ordinary linux runner (the lane planner's default-runner twin): a
-#: python wheel or npm tarball builds once, anywhere.
 DEFAULT_PLATFORM: str = "linux-x86_64"
 
 
 @dataclass(frozen=True)
 class PlatformSpec:
-    """One platform's release-lane attributes — the legacy ``setup-matrix``
-    per-entry vocabulary, declared once here instead of transcribed per
-    workflow. ``target`` is the rust-style target triple (cross-compiling
-    toolchains consume it; single-artifact toolchains ignore it), ``runner``
-    the GitHub ``runs-on`` label, ``ext_archive``/``ext_bin`` the platform's
-    archive and binary suffixes, ``package_arch`` the packaging (deb/pkg)
-    arch word."""
-
     target: str
     runner: str
     ext_archive: str
@@ -115,10 +37,8 @@ class PlatformSpec:
     package_arch: str
 
 
-#: The closed platform-attribute table, keyed by exactly
-#: :data:`shipit.config.PLATFORMS` (drift-guarded by test). Darwin x86_64
-#: cross-compiles on the arm64 mac runner (rustup target, the legacy path);
-#: linux-arm64 gets GitHub's native arm runner.
+#: The closed attribute table, keyed by exactly :data:`shipit.config.PLATFORMS`.
+#: Darwin x86_64 cross-compiles on the arm64 mac runner.
 PLATFORM_MATRIX: dict[str, PlatformSpec] = {
     "darwin-arm64": PlatformSpec(
         target="aarch64-apple-darwin",
@@ -164,9 +84,7 @@ PLATFORM_MATRIX: dict[str, PlatformSpec] = {
     ),
 }
 
-# The declaration vocabulary (config) and the attribute table (here) are two
-# halves of one registry — import dies loudly if they ever drift. An explicit
-# raise, not `assert`: the guard must survive `python -O` (which strips asserts).
+# Two halves of one registry. An explicit raise, not `assert`, survives -O.
 if tuple(PLATFORM_MATRIX) != PLATFORMS:
     raise RuntimeError(
         f"PLATFORM_MATRIX keys {tuple(PLATFORM_MATRIX)} drifted from the closed "
@@ -177,23 +95,7 @@ if tuple(PLATFORM_MATRIX) != PLATFORMS:
 
 @dataclass(frozen=True)
 class MatrixEntry:
-    """One emitted OS×arch matrix entry: an artifact's build on one platform.
-
-    ``sign`` is THE per-entry signing decision (resolved once, referenced
-    everywhere downstream): the artifact declares signing, the platform is
-    darwin, and no ``--unsigned`` break-glass flipped the plan. ``bundle`` is
-    the parallel per-entry bundle decision — whether THIS entry's artifact
-    declares a composition THAT APPLIES TO THIS PLATFORM
-    (:meth:`shipit.release.bundle.Composition.applies`, the same predicate the
-    bundle verb skips on: a platform-specific composition — deb on linux,
-    mac-app on darwin — bundles only its matching legs). The ``bundle`` stage
-    is a plan-wide flag (live when ANY artifact bundles), but the fan includes
-    every build-bearing artifact whether or not it bundles, so the per-entry
-    flag is what gates the block work: wf-build bundles/uploads only ``bundle``
-    entries, and the unsigned assert projection (:func:`plan`'s consumers)
-    narrows to them — a build-only artifact (or a leg the composition does not
-    apply to) beside a bundled one would otherwise stage nothing yet trip
-    ``if-no-files-found: error`` and a phantom assert download."""
+    """One matrix entry: an artifact's build on one platform, with its per-entry flags."""
 
     artifact: str
     platform: str
@@ -206,7 +108,6 @@ class MatrixEntry:
     package_arch: str
 
     def as_matrix_entry(self) -> dict[str, str | bool]:
-        """The GitHub ``matrix.include`` entry — the JSON hand-off shape."""
         return {
             "artifact": self.artifact,
             "platform": self.platform,
@@ -222,14 +123,7 @@ class MatrixEntry:
 
 @dataclass(frozen=True)
 class ReleasePlan:
-    """The machine-readable release plan (story 27) — frozen, typed
-    (ADR-0030), consumed by the composed workflow as job outputs.
-
-    ``version``/``tag``/``prerelease``/``tag_only`` restate the resolver's
-    verdict the plan was shaped around (``tag_only`` IS the ``-release-rc``
-    live-fire cut whose endpoint set collapsed to GH-release-only);
-    ``unsigned`` marks the break-glass plan so the record travels with the
-    plan, not just the log."""
+    """The machine-readable release plan, consumed as workflow job outputs."""
 
     version: str
     tag: str
@@ -245,7 +139,6 @@ class ReleasePlan:
     secret_alternatives: tuple[secretreq.AlternativeSet, ...]
 
     def to_dict(self) -> dict:
-        """The ``--json`` projection — exactly the plan's declared fields."""
         return {
             "version": self.version,
             "tag": self.tag,
@@ -269,16 +162,7 @@ def plan(
     event: str = "dispatch",
     unsigned: bool = False,
 ) -> ReleasePlan:
-    """The release plan for ``artifacts`` at ``resolved`` under ``event``. Pure.
-
-    Refusals are :class:`~shipit.release.ReleaseError` (the shared CLI error
-    shell renders them, exit 1): a zero-endpoint artifact map (the legacy
-    python-pkg "phantom release" — nothing would publish), and
-    ``unsigned=True`` when the signed plan would carry no sign stage (nothing
-    to break-glass, story 29). An ``event`` outside :data:`EVENTS` is a
-    caller bug (``ValueError``): the verb's click boundary admits only the
-    closed choices.
-    """
+    """The release plan for ``artifacts`` at ``resolved`` under ``event``. Pure."""
     if event not in EVENTS:
         raise ValueError(f"unknown release event {event!r}; expected one of {EVENTS}")
     declared = {e for artifact in artifacts for e in artifact.endpoints}
@@ -299,18 +183,9 @@ def plan(
         )
     matrix = tuple(replace(e, sign=False) for e in signed) if unsigned else signed
 
-    # The bundle stage is live iff some MATRIX ENTRY actually bundles — the
-    # same platform-aware per-entry flag the fan gates on, never the
-    # artifact-level declaration: a platform-specific composition that matches
-    # only some legs still bundles, but the stage and the matrix must agree on
-    # WHICH, or the plan advertises a stage no entry produces.
+    # Live iff some MATRIX ENTRY bundles: the stage and the matrix must agree.
     bundling = {entry.artifact for entry in matrix if entry.bundle}
-    # A declared composition matching NONE of its artifact's build platforms
-    # produces no bundle anywhere — a config mistake (deb on a darwin-only
-    # artifact) refused loudly here, the way `sign = true` demands a darwin
-    # lane, rather than silently dropping the stage. (A bundle with no build at
-    # all is refused earlier, at config parse — shipit.config._parse_artifact —
-    # so every artifact reaching here has build targets.)
+    # A composition matching NONE of its platforms produces no bundle at all.
     for artifact in artifacts:
         if artifact.bundle is not None and artifact.name not in bundling:
             platforms = ", ".join(artifact.platforms) or DEFAULT_PLATFORM
@@ -322,12 +197,7 @@ def plan(
                 f"platform, or the bundle is never produced"
             )
 
-    # assert-bundle (the scar-#2 integrity guard) is live only when some
-    # bundling entry's composition carries a MAIN BINARY to check
-    # (:attr:`shipit.release.bundle.Composition.asserts_binary`): a source /
-    # package composition (wheel's sdist+wheel, tarball's generated C, #792)
-    # has no binary, and running the guard over its ``.tar.gz`` would hard-fail
-    # with "no main binary". So bundle can be live while assert-bundle is not.
+    # Over a source `.tar.gz` the guard would fail "no main binary".
     by_name = {artifact.name: artifact for artifact in artifacts}
     asserting = {
         name
@@ -346,11 +216,7 @@ def plan(
         live.add("sign")
     stages = tuple(stage for stage in STAGES if stage in live)
 
-    # Story 33 consumed as plan shape: a -release-rc cut publishes the GH
-    # release only; every external endpoint is absent from the plan. The
-    # canonical order is the closed registry's (gh-release first, brew — the
-    # derived endpoint — last: the publish stage's release-before-derived
-    # ordering).
+    # The RC guard as plan shape; the order is release-before-derived.
     endpoints = (
         ("gh-release",)
         if resolved.tag_only
@@ -359,9 +225,6 @@ def plan(
 
     sign_stage = "sign" in stages
     secrets = _plan_secrets(endpoints, sign=sign_stage)
-    # The plan's either-satisfies requirements (#746): with a live sign
-    # stage, the notary credentials — either complete trio passes presence
-    # validation; an unsigned or non-darwin plan carries none.
     secret_alternatives = (secretreq.NOTARY_SECRETS,) if sign_stage else ()
     return ReleasePlan(
         version=resolved.version,
@@ -382,33 +245,13 @@ def plan(
 def missing_secrets(
     release_plan: ReleasePlan, env: Mapping[str, str]
 ) -> tuple[str, ...]:
-    """The plan's required secret names absent (or empty) in ``env`` — story
-    28's hard-fail set, checked over exactly what the plan uses (a
-    non-signing plan never checks the Apple names).
-
-    A name in :data:`shipit.release.secretreq.EMPTY_VALID_SECRETS` is EXEMPT
-    from the non-empty demand (#892): its empty value is valid presence, so it
-    never counts as missing — the one authority for what "present" means per
-    name lives beside the requirement declaration, and preflight consumes it
-    rather than contradict the signer. Today that is
-    ``APPLE_CERTIFICATE_PASSWORD``: the signer treats a passwordless ``.p12``
-    (empty password) as legal PKCS#12, so refusing an empty value here would
-    strand a repo the sign stage would sign fine.
-
-    An alternative-set requirement (#746) is satisfied by ANY complete
-    alternative present in ``env``; when none is, the set contributes ONE
-    rendered diagnostic naming what is missing from every alternative (never
-    its names one by one). Pure; the shell injects the real environment."""
+    """The plan's required secret names absent or empty in ``env``."""
     missing = [
         name
         for name in release_plan.secrets
         if name not in secretreq.EMPTY_VALID_SECRETS and not env.get(name)
     ]
-    # Empty-valid names count as present for alternative-set satisfaction too:
-    # an empty/absent value IS valid presence per the one authority (#892), so a
-    # future AlternativeSet naming one must not fail on its emptiness. No live
-    # set names such a secret today, so this is defensive — but it keeps the
-    # empty-valid contract consistent across BOTH plain names and either-sets.
+    # Empty-valid names count as present for alternative sets too.
     present = {
         name for name, value in env.items() if value
     } | secretreq.EMPTY_VALID_SECRETS
@@ -421,17 +264,7 @@ def missing_secrets(
 
 
 def missing_pin_refusal(missing: Sequence[tuple[str, str]]) -> str:
-    """The refusal text for reusable-workflow ``@vN`` pins that do not resolve
-    on their publisher repo (#917). Pure.
-
-    Each ``(repo, ref)`` is a ``uses: <repo>/…@<ref>`` the release caller
-    dispatches. A ref resolving to no branch/tag/SHA makes GitHub reject the
-    WHOLE dispatch at its workflow-resolution step with an opaque HTTP 422 —
-    before any job (even preflight-in-CI) runs — which is exactly the dead-on-
-    arrival first cut this refusal replaces. It names the one-command bootstrap
-    per missing pin: push the floating v-major BRANCH at the stable commit
-    once, after which ``advance-major.yml`` force-moves it on every later
-    stable tag (ADR-0010), so the chicken-and-egg is paid exactly once."""
+    """The refusal text for reusable-workflow ``@vN`` pins that do not resolve."""
     lines = [
         "reusable-workflow pin(s) will not resolve on the publisher — GitHub "
         "would reject this dispatch with a raw HTTP 422 at its "
@@ -451,23 +284,14 @@ def missing_pin_refusal(missing: Sequence[tuple[str, str]]) -> str:
 
 
 def _matrix(artifacts: Sequence[Artifact]) -> tuple[MatrixEntry, ...]:
-    """The signed-path matrix: one entry per build-bearing artifact ×
-    declared platform (none declared → :data:`DEFAULT_PLATFORM`), in
-    declaration order. An artifact with no build targets emits no entries
-    (the tag is its release — nothing fans out)."""
     entries: list[MatrixEntry] = []
     for artifact in artifacts:
         if not artifact.build:
             continue
         for platform in artifact.platforms or (DEFAULT_PLATFORM,):
             spec = PLATFORM_MATRIX[platform]
-            # Per-entry bundle decision, in lockstep with the bundle verb's own
-            # skip (shipit.verbs.release: `comp.applies(target)`): a
-            # platform-specific composition (deb on linux, mac-app on darwin)
-            # bundles only its matching legs. A whole-artifact flag would mark
-            # every leg of a multi-platform artifact bundle-bearing, then the
-            # non-applicable legs run `release bundle`, compose NOTHING (the
-            # verb skips), and trip the upload's `if-no-files-found: error`.
+            # In lockstep with the bundle verb's own skip: a whole-artifact
+            # flag would mark legs that compose nothing.
             bundle_here = artifact.bundle is not None and bundle.composition(
                 artifact.bundle.composition
             ).applies(spec.target)
@@ -488,11 +312,6 @@ def _matrix(artifacts: Sequence[Artifact]) -> tuple[MatrixEntry, ...]:
 
 
 def _plan_secrets(endpoints: Sequence[str], *, sign: bool) -> tuple[str, ...]:
-    """The plan-scoped required names, from the SAME requirement registries
-    gh-setup syncs (:mod:`shipit.release.secretreq` — one definition of every
-    name): prepare's push, each live endpoint's declaration, and the sign-mac
-    CERT PAIR only when the sign stage is live — the notary credentials are
-    not names here but the plan's alternative-set requirement (#746)."""
     seen: dict[str, None] = {}
     for name in secretreq.PREPARE_SECRETS:
         seen[name] = None
