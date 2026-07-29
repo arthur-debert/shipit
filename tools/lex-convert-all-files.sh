@@ -1,11 +1,5 @@
 #!/usr/bin/env bash
-#
-# lex-convert-all-files.sh [--no-preamble]
-#
-# Finds every .lex file tracked by (or visible to) git from the repository
-# root, respecting .gitignore rules, and converts each to Markdown by calling
-# lex-convert-doc.sh. The --no-preamble flag, if given, is forwarded to each
-# conversion.
+# Convert every tracked or unignored Lex file to Markdown.
 
 set -euo pipefail
 
@@ -49,7 +43,6 @@ if [[ "$no_preamble" == true ]]; then
     forward_args+=(--no-preamble)
 fi
 
-# Tracked files plus untracked-but-not-ignored files, so .gitignore is honored.
 count=0
 while IFS= read -r -d '' lexfile; do
     "$convert_one" "${forward_args[@]}" "$lexfile"

@@ -1,9 +1,3 @@
-# COMPOSITION cell (ADR-0049/ADR-0051; format: lab/README.md "Cells").
-# One axis vs fanout-sevtiers: sweep mode informed instead of blind — the
-# composition of the two treatments that each showed an equal-budget edge
-# (informed sweeps: v35+v36 evidence; severity-tier scoping: the v36 sevtiers
-# run). Everything else is byte-identical to the fanout-sevtiers baseline;
-# PR review of this pair checks exactly that.
 
 schema = 1
 id = "sevtiers-informed"

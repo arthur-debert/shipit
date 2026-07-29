@@ -7,32 +7,6 @@ name = "shipit"
 version = "1.7.0"
 description = "Portfolio standardization tooling — provisioning, gh-setup, lint, PR flow, release — on pixi."
 requires-python = ">=3.13"
-# Runtime deps are pure-python wheel pulls (no native build step):
-#   click        — the CLI framework backing the `shipit <command>` tree.
-#   PyYAML       — parse a target repo's workflow files for required-check discovery.
-#   platformdirs — resolve the per-platform log directory (OBS01 logging); the
-#                  single source of truth for the log path (no platform branches).
-#   duckdb       — the SQL query engine behind `shipit eval report` (HAR02-WS04):
-#                  it reads the local JSONL eval store directly (read_json_auto) so
-#                  aggregation is plain SQL with no platform/infra (ADR-0013).
-#   structlog    — the JSONL log pipeline (LOG01 logging, ADR-0029): its
-#                  ProcessorFormatter attaches to the logsetup handlers so the
-#                  file sink emits JSONL while console stderr stays human;
-#                  zero transitive dependencies.
-#   jc           — ADR-0028's "converted" harvest rung for JSON-less tools:
-#                  turns classic CLI output (here: `ps` in session/liveness)
-#                  into structured dicts, replacing hand positional parsing.
-#                  Pure-python wheel; its transitive deps (ruamel.yaml,
-#                  xmltodict, Pygments) are pure-python wheels too.
-#   pyjwt[crypto]— sign the RS256 App JWT that authenticates a local-agent review
-#                  (codex/agy) AS its GitHub App, from the in-memory PEM
-#                  (`review/ghauth.py`). NOT optional (#969): the local-reviewer
-#                  path is the PR engine's, not an edge tool, and an extra is
-#                  precisely what a consumer repo's pinned install does not carry
-#                  — which left every consumer PR on a copilot-only review. Its
-#                  crypto backend (`cryptography`) is the one dep here with a
-#                  compiled wheel; prebuilt wheels cover every platform shipit
-#                  targets, so there is still no build step.
 dependencies = [
     "click>=8,<9",
     "PyYAML>=6",
@@ -52,52 +26,17 @@ dev = ["pytest>=8"]
 [tool.hatch.build.targets.wheel]
 packages = ["src/shipit"]
 
-# Embed the building checkout's git HEAD sha as shipit/data/build-sha
-# (hatch_build.py, ADR-0033): one of the three places shipit.buildid resolves
-# the build's own commit identity from when `shipit install` stamps the pin.
 [tool.hatch.build.targets.wheel.hooks.custom]
 path = "hatch_build.py"
 
-# The managed skill store needs NO force-include (#1115): it lives at
-# `src/shipit/data/skills/`, so `packages = ["src/shipit"]` above already bundles
-# it as ordinary package data and `skills_root()` reads it through the SAME
-# `shipit.data` resources lookup in a wheel and in a dev checkout. It used to sit
-# at the repo root as `.shipit-skills/` and be force-included here; that residual
-# repo-root path is now retired fleet-wide (retired-files.toml), which is only
-# safe once the source no longer lives there — a content-hash retirement is
-# global, so a store still at `.shipit-skills/` would delete itself on shipit's
-# own self-install.
-#
-# The generated subagent agent-defs ARE force-included: they live at
-# `.claude/agents/` (where Claude Code reads them for shipit-self) and are vendored
-# into the wheel so `shipit install` can lay them into a consumer's `.claude/agents/`.
-# One source (the regen-roles generator), two readers (shipit-self at the repo
-# root, the wheel for install) — never committed twice.
-#
-# The AGY native reviewer def (#989) is vendored the same way: it lives at
-# `.agents/agents/` (where `agy --agent reviewer` reads it for shipit-self) and is
-# force-included so `shipit install` can lay it into a consumer's `.agents/agents/`.
-# Only the `agents/` subtree is vendored, NOT the whole `.agents/` dir (which also
-# holds `.agents/skills/`, a separate concern).
 [tool.hatch.build.targets.wheel.force-include]
 ".claude/agents" = "shipit/data/agents"
 ".agents/agents" = "shipit/data/agy-agents"
 
-# shipit's ruff config was CARVED OUT of this file into a standalone `ruff.toml`
-# (LNT01-WS03 #516, ADR-0037 "the gate owns the config"): the ONE canonical body
-# ships as shipit data (`src/shipit/data/ruff.toml`, byte-identical to the repo
-# root `ruff.toml` — a drift test guards it) and the lint gate INJECTS it
-# (`ruff --config <that>`) so the verdict never depends on an ancestor/user config.
-# There is deliberately no `[tool.ruff]` table here anymore; `ruff.toml` is the
-# single source, seeded fleet-wide in WS06 (#519).
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
 markers = [
-    # Opts a test OUT of the autouse session-store home guard (tests/conftest.py), which
-    # otherwise points `sessionstore`'s default `~` at a tmp dir so no test can plant a
-    # symlink in the developer's real `~/.claude`. Only for tests that assert on the
-    # real default as a PATH VALUE and touch no filesystem.
     "real_session_store_home: read the real ~ as the session store default (ADR-0073)",
 ]

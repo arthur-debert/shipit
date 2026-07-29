@@ -1,8 +1,3 @@
-# Demo CONTROL cell (ADR-0049; format: lab/README.md "Cells").
-# The union baseline: the shipped dimension fan-out, mechanical dedup, blind
-# sweeps — the arm every treatment cell names as `baseline` and differs from
-# on exactly one declared axis. A control is its own baseline and declares
-# axis = "control".
 
 schema = 1
 id = "fanout-baseline"

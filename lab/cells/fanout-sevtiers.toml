@@ -1,9 +1,3 @@
-# TREATMENT cell (ADR-0051; format: lab/README.md "Cells").
-# One axis vs fanout-baseline: passes scoped by severity tier (the ADR-0051
-# experiment-only set) instead of concern dimension — the literature's
-# strongest configuration, measured against the shipped fan-out. Everything
-# else is byte-identical to the control; PR review of this pair checks
-# exactly that.
 
 schema = 1
 id = "fanout-sevtiers"
