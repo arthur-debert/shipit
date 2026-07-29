@@ -1,12 +1,4 @@
-"""instructions — load the review instructions text.
-
-The bundled default (`instructions.txt`, shipped inside the wheel as package
-data) is the generic single-repo review guidance. It is provider-neutral — it
-names no backend and no specific project.
-
-`load_instructions(path)` is the one entry point callers use: an explicit path
-reads that file; otherwise the bundled default is returned.
-"""
+"""Load the review instructions text — an explicit path, else the bundled default."""
 
 from __future__ import annotations
 
