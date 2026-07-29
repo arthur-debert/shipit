@@ -1,20 +1,4 @@
-"""`shipit gh-setup` — ADR-0030 glue + renderer over the gh-setup domain.
-
-The verb is click glue and a renderer (CLI02-WS04): the four setup passes
-live in :mod:`shipit.ghsetup` and return one typed
-:class:`~shipit.ghsetup.SetupReport`; this module resolves the ambient identity
-(the root context — never a per-run API shellout), threads it as values, and
-renders the report through the shared :func:`~._render.emit` seam (``--json``
-serializes ``SetupReport.to_dict()``). One deliberate out-of-band write stays
-outside that seam: the empty-checks warning goes to stderr (derived from the
-report, kept off the result stream so ``--json`` output stays clean). The exit
-code derives from the report — any failed secret makes the run rc 1 — with
-runtime failures mapped by the one :func:`~._errors.cli_errors` shell
-(``error: …`` + exit 1).
-
-Dry-run renders off the SAME report shape: the domain performs no mutations
-and the renderer shows exactly what would change, payload included.
-"""
+"""`shipit gh-setup` — click glue and renderer over the gh-setup domain."""
 
 from __future__ import annotations
 
@@ -36,9 +20,6 @@ from ._render import emit
 
 logger = logging.getLogger("shipit.ghsetup")
 
-#: The out-of-band stderr warning for an empty required-checks set — kept on
-#: stderr (not part of the rendered report) so piped/--json consumers still
-#: see it without it polluting the result stream.
 _NO_CHECKS_WARNING = (
     "  warning: no required checks found — the ruleset carries no "
     "required-status-checks gate (the API rejects an empty set). "
@@ -69,13 +50,7 @@ def cmd(
     dry_run: bool,
     as_json: bool,
 ) -> None:
-    """Make REPO conform to the portfolio standard (ruleset, labels, secrets)
-    and verify the Actions access level of a private workflow publisher
-    (warn-only — never set; #739).
-
-    REPO is owner/name; omitted, it defaults to the current checkout's repo.
-    Idempotent — safe to re-run for both install and update.
-    """
+    """Make REPO conform to the portfolio standard (ruleset, labels, secrets)."""
     checks_override = (
         [c.strip() for c in checks.split(",") if c.strip()]
         if checks is not None
@@ -103,35 +78,12 @@ def run(
     as_json: bool = False,
     prompt=None,
 ) -> int:
-    """Resolve identity → run the four passes → render. Returns an exit code.
-
-    ``repo`` arrives as a value: the shared REPO argument mints it at parse
-    (explicit slug) or defaults it to the ambient repo from the root context;
-    a direct caller (a test) injects it. Omitted outside a checkout, the ONE
-    uniform refusal (:class:`~._context.NoAmbientRepoError`) maps to
-    ``error: …`` + exit 1 via the shell.
-
-    0 when every pass applied (dry or real); 1 when any secret failed OR the
-    ruleset pass refused (auto-discovery could not confidently name a PR
-    workflow's checks — #1056) — the exit contract derives from the report. The
-    workflow-access pass is advisory (verify-and-warn, #739): a warn or unknown
-    outcome renders in the report but never changes the exit code. Local workflow
-    auto-discovery is enabled only when the target IS the ambient checkout's
-    repo; the config default is the ambient checkout's ``.shipit.toml`` either
-    way.
-    """
+    """Run the four gh-setup passes and render the report; returns an exit code."""
     ctx = current_root_context()
     target = repo if repo is not None else ctx.require_repo()
     wd = ctx.working_dir
-    # Auto-discovery reads the target's own workflow files, so it needs the
-    # target's local checkout. For a different remote target, pass --checks.
     local = wd.path if (wd is not None and target == wd.repo) else None
     cfg_path = config_path or str(Path(ctx.default_path()) / CONFIG_NAME)
-    # The run's milestones are dev-cycle events (#434, ADR-0032): a gh-setup
-    # that dies mid-pass leaves `ghsetup.failed` with the failing step in the
-    # flow record instead of nothing at all. A completed run with failed
-    # secrets is still `ghsetup.completed` — the report (and rc 1) carries
-    # that outcome; `failed` is reserved for a run that could not finish.
     events.emit(
         logger,
         "ghsetup.started",
@@ -160,8 +112,6 @@ def run(
         )
         raise
     if report.ruleset_refused:
-        # A refusal is not the empty-gate case — it has its own rendered message
-        # and a distinct exit code; the "pass --checks" nudge would double up.
         print(f"  error: {report.ruleset.refusal}", file=sys.stderr)
     elif not report.ruleset.checks:
         print(_NO_CHECKS_WARNING, file=sys.stderr)
@@ -181,27 +131,17 @@ def run(
 
 
 def format_setup(report: SetupReport) -> str:
-    """The pure text renderer — the frozen gh-setup output, off the typed report.
-
-    Dry-run and the real run render from the SAME shape; the only branches are
-    per-outcome ``action`` values (the dry ruleset shows the full would-be
-    payload; a dry secret shows its intended source).
-    """
+    """The frozen gh-setup output, rendered off the typed report."""
     lines = [f"gh-setup: {report.repo}{' (dry-run)' if report.dry_run else ''}"]
 
     rs = report.ruleset
     lines.append("ruleset:")
     if rs.action == "refused":
-        # Auto-discovery could not confidently name a PR workflow's checks, so
-        # the ruleset was NOT written (#1056) — show the actionable breakdown,
-        # then fall through to the remaining passes.
         lines.append("  REFUSED — ruleset NOT written (auto-discovery uncertain)")
         for detail in (rs.refusal or "").splitlines():
             lines.append(f"  {detail}")
     else:
         if rs.list_error is not None:
-            # Degraded path only: the listing failed and the pass assumed no
-            # existing ruleset — say so, or "existing id: none" reads as verified.
             lines.append(
                 "  warning: could not list rulesets — assumed none exists"
                 f" ({rs.list_error})"
@@ -250,8 +190,6 @@ def format_setup(report: SetupReport) -> str:
         else:
             lines.append(f"  secret {secret.name}")
     if report.secrets:
-        # The historical summary counts a dry secret as "set" — it is the
-        # number of secrets the run WOULD push.
         would_set = sum(1 for s in report.secrets if s.action in ("set", "dry-run"))
         summary = (
             f"  {would_set} secret(s) set, "

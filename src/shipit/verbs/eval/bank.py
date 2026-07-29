@@ -1,25 +1,4 @@
-"""``shipit eval bank`` — bank an adjudicated verdict into the Ground-truth fixture.
-
-The Adjudication write-side (ADR-0048, RVW03-WS06): the scorer's adjudication
-report surfaces near-misses and unmatched emissions; a human rules on each ONE
-time, and this verb banks the verdict — ``bank label`` for an emission the
-corpus did not know (``--verdict real`` grows recall's denominator,
-``--verdict not-real`` makes that false positive measurable forever after;
-``--defect FAMILY`` banks it as another valid anchor of an already-banked
-defect — the equivalence family counts once for recall, #751),
-``bank alias`` for a near-miss confirmed to be a known label in new words.
-Either way the fixture VERSION BUMPS (:mod:`shipit.review.groundtruth` owns
-the rules), the file is rewritten canonically, and the diff is reviewed like
-code — the human confirmation THIS verb records is what admits a label into
-any metric.
-
-Thin boundary over the pure banking core: parse CLI args into a
-:class:`~shipit.review.groundtruth.Label` / alias, call
-:func:`~shipit.review.groundtruth.bank_label` /
-:func:`~shipit.review.groundtruth.bank_alias`, save. Every domain violation
-(duplicate id, unknown pr, bad vocabulary) is a loud exit 1 from the domain's
-own :class:`~shipit.review.groundtruth.FixtureError`.
-"""
+"""``shipit eval bank`` — bank an adjudicated verdict into the Ground-truth fixture."""
 
 from __future__ import annotations
 
