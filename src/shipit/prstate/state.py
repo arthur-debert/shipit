@@ -1,79 +1,5 @@
-"""The PR lifecycle state machine — the stable core.
-
-`evaluate()` is a pure function from a `ReadinessView` snapshot to one
-`TaskStatus`: where the PR stands and the single next action. It never mutates
-(it *reports* READY; the caller does the draft->ready flip) and never branches
-on a reviewer's name — it consumes the adapter interface only.
-
-Two definitions anchor it (ADR-0006 redefines the first):
-  Reviewed = every required reviewer SETTLED (a recorded terminal funnel outcome —
-             posted / empty / failed / timed-out, NOT only "succeeded") + every
-             thread from a POSTED review resolved. A reviewer that failed / came
-             back empty / timed out settles NON-blocking and is surfaced as
-             *degraded* ("Ready (degraded: codex-local failed)"); a reviewer
-             still HOLDS the PR only while never-requested or still pending —
-             requested or in-flight within its wait window (NEVER_REQUESTED,
-             REQUESTED, IN_FLIGHT); a past-window in-flight reviewer has already
-             aged to settled TIMED_OUT (WS03), so it no longer holds.
-  Ready    = Reviewed + CI green + a merge state of CLEAN, or UNSTABLE while the
-             CI rollup is already green (a transient ready_for_review re-queue
-             lag; release#715). "Mergeable" here keys off `mergeStateStatus` — the
-             authoritative, merge-obeyed signal — NOT GitHub's async-stale
-             `mergeable` verdict (it reads MERGEABLE optimistically before a
-             recompute lands). Check order once
-             Reviewed: a conflict (DIRTY) or a BEHIND base surfaces first (a
-             moved base re-stales CI); then failing/pending/cancelled CI
-             (BLOCKED-fix / VALIDATING / BLOCKED-rerun); then CLEAN -> READY; an UNSTABLE that survives the CI
-             checks is a transient ready_for_review re-queue lag (the rollup is
-             green) and also goes READY (release#715); an uncomputed (UNKNOWN)
-             merge state re-polls; any remaining computed non-CLEAN state
-             (BLOCKED/HAS_HOOKS) is BLOCKED (release#675).
-
-FAILING checks outrank review requests (#352): every reviewer is token-billed,
-and a CI fix always pushes a new head, so a red-checks PR never advises (or
-routes to) a review request — it ranks BLOCKED/fix-CI with `to_request`
-suppressed, naming the deferred reviewers in the prose. PENDING (still-running)
-checks do not defer: reviewing in parallel with a green-bound run wastes nothing.
-
-A CANCELLED run is NEITHER of those (#621): a killed run (superseded, manual
-cancel, concurrency-group cancel) never judged the code, so it is not a failure
-("fix and push" is the wrong cure — a rerun of the SAME head is), and it will
-never complete on its own, so it must not read as pending (a waiter would poll
-a corpse forever). `classify_checks` gives it its own verdict — surfaced only
-when nothing is still running (a cancelled entry next to a live one is the
-superseded shape: PENDING wins) — and the engine ranks it BLOCKED with a RERUN
-next-action (`gh run rerun`), deferring review requests one evaluation until
-the rerun is live.
-
-Best-effort reviewers (Gemini) never hold: an absent or in-progress best-effort
-reviewer does not hold the PR in REVIEWS_PENDING. The *skip-after-timeout*
-decision is the polling caller's, not the snapshot's — the snapshot is
-stateless and has no clock.
-
-Review rounds repeat until done, governed by the per-reviewer rerun policy: for a
-rerun=True (head-strict — the DEFAULT for everyone) reviewer a review counts only
-against the current head, so any push stales the prior review and the snapshot
-advises RE-REQUEST; for a rerun=False reviewer (review-once — the opt-out) a
-review on ANY head still counts as done and a push never re-stales it. Either way the engine
-is the arbiter — no minor-round exception, #565.
-
-The stopping rule (breakers.py) caps that repetition: address every comment
-each round EXCEPT stop when the round cap is reached, or when the latest round
-has findings but NONE major-or-worse (ADR-0044 — the engine resolves each
-finding's severity on the 4-tier Severity ladder through the precedence
-chain: machine marker → reviewer-adapter mapping → the adapter's
-unclassified-severity policy (#743: Copilot's is `minor`) → `major`
-fail-safe, beaten only by a write-once Severity override). A fired
-breaker means no further round is minted: it suppresses every RE-REQUEST, so
-the fix push cannot re-open the loop (not even for a rerun=True reviewer whose
-review the push staled). The round's leftover minor/nit threads still require
-RESOLUTION before Ready — the PR holds at ADDRESSING while any thread is open —
-they just never buy the reviewers another round. When the PR is not otherwise
-ready, the real reason (failing CI / conflict) blocks it.
-
-There is no classification step and no CLASSIFY state (ADR-0044): nothing can
-be unclassified, so the old verdict gate is structurally unreachable and gone.
-"""
+"""The PR lifecycle state machine: a `ReadinessView` snapshot to one
+`TaskStatus`. See docs/adr/0006-readiness-with-degraded-reviewers.md."""
 
 from __future__ import annotations
 
@@ -87,32 +13,9 @@ from .breakers import build_rounds, evaluate_breakers
 from .model import FunnelState, ReadinessView, ReviewLifecycle
 from .reviewers import REGISTRY, ReviewerAdapter, required_adapters
 
-# --- ADR-0001 divergence (OBS04) -------------------------------------------
-# `prstate` is a VERBATIM copy of release-core's engine (ADR-0001: reuse by copy,
-# not dependency). The `TaskStatus` contract below is DELIBERATELY extended in
-# shipit — `reviewer_funnel` (structured per-reviewer funnel data, incl. the WS02
-# normalized `FunnelState`) and `degraded` (required reviewers settled non-success)
-# — beyond the upstream shape. This is a recorded divergence, made so the OBS04
-# readiness engine's downstream workstreams (WS02 readiness verdict, WS04 dispatcher) read
-# STRUCTURE off `TaskStatus` instead of substring-matching `next_action` prose. The
-# divergence is also recorded in `docs/adr/0001-reuse-release-core-by-copy.md`. WS01
-# CARRIED the data; WS02 redefines the readiness verdict over it (settled + degraded); the
-# dispatcher rewrite is WS04.
-# ---------------------------------------------------------------------------
-
-#: The lifecycle engine's logger — a child of the package ``shipit`` logger, so
-#: it inherits the configured sinks. The resolved next-action decision (what
-#: ``pr next`` / ``pr status`` will report) is a lifecycle milestone recorded
-#: here at INFO (glassbox spray, LOG02), so the state machine's reasoning is
-#: reconstructable after the fact without changing any user-facing output.
 logger = logging.getLogger("shipit.prstate")
 
-# The funnel-state readiness verdicts (ADR-0006). A required reviewer is SETTLED at any
-# recorded terminal outcome (POSTED *or* a degraded one), and HOLDS the PR only
-# while never-requested or still pending — requested or in-flight within its wait
-# window (a past-window in-flight reviewer has aged to settled TIMED_OUT, WS03).
-# DEGRADED is the non-blocking subset of settled — a recorded non-delivery that is
-# surfaced loud but does not hold Ready.
+# DEGRADED is the non-blocking subset of settled.
 _HOLDS = {
     FunnelState.NEVER_REQUESTED,
     FunnelState.REQUESTED,
@@ -120,19 +23,14 @@ _HOLDS = {
 }
 _DEGRADED = {FunnelState.FAILED, FunnelState.EMPTY, FunnelState.TIMED_OUT}
 
-# CheckRun conclusions / StatusContext states that count as failures.
-# CANCELLED is deliberately NOT here (#621): a cancelled job means the run was
-# killed (superseded by a newer run, manual cancel, concurrency-group cancel) —
-# the code was never judged, so reading it as FAILING advised "fix and push"
-# for a failure that does not exist. It gets its own classification below.
+# CANCELLED is deliberately not a failure: a killed run never judged.
 _FAIL_CONCLUSIONS = {
     "FAILURE",
     "TIMED_OUT",
     "ACTION_REQUIRED",
     "STARTUP_FAILURE",
 }
-# CheckRun conclusions that mean the run was killed, not judged (#621). Only
-# CheckRuns can carry it — legacy StatusContext states have no cancelled value.
+# Only CheckRuns carry this; StatusContext has no cancelled state.
 _CANCELLED_CONCLUSIONS = {"CANCELLED"}
 _FAIL_STATES = {"FAILURE", "ERROR"}
 _PENDING_STATUSES = {
@@ -160,35 +58,15 @@ class ChecksState(StrEnum):
     GREEN = "green"
     PENDING = "pending"
     FAILING = "failing"
-    # A run on this head was killed (superseded / manually cancelled / timed out
-    # by a concurrency group) and nothing is still running — the code was never
-    # judged (#621). Distinct from FAILING because the cure is a RERUN of the
-    # same head (`gh run rerun`), never a code fix, and distinct from PENDING
-    # because nothing will ever complete on its own — treating a dead run as
-    # pending would poll it forever.
+    # A killed run with nothing running: the cure is a rerun, not a fix.
     CANCELLED = "cancelled"
 
 
 @dataclass(frozen=True)
 class ReviewerFunnel:
-    """Structured per-reviewer funnel signal carried on `TaskStatus`.
-
-    The OBS04 divergence's payload: it pairs the native `ReviewLifecycle` (what
-    `reviewers.py` `detect` resolves) with the OBS02/ADR-0005 funnel check-run
-    breadcrumb (`status` / `conclusion` / `started_at`), if the reviewer has one.
-    A local-agent reviewer carries both; an App/native reviewer carries only the
-    lifecycle (its check fields stay `None` — it sources the funnel from native
-    signals). WS02's readiness verdict and WS04's dispatcher read THIS instead of parsing
-    `next_action` text. WS01 carries the raw signal; the funnel-STATE
-    normalization (requested / in-flight / posted / failed / empty / timed-out)
-    and the wait-window ageing of `started_at` are WS02 / WS03.
-    """
+    """A reviewer's lifecycle paired with its funnel check-run breadcrumb."""
 
     lifecycle: ReviewLifecycle
-    # The normalized OBS04 funnel state (ADR-0006): the ONE per-reviewer view the
-    # WS02 readiness verdict turns on and WS04's dispatcher routes on. Folded from the
-    # lifecycle (App reviewers) or the breadcrumb (local reviewers) by the adapter,
-    # so neither downstream reader branches on a reviewer's name.
     state: FunnelState = FunnelState.NEVER_REQUESTED
     check_status: str | None = None
     check_conclusion: str | None = None
@@ -206,32 +84,12 @@ class TaskStatus:
     open_threads: int = 0
     checks: ChecksState = ChecksState.NONE
     mergeable: str | None = None
-    cycles: int = 0  # completed required-reviewer review rounds (raw count)
-    breaker: str | None = None  # which stopping condition fired, if any
-    # ADR-0001 divergence (OBS04): structured per-reviewer funnel data so WS02's
-    # readiness verdict and WS04's dispatcher read structure, not `next_action` prose. Keyed by
-    # adapter name, same keys as `reviewers`. The `reviewers` map (name ->
-    # lifecycle string) is UNCHANGED for back-compat with current consumers; this
-    # is purely additive.
+    cycles: int = 0
+    breaker: str | None = None
     reviewer_funnel: dict[str, ReviewerFunnel] = field(default_factory=dict)
-    # ADR-0006 (OBS04-WS02): required reviewers that SETTLED at a non-success
-    # terminal outcome (failed / empty / timed-out). They do NOT hold Ready, but
-    # they are surfaced LOUD so a degraded PR is never silently "fine". Keyed by the
-    # reviewer's DISPLAY name (a local reviewer's `<agent>-local`, so the annotation
-    # reads "codex-local failed") → the `FunnelState` reason value. Empty when the
-    # PR is cleanly settled. WS04's dispatcher still proceeds (a degraded-but-ready
-    # PR flips); this set only makes the degradation visible.
+    # Settled-non-success required reviewers, by display name → reason.
     degraded: dict[str, str] = field(default_factory=dict)
-    # OBS04-WS04: the structured REVIEWS_PENDING routing signal — the required
-    # reviewers still HOLDING the PR whose funnel state says they need a
-    # (re-)request NOW: funnel NEVER_REQUESTED, i.e. never asked, or a prior review
-    # staled by a push (re-request). The dispatcher routes REVIEWS_PENDING to
-    # `request_review` iff this is non-empty, else to WAIT — reading this structure
-    # instead of substring-matching `next_action` prose (it absorbs #24.1). A
-    # holding reviewer that is REQUESTED / IN_FLIGHT (in-flight within window — WS03
-    # already aged any past-window one into a settled TIMED_OUT) is NOT here: it is
-    # the wait case. Empty outside REVIEWS_PENDING and whenever every holding
-    # reviewer is merely awaited.
+    # Holding required reviewers needing a (re-)request now.
     to_request: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -261,12 +119,6 @@ class TaskStatus:
 
 
 def no_pr() -> TaskStatus:
-    """No PR exists for the branch — the entry state.
-
-    A pre-engine shortcut the verbs take when there is no PR to evaluate, so it
-    does NOT log a decision: the state machine's resolution point (and its
-    decision record) is :func:`evaluate`.
-    """
     return TaskStatus(
         state=TaskState.NO_PR,
         next_action="no PR for this branch — create a draft PR to start the review loop",
@@ -278,35 +130,7 @@ def evaluate(
     registry: list[ReviewerAdapter] | None = None,
     required: list[ReviewerAdapter] | None = None,
 ) -> TaskStatus:
-    """Compute the PR's lifecycle state from a snapshot, recording the decision.
-
-    A thin observable wrapper over :func:`_evaluate` (the pure engine): it logs
-    the resolved lifecycle state + next action at INFO — a state decision is a
-    lifecycle milestone (glassbox spray, LOG02) — with the decision's inputs as
-    flat event fields, so a ``pr next`` / ``pr status`` decision is
-    reconstructable (and jq-sliceable by ``pr``) after the run. Reviewers that
-    settled DEGRADED (failed / empty / timed-out — non-blocking but never
-    silently "fine") are additionally surfaced at WARNING. The engine itself
-    stays pure — the log is the only side effect, and it never touches
-    user-facing output.
-
-    The wrapper also emits the engine's OBSERVATIONAL dev-cycle events
-    (ADR-0032 / LOG04-WS02) — milestones the engine can only witness by
-    reading the snapshot, tagged on first sight against the invocation's
-    :class:`~shipit.events.Sightings` registry riding the snapshot
-    (``ctx.sightings``; ``pr next`` evaluates up to three snapshots per
-    invocation and threads ONE registry through its gathers, and each event
-    carries its identity flat so a reader can dedupe on data):
-
-    - ``round.detected`` — a head SHA the required reviewers reviewed (one per
-      round the stopping rule counts);
-    - ``breaker.fired`` — the stopping rule stopped the loop (round-cap /
-      no-major-finding);
-    - ``review.degraded`` — a required reviewer settled at a non-success
-      terminal outcome (failed / empty / timed-out), one per reviewer.
-    """
     status = _evaluate(ctx, registry, required)
-    # Flat event fields (ADR-0029): present-when-meaningful, never null-stuffed.
     fields: dict[str, object] = {
         "pr": status.pr,
         "state": status.state.value,
@@ -337,8 +161,6 @@ def evaluate(
         extra=fields,
     )
     if status.degraded:
-        # A degraded-but-continuing outcome (ADR-0006): the reviewer settled at a
-        # non-success terminal state and no longer holds Ready — loud, not fatal.
         logger.warning(
             "pr#%s: degraded reviewer(s) — settled non-success, not holding Ready: %s",
             status.pr,
@@ -360,22 +182,9 @@ def _emit_snapshot_events(
     status: TaskStatus,
     required: list[ReviewerAdapter] | None,
 ) -> None:
-    """Emit the observational dev-cycle events one evaluation witnessed.
-
-    Each is keyed by its own identity — ``(slug, pr, …)``, since one invocation
-    can evaluate several repos — and deduped against the snapshot's
-    :class:`~shipit.events.Sightings` registry by :func:`shipit.events.emit_once`
-    (the WARNING above deliberately still repeats per evaluation; the milestone
-    TRAIL does not). The bound domain keys (``pr``/``repo`` and any
-    ``epic``/``ws`` from the fetch seam) ride in via the pipeline; the flat
-    extras carry the identity for data-level dedup.
-    """
     slug = ctx.pr.repo.slug
     sightings = ctx.sightings
     required = required if required is not None else required_adapters(ctx.roster)
-    # `round.detected`: one per head the required reviewers reviewed — the same
-    # round vocabulary the stopping rule counts (breakers.build_rounds), so the
-    # trail and the cap can never disagree on what a round was.
     for rnd in build_rounds(ctx, required=required):
         head = str(rnd.commit_id) if rnd.commit_id is not None else None
         events.emit_once(
@@ -425,46 +234,13 @@ def _evaluate(
     registry: list[ReviewerAdapter] | None = None,
     required: list[ReviewerAdapter] | None = None,
 ) -> TaskStatus:
-    """Compute the PR's lifecycle state from a snapshot.
-
-    PURE: a function of `ctx` (+ an optional explicit reviewer set). The
-    reviewer configuration rides the snapshot as ONE value — `ctx.roster`,
-    loaded once at the verb boundary (CLI01-WS04) — so config resolution lives
-    at the edge, never in the engine, and no call path resolves reviewer
-    settings twice per verb invocation.
-
-    `required` is the blocking reviewer SET; every reviewer in it holds Ready
-    (parallel-required, release#622), reviewers outside it are best-effort and
-    never block. Defaulted (`None`), it is derived from the snapshot's Roster
-    (`required_adapters(ctx.roster)`) — the production shape. A test passes a
-    DIFFERENT set to prove the engine is data-driven, not hard-coded to any
-    reviewer.
-
-    The stopping rule (breakers.py) decides when the review loop has run its
-    course: the round cap reached, or the latest round has findings but none
-    major-or-worse (ADR-0044 — each finding's severity resolved through the
-    precedence chain against the snapshot's `ctx.overrides`). A fired breaker
-    suppresses every RE-REQUEST, so the fix push cannot re-open the loop; the
-    round's leftover minor/nit threads still hold the PR at ADDRESSING until
-    resolved (fix-or-reply + resolve), and only then does an otherwise-ready PR
-    (CI green + a CLEAN merge, or a transient UNSTABLE while the rollup is
-    green) route to READY with the breaker recorded. When the PR is not
-    otherwise ready (failing CI / conflict), the real reason blocks it; the
-    stopping rule never invents a block of its own.
-    """
+    """The pure engine: `required` defaults to the snapshot Roster's blocking set."""
     registry = registry if registry is not None else REGISTRY
     required = required if required is not None else required_adapters(ctx.roster)
-    # Detect over the union of the catalog and the required set so a required
-    # reviewer is always evaluated even if (in a test) it isn't in `registry`.
+    # The union, so a required reviewer outside `registry` is still evaluated.
     to_detect = {r.name: r for r in (*registry, *required)}.values()
     lifecycles = {r.name: r.detect(ctx) for r in to_detect}
     reviewers = {name: lc.value for name, lc in lifecycles.items()}
-    # Normalize each reviewer's signals to its ONE funnel state (ADR-0006), asking
-    # the ADAPTER so the engine never name-branches: an App reviewer folds from its
-    # lifecycle, a local reviewer from its `review: <agent>-local` breadcrumb (or a
-    # posted review). This is the structured state WS02's verdict turns on and WS04 routes on,
-    # in place of `next_action` prose. The raw breadcrumb (status / conclusion /
-    # started_at) rides alongside it on `ReviewerFunnel` (WS03 ages started_at).
     funnel_states = {r.name: r.funnel_state(ctx, lifecycles[r.name]) for r in to_detect}
     reviewer_funnel = {}
     for r in to_detect:
@@ -478,20 +254,9 @@ def _evaluate(
         )
     open_threads = len(ctx.open_threads())
     checks = classify_checks(ctx.checks)
-    # The stopping rule counts rounds against the SAME required set the engine
-    # evaluates — passed through so an override repo's round math matches its
-    # reviewers. When it has fired, the loop must NOT open another round: the
-    # leftover minor/nit threads still resolve (ADDRESSING below), but the fix
-    # push re-requests no one, and a threads-resolved, otherwise-ready PR flips
-    # to READY with the breaker recorded.
     breaker = evaluate_breakers(ctx, required=required)
     breaker_stops = breaker.stop
 
-    # The degraded set (ADR-0006): required reviewers SETTLED at a non-success
-    # terminal outcome (failed / empty / timed-out). They settle non-blocking, so
-    # they never appear in `holding` below — but they are surfaced LOUD on every
-    # status (even while another reviewer still holds) so the state is never
-    # silently "fine". Keyed by display name (`codex-local`) → the reason value.
     degraded = {
         r.display_name: funnel_states[r.name].value
         for r in required
@@ -511,59 +276,25 @@ def _evaluate(
         degraded=degraded,
     )
 
-    # 1. Required reviewers must all be SETTLED (ADR-0006): a recorded terminal
-    #    funnel outcome, NOT only a posted review. A reviewer HOLDS the PR only
-    #    while never-requested or in-flight (within window — WS03 ages in-flight
-    #    past its window into timed-out, which settles). failed / empty / timed-out
-    #    settle non-blocking (already collected into `degraded` above), so they do
-    #    NOT appear here — one broken reviewer never parks the PR. Best-effort
-    #    reviewers (outside `required`) never hold.
+    # 1. Every required reviewer must be settled; best-effort ones never hold.
     holding = [r for r in required if funnel_states[r.name] in _HOLDS]
-    # No-re-request after a fired breaker (ADR-0044): the loop is stopped, so
-    # the fix push must not re-open it — a reviewer holding only because that
-    # push staled its earlier review (the rerun=True stale-after-push case) is
-    # dropped from the holding set entirely, so no RE-REQUEST is advised or
-    # performed and the round's leftover threads are the only remaining work. A
-    # genuinely never-requested reviewer still holds (the breaker cannot waive
-    # a review that never happened), and an already in-flight one is awaited.
+    # A fired breaker must not let the fix push re-open the loop.
     if breaker_stops:
         holding = [r for r in holding if not _has_stale_review(ctx, r)]
     if holding:
-        # Split the holding reviewers into the act each one's funnel state dictates
-        # ONCE: those needing a (re-)request now vs those merely awaited. Both the
-        # human-facing prose (`_reviews_pending_action`) and the WS04 dispatcher's
-        # routing read this same structured split — the dispatcher off
-        # `status.to_request`, never the prose (it absorbs #24.1).
         request_names, rerequest_names, waiting_names = _classify_pending(
             ctx, holding, funnel_states
         )
-        # FAILING checks OUTRANK review requests (#352): every reviewer is
-        # token-billed (a review is a real model run), so requesting a review on
-        # a head that is known to be about to change — a CI fix ALWAYS pushes a
-        # new head — burns review budget for nothing. Rank the state as the CI
-        # block and SUPPRESS `to_request` (the funnel split above is still
-        # computed and rides `reviewer_funnel`; it just must not surface as the
-        # action), so neither `pr next` (routes on the structured field) nor a
-        # coordinator following the prose requests on a doomed head. The prose
-        # names the deferred reviewers so the hold reads intentional, not
-        # forgotten. PENDING (still-running) checks deliberately do NOT defer:
-        # reviewing in parallel with a green-bound CI run wastes nothing.
+        # Failing checks outrank review requests: a CI fix always pushes a
+        # new head. Pending checks deliberately do not defer.
         if checks == ChecksState.FAILING:
             status.state = TaskState.BLOCKED
             status.next_action = _checks_failing_deferral_action(
                 request_names + rerequest_names, waiting_names
             )
             return status
-        # A dead (cancelled, nothing running) run also outranks review requests
-        # (#621) — but for a different reason than FAILING. The head is NOT
-        # about to change (a rerun re-judges the SAME commit), so a review here
-        # would not be wasted; what forces the ranking is that `pr next`
-        # performs ONE act, and if it spent this invocation placing requests
-        # the rerun advice would stay invisible until the round settled —
-        # leaving the head's CI dead for the whole round. Advising the RERUN
-        # first costs one evaluation, not a round: the moment the rerun is live
-        # the checks read PENDING, which does NOT defer, and the very next
-        # evaluation places the requests in parallel with the running CI.
+        # A dead run also outranks: `pr next` performs one act, and the
+        # rerun advice must not stay hidden for the whole round.
         if checks == ChecksState.CANCELLED:
             status.state = TaskState.BLOCKED
             status.next_action = _checks_cancelled_deferral_action(
@@ -571,24 +302,13 @@ def _evaluate(
             )
             return status
         status.state = TaskState.REVIEWS_PENDING
-        # request ∪ re-request both route to the single `request_review` act; only
-        # the wait set (`waiting_names`) leaves `to_request` empty → the dispatcher
-        # reports/waits.
         status.to_request = request_names + rerequest_names
         status.next_action = _reviews_pending_action(
             holding, request_names, rerequest_names, waiting_names
         )
         return status
 
-    # 2. Required reviews in; any open thread (from any reviewer) must be
-    #    addressed BEFORE Ready — breaker or no breaker (ADR-0044: minor/nit
-    #    findings still require thread resolution; they just never mint another
-    #    round). When the stopping rule has fired the prose says so: the
-    #    remaining work is resolving the leftover threads, and the fix push
-    #    re-opens nothing (the re-request suppression above). Once every thread
-    #    is resolved, an otherwise-ready PR falls through to READY with the
-    #    breaker name recorded, and a real CI/merge problem still blocks it on
-    #    its own terms.
+    # 2. Reviews in; open threads are addressed before Ready either way.
     if breaker_stops:
         status.breaker = breaker.breaker
     if open_threads:
@@ -610,37 +330,8 @@ def _evaluate(
 
     # 3. Reviewed. Now evaluate mergeability + CI.
     #
-    # GitHub exposes mergeability through TWO fields, and they disagree often
-    # enough to matter (release#675):
-    #   - `mergeable`        MERGEABLE / CONFLICTING / UNKNOWN — computed
-    #                        ASYNCHRONOUSLY; the first read after an open / push
-    #                        / base move returns the STALE prior value (usually
-    #                        the optimistic MERGEABLE) until the recompute lands.
-    #   - `mergeStateStatus` CLEAN / DIRTY / BEHIND / BLOCKED / UNSTABLE /
-    #                        HAS_HOOKS / UNKNOWN — the richer, fresher signal,
-    #                        and the one the merge actually obeys.
-    # READY therefore requires the authoritative `mergeStateStatus == CLEAN`,
-    # not just a (stale-able) MERGEABLE verdict. Every other COMPUTED state is a
-    # real reason the PR is not merge-ready and must NOT hand off:
-    #   DIRTY    → conflict          BEHIND → base moved, head out of date
-    #   BLOCKED  → branch protection / a required status not satisfied
-    #   UNSTABLE → a (non-required) check is failing/pending — EXCEPT when the
-    #              rollup is already green (the FAILING/PENDING checks passed): then
-    #              UNSTABLE is a transient ready_for_review re-queue lag and goes
-    #              READY, deferring to the authoritative rollup (release#715).
-    # An UNKNOWN / null merge state means GitHub is still computing — re-poll
-    # (that loop is `shipit pr wait`'s job, ADR-0034: gather()+evaluate() until
-    # a terminal state), never flip on it. We do NOT special-case approval-pending
-    # because this fleet requires 0 approving reviews — a reviewed + green PR
-    # reaches CLEAN without a human, so a non-CLEAN computed state is always a
-    # genuine block, not a waiting-on-the-human handoff point.
-
-    # A real conflict. `mergeStateStatus == DIRTY` is the authoritative flag;
-    # the async-stale `mergeable == CONFLICTING` is only a FALLBACK for when the
-    # merge state is still uncomputed (None/UNKNOWN). Trusting CONFLICTING
-    # unconditionally would false-BLOCK a PR that DIRTY/CLEAN already disproves —
-    # the mirror image of the stale-MERGEABLE bug this check exists to fix.
-    # Checked first: a conflict must be resolved regardless of CI.
+    # `mergeStateStatus` is the signal the merge obeys; `mergeable` reads
+    # stale, so CONFLICTING is only a fallback for an uncomputed state.
     if ctx.merge_state == "DIRTY" or (
         ctx.merge_state in (None, "UNKNOWN") and ctx.mergeable == "CONFLICTING"
     ):
@@ -648,11 +339,7 @@ def _evaluate(
         status.next_action = "merge conflict — rebase/resolve against the base branch"
         return status
 
-    # Behind the base branch: the head no longer contains the base tip, so it
-    # cannot merge cleanly. Checked BEFORE CI because a moved base re-stales the
-    # branch's review + checks — reporting VALIDATING/CI-blocked here would give
-    # a misleading next action; "update the branch" is the actionable one. The
-    # agent updates and re-evaluates — not a human handoff.
+    # Checked before CI: a moved base re-stales the review and the checks.
     if ctx.merge_state == "BEHIND":
         status.state = TaskState.BLOCKED
         status.next_action = "branch is behind its base — update it (merge/rebase the base) before this can be Ready"
@@ -665,12 +352,7 @@ def _evaluate(
         )
         return status
 
-    # A dead run (#621): cancelled (superseded / manual / concurrency-killed)
-    # with nothing still running. The code was never judged, so the advice is a
-    # RERUN of the same head — never "fix and push". Ranked BLOCKED, not
-    # VALIDATING: nothing will complete on its own, so a waiter treating this
-    # as pending would poll a corpse until its deadline (the #621 hang guard —
-    # `pr wait` sees a terminal, actionable state instead).
+    # BLOCKED, not VALIDATING: a waiter would poll a dead run until timeout.
     if checks == ChecksState.CANCELLED:
         status.state = TaskState.BLOCKED
         status.next_action = _checks_cancelled_action()
@@ -681,27 +363,9 @@ def _evaluate(
         status.next_action = "reviews done; CI check(s) running — wait for checks"
         return status
 
-    # The PR is now otherwise-ready: required reviews in, every thread
-    # resolved, no conflict, not behind, CI not failing/pending. The ONLY merge
-    # states left lead to READY (UNSTABLE-green / CLEAN). If the stopping rule
-    # fired, `status.breaker` already carries its name (set above) so the stop
-    # stays visible on the READY status — the flip itself proceeds normally; the
-    # human gets a ready PR, not a dead-end.
-
-    # UNSTABLE is GitHub's "a non-required check is failing/pending" state — but
-    # the engine ALREADY inspects every check via the rollup (the FAILING/PENDING
-    # checks above). A surviving UNSTABLE with an EXPLICITLY GREEN rollup is a
-    # transient lag, not a real block: GitHub re-runs a SKIPPED/NEUTRAL check on
-    # the `ready_for_review` event (e.g. phos's `e2e-gpu`, conclusion=skipped),
-    # flipping mergeStateStatus to UNSTABLE for a beat while the rollup still reads
-    # green — the false-alarm #715 hit right after `pr ready`. The authoritative
-    # rollup wins: defer to it. We require GREEN, not merely "not failing/pending":
-    # ChecksState.NONE (an empty/absent rollup) is NOT evidence the checks passed,
-    # so an UNSTABLE-with-no-rollup falls through to BLOCKED rather than a blind
-    # hand-off (#737 review). We also do NOT relax BLOCKED/HAS_HOOKS: those can
-    # reflect a required status the rollup never lists (e.g. a missing required
-    # check), so the rollup cannot disprove them — only UNSTABLE, whose whole
-    # meaning IS the per-check state an explicitly-green rollup already covers.
+    # GitHub re-runs a skipped check on `ready_for_review`, flipping
+    # UNSTABLE for a beat while the rollup still reads green. An absent
+    # rollup is no evidence, and BLOCKED/HAS_HOOKS it cannot disprove.
     if ctx.merge_state == "UNSTABLE" and checks == ChecksState.GREEN:
         status.state = TaskState.READY
         if ctx.is_draft:
@@ -720,8 +384,6 @@ def _evaluate(
             )
         return status
 
-    # CLEAN is the ONLY merge-ready state — mergeable, current, all contexts
-    # green. This is the single hand-off point.
     if ctx.merge_state == "CLEAN":
         status.state = TaskState.READY
         if ctx.is_draft:
@@ -736,7 +398,6 @@ def _evaluate(
             )
         return status
 
-    # Merge state not yet computed (UNKNOWN / null) — GitHub is working; re-poll.
     if ctx.merge_state in (None, "UNKNOWN"):
         status.state = TaskState.REVIEWED
         status.next_action = (
@@ -744,10 +405,7 @@ def _evaluate(
         )
         return status
 
-    # Computed, but a non-CLEAN merge state (BLOCKED / HAS_HOOKS — UNSTABLE was
-    # handled above): GitHub is blocking the merge for a real reason — a status
-    # check or branch-protection rule the rollup can't disprove (e.g. a missing
-    # required check). Surface it; don't flip.
+    # A computed non-CLEAN state the rollup can't disprove: surface, don't flip.
     status.state = TaskState.BLOCKED
     status.next_action = (
         f"merge blocked by GitHub (mergeStateStatus={ctx.merge_state}) — a status "
@@ -757,25 +415,7 @@ def _evaluate(
 
 
 def reviews_in(status: TaskStatus, required_names: Sequence[str]) -> bool:
-    """True iff the latest round's reviews have all LANDED — no required
-    reviewer still holds the PR.
-
-    The pure predicate behind `pr wait --until reviews-in` (ADR-0034): the
-    moment an addressing agent becomes dispatchable. It reads the SAME holding
-    vocabulary the engine evaluates with (`_HOLDS` over the normalized funnel
-    states, ADR-0006), so the waiter and the state machine can never disagree
-    on what "still waiting on a reviewer" means: a required reviewer holds
-    while never-requested / requested / in-flight; any recorded terminal
-    outcome — posted OR degraded (failed / empty / timed-out) — settles it.
-
-    Deliberately NOT a `TaskState` check: a red-checks PR with its reviews
-    landed ranks BLOCKED (#352), and a landed round with open threads ranks
-    ADDRESSING — both are reviews-in. Conversely BLOCKED-on-CI with review
-    requests deferred is NOT. Only the
-    per-reviewer funnel answers this. A required name MISSING from
-    `reviewer_funnel` (a snapshot that never evaluated it) counts as holding —
-    absence of evidence is not a landed review.
-    """
+    """True iff no required reviewer holds; an unevaluated name holds."""
     return all(
         name in status.reviewer_funnel
         and status.reviewer_funnel[name].state not in _HOLDS
@@ -788,25 +428,6 @@ def _classify_pending(
     pending: list[ReviewerAdapter],
     funnel_states: dict[str, FunnelState],
 ) -> tuple[list[str], list[str], list[str]]:
-    """Split the holding required reviewers into `(request, rerequest, wait)` by
-    funnel state — the ONE structured decision both the next-action prose and the
-    WS04 dispatcher's routing read from (no prose round-trip). The cases a bare
-    "request if not yet requested, else wait" conflates:
-
-      • never-requested — no signal at all from this reviewer → request.
-      • stale-after-push — a review landed on an EARLIER commit but the current
-        head is `not_requested` (a fixup push resets Copilot's request) → the
-        action is to *re-request* the reviewer for the new head, not to wait.
-      • in-flight / requested — a review is already coming on the head → wait.
-
-    Routed on the normalized FUNNEL state, not the raw lifecycle: a local-agent
-    reviewer whose detached run is IN_FLIGHT has lifecycle NOT_REQUESTED (it has no
-    requested edge — the in-flight signal lives in its breadcrumb), so keying off
-    the lifecycle alone would wrongly advise "request" and risk a duplicate run.
-    The funnel state folds the breadcrumb in, so IN_FLIGHT correctly reads as wait.
-    The stale-after-push re-request stays a lifecycle/commit concern
-    (`_has_stale_review`), only reachable for a never-requested funnel state.
-    """
     request_names: list[str] = []  # no signal → request
     rerequest_names: list[str] = []  # reviewed an earlier head → re-request
     waiting_names: list[str] = []  # already requested/in-flight on head → wait
@@ -828,12 +449,7 @@ def _reviews_pending_action(
     rerequest_names: list[str],
     waiting_names: list[str],
 ) -> str:
-    """Render the REVIEWS_PENDING next-action from the precomputed
-    `_classify_pending` split. PURE human-facing prose for the status/`pr next`
-    output — it no longer DRIVES routing (the dispatcher routes on
-    `TaskStatus.to_request`, WS04), so a wording change here cannot re-route
-    `pr next` (the #24.1 fix).
-    """
+    """Render the REVIEWS_PENDING next-action prose; it never drives routing."""
     clauses: list[str] = []
     if request_names:
         clauses.append(f"request for the current head: {', '.join(request_names)}")
@@ -857,11 +473,6 @@ def _reviews_pending_action(
 def _checks_failing_deferral_action(
     deferred_names: list[str], waiting_names: list[str]
 ) -> str:
-    """Render the fix-CI-first next-action for a red-checks PR with reviewers
-    still holding (#352). PURE human-facing prose (the dispatcher routes on the
-    suppressed `to_request`, never this text). It names the deferred reviewers —
-    the (re-)requests the engine is intentionally holding until CI is green — so
-    a coordinator reading the prose knows they are deferred, not forgotten."""
     action = "CI check(s) failing — fix CI first"
     if deferred_names:
         action += f"; review requests deferred ({', '.join(deferred_names)} pending)"
@@ -871,11 +482,7 @@ def _checks_failing_deferral_action(
 
 
 def _checks_cancelled_action() -> str:
-    """Render the RERUN next-action for a dead-run head (#621). PURE
-    human-facing prose, deliberately carrying the literal rerun command AND the
-    negative instruction: the whole point of the CANCELLED classification is
-    that "fix and push" is the WRONG cure for a run that never judged the code
-    (three PRs sat blocked on exactly that advice in the TOL01-FUPS sweep)."""
+    """Render the rerun prose, including the "do NOT fix-and-push" line."""
     return (
         "CI run cancelled/superseded, nothing still running — no code failure "
         "to fix: rerun the workflow on this head (`gh run rerun <run-id> "
@@ -886,13 +493,6 @@ def _checks_cancelled_action() -> str:
 def _checks_cancelled_deferral_action(
     deferred_names: list[str], waiting_names: list[str]
 ) -> str:
-    """Render the rerun-first next-action for a dead-run PR with reviewers
-    still holding (#621) — the CANCELLED sibling of
-    :func:`_checks_failing_deferral_action`. PURE human-facing prose (the
-    dispatcher routes on the suppressed `to_request`, never this text). It
-    names the deferred reviewers so the hold reads intentional, not forgotten —
-    they place on the next evaluation once the rerun is live (PENDING does not
-    defer)."""
     action = _checks_cancelled_action()
     if deferred_names:
         action += (
@@ -905,22 +505,7 @@ def _checks_cancelled_deferral_action(
 
 
 def _has_stale_review(ctx: ReadinessView, adapter: ReviewerAdapter) -> bool:
-    """True iff this reviewer should be RE-REQUESTED because a push staled its
-    review — i.e. it has a review on some commit OTHER than the current head.
-
-    Only a rerun=True (head-strict) reviewer can be stale-after-push: a
-    rerun=False (review-once) reviewer's earlier-head review still counts as DONE
-    (it reads done in `detect`, so it never reaches `pending` here), and it must
-    NEVER appear in the RE-REQUEST advice — re-running it would cost a token /
-    model run for a review it already gave. The rerun guard makes that explicit
-    even if a future caller passes a done reviewer in. DISMISSED reviews don't
-    count.
-
-    The head comparison is ``Sha``-vs-``Sha`` (COR02): both sides are validated,
-    lowercase-normalized FULL shas, so a case or length mismatch can no longer
-    silently read a current-head review as stale. A review whose wire node
-    carried no commit (``commit_id is None``) is explicitly treated as
-    not-on-this-head — stale, exactly as the old empty-string sentinel read."""
+    """True iff a push staled this review; a commit-less one counts stale."""
     if not adapter._rerun(ctx):
         return False
     return any(
@@ -932,24 +517,7 @@ def _has_stale_review(ctx: ReadinessView, adapter: ReviewerAdapter) -> bool:
 
 
 def classify_checks(rollup: list[dict]) -> ChecksState:
-    """Reduce a gh `statusCheckRollup` to one state.
-
-    Handles both CheckRun entries (status/conclusion) and legacy StatusContext
-    entries (state). Failing dominates pending dominates cancelled dominates
-    green:
-
-    - FAILING first: a genuine failure needs a code fix regardless of what else
-      is on the head.
-    - PENDING beats CANCELLED (#621): a cancelled entry next to a still-running
-      one is the SUPERSEDED shape — a newer run (a rerun, or the sibling
-      push/pull_request event's run) is already re-judging the head, so the
-      right verdict is "wait for it", not "rerun".
-    - CANCELLED surfaces only when a run was killed and NOTHING is still
-      running — a genuinely dead head that will never complete on its own. It
-      is deliberately not folded into FAILING (the old #621 bug: "fix and push"
-      advice for code that was never judged) nor into PENDING (a dead run polled
-      forever). The cure is a rerun of the same head.
-    """
+    """Reduce a `statusCheckRollup`: failing > pending > cancelled > green."""
     if not rollup:
         return ChecksState.NONE
     saw_pending = False
@@ -978,14 +546,12 @@ def _is_failing(entry: dict) -> bool:
 
 
 def _is_cancelled(entry: dict) -> bool:
-    # CheckRun only: a killed run's conclusion. Legacy StatusContext states have
-    # no cancelled value, so `state` is never consulted here.
+    # CheckRun only: StatusContext has no cancelled state.
     return entry.get("conclusion") in _CANCELLED_CONCLUSIONS
 
 
 def _is_pending(entry: dict) -> bool:
-    # CheckRun: any status other than COMPLETED is still running.
-    # StatusContext (no `status` field): a pending-ish `state`.
+    # CheckRun: not COMPLETED is running. StatusContext: a pending `state`.
     status = entry.get("status")
     if status is not None:
         return status != "COMPLETED"
