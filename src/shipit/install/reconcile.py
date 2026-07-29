@@ -1,145 +1,8 @@
 """The reconcile decision core — hash compares in, one frozen :class:`Plan` out.
 
-Reconciliation is a HASH COMPARE, not a subsystem. Per managed unit there are
-four outcomes and no more — the moment it grows features it has become the
-drift engine this design exists to delete (docs/dev/lessons-learned.lex §4):
-
-  - absent in the consumer            -> ADD      (write it; record its hash)
-  - present, hash == desired          -> NOOP     (already current; nothing to do)
-  - present, hash == stored pristine  -> UPDATE   (overwrite silently; advance pristine)
-  - present, hash != stored pristine  -> OVERRIDE (consumer-edited: still propose
-                                                    shipit's content on the PR
-                                                    branch, but FLAG it with a diff
-                                                    so the human decides at merge)
-
-A unit the consumer has DECLINED (#600) never enters the four cases at all:
-``.shipit.toml [managed.decline].keep`` lists managed-unit keys the repo keeps
-as its own — the durable form of hand-declining the same OVERRIDE in every
-reconcile PR (the dogfood repo's ``bin/shipit`` source-deferring bootstrap is
-the standing case). A declined unit is excluded from the decisions outright
-(never written, never re-proposed; its stale ``[managed]`` pristine entry ages
-out on the next applying install's re-stamp), recorded on
-:attr:`Plan.declined` so every surface — the plan report, the PR body — keeps
-the decision visible. A declined key naming NO unit in this catalog rides
-:attr:`Plan.decline_unmatched` and warns (a typo must not silently decline
-nothing).
-
-Install also decides a RETIRED-FILES pass (docs/legacy-prd/rvw01-sole-requester.md,
-ADR-0031): a packaged manifest (``retired-files.toml``) lists paths shipit used
-to distribute that must no longer exist, each with every known pristine
-content hash. Three outcomes, same safety philosophy — never destroy a local
-edit:
-
-  - absent                              -> NOOP   (already gone)
-  - present, hash in known pristines    -> DELETE (safe: it is shipit's own content)
-  - present, hash matches NO known one  -> KEEP   (locally modified: warn, keep)
-
-Install also decides a RETIRED-HOOKS pass (#619) — the retired-files idea
-extended to consumer-local hook ENTRIES inside a hooks file shipit does not
-own outright: the same packaged manifest lists ``(file, event, marker)``
-triples naming legacy entries (the ADR-0003 ``bin/install-release-core``
-resolver hook, the pre-managed ``setup-dev-env.sh`` duplicate), and every
-matching entry in that event array is removed. Two outcomes — a matching
-entry exists -> DELETE, none -> NOOP; there is deliberately no KEEP case: a
-hook entry's whole content is the command it runs, so "invokes the retired
-script" IS its identity, and shipit's own managed entries are protected by
-their ``shipit hook`` command marker inside the match itself
-(:func:`shipit.install.splice.is_retired_hook`).
-
-Install also runs a LEFTHOOK MERGE-CONFLICT tripwire (#544): lefthook merges a
-consumer's committed ``lefthook-local.yml`` over the managed ``lefthook.yml``
-and refuses a merged hook where both ``piped`` and ``parallel`` are true —
-crashing BEFORE any check runs, so every ``git commit`` in that consumer is
-blocked. The managed caller deliberately sets NO hook-level execution-order
-option, but a future managed edit (or an old managed copy) can reintroduce the
-class, so the reconcile detects it against the DESIRED managed content and the
-Plan carries the conflicts: the working-tree mode warns loudly, the committing
-modes fail closed (:mod:`shipit.install.apply`) — a managed-config change must
-never silently brick a consumer's commits.
-
-Install also runs a PIXI KEY-CONFLICT guard on first block splices (#547
-round 1): a pixi block unit is exact bytes anchored under a TOML table the
-consumer owns (the node deps block lands in ``[dependencies]``), so a consumer
-who already pins one of the block's keys there (their own ``nodejs``, say)
-would get a DUPLICATE TOML KEY on the ADD splice — an unparseable pixi.toml
-that blocks installs and every hooked commit. The reconcile detects the clash
-against the manifest this plan will leave behind, excludes that block's
-decision — never a broken write, in any mode — and EVERY applying mode then
-FAILS CLOSED on the record (#1116, :func:`shipit.install.apply.reject_pixi_key_conflicts`).
-Refusing is the point: the whole purpose of a managed block is fleet uniformity,
-so a block that silently opts itself out of delivery produces exactly the drift
-the mechanism exists to prevent — 16 of 20 portfolio repos sat off the fleet pin
-this way while their reconcile reported success. The escape hatch is the
-consumer DECLARING the override in ``.shipit.toml``'s ``[managed.decline].keep``
-(#600), which already exists for precisely this: a declined block is not a
-conflict (nothing will be spliced), so the intent lands in version control where
-it is reviewable instead of in a warning line nobody reads.
-Its pixi-run-level sibling (TOL01-WS01) guards ``[tasks]`` blocks against TASK-NAME
-ambiguity: a managed default-env task (``test``) also defined by a consumer
-``[feature.*.tasks]`` table would make ``pixi run <task>`` refuse the name,
-so the block is skipped and the consumer's own task stays authoritative
-(:class:`PixiTaskConflict`). A third sibling (ARF01-WS04) guards ANCHOR-LESS
-blocks against TABLE REDECLARATION: an EOF-appended top-level table whose name
-is NOT in shipit's reserved namespace — the private-tier
-``[s3-options.<bucket>]``, which the documented manual runbook may have the
-consumer declare by hand — would, on a first splice over a pre-existing table,
-declare that table twice and make ``pixi.toml`` unparseable, so the block is
-skipped and the consumer's own table stays authoritative
-(:class:`PixiTableConflict`). All THREE conflicts leave a managed block
-undelivered out of a reconcile that reports success — what separates them is the
-fail-closed POLICY, not the effect. Both siblings stay WARN-ONLY on purpose
-(#1116) because refusing on them costs more than the drift does: shipit's own
-repo carries a deliberate, documented ``test`` task conflict, so refusing on task
-ambiguity would make shipit refuse to install itself, and the fleet-wide
-table-conflict count is zero — an untested refusal nobody has ever hit. The KEY
-conflict carries neither counterweight and the fleet-proven drift above to its
-name (a pin in the #1116 incident, but a ``[tasks]`` entry just as readily), so
-it is the one that refuses.
-
-Install also runs a RETIRED-COMMAND tripwire over the consumer's pixi tasks
-(#1070, ADR-0066): ``shipit provision lexd`` was deleted with no fallback, but
-a dozen repos still call it from a lane task
-(``lint-full = { cmd = "./bin/shipit provision lexd && ./bin/shipit lint" }``)
-whose stale call would otherwise surface much later as a dead call on a red CI
-lane. The call sites come in TWO shapes, and the tripwire fires on only one of
-them (#1127): most of the fleet's sites sit INSIDE a shipit-managed ``[tasks]``
-span whose desired content no longer defines the task, so THIS reconcile deletes
-them itself — refusing there would block the very run that repairs the repo, and
-would name a line inside a block marked "do not edit". So the finding is decided
-POST-PLAN, over the manifest text projected through this plan's managed rewrites
-(:func:`_plan_stale_provision`). What survives the projection is the genuinely
-CONSUMER-AUTHORED shape — a call outside every managed block, or inside one the
-consumer DECLINED — and there EVERY applying mode fails closed
-(:class:`StaleProvisionTask`,
-:func:`shipit.install.apply.reject_stale_provision`) naming the task, its table,
-and the remedy — the managed ``[feature.shipit-lexd]`` block already puts lexd
-on PATH in the lint env, so the fix is deleting the prefix. The match is over
-the parsed tasks' COMMANDS (never a task name: one repo carries only the inline
-prefix, with no ``provision-lexd`` task at all), over the commands the check can
-read EXACTLY, and DECLINES the rest rather than approximating a shell
-(:func:`_calls_retired_provision`); a declined call still fails legibly at the
-``shipit provision`` tombstone (:mod:`shipit.verbs.provision`). There is nothing
-to skip here, unlike the pixi conflicts above: a surviving call is in the
-consumer's own text, and only their edit can repair it.
-
-Install also decides a CHANGELOG RE-RENDER (TOL01-WS08 #578): where the
-consumer has adopted the fragment convention (``CHANGELOG/``), a renderer
-change in shipit (a new generated-file header, section fixes) leaves the
-committed ``CHANGELOG.md`` stale against ``shipit changelog check`` fleet-wide,
-and the reconcile PR is the sanctioned channel that refreshes it (ADR-0033) —
-gather compares the CURRENT renderer's output against the committed file and
-the Plan carries the re-render decision (:attr:`Plan.rerender_changelog`);
-:mod:`shipit.install.apply` writes the refreshed render. A repo without the
-convention has nothing to re-render and is never refused.
-
-The seam (ADR-0030): :func:`gather` is the ONE filesystem read boundary
-(consumer hashes, the stored pristine map, the policy-seed plan — a frozen
-:class:`ConsumerState`); :func:`detect_toolchains` is its small signal-scoped
-sibling (#547: one tracked-manifest read through the git adapter, deciding
-WHICH catalog :func:`~shipit.install.units.load_units` returns, before gather
-hashes it); :func:`reconcile` is pure over those values and aggregates every
-managed and retired decision into the frozen :class:`Plan`, inspectable before
-any file is written. All writes live in :mod:`shipit.install.apply`.
+Per unit: absent -> ADD, hash == desired -> NOOP, hash == stored pristine ->
+UPDATE, else OVERRIDE. `gather` is the only read boundary; all writes live in
+:mod:`shipit.install.apply`.
 """
 
 from __future__ import annotations
@@ -187,18 +50,10 @@ NOOP = "noop"
 UPDATE = "update"
 OVERRIDE = "override"
 
-# Retired-files outcomes (docs/legacy-prd/rvw01-sole-requester.md). NOOP is shared:
-# an absent retired file is the same nothing-to-do as a current managed unit.
 DELETE = "delete"
 KEEP = "keep"
 
-#: The packaged retired-files manifest (data — retiring a file is an entry, not code).
 RETIRED_MANIFEST = "retired-files.toml"
-
-
-# --------------------------------------------------------------------------
-# Managed-unit decisions
-# --------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -213,7 +68,7 @@ class Decision:
 def decide(
     *, consumer_hash: str | None, pristine_hash: str | None, desired_hash: str
 ) -> str:
-    """The reconciliation outcome for one unit — the whole algorithm, four cases."""
+    """ADD / NOOP / UPDATE / OVERRIDE for one unit; a ``None`` consumer hash means absent."""
     if consumer_hash is None:
         return ADD
     if consumer_hash == desired_hash:
@@ -228,7 +83,6 @@ def plan(
     consumer_hashes: Mapping[str, str | None],
     pristine: Mapping[str, str],
 ) -> list[Decision]:
-    """Decide every unit against the consumer state and the stored pristine map."""
     decisions: list[Decision] = []
     for unit in units:
         consumer_hash = consumer_hashes.get(unit.key)
@@ -251,63 +105,31 @@ def plan(
 
 
 def activates_hooks(decisions: Sequence[Decision]) -> bool:
-    """Whether this install should activate the git hooks.
-
-    The pure half of the decision: ``True`` whenever ``lefthook.yml`` is part of
-    the reconciled set, i.e. the lint-check config is (now) in place — so its hooks
-    belong live. The actual ``lefthook install`` is the bounded side effect
-    :mod:`shipit.install.apply` performs; the plan only records that it WILL
-    happen. Because activation is idempotent, it runs on every WRITING install
-    that manages the caller (ADD or UPDATE), not only the first ADD. A pure
-    no-op re-run never reaches apply, so it never re-touches already-current
-    hooks.
-    """
+    """True when ``lefthook.yml`` is in the reconciled set; apply performs the activation."""
     return any(d.unit.key == LEFTHOOK_FILE for d in decisions)
-
-
-# --------------------------------------------------------------------------
-# Retired files (docs/legacy-prd/rvw01-sole-requester.md, ADR-0031)
-# --------------------------------------------------------------------------
-#
-# Files shipit used to distribute (or release-sync-era debris) are removed
-# portfolio-wide by the same mechanism that installs files — onboarding a repo
-# IS the cleanup. The packaged manifest lists each retired path with the set of
-# known pristine content hashes; the pure core below maps (actual hash, known
-# hashes) to delete / warn-and-keep / no-op; the IO pass in
-# :func:`shipit.install.apply.apply` unlinks the decided deletes.
 
 
 @dataclass(frozen=True)
 class RetiredFile:
-    """One retired path with every known pristine version's ``sha256:`` hash."""
-
-    path: str  # path relative to the consumer root
+    path: str
     pristine_hashes: tuple[str, ...]
 
 
 @dataclass(frozen=True)
 class RetiredDecision:
     retired: RetiredFile
-    action: str  # DELETE | KEEP | NOOP
+    action: str
     actual_hash: str | None
 
 
 def _retired_path(raw: str) -> str:
-    """Validate one manifest path: plain relative, inside the consumer root.
-
-    The manifest is packaged data, but every entry names a file a later unlink
-    will destroy — so a bad entry (absolute path, drive letter, ``..``
-    traversal) fails the load closed rather than reaching the IO pass.
-    """
+    """One manifest path, validated plain-relative; raises ``ValueError`` on absolute or traversing."""
     posix = PurePosixPath(raw)
     win = PureWindowsPath(raw)
     if (
         not raw
         or posix.is_absolute()
         or ".." in posix.parts
-        # Windows forms: `drive` rejects both absolute (`C:\x`) and
-        # drive-relative (`C:x`) paths, `root` rejects rooted `\x`, and the
-        # parts check catches backslash-separated `..` traversal.
         or win.drive
         or win.root
         or ".." in win.parts
@@ -317,7 +139,6 @@ def _retired_path(raw: str) -> str:
 
 
 def load_retired() -> list[RetiredFile]:
-    """The packaged retired-files manifest, in manifest order."""
     data = tomllib.loads(data_bytes(RETIRED_MANIFEST).decode("utf-8"))
     return [
         RetiredFile(
@@ -329,13 +150,7 @@ def load_retired() -> list[RetiredFile]:
 
 
 def decide_retired(*, actual_hash: str | None, pristine_hashes: tuple[str, ...]) -> str:
-    """The retired-files outcome for one path — the whole algorithm, three cases.
-
-    ``actual_hash is None`` means the file is absent (the same encoding
-    :func:`decide` uses for ``consumer_hash``). A pristine match — ANY of the
-    known historical versions — is safe to delete; content differing from every
-    known version is a local edit we never destroy (KEEP, warned); absent is done.
-    """
+    """NOOP / DELETE / KEEP for one retired path; ``actual_hash is None`` means absent."""
     if actual_hash is None:
         return NOOP
     if actual_hash in pristine_hashes:
@@ -346,7 +161,6 @@ def decide_retired(*, actual_hash: str | None, pristine_hashes: tuple[str, ...])
 def plan_retired(
     retired: Sequence[RetiredFile], actual_hashes: Mapping[str, str | None]
 ) -> list[RetiredDecision]:
-    """Decide every retired path against the consumer's actual content hashes."""
     decisions: list[RetiredDecision] = []
     for r in retired:
         actual = actual_hashes.get(r.path)
@@ -363,62 +177,36 @@ def plan_retired(
 
 
 def retired_actual_hash(root: Path, retired: RetiredFile) -> str | None:
-    """The hash of a retired path's current content, or ``None`` if absent."""
+    """``None`` when absent, ``"symlink"`` for a link — which matches no pristine hash, so it is kept."""
     dest = root / retired.path
     if dest.is_symlink():
-        # ``is_file()`` follows symlinks, so a link whose TARGET matches a
-        # pristine hash would otherwise decide DELETE. A symlink is never
-        # shipit's pristine output; any non-``sha256:`` value can never match
-        # a pristine hash, so the link is kept and warned as locally modified.
         return "symlink"
     if not dest.is_file():
         return None
     return config.content_hash(dest.read_bytes())
 
 
-# --------------------------------------------------------------------------
-# Retired hook entries (#619)
-# --------------------------------------------------------------------------
-#
-# The retired-files idea extended to consumer-local hook ENTRIES: legacy
-# entries in a hooks-event array (the ADR-0003 `bin/install-release-core`
-# resolver hook, the pre-managed `setup-dev-env.sh` duplicate) are removed
-# fleet-wide by the same reconcile that installs the managed set. An entry is
-# identified by the command it runs (`marker`), and shipit's own managed
-# entries are protected inside the match itself (splice.is_retired_hook), so
-# the pass can never touch the entries install manages.
-
-
 @dataclass(frozen=True)
 class RetiredHook:
-    """One retired consumer-local hook entry: every entry in ``file``'s
-    ``event`` hooks-array whose command carries ``marker`` must go."""
+    """One retired consumer-local hook entry, identified by a command substring."""
 
-    file: str  # the hooks file, relative to the consumer root
-    event: str  # the hooks-event array the entry lives in
-    marker: str  # the command substring identifying the retired entry
+    file: str
+    event: str
+    marker: str
 
     @property
     def key(self) -> str:
-        """The entry's unique manifest identity — the gather counts' mapping
-        key and every surface's display name."""
         return f"{self.file}#{self.event}[{self.marker}]"
 
 
 @dataclass(frozen=True)
 class RetiredHookDecision:
     retired: RetiredHook
-    action: str  # DELETE | NOOP
-    count: int  # matching consumer-local entries at gather time
+    action: str
+    count: int
 
 
 def load_retired_hooks() -> list[RetiredHook]:
-    """The packaged retired-hooks manifest entries, in manifest order (#619).
-
-    Same manifest file as the retired FILES (:data:`RETIRED_MANIFEST` —
-    retiring the next entry is data, not code), same path validation: every
-    ``file`` names a consumer file the IO pass will rewrite.
-    """
     data = tomllib.loads(data_bytes(RETIRED_MANIFEST).decode("utf-8"))
     return [
         RetiredHook(
@@ -431,21 +219,13 @@ def load_retired_hooks() -> list[RetiredHook]:
 
 
 def decide_retired_hook(*, count: int) -> str:
-    """The retired-hooks outcome for one entry — the whole algorithm, two cases.
-
-    Deliberately NO KEEP case (unlike :func:`decide_retired`): a hook entry's
-    whole content is the command it runs, so "invokes the retired script" IS
-    its identity — there is no local-edit body to preserve the way a retired
-    FILE can carry one — and shipit's own managed entries are already excluded
-    by the match (:func:`shipit.install.splice.is_retired_hook`).
-    """
+    """DELETE when any entry matches, else NOOP — deliberately no KEEP case."""
     return DELETE if count else NOOP
 
 
 def plan_retired_hooks(
     retired_hooks: Sequence[RetiredHook], counts: Mapping[str, int]
 ) -> list[RetiredHookDecision]:
-    """Decide every retired hook entry against the consumer's gathered counts."""
     return [
         RetiredHookDecision(
             retired=rh,
@@ -457,15 +237,7 @@ def plan_retired_hooks(
 
 
 def retired_hook_count(root: Path, hook: RetiredHook) -> int:
-    """How many consumer-local entries ``hook`` currently matches — 0 when the
-    file is absent, unreadable, or malformed.
-
-    Fails OPEN like :func:`_read_lefthook_local`: an ``OSError`` or non-UTF-8
-    read degrades to "nothing to remove" with a logged warning, and a malformed
-    file counts 0 in lockstep with the write path
-    (:func:`shipit.install.splice.remove_retired_hooks` preserves it verbatim)
-    — the decision never claims work the write cannot safely do.
-    """
+    """How many consumer-local entries ``hook`` matches — 0 when absent, unreadable, or malformed."""
     dest = root / hook.file
     if not dest.is_file():
         return 0
@@ -481,28 +253,8 @@ def retired_hook_count(root: Path, hook: RetiredHook) -> int:
     return count_retired_hooks(text, hook.event, hook.marker)
 
 
-# --------------------------------------------------------------------------
-# The lefthook merge-conflict tripwire (#544)
-# --------------------------------------------------------------------------
-#
-# lefthook layers a consumer's committed lefthook-local config over the managed
-# lefthook.yml (per-hook map merge, the local scalar winning) and REFUSES a
-# merged hook where both `piped: true` and `parallel: true` hold — the run
-# crashes before executing any command, so the gate neither runs nor can be
-# satisfied and every `git commit` in the consumer is blocked (the phos-editor
-# incident). The detection below is scoped to the conflict class INSTALL can
-# cause: it only flags a hook where the DESIRED managed content itself sets one
-# of the exclusive options (a lefthook-local.yml arguing with itself is the
-# consumer's own file, outside the managed set's blast radius — lefthook
-# reports it on the consumer's next hook run either way).
-
-#: The hook-level execution-order options lefthook refuses to combine.
 EXCLUSIVE_HOOK_OPTIONS = ("piped", "parallel")
 
-#: The consumer-owned local-config names lefthook merges over the managed
-#: `lefthook.yml` (the managed caller fixes the naming style, so only the
-#: `lefthook-local` YAML spellings at the consumer root apply). First hit wins,
-#: matching lefthook's own single-local-config resolution.
 LEFTHOOK_LOCAL_FILES = ("lefthook-local.yml", "lefthook-local.yaml")
 
 
@@ -510,24 +262,13 @@ LEFTHOOK_LOCAL_FILES = ("lefthook-local.yml", "lefthook-local.yaml")
 class LefthookConflict:
     """One hook whose merged managed+local config lefthook would refuse."""
 
-    hook: str  # the hook name, e.g. "pre-commit"
-    local_path: str  # the consumer's local-config filename
-    managed_options: tuple[str, ...]  # exclusive options the managed caller sets
-    local_options: tuple[str, ...]  # exclusive options the local config sets
+    hook: str
+    local_path: str
+    managed_options: tuple[str, ...]
+    local_options: tuple[str, ...]
 
 
 def format_lefthook_conflict(conflict: LefthookConflict) -> str:
-    """The one actionable message for a conflict — used verbatim by the
-    working-tree stderr warning and the committing modes' fail-closed error,
-    so the two surfaces can never drift.
-
-    Both branches below are reachable only once a FUTURE managed edit
-    reintroduces a hook-level option (today's caller sets none, per the #544
-    tripwire). The usual shape is the managed side setting one option and the
-    consumer's local config the other, so the fix is to drop the local one. If
-    the managed side sets BOTH, ``local_options`` is empty: the conflict is
-    entirely managed-side, so the guidance points at regenerating the managed
-    config, never at removing an option the consumer never set."""
 
     def named(options: tuple[str, ...]) -> str:
         return " and ".join(f"'{o}: true'" for o in options)
@@ -560,19 +301,7 @@ def format_lefthook_conflict(conflict: LefthookConflict) -> str:
 def detect_lefthook_conflicts(
     managed_text: str, local_text: str, local_path: str
 ) -> tuple[LefthookConflict, ...]:
-    """The piped/parallel conflicts lefthook would refuse in the MERGED config.
-
-    Pure over the two texts: parse both YAML, and per managed hook compute the
-    merged exclusive options the way lefthook layers them (the local value wins
-    when set — so a local ``piped: false`` DEFUSES a managed ``piped: true``).
-    A hook conflicts when both exclusive options are true in the merge, the
-    managed side contributes at least one of them, and the local side is NOT
-    already a both-true self-conflict (which install neither causes nor can fix
-    — see the section comment for the scoping rationale). An unparseable or
-    non-mapping YAML yields no conflicts: that is a different failure class the
-    consumer owns and lefthook itself reports; this tripwire never turns it into
-    an install refusal.
-    """
+    """The piped/parallel conflicts in the MERGED config; a local value overrides the managed one."""
     try:
         managed = yaml.safe_load(managed_text)
         local = yaml.safe_load(local_text)
@@ -589,12 +318,6 @@ def detect_lefthook_conflicts(
             o for o in EXCLUSIVE_HOOK_OPTIONS if local_hook.get(o) is True
         )
         if len(local_set) == len(EXCLUSIVE_HOOK_OPTIONS):
-            # The consumer's own lefthook-local.yml already sets BOTH exclusive
-            # options true: the merged hook is refused whatever the managed side
-            # sets, so install neither causes it nor can fix it (removing a
-            # managed option leaves the local self-conflict intact). Outside the
-            # managed blast radius — lefthook reports it on the consumer's next
-            # hook run; the tripwire stays scoped to conflicts install creates.
             continue
         managed_set = tuple(
             o for o in EXCLUSIVE_HOOK_OPTIONS if managed_hook.get(o) is True
@@ -619,11 +342,6 @@ def detect_lefthook_conflicts(
 def _plan_lefthook_conflicts(
     units: Sequence[Unit], state: ConsumerState
 ) -> tuple[LefthookConflict, ...]:
-    """The Plan's conflict facts: the DESIRED managed caller vs the gathered
-    local config. Desired, not on-disk: install writes shipit's content on
-    every ADD/UPDATE/OVERRIDE, so the merge lefthook will actually see is
-    desired + local. No lefthook unit (a test subset) or no local config means
-    nothing to detect."""
     if state.lefthook_local is None or state.lefthook_local_path is None:
         return ()
     unit = next((u for u in units if u.key == LEFTHOOK_FILE), None)
@@ -634,18 +352,6 @@ def _plan_lefthook_conflicts(
     )
 
 
-# --------------------------------------------------------------------------
-# The read boundary — the consumer's current state, as one frozen value
-# --------------------------------------------------------------------------
-
-#: manifest basename -> toolchain signal (#547 Layer 1). A tracked manifest
-#: ANYWHERE in the tree is the signal, matching `shipit/lint.py`'s per-manifest
-#: leg discovery: a tracked ``Cargo.toml`` is exactly what makes the rust lint
-#: leg run (which hard-fails 127 without cargo — the gap the rust dep block
-#: closes, #526); ``go.mod`` and ``package.json`` are the go/node analogues.
-#: ``pyproject.toml`` joined in #801 (TOL02-WS17 open hole 2): the python
-#: signal delivers the release-side twine block — the same tracked-manifest
-#: read, feeding :data:`shipit.install.units.TOOLCHAIN_UNITS`' python rows.
 TOOLCHAIN_MANIFESTS = (
     ("Cargo.toml", TOOLCHAIN_RUST),
     ("go.mod", TOOLCHAIN_GO),
@@ -655,20 +361,9 @@ TOOLCHAIN_MANIFESTS = (
 
 
 def detect_toolchains(root: Path) -> frozenset[str]:
-    """The consumer's toolchain signals, off its tracked manifests (#547 Layer 1).
-
-    A small read boundary of its own, SEPARATE from :func:`gather` (which stays
-    filesystem-only): one ``git ls-files`` over the toolchain manifest names
-    through the git adapter (ADR-0028) — tracked-only, like the lint scope, so a
-    vendored/ignored ``package.json`` deep in ``node_modules`` can never summon
-    a toolchain. On a non-git root the read degrades to root-level manifest
-    existence checks. The result feeds
-    :func:`shipit.install.units.load_units`'s ``toolchains`` parameter.
-    """
+    """Toolchain signals off the consumer's TRACKED manifests; root-level existence off git."""
     pathspecs = [
-        spec
-        for name, _ in TOOLCHAIN_MANIFESTS
-        for spec in (name, f"*/{name}")  # the root manifest and any nested one
+        spec for name, _ in TOOLCHAIN_MANIFESTS for spec in (name, f"*/{name}")
     ]
     tracked = git.ls_files_matching(pathspecs, cwd=str(root))
     if tracked is not None:
@@ -686,68 +381,14 @@ def detect_toolchains(root: Path) -> frozenset[str]:
 
 @dataclass(frozen=True)
 class PixiKeyConflict:
-    """One pixi block unit whose FIRST splice would duplicate consumer-owned keys.
+    """One pixi block unit whose FIRST splice would duplicate consumer-owned keys in ``anchor``."""
 
-    Detected only when the block's markers are absent (an ADD): once the block
-    is spliced, its own keys legitimately live in the anchor table. A DECLINED
-    block is never one of these (#1116): the plan will not splice it at all, so
-    the consumer's ``[managed.decline].keep`` entry IS the supported way to own
-    the key — see :func:`_plan_pixi_key_conflicts`.
-
-    Anything else here is a REFUSAL, not a skip: every applying mode fails closed
-    on this record (:func:`shipit.install.apply.reject_pixi_key_conflicts`).
-    Continuing would leave the repo without whatever the block exists to deliver,
-    with only a warning in a reconcile that ends "success" — the drift the managed
-    set exists to prevent, in the repos most likely to have hand-edited their
-    manifest.
-
-    ``anchor`` is ANY anchor a marker-formatted pixi block declares under, not
-    just a dependency table: ``[tasks]`` and ``[feature.lint.tasks]`` units are
-    checked on the same path, so a consumer's own ``test`` task collides exactly
-    like a hand-rolled ``uv`` pin. The #1116 fleet incident happened to be all
-    dependency pins, but nothing here is pin-specific — which is why
-    :func:`format_pixi_key_conflict` words the message over DECLARATIONS.
-    """
-
-    unit_key: str  # the [managed] table key, e.g. "pixi.toml#shipit-node-deps"
-    anchor: str  # the TOML table header the block anchors under
-    keys: tuple[str, ...]  # the block keys the consumer already declares there
+    unit_key: str
+    anchor: str
+    keys: tuple[str, ...]
 
 
 def format_pixi_key_conflict(conflict: PixiKeyConflict) -> str:
-    """The one actionable message for a key conflict — used verbatim by the
-    stderr warning, the durable log line and the refusal
-    (:func:`shipit.install.apply.reject_pixi_key_conflicts`), so no surface drifts.
-
-    Names the key, the block, and BOTH remedies — deletion first, because that is
-    the right answer for the overwhelming majority of them (#1116: of 16 colliding
-    portfolio repos, 13 carried a stale hand-pin whose own comment named the
-    shipit gap the managed block has since closed). The decline is the exception,
-    DESCRIBED rather than offered as a paste-able snippet, because no single-line
-    spelling of it is valid.
-
-    Worded over DECLARATIONS, never over pins (#1133 rounds 1-2). A
-    :class:`PixiKeyConflict` can anchor under ``[tasks]`` or
-    ``[feature.lint.tasks]`` just as readily as under a dependency table, so
-    "also pins" / "off the fleet pin" would misdescribe a colliding ``test``
-    task to the operator whose install just refused over it — on the one surface
-    that has to be accurate, since it is all they get. "VERSION" is pin framing
-    too, and the last of it to go: a consumer's ``logs`` task is a command, not
-    a version of anything, so what the repo keeps is its own DECLARATION.
-    ``test_a_key_conflict_message_never_assumes_the_collision_is_a_version_pin``
-    pins the whole vocabulary against a real ``[tasks]``-anchored conflict.
-
-    That wording is deliberate (#1133 round 1). The remedy needs two lines — a
-    ``[managed.decline]`` header then its ``keep`` assignment — and there is no
-    one-line alternative: :func:`shipit.config.load_declines` refuses the dotted
-    ``decline.keep`` form outright (it would evaporate on the next re-stamp), so
-    the header is mandatory. Meanwhile the LOUDEST surface this message reaches,
-    the refusal, is rendered by :func:`shipit.verbs._errors.cli_errors`, whose
-    contract collapses the message to ONE stderr line — an embedded snippet comes
-    out as ``[managed.decline] keep = [...]``, which does not parse. An operator
-    pasting that would trade the refusal for a ``.shipit.toml`` parse error and
-    have no way out at all. So the two lines are NAMED in prose, which survives
-    the collapse intact and reads the same on all three surfaces."""
     keys = " and ".join(f"'{k}'" for k in conflict.keys)
     return (
         f"this repo's pixi.toml already declares {keys} in {conflict.anchor}, "
@@ -770,20 +411,7 @@ def format_pixi_key_conflict(conflict: PixiKeyConflict) -> str:
 def _rewritten_pixi_blocks(
     units: Sequence[Unit], state: ConsumerState, kept: frozenset[str]
 ) -> tuple[Unit, ...]:
-    """The PRESENT managed ``pixi.toml`` marker blocks this reconcile will
-    actually rewrite — the input both post-plan pixi projections need.
-
-    "Will rewrite" is the whole point (#1127/#1081): a block whose markers are
-    present is rewritten with :meth:`Unit.desired_inner` on every ADD/UPDATE/
-    OVERRIDE, so its CURRENT span text is not what the manifest will hold. A
-    block the plan drops instead — declined via ``[managed.decline].keep``, or
-    excluded because its dest crosses a symlink — keeps its current span
-    verbatim, so ``kept`` carries those unit keys and they are left out.
-
-    Only ``FMT_MARKERS`` units qualify: an ``FMT_ENV_MEMBER`` unit merges into a
-    consumer-owned env entry rather than owning a marker span, so it has no span
-    to project.
-    """
+    """The present ``pixi.toml`` marker blocks this reconcile will rewrite; ``kept`` names the ones it will not."""
     return tuple(
         u
         for u in units
@@ -798,28 +426,7 @@ def _rewritten_pixi_blocks(
 def _departing_managed_keys(
     text: str, rewritten: Sequence[Unit]
 ) -> dict[str, frozenset[str]]:
-    """Anchor → the keys a present shipit-managed block span DECLARES NOW but
-    will NOT declare once this reconcile rewrites it.
-
-    These keys are shipit-OWNED and LEAVING: the same reconcile that would splice
-    a marker-absent block carrying one of them is removing it from the block that
-    holds it today. That is a managed-block MIGRATION — the key moving from one
-    managed block to another in one pass (#1071: ``rattler-build`` moving out of
-    the rust release-deps block into the new conda-packager block) — which
-    :func:`_plan_pixi_key_conflicts` must NOT mistake for a duplicate over a
-    genuine consumer pin, or it would skip the RECEIVING block and, with the same
-    plan removing the key from the DONOR block, strand the repo with no packager
-    until a second reconcile.
-
-    DEPARTING, not merely present (#1081): a key the donor block still declares
-    after the rewrite really would duplicate on the receiving splice, and a
-    DECLINED donor is not rewritten at all — ``rewritten`` already excludes it, so
-    its keys stay conflicts and the receiving block is skipped rather than
-    written into an unparseable manifest.
-
-    Best-effort and fail-open like the caller: an unparseable managed span (in
-    either its current or its desired form) contributes nothing.
-    """
+    """Anchor -> the keys a rewritten managed block declares now but will not after the rewrite."""
     by_anchor: dict[str, set[str]] = {}
     for unit in rewritten:
         if unit.anchor is None:
@@ -841,34 +448,6 @@ def _departing_managed_keys(
 def _plan_pixi_key_conflicts(
     units: Sequence[Unit], state: ConsumerState, kept: frozenset[str]
 ) -> tuple[PixiKeyConflict, ...]:
-    """The Plan's key-conflict facts: first-splice duplicates in the pixi
-    manifest, judged against the manifest this reconcile will LEAVE BEHIND.
-
-    Best-effort and fail-open, like the lefthook-local read: no manifest or an
-    unparseable one detects nothing (a consumer who already broke their own
-    TOML hears it from pixi, not from a guard that only inspects). Only
-    marker-absent (ADD-bound) pixi block units are checked — see
-    :class:`PixiKeyConflict`.
-
-    A clash is a duplicate over a CONSUMER-owned key, so keys DEPARTING another
-    managed block in this same pass (:func:`_departing_managed_keys`) are
-    excluded: the manifest is projected through the managed-block rewrites this
-    plan will actually make, so a key migrating between two managed blocks in one
-    pass (#1071) does not read as a first-splice conflict and strand the
-    receiving block for a whole extra reconcile — while a key whose donor block
-    is DECLINED, or whose donor keeps declaring it, stays a conflict (#1081).
-
-    A unit in ``kept`` is not judged at all (#1116). ``kept`` is what this plan
-    will NOT splice: a unit the consumer DECLINED (``[managed.decline].keep``) or
-    one whose dest crosses a symlink. Since the conflict is about a FIRST SPLICE,
-    a block that will never be spliced cannot have one — and that is what makes
-    the decline the supported escape hatch now that a conflict REFUSES: declaring
-    the override in version control is exactly how a consumer keeps owning the
-    key. (A symlinked dest is out for the same mechanical reason; it has its own
-    refusal, :func:`shipit.install.apply.reject_symlinked_dests`, so nothing is
-    lost by not also reporting it here with a decline remedy that would not fix
-    it.)
-    """
     if state.pixi_text is None:
         return ()
     try:
@@ -884,29 +463,20 @@ def _plan_pixi_key_conflicts(
         if unit.kind != "block" or unit.dest != PIXI_FILE or unit.anchor is None:
             continue
         if unit.key in kept:
-            continue  # never spliced (declined / symlinked dest) — no first splice
+            continue
         if unit.fmt != FMT_MARKERS:
-            # An FMT_ENV_MEMBER unit shares its anchor table (`[environments]`) with
-            # the consumer BY DESIGN — it merges its managed feature into the
-            # consumer's own env entry (append, never a duplicate key), so its
-            # would-be "clash" is the merge, not a conflict to skip (ADR-0066).
             continue
         if consumer_hashes.get(unit.key) is not None:
-            continue  # markers present: the table's keys include the block's own
+            continue
         try:
             block_keys = tomllib.loads(unit.desired_inner())
         except tomllib.TOMLDecodeError:  # pragma: no cover — packaged data
             continue
         table: object = manifest
-        # Split the anchor honoring TOML quoting: a dotted quoted segment
-        # (`[feature."shipit-artifacts-tools.v2"]`) is ONE literal name, not a
-        # key-path — a naive `.split(".")` would walk the wrong table and miss a
-        # real key clash (#1094 round-3). Reuses `_split_toml_key`, the same
-        # quote-aware splitter the table-conflict guard uses.
         for part in _split_toml_key(unit.anchor.strip().strip("[]")):
             table = table.get(part) if isinstance(table, dict) else None
         if not isinstance(table, dict):
-            continue  # the anchor table does not exist yet — nothing to clash
+            continue
         owned = managed_keys.get(unit.anchor, frozenset())
         clashes = tuple(sorted(k for k in block_keys if k in table and k not in owned))
         if clashes:
@@ -918,41 +488,15 @@ def _plan_pixi_key_conflicts(
 
 @dataclass(frozen=True)
 class PixiTaskConflict:
-    """One pixi ``[tasks]`` block unit whose FIRST splice would make a pixi
-    task AMBIGUOUS — the key-conflict guard's pixi-run-level sibling
-    (TOL01-WS01).
+    """One pixi ``[tasks]`` block unit whose FIRST splice would make ``task`` ambiguous across environments."""
 
-    pixi refuses a bare ``pixi run <task>`` when a task of that name is
-    defined in several environments, so splicing a managed default-env task
-    (``test = "./bin/shipit test"``) into a manifest whose own
-    ``[feature.*.tasks]`` already defines the name would break the consumer's
-    working command — shipit's own repo is the standing case (its full-gate
-    ``test`` task lives in the ``test`` feature for the rust toolchain env).
-    Detected only when the block's markers are
-    absent (an ADD), like :class:`PixiKeyConflict`; the remedy is the
-    consumer's call — keep their task (the block stays undelivered) or delete
-    it and re-run install to adopt the managed caller. A same-named key in the
-    ``[tasks]`` anchor table itself is the OTHER guard's case (a duplicate
-    TOML key, :class:`PixiKeyConflict`).
-    """
-
-    unit_key: str  # the [managed] table key, e.g. "pixi.toml#shipit-test-task"
-    task: str  # the ambiguous task name
-    features: tuple[str, ...]  # the features whose tasks tables define it
+    unit_key: str
+    task: str
+    features: tuple[str, ...]
 
 
 def _feature_tasks_header(feature: str) -> str:
-    """The ``[feature.<name>.tasks]`` header for ``feature``, QUOTING the name
-    when it carries a dot (or is otherwise not a bare TOML key) so the rendered
-    header is a valid, unambiguous path — an unquoted ``ruamel.yaml`` would read
-    as the nested ``ruamel`` → ``yaml`` tables, not the one feature named
-    ``ruamel.yaml``. Bare keys (the common case) render unquoted.
-
-    The name is read from the CONSUMER's own ``pixi.toml`` (:func:`_enabled_features`),
-    so it is unbounded: a quoted TOML key is a basic string, so any ``\\`` or ``"``
-    it carries is escaped before interpolation — otherwise the header would be
-    invalid TOML and the conflict message would mis-render the very path it names.
-    """
+    """The ``[feature.<name>.tasks]`` header, quoting and escaping ``feature`` when it is not a bare TOML key."""
     if re.fullmatch(r"[A-Za-z0-9_-]+", feature):
         return f"[feature.{feature}.tasks]"
     escaped = feature.replace("\\", "\\\\").replace('"', '\\"')
@@ -960,8 +504,6 @@ def _feature_tasks_header(feature: str) -> str:
 
 
 def format_pixi_task_conflict(conflict: PixiTaskConflict) -> str:
-    """The one actionable message for a task-ambiguity conflict — used verbatim
-    by the stderr warning and the durable log line, so the two never drift."""
     tables = " and ".join(_feature_tasks_header(f) for f in conflict.features)
     return (
         f"this repo's pixi.toml already defines a '{conflict.task}' task in "
@@ -975,15 +517,6 @@ def format_pixi_task_conflict(conflict: PixiTaskConflict) -> str:
 
 
 def _enabled_features(manifest: Mapping[str, object]) -> frozenset[str]:
-    """The feature names referenced by any ``[environments]`` entry.
-
-    pixi's ``[environments]`` maps an env name to its features — either a bare
-    list (``test = ["test"]``) or a table (``test = { features = ["test"] }``).
-    A feature listed by no environment materializes in none, so its tasks
-    cannot collide with a default-env managed task (:func:`_pixi_task_conflicts`
-    uses this to avoid over-detecting). The always-present ``default`` feature
-    is not enumerated here — it is not a consumer ``[feature.*]`` name.
-    """
     environments = manifest.get("environments")
     if not isinstance(environments, dict):
         return frozenset()
@@ -1000,23 +533,6 @@ def _pixi_task_conflicts(
     units: Sequence[Unit],
     consumer_hashes: Mapping[str, str | None],
 ) -> tuple[PixiTaskConflict, ...]:
-    """Gather's task-ambiguity detection: first-splice pixi-task name clashes.
-
-    Pure over gather's ONE raw read of the manifest (:func:`_read_pixi_text`),
-    like every other pixi guard — so all of them judge the same snapshot rather
-    than re-reading a file that could change between them.
-
-    Best-effort and fail-open like :func:`_plan_pixi_key_conflicts` (whose
-    ADD-bound-only rule it shares): no manifest or an unparseable one detects
-    nothing. Only ``[tasks]``-anchored pixi block units are checked — a task
-    the block would define in the default env clashes with a same-named task
-    a consumer ``[feature.*.tasks]`` table defines, but ONLY when that feature
-    is ENABLED by some ``[environments]`` entry: a feature no environment
-    includes never materializes its tasks in any env, so it cannot make
-    ``pixi run <task>`` ambiguous — counting it would over-detect and skip the
-    managed block needlessly. Ambiguity is exactly the task landing in the
-    default env (the managed block) AND another env (the enabled feature).
-    """
     if pixi_text is None:
         return ()
     try:
@@ -1030,7 +546,7 @@ def _pixi_task_conflicts(
     feature_tasks: dict[str, list[str]] = {}
     for feature, body in features.items():
         if str(feature) not in enabled:
-            continue  # unreferenced feature: its tasks reach no environment
+            continue
         tasks = body.get("tasks") if isinstance(body, dict) else None
         if isinstance(tasks, dict):
             for task in tasks:
@@ -1042,7 +558,7 @@ def _pixi_task_conflicts(
         if unit.kind != "block" or unit.dest != PIXI_FILE or unit.anchor != "[tasks]":
             continue
         if consumer_hashes.get(unit.key) is not None:
-            continue  # markers present: the task is already the managed one
+            continue
         try:
             block_tasks = tomllib.loads(unit.desired_inner())
         except tomllib.TOMLDecodeError:  # pragma: no cover — packaged data
@@ -1061,37 +577,13 @@ def _pixi_task_conflicts(
 
 @dataclass(frozen=True)
 class PixiTableConflict:
-    """One anchor-less pixi block unit whose FIRST splice would REDECLARE a
-    consumer-owned TOML table — the key-conflict guard's EOF-appended-table
-    sibling (ARF01-WS04).
+    """One anchor-less pixi block unit whose FIRST splice would redeclare a consumer-owned table."""
 
-    An anchor-less block appends its own top-level table(s) at EOF. The
-    projection's reserved ``shipit-artifacts*`` feature tables can never clash
-    with a consumer table by design, but the private-tier
-    ``[s3-options.<bucket>]`` table (:data:`shipit.install.artifactdeps.S3_OPTIONS_KEY`)
-    reuses a NON-reserved name a consumer may already declare by hand (the
-    documented manual private-tier runbook). Splicing a second identical table
-    header makes ``pixi.toml`` unparseable (TOML forbids a table defined twice),
-    blocking installs and every hooked commit — so the block is SKIPPED, the
-    consumer's own table stays authoritative, and every surface warns. Detected
-    only when the block's markers are absent (an ADD), like
-    :class:`PixiKeyConflict`: once spliced, the block's own tables legitimately
-    live in the manifest and a re-reconcile reads them as its own.
-    """
-
-    unit_key: (
-        str  # the [managed] table key, e.g. "pixi.toml#shipit-artifact-deps-s3-options"
-    )
-    # The clashing table headers the consumer already declares, VERBATIM (the
-    # TOML-quoted form, e.g. `s3-options."my.bucket"`) so the warning names the
-    # real path — a bare `s3-options.my.bucket` is a different nested table.
+    unit_key: str
     tables: tuple[str, ...]
 
 
 def format_pixi_table_conflict(conflict: PixiTableConflict) -> str:
-    """The one actionable message for a table-redeclaration conflict — used
-    verbatim by the stderr warning and the durable log line, so the two surfaces
-    never drift."""
     tables = " and ".join(f"[{t}]" for t in conflict.tables)
     return (
         f"this repo's pixi.toml already declares the {tables} table(s), which "
@@ -1104,14 +596,7 @@ def format_pixi_table_conflict(conflict: PixiTableConflict) -> str:
 
 
 def _split_toml_key(key: str) -> tuple[str, ...]:
-    """Split a TOML dotted key-path into its segments, honoring quoted parts.
-
-    A dot inside a quoted segment is a literal name char, not a path separator,
-    so ``s3-options."my.bucket"`` splits into ``("s3-options", "my.bucket")`` —
-    the same quoting :func:`shipit.install.artifactdeps._toml_key` emits when a
-    projected name carries a dot. Surrounding whitespace on a bare segment is
-    trimmed; a quoted segment's inner text is taken verbatim.
-    """
+    """A TOML dotted key-path split into segments; a dot inside quotes is a literal."""
     segments: list[str] = []
     buf: list[str] = []
     quote: str | None = None
@@ -1133,27 +618,7 @@ def _split_toml_key(key: str) -> tuple[str, ...]:
 
 
 def _toml_table_headers(inner: str) -> tuple[tuple[str, tuple[str, ...]], ...]:
-    """Every plain ``[table]`` header in a TOML text, as ``(raw, segments)``.
-
-    ``raw`` is the header's inner text VERBATIM (``s3-options."my.bucket"`` —
-    the TOML-quoted form the block emitted), so a conflict report names the real
-    table path a user would delete; ``segments`` is that path split with quoting
-    honored (:func:`_split_toml_key`), so the walk against the parsed consumer
-    manifest compares whole names. Reporting ``raw`` rather than
-    ``".".join(segments)`` keeps the quoting: a bare ``s3-options.my.bucket`` is
-    a DIFFERENT (nested) table in TOML and would misdirect the fix.
-
-    A TRAILING COMMENT is honored: ``[feature.x]  # owned by consumer`` is a valid
-    TOML header, so the scan strips a trailing ``# …`` (respecting a ``#`` inside a
-    quoted key, which is a literal, not a comment) before the ``]`` check — else an
-    explicitly-commented consumer header would be missed and
-    :func:`_table_redeclared` would misread the explicit table as re-openable and
-    clobber it (#1094 round-4).
-
-    Only plain-table headers matter to the redeclaration guard: array-of-tables
-    (``[[...]]``) declarations stack rather than clash, and the projection emits
-    none anyway.
-    """
+    """Every plain ``[table]`` header as ``(verbatim inner text, quote-aware segments)``."""
     headers: list[tuple[str, tuple[str, ...]]] = []
     for line in inner.splitlines():
         stripped = _strip_toml_comment(line).strip()
@@ -1169,12 +634,7 @@ def _toml_table_headers(inner: str) -> tuple[tuple[str, tuple[str, ...]], ...]:
 
 
 def _strip_toml_comment(line: str) -> str:
-    """``line`` with any trailing TOML ``# …`` comment removed — quote-aware.
-
-    A ``#`` inside a quoted string (``[feature."a#b"]``) is a literal char, not a
-    comment start, so the scan tracks single/double quote state and truncates at
-    the FIRST unquoted ``#``. A line that is wholly a comment returns ``""``.
-    """
+    """``line`` truncated at the first unquoted ``#``."""
     quote: str | None = None
     for i, ch in enumerate(line):
         if quote is not None:
@@ -1188,15 +648,6 @@ def _strip_toml_comment(line: str) -> str:
 
 
 def _table_declared(manifest: Mapping[str, object], path: tuple[str, ...]) -> bool:
-    """Whether the parsed consumer manifest already declares the table at ``path``.
-
-    Walks the manifest along the segments; the table is present when the FULL
-    path resolves to a sub-table (dict) — exactly the redeclaration a duplicate
-    ``[path]`` header would cause. An empty path (a malformed header) is never a
-    table. Only the LEAF path each block header names is checked, so a shared
-    super-table (a consumer ``[feature.foo]`` next to the reserved
-    ``[feature.shipit-artifacts]``) is not mistaken for a clash.
-    """
     if not path:
         return False
     table: object = manifest
@@ -1212,32 +663,11 @@ def _table_redeclared(
     consumer_headers: frozenset[tuple[str, ...]],
     segs: tuple[str, ...],
 ) -> bool:
-    """Whether appending a top-level ``[segs]`` header would REDECLARE a table the
-    consumer already defines — honoring TOML's implicit-super-table rule.
-
-    TOML lets you re-open a super-table created ONLY implicitly by a deeper header
-    (``[a.b]`` then ``[a]`` is VALID), but forbids redefining a table declared
-    EXPLICITLY (a literal ``[a]`` header, or a dotted/inline definition). So
-    ``[segs]`` is a real redeclaration iff the table is present AND is not a
-    purely-implicit super-table:
-
-    - an EXACT ``[segs]`` header the consumer wrote → redeclaration (skip);
-    - present but explained SOLELY by a deeper ``[segs.…]`` header → implicit
-      super-table, re-openable → NOT a redeclaration (the conda-direct consumer's
-      ``[feature.shipit-artifacts.dependencies]`` pin makes ``feature.shipit-artifacts``
-      exist implicitly; splicing the managed ``[feature.shipit-artifacts]`` channel
-      block after it is valid TOML — #1094 round-3);
-    - present with NEITHER (a dotted/inline definition like
-      ``feature.shipit-artifacts.channels = […]``) → conservatively a
-      redeclaration (skip rather than risk an unparseable splice).
-
-    ``consumer_headers`` is the set of the consumer manifest's EXPLICIT
-    ``[header]`` segment-tuples (:func:`_toml_table_headers` over the raw text).
-    """
+    """Whether appending ``[segs]`` would redeclare a table; a purely implicit super-table is re-openable."""
     if not _table_declared(manifest, segs):
         return False
     if segs in consumer_headers:
-        return True  # explicit [segs] header → real redeclaration
+        return True
     has_deeper = any(
         h[: len(segs)] == segs and len(h) > len(segs) for h in consumer_headers
     )
@@ -1249,25 +679,6 @@ def _pixi_table_conflicts(
     units: Sequence[Unit],
     consumer_hashes: Mapping[str, str | None],
 ) -> tuple[PixiTableConflict, ...]:
-    """Gather's table-redeclaration detection: first-splice duplicate top-level
-    tables.
-
-    Pure over gather's ONE raw read of the manifest (:func:`_read_pixi_text`),
-    like :func:`_pixi_task_conflicts` and the two post-plan guards.
-
-    Best-effort and fail-open like :func:`_plan_pixi_key_conflicts` (whose
-    ADD-bound-only rule it shares): no manifest or an unparseable one detects
-    nothing. Only ANCHOR-LESS pixi block units are checked — an anchored block's
-    duplicate-KEY risk is the key-conflict guard's, and its own header (an
-    ``[environments]`` say) is the consumer's own table it merges into. An
-    anchor-less block whose EOF-appended header names a table the consumer
-    already declares EXPLICITLY would make pixi.toml unparseable on the ADD
-    splice, so the reconcile skips it (:class:`PixiTableConflict`). A table the
-    consumer created only IMPLICITLY via a deeper header (the conda-direct pin's
-    ``[feature.shipit-artifacts.dependencies]`` making ``feature.shipit-artifacts``
-    exist) is re-openable per TOML, so the managed ``[feature.shipit-artifacts]``
-    channel block merges in cleanly and is NOT skipped (:func:`_table_redeclared`).
-    """
     if pixi_text is None:
         return ()
     try:
@@ -1280,7 +691,7 @@ def _pixi_table_conflicts(
         if unit.kind != "block" or unit.dest != PIXI_FILE or unit.anchor is not None:
             continue
         if consumer_hashes.get(unit.key) is not None:
-            continue  # markers present: the block's tables are already its own
+            continue
         clashes = tuple(
             raw
             for raw, segments in _toml_table_headers(unit.desired_inner())
@@ -1292,31 +703,6 @@ def _pixi_table_conflicts(
 
 
 def _changelog_stale(root: Path) -> bool:
-    """Whether the consumer's committed ``CHANGELOG.md`` no longer matches the
-    CURRENT renderer's output over ``CHANGELOG/`` — gather's changelog read
-    (TOL01-WS08 #578).
-
-    A renderer change (WS06's generated-file header, the duplicate-section
-    fixes) strands every consumer's committed projection: ``shipit changelog
-    check`` fails fleet-wide, and hand-patching per repo is exactly what the
-    reconcile channel exists to replace (ADR-0033). ``True`` only where the
-    fragment convention EXISTS and the render differs — a repo without
-    ``CHANGELOG/`` (or with unrenderable version filenames) is not stale, it
-    just has nothing to re-render (:func:`shipit.verbs.changelog.render_current`
-    returns ``None`` there). Imported at call time: the verb module wears the
-    ``_errors`` CLI shell, whose import chain leads back into this package (the
-    same cycle the selfcert lint import breaks lazily).
-
-    Fails OPEN on an unreadable projection, like :func:`_read_lefthook_local`
-    and the manifest reads: :func:`gather` runs this advisory read
-    unconditionally, so an ``OSError`` (a permission denial, a mid-read unlink)
-    or a non-UTF-8 file anywhere in the changelog inspection — the committed
-    ``CHANGELOG.md`` OR a ``CHANGELOG/`` fragment ``render_current`` reads —
-    degrades to "not stale" with a logged warning rather than crashing ``shipit
-    install`` on files it only inspects. The catch lives at THIS advisory
-    boundary, not in ``render_current``, so the ``changelog`` verb (for which
-    the render is the primary operation, not an aside) still fails loud.
-    """
     from ..verbs.changelog import render_current
 
     try:
@@ -1340,7 +726,7 @@ def _changelog_stale(root: Path) -> bool:
 
 
 def consumer_inner(root: Path, unit: Unit) -> str | None:
-    """A block unit's current inner text in the consumer, or ``None``."""
+    """A block unit's current inner text in the consumer, or ``None`` when absent."""
     dest = root / unit.dest
     if not dest.is_file():
         return None
@@ -1354,34 +740,15 @@ def consumer_inner(root: Path, unit: Unit) -> str | None:
 
 @dataclass(frozen=True)
 class SymlinkedDest:
-    """A managed unit (any kind) whose destination crosses a consumer symlink.
-
-    ``component`` is the repo-relative path of the SHALLOWEST symlinked path
-    element (from the consumer root down to the leaf) — the containment breach
-    point the operator must remove before install can write the unit. Applies to
-    whole-file AND block/splice units: both write through ``root / dest`` and
-    would follow a symlinked component out of the repo (#1088 review).
-    """
+    """A managed unit whose dest crosses a consumer symlink; ``component`` is the shallowest linked element."""
 
     unit_key: str
-    dest: str  # the unit's declared dest (repo-relative)
-    component: str  # the symlinked path element (repo-relative)
+    dest: str
+    component: str
 
 
 def symlinked_dest_component(root: Path, dest: str) -> str | None:
-    """The shallowest symlinked component of ``dest`` under ``root``, or None.
-
-    Walks every path element from the consumer root down to the leaf. EVERY
-    managed unit's apply writes through ``root / unit.dest``
-    (:func:`shipit.install.apply.write_unit`): a whole-file unit via
-    ``dest.write_bytes``, a block/splice unit via ``dest.read_text`` +
-    ``dest.write_text``. All of them — and the :func:`consumer_hash` read —
-    FOLLOW a symlink in ANY path component, so a symlinked element (a linked
-    leaf, or a linked parent dir) would let an install write THROUGH the link,
-    over whatever it targets OUTSIDE the repo. Returns the offending element's
-    repo-relative path so the caller fails closed on it; shipit never writes
-    through a consumer's symlink (ADR-0077).
-    """
+    """The shallowest symlinked component of ``dest`` under ``root``, or ``None``."""
     current = root
     for part in Path(dest).parts:
         current = current / part
@@ -1391,17 +758,6 @@ def symlinked_dest_component(root: Path, dest: str) -> str | None:
 
 
 def symlinked_dests(root: Path, units: Sequence[Unit]) -> tuple[SymlinkedDest, ...]:
-    """Every managed unit whose dest crosses a consumer symlink (fail-closed).
-
-    Covers EVERY unit kind — whole-file AND block/splice. A block unit splices
-    into a host file (``AGENTS.md``, ``pixi.toml``, ``.claude/settings.json``)
-    via ``dest.write_text``, which follows a symlinked leaf or parent exactly as
-    a whole-file ``write_bytes`` does; calling the host consumer-owned does not
-    make overwriting a target OUTSIDE the repo safe (#1088 review). The apply
-    path is identical, so the containment guard is too. One ``SymlinkedDest`` per
-    offending unit — several block units sharing one symlinked host (the pixi
-    blocks, the settings hooks) each report it, and apply fails closed on the set.
-    """
     found: list[SymlinkedDest] = []
     for u in units:
         component = symlinked_dest_component(root, u.dest)
@@ -1413,9 +769,6 @@ def symlinked_dests(root: Path, units: Sequence[Unit]) -> tuple[SymlinkedDest, .
 
 
 def format_symlinked_dest(sd: SymlinkedDest) -> str:
-    """The one actionable message for a symlinked-dest conflict — used verbatim
-    by the working-tree/dry-run stderr warning and the fail-closed error, so the
-    two surfaces can never drift."""
     leaf = "" if sd.component == sd.dest else f" (writing {sd.dest} would follow it)"
     return (
         f"{sd.component} is a symlink{leaf} — shipit refuses to write the managed "
@@ -1425,72 +778,18 @@ def format_symlinked_dest(sd: SymlinkedDest) -> str:
     )
 
 
-# --------------------------------------------------------------------------
-# The retired `provision lexd` tripwire (ARF02-WS06 #1070, ADR-0066)
-# --------------------------------------------------------------------------
-#
-# The tripwire answers ONE question — does this pixi task run
-# `shipit provision lexd`? — and the reconcile asks it of the PROJECTED manifest
-# (`_plan_stale_provision`, #1127), never the on-disk one, so a call this same
-# plan deletes is not a finding. It answers it only for commands it can read
-# EXACTLY. Three review rounds established both halves of that boundary (#1105):
-# the fleet writes the call as plain, unquoted words (14 call sites across 10
-# repos, verified), and every attempt to read the commands it CANNOT read
-# exactly — a substring search, then a hand-split word list, then a shell
-# lexer — shipped a false positive that fails `shipit install` closed over a
-# manifest that was fine (prose in an `echo`, a quoted `'&&'`, a redirect
-# target). So the check declines the commands it cannot read rather than
-# approximating a shell, and `shipit provision` is a TOMBSTONE verb
-# (:mod:`shipit.verbs.provision`) so that a declined call still fails legibly
-# where it runs. The guard is sound; the tombstone makes it safe for it to be
-# incomplete.
-
-#: The retired command's argument words, matched after the executable — never as
-#: a substring of the command text. ADR-0066 deleted the `provision` verb, so any
-#: surviving call is already dead. The fleet wrote it in two shapes: a
-#: `provision-lexd` task of its own — which in 9 of 10 repos sits INSIDE the
-#: shipit-managed `[tasks]` span, so the reconcile retires it unaided (#1127) —
-#: and an inline `./bin/shipit provision lexd && ./bin/shipit lint` prefix on a
-#: consumer-authored `lint-full`/`test-full` lane task, which no unit rewrites.
-#: At least one repo (phos-editor/app) carries ONLY the inline prefix, with no
-#: `provision-lexd` task at all, so a task-name check would miss it.
 RETIRED_PROVISION_ARGS = ("provision", "lexd")
 
-#: What makes a shell command UNJUDGEABLE — the constructs under which the words
-#: the shell runs are not the words the text splits into. A quote regroups words
-#: (`echo 'shipit provision lexd is retired'` is one argument, not four), a
-#: redirect's operand is a filename rather than a command (`echo > shipit …`), a
-#: backslash escapes a separator, and `$(`/`` ` `` runs a command the text does
-#: not contain. Reading any of them correctly needs a shell; a command carrying
-#: one is simply not judged.
 _UNJUDGEABLE_CHARS = frozenset("\"'`<>\\")
 
-#: The characters that END a simple command in a QUOTE-FREE command line, so what
-#: follows is a new command. Exact rather than heuristic precisely because the
-#: text is quote-free: with no quoting in play, `;`, `&`, `|` and the subshell
-#: parens can only be syntax. A newline terminates a command too (a multi-line
-#: task body is a script). The fleet needs this: 7 of its 14 call sites are
-#: `&&`-chained behind another command, and one is a three-command chain.
 _COMMAND_SEPARATORS = re.compile(r"[;&|()\n]+")
 
-#: A shell assignment PREFIX (`LEXD_HOME=/tmp ./bin/shipit provision lexd`). POSIX
-#: simple-command grammar puts any number of these before the executable, so they
-#: are skipped rather than read as the executable.
 _ASSIGNMENT_PREFIX_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 
 
 @dataclass(frozen=True)
 class StaleProvisionTask:
-    """One consumer pixi task still calling the retired ``shipit provision lexd``.
-
-    ``table`` is the dotted TOML path of the tasks table holding it (``tasks``,
-    ``feature.lint.tasks``) and ``command`` the offending command string as
-    written, so the operator can see exactly which prefix to drop. Task plus
-    table locate the edit: a task name is unique within its table and greppable,
-    which is why there is no line number — recovering one means scanning the raw
-    text for TOML positions ``tomllib`` discards, a second hand-rolled parser
-    that produced a defect in every round it existed (#1105 round 3).
-    """
+    """One consumer pixi task still calling the retired ``shipit provision lexd``."""
 
     task: str
     table: str
@@ -1499,27 +798,13 @@ class StaleProvisionTask:
 
 @dataclass(frozen=True)
 class _TaskCommand:
-    """One command a pixi task runs.
-
-    ``text`` is the command as written (what the refusal quotes back). ``argv``
-    is the word sequence when pixi runs the task WITHOUT a shell — a list-form
-    task — and ``None`` for a string-form task, which a shell will interpret.
-    The distinction is the whole matching contract: an argv element is a literal
-    argument (``["echo", ";", "shipit"]`` passes a semicolon, it does not end a
-    command), where a string has to be read as shell text or not at all.
-    """
+    """One command a pixi task runs; ``argv`` is the word list for a list-form task, ``None`` for a string one."""
 
     text: str
     argv: tuple[str, ...] | None
 
 
 def _task_commands(spec: object) -> tuple[_TaskCommand, ...]:
-    """Every command a pixi task definition carries.
-
-    pixi writes a task three ways: a bare string (``t = "cmd"``), an argv list
-    (``t = ["./bin/shipit", "provision", "lexd"]``), or a table with a ``cmd``
-    that is itself either shape.
-    """
     if isinstance(spec, str):
         return (_TaskCommand(text=spec, argv=None),)
     if isinstance(spec, list):
@@ -1531,19 +816,10 @@ def _task_commands(spec: object) -> tuple[_TaskCommand, ...]:
 
 
 def _runs_retired_provision(words: Sequence[str]) -> bool:
-    """Whether ``words`` — ONE simple command — runs the retired call.
-
-    The executable is the first word past any assignment prefix, and its
-    BASENAME must be ``shipit``, which is what absorbs the launcher-path
-    variation the fleet wrote (``./bin/shipit``, a bare ``shipit``). Wrapper
-    commands (``env``, ``pixi run``) are deliberately not seen through: that
-    needs each wrapper's own option grammar (``pixi run -e lint shipit …`` puts
-    two words in between), no fleet manifest wraps the call, and the tombstone
-    verb catches a wrapped call where it runs.
-    """
+    """Whether ``words`` — ONE simple command — runs the retired call."""
     for index, word in enumerate(words):
         if _ASSIGNMENT_PREFIX_RE.match(word):
-            continue  # a VAR=value prefix — the executable is still ahead
+            continue
         return (
             PurePosixPath(word).name == "shipit"
             and tuple(words[index + 1 : index + 1 + len(RETIRED_PROVISION_ARGS)])
@@ -1553,14 +829,7 @@ def _runs_retired_provision(words: Sequence[str]) -> bool:
 
 
 def _shell_command_words(segment: str) -> tuple[str, ...]:
-    """One quote-free shell segment's words, with any trailing comment dropped.
-
-    Whitespace splitting IS the shell's word splitting once quoting is out of
-    the picture — that is what the :data:`_UNJUDGEABLE_CHARS` precondition buys.
-    An unquoted ``#`` at the start of a word opens a comment that runs to the end
-    of the line, so the words from there on are not run and are dropped (a task
-    body's own narration about the retirement is a comment, not a call).
-    """
+    """One QUOTE-FREE shell segment's words, stopping at an unquoted ``#``."""
     words: list[str] = []
     for word in segment.split():
         if word.startswith("#"):
@@ -1570,16 +839,7 @@ def _shell_command_words(segment: str) -> tuple[str, ...]:
 
 
 def _calls_retired_provision(command: _TaskCommand) -> bool:
-    """Whether ``command`` RUNS the retired call — or is DECLINED as unreadable.
-
-    An argv list never reaches a shell: it is exactly one simple command whose
-    words are exactly its elements, so it is read directly. A string command is
-    read only when it carries none of :data:`_UNJUDGEABLE_CHARS`; within that
-    set the reading is exact, splitting on the separators into simple commands
-    and checking each. Anything else is DECLINED — no finding, no guess. A
-    declined call is not lost: it dies at the tombstone verb with the same
-    remedy this refusal carries, one CI run later instead of at reconcile time.
-    """
+    """Whether ``command`` runs the retired call; a command the reader cannot read exactly is declined (False)."""
     if command.argv is not None:
         return _runs_retired_provision(command.argv)
     if any(ch in _UNJUDGEABLE_CHARS for ch in command.text) or "$(" in command.text:
@@ -1593,16 +853,6 @@ def _calls_retired_provision(command: _TaskCommand) -> bool:
 def _tasks_tables(
     node: object, path: tuple[str, ...] = ()
 ) -> list[tuple[tuple[str, ...], dict]]:
-    """Every ``tasks`` table in a parsed pixi manifest, with its key path.
-
-    A recursive walk rather than two hard-coded lookups: pixi accepts tasks at
-    ``[tasks]``, ``[feature.<name>.tasks]`` and under a ``[target.<platform>]``
-    of either, and a stale command hiding in any of them fails the same way. The
-    descent is UNCONDITIONAL — a ``tasks`` table is collected AND recursed into
-    — so a feature or environment that happens to be named ``tasks`` cannot make
-    the walk mistake it for the task collection and skip the real
-    ``[feature.tasks.tasks]`` inside it (#1105 round 1).
-    """
     if not isinstance(node, dict):
         return []
     found: list[tuple[tuple[str, ...], dict]] = []
@@ -1616,15 +866,6 @@ def _tasks_tables(
 
 
 def stale_provision_tasks(text: str) -> tuple[StaleProvisionTask, ...]:
-    """Every pixi task in ``text`` still calling the retired ``provision lexd``.
-
-    Pure over the manifest text (:func:`gather` supplies it), and fail-open on
-    an unparseable manifest like its :func:`_plan_pixi_key_conflicts` siblings:
-    the tripwire never turns a malformed pixi.toml into a different error. Matching
-    is over the PARSED tasks' commands (:func:`_calls_retired_provision`), so a
-    comment quoting the retired verb — every fleet manifest carries one — is not
-    a call site, and neither is a command the check declines to read.
-    """
     try:
         manifest = tomllib.loads(text)
     except tomllib.TOMLDecodeError:
@@ -1645,18 +886,7 @@ def stale_provision_tasks(text: str) -> tuple[StaleProvisionTask, ...]:
 
 
 def project_pixi_text(text: str, rewritten: Sequence[Unit]) -> str:
-    """``text`` with every rewritten managed block replaced by its DESIRED inner
-    — the manifest this reconcile will leave behind, as far as the managed spans
-    determine it.
-
-    The same :func:`~shipit.install.splice.splice_block` call
-    :mod:`shipit.install.apply` makes, so the projection cannot drift from the
-    write. Marker-absent (ADD-bound) units are deliberately NOT projected: a
-    first splice only ADDS shipit's own content, which never carries a consumer
-    lane's stale call, so appending it can neither create nor clear a
-    :class:`StaleProvisionTask` — and skipping it keeps the projection free of
-    the anchor-placement guesswork an ADD would need.
-    """
+    """``text`` with every rewritten managed block replaced by its desired inner."""
     for unit in rewritten:
         text = splice_block(
             text, unit.desired_inner(), unit.open_marker, unit.close_marker
@@ -1667,24 +897,7 @@ def project_pixi_text(text: str, rewritten: Sequence[Unit]) -> str:
 def _plan_stale_provision(
     units: Sequence[Unit], state: ConsumerState, kept: frozenset[str]
 ) -> tuple[StaleProvisionTask, ...]:
-    """The Plan's retired-command facts: ``provision lexd`` calls that SURVIVE
-    this reconcile.
-
-    Post-plan, not on-disk (#1127) — the guard's whole justification is that
-    nothing shipit writes can repair the call, and for most of the fleet that is
-    simply false: 9 of the 13 known call sites live INSIDE the managed
-    ``[tasks]`` span, whose desired content no longer defines the task, so the
-    reconcile deletes them itself. Refusing on the pre-update text would block
-    the very run that fixes the repo, and the refusal would name a line inside a
-    block marked "do not edit" — telling the operator to hand-edit managed
-    content, which is exactly what shipit tells them never to do.
-
-    So the text is projected through the managed rewrites this plan will make
-    (:func:`project_pixi_text`) before matching. What survives is a genuinely
-    consumer-authored call — outside every managed block, or inside a DECLINED
-    one shipit will not rewrite — and that stays fail-closed: only the
-    operator's edit can repair it.
-    """
+    """Retired ``provision lexd`` calls that SURVIVE this reconcile, judged over the projected manifest."""
     if state.pixi_text is None:
         return ()
     return stale_provision_tasks(
@@ -1693,16 +906,6 @@ def _plan_stale_provision(
 
 
 def _read_pixi_text(root: Path) -> str | None:
-    """Gather's raw read of the consumer's ``pixi.toml`` — the ONE read EVERY
-    pixi guard is pure over: the two ADD-only detections gather itself makes
-    (:func:`_pixi_task_conflicts`, :func:`_pixi_table_conflicts`) and the two
-    post-plan projections inside :func:`reconcile`
-    (:func:`_plan_pixi_key_conflicts`, :func:`_plan_stale_provision`).
-
-    One read, so no guard can judge a different snapshot than its siblings.
-    Fails OPEN like :func:`_read_lefthook_local`: no manifest, or one that cannot
-    be read as text, yields None and every guard over it detects nothing.
-    """
     path = root / PIXI_FILE
     if not path.is_file():
         return None
@@ -1713,14 +916,6 @@ def _read_pixi_text(root: Path) -> str | None:
 
 
 def format_stale_provision(ref: StaleProvisionTask) -> str:
-    """The one actionable message for a retired ``provision lexd`` reference —
-    used verbatim by the dry-run stderr warning and the fail-closed error, so the
-    two surfaces can never drift.
-
-    Task plus table is the whole location: a task name is unique within its
-    table, so `grep` lands on the edit. It reads better than a line number too —
-    the operator sees WHICH lane is broken, not just where a byte is.
-    """
     return (
         f"pixi.toml: the '{ref.task}' task in [{ref.table}] runs `{ref.command}`, "
         f"which calls the RETIRED `shipit provision lexd` — the `provision` verb "
@@ -1732,42 +927,24 @@ def format_stale_provision(ref: StaleProvisionTask) -> str:
     )
 
 
-# --------------------------------------------------------------------------
-# The `.claude/skills` structural symlink (issue #1088, ADR-0077)
-# --------------------------------------------------------------------------
-
-#: `.claude/skills` -> `.agents/skills` symlink actions. Skill CONTENT is a real
-#: managed dir at `.agents/skills` only; Claude reads the identical set through
-#: this whole-directory symlink, so install never duplicates the files.
-#: Create-only-when-absent (ADR-0077, owner decision): shipit NEVER removes an
-#: existing `.claude/skills` — anything already there BLOCKS with guidance.
-LINK_NOOP = "link-noop"  # the correct relative symlink is already present
-LINK_CREATE = "link-create"  # absent → create the symlink
-LINK_BLOCKED = "link-blocked"  # anything else already at the path — never removed
+LINK_NOOP = "link-noop"
+LINK_CREATE = "link-create"
+LINK_BLOCKED = "link-blocked"
 
 
 @dataclass(frozen=True)
 class ClaudeSkillsLink:
-    """The structural ``.claude/skills`` -> ``.agents/skills`` symlink decision.
-
-    Not a managed content unit — a whole-directory pointer install ensures, like
-    lefthook activation, and ONLY when the path is absent. ``reason`` (BLOCKED
-    only) is the human-readable why: shipit never removes an existing
-    ``.claude/skills``, so a real dir / real file / wrong-target symlink is left
-    untouched and flagged for the operator to resolve.
-    """
+    """The ``.claude/skills`` -> ``.agents/skills`` symlink decision; ``reason`` is set on BLOCKED only."""
 
     action: str
     reason: str = ""
 
     @property
     def is_work(self) -> bool:
-        """CREATE changes the tree; NOOP/BLOCKED do not (BLOCKED warns)."""
         return self.action == LINK_CREATE
 
 
 def _claude_skills_exists_reason(link: Path) -> str:
-    """The BLOCKED guidance for an existing ``.claude/skills`` (any shape)."""
     if link.is_symlink():
         what = f"a symlink to {str(link.readlink())!r}, not the managed {CLAUDE_SKILLS_LINK_TARGET!r}"
     elif link.is_dir():
@@ -1782,22 +959,6 @@ def _claude_skills_exists_reason(link: Path) -> str:
 
 
 def plan_claude_skills_link(root: Path) -> ClaudeSkillsLink:
-    """Decide the ``.claude/skills`` symlink — read at the gather boundary.
-
-    Create-only-when-absent (ADR-0077, owner decision): shipit creates the
-    whole-dir symlink ONLY when the path is absent. An existing ``.claude/skills``
-    of ANY shape — a real dir (the copies-round / pre-symlink layout), a real
-    file, or a symlink pointing elsewhere — is NEVER removed: it BLOCKS with
-    guidance to remove it manually. Only the exact managed symlink is a NOOP.
-
-    shipit never deletes a consumer's ``.claude/skills``; there is no
-    content-hash retirement of ``.claude/skills/*`` (which would also delete the
-    byte-identical ``.agents/skills`` copy).
-
-    A symlinked PARENT component (a consumer who symlinks ``.claude`` itself)
-    BLOCKS before any ``is_dir``/``rglob`` read would follow it outside the repo —
-    the same containment stance as :func:`symlinked_dest_component`.
-    """
     parent = symlinked_dest_component(root, str(Path(CLAUDE_SKILLS_DIR).parent))
     if parent is not None:
         return ClaudeSkillsLink(
@@ -1819,8 +980,6 @@ def plan_claude_skills_link(root: Path) -> ClaudeSkillsLink:
 
 
 def format_claude_skills_link(link: ClaudeSkillsLink) -> str:
-    """The one-line description of a non-noop link action — used by the dry-run
-    report (CREATE) and the stderr warning (BLOCKED)."""
     if link.action == LINK_CREATE:
         return f"link     {CLAUDE_SKILLS_DIR} -> {CLAUDE_SKILLS_LINK_TARGET}"
     return f"{CLAUDE_SKILLS_DIR}: {link.reason}"
@@ -1839,83 +998,26 @@ def consumer_hash(root: Path, unit: Unit) -> str | None:
 
 @dataclass(frozen=True)
 class ConsumerState:
-    """What :func:`gather` read off the consumer — the reconcile's only input.
-
-    ``manifest_error`` is the degraded-but-continuing case: an unreadable
-    ``.shipit.toml`` empties the pristine map (consumer edits will surface as
-    OVERRIDEs) and carries the reason so the renderer can warn.
-    """
+    """What :func:`gather` read off the consumer — the reconcile's only input."""
 
     root: str
-    consumer_hashes: Mapping[str, str | None]  # unit key -> current hash (or absent)
-    pristine: Mapping[str, str]  # unit key -> stored pristine hash
-    retired_hashes: Mapping[str, str | None]  # retired path -> current hash
-    seeds: tuple[str, ...]  # policy entries the seed pass would add
-    # Retired hook entries (#619): RetiredHook.key -> how many consumer-local
-    # entries currently match — read here (the ONE read boundary) so the
-    # reconcile's two-case decision stays pure over this state.
+    consumer_hashes: Mapping[str, str | None]
+    pristine: Mapping[str, str]
+    retired_hashes: Mapping[str, str | None]
+    seeds: tuple[str, ...]
     retired_hook_counts: Mapping[str, int] = field(default_factory=dict)
-    # The consumer's current Shipit pin (`.shipit.toml [shipit].version`, RAW —
-    # whatever is stored, sha or not) and the pin an applying install WOULD
-    # stamp (ADR-0033: its own build sha, resolved through the SAME seam apply
-    # stamps with so the two can never disagree). Their mismatch is a plan-level
-    # work axis: a code-only shipit change bumps the build sha without touching a
-    # managed file, and the reconcile must still roll that pin forward — see
-    # :attr:`Plan.pin_stale`. Compared raw (not sha-validated): a non-sha or
-    # absent stored pin simply differs from the target and gets re-stamped.
-    # ``target_pin`` is None when no build identity resolves (apply fails closed
-    # there anyway, so forcing a bump would only raise).
     current_pin: str | None = None
     target_pin: str | None = None
-    # No pixi.toml at all (#432) — distinct from "present without the managed
-    # blocks", which the per-unit hashes already encode as ADDs: pixi requires a
-    # [workspace]/[project]/[package] table, so an applying install must seed a
-    # minimal valid manifest before the block splices land.
     pixi_manifest_missing: bool = False
     manifest_error: str | None = None
-    # The consumer's committed lefthook-local config (#544) — the filename found
-    # (first of :data:`LEFTHOOK_LOCAL_FILES`) and its raw text, or None/None when
-    # absent. Read here (the ONE read boundary) so the reconcile's merge-conflict
-    # tripwire stays pure over this state.
     lefthook_local_path: str | None = None
     lefthook_local: str | None = None
-    # The consumer's pixi.toml, RAW (#1127/#1081) — gather's ONE read of the
-    # manifest (:func:`_read_pixi_text`), which every pixi guard is pure over:
-    # the two ADD-only fields below derive from it, and the two guards that must
-    # judge the manifest this reconcile will LEAVE BEHIND
-    # (:func:`_plan_pixi_key_conflicts`, :func:`_plan_stale_provision`) project
-    # it inside `reconcile()`, where the decisions and the decline set exist.
-    # None when there is no readable manifest; every guard then detects nothing.
     pixi_text: str | None = None
-    # First-splice pixi-task AMBIGUITY clashes (TOL01-WS01): a managed [tasks]
-    # block task also defined by a consumer [feature.*.tasks] table — derived
-    # here, from `pixi_text`, for the same purity reason.
     pixi_task_conflicts: tuple[PixiTaskConflict, ...] = ()
-    # First-splice table-REDECLARATION clashes (ARF01-WS04): an anchor-less
-    # managed block whose EOF-appended top-level table (the private-tier
-    # [s3-options.<bucket>]) the consumer already declares by hand — derived
-    # here, from `pixi_text`, for the same purity reason.
     pixi_table_conflicts: tuple[PixiTableConflict, ...] = ()
-    # The committed CHANGELOG.md no longer matches the CURRENT renderer's
-    # output over CHANGELOG/ (#578) — read here (the ONE read boundary) so the
-    # reconcile's re-render decision stays pure over this state. Always False
-    # where the fragment convention is absent or unrenderable.
     changelog_stale: bool = False
-    # The consumer's declined managed-unit keys (#600) — `.shipit.toml
-    # [managed.decline].keep`, read here (the ONE read boundary) so the
-    # reconcile's skip decision stays pure over this state. Empties with the
-    # pristine map on an unreadable manifest (the degraded-but-continuing
-    # path): no readable policy means no decline.
     declines: tuple[str, ...] = ()
-    # Managed units (ANY kind — file or block) whose dest crosses a consumer
-    # symlink (#1088 review): read here (the ONE read boundary) so the reconcile's
-    # fail-closed decision stays pure over this state. A symlinked dest component
-    # would make an install write THROUGH the link, outside the repo — the
-    # containment breach every mode refuses.
     symlinked_dests: tuple[SymlinkedDest, ...] = ()
-    # The `.claude/skills` structural symlink decision (#1088, ADR-0077): read
-    # here (the ONE read boundary) so reconcile stays pure over it. Defaults to
-    # NOOP so a synthetic state with no skills carries no phantom work.
     claude_skills_link: ClaudeSkillsLink = field(
         default_factory=lambda: ClaudeSkillsLink(LINK_NOOP)
     )
@@ -1927,28 +1029,7 @@ def gather(
     retired: Sequence[RetiredFile],
     retired_hooks: Sequence[RetiredHook] = (),
 ) -> ConsumerState:
-    """Read the consumer's current state — the install domain's ONE read boundary.
-
-    Filesystem reads only, no git/gh: per-unit content hashes, the stored
-    pristine map and the seed-if-absent policy plan from ``.shipit.toml``
-    (consumer-owned policy — the App ``[secrets]`` mappings, the ``[reviewers]``
-    set, the ``[lint]`` ignore globs, and the manifest-derived ``[toolchains]``
-    map (#578) — is planned alongside the manifest but never under the
-    pristine-hash reconciliation; architecture.lex §6, issue #25), each retired path's
-    actual hash, each retired hook entry's current match count
-    (:func:`retired_hook_count`, #619), the consumer's committed
-    lefthook-local config (#544, the
-    merge-conflict tripwire's input), the raw ``pixi.toml`` text
-    (:func:`_read_pixi_text`, #1127/#1081 — read ONCE and shared by every pixi
-    guard, including the two POST-PLAN ones that project it inside
-    :func:`reconcile`), the first-splice task-ambiguity clashes
-    (:func:`_pixi_task_conflicts`) and table-redeclaration clashes
-    (:func:`_pixi_table_conflicts`) derived from that text, whether the
-    committed ``CHANGELOG.md`` is stale against the current renderer
-    (:func:`_changelog_stale`, #578), and the declined managed-unit keys
-    (``[managed.decline].keep``, #600 — consumer-owned policy, read alongside
-    the pristine map).
-    """
+    """Read the consumer's current state — the install domain's ONE read boundary, filesystem only."""
     root = root.resolve()
     if not root.is_dir():
         raise InstallError(f"{root} is not a directory")
@@ -1964,20 +1045,12 @@ def gather(
             raw = cfg_path.read_text(encoding="utf-8")
             cfg = config.load(cfg_path)
             pristine = config.load_managed(cfg)
-            current_pin = config.shipit_version(cfg)  # RAW — compared, not validated
-            # `raw` lets load_declines reject a dotted `decline.keep` that the
-            # re-stamp would silently strip (#600); the header form is required.
-            declines = config.load_declines(cfg, raw)  # [managed.decline].keep
-        # The [toolchains] seed entries derive from the consumer's root
-        # manifests (#578) — the same signal table the Tool verbs' missing-map
-        # error suggests (`config.SIGNAL_MANIFESTS`), so seed and suggestion
-        # can never disagree. Seed-when-absent like every policy table.
+            current_pin = config.shipit_version(cfg)
+            declines = config.load_declines(cfg, raw)
         seeds = config.plan_policy_seed(
             cfg_path, toolchains=config.derive_toolchains(root)
         )
     except config.ConfigError as exc:
-        # Degraded-but-continuing: the reconcile proceeds against an empty
-        # pristine map, so consumer edits will surface as OVERRIDEs.
         manifest_error = str(exc)
         logger.warning(
             "ignoring unreadable manifest",
@@ -1987,9 +1060,6 @@ def gather(
 
     lefthook_local_path, lefthook_local = _read_lefthook_local(root)
     consumer_hashes = {u.key: consumer_hash(root, u) for u in units}
-    # ONE read of pixi.toml, shared by every guard over it (#1129 review): the
-    # two ADD-only detections below and, via `state.pixi_text`, the two POST-PLAN
-    # projections inside `reconcile()` — so all four judge the same snapshot.
     pixi_text = _read_pixi_text(root)
     return ConsumerState(
         root=str(root),
@@ -2015,17 +1085,7 @@ def gather(
 
 
 def _read_lefthook_local(root: Path) -> tuple[str | None, str | None]:
-    """The consumer's lefthook-local config: ``(filename, text)``, or None/None.
-
-    First existing name of :data:`LEFTHOOK_LOCAL_FILES` wins — the same
-    single-local-config resolution lefthook applies over the managed caller.
-
-    Fails OPEN, like the unreadable-manifest path above: an ``OSError`` reading
-    a consumer-owned file (a permission denial, a mid-read unlink) degrades to
-    None/None with a logged warning rather than crashing ``shipit install`` —
-    the merge-conflict tripwire is best-effort, and a working-tree refresh must
-    never abort on a file it only inspects.
-    """
+    """The consumer's lefthook-local config as ``(filename, text)``; ``(None, None)`` when absent or unreadable."""
     for name in LEFTHOOK_LOCAL_FILES:
         dest = root / name
         if not dest.is_file():
@@ -2043,16 +1103,7 @@ def _read_lefthook_local(root: Path) -> tuple[str | None, str | None]:
 
 
 def _target_pin() -> str | None:
-    """The pin an applying install WOULD stamp — ``None`` if none resolves.
-
-    Resolved through the very seam :func:`shipit.install.apply.apply` stamps
-    with (its ``_shipit_version``), so the plan's ``target_pin`` and the pin
-    apply writes can never disagree — a code-only build's sha, the same value
-    on both sides. Imported at call time to avoid the ``apply -> reconcile``
-    module cycle (apply imports the :class:`Plan`). Apply's fail-closed refusal
-    (no build identity) becomes ``None`` here: a plan cannot force a bump it
-    could not stamp anyway.
-    """
+    """The pin an applying install WOULD stamp — ``None`` if no build identity resolves."""
     from .apply import _shipit_version
 
     try:
@@ -2061,121 +1112,28 @@ def _target_pin() -> str | None:
         return None
 
 
-# --------------------------------------------------------------------------
-# The Plan — every decision, one frozen aggregate
-# --------------------------------------------------------------------------
-
-
 @dataclass(frozen=True)
 class Plan:
-    """What install WOULD do — the frozen aggregate :func:`reconcile` returns.
-
-    Managed-unit decisions, retired-file decisions, and the policy seeds ride
-    together, so "what does install do" is one inspectable value: the dry-run
-    renders it, :func:`shipit.install.apply.apply` executes it.
-    """
+    """What install WOULD do — the frozen aggregate :func:`reconcile` returns."""
 
     root: str
     decisions: tuple[Decision, ...]
     retired: tuple[RetiredDecision, ...]
     seeds: tuple[str, ...]
-    # Retired hook entries (#619): the two-case decisions over the packaged
-    # (file, event, marker) triples — a DELETE removes every matching
-    # consumer-local entry from its event array (shipit's own managed entries
-    # are protected inside the match; splice.is_retired_hook).
     retired_hooks: tuple[RetiredHookDecision, ...] = ()
-    # The consumer has no pixi.toml, and this plan writes pixi block units into
-    # one (#432): apply seeds the minimal valid [workspace] manifest first, so
-    # pixi parses the file from the very first commit. One-time scaffold —
-    # never hashed into [managed], consumer-owned after the seed.
     seed_pixi_manifest: bool = False
     manifest_error: str | None = None
-    # ADR-0033: the Shipit pin travels IN the reconcile payload. The consumer's
-    # current pin and the running build's sha ride the plan so a code-only
-    # shipit change — new build sha, every managed file byte-identical — is
-    # still work to do (:attr:`pin_stale`), rolling the pin forward via the same
-    # `.shipit.toml` write apply already performs. Without this the no-op check
-    # would strand consumers on a stale build forever (the install reconcile PR
-    # is the ONLY bump vehicle; nothing else stamps the pin).
     current_pin: str | None = None
     target_pin: str | None = None
-    # The lefthook merge-conflict tripwire's findings (#544): hooks where the
-    # DESIRED managed lefthook.yml and the consumer's lefthook-local.yml merge
-    # into a config lefthook refuses (both `piped` and `parallel` true — every
-    # commit in the consumer would be blocked before any check runs). The
-    # working-tree mode warns loudly; the committing modes fail closed in apply.
     lefthook_conflicts: tuple[LefthookConflict, ...] = ()
-    # Pixi blocks this plan could NOT deliver (#547 round 1): a first splice
-    # would have duplicated a consumer-owned key in the anchor table, breaking
-    # pixi.toml — so their decisions are excluded outright (never a broken write,
-    # in any mode) and EVERY applying mode then fails closed on this record
-    # (#1116, `shipit.install.apply.reject_pixi_key_conflicts`). Undeliverable is
-    # not "did not need delivering": continuing leaves the repo without whatever
-    # the block carries — a pin, a task — while the reconcile reports success. A
-    # block the consumer DECLINED never lands here — that declaration IS the way
-    # to own the key. The two siblings below strand a managed block the same way;
-    # they stay warn-only over the cost of refusing on THEM, not over a lesser
-    # effect (see the module docstring).
     pixi_key_conflicts: tuple[PixiKeyConflict, ...] = ()
-    # Pixi blocks SKIPPED over a task-name AMBIGUITY (TOL01-WS01): the splice
-    # would define a default-env task a consumer feature also defines, making
-    # `pixi run <task>` refuse the name — excluded the same way, every surface
-    # warns off this record.
     pixi_task_conflicts: tuple[PixiTaskConflict, ...] = ()
-    # Pixi blocks SKIPPED over a table REDECLARATION (ARF01-WS04): an anchor-less
-    # block's EOF-appended top-level table (the private-tier
-    # [s3-options.<bucket>]) is one the consumer already declares by hand, so the
-    # splice would make pixi.toml unparseable — excluded the same way, every
-    # surface warns off this record.
     pixi_table_conflicts: tuple[PixiTableConflict, ...] = ()
-    # This plan regenerates CHANGELOG.md from CHANGELOG/ with the CURRENT
-    # renderer (#578): the committed projection went stale against a renderer
-    # change, and the reconcile PR is the sanctioned channel that refreshes it
-    # (ADR-0033). A work axis of its own, like the pin bump — it can be the
-    # ONLY change and must still make the plan actionable. The fragments stay
-    # authoritative; the rendered file is a projection, never a managed unit.
     rerender_changelog: bool = False
-    # Units this plan DECLINED (#600): catalog units the consumer's
-    # `.shipit.toml [managed.decline].keep` keeps as its own. Excluded from the
-    # decisions outright — never written, never re-proposed as an OVERRIDE, and
-    # dropped from the manifest re-stamp (apply stamps `[managed]` from the
-    # decisions, so a declined unit's stale pristine entry ages out on the next
-    # applying install). Not work: a decline contributes nothing to
-    # :attr:`nothing_to_do`. Every surface renders the standing decision off
-    # this record.
     declined: tuple[str, ...] = ()
-    # Declined keys naming NO unit in this catalog (#600): warned, never
-    # silently ignored — usually a typo, occasionally a toolchain-conditional
-    # unit whose signal manifest this repo does not track.
     decline_unmatched: tuple[str, ...] = ()
-    # Managed units (ANY kind — file or block) whose dest crosses a consumer
-    # symlink (#1088 review): their decisions are EXCLUDED (a symlinked read
-    # would hash the link's target, not shipit's dest) and EVERY mode fails
-    # closed on this record before any write
-    # (:func:`shipit.install.apply.reject_symlinked_dests`) — the containment
-    # guarantee is mode-independent, unlike the lefthook publish refusal. Every
-    # surface warns off this record.
     symlinked_dests: tuple[SymlinkedDest, ...] = ()
-    # Pixi tasks that will STILL call the RETIRED `shipit provision lexd` after
-    # this plan applies (#1070/#1127, ADR-0066): decided post-plan over the
-    # projected manifest (`_plan_stale_provision`), so a call this reconcile
-    # itself deletes — the majority fleet shape, a task line inside the managed
-    # [tasks] span — is not here and does not block its own remedy. EVERY
-    # applying mode fails closed on what IS here, before any write
-    # (:func:`shipit.install.apply.reject_stale_provision`). Unlike the pixi
-    # conflicts above there is no unit to skip: a surviving call is the
-    # consumer's own text (outside every managed block, or inside a DECLINED
-    # one), so nothing shipit writes can repair it and only the operator's edit
-    # can. Refusing at reconcile is the whole point: otherwise the pin bump lands
-    # green and the consumer's CI discovers the dead call later, at the `shipit
-    # provision` tombstone (:mod:`shipit.verbs.provision`) — the same remedy, an
-    # hour and a pin bump too late.
     stale_provision: tuple[StaleProvisionTask, ...] = ()
-    # The `.claude/skills` -> `.agents/skills` structural symlink (#1088,
-    # ADR-0077): CREATE (absent path) is a work axis of its own (apply ensures the
-    # link; :attr:`nothing_to_do` and :attr:`changed_paths` account for it);
-    # BLOCKED (anything already there) warns and is left untouched — shipit never
-    # removes it (fail-safe). Never a content unit.
     claude_skills_link: ClaudeSkillsLink = field(
         default_factory=lambda: ClaudeSkillsLink(LINK_NOOP)
     )
@@ -2203,35 +1161,12 @@ class Plan:
 
     @property
     def pin_stale(self) -> bool:
-        """The consumer's pin differs from the running build's sha — a pin bump.
-
-        The pin-only work axis (ADR-0033): a code-only shipit change leaves
-        every managed file byte-identical yet advances the build sha, and the
-        reconcile must still stamp the new pin so the fix reaches the repo.
-        Only when ``target_pin`` resolved (else apply cannot stamp anyway and
-        would fail closed) and it differs from what the consumer carries — a
-        pinless consumer (``current_pin is None``) with a resolved build sha is
-        stale too, so a first stamp is never skipped.
-        """
+        """The consumer's pin differs from the running build's sha — a work axis of its own."""
         return self.target_pin is not None and self.current_pin != self.target_pin
 
     @property
     def nothing_to_do(self) -> bool:
-        """No writes, no seeds, no retired delete, no pin bump, no changelog
-        re-render — a clean no-op.
-
-        A seed-only change (managed set current, policy missing) still counts
-        as a write, so a re-install picks up policy a consumer never had — but
-        stays a no-op once the policy is in place. A pending retired delete —
-        file or hook entry (#619) — likewise keeps the run a write, so cleanup
-        lands even when the managed
-        set is current. A stale pin (:attr:`pin_stale`) is a work axis of its
-        own: a code-only shipit change touches no managed file yet must roll the
-        pin forward. So is a stale changelog projection
-        (:attr:`rerender_changelog`, #578): a renderer change touches no managed
-        file yet must refresh the consumer's committed render. A KEPT retired
-        file does not: there is nothing shipit will change on its own.
-        """
+        """No writes, seeds, retired deletes, pin bump, changelog re-render or skills link — a clean no-op."""
         return (
             not self.writes
             and not self.seeds
@@ -2239,29 +1174,16 @@ class Plan:
             and not self.retire_hook_deletes
             and not self.pin_stale
             and not self.rerender_changelog
-            # An ABSENT `.claude/skills` the install must link is a work axis of
-            # its own (#1088): the managed set can be current yet the structural
-            # symlink absent — the common adoption case. BLOCKED (anything already
-            # at the path) is NOT work (it warns and is left alone), so it stays a
-            # no-op — shipit never removes an existing `.claude/skills`.
             and not self.claude_skills_link.is_work
         )
 
     @property
     def activates_hooks(self) -> bool:
-        """Whether an applying install will (re)activate the git hooks."""
         return activates_hooks(self.decisions)
 
     @property
     def changed_paths(self) -> tuple[str, ...]:
-        """Every path a writing apply touches — the commit set, manifest included.
-
-        Deleted retired paths join it: ``git add`` on a removed path stages the
-        deletion, so every commit mode carries the cleanup. So do the hooks
-        files a retired-entry removal rewrites (#619), and the
-        re-rendered ``CHANGELOG.md`` (#578), so the reconcile PR carries the
-        refreshed render.
-        """
+        """Every path a writing apply touches — the commit set, manifest included."""
         return tuple(
             sorted(
                 {d.unit.dest for d in self.writes}
@@ -2269,9 +1191,6 @@ class Plan:
                 | {d.retired.path for d in self.retire_deletes}
                 | {d.retired.file for d in self.retire_hook_deletes}
                 | ({CHANGELOG_FILE} if self.rerender_changelog else set())
-                # The structural `.claude/skills` symlink rides the commit when
-                # install creates it (create-only-when-absent), so a committing
-                # mode publishes the new managed link (#1088).
                 | ({CLAUDE_SKILLS_DIR} if self.claude_skills_link.is_work else set())
             )
         )
@@ -2283,50 +1202,17 @@ def reconcile(
     state: ConsumerState,
     retired_hooks: Sequence[RetiredHook] = (),
 ) -> Plan:
-    """Decide the whole install — pure over the gathered :class:`ConsumerState`.
-
-    Aggregates the four-case managed decisions, the three-case retired-file
-    decisions, the two-case retired-hook decisions (#619), and the policy
-    seeds into one frozen :class:`Plan`. Logs the
-    decided counts (the plan is mechanics, DEBUG) and each kept retired file
-    (a locally modified copy shipit refuses to destroy, WARNING) — the durable
-    twin (ADR-0029); the terminal report is the renderer's.
-
-    The two POST-PLAN pixi guards (#1127/#1081) are decided HERE, not in
-    :func:`gather`, for the reason :func:`_plan_lefthook_conflicts` already
-    states: install writes shipit's content on every ADD/UPDATE/OVERRIDE, so
-    what the consumer's ``pixi.toml`` will actually hold is the projection of
-    its text through this plan's rewrites — and only here do the decline set and
-    the decisions that determine those rewrites exist.
-    """
+    """Decide the whole install — pure over the gathered :class:`ConsumerState`."""
     decline_set = set(state.declines)
-    # The managed pixi blocks this reconcile will NOT rewrite, so both post-plan
-    # pixi projections read their CURRENT span text: a DECLINED unit (#600 — the
-    # consumer's `[managed.decline].keep` keeps it as the repo's own) and a
-    # symlinked-dest unit (its decision is excluded below). The two ADD-only
-    # conflict guards cannot appear here — they fire on marker-ABSENT units,
-    # which own no present span to project.
     kept = frozenset(decline_set | {sd.unit_key for sd in state.symlinked_dests})
     pixi_key_conflicts = _plan_pixi_key_conflicts(units, state, kept)
-    # A conflicted block never reaches the write set: a key conflict's ADD
-    # would splice a duplicate TOML key into the consumer's pixi.toml
-    # (PixiKeyConflict); a task conflict's would make a pixi task ambiguous
-    # (PixiTaskConflict); a table conflict's would redeclare a consumer-owned
-    # top-level table (PixiTableConflict, ARF01-WS04). Neither does a DECLINED
-    # unit (#600), which is excluded before the four-case decide ever runs.
     conflicted = (
         {c.unit_key for c in pixi_key_conflicts}
         | {c.unit_key for c in state.pixi_task_conflicts}
         | {c.unit_key for c in state.pixi_table_conflicts}
-        # A symlinked-dest unit's decision would be read THROUGH the link (its
-        # hash is the target's, not the dest's), so exclude it outright — apply
-        # fails closed on the record below before any write reaches the link.
         | {sd.unit_key for sd in state.symlinked_dests}
     )
     unit_keys = {u.key for u in units}
-    # Both surfaces keep the consumer's DECLARATION order (config.load_declines'
-    # promise), de-duped — not the catalog's `units` order, which would make the
-    # plan report and PR body reorder unpredictably as the shipped catalog grows.
     declined = tuple(dict.fromkeys(k for k in state.declines if k in unit_keys))
     decline_unmatched = tuple(
         dict.fromkeys(k for k in state.declines if k not in unit_keys)
@@ -2344,10 +1230,6 @@ def reconcile(
         retired_hooks=tuple(
             plan_retired_hooks(retired_hooks, state.retired_hook_counts)
         ),
-        # Seed only when a write will actually create pixi.toml: no manifest on
-        # the consumer AND a pixi block unit in this plan's write set (with the
-        # file absent every pixi unit decides ADD, so this is one condition,
-        # stated fully).
         seed_pixi_manifest=state.pixi_manifest_missing
         and any(
             d.unit.dest == PIXI_FILE for d in decisions if d.action in (ADD, UPDATE)

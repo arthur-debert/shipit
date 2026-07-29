@@ -1,14 +1,7 @@
 """apply — the install domain's ONE effectful path: execute a :class:`Plan`.
 
-Everything that touches the world lives here: unit writes and block splices,
-the changelog re-render (#578), retired-file unlinks, retired-hook-entry
-removals (#619), the policy seed, the
-manifest re-stamp, the bounded
-``lefthook install`` activation, and the four write modes' git/gh side effects
-(#359: the branch/PR side effect is explicit opt-in — the default mode
-refreshes the working tree and stops). Returns a typed :class:`InstallResult`;
-logs every milestone (the durable twin, ADR-0029) and never prints — the
-terminal report is the renderer's (:mod:`shipit.verbs.install`).
+Every write, unlink, splice, activation and git/gh side effect lives here.
+Returns a typed :class:`InstallResult` and never prints.
 """
 
 from __future__ import annotations
@@ -61,23 +54,6 @@ from .units import (
 
 logger = logging.getLogger("shipit.install")
 
-#: The four write modes, in order of precedence at the CLI:
-#:
-#: - ``MODE_TREE`` (default) — refresh the managed set IN THE WORKING TREE and
-#:   stop: no commit, no branch, no push, no PR. Committing the refresh is the
-#:   caller's job — mid-workstream the refreshed files belong in the caller's
-#:   own commit/PR, never in a parallel PR racing it to main (#359).
-#: - ``MODE_LOCAL`` — commit the managed set on the CURRENT branch and stop: no
-#:   branch switch, no push, no PR. This is the Tree-provisioning mode
-#:   (``tree create``): the Tree is already on its planned holding branch and
-#:   provisioning only needs the managed files committed there, never an origin
-#:   side effect (no ``shipit/install`` branch, no draft PR). See #170.
-#: - ``MODE_PUSH`` — break-glass: commit on the current branch and push straight
-#:   to it (admin bypass), no PR.
-#: - ``MODE_PR`` — (re)create the ``shipit/install`` branch based on the CURRENT
-#:   origin default (never the Tree's cut point, #852), commit, force-push, and
-#:   open a DRAFT PR against that default (the standalone
-#:   consumer-onboarding/reconcile flow).
 MODE_TREE = "tree"
 MODE_LOCAL = "local"
 MODE_PUSH = "push"
@@ -90,78 +66,29 @@ COMMIT_MESSAGE = "chore(shipit): install/update the managed set"
 LEFTHOOK_BINARY = "lefthook"
 HOOK_ACTIVATE_ARGV = ["install"]
 
-#: The consumer-generated lockfile (#439): the managed set's decision is the
-#: COMMITTED lockfile — pixi's own recommended practice, and what laptop/CI
-#: parity via ``setup-pixi --locked`` wants. The lockfile is generated per
-#: consumer (self-certification's lint-env solve materializes/refreshes it), so
-#: it can never be a pristine-hashed managed unit; instead every committing
-#: apply stages it alongside the managed set when present, and no consumer tree
-#: is left dirty with an untracked ``pixi.lock`` after an install lands.
 PIXI_LOCK = "pixi.lock"
 
-#: The suffix ``lefthook install`` appends when it renames a pre-existing hook
-#: ``<hook>`` to ``<hook>.old`` before writing its own shim, and the markers
-#: that positively identify a lefthook-generated shim (#777 mode 2). A stale
-#: ``.git/hooks/pre-commit.old``
-#: left by a prior (release-era) ``lefthook install`` makes the next
-#: activation's rename fail ("can't rename pre-commit to pre-commit.old — file
-#: already exists"), which absorbs into a failed ``hooks`` postcondition and
-#: fails self-cert CLOSED. Pre-cleaning that stale backup unblocks activation.
-#: The markers are lefthook's OWN generated content — the ``LEFTHOOK`` env
-#: guards and the ``call_lefthook`` dispatch function every shim it writes
-#: carries, at every version/size — so requiring BOTH positively identifies a
-#: tool-authored shim and never a hand-written consumer hook (the conservative
-#: bar the issue sets: only remove backups you can prove are release-managed).
 HOOK_BACKUP_SUFFIX = ".old"
 LEFTHOOK_SHIM_MARKERS = ("LEFTHOOK", "call_lefthook")
 
-#: The MANAGED git-hook slots the shipped ``lefthook.yml`` activates a shim into
-#: — the hooks whose activation this module owns (#912). Keep in sync with the
-#: top-level hook keys in ``src/shipit/data/lefthook.yml``. This is the
-#: managed-only set on purpose: a consumer's ``lefthook-local.yml`` can configure
-#: ADDITIONAL hooks, and an obstruction in one of those paths can block
-#: ``lefthook install`` too — but self-healing another tool's hook slot is not
-#: this preclean's job, so it scopes itself to the slots shipit ships.
-#: A pre-existing DANGLING symlink at one of these paths defeats
-#: ``lefthook install``: lefthook's existence ``stat`` FOLLOWS the link, sees the
-#: dead target as absent, skips its move-to-``.old`` step, and goes straight to
-#: ``open(<hook>, O_CREATE|O_WRONLY)`` — which also follows the dead link and
-#: tries to create the missing target in a directory that does not exist →
-#: ``ENOENT``. :func:`_preclean_dangling_hook_symlinks` unlinks the dead link at
-#: these paths so lefthook writes a fresh shim.
 MANAGED_HOOK_NAMES = ("pre-commit", "pre-push", "post-commit")
 
-#: The PR-body renderer apply calls at the boundary moment (``MODE_PR`` only):
-#: ``(override_before, hooks_activated, rerendered, stamped_pin, lint_debt) ->
-#: body``. Injected by the verb so the body's sections stay a pure renderer
-#: concern (ADR-0030) while apply supplies the inputs only it can know — the
-#: pre-write consumer snapshots, the real activation outcome, whether the
-#: changelog re-render ACTUALLY ran (never just what the plan decided — the
-#: gather→apply window can skip it), the pin it stamped, and the best-effort
-#: whole-tree debt count (``None`` when unreadable).
 PrBody = Callable[[Mapping[str, str], "bool | None", bool, str, "int | None"], str]
 
 
 @dataclass(frozen=True)
 class InstallResult:
-    """What an :func:`apply` actually did — the typed result (ADR-0030).
-
-    ``hooks_activated`` carries the real activation outcome so a renderer (or
-    the PR body) never claims a success that did not happen: ``None`` when this
-    apply had no checks to activate, ``True`` when ``lefthook install``
-    succeeded where install ran, ``False`` when it was skipped/failed —
-    ``hooks_detail`` then carries the human-oriented failure detail.
-    """
+    """What an :func:`apply` actually did; ``hooks_activated`` is ``None`` when there was nothing to activate."""
 
     plan: Plan
     mode: str
     hooks_activated: bool | None = None
     hooks_detail: str = ""
-    branch: str | None = None  # the committed/pushed branch (local/push modes)
-    pr_url: str | None = None  # the draft PR (pr mode)
-    pr_updated: bool = False  # True when an existing install PR was refreshed
-    stamped_version: str | None = None  # the Shipit pin this apply stamped (#433)
-    lint_debt: int | None = None  # whole-tree failing checks (MODE_PR; None = unread)
+    branch: str | None = None
+    pr_url: str | None = None
+    pr_updated: bool = False
+    stamped_version: str | None = None
+    lint_debt: int | None = None
 
 
 def write_unit(root: Path, unit: Unit) -> None:
@@ -197,23 +124,10 @@ def write_unit(root: Path, unit: Unit) -> None:
 
 
 def ensure_claude_skills_link(root: Path, link: ClaudeSkillsLink) -> bool:
-    """Execute the ``.claude/skills`` -> ``.agents/skills`` symlink decision.
-
-    Returns whether this apply CREATED the managed symlink (so a committing mode
-    stages it). Create-only-when-absent (ADR-0077, owner decision): shipit NEVER
-    removes an existing ``.claude/skills`` — NOOP/BLOCKED do nothing here.
-
-    Defensive over the gather→apply window: a CREATE planned against an absent
-    path re-checks at apply and stands down if the path is now occupied — a NOOP
-    if it is already the exact managed symlink, otherwise left untouched (never
-    overwritten). Never destroys consumer content.
-    """
-    if not link.is_work:  # NOOP / BLOCKED — nothing structural to do
+    """Execute the skills-symlink decision; returns whether this apply CREATED the link."""
+    if not link.is_work:
         return False
     dest = root / CLAUDE_SKILLS_DIR
-    # TOCTOU re-check: a PARENT component turned into a symlink in the gather→apply
-    # window (e.g. `.claude` became a link) would make `symlink_to` write outside
-    # the repo. Stand down rather than create through it (a re-run re-plans a BLOCK).
     parent_link = symlinked_dest_component(root, str(Path(CLAUDE_SKILLS_DIR).parent))
     if parent_link is not None:
         logger.warning(
@@ -225,9 +139,6 @@ def ensure_claude_skills_link(root: Path, link: ClaudeSkillsLink) -> bool:
         )
         return False
     if dest.is_symlink() or dest.exists():
-        # Something occupied the path in the gather→apply window. Never clobber:
-        # a correct managed symlink is a silent NOOP, anything else is left as-is
-        # (a re-run re-plans it as a BLOCK).
         if dest.is_symlink() and str(dest.readlink()) == CLAUDE_SKILLS_LINK_TARGET:
             return False
         logger.warning(
@@ -249,22 +160,7 @@ def ensure_claude_skills_link(root: Path, link: ClaudeSkillsLink) -> bool:
 
 
 def _rerender_changelog(root: Path) -> bool:
-    """Regenerate ``CHANGELOG.md`` from ``CHANGELOG/`` with the CURRENT renderer
-    — the write half of the plan's re-render decision (TOL01-WS08 #578).
-
-    Recomputed at the write, like the policy seed re-reads the config text: the
-    render over what NOW holds is always the current one, so a fragment that
-    changed in the gather→apply window still lands rendered, never half-stale.
-    Skipped (idempotence, the retired-unlink stance) when the fragment tree
-    vanished in that window — :func:`shipit.verbs.changelog.render_current`
-    returns ``None`` and the goal state "nothing to render" already holds.
-    Imported at call time for the same ``_errors``-shell cycle the selfcert
-    lint import breaks lazily.
-
-    Returns ``True`` when it wrote the file, ``False`` when it skipped — the
-    caller drops the now-phantom ``CHANGELOG.md`` from the commit set on a skip
-    so a committing mode's ``git add`` never chokes on it.
-    """
+    """Regenerate ``CHANGELOG.md`` from ``CHANGELOG/``; ``False`` when the fragment tree is gone and it skipped."""
     from ..verbs.changelog import render_current
 
     rendered = render_current(root)
@@ -279,36 +175,7 @@ def _rerender_changelog(root: Path) -> bool:
 
 
 def _activate_hooks(root: Path) -> execrun.ExecResult:
-    """Run ``lefthook install`` in ``root`` — the bounded side effect that turns
-    the ``lefthook.yml`` config into live ``.git/hooks``.
-
-    Runs THROUGH the consumer's OWN managed pixi lint env
-    (:func:`shipit.pixienv.run_in_env`, ``environment=LINT_ENV`` — the same seam
-    :func:`shipit.tree.create._activate_hooks` uses). This is the #478 fix: the
-    ``.git/hooks/pre-push`` shim lefthook generates bakes ``os.Executable()`` (the
-    absolute path of the lefthook that ran ``install``) into its ``call_lefthook``
-    resolution chain as a fallback. Run bare off the install process's PATH, that
-    executable is the INSTALLER's env — and when the installer is an ephemeral
-    shipit Tree, a cross-tree absolute path that dies when the Tree is gc'd and
-    exists on no other machine. Routing through the consumer's own lint env
-    (where the managed blocks pin ``lefthook``) makes the baked fallback
-    consumer-local and stable instead, and ``--manifest-path`` (built by
-    :func:`shipit.pixienv.run_argv`) pins resolution to the consumer's manifest
-    regardless of any inherited ``PIXI_PROJECT_MANIFEST``. The shim's *first-hit*
-    resolution is still ``lefthook`` on PATH, which resolves consumer-locally
-    inside any activated pixi env (how a pixi consumer runs hooks); the baked
-    path is only its non-activated fallback.
-
-    ``check=False`` because a nonzero rc is an outcome apply *degrades* on
-    (activation is opportunistic setup, never a hard-fail check); a launch
-    failure — ``pixi`` absent, or a hang killed at the adapter's long-runner
-    bound — surfaces as the runner's :class:`~shipit.execrun.ExecError`, which
-    apply likewise absorbs into the result's activation outcome and moves on
-    (fail-open where the runtime is genuinely absent, #491's sibling theme). The
-    adapter's long-runner bound covers the worst case: a first ``pixi run -e
-    lint`` solving the lint env — provisioning-shaped work, the same reason
-    :func:`shipit.tree.create._activate_hooks` uses it.
-    """
+    """Run ``lefthook install`` through the consumer's own managed pixi lint env, ``check=False``."""
     return pixienv.run_in_env(
         [LEFTHOOK_BINARY, *HOOK_ACTIVATE_ARGV],
         root,
@@ -318,11 +185,7 @@ def _activate_hooks(root: Path) -> execrun.ExecResult:
 
 
 def _activation_output(result: execrun.ExecResult) -> str:
-    """Both streams of an activation run, joined for the renderer's warning.
-
-    Joined with a newline so a stdout without a trailing newline does not run
-    straight into stderr (e.g. ``donefatal: ...``) in the warning the verb prints.
-    """
+    """Both streams of an activation run, newline-joined for the renderer's warning."""
     return "\n".join(s for s in (result.stdout, result.stderr) if s)
 
 
@@ -331,9 +194,6 @@ def consumer_snapshot(root: Path, unit: Unit) -> str:
     if unit.kind == "block":
         inner = consumer_inner(root, unit)
         if inner in (SETTINGS_MALFORMED, ENV_MEMBER_MALFORMED, ENV_MEMBER_UNSUPPORTED):
-            # A malformed settings.json / pixi.toml, or an env in a form shipit
-            # cannot merge into, has no clean managed region; surface the whole
-            # file so the OVERRIDE diff shows the real content.
             dest = root / unit.dest
             return (
                 dest.read_text(encoding="utf-8", errors="replace")
@@ -346,17 +206,7 @@ def consumer_snapshot(root: Path, unit: Unit) -> str:
 
 
 def _shipit_version() -> str:
-    """The FULL git sha of the build performing this install — the Shipit pin.
-
-    ADR-0033: the stamp is the build's OWN commit identity
-    (:func:`shipit.buildid.build_sha` — install record, build-time embed, or
-    source-checkout HEAD), never an operator-supplied value and never the
-    static package version (which identifies nothing). Fails CLOSED with
-    :class:`InstallError` when no identity resolves: a pin the launcher cannot
-    exec is worse than no install at all. The version string is a rendered
-    artifact, so the typed :class:`~shipit.identity.Sha` stringifies here, at
-    the seam.
-    """
+    """The FULL git sha of the build performing this install; raises :class:`InstallError` when none resolves."""
     sha = buildid.build_sha()
     if sha is None:
         raise InstallError(
@@ -372,19 +222,7 @@ def _shipit_version() -> str:
 def _activate(
     root: Path, activate_hooks: Callable[[Path], execrun.ExecResult]
 ) -> tuple[bool, str]:
-    """Run the activation boundary, absorbing failure into a ``(ok, detail)`` outcome.
-
-    A transport failure from the runner branches on the cause so a timeout or
-    other OS error is not mislabelled as a missing binary. Activation now runs
-    THROUGH the consumer's pixi lint env (#478, :func:`_activate_hooks`), so the
-    missing-binary case is ``pixi`` absent (``pixi`` is ``argv[0]`` — a nonzero
-    rc from a broken lint env is a normal ``check=False`` result, not this
-    transport error). Either way the recovery the operator runs is the ONE
-    shipit-level command (:data:`~shipit.install.units.HOOK_RECOVERY_CMD`):
-    re-run ``shipit install``, which re-activates the hooks idempotently. The
-    message never leaks the internal ``lefthook``/``pixi`` command under it —
-    that is the layer the operator drives shipit over, not a command they run.
-    """
+    """Run the activation boundary, absorbing failure into an ``(ok, detail)`` outcome."""
     try:
         activation = activate_hooks(root)
     except execrun.ExecError as exc:
@@ -410,30 +248,7 @@ def _activate(
 
 
 def _preclean_stale_hook_backups(root: Path) -> None:
-    """Remove stale lefthook-shim ``.old`` hook backups before ``lefthook
-    install`` re-runs — the #777 mode 2 fix.
-
-    ``lefthook install`` renames any pre-existing ``.git/hooks/<hook>`` to
-    ``<hook>.old`` before writing its own shim; when a prior (release-era)
-    activation already left a ``<hook>.old`` behind, that rename collides
-    ("can't rename pre-commit to pre-commit.old — file already exists"), the
-    activation fails, and self-cert fails CLOSED on the ``hooks`` postcondition.
-    The fleet is full of ex-release repos carrying exactly this leftover.
-
-    Conservative by construction (the issue's bar — only remove backups
-    positively identifiable as tool-managed): a ``.old`` file is removed only
-    when its content carries BOTH :data:`LEFTHOOK_SHIM_MARKERS`, which lefthook
-    bakes into every shim it generates and a hand-written consumer hook would
-    not. A backup that is not a lefthook shim is left untouched. Best-effort:
-    an unreadable/unremovable backup is logged and skipped, never fatal — the
-    worst case is the pre-existing collision, which the activation degrades on
-    as before.
-
-    Resolves the hooks dir through the git adapter (:func:`shipit.git.hooks_dir`,
-    #914) so a linked-worktree consumer — whose ``.git`` is a *file* and whose
-    hooks live in the shared common dir — is cleaned too, not silently skipped by
-    a hardcoded ``root / ".git" / "hooks"`` that does not exist there.
-    """
+    """Remove ``.old`` hook backups that carry BOTH :data:`LEFTHOOK_SHIM_MARKERS`; best-effort."""
     hooks_dir = git.hooks_dir(cwd=str(root))
     if hooks_dir is None or not hooks_dir.is_dir():
         return
@@ -466,62 +281,21 @@ def _preclean_stale_hook_backups(root: Path) -> None:
 
 
 def _preclean_dangling_hook_symlinks(root: Path) -> None:
-    """Remove a pre-existing DANGLING symlink at a managed hook path before
-    ``lefthook install`` re-runs — the #912 fix.
-
-    A repo carrying a legacy ``.git/hooks/<hook>`` symlink whose target no longer
-    resolves defeats ``lefthook install``: lefthook decides a hook already exists
-    with a ``stat`` that FOLLOWS the link, so a dangling link reads as absent;
-    lefthook then skips its normal move-to-``.old`` step and goes straight to
-    ``open(<hook>, O_CREATE|O_WRONLY)``, which ALSO follows the dead link and
-    tries to create the missing target in a directory that does not exist →
-    ``ENOENT`` ("no such file or directory"). lefthook cannot self-heal this, so
-    that one hook never activates while the others do. Unlinking the dead link
-    here lets lefthook write a fresh shim into the now-empty slot.
-
-    Same category as :func:`_preclean_stale_hook_backups` (a leftover blocking
-    activation), and held to the same conservative bar: only a DANGLING symlink
-    is removed — the path is a symlink (:meth:`~pathlib.Path.is_symlink`, an
-    ``lstat`` that does NOT follow) whose target does not resolve (a following
-    :meth:`~pathlib.Path.stat` raises :class:`FileNotFoundError`). A symlink
-    whose target resolves is a working consumer hook and is left untouched, as is
-    a real (non-symlink) file. The classification stats rather than calling
-    :meth:`~pathlib.Path.exists` on purpose: ``exists`` returns false for ANY
-    ``stat`` failure — including a :class:`PermissionError` reaching an existing
-    target — which would misread a LIVE but momentarily-unreachable link as
-    dangling and destroy it. So ONLY :class:`FileNotFoundError` counts as
-    dangling; any other :class:`OSError` leaves the link untouched. Best-effort:
-    the classification calls are themselves OSError-guarded (a restrictive parent
-    directory would otherwise crash the install), so an unclassifiable or
-    unremovable link is logged and skipped, never fatal — the worst case is
-    today's degraded activation warning.
-
-    Resolves the hooks dir through the git adapter (:func:`shipit.git.hooks_dir`,
-    #914) so a linked-worktree consumer — whose ``.git`` is a *file* and whose
-    hooks live in the shared common dir — is cleaned too, not silently skipped by
-    a hardcoded ``root / ".git" / "hooks"`` that does not exist there.
-    """
+    """Unlink a DANGLING symlink at a managed hook path; best-effort, any other ``OSError`` leaves it."""
     hooks_dir = git.hooks_dir(cwd=str(root))
     if hooks_dir is None or not hooks_dir.is_dir():
         return
     for name in MANAGED_HOOK_NAMES:
         hook = hooks_dir / name
         try:
-            # DANGLING = a symlink (lstat, does not follow) whose target does not
-            # resolve (a following stat raises FileNotFoundError). A real file or
-            # an absent path is not a symlink; a link whose target resolves stats
-            # cleanly. Stat rather than `exists()` keeps the bar honest —
-            # `exists()` also reads false on a PermissionError while following the
-            # link, which would destroy a LIVE but unreachable hook — so only
-            # FileNotFoundError is dangling and any other OSError leaves it be.
             if not hook.is_symlink():
                 continue
             try:
-                hook.stat()  # follows the link
+                hook.stat()
             except FileNotFoundError:
-                pass  # dead target → dangling → removed below
+                pass
             else:
-                continue  # target resolves → live consumer hook → leave it
+                continue
         except OSError:
             logger.warning(
                 "could not classify a git-hook path before activation; "
@@ -546,14 +320,7 @@ def _preclean_dangling_hook_symlinks(root: Path) -> None:
 
 
 def _snapshot_paths(plan: Plan) -> list[str]:
-    """Every consumer path a committing apply may write, delete, or stamp — the
-    superset of :attr:`Plan.changed_paths` plus the two generated files it does
-    not track (:data:`PIXI_LOCK`, and the seeded :data:`~shipit.install.units.PIXI_FILE`).
-
-    The roll-back set for the #777 mode 3 transaction (see
-    :func:`_snapshot_committing_writes`): capturing these before the writes and
-    restoring them on a failed self-cert leaves NOTHING half-applied.
-    """
+    """Every consumer path a committing apply may write, delete or stamp — the roll-back set."""
     paths = set(plan.changed_paths)
     if plan.seed_pixi_manifest:
         paths.add(PIXI_FILE)
@@ -562,16 +329,7 @@ def _snapshot_paths(plan: Plan) -> list[str]:
 
 
 class _SnapshotCell(NamedTuple):
-    """One path's pre-write state: its bytes AND its permission bits.
-
-    The mode is carried because a managed write can CHANGE it —
-    :func:`write_unit` ``chmod(0o755)``\\s an executable unit (``bin/shipit``),
-    and the rollback recreates retire-deleted files — so a bytes-only restore
-    would return the content but leave the mode dirty (the #838 review's major
-    finding). ``mode`` is the :func:`stat.S_IMODE` permission bits only, so the
-    restore reapplies exactly what the file carried before, executable bit
-    included.
-    """
+    """One path's pre-write bytes AND permission bits, so a restore returns the mode too."""
 
     data: bytes
     mode: int
@@ -580,17 +338,7 @@ class _SnapshotCell(NamedTuple):
 def _snapshot_committing_writes(
     root: Path, plan: Plan
 ) -> dict[str, _SnapshotCell | None]:
-    """Capture the pre-write bytes+mode of every :func:`_snapshot_paths` entry.
-
-    ``None`` marks a path absent before the writes (so the restore UNLINKS it
-    rather than resurrecting stale state). The map is the transaction the
-    committing modes roll back to on a failed self-cert (#777 mode 3): the
-    fail-closed run had already applied the full managed set AND stamped
-    ``.shipit.toml``, so a rerun saw matching hashes, reported "nothing to do",
-    and exited 0 — the half-applied state was unrecoverable by the tool. Taken
-    only for committing modes; the default working-tree refresh publishes
-    nothing and keeps its writes for the caller to review (``git diff``).
-    """
+    """Pre-write cells for every :func:`_snapshot_paths` entry; ``None`` marks a path absent."""
     return {rel: _snapshot_cell(root / rel) for rel in _snapshot_paths(plan)}
 
 
@@ -604,28 +352,7 @@ def _snapshot_cell(path: Path) -> _SnapshotCell | None:
 def _restore_committing_writes(
     root: Path, snapshot: dict[str, _SnapshotCell | None]
 ) -> None:
-    """Roll the working tree back to ``snapshot`` — the #777 mode 3 rollback.
-
-    Each cell is restored to exactly its pre-write state: bytes are rewritten
-    verbatim AND the original permission bits reapplied (a spliced block file
-    returns to its original content, a stamped ``.shipit.toml`` to its prior
-    stamp, an executable-managed ``bin/shipit`` to both its old bytes and old
-    mode — never a mode-only dirty file after the content restore). A ``None``
-    cell (the path was absent) is unlinked so a freshly-added managed file
-    leaves no trace. Emptied parent directories are left in place — inert (git
-    does not track them, reconcile reads files) and cheaper than proving a dir
-    was created by this run rather than pre-existing. Hook activation is
-    deliberately NOT rolled back either: the ``lefthook install`` shims are
-    idempotent and sit outside the managed-set/manifest state that decides
-    :attr:`Plan.nothing_to_do`, so a rerun re-activates them cleanly.
-
-    Best-effort per path: a failure on one entry does NOT abort the rest — this
-    is an emergency rollback, so every path that CAN be restored is, and only
-    then is a combined :class:`OSError` raised naming the paths that could not be
-    (chained from the first cause). The caller wraps that raise so a rollback
-    failure never masks the ``SelfCertError`` that triggered it and logs it as a
-    partial rollback.
-    """
+    """Roll the working tree back to ``snapshot``, best-effort per path, then raise a combined ``OSError``."""
     failures: list[tuple[str, OSError]] = []
     for rel, cell in snapshot.items():
         dest = root / rel
@@ -648,96 +375,12 @@ def _restore_committing_writes(
 def _restore_caller_branch(
     cwd: str, original_ref: str | None, staged_writes: set[str]
 ) -> None:
-    """Switch the caller's checkout back to ``original_ref`` after the MODE_PR
-    flow — the #777 mode 1 fix.
+    """Switch the caller's checkout back to ``original_ref``; best-effort, never raises.
 
-    MODE_PR switches onto the ``shipit/install`` scratch branch to stage its
-    commit; without this the operator is silently left off their own branch.
-    Best-effort and no-op when there is nothing to restore to — a detached HEAD
-    (``original_ref`` is ``None``). A caller who STARTED on the scratch branch
-    has no other branch to return to; the reconcile publishes via an ISOLATED
-    scratch index (#992), so the operator's real index is left at its soft-reset
-    state (their pre-reset branch tip, now a staged diff against the published
-    install HEAD), and this rewinds it to HEAD (:func:`git.reset_index`) so they
-    land on a clean install branch rather than a heavily-staged index (#852
-    review). A restore that cannot run is logged, never raised: it must not mask
-    the real apply outcome (or a git/gh error already unwinding through the
-    ``finally`` that calls this).
-
-    ``staged_writes`` is the managed set apply left ON DISK. The members of it
-    that git's checkout would actually TRIP OVER — and only those — are staged
-    into the caller's REAL index immediately before the switch (#993). That set is
-    precisely ``UNTRACKED in the real index AND carried by HEAD AND absent from
-    the caller's own branch``. The reconcile
-    commit is built on an ISOLATED scratch index (#992), so a managed path apply
-    ADDED is on disk but was never added to the real index — untracked. It is,
-    however, in the scratch-index commit now at HEAD, so switching back to a branch that lacks it
-    makes git refuse outright (``error: The following untracked working tree files
-    would be removed by checkout: .agents/skills/…``) and the operator is stranded
-    on the scratch branch — the very #777 mode 1 surprise this exists to prevent,
-    back again whenever a reconcile adds a new path (the ``skills/`` →
-    ``.agents/skills/`` skill-dest move). Staging those ADDS makes them TRACKED and
-    index-clean against HEAD, so the switch drops each one: the reconcile lives in
-    the PR, not in the caller's tree.
-
-    ALL THREE parts of that predicate are load-bearing, not optimisations (#993
-    review).
-
-    UNTRACKED keeps the :func:`git.reset_soft` contract — "the caller's staged
-    state survives the flow untouched" (#992) — true. An untracked path has NO
-    index entry, so staging it cannot overwrite one. Staging the WHOLE of
-    ``staged_writes`` would: the set spans NOOP units, ``.shipit.toml``, splice
-    files such as ``AGENTS.md``, and ``pixi.lock``, and for a TRACKED member a
-    blanket ``git add`` replaces whatever the caller had staged at that path with
-    apply's write — index-only content that the switch then resets away,
-    unrecoverable and unannounced. A tracked managed path never needs the help
-    anyway: it already HAS an index entry, so it raises no untracked-file refusal.
-    Where a caller's staged content diverges from both HEAD and their branch, git
-    refuses the switch and this logs it — git declining to destroy their staged
-    work is the better failure than silently destroying it, and that strand is
-    #992's to answer, not this restore's.
-
-    CARRIED BY HEAD is what makes the staging conditional on the blocked case
-    actually existing. Git aborts over an untracked file only when the CURRENT
-    HEAD carries it (leaving would have to remove it), so when the flow dies
-    BEFORE the scratch-index ``commit_all`` — HEAD still ``origin/<base>``, which
-    carries none of apply's adds — nothing blocks the switch at all. Staging then
-    would be pure side effect: the adds are absent from HEAD *and* from the target
-    branch, so the switch PRESERVES them and the operator lands back on their own
-    branch with shipit's writes sitting STAGED in their index. Reading HEAD's tree
-    (:func:`git.tree_paths`) keeps the remedy scoped to the disease.
-
-    ABSENT FROM THE CALLER'S OWN BRANCH is what tells a genuine reconcile ADD from
-    a caller's STAGED DELETION (#993 review). ``git rm --cached AGENTS.md`` leaves
-    no index entry, so UNTRACKED alone reports it as untracked; apply then
-    re-renders the path on disk and the scratch HEAD carries it, so it lands in
-    ``in_head - tracked`` and a blanket ``add`` stages apply's render straight over
-    their staged deletion — the same ``reset_soft`` breach as the staged-CONTENT
-    case, just for a deletion entry.
-
-    That discriminator CANNOT come from the index. With the reconcile built on an
-    isolated scratch index (#992), the caller's real index has no entry for the
-    path in EITHER case, so a genuine add and a staged deletion are byte-identical
-    in ``git status --porcelain`` (both ``D`` + ``??``) and in ``git diff
-    --cached`` (both ``D``) — an index-status probe cannot separate them. What
-    separates them is the CALLER'S OWN BRANCH: a genuine reconcile add is absent
-    from ``original_ref``'s tree, whereas a staged deletion is by definition a
-    deletion OF something that branch carries. Reading ``original_ref``'s tree
-    (:func:`git.tree_paths` again, no new probe) is the whole test.
-
-    Excluding it means git refuses the switch and this logs it — the operator is
-    left on the scratch branch WITH their staged deletion intact. That is the same
-    trade the staged-content case already makes, and the right way round: git
-    declining to destroy their staged work beats silently destroying it, and the
-    strand is #992's to answer, not this restore's.
-
-    The staging is transient (the switch resets those entries to the target
-    branch) and scoped to shipit's OWN writes, never a consumer-owned or unrelated
-    dirty path, and it is skipped unless the checkout is actually ON the scratch
-    branch — a flow that failed BEFORE ``switch_create`` never moved the operator,
-    so its restore must leave their index untouched. A staging failure is logged
-    and the switch still ATTEMPTED: it is a precondition for the blocked case
-    only, so it must not itself strand the caller.
+    ``staged_writes`` members that are UNTRACKED and carried by HEAD and absent
+    from ``original_ref`` are staged first — those and only those would make git
+    refuse the switch, and staging any other member would clobber the caller's
+    own index entry.
     """
     if original_ref is None:
         return
@@ -759,12 +402,6 @@ def _restore_caller_branch(
             tracked = git.ls_files_matching(sorted(staged_writes), cwd=cwd)
             in_head = git.tree_paths("HEAD", sorted(staged_writes), cwd=cwd)
             in_original = git.tree_paths(original_ref, sorted(staged_writes), cwd=cwd)
-            # `None` is "unreadable" (not-a-repo / unborn ref) — unreachable
-            # mid-flow, but all three must fail CLOSED (stage nothing) rather than
-            # degrade into a wider set: an empty `tracked` is the blanket staging
-            # that clobbers the caller's index, an empty `in_head` stages adds that
-            # never blocked, and an empty `in_original` stages over a staged
-            # deletion.
             if tracked is not None and in_head is not None and in_original is not None:
                 blocked = sorted(set(in_head) - set(tracked) - set(in_original))
                 if blocked:
@@ -791,23 +428,7 @@ def _restore_caller_branch(
 
 
 def reject_lefthook_conflicts(plan: Plan, mode: str) -> None:
-    """Fail closed on a #544 lefthook merge conflict BEFORE any write or git
-    side effect — the single guard shared by :func:`apply` and the verb's
-    no-op shortcut (:mod:`shipit.verbs.install`), so a conflict-bearing but
-    otherwise-empty plan cannot slip past a committing mode's no-op return.
-
-    The managed ``lefthook.yml`` and the consumer's ``lefthook-local.yml`` merge
-    into a config lefthook refuses to run, so publishing it would brick every
-    commit in the consumer. Every committing mode refuses; ``MODE_TREE`` stays a
-    warning (the plan's stderr lines) — a working-tree refresh publishes
-    nothing, and the caller reviews ``git diff`` with the warning in hand. The
-    refusal can originate on EITHER side (see :func:`format_lefthook_conflict`):
-    usually the consumer's local config sets the option to drop, but when the
-    managed side alone sets both the remedy is regenerating the managed
-    ``lefthook.yml``. Either way the fix is a config edit the operator makes, so
-    this is a plain :class:`InstallError`, never a :class:`SelfCertError` (which
-    signals a self-certification postcondition failure of shipit's own staged
-    managed content)."""
+    """Raise :class:`InstallError` on a lefthook merge conflict in a committing mode, before any write."""
     if plan.lefthook_conflicts and mode != MODE_TREE:
         raise InstallError(
             "lefthook config conflict — refusing to publish a managed config "
@@ -819,22 +440,7 @@ def reject_lefthook_conflicts(plan: Plan, mode: str) -> None:
 
 
 def reject_symlinked_dests(plan: Plan) -> None:
-    """Fail closed on a symlinked destination component BEFORE any write — the
-    single guard shared by :func:`apply` and the verb's no-op shortcut
-    (:mod:`shipit.verbs.install`), so a symlink-bearing but otherwise-empty plan
-    cannot slip past a mode's no-op return.
-
-    A managed unit of ANY kind whose dest crosses a consumer symlink (a linked
-    leaf, or a linked parent dir) would write THROUGH the link and overwrite the
-    target OUTSIDE the repo (#1088 review): a whole-file unit via
-    ``dest.write_bytes``, a block/splice unit via ``dest.read_text`` +
-    ``dest.write_text`` — both follow a symlinked component identically, so the
-    host being consumer-owned does not make the external write safe. Unlike the
-    lefthook refusal — which only guards PUBLISHING a config, so ``MODE_TREE``
-    warns — the containment breach happens on the raw filesystem write, so EVERY
-    mode (``MODE_TREE`` included) refuses. The fix is the operator's: remove the
-    symlink and re-run to receive a real copy. A plain :class:`InstallError` (an
-    operator-fixable state), never a :class:`SelfCertError`."""
+    """Raise :class:`InstallError` on a symlinked dest component in EVERY mode, before any write."""
     if plan.symlinked_dests:
         raise InstallError(
             "symlinked destination — refusing to write a managed file through a "
@@ -845,46 +451,8 @@ def reject_symlinked_dests(plan: Plan) -> None:
 
 
 def reject_pixi_key_conflicts(plan: Plan) -> None:
-    """Fail closed on a consumer key shadowing a managed pixi block (#1116) — the
-    single guard shared by :func:`apply` and the verb's no-op shortcut
-    (:mod:`shipit.verbs.install`), so a conflict-bearing but otherwise-empty plan
-    (the COMMON shape: the rest of the managed set is already current and only
-    this one block cannot land) cannot slip past a mode's no-op return.
-
-    The conflicted block's decision is already excluded from the plan, so nothing
-    unparseable is ever written — what this guard refuses is EXITING 0 over it.
-    Warning and continuing treated a block that could not be DELIVERED as a block
-    that did not need delivering: the repo silently kept its own declaration of
-    whatever the block carries, in a reconcile that reported success. In the
-    #1116 incident that was always a dependency pin — 16 of 20 portfolio repos,
-    most over a hand-pin whose own comment named the shipit gap the managed block
-    had since closed — but the guard is not pin-specific and neither is its
-    message: a ``[tasks]``-anchored block collides the same way (#1133 round 1).
-
-    The supported way to keep owning the key is DECLARING it —
-    ``[managed.decline].keep`` in ``.shipit.toml``, which
-    :func:`shipit.install.reconcile._plan_pixi_key_conflicts` exempts from the
-    detection outright, so a declined block never reaches this guard. That turns
-    an invisible warning into a reviewable declaration in version control.
-
-    EVERY applying mode refuses, ``MODE_TREE`` included: like
-    :func:`reject_stale_provision`, the refusal is about the state of the
-    consumer's manifest rather than about publishing, so a working-tree refresh
-    that "succeeded" while under-delivering would just relocate the discovery to
-    a fleet audit months later. The two conflict SIBLINGS strand a managed block
-    just as this one does; what keeps them warn-only is the cost of refusing on
-    THEM: :class:`~shipit.install.reconcile.PixiTaskConflict` is a deliberate,
-    documented shape in shipit's OWN repo, so refusing would make shipit refuse to
-    install itself; :class:`~shipit.install.reconcile.PixiTableConflict` has a
-    fleet-wide count of zero, so refusing on it would ship an untested
-    refusal. A plain
-    :class:`InstallError` (an operator-fixable state), never a
-    :class:`SelfCertError`."""
+    """Raise :class:`InstallError` in EVERY mode when a consumer key shadows an undelivered managed pixi block."""
     if plan.pixi_key_conflicts:
-        # "under-deliver its managed set", not "stay off the managed pin" (#1133
-        # round 1): a key conflict anchors under `[tasks]` as readily as under a
-        # dependency table, so pin-specific framing misdescribes a colliding task
-        # to the operator whose install just refused over it.
         raise InstallError(
             "pixi key conflict — refusing to reconcile a repo that would silently "
             "under-deliver its managed set:\n"
@@ -895,30 +463,7 @@ def reject_pixi_key_conflicts(plan: Plan) -> None:
 
 
 def reject_stale_provision(plan: Plan) -> None:
-    """Fail closed on a consumer pixi task still calling the retired
-    ``shipit provision lexd`` (#1070, ADR-0066) — the single guard shared by
-    :func:`apply` and the verb's no-op shortcut (:mod:`shipit.verbs.install`), so
-    a stale-reference-bearing but otherwise-empty plan (the common shape: the
-    managed set is already current and only the consumer's own lane task is
-    broken) cannot slip past a mode's no-op return.
-
-    The ``provision`` verb was deleted with no fallback, so the task is ALREADY
-    dead — the only question is whether install says so or the consumer's CI
-    does, an hour and a pin bump later, at the ``shipit provision`` tombstone
-    (:mod:`shipit.verbs.provision`, which carries this same remedy for the calls
-    the tripwire declines to judge). Nothing shipit writes can repair what
-    reaches this guard: the reconcile already projected the manifest through its
-    own managed-block rewrites (#1127,
-    :func:`shipit.install.reconcile._plan_stale_provision`), so a call this plan
-    would DELETE never lands in :attr:`Plan.stale_provision` — what survives is
-    consumer text, outside every managed block or inside a DECLINED one, and the
-    remedy is the operator's one-line edit, named per task by
-    :func:`format_stale_provision`.
-    EVERY mode refuses, ``MODE_TREE`` included: the refusal is about the state of
-    the consumer's manifest, not about publishing, so a working-tree refresh
-    that "succeeded" over a dead lane would just relocate the discovery to CI.
-    A plain :class:`InstallError` (an operator-fixable state), never a
-    :class:`SelfCertError`."""
+    """Raise :class:`InstallError` in EVERY mode on a surviving retired ``shipit provision lexd`` call."""
     if plan.stale_provision:
         raise InstallError(
             "retired command in pixi.toml — refusing to reconcile a repo whose "
@@ -940,60 +485,12 @@ def apply(
 ) -> InstallResult:
     """Execute ``plan`` against its consumer root — the only effectful path.
 
-    Writes every decided unit, regenerates a stale ``CHANGELOG.md`` from
-    ``CHANGELOG/`` with the current renderer when the plan decided the
-    re-render (#578, :func:`_rerender_changelog`), unlinks every decided
-    retired DELETE (the decision already proved the content is a known
-    pristine version, so the
-    unlink is the whole IO; KEEPs touch nothing), removes every decided
-    retired hook ENTRY from its hooks file (#619 — shipit's own managed
-    entries are protected inside the match), seeds the consumer-owned
-    policy, re-stamps the manifest from the CURRENT decisions only (so a unit
-    retired in a later shipit version drops out rather than lingering as a
-    stale key), opportunistically activates the git hooks, and performs the
-    ``mode``'s git/gh side effects.
-
-    ``activate_hooks`` injects the lefthook boundary so tests exercise the
-    activation contract without mutating a real ``.git/hooks``; ``pr_body`` is
-    the verb's pure PR-body renderer, required for :data:`MODE_PR` (the draft
-    PR's body is rendered at the boundary moment, from the pre-write override
-    snapshots, the real activation outcome, the stamped pin, and the debt
-    count). ``certify``/``debt`` inject the self-certification boundaries
-    (defaults: :func:`shipit.install.selfcert.certify` /
-    :func:`~shipit.install.selfcert.consumer_debt`).
-
-    Every COMMITTING mode (``local``/``push``/``pr``) self-certifies after
-    staging and BEFORE any git side effect (ADR-0033): a missed postcondition
-    raises :class:`SelfCertError` — fail closed, no commit, no PR, the loud
-    diagnostic naming each miss. The fail-closed is TRANSACTIONAL (#777 mode 3):
-    a committing mode snapshots every path its writes will touch before the
-    first write and rolls them back on a failed self-cert, so a fail-closed run
-    leaves NOTHING half-applied — otherwise the stamped manifest and written
-    managed set make the next run read "nothing to do" and exit 0 over an
-    unrecoverable partial state. The default working-tree refresh does not
-    certify (nor snapshot): nothing is being published, `git diff` is the
-    caller's review surface, and the caller's own commit rides the repo's hooks.
-    Install's OWN git operations — the reconcile commit AND its push — bypass the
-    repo's hooks (``--no-verify``, #477): the whole-tree gate is the REPO'S bar,
-    this very run just armed it (pre-push lints the whole tree, not the staged
-    managed set), and pre-existing consumer debt is reported in the PR body,
-    never a blocker. ``MODE_PR`` stages onto the ``shipit/install`` scratch
-    branch, which it (re)creates and resets onto the CURRENT origin default
-    branch (#852) — never the HEAD the Tree was cut from — so a Tree cut from a
-    stale leftover remote ``shipit/install`` head can never stack a conflicting
-    commit; and, in a ``finally``, always restores the caller's original checkout
-    (#777 mode 1 — never strand the operator off their own branch).
-
-    Raises :class:`InstallError` on a domain refusal (``local``/``push`` in
-    detached HEAD, a failed self-certification, a lefthook merge conflict with
-    the consumer's local config in any committing mode — #544, a managed dest
-    crossing a consumer symlink, an undeclined consumer key shadowing a managed
-    pixi block — #1116, a pixi task still calling the retired
-    ``shipit provision lexd`` — #1070) and lets a
-    git/gh boundary
-    failure propagate as :class:`~shipit.execrun.ExecError` — both members of
-    the CLI error shell's known set. Callers decide nothing here: a no-op plan
-    should simply never be applied (:attr:`Plan.nothing_to_do`).
+    ``activate_hooks``, ``pr_body``, ``certify`` and ``debt`` inject the
+    boundaries; ``pr_body`` is required for :data:`MODE_PR`. Every committing
+    mode self-certifies after staging and before any git side effect, rolling
+    its writes back and raising :class:`SelfCertError` on a miss. Raises
+    :class:`InstallError` on a domain refusal and lets a git/gh failure
+    propagate as :class:`~shipit.execrun.ExecError`.
     """
     if mode not in MODES:
         raise ValueError(f"unknown install mode: {mode!r}")
@@ -1001,43 +498,22 @@ def apply(
         raise ValueError("MODE_PR needs the pr_body renderer")
     reject_lefthook_conflicts(plan, mode)
     reject_symlinked_dests(plan)
-    # After the retired-command tripwire on purpose: a repo can carry both (the
-    # fleet shape does), and a dead `provision lexd` call is broken TODAY while a
-    # key conflict is an undelivered declaration — report the harder breakage
-    # first.
     reject_stale_provision(plan)
     reject_pixi_key_conflicts(plan)
     activate = activate_hooks or _activate_hooks
     started = time.monotonic()
     root = Path(plan.root)
 
-    # Snapshot each override's consumer content BEFORE writing, so the PR diff
-    # shows the real divergence rather than an empty diff against what we wrote.
-    # Only MODE_PR renders these snapshots (into the draft PR body), so the
-    # other modes skip the reads entirely.
     override_before = (
         {d.unit.key: consumer_snapshot(root, d.unit) for d in plan.overrides}
         if mode == MODE_PR
         else {}
     )
 
-    # Snapshot every path the committing writes below will touch BEFORE the
-    # first write (#777 mode 3): a committing mode self-certifies AFTER staging,
-    # and a failed self-cert must roll the tree back to leave NOTHING
-    # half-applied — otherwise the stamped manifest + written managed set make a
-    # rerun read "nothing to do" and exit 0 over an unrecoverable partial state.
-    # The default working-tree refresh keeps its writes (its whole point), so it
-    # takes no snapshot.
     committing_snapshot = (
         _snapshot_committing_writes(root, plan) if mode != MODE_TREE else None
     )
 
-    # Seed the minimal valid pixi manifest BEFORE the unit writes (#432): the
-    # pixi block splices below land inside a file pixi can parse, so the very
-    # first commit — which fires the freshly-synced pre-commit hook, which
-    # shells into pixi — sees a valid manifest. Guarded on the file still being
-    # absent so a pixi.toml that appeared in the gather→apply window is never
-    # clobbered (the same idempotence stance as the retired unlinks).
     if plan.seed_pixi_manifest:
         pixi_path = root / PIXI_FILE
         if not pixi_path.is_file():
@@ -1047,37 +523,10 @@ def apply(
                 extra={"root": str(root), "path": PIXI_FILE},
             )
 
-    # The authoritative touched-set (#986, the design fix behind #852/#984):
-    # every shipit-owned path this apply is authoritative for, RECORDED here as
-    # apply performs each mutation — never re-derived per path-category after the
-    # fact (the leak the enumerated "commit universe" kept re-opening). The
-    # MODE_PR reconcile commit publishes exactly this set against origin/<base>.
-    # Three views, all built inline below:
-    #
-    # - ``touched`` is the commit SCOPE: `git.staged_paths` filters it to the
-    #   members that actually carry a staged diff against origin/<base>, so no
-    #   consumer-local path outside it can ever leak into the PR.
-    # - ``staged_writes`` is the subset apply left ON DISK as WRITES — the paths
-    #   `git add` stages from the working tree. A path apply made ABSENT (a
-    #   retired deletion) is NEVER here: `git add` on an absent+untracked path
-    #   errors, so a removal is staged from the index instead (next view).
-    # - ``retired_removals`` is the retired paths whose ABSENCE must be published.
-    #   MODE_PR stages these with `git rm --cached --ignore-unmatch` — an
-    #   INDEX-only purge (the working tree is never touched, so a consumer file
-    #   that reappeared at a retired path is never destroyed) that is a safe no-op
-    #   when the path is untracked or already gone, so it can never crash the
-    #   commit the way `git add` on an absent pathspec does (#986 review).
-    #
-    # Built for every mode (cheap set-building); only MODE_PR consumes them.
     touched: set[str] = set()
     staged_writes: set[str] = set()
     retired_removals: set[str] = set()
 
-    # Managed units: the WHOLE managed set is shipit-owned. A NOOP unit writes
-    # nothing — its file already holds the desired content — but is still a
-    # managed destination the PR must assert against the base (a base that lacks
-    # it needs it published, the #852 NOOP-unit drop-out), so record every
-    # decision's dest, present on disk either way, not just the writes.
     for d in plan.decisions:
         touched.add(d.unit.dest)
         staged_writes.add(d.unit.dest)
@@ -1085,56 +534,19 @@ def apply(
         write_unit(root, d.unit)
 
     rerendered = plan.rerender_changelog and _rerender_changelog(root)
-    # The changelog rides the commit SCOPE unconditionally: a CHANGELOG.md the
-    # base still carries but this tree no longer does — deleted since a prior run,
-    # or a re-render skipped in the gather→apply window (#578) — must be published
-    # as a deletion, never reverted to the base copy. It joins ``staged_writes``
-    # only when the re-render actually WROTE it: an absent changelog must not
-    # reach `git add`, which errors on an absent+untracked pathspec (#578 review).
     touched.add(CHANGELOG_FILE)
     if rerendered:
         staged_writes.add(CHANGELOG_FILE)
 
     for d in plan.retired:
-        # Every retired decision EXCEPT KEEP must publish the path's ABSENCE, so
-        # the reset onto a base that still carries it DELETES it rather than
-        # resurrecting it (#984). Record the path in the commit scope AND the
-        # retired-removals set — MODE_PR stages the deletion from the INDEX with
-        # `git rm --cached` (never `staged_writes`/`git add`, which errors on an
-        # absent or untracked pathspec, #986 review). KEEP is a locally-modified
-        # consumer file apply PRESERVES: never touched, never recorded, never
-        # published (the retired-file invariant).
         if d.action == KEEP:
             continue
         touched.add(d.retired.path)
         retired_removals.add(d.retired.path)
-        # Only a DELETE removes anything from the WORKING TREE, and only when the
-        # path is still a regular file. DELETE proved a pristine shipit-owned copy
-        # at gather, so unlink that copy; but if it vanished OR turned into a
-        # directory in the gather→apply window, `is_file()` is False and the goal
-        # state ("shipit's file absent") already holds — leave the disk alone
-        # (no missing-file or IsADirectory crash). A NOOP found the path already
-        # gone at gather, so it NEVER touches the disk: a consumer file that
-        # reappeared at a NOOP path in the window is theirs, never ours to delete
-        # (#986 codex review). The base-side deletion is still published via
-        # ``retired_removals``, which needs nothing on disk.
         dest = root / d.retired.path
         if d.action == DELETE and dest.is_file():
             dest.unlink(missing_ok=True)
     for d in plan.retire_hook_deletes:
-        # Retired hook entries (#619): rewrite the hooks file without the
-        # matched consumer-local entries. Runs AFTER the unit writes above, so
-        # shipit's own freshly-spliced entries are already in place (and
-        # protected inside the match — splice.is_retired_hook). Same
-        # idempotence stance as the unlinks: a file gone in the gather→apply
-        # window means the goal state already holds, and a file turned
-        # malformed in that window is preserved verbatim by
-        # remove_retired_hooks (never a clobber).
-        #
-        # Fails OPEN in lockstep with the gather side (reconcile.retired_hook_count,
-        # #619): a consumer-owned hooks file that turns unreadable/non-UTF-8 — or
-        # an unwritable dest — in the gather→apply window degrades to "nothing to
-        # remove" with a logged warning rather than crashing the whole install.
         dest = root / d.retired.file
         if not dest.is_file():
             continue
@@ -1151,43 +563,21 @@ def apply(
                 extra={"root": str(root), "file": d.retired.file},
             )
             continue
-        # apply REWROTE this hook file — a present file, so it joins BOTH the
-        # scope and the git-add set. A retired-hook NOOP is deliberately NOT here:
-        # the entry was merely absent, but the file may still hold UNRELATED
-        # consumer edits, so carrying it would leak those into the PR (the
-        # files-vs-hooks asymmetry, #984 round-6). Only a rewrite is apply's own.
         touched.add(d.retired.file)
         staged_writes.add(d.retired.file)
 
-    # The `.claude/skills` structural symlink (#1088, ADR-0077): ensure it here,
-    # after the `.agents/skills` content writes above so the link's target
-    # already holds the managed set. Create-only-when-absent — shipit never
-    # removes an existing `.claude/skills` (an existing one BLOCKS at gather), so
-    # a CREATE only ever ADDs the symlink; it joins the commit scope.
     if ensure_claude_skills_link(root, plan.claude_skills_link):
         touched.add(CLAUDE_SKILLS_DIR)
         staged_writes.add(CLAUDE_SKILLS_DIR)
 
     cfg_path = root / config.CONFIG_NAME
-    # Seed the consumer-owned policy BEFORE the manifest write, which preserves
-    # `[secrets]`/`[reviewers]` textually while it re-stamps `[shipit]`/`[managed]`.
     if plan.seeds:
-        # Re-derive the [toolchains] entries at the write (#578) — the same
-        # derivation gather planned with, recomputed the way the whole seed
-        # pass re-reads the config text (idempotent either way: an entry that
-        # appeared in the gather→apply window just seeds what NOW holds).
         config.apply_policy_seed(cfg_path, toolchains=config.derive_toolchains(root))
-    # Stamped from the CURRENT decisions only: a unit retired in a later shipit
-    # version — or DECLINED by the consumer (#600, excluded from the decisions
-    # at reconcile) — drops out of [managed] here rather than lingering as a
-    # stale key that re-proposes the same override every reconcile.
     new_managed = {d.unit.key: d.desired_hash for d in plan.decisions}
     stamped_version = _shipit_version()
     config.write_manifest(cfg_path, version=stamped_version, managed=new_managed)
-    # The re-stamped `.shipit.toml` is always written — record it in both views.
     touched.add(config.CONFIG_NAME)
     staged_writes.add(config.CONFIG_NAME)
-    # The reconcile milestone: the managed set (and manifest) is on disk.
     logger.info(
         "managed set written",
         extra={
@@ -1202,28 +592,13 @@ def apply(
         },
     )
 
-    # Turn the checks on: with lefthook.yml on disk, activate the local hooks so
-    # `pixi run lint` fires at commit time — the checks ship LIVE, not dormant.
-    # Opportunistic, so a missing lefthook degrades rather than aborting. Only
-    # (re)activate when this install actually writes a managed unit; a seed-only
-    # change touches just `.shipit.toml` and leaves the live hooks alone.
     hooks_activated: bool | None = None
     hooks_detail = ""
     if plan.writes and plan.activates_hooks:
-        # Clear any stale lefthook `.old` backup first (#777 mode 2) so the
-        # rename `lefthook install` performs never collides — a collision fails
-        # the whole activation, which then fails self-cert closed on a virgin
-        # ex-release consumer. Same for a pre-existing DANGLING hook symlink
-        # (#912): lefthook's stat follows the dead link, reads it as absent, and
-        # then ENOENTs trying to create its missing target — so that one hook
-        # never activates. Both are leftovers that block activation; clear them
-        # before `lefthook install` writes its fresh shims.
         _preclean_stale_hook_backups(root)
         _preclean_dangling_hook_symlinks(root)
         hooks_activated, hooks_detail = _activate(root, activate)
         if not hooks_activated:
-            # Degraded-but-continuing: the config shipped, only local activation
-            # was deferred — the PR body tells the merger to activate.
             logger.warning(
                 "could not activate git hooks: %s",
                 hooks_detail.strip(),
@@ -1243,10 +618,6 @@ def apply(
         return int((time.monotonic() - started) * 1000)
 
     if mode == MODE_TREE:
-        # Default: working-tree refresh ONLY (#359). The managed set and the
-        # manifest are on disk, uncommitted — `git diff` is the review surface,
-        # and the caller folds the refresh into their own commit/PR. Zero git/gh
-        # side effects: no commit, no branch, no push, no PR.
         logger.info(
             "install refreshed working tree",
             extra={
@@ -1259,10 +630,6 @@ def apply(
         )
         return result
 
-    # The committing modes self-certify BEFORE any git side effect (ADR-0033):
-    # any missed postcondition fails closed — no commit, no push, no PR — with
-    # the loud diagnostic naming every miss. Runs after the writes/stamp/
-    # activation above, so it asserts exactly the state a commit would publish.
     certifier = certify or selfcert.certify
     cert_report = certifier(
         plan,
@@ -1272,13 +639,6 @@ def apply(
     )
     if not cert_report.ok:
         message = selfcert.format_failure(cert_report)
-        # Roll the staged writes back BEFORE raising (#777 mode 3): fail-closed
-        # must be fully closed, leaving the tree exactly as apply found it. Skip
-        # only the (unreachable-here) missing-snapshot guard for MODE_TREE, which
-        # never certifies. Otherwise the stamped manifest + written managed set
-        # would make the next run read "nothing to do" over a half-applied tree.
-        # A rollback IO failure must not mask the SelfCertError (the real fault):
-        # log it and still raise the diagnostic that names every missed check.
         if committing_snapshot is not None:
             try:
                 _restore_committing_writes(root, committing_snapshot)
@@ -1301,25 +661,13 @@ def apply(
         )
         raise SelfCertError(message)
 
-    # The consumer's whole-tree debt (#439's sibling scoping, ADR-0033):
-    # REPORTED in the reconcile PR body, never a blocker — read best-effort
-    # only where a PR body will carry it.
     if mode == MODE_PR:
         debt_reader = debt or selfcert.consumer_debt
         result = replace(result, lint_debt=debt_reader(root))
 
     changed_paths = list(plan.changed_paths)
-    # The re-render can be skipped in the gather→apply window (CHANGELOG/ gone
-    # or turned unrenderable → render_current is None, the retired-unlink
-    # idempotence stance, #578). Complete the skip: drop the now-phantom
-    # CHANGELOG.md from the commit set so a committing mode's `git add -f` never
-    # crashes with an opaque pathspec error on a file that was never (re)written
-    # and is absent+untracked (#578 review).
     if plan.rerender_changelog and not rerendered:
         changed_paths = [p for p in changed_paths if p != CHANGELOG_FILE]
-    # The committed-lockfile decision (#439, see PIXI_LOCK): the lint-env solve
-    # above materializes/refreshes pixi.lock; stage it with the managed set so
-    # the install lands laptop/CI parity and never leaves the tree dirty.
     if PIXI_LOCK not in changed_paths and (root / PIXI_LOCK).is_file():
         changed_paths.append(PIXI_LOCK)
     try:
@@ -1358,105 +706,28 @@ def apply(
             )
             return replace(result, branch=branch)
 
-        # MODE_PR: stage onto the install branch, push it, open a DRAFT PR — the
-        # standalone consumer-onboarding/reconcile flow, explicit opt-in only.
-        # Capture the caller's branch first so the `finally` returns their
-        # checkout to it (#777 mode 1): `shipit/install` is a shipit-owned
-        # scratch ref, and leaving the operator sitting on it — off their own
-        # branch, with no notice — is the surprise the issue reports.
         original_ref = git.current_branch(cwd=cwd)
-        # Base the staging branch on the CURRENT origin default, never on the
-        # HEAD the Tree was cut from (#852): a Tree cut from a STALE leftover
-        # remote `shipit/install` head (the reconcile merge does not delete the
-        # staging branch) would otherwise stack the fresh managed commit onto
-        # stale commits, minting a PR that conflicts with main. Fetch the base,
-        # (re)create the branch, then reset it onto origin/<default> so the
-        # managed commit lands as ONE clean refresh regardless of the cut point —
-        # which also RECYCLES a stale leftover branch on the next run. The reset
-        # is `--soft`: it moves only the branch pointer, so the rendered managed
-        # files stay in the working tree for the pathspec commit below (which
-        # takes the listed paths from the working tree and everything else from
-        # HEAD, now origin/<default>).
-        #
-        # Fetch BEFORE resolving the default branch (#984 review): when
-        # `<remote>/HEAD` is absent (a reference-borrow clone), `default_branch`
-        # falls back to probing the remote-tracking refs a fetch populated. A
-        # pre-fetch checkout may not yet have `origin/master`/`origin/trunk`, so
-        # resolving first would mis-fall-back to `main` and then `reset_soft`
-        # onto a non-existent `origin/main`. Fetch first, then resolve, so the
-        # fallback probes see the current remote-tracking refs.
+        # Fetch BEFORE resolving the default branch: with `<remote>/HEAD` absent,
+        # `default_branch` probes the remote-tracking refs a fetch populates.
         git.fetch(cwd=cwd)
         base_branch = git.default_branch(cwd=cwd)
-        # The branch switch and the reset live INSIDE the try/finally: a
-        # `reset_soft` (or `switch_create`) that raises AFTER the checkout has
-        # moved onto `shipit/install` must still restore the caller's branch
-        # (#852 review) — leaving the operator stranded on the scratch branch is
-        # exactly the #777 mode 1 surprise the restore exists to prevent.
         try:
             git.switch_create(INSTALL_BRANCH, cwd=cwd)
             git.reset_soft(f"origin/{base_branch}", cwd=cwd)
-            # The committed-lockfile decision (#439, see PIXI_LOCK): the lint-env
-            # solve during hook activation above materialized/refreshed pixi.lock;
-            # stage it with the managed set so the reconcile lands laptop/CI parity
-            # and never leaves the tree dirty. Present on disk, so it joins BOTH
-            # views (a real staged write).
             if (root / PIXI_LOCK).is_file():
                 touched.add(PIXI_LOCK)
                 staged_writes.add(PIXI_LOCK)
-            # The reconcile commit is the touched-set (#986), recorded as apply
-            # mutated — no per-category universe to re-derive, no consumer-edit
-            # surface. It is a whole-INDEX commit (`commit_all`, #991) built on an
-            # ISOLATED SCRATCH INDEX (#992), never the checkout's real index: the
-            # `reset --soft origin/<base>` above moves ONLY HEAD, so the real
-            # index still points at the caller's branch tip (all their local
-            # commits ahead of base, plus anything they had staged). Publishing
-            # that real index with a whole-index commit would squash the caller's
-            # branch and staged changes into the PR — and the `finally` restore
-            # would then leave the operator's real index destroyed. So seed a
-            # scratch index from `origin/<base>` (`read_tree`) and stage ONLY the
-            # managed paths into IT, leaving the caller's real index untouched.
-            #
-            # Staging into the scratch index has two halves. `git add` stages the
-            # paths apply left ON DISK as writes (`staged_writes`: the managed set
-            # incl. NOOP units, the config, a re-rendered changelog, rewritten
-            # hook files, and pixi.lock). `git rm --cached` then stages the
-            # retired-path REMOVALS (`retired_removals`): an index-only purge (the
-            # working tree is never touched) that publishes each retired path's
-            # absence as a staged deletion against a base that still carries it —
-            # robust where `git add` is not, since the path may be absent,
-            # untracked, or a consumer file that reappeared at it, and
-            # `--ignore-unmatch` makes any of those a no-op rather than a crash
-            # (#986 review). `git.staged_paths` then scopes the FULL `touched` set
-            # to the members that actually carry a staged diff against
-            # origin/<base> in the scratch index — used here ONLY as the no-op
-            # guard (empty → nothing to publish, below), NOT as a commit pathspec:
-            # the commit itself is the whole-INDEX `commit_all`. It MUST be that,
-            # never a pathspec `git commit`: a pathspec commit runs git's
-            # PARTIAL-commit mode, which builds the tree from the WORKING TREE of
-            # the named paths and DISREGARDS the index — silently negating the
-            # `git rm --cached` deletions (they live only in the index) and
-            # resurrecting every retired file whose working-tree copy survived
-            # (the skills-store move dropped all 11 `skills/*` deletions, #991).
-            # The scratch index seeded from origin/<base> IS precisely the
-            # reconcile: it keeps the adds, HONORS the deletions, and — since a
-            # KEPT retired file or an unrelated dirty consumer file is NEVER
-            # `git add`ed — leaves consumer-local paths at their base content.
             with tempfile.TemporaryDirectory(prefix="shipit-pr-index-") as index_dir:
                 index_file = str(Path(index_dir) / "index")
                 git.read_tree(f"origin/{base_branch}", cwd=cwd, index_file=index_file)
                 git.add(sorted(staged_writes), cwd=cwd, index_file=index_file)
+                # Removals go through `git rm --cached --ignore-unmatch`, never
+                # `git add`, which errors on an absent or untracked pathspec.
                 git.rm_cached(sorted(retired_removals), cwd=cwd, index_file=index_file)
                 pr_paths = git.staged_paths(
                     sorted(touched), cwd=cwd, index_file=index_file
                 )
                 if not pr_paths:
-                    # The managed set already matches origin/<base> — a stale Tree
-                    # duplicating an already-merged reconcile. Nothing in the
-                    # shipit-owned touched-set is staged into the scratch index, so
-                    # a whole-index `git commit` over an empty diff would fail with
-                    # "nothing to commit" (exit 1); report the clean no-op and skip
-                    # the commit/PR rather than crashing the install (#852 review).
-                    # The `finally` still restores the caller's branch.
                     logger.info(
                         "install PR: the managed set is already current on "
                         "origin/%s — nothing to publish",
@@ -1469,16 +740,16 @@ def apply(
                         },
                     )
                     return result
+                # Whole-index, never a pathspec commit: a pathspec commit runs
+                # git's PARTIAL-commit mode, which builds the tree from the
+                # working tree and disregards the index — silently dropping the
+                # `rm --cached` deletions staged above.
                 git.commit_all(
                     COMMIT_MESSAGE, cwd=cwd, no_verify=True, index_file=index_file
                 )
-            # The install branch is regenerated on top of origin/<default> each
-            # run; force so a re-run with an open install PR (or a stale leftover
-            # branch) updates it rather than failing non-fast-forward.
             git.push(INSTALL_BRANCH, cwd=cwd, force=True, no_verify=True)
             existing = gh.pr_url_for_head(INSTALL_BRANCH, cwd=cwd)
             if existing:
-                # The force-push already refreshed the open PR's diff.
                 logger.info(
                     "install draft PR updated",
                     extra={
@@ -1516,20 +787,8 @@ def apply(
             )
             return replace(result, branch=INSTALL_BRANCH, pr_url=url)
         finally:
-            # Success or failure, restore the caller's checkout: the operator
-            # never asked to move off their branch, and a git/gh failure mid-flow
-            # would otherwise strand them on the scratch branch too. The managed
-            # writes ride along because the restore must STAGE the newly ADDED
-            # ones into the real index first (#993): the scratch-index commit
-            # (#992) never touched that index, so a newly added managed path is
-            # untracked on disk and git refuses to switch away over it. It stages
-            # only the untracked members — a tracked one needs no unblocking, and
-            # staging it would overwrite the caller's staged blob (#993 review).
             _restore_caller_branch(cwd, original_ref, staged_writes)
     except execrun.ExecError:
-        # The failure propagates to the CLI error shell (clean `error: …` +
-        # exit 1); it is recorded here at ERROR with the exception attached so
-        # the durable record survives the propagation (ADR-0029).
         logger.error(
             "install git/gh step failed", exc_info=True, extra={"root": str(root)}
         )
