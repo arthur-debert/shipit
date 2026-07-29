@@ -1,26 +1,4 @@
-"""The deep repository-creation orchestrator — ``shipit repo new``'s one API.
-
-This is the deep module the CLI is thin over (``docs/spec/repo-new.md`` §Design
-Decisions): its small interface takes a name, a parent, and the selected stacks
-and returns a typed :class:`CreationResult`, owning every step in between —
-request preflight, plan composition, staging, managed installation, pixi
-provisioning, staged verification, the root commit, and the atomic publish.
-Callers never coordinate those steps.
-
-The atomic-rename contract (ADR-0059) is the spine of the effectful path: the
-complete, verified, initially-committed Repo is built in a temporary sibling
-UNDER the requested parent (staging and destination share one filesystem), and
-only after every step succeeds does one :func:`os.rename` publish it. Any
-handled failure removes the temporary sibling and leaves the destination in its
-preflight state (absent stays absent; an empty directory stays empty); a cleanup
-failure is reported but never publishes a partial Repo.
-
-Every effect that reaches the world — managed install, pixi provisioning, the
-staged Checks, and Git — is a seam with a real default and an injectable
-override, so the orchestration (preflight, staging, ordering, rollback, publish)
-is exercised without a full Rust toolchain while the command wires the real
-effects (ADR-0062; the injection detail ADR-0055–0063 leave to the module).
-"""
+"""``repocreate/create`` — the repository-creation orchestrator; publishes by atomic rename."""
 
 from __future__ import annotations
 
@@ -41,31 +19,18 @@ from .profiles import resolve_profiles
 
 logger = logging.getLogger("shipit.repocreate")
 
-#: The public Checks creation certifies the staged Repo against, in order
-#: (``docs/spec/repo-new.md``): the same public pixi tasks a user runs.
+#: The public pixi tasks the staged Repo is certified against, in order.
 CHECKS: tuple[str, ...] = ("lint", "test", "build")
 
-#: pixi's long-runner bound — a cold provision or a first-activation Check
-#: re-solve is provisioning-shaped work, so it shares pixi's own budget rather
-#: than the Exec runner's 5-minute default. Aliased to the single source of
-#: truth (:data:`shipit.pixienv.INSTALL_TIMEOUT`) so the two cannot drift.
+#: Staged Checks are provisioning-shaped, so they share pixi's own budget.
 _LONG_TIMEOUT: float = pixienv.INSTALL_TIMEOUT
 
-# Seam type aliases — each takes the staged Repo root and performs its effect.
 Effect = Callable[[Path], None]
 
 
 @dataclass(frozen=True)
 class CreationResult:
-    """What a successful :func:`create_repo` produced (ADR-0030).
-
-    ``destination`` is the published Repo path; ``initial_commit`` the root
-    commit's sha; ``stacks`` the selected profile keys. A value returned only
-    on full success — a handled failure publishes nothing (a domain-level
-    refusal raises :class:`CreationError`; an underlying tool failure such as an
-    :class:`~shipit.execrun.ExecError` from Git propagates unchanged), and
-    rollback leaves the destination in its preflight state.
-    """
+    """What a successful :func:`create_repo` produced; never returned on failure."""
 
     destination: Path
     initial_commit: str
@@ -73,45 +38,19 @@ class CreationResult:
 
 
 def _preflight(parent: Path, name_value: str) -> tuple[Path, Path]:
-    """Validate the parent and derive+validate the destination (ADR-0059).
-
-    The parent must already exist as a writable, traversable directory (a
-    symlink resolving to one is accepted); creation never creates missing parent
-    structure. The destination is always ``parent/name`` and must be absent or an
-    empty directory — a file, a symlink, or a directory containing ANY entry
-    (including a hidden one) is refused before anything is written.
-    """
     resolved = parent.resolve() if parent.is_symlink() else parent
     if not resolved.is_dir():
         raise CreationError(f"parent {parent} is not an existing directory")
-    # Both write AND traverse (execute) are required: creation creates the
-    # staging sibling under the parent and stats/renames entries within it, and
-    # a non-traversable parent (W_OK without X_OK) would accept preflight only to
-    # fail mid-creation.
     if not os.access(resolved, os.W_OK | os.X_OK):
         raise CreationError(f"parent {parent} is not a writable, traversable directory")
-    # Anchor the destination to the user-supplied `parent`, NOT its resolved
-    # target: when `parent` is a symlink to a directory we accept it, but the
-    # created/reported path must stay `parent/name` (a path *through* the symlink)
-    # so it matches the docstring and the CLI's `<parent>/<name>` contract rather
-    # than surprising the caller with the real path behind the link. Staging still
-    # uses the resolved parent so the publish rename stays same-filesystem.
+    # The destination stays a path THROUGH any symlinked parent; only staging
     dest = parent / name_value
     _assert_absent_or_empty(dest)
     return resolved, dest
 
 
 def _assert_absent_or_empty(dest: Path) -> None:
-    """Refuse a destination that is not absent or an empty directory.
-
-    Every probe here (``exists``/``is_symlink``/``is_dir``/``iterdir``) hits the
-    filesystem and can raise ``OSError`` — e.g. a destination that exists but is
-    not readable/traversable raises ``PermissionError`` (``EACCES`` propagates
-    from the stat-based checks too, not just ``iterdir``). Any such error is
-    re-raised as :class:`CreationError` so an uninspectable destination stays on
-    the verb's ``error: …`` + exit-1 refusal contract rather than escaping as a
-    raw traceback.
-    """
+    """Refuse a destination that is not absent or an empty directory, or cannot be inspected."""
     try:
         if not dest.exists() and not dest.is_symlink():
             return
@@ -130,7 +69,6 @@ def _assert_absent_or_empty(dest: Path) -> None:
 
 
 def _write_plan(plan: CreationPlan, root: Path) -> None:
-    """Write every consumer-owned file of ``plan`` into ``root``."""
     for owned in plan.files:
         dest = root / owned.path
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -140,30 +78,7 @@ def _write_plan(plan: CreationPlan, root: Path) -> None:
 
 
 def default_installer(root: Path) -> None:
-    """Orchestrate the existing install domain in-process (ADR-0055).
-
-    Runs the unchanged gather → reconcile → apply pipeline in ``MODE_TREE``:
-    the managed catalog is written into the working tree (no commit — creation
-    owns the single root commit) and the installed hooks are activated. The
-    catalog is derived exactly as the ``shipit install`` verb derives it, so a
-    freshly-created repo gets the SAME conditional blocks a reconcile would: the
-    toolchain blocks off the tracked manifests UNIONed with the ``.shipit.toml``
-    declaration signals (a wasm-pack composition's node leg, a tree-sitter/lua
-    ``[toolchains]`` leg — a grammar has no manifest to detect), the
-    endpoint-gated conda packager off a declared ``conda`` endpoint (#1071 — so
-    a created conda producer is not starved of ``rattler-build``), and the lexd
-    ``[target]`` set scoped to the scaffold's declared platforms (#1072). The
-    scaffold must already be ``git add``-ed when this runs (creation stages
-    before installing) for the manifest-detected signals to ship.
-
-    ``MODE_TREE`` degrades a failed ``lefthook install`` to a warning
-    (``hooks_activated is False``) rather than aborting — right for install's
-    own working-tree refresh, wrong for creation, whose contract is that the
-    managed baseline INCLUDING active hooks is in place before the initial
-    commit (so that commit runs the hooks). So creation fails CLOSED here: a
-    false activation raises :class:`CreationError`, the staging sibling is
-    cleaned up, and nothing is published.
-    """
+    """Install the managed baseline into the staged tree; raise if hooks did not activate."""
     from ..install.apply import MODE_TREE
     from ..install.apply import apply as apply_plan
     from ..install.reconcile import (
@@ -197,41 +112,12 @@ def default_installer(root: Path) -> None:
 
 
 def default_provisioner(root: Path) -> None:
-    """Resolve and lock the staged Repo's pixi environment (writes ``pixi.lock``).
-
-    Runs ``pixi install`` from a child rooted in the staged Repo (``cwd=root``)
-    through a SCRUBBED environment (ADR-0062) so an inherited ``PIXI_*`` project
-    pointer from the invoking checkout cannot bind the child to a different
-    manifest. ``pixi install`` carries no ``--manifest-path`` (unlike the ``pixi
-    run`` wrap :func:`shipit.pixienv.run_task`/:func:`shipit.pixienv.run_argv`
-    build): with the leaked pointer scrubbed away, pixi discovers the manifest
-    from the working directory — the staged Repo — which is what pins resolution
-    here.
-    """
     scrubbed = pixienv.scrub_env(dict(os.environ))
     pixienv.install(root, env=scrubbed)
 
 
 def default_verifier(root: Path) -> None:
-    """Certify the staged Repo through the user shell seam (ADR-0062).
-
-    Runs ``pixi run lint``, ``pixi run test``, and ``pixi run build`` — the
-    public pixi TASKS, exactly as a user would — from a child rooted in the
-    staged Repo, with a scrubbed environment and an explicit ``--manifest-path``
-    so inherited pixi activation cannot select the invoking checkout. The first
-    failing Check raises :class:`CreationError`, which prevents publication.
-
-    The Check runs ``check=False`` so a nonzero task is a normal
-    :class:`~shipit.execrun.ExecResult` this function reads as a verdict, then
-    RETAINS the failing command's captured output in the raised message
-    (``docs/spec/repo-new.md`` §Testing acceptance criterion): a mocked verifier
-    could hide a missing generated dependency, but the real staged Check surfaces
-    the tool's own diagnostics — e.g. a ``cargo-nextest: command not found`` — so
-    the failure is actionable rather than a bare rc. The message carries the
-    creation-stage context (``staged Check`` + ``the Repo was not published``)
-    and, because the raise aborts before the ``Initial commit`` and publish, the
-    root commit and atomic rename never happen.
-    """
+    """Run every Check in :data:`CHECKS` against the staged Repo; the first failure raises."""
     scrubbed = pixienv.scrub_env(dict(os.environ))
     for task in CHECKS:
         result = pixienv.run_task(
@@ -242,27 +128,7 @@ def default_verifier(root: Path) -> None:
 
 
 def _check_failure_message(task: str, result: execrun.ExecResult) -> str:
-    """The failure message for a staged Check, retaining its captured output.
-
-    Joins the tails of the failing command's stdout and stderr onto the
-    creation-stage context so a caller (and the ``error:`` verb shell) sees the
-    tool's own diagnostics, not just the return code. Each stream is bounded to
-    :data:`execrun.TAIL_CHARS` — the same tail budget an :class:`ExecError`
-    carries — so an enormous build log cannot swamp the message; an empty stream
-    is omitted so a tool that writes only to stderr reads cleanly.
-
-    Each bounded tail is run through :func:`redact.redact_text` — the SAME
-    masking an :class:`ExecError` applies to its own captured streams — because
-    the staged Check inherits the caller's scrubbed-but-still-secret-bearing
-    environment (:func:`pixienv.scrub_env` drops pixi/Conda selection, not the
-    user's secrets), so a failing tool that echoes a token or PEM would
-    otherwise leak it straight onto the unredacted ``CreationError`` /
-    ``error:`` CLI surface. Redaction runs on the WHOLE stream before the tail
-    is sliced — the SAME order an :class:`ExecError` uses on its own streams —
-    so a secret that straddles the :data:`execrun.TAIL_CHARS` boundary is masked
-    intact; slicing first would tail a half-secret the exact-value and pattern
-    matchers can no longer recognize, leaking the retained fragment.
-    """
+    """The staged Check's failure message; redaction runs BEFORE the tail slice."""
     tails = [
         f"{label}:\n{tail}"
         for label, stream in (("stdout", result.stdout), ("stderr", result.stderr))
@@ -276,20 +142,7 @@ def _check_failure_message(task: str, result: execrun.ExecResult) -> str:
 
 
 def default_author(root: Path) -> str:
-    """The resolved Git author name for the MIT ``LICENSE`` copyright holder.
-
-    Resolves the author through :func:`git.author_name` (``git var
-    GIT_AUTHOR_IDENT``) from ``root`` (after ``git init``), so it uses the SAME
-    identity the ``Initial commit`` will — honoring ``GIT_AUTHOR_NAME``/
-    ``GIT_AUTHOR_EMAIL`` and the full ``user.*`` config chain, not one config
-    key. It ALSO probes the committer identity (:func:`git.committer_name`,
-    ``git var GIT_COMMITTER_IDENT``), which git resolves INDEPENDENTLY of the
-    author: a setup with only ``GIT_AUTHOR_*`` set resolves an author but no
-    committer, and the ``Initial commit`` needs both. Requiring both here means
-    an unresolvable identity is a creation PREFLIGHT failure
-    (``docs/spec/repo-new.md``: never a template placeholder), raised BEFORE any
-    effect rather than as a raw commit-time git error mid-creation.
-    """
+    """The Git author name for the ``LICENSE`` holder; raises unless BOTH identities resolve."""
     name = git.author_name(cwd=str(root))
     committer = git.committer_name(cwd=str(root))
     if not name or not committer:
@@ -314,47 +167,16 @@ def create_repo(
     author_reader: Callable[[Path], str] = default_author,
     year: int | None = None,
 ) -> CreationResult:
-    """Create, verify, and publish a new local Repo — the whole flow.
-
-    Resolves the stacks and validates the name (usage-shaped
-    :class:`CreationError`), preflights the parent/destination, then stages the
-    complete Repo in a temporary sibling: writes the plan, initializes Git on
-    ``main``, stages the scaffold, installs the managed baseline, provisions and
-    locks pixi, runs the three public Checks, and creates the ``Initial commit``.
-    It then strips every non-committed artifact (the build cache and resolved
-    environment that certification produced, both of which embed the staging
-    path) so the published tree is relocatable, and rewrites the staging path
-    baked into the managed git-hook shims to the destination — the one staging
-    reference the strip cannot reach, since ``git clean`` never touches
-    ``.git`` — and only after every step succeeds does one atomic rename publish
-    it at the destination. Any handled failure removes the temporary sibling and
-    leaves the destination in its preflight state.
-
-    ``year`` defaults to the local creation year; the effect seams default to
-    the real implementations and are injected in tests.
-    """
+    """Create, verify, and publish a new local Repo; ``year`` defaults to the creation year."""
     profiles = resolve_profiles(stacks)
     name = validate_name(raw_name)
     resolved_parent, dest = _preflight(parent, name.value)
     creation_year = year if year is not None else datetime.date.today().year
 
     staging = Path(tempfile.mkdtemp(dir=resolved_parent, prefix=".shipit-repo-new-"))
-    # `mkdtemp` hard-codes 0o700, and `os.rename` publishes the directory mode
-    # verbatim — so a published Repo would be `rwx------`, breaking shared
-    # workspaces and container mounts and diverging from `git init`/`cargo new`,
-    # which respect the user's umask. Widen the staging root to the umask-derived
-    # mode (typically 0o755) before it is published. Read the umask WITHOUT
-    # mutating process-global state: an `os.umask` set/restore probe reads only
-    # by writing, imposing its momentary mask on any file a concurrent thread
-    # creates in the window — an unacceptable side effect for an orchestration
-    # library. Instead create a throwaway 0o777 directory inside the staging
-    # root, which the OS masks atomically on creation (`0o777 & ~umask`), and
-    # read the umask-derived bits straight back off it. Preserve any high-order
-    # bits `mkdtemp` inherited from the parent (e.g. an SGID group-inheritance
-    # bit on a shared workspace) by only rewriting the low 9 permission bits.
-    # Guard EVERYTHING after the staging root exists — including the umask probe
-    # and chmod below — so any filesystem error (permissions, disk) removes the
-    # temporary sibling instead of leaking it.
+    # `mkdtemp` hard-codes 0o700 and the rename publishes that mode verbatim, so
+    # widen to the umask, read off a throwaway dir (an `os.umask` probe would
+    # impose its momentary mask on concurrent threads).
     try:
         probe = staging / ".shipit-umask-probe"
         probe.mkdir(mode=0o777)
@@ -370,8 +192,7 @@ def create_repo(
         author = author_reader(staging)
         plan = build_plan(name, profiles, author=author, year=creation_year)
         _write_plan(plan, staging)
-        # Stage the scaffold BEFORE install so the tracked Cargo manifest
-        # signals the Rust toolchain to the managed catalog.
+        # Stage BEFORE install so tracked manifests signal toolchains to the catalog.
         git.add_all(cwd=str(staging))
         installer(staging)
         provisioner(staging)
@@ -381,29 +202,11 @@ def create_repo(
         head = git.head_commit(cwd=str(staging))
         if head is None:
             raise CreationError("Initial commit did not produce a resolvable HEAD")
-        # Strip every non-committed artifact BEFORE the atomic rename so
-        # publication is relocatable (ADR-0059). Staged certification (ADR-0062)
-        # builds the Rust workspace and materializes the pixi environment in this
-        # temporary sibling; both embed the staging path as an absolute location
-        # (Cargo bakes `CARGO_BIN_EXE_<bin>` into the compiled black-box test;
-        # the conda-based `.pixi` env hard-codes its prefix), so a rename that
-        # carried them would leave the published Repo resolving canonical commands
-        # against the vanished staging path. The `Initial commit` already excludes
-        # these (they are gitignored), so removing them leaves the destination
-        # exactly the committed tree, which regenerates its build/environment
-        # state fresh from the committed lockfiles on first use.
+        # Certification artifacts bake in the staging path; strip before renaming.
         git.clean_non_committed(cwd=str(staging))
-        # `git clean` never touches `.git`, so the one staging-path reference the
-        # strip cannot remove is the absolute lefthook fallback baked into the
-        # activated hook shims; rewrite it to the destination before publishing.
         _relocate_hook_shims(staging, dest)
         _publish(staging, dest)
     except BaseException as primary:
-        # Roll back on ANY handled failure, then let the primary failure keep
-        # propagating (creation still returns non-zero and publishes nothing). A
-        # cleanup failure is REPORTED ALONGSIDE the primary (ADR-0059) — attached
-        # as a note to the in-flight exception so it travels with it wherever the
-        # primary surfaces — but never converts the failure into a publish.
         cleanup_report = _cleanup(staging)
         if cleanup_report is not None:
             primary.add_note(cleanup_report)
@@ -416,48 +219,7 @@ def create_repo(
 
 
 def _relocate_hook_shims(staging: Path, dest: Path) -> None:
-    """Rewrite the baked staging path in the git hook shims to the destination.
-
-    The managed install activates hooks by running ``lefthook install``
-    (:func:`shipit.install.apply._activate_hooks`), which bakes the ABSOLUTE path
-    of the lefthook executable that ran install into every generated
-    ``.git/hooks/*`` shim as its ``call_lefthook`` non-activated fallback (#478).
-    Routed through the staged Repo's own lint env, that executable lives at
-    ``<staging>/.pixi/envs/lint/bin/lefthook`` — so the fallback embeds the
-    staging path. :func:`shipit.git.clean_non_committed` then deletes ``.pixi``
-    and :func:`_publish` renames the tree, but ``git clean`` never touches
-    ``.git``, so this is the ONE staging-path reference the relocatability strip
-    cannot remove: left as-is, a ``git commit`` from a NON-activated shell in the
-    published Repo would fall through to the vanished staging ``.pixi`` path
-    instead of running the hooks.
-
-    Rewriting the staging prefix to the final destination makes each published
-    shim's fallback resolve ``<dest>/.pixi/envs/lint/bin/lefthook`` — exactly the
-    path a plain ``shipit install`` at the destination would bake — so the
-    published Repo's hooks behave identically to any other managed consumer's
-    once its environment is provisioned. Runs at staging BEFORE the atomic rename
-    so publication still carries one fully finalized, relocatable tree. Every
-    file in ``.git/hooks`` is swept (lefthook writes a shim per managed slot);
-    files without the staging prefix (git's ``*.sample`` defaults) are untouched.
-
-    Both the searched staging prefix and its destination replacement are
-    ABSOLUTIZED against the current directory (``Path.cwd() / p`` when ``p`` is
-    relative). ``create_repo`` accepts a relative ``parent`` (``repo new NAME
-    relative-parent`` or a direct ``create_repo(..., Path("relative-parent"),
-    ...)``), which makes both ``staging`` and ``dest`` relative — but the fallback
-    lefthook bakes is an ABSOLUTE ``os.Executable()`` path, and a git hook runs
-    with the repo as its working directory, so a relative fallback would resolve
-    against the repo root and miss. Absolutizing keeps the needle aligned with the
-    absolute baked path and guarantees the rewritten fallback stays absolute
-    regardless of how the parent was supplied. The absolutization is purely
-    lexical (no ``resolve()``), so a user-visible symlink parent is preserved
-    rather than collapsed to its real target.
-
-    Symlinks under ``.git/hooks`` are skipped (never followed): a global
-    ``init.templateDir`` may seed symlinked hooks, and writing through one would
-    mutate a file OUTSIDE the staged Repo. Lefthook's own shims are always regular
-    files, so this only ever skips foreign links.
-    """
+    """Rewrite the staging path lefthook baked into each hook shim; skips symlinked hooks."""
     hooks = staging / ".git" / "hooks"
     if not hooks.is_dir():
         return
@@ -466,10 +228,7 @@ def _relocate_hook_shims(staging: Path, dest: Path) -> None:
     for shim in hooks.iterdir():
         if not shim.is_file() or shim.is_symlink():
             continue
-        # `newline=""` disables universal-newline translation on BOTH ends: hook
-        # shims are POSIX bash scripts that must keep `\n` line endings verbatim,
-        # and the default write would rewrite them to `os.linesep` (`\r\n` on
-        # Windows), breaking the script under Git Bash (`\r: command not found`).
+        # `newline=""` keeps the POSIX `\n` endings a bash shim needs verbatim.
         body = shim.read_text(encoding="utf-8", errors="surrogateescape", newline="")
         if needle not in body:
             continue
@@ -482,29 +241,13 @@ def _relocate_hook_shims(staging: Path, dest: Path) -> None:
 
 
 def _publish(staging: Path, dest: Path) -> None:
-    """Atomically rename the staged Repo to ``dest`` after a final empty-recheck.
-
-    The destination must still be absent or empty at publish time (ADR-0059);
-    ``os.rename`` is the one same-filesystem atomic step — it creates ``dest``
-    when absent and replaces an existing empty directory in place.
-    """
     _assert_absent_or_empty(dest)
     os.rename(staging, dest)
     logger.info("published new Repo", extra={"destination": str(dest)})
 
 
 def _cleanup(staging: Path) -> str | None:
-    """Remove the temporary sibling on a handled failure; report if it cannot.
-
-    Returns ``None`` when the sibling is gone, or a one-line report of the
-    cleanup failure when it could not be removed. A cleanup failure never
-    publishes the partial Repo: the failure is logged (via
-    :meth:`logging.Logger.exception`) AND the report string is handed back to
-    :func:`create_repo` to travel alongside the primary failure (ADR-0059),
-    while the original failure continues to propagate (creation still returns
-    non-zero). A leaked ``.shipit-repo-new-*`` sibling is thus surfaced, never a
-    silent orphan and never a published Repo.
-    """
+    """Remove the temporary sibling; ``None`` when gone, else a report of why it could not be."""
     try:
         shutil.rmtree(staging, ignore_errors=False)
         return None
