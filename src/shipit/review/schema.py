@@ -54,8 +54,6 @@ REVIEW_SCHEMA: dict = {
                 "type": "object",
                 "properties": {
                     "file": {"type": "string"},
-                    # Nullable for a file-level finding, but still `required`:
-                    # codex's strict `--output-schema` needs every property.
                     "line": {"type": ["integer", "null"]},
                     "text": {"type": "string"},
                     "severity": {
@@ -91,26 +89,20 @@ REVIEW_SCHEMA: dict = {
 
 
 def _str_field(value: object) -> str:
-    """Coerce an untrusted JSON field to a ``str``, else ``""``."""
     return value if isinstance(value, str) else ""
 
 
 def finding_from_dict(raw: dict) -> Finding:
-    """The trust boundary from unvalidated agent JSON to a typed
-    :class:`Finding`: every field is coerced to the domain type or a fail-safe,
-    so a malformed comment can never crash a downstream consumer."""
+    """The trust boundary: every field coerces to a domain type or a fail-safe."""
     line = raw.get("line")
     confidence = raw.get("confidence")
     return Finding(
-        # Adapter-layer input, not a marker recovered from a posted body, so it
-        # enters the precedence chain at the `adapter=` slot.
         severity=resolve_severity(adapter=parse_severity(raw.get("severity"))),
         text=_str_field(raw.get("text")),
         file=_str_field(raw.get("file")),
         # `bool` is an `int` subclass: `line: true` must not anchor at line 1.
         line=line if isinstance(line, int) and not isinstance(line, bool) else None,
         category=_str_field(raw.get("category")),
-        # JSON Schema `type: number` admits an int, so coerce to float.
         confidence=(
             float(confidence)
             if isinstance(confidence, (int, float)) and not isinstance(confidence, bool)
@@ -121,7 +113,6 @@ def finding_from_dict(raw: dict) -> Finding:
     )
 
 
-#: Derived from :data:`REVIEW_SCHEMA`, so the two can never disagree.
 _STATUS_VALUES: tuple[str, ...] = tuple(
     REVIEW_SCHEMA["properties"]["summary"]["properties"]["status"]["enum"]
 )
@@ -133,7 +124,6 @@ def _is_str(value: object) -> bool:
 
 
 def _is_int_not_bool(value: object) -> bool:
-    # `bool` is an `int` subclass, and a schema `integer` must reject it.
     return isinstance(value, int) and not isinstance(value, bool)
 
 
@@ -144,9 +134,6 @@ def _is_number_not_bool(value: object) -> bool:
 def _check_object(
     value: object, path: str, required: tuple[str, ...], problems: list[str]
 ) -> dict | None:
-    """Confirm ``value`` is an object with exactly ``required`` keys, appending
-    a problem per violation; returns the dict when it is one, so field checks can
-    proceed even with a key missing."""
     if not isinstance(value, dict):
         problems.append(f"{path}: expected an object, got {_typename(value)}")
         return None
@@ -162,14 +149,11 @@ def _check_object(
 def _check_field(
     obj: dict, key: str, path: str, predicate, expected: str, problems: list[str]
 ) -> None:
-    """Type-check ``obj[key]`` when present; a missing key is
-    :func:`_check_object`'s to report, so a field is never flagged twice."""
     if key in obj and not predicate(obj[key]):
         problems.append(f"{path}.{key}: expected {expected}, got {_typename(obj[key])}")
 
 
 def _typename(value: object) -> str:
-    """A JSON-flavored type name: ``null``, not ``NoneType``."""
     if value is None:
         return "null"
     if isinstance(value, bool):
@@ -188,9 +172,6 @@ def _typename(value: object) -> str:
 
 
 def validate_review(payload: object) -> list[str]:
-    """Check a parsed review against :data:`REVIEW_SCHEMA`, returning one
-    JSON-path-prefixed problem string per violation (empty means valid). Never
-    raises and never mutates, so an agent sees every problem at once."""
     problems: list[str] = []
     root = _check_object(payload, "review", ("summary", "comments"), problems)
     if root is None:
@@ -303,27 +284,20 @@ def _validate_comment(comment: object, path: str, problems: list[str]) -> None:
 
 
 def is_review_shaped(payload: dict) -> bool:
-    """Whether ``payload`` has the review ENVELOPE shape. Deliberately shallow:
-    it gates selection among embedded candidates, not schema validation."""
     return isinstance(payload.get("summary"), dict) and isinstance(
         payload.get("comments"), list
     )
 
 
 def _accepted(value: object, want: Callable[[dict], bool] | None) -> bool:
-    """Whether ``value`` is an acceptable :func:`extract_json` result: a
-    ``dict``, and one ``want`` approves when a predicate was given."""
     if not isinstance(value, dict):
         return False
     return want is None or want(value)
 
 
 def extract_json(text: str, *, want: Callable[[dict], bool] | None = None) -> dict:
-    """Parse a JSON object out of an agent's stdout, tolerating wrapping: direct,
-    then de-fenced, then the largest embedded object a balanced scan finds.
-    Raises :class:`ValueError` when nothing is accepted, never returning a
-    non-object. ``want`` narrows acceptance to a shape, so a large unrelated blob
-    in noisy stdout is never selected over the real review."""
+    """Direct, then de-fenced, then the largest embedded object ``want``
+    accepts; raises when nothing is."""
     text_clean = text.strip()
     try:
         parsed = json.loads(text_clean)
@@ -355,15 +329,12 @@ def extract_json(text: str, *, want: Callable[[dict], bool] | None = None) -> di
 
 
 def has_complete_json_object(text: str) -> bool:
-    """Whether ``text`` holds at least one COMPLETE embedded JSON object, which
-    a bare ``{`` does not prove — the parse-failure diagnosis needs the difference."""
     return bool(_scan_embedded_objects(text or ""))
 
 
 def _scan_embedded_objects(text: str) -> list[tuple[dict, int]]:
-    """Every complete JSON object embedded in ``text``, as ``(object, source
-    length)`` pairs. The real decoder parses each candidate, so a candidate is
-    well-formed by construction and an object's nested braces are never rescanned."""
+    """As ``(object, source length)``; the real decoder parses each, so nested
+    braces are never rescanned as candidates."""
     decoder = json.JSONDecoder()
     found: list[tuple[dict, int]] = []
     index = text.find("{")
@@ -371,13 +342,11 @@ def _scan_embedded_objects(text: str) -> list[tuple[dict, int]]:
         try:
             candidate, end = decoder.raw_decode(text, index)
         except json.JSONDecodeError as exc:
-            # Skip the broken object's consumed prefix, not just one brace: its
-            # interior objects are fragments of IT, never candidates.
             index = text.find("{", max(exc.pos, index + 1))
             continue
         except RecursionError:
-            # Step past the whole over-deep object in one O(N) pass: a per-brace
-            # retry would be O(N^2), since `RecursionError` carries no `.pos`.
+            # One O(N) pass: a per-brace retry would be O(N^2), since
+            # `RecursionError` carries no `.pos`.
             end = _skip_balanced_object(text, index)
             if end is None:
                 break
@@ -390,9 +359,7 @@ def _scan_embedded_objects(text: str) -> list[tuple[dict, int]]:
 
 
 def _skip_balanced_object(text: str, start: int) -> int | None:
-    """The index just past the balanced object at ``text[start]``, or ``None``
-    when it is unterminated. One O(N) pass over brace depth, honoring string
-    literals and escapes, so no re-decoding is needed."""
+    """``None`` when the object is unterminated; one O(N) pass, no re-decoding."""
     depth = 0
     in_string = False
     escaped = False

@@ -1,7 +1,7 @@
 """Map a review JSON to one GitHub grouped-review payload and post it.
 
-An inline comment whose ``(file, line)`` is not in the diff would 422 the WHOLE
-review, so unanchored findings fold into the summary body instead.
+An unanchored inline comment would 422 the WHOLE review, so such findings fold
+into the summary body instead.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from . import ghauth
 from .diff import ReviewView
 from .schema import finding_from_dict
 
-#: The minted installation token is never passed to a record; only ``as_app`` is.
+#: The minted installation token is never passed to a record.
 logger = logging.getLogger("shipit.review")
 
 _STATUS_TO_EVENT = {
@@ -33,8 +33,6 @@ _STATUS_TO_EVENT = {
 
 
 def commentable_lines(diff: str) -> dict[str, set[int]]:
-    """Parse a unified diff into ``{path: RIGHT-side line numbers}`` — the added
-    and context lines, since every comment anchors to the new side."""
     result: dict[str, set[int]] = {}
     path: str | None = None
     new_line = 0
@@ -46,7 +44,6 @@ def commentable_lines(diff: str) -> dict[str, set[int]]:
             in_hunk = False
             continue
         if raw.startswith("+++ "):
-            # "+++ b/path", or "+++ /dev/null" for a deletion.
             target = raw[4:].strip()
             if target == "/dev/null":
                 path = None
@@ -62,10 +59,8 @@ def commentable_lines(diff: str) -> dict[str, set[int]]:
         if not in_hunk or path is None:
             continue
         if raw.startswith("\\"):
-            # "\ No newline at end of file" is not a content line.
             continue
         if raw.startswith("-"):
-            # LEFT side only, so no RIGHT-side number is consumed.
             continue
         result[path].add(new_line)
         new_line += 1
@@ -74,7 +69,6 @@ def commentable_lines(diff: str) -> dict[str, set[int]]:
 
 
 def _parse_hunk_new_start(header: str) -> int:
-    """``new_start`` from a ``@@ -a,b +c,d @@`` header; 1 when unparseable."""
     for token in header.split():
         if token.startswith("+"):
             spec = token[1:]
@@ -87,8 +81,8 @@ def _parse_hunk_new_start(header: str) -> int:
 
 
 def _coverage_section(coverage: object) -> str:
-    """The coverage attestation as a body section, empty when it carries nothing.
-    Total over malformed input: an agent may emit any shape here."""
+    """Empty when the attestation carries nothing, and total over malformed
+    input: an agent may emit any shape here."""
     if not isinstance(coverage, dict):
         return ""
     raw_reviewed = coverage.get("reviewed")
@@ -120,9 +114,8 @@ def build_review_payload(
     agent_name: str,
     event: str | None = None,
 ) -> dict:
-    """The create-review payload, findings ordered highest severity first.
-    ``event`` overrides the summary's status; ``commit_id`` pins ``ctx.head_sha``,
-    so comments whose lines moved since an earlier sha are not rejected."""
+    """Findings order highest severity first, ``event`` overrides the summary's
+    status, and ``commit_id`` pins the head sha so moved lines are not rejected."""
     summary = review.get("summary") or {}
     status = summary.get("status", "COMMENT")
     overall_feedback = summary.get("overall_feedback", "")
@@ -185,7 +178,6 @@ def build_review_payload(
 
 
 def _resolve_repo(ctx: ReviewView) -> str:
-    """The slug to POST to: ``ctx.repo`` if set, else inferred via ``gh repo view``."""
     if ctx.repo:
         return ctx.repo
     try:
@@ -211,9 +203,8 @@ def post_review(
     dry_run: bool = False,
     as_app: bool = False,
 ) -> dict:
-    """Build the grouped-review payload and, unless ``dry_run``, POST it —
-    authenticated as the backend's GitHub App when ``as_app``, so GitHub
-    attributes the review to the bot. A dry run mints no token."""
+    """POSTs unless ``dry_run``, authenticated as the backend's GitHub App when
+    ``as_app``, so GitHub attributes the review to the bot; a dry run mints no token."""
     agent_name = backend.funnel_agent or backend.name
     payload = build_review_payload(review, ctx, agent_name=agent_name, event=event)
 
@@ -235,7 +226,6 @@ def post_review(
 
     token: str | None = None
     if as_app:
-        # The token value never reaches a log record; only the fact does.
         logger.debug(
             "review post authenticating as the %r GitHub App for %s",
             agent_name,

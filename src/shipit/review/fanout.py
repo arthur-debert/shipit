@@ -45,8 +45,6 @@ logger = logging.getLogger("shipit.review")
 
 @dataclass(frozen=True)
 class FanoutOutcome:
-    """One round's product; ``findings`` holds every judged finding, routed-out ones included."""
-
     review: dict
     findings: tuple[JudgedFinding, ...]
     runs: tuple[dict[str, Any], ...]
@@ -57,8 +55,6 @@ class FanoutOutcome:
 
 @dataclass(frozen=True)
 class _PassResult:
-    """One pass's outcome; ``review`` is ``None`` when the pass failed."""
-
     dimension: Dimension
     run: dict[str, Any]
     review: dict | None
@@ -66,14 +62,14 @@ class _PassResult:
 
 DEFAULT_INCREMENTAL_REASONING = "low"
 
-#: Labels the pass of an incremental round; not a registry dimension.
+#: Not a registry dimension: it only labels an incremental round's pass.
 _INCREMENTAL_DIMENSION = Dimension(
     name="incremental",
     title="Incremental fix-range",
     focus="the fix range only, with mandatory dependency-neighborhood context",
 )
 
-#: Labels the round-1 default unscoped pass; not a registry dimension either.
+#: Not a registry dimension either, so a ``dimensions`` list cannot name it.
 _SINGLE_PASS_DIMENSION = Dimension(
     name="single",
     title="Single full-scope pass",
@@ -165,7 +161,6 @@ def run_fanout_review(
     agent = backend.funnel_agent or backend.name
     scoped = not incremental and not single
     pass_word = "incremental" if incremental else ("single" if single else "dimension")
-    # A per-call `extra` does not drop None the way a bound key does.
     pr_number = None if range_view is not None else target.number
     pr_extra = {"pr": pr_number} if pr_number is not None else {}
     where = (
@@ -454,7 +449,6 @@ def run_fanout_review(
             "kind": "calibrator",
             "backend": calibrator.backend,
             "model": calibrator.model,
-            # Stamped below from the run: a knob-less backend records unset.
             "artifacts": (
                 str(calibrator_bundle.dir)
                 if calibrator_bundle.dir is not None
@@ -645,7 +639,6 @@ def run_fanout_review(
 
 
 def _round_total(runs: Sequence[Mapping[str, Any]]) -> int | None:
-    """The runs' reported usage summed, or ``None`` when none reported."""
     totals = []
     for run in runs:
         usage = run.get("usage")
@@ -658,7 +651,6 @@ def _round_total(runs: Sequence[Mapping[str, Any]]) -> int | None:
 
 
 def _pass_run_id(union: Sequence[Mapping[str, Any]], entry_id: int) -> str | None:
-    """The originating pass's run id, keyed by ``entry_id``'s union index."""
     if 0 <= entry_id < len(union):
         raw = union[entry_id].get("run_id")
         return str(raw) if raw else None
@@ -668,9 +660,9 @@ def _pass_run_id(union: Sequence[Mapping[str, Any]], entry_id: int) -> str | Non
 def route_calibrated(
     entries: Sequence[CalibratedFinding], *, nit_cap: int | None
 ) -> tuple[tuple[CalibratedFinding, Disposition], ...]:
-    """Every judged finding with its final disposition, severity-first; one
-    posts iff that is ``post`` AND it is canonical. Nits beyond ``nit_cap``
-    (``None`` uncapped) flip to ``nit-suppressed``; a duplicate inherits its twin's."""
+    """Every judged finding with its final disposition, severity-first; one posts
+    iff that is ``post`` AND it is canonical. Nits over ``nit_cap`` (``None``
+    uncapped) flip to ``nit-suppressed``; a duplicate inherits its twin's."""
     ordered = sorted(entries, key=lambda e: e.finding.severity.rank)
     nits_posted = 0
     routed: list[tuple[CalibratedFinding, Disposition]] = []
@@ -678,9 +670,8 @@ def route_calibrated(
     for entry in ordered:
         disposition = entry.disposition
         if entry.duplicate_of is not None:
-            # Canonical-before-duplicate ordering is guaranteed: both producers
-            # append duplicates after the canonicals whose severity they carry,
-            # and the severity sort is stable, so the twin is seen first.
+            # Both producers append duplicates after their canonical, and the
+            # severity sort is stable, so the twin is always seen first.
             disposition = final_disposition_for[entry.duplicate_of]
         elif (
             disposition is Disposition.POST
@@ -702,9 +693,8 @@ def dedup_union(
     *,
     semantic: bool = False,
 ) -> tuple[CalibratedFinding, ...]:
-    """Merge candidates by ``(file, line, claim)``, most-severe member canonical
-    and the rest duplicates carrying its severity; ``semantic`` also collapses
-    near-duplicates. Nothing is dropped, and canonicals are emitted first."""
+    """Merge candidates by ``(file, line, claim)``, most-severe canonical and the
+    rest duplicates carrying its severity. Nothing is dropped, canonicals first."""
     grouped: list[list[Mapping[str, Any]]] = []
     group_by_key: dict[tuple[str, int | None, str], list[Mapping[str, Any]]] = {}
     for candidate in union:
@@ -767,7 +757,6 @@ SEMANTIC_DEDUP_LINE_SLACK = 0
 
 
 def _near_duplicate(a: Mapping[str, Any], b: Mapping[str, Any]) -> bool:
-    """Are two candidates the same defect in different words? A file-less one never matches."""
     file = str(a.get("file") or "")
     if not file:
         return False
@@ -792,7 +781,6 @@ def _candidate_line(candidate: Mapping[str, Any]) -> int | None:
 
 
 def _dedup_key(candidate: Mapping[str, Any]) -> tuple[str, int | None, str]:
-    """File + line + the claim whitespace-collapsed and case-folded."""
     claim = " ".join(str(candidate.get("text") or "").split()).casefold()
     return (str(candidate.get("file") or ""), _candidate_line(candidate), claim)
 
@@ -805,7 +793,6 @@ def _candidate_id(candidate: Mapping[str, Any]) -> int:
 def _finding_from_candidate(
     candidate: Mapping[str, Any], *, severity: Severity | None = None
 ) -> Finding:
-    """``severity`` ``None`` keeps the candidate's own."""
     resolved = (
         severity
         if severity is not None
@@ -829,7 +816,6 @@ def _finding_from_candidate(
 
 
 def _build_union(succeeded: Sequence[_PassResult]) -> list[dict[str, Any]]:
-    """Every successful pass's comments, coerced and tagged; ``id`` is the list index."""
     union: list[dict[str, Any]] = []
     for result in succeeded:
         for raw in result.review.get("comments") or []:
@@ -855,7 +841,6 @@ def _build_union(succeeded: Sequence[_PassResult]) -> list[dict[str, Any]]:
 
 
 def _merge_coverage(succeeded: Sequence[_PassResult]) -> dict[str, list]:
-    """Union the passes' coverage attestations, skipping malformed ones."""
     reviewed: list[str] = []
     skipped: list[dict[str, str]] = []
     seen_reviewed: set[str] = set()
@@ -893,11 +878,9 @@ def _attestation(
     calibrated: bool,
     semantic: bool = False,
 ) -> str:
-    """The posted summary's attestation; the routed-out counts plus ``posted``
-    plus the duplicates sum to ``union_size``, so the arithmetic balances."""
     if len(dims) == 1 and dims[0] is _SINGLE_PASS_DIMENSION:
-        # Keyed off the synthetic dimension's object identity, not its name, so
-        # a registry dimension named "single" cannot trigger this wording.
+        # Keyed off object identity, so a registry dimension named "single"
+        # cannot trigger this wording.
         prelude = "Review: one full-scope pass -> "
     else:
         names = ", ".join(d.name for d in dims)
@@ -960,7 +943,6 @@ def _comment_dict(finding: Finding) -> dict[str, Any]:
 
 
 def _derive_status(posted: object, *, degraded: bool) -> str:
-    """Major-or-worse ``REQUEST_CHANGES``, anything posted or degraded ``COMMENT``, else ``APPROVED``."""
     findings = list(posted)
     if any(f.severity.blocks_merge for f in findings):
         return "REQUEST_CHANGES"

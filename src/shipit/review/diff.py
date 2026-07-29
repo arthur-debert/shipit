@@ -15,13 +15,11 @@ from ..pr import PR, PrId, core_from_node
 
 
 class ReviewError(RuntimeError):
-    """A review precondition failed; the message is actionable."""
+    """A review precondition failed."""
 
 
 @dataclass
 class ReviewView:
-    """One PR's :class:`shipit.pr.PR` plus the diff a review runs over."""
-
     pr: PR
     base_sha: Sha
     diff: str
@@ -44,8 +42,6 @@ class ReviewView:
 
     @property
     def repo(self) -> str | None:
-        """The slug the review posts to, or ``None`` when hand-built, so
-        downstream keeps its ``gh repo view`` fallback."""
         if self.pr.repo == _HANDBUILT_REPO:
             return None
         return self.pr.repo.slug
@@ -65,8 +61,7 @@ def review_view(
     workdir: str = ".",
     head_ref: str = "",
 ) -> ReviewView:
-    """Compose a :class:`ReviewView` from flattened fields; ``is_draft`` has no
-    default, so no caller fabricates a core field the real path fetches."""
+    """``is_draft`` has no default, so no caller fabricates a fetched core field."""
     pr = PR(
         id=PrId(repo=repo_from_slug(repo) if repo else _HANDBUILT_REPO, number=number),
         head_sha=head_sha if isinstance(head_sha, Sha) else Sha(head_sha),
@@ -86,8 +81,6 @@ def review_view(
 
 @dataclass(frozen=True)
 class RangeView:
-    """The offline sibling of :class:`ReviewView`: the target IS the range."""
-
     repo: Repo
     base_sha: Sha
     head_sha: Sha
@@ -97,8 +90,6 @@ class RangeView:
 
 
 def rescoped_view(view: ReviewView, base_sha: str | Sha) -> ReviewView:
-    """``view`` re-diffed over the two-dot fix range ``base_sha..head``; raises
-    rather than silently reviewing nothing."""
     base = base_sha if isinstance(base_sha, Sha) else Sha(str(base_sha))
     try:
         diff = git.diff_range(base, view.head_sha, cwd=view.workdir)
@@ -118,7 +109,6 @@ def rescoped_view(view: ReviewView, base_sha: str | Sha) -> ReviewView:
     )
 
 
-#: For a hand-built view; a resolved PR carries its real identity.
 _HANDBUILT_REPO = repo_from_slug("local/local")
 
 
@@ -157,8 +147,7 @@ def resolve_pr(
     repo: str | None = None,
     workdir: str | None = None,
 ) -> ReviewView:
-    """Resolve PR ``pr`` to a :class:`ReviewView`, diffing merge-base to head.
-    Both endpoints are hard preconditions: one that cannot be made present fails
+    """Diffs merge-base to head; an endpoint that cannot be made present fails
     loud rather than degrading to a local ref."""
     workdir = workdir or os.getcwd()
     toplevel = _git_toplevel(workdir)
@@ -171,7 +160,6 @@ def resolve_pr(
     # The prompt names repo-root-relative paths, unopenable from a nested cwd.
     workdir = toplevel
 
-    # An aliased slug 307-redirects on GET but NOT on POST, so posting fails.
     canonical: Repo | None = None
     if repo is not None:
         try:
@@ -186,7 +174,6 @@ def resolve_pr(
     repo_obj = canonical if canonical is not None else _HANDBUILT_REPO
 
     meta = _pr_meta(pr, canonical.slug if canonical is not None else None)
-    # Never FETCH_HEAD (it may point at the base ref just fetched) or HEAD.
     try:
         pr_core = core_from_node(meta, repo_obj)
     except (KeyError, ValueError) as exc:
@@ -198,7 +185,6 @@ def resolve_pr(
     head_sha = pr_core.head_sha
     head_ref = meta.get("headRefName") or ""
 
-    # A known commit object, not whatever a local `origin/<base>` points at.
     raw_base = meta.get("baseRefOid") or ""
     if not raw_base:
         raise ReviewError(
@@ -213,7 +199,6 @@ def resolve_pr(
             f"`gh pr view` ({exc}) — cannot resolve the PR base to review against."
         ) from exc
 
-    # Fetch only, never a checkout-switch.
     if not git.commit_present(head_sha, cwd=workdir):
         git.fetch_ref(f"pull/{pr}/head", cwd=workdir)
         if not git.commit_present(head_sha, cwd=workdir) and head_ref:
@@ -244,7 +229,6 @@ def resolve_pr(
             f"reviewing against a stale or wrong base."
         )
 
-    # Explicit rather than git's `A...B` shorthand, so the endpoint is unambiguous.
     base_point = git.merge_base(base_sha, head_point, cwd=workdir)
     if base_point is None:
         raise ReviewError(

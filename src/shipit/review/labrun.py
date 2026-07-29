@@ -1,7 +1,6 @@
 """Resolve one Cell onto the offline replay driver and run its sweep plan.
 
 Every point is idempotent by its full key, so no result is paid for twice.
-See docs/adr/0049-review-lab-cells.md.
 """
 
 from __future__ import annotations
@@ -47,8 +46,7 @@ __all__ = [
 
 
 def safe_instructions_path(path: str | None) -> str | None:
-    """The cell's instructions path resolved absolute, refusing one that escapes
-    the working directory via symlink; ``None`` passes through."""
+    """Resolved absolute, refusing a symlink that escapes the working directory."""
     if path is None:
         return None
     root = Path.cwd().resolve()
@@ -70,8 +68,6 @@ def safe_instructions_path(path: str | None) -> str | None:
 
 @dataclass(frozen=True)
 class PlannedPoint:
-    """One (fixture PR × replicate × sweep) point of a cell's sweep plan."""
-
     pin: PinnedRange
     replicate: int
     sweep: int
@@ -80,8 +76,6 @@ class PlannedPoint:
 
 @dataclass(frozen=True)
 class RunSummary:
-    """What one ``lab run`` did: executed vs reused points (by key)."""
-
     cell_id: str
     executed: tuple[Mapping[str, Any], ...]
     reused: tuple[Mapping[str, Any], ...]
@@ -90,9 +84,6 @@ class RunSummary:
 def resolve_pins(
     cell: Cell, fixture: Fixture, *, subset: Sequence[str] = ()
 ) -> tuple[PinnedRange, ...]:
-    """The cell's declared pins narrowed by ``subset``, which must stay inside
-    them. The fixture version must equal the cell's pin, or the records banked
-    would be incomparable."""
     if fixture.version != cell.fixture_version:
         raise CellError(
             f"cell {cell.id!r} pins fixture v{cell.fixture_version} but the "
@@ -124,9 +115,8 @@ def resolve_pins(
 def plan_points(
     cell: Cell, pins: Sequence[PinnedRange], *, variant_hash: str
 ) -> tuple[PlannedPoint, ...]:
-    """The cell's full sweep plan in run order, sweeps innermost so an informed
-    sweep's priors are always banked before it runs. Refuses a plan over
-    :data:`~shipit.review.cell.MAX_PLANNED_POINTS` before building the tuple."""
+    """The full sweep plan in run order, sweeps innermost so an informed sweep's
+    priors are always banked before it runs."""
     total = len(pins) * cell.replicates * cell.sweeps
     if total > MAX_PLANNED_POINTS:
         raise CellError(
@@ -156,7 +146,6 @@ def plan_points(
 
 
 def _checkout_map(checkouts: Sequence[str]) -> dict[str, str]:
-    """Origin slug to checkout path; a path with no resolvable origin refuses."""
     mapping: dict[str, str] = {}
     for path in checkouts:
         try:
@@ -171,7 +160,6 @@ def _checkout_map(checkouts: Sequence[str]) -> dict[str, str]:
 
 
 def _posted_findings(record: Mapping[str, Any]) -> list[Mapping[str, Any]]:
-    """The record's POSTED findings: ``post`` AND canonical."""
     findings = record.get("round.findings")
     if not isinstance(findings, Sequence):
         return []
@@ -187,9 +175,6 @@ def _posted_findings(record: Mapping[str, Any]) -> list[Mapping[str, Any]]:
 def _prior_findings(
     records: Sequence[Mapping[str, Any]], point: PlannedPoint
 ) -> list[Mapping[str, Any]]:
-    """Every posted finding banked by this point's prior sweeps, newest record
-    winning per key — the store is append-only, so a superseded run's findings
-    must not leak into the next sweep's prompt."""
     priors: list[Mapping[str, Any]] = []
     for sweep in range(1, point.sweep):
         prior_key = {**point.key, "sweep": sweep}
@@ -212,10 +197,8 @@ def run_cell(
     launcher=None,
     out: TextIO | None = None,
 ) -> RunSummary:
-    """Execute ``cell``'s sweep plan, foreground and sequential, reusing every
-    banked point unless ``force``. Preflight is all-or-nothing before any model
-    run bills, so a missing clone or unfetched SHA never leaves a half-run curve.
-    The first failing point propagates; a re-run continues where it stopped."""
+    """Execute ``cell``'s sweep plan sequentially, reusing every banked point
+    unless ``force``. Preflight is all-or-nothing before any model run bills."""
     stream = out if out is not None else sys.stdout
 
     def say(line: str) -> None:
@@ -234,8 +217,6 @@ def run_cell(
             f"{cell.invocation.backend!r} (known: {known})"
         ) from None
 
-    # Read once, up front: the key's variant half hashes this text, and an
-    # unreadable file must die before any model run bills.
     try:
         base_text = load_instructions(safe_instructions_path(cell.instructions_path))
     except OSError as exc:
@@ -245,8 +226,6 @@ def run_cell(
         ) from exc
     variant_hash = variant_of(instructions_variant_text(cell, base_text)).content_hash
 
-    # Every pin must resolve to a clone before anything runs, or a silent skip
-    # would shrink the curve's denominator. Slugs compare lowercased.
     slug_to_checkout = _checkout_map(checkouts)
     try:
         cwd_repo = identity.resolve_repo(".")
@@ -262,8 +241,6 @@ def run_cell(
             "pinned commits fetched) and pass each clone via --checkout"
         )
 
-    # Likewise every pin's commit range, so an unfetched SHA refuses before any
-    # point launches rather than leaving a half-run curve banked.
     views_by_pin: dict[str, Any] = {}
     for pin in pins:
         workdir = slug_to_checkout[pin.repo.lower()]
@@ -293,8 +270,6 @@ def run_cell(
         f"{cell.sweep_mode} sweeps"
     )
 
-    # One source of truth for both the idempotency check and the informed
-    # sweep's priors, refreshed after each write.
     records_by_slug: dict[str, list[dict[str, Any]]] = {}
 
     def _records(slug: str) -> list[dict[str, Any]]:
@@ -304,7 +279,6 @@ def run_cell(
             )
         return records_by_slug[slug]
 
-    # A set, so the per-point reuse check is O(1) rather than O(points × records).
     banked_keys_by_slug: dict[str, set[tuple]] = {}
 
     def _banked_keys(slug: str) -> set[tuple]:
@@ -361,10 +335,9 @@ def _run_point(
     launcher,
     base_dir: Path | None,
 ) -> dict:
-    """One point through the replay driver, launched from a TEMP file holding
-    the exact bytes hashed into its ``variant_hash``: the driver re-reads its
-    instructions at launch, so passing the cell's own path would let an edit
-    between the two run different bytes than the record is banked under."""
+    """One point through the replay driver, launched from a TEMP file holding the
+    exact bytes hashed into its ``variant_hash``: the driver re-reads its
+    instructions, so the cell's own path could change under it."""
     if cell.sweep_mode == "informed" and point.sweep > 1:
         priors = _prior_findings(records, point)
         launch_text = compose_informed_instructions(base_text, priors)
@@ -378,8 +351,7 @@ def _run_point(
     else:
         launch_text = base_text
     fd, instructions_path = tempfile.mkstemp(prefix=f"lab-{cell.id}-", suffix=".txt")
-    # Write by path, not through the fd: os.fdopen takes ownership only on
-    # success, so it would leak the fd if fdopen itself raised.
+    # Write by path: os.fdopen takes ownership of the fd only on success.
     os.close(fd)
     try:
         Path(instructions_path).write_text(launch_text, encoding="utf-8")

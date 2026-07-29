@@ -1,8 +1,7 @@
 """Authenticate as a review-agent GitHub App installation: app JWT, installation
 id, then a 1-hour ``ghs_…`` token the caller injects as ``GH_TOKEN``.
 
-Credentials come from Doppler and the PEM never lands on disk. An error message
-never quotes a body that can carry a credential — see :func:`_body_detail`.
+Credentials come from Doppler, and the PEM never lands on disk.
 """
 
 from __future__ import annotations
@@ -18,7 +17,6 @@ from .. import secretsrc
 from ..agent import backend as _agent_backend
 from ..agent.backend import Backend
 
-#: Seconds.
 _HTTP_TIMEOUT = 30
 
 _API_BASE = "https://api.github.com"
@@ -41,7 +39,6 @@ class ReviewAuthError(Exception):
     def __init__(self, message: str, *, kind: str, status: int | None = None) -> None:
         super().__init__(message)
         self.kind = kind
-        #: So callers branch on the code rather than grepping the message.
         self.status = status
 
 
@@ -77,7 +74,6 @@ def _doppler_get(key: str, *, what: str, agent: str) -> str:
 
 
 def make_app_jwt(backend: Backend) -> str:
-    """Sign an RS256 app JWT from the in-memory PEM, valid ~9 minutes."""
     agent = backend.funnel_agent or backend.name
     keys = _doppler_keys(backend)
     app_id = _doppler_get(keys["app_id"], what="app id", agent=agent)
@@ -87,7 +83,6 @@ def make_app_jwt(backend: Backend) -> str:
     payload = {
         "iat": now - _JWT_IAT_SKEW,
         "exp": now + _JWT_TTL,
-        # PyJWT >= 2.10 requires `iss` to be a string; Doppler stores digits.
         "iss": str(app_id),
     }
     try:
@@ -114,7 +109,6 @@ def _body_detail(payload: bytes, *, credential_body: bool) -> str:
 
 
 def _shape(value: object) -> str:
-    """A JSON value's type, with no content."""
     if isinstance(value, str):
         return "a string" if value else "an empty string"
     if value is None:
@@ -125,9 +119,8 @@ def _shape(value: object) -> str:
 def _api_request(
     path: str, jwt_token: str, *, method: str, credential_body: bool
 ) -> object:
-    """Bearer-JWT call to the GitHub REST API. Every exit is a parsed body or a
-    :class:`ReviewAuthError`, never a raw decode error; ``credential_body`` says
-    whether an error may quote this endpoint's success body."""
+    """Every exit is a parsed body or a :class:`ReviewAuthError`, never a raw
+    decode error; ``credential_body`` gates quoting the success body."""
     url = f"{_API_BASE}{path}"
     req = urllib.request.Request(url, method=method)  # noqa: S310 - fixed https host
     req.add_header("Authorization", f"Bearer {jwt_token}")
@@ -142,7 +135,6 @@ def _api_request(
         ) as resp:
             payload = resp.read()
     except urllib.error.HTTPError as exc:
-        # Quotable: the request failed, so no token was issued.
         body = _excerpt(exc.read().decode("utf-8", "replace"))
         raise ReviewAuthError(
             f"GitHub API {method} {path} failed (HTTP {exc.code}): {body}",
@@ -155,7 +147,6 @@ def _api_request(
             kind=API_ERROR,
         ) from exc
     except urllib.error.URLError as exc:
-        # A urllib timeout surfaces as URLError wrapping a socket timeout.
         if isinstance(exc.reason, TimeoutError):
             raise ReviewAuthError(
                 f"GitHub API {method} {path} timed out after {_HTTP_TIMEOUT}s",
@@ -167,8 +158,8 @@ def _api_request(
     try:
         raw = payload.decode("utf-8")
     except UnicodeDecodeError as exc:
-        # Strict on purpose: `errors="replace"` would substitute U+FFFD inside
-        # the token string and mint a corrupted but usable-looking `ghs_…`.
+        # Strict: `errors="replace"` would mint a corrupted `ghs_…` that still
+        # parses.
         raise ReviewAuthError(
             f"GitHub API {method} {path} returned a body that is not valid UTF-8 "
             f"({exc}): {_body_detail(payload, credential_body=credential_body)}",
@@ -187,18 +178,15 @@ def _api_request(
 
 
 def _api_get(path: str, jwt_token: str) -> object:
-    """The one GET carries no credential."""
     return _api_request(path, jwt_token, method="GET", credential_body=False)
 
 
 def _api_post(path: str, jwt_token: str) -> object:
-    """The one POST's success body IS a credential."""
     return _api_request(path, jwt_token, method="POST", credential_body=True)
 
 
 def installation_id(backend: Backend, repo: str, *, jwt: str | None = None) -> int:
-    """The installation id on ``repo``'s owner; a 404 is the one status read as
-    a verdict (:data:`NOT_INSTALLED`)."""
+    """A 404 here is the one status read as a verdict (:data:`NOT_INSTALLED`)."""
     agent = backend.funnel_agent or backend.name
     token = jwt if jwt is not None else make_app_jwt(backend)
     try:
@@ -219,8 +207,7 @@ def installation_id(backend: Backend, repo: str, *, jwt: str | None = None) -> i
             kind=API_ERROR,
         )
     inst_id = resp["id"]
-    # Validate the shape, never coerce: `int()` turns `True` into 1 and `42.9`
-    # into 42, addressing the token request to a DIFFERENT installation.
+    # Never coerce: `int()` would address a DIFFERENT installation.
     if isinstance(inst_id, bool) or not isinstance(inst_id, int) or inst_id <= 0:
         raise ReviewAuthError(
             f"Installation response for {agent!r} on {repo} has an unusable 'id' "
@@ -231,13 +218,12 @@ def installation_id(backend: Backend, repo: str, *, jwt: str | None = None) -> i
 
 
 def installation_auth(backend: Backend, repo: str) -> dict:
-    """The whole access-tokens response; its ``token`` is a guaranteed non-empty string."""
     jwt_token = make_app_jwt(backend)
     inst_id = installation_id(backend, repo, jwt=jwt_token)
     resp = _api_post(f"/app/installations/{inst_id}/access_tokens", jwt_token)
     agent = backend.funnel_agent or backend.name
-    # The credential endpoint's body, so the failures below state its shape and
-    # never repr it: a failing answer can still carry a usable `ghs_…`.
+    # The failures below never repr the body: a failing answer can still carry
+    # a usable `ghs_…`.
     if not isinstance(resp, dict):
         raise ReviewAuthError(
             f"Minting an installation token for {agent!r} on {repo} answered with "
@@ -255,5 +241,4 @@ def installation_auth(backend: Backend, repo: str) -> dict:
 
 
 def installation_token(backend: Backend, repo: str) -> str:
-    """The 1-hour ``ghs_…`` token, for the caller to inject as ``GH_TOKEN``."""
     return installation_auth(backend, repo)["token"]

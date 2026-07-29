@@ -1,7 +1,6 @@
 """The Review-round record: what one review CONCLUDED and what it cost.
 
-:func:`build` is pure; :func:`record_round` is the I/O boundary and raises on
-failure, so each caller owns its own failure posture.
+:func:`record_round` raises, so each caller owns its own failure posture.
 """
 
 from __future__ import annotations
@@ -19,15 +18,12 @@ from .dimensions import fanout_variant_text
 from .instructions import load_instructions
 from .schema import finding_from_dict
 
-#: Bump when the field set changes, so an aggregator can read mixed stores.
 SCHEMA_VERSION = 4
 
 
 def dispositioned(
     review: Mapping[str, Any], *, run_id: str | None = None
 ) -> list[JudgedFinding]:
-    """Every finding of a review dict, all ``post`` and canonical — the
-    single-pass default, for a caller with no calibrator routing to supply."""
     comments = review.get("comments") or []
     return [
         JudgedFinding(finding_from_dict(raw), Disposition.POST, run_id=run_id)
@@ -57,9 +53,8 @@ def build(
     cell: Mapping[str, Any] | None = None,
     timestamp: str,
 ) -> dict[str, Any]:
-    """One JSONL line for one review round. ``findings`` is the FULL judged set,
-    routed-out findings included; ``pr`` is ``None`` for an offline range replay,
-    and ``total_tokens`` ``None`` means no contributing run reported any."""
+    """``findings`` is the FULL judged set, routed-out ones included; ``pr`` is
+    ``None`` for an offline replay, ``total_tokens`` when no run reported usage."""
     summary = review.get("summary") or {}
     if not isinstance(summary, Mapping):
         summary = {}
@@ -89,9 +84,8 @@ def build(
 
 
 def _finding_record(judged: JudgedFinding) -> dict[str, Any]:
-    """One judged finding as record data. A duplicate carries its twin's ``post``
-    disposition but never reached the PR, so "posted" reads as ``disposition ==
-    post AND duplicate_of is None``, never the disposition alone."""
+    """A duplicate carries its twin's ``post`` disposition but never reached the
+    PR, so "posted" reads as ``post AND duplicate_of is None``."""
     finding = judged.finding
     return {
         "file": finding.file,
@@ -131,12 +125,11 @@ def record_round(
     base_dir: Path | None = None,
     env: Mapping[str, str] | None = None,
 ) -> Path:
-    """Build one round record and append it to the repo's store, returning the
-    store path. ``dimension_names`` must be the RESOLVED pass set — ``None`` means
-    "not a fan-out" — because the focus texts live in code, not the instructions
-    file, so arms differing only by dimension set would otherwise pool under one
-    variant. ``findings`` ``None`` falls back to :func:`dispositioned`. Raises on
-    failure; the caller owns the posture."""
+    """Append one round record to the repo's store, returning its path.
+    ``dimension_names`` must be the RESOLVED pass set (``None`` means "not a
+    fan-out"), because the focus texts live in code, not the instructions file,
+    so arms differing only by dimension set would otherwise pool under one
+    variant. Raises on failure; the caller owns the posture."""
     repo = repo_from_slug(repo_slug)
     variant_text = load_instructions(instructions_path)
     if dimension_names is not None:
@@ -175,9 +168,8 @@ def last_reviewed_head(
     new_head: str,
     base_dir: Path | None = None,
 ) -> str | None:
-    """The head ``reviewer`` most recently reviewed on PR ``pr``, ignoring
-    ``new_head`` itself — the incremental round's fix-range base. ``None`` for a
-    first round or a lost record, which fall through to a full round."""
+    """The head ``reviewer`` last reviewed on ``pr``, ignoring ``new_head``
+    itself; ``None`` — a first round, or a lost record — means a full round."""
     repo = repo_from_slug(repo_slug)
     found: str | None = None
     for record in read_records(repo, base_dir, kind=REVIEW_ROUNDS_KIND):

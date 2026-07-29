@@ -1,6 +1,5 @@
 """The declarative Cell file — one review experiment, parsed and validated.
 
-Pure domain layer; the I/O runner lives in :mod:`shipit.review.labrun`.
 See docs/adr/0049-review-lab-cells.md.
 """
 
@@ -49,20 +48,17 @@ SHAPES = ("single", "fanout")
 
 DEDUP_MODES = ("mechanical", "semantic", "calibrated")
 
-#: An ``informed`` sweep composes the prior sweeps' findings into its prompt.
 SWEEP_MODES = ("blind", "informed")
 
 CONTROL_AXIS = "control"
 
 
 class CellError(ValueError):
-    """A cell file that cannot be trusted: parse or validation failure."""
+    """A cell file that cannot be trusted."""
 
 
 @dataclass(frozen=True)
 class CellInvocation:
-    """The cell's pinned Invocation; ``backend`` is a funnel-agent token."""
-
     backend: str = "codex"
     model: str = "pro"
     timeout: str = "600s"
@@ -70,8 +66,6 @@ class CellInvocation:
 
 @dataclass(frozen=True)
 class Cell:
-    """One validated experiment cell; a control names itself as ``baseline``."""
-
     id: str
     baseline: str
     axis: str
@@ -103,7 +97,7 @@ def _require_str(raw: Mapping[str, Any], key: str, where: str) -> str:
 
 
 def _require_cell_name(raw: Mapping[str, Any], key: str, where: str) -> str:
-    """A required bare cell name, so the ``<cells>/<name>.toml`` lookup cannot traverse out."""
+    """Bare, so the ``<cells>/<name>.toml`` lookup cannot traverse out."""
     value = _require_str(raw, key, where)
     if "/" in value or "\\" in value or value in (".", ".."):
         raise CellError(
@@ -123,7 +117,7 @@ def _optional_str(raw: Mapping[str, Any], key: str, where: str) -> str | None:
     return value.strip()
 
 
-#: One point per (pin × replicate × sweep), so unbounded counts are an OOM vector.
+#: One point per (pin × replicate × sweep), so unbounded is an OOM vector.
 MAX_SWEEP_COUNT = 1000
 
 #: A total ceiling too: the per-axis bound still permits a million launches.
@@ -145,8 +139,7 @@ def _positive_int(raw: Mapping[str, Any], key: str, where: str, default: int) ->
 
 
 def _validate_instructions_path(path: str, where: str) -> None:
-    """Refuse anything but an in-repo relative path: an absolute, ``~``, or
-    traversal path could feed a local secret to the model."""
+    """In-repo relative only: another path could feed a local secret to the model."""
     candidate = Path(path)
     if candidate.is_absolute() or path.startswith("~") or ".." in candidate.parts:
         raise CellError(
@@ -235,7 +228,6 @@ def _parse_dimension_invocations(
 
 
 def parse_cell(data: Mapping[str, Any], *, where: str = "cell") -> Cell:
-    """Parsed TOML into a validated :class:`Cell`; downstream consumers can trust one unconditionally."""
     if not isinstance(data, Mapping):
         raise CellError(f"{where}: cell file must be a TOML table")
     _reject_unknown_keys(
@@ -394,7 +386,6 @@ def parse_cell(data: Mapping[str, Any], *, where: str = "cell") -> Cell:
 
     invocation_raw = data.get("invocation")
     invocation = _parse_invocation(invocation_raw, where)
-    # The shipped default set, not the whole registry. Empty only when omitted.
     effective_dimensions = dimensions if dimensions else DEFAULT_DIMENSION_NAMES
     dimension_invocations = _parse_dimension_invocations(
         invocation_raw.get("dimensions")
@@ -458,7 +449,6 @@ def parse_cell(data: Mapping[str, Any], *, where: str = "cell") -> Cell:
 
 
 def load_cell(path: Path) -> Cell:
-    """Read and validate the cell file at ``path``, requiring ``id`` to equal the filename stem."""
     try:
         with path.open("rb") as fh:
             data = tomllib.load(fh)
@@ -489,7 +479,6 @@ def _effective_pins(cell: Cell, fixture: Fixture) -> frozenset[str]:
 
 
 def check_fair_pair(cell: Cell, baseline: Cell, fixture: Fixture) -> None:
-    """Raise unless the two name each other and share fixture version and pin set."""
     if cell.baseline != baseline.id:
         raise CellError(
             f"cell {cell.id!r} declares baseline {cell.baseline!r}, not {baseline.id!r}"
@@ -512,9 +501,6 @@ def check_baseline_lineage(
     fixture: Fixture,
     resolve_baseline: Callable[[Cell], Cell],
 ) -> tuple[Cell, ...]:
-    """The chain ``(cell, …, control)``, fair-pair checked at every hop;
-    ``resolve_baseline`` loads one cell's baseline or raises, and a repeated id
-    is a cycle error."""
     chain = [cell]
     visited = {cell.id}
     current = cell
@@ -557,8 +543,8 @@ def load_baseline_lineage(
 
 
 def instructions_variant_text(cell: Cell, base_text: str) -> str:
-    """The text the variant hash covers: a fan-out cell folds in its dimension
-    set and overrides, which live in code and would otherwise under-key it."""
+    """A fan-out cell folds in its dimension set, which lives in code and would
+    otherwise under-key the experiment."""
     if cell.shape != "fanout":
         return base_text
     return fanout_variant_text(base_text, cell.dimensions, cell.dimension_invocations)
@@ -572,7 +558,6 @@ def run_key(
     replicate: int,
     sweep: int,
 ) -> dict[str, Any]:
-    """One run's ``round.cell`` tag; ``variant_hash`` covers :func:`instructions_variant_text`."""
     return {
         "id": cell.id,
         "baseline": cell.baseline,
@@ -587,16 +572,14 @@ def run_key(
     }
 
 
-#: The fields of :func:`run_key` that ARE the key; the rest is report decoration.
+#: The fields of :func:`run_key` that ARE the key; the rest decorates.
 KEY_FIELDS = ("id", "fixture_version", "pr", "variant", "replicate", "sweep")
 
 
-#: Anything else is a corrupt record, and would be an unhashable set element.
 _KEY_SCALAR_TYPES = (str, int, type(None))
 
 
 def key_tuple(tag: Mapping[str, Any]) -> tuple | None:
-    """``tag``'s key as a hashable tuple, or ``None`` when any field is non-scalar."""
     values = tuple(tag.get(field) for field in KEY_FIELDS)
     if any(not isinstance(value, _KEY_SCALAR_TYPES) for value in values):
         return None
@@ -610,10 +593,9 @@ def record_matches_key(record: Mapping[str, Any], key: Mapping[str, Any]) -> boo
     return all(tag.get(field_name) == key[field_name] for field_name in KEY_FIELDS)
 
 
-#: Stripped from a prior finding: its fields derive from untrusted diffs.
+#: Stripped: a prior finding's fields derive from untrusted diffs.
 _PRIOR_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 
-#: Caps on the composed prompt: a banked finding's text is unbounded.
 MAX_PRIOR_FINDINGS = 200
 _MAX_PRIOR_FIELD_LEN = 500
 
@@ -626,7 +608,6 @@ def _clean_prior_field(value: Any, *, limit: int = _MAX_PRIOR_FIELD_LEN) -> str:
 def compose_informed_instructions(
     base_text: str, prior_findings: Sequence[Mapping[str, Any]]
 ) -> str:
-    """Base text plus the prior sweeps' findings, inert and truncated."""
     if not prior_findings:
         return base_text
     lines = []

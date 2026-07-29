@@ -1,8 +1,7 @@
-"""Deterministic scoring of banked Review-round records against the fixture:
-recall, false positives, and unadjudicated emissions per Variant.
+"""Recall, false positives, and unadjudicated emissions per Variant, scored
+deterministically over banked Review-round records.
 
-Zero tokens, zero LLM, and pure — the same store and fixture always render the
-same report. See docs/adr/0048-ground-truth-fixture-deterministic-scorer.md.
+See docs/adr/0048-ground-truth-fixture-deterministic-scorer.md.
 """
 
 from __future__ import annotations
@@ -27,18 +26,14 @@ __all__ = [
     "score_records",
 ]
 
-#: Below this many positives a tier is statistically underpowered, and its
-#: recall renders with a marker rather than as a headline.
+#: Below this many positives a tier is statistically underpowered.
 UNDERPOWERED_FLOOR = 20
 
-#: The bucket a record with no variant groups under.
 _NO_VARIANT = "(none)"
 
 
 @dataclass(frozen=True)
 class TierScore:
-    """One severity tier of one variant; both counts are DEFECTS, not labels."""
-
     severity: Severity
     positives: int
     recalled: int
@@ -50,9 +45,6 @@ class TierScore:
 
 @dataclass(frozen=True)
 class Adjudication:
-    """One emission awaiting a human verdict: a ``near-miss`` wants an alias on
-    ``label_id``, an ``unmatched`` a new label."""
-
     kind: str
     variant: str
     pr_id: str
@@ -65,9 +57,6 @@ class Adjudication:
 
 @dataclass(frozen=True)
 class VariantScore:
-    """One Variant's scorecard; ``recalled_label_ids`` lists individual anchor
-    labels, while ``tiers`` collapses them to defects."""
-
     variant: str
     rounds: int
     pr_ids: tuple[str, ...]
@@ -80,8 +69,6 @@ class VariantScore:
 
 @dataclass(frozen=True)
 class ScoreReport:
-    """The whole scoring run: per-variant scores + what was and wasn't scored."""
-
     fixture_version: int
     variants: tuple[VariantScore, ...]
     confirmed_labels: int
@@ -91,7 +78,6 @@ class ScoreReport:
 
 
 def _sha_matches(recorded: str, pinned: str) -> bool:
-    """Prefix-tolerant SHA equality; either side may abbreviate, to ≥7 chars."""
     a, b = recorded.strip().lower(), pinned.strip().lower()
     if len(a) < 7 or len(b) < 7:
         return False
@@ -117,8 +103,6 @@ def _pin_for(fixture: Fixture, record: Mapping[str, Any]) -> PinnedRange | None:
 
 
 def _variant_key(record: Mapping[str, Any]) -> str:
-    """The record's experiment-arm key: ``content_hash [label]``, keyed on the
-    hash so two arms sharing one label never collapse into a single bucket."""
     variant = record.get("round.variant")
     if not isinstance(variant, Mapping):
         return _NO_VARIANT
@@ -130,7 +114,6 @@ def _variant_key(record: Mapping[str, Any]) -> str:
 
 
 def _posted_findings(record: Mapping[str, Any]) -> list[Mapping[str, Any]]:
-    """The findings that reached the PR: ``post`` AND canonical."""
     findings = record.get("round.findings")
     if not isinstance(findings, Sequence):
         return []
@@ -175,9 +158,6 @@ def _adjudication(
 def score_records(
     fixture: Fixture, records: Sequence[Mapping[str, Any]]
 ) -> ScoreReport:
-    """Score every in-fixture record against ``fixture``; iteration order is
-    fixed, so the same inputs render the same report byte-for-byte."""
-    # variant -> accumulator state
     joined: dict[str, dict[str, Any]] = {}
     records_scored = 0
     for record in records:
@@ -233,7 +213,6 @@ def score_records(
     for variant in sorted(joined):
         state = joined[variant]
         pin_ids = sorted(state["pins"])
-        # Only the pins this variant actually has records for.
         in_scope = [
             label
             for pid in pin_ids
@@ -243,8 +222,6 @@ def score_records(
         tiers = []
         for severity in Severity:
             tier_labels = [lb for lb in in_scope if lb.severity is severity]
-            # An equivalence family fills one denominator slot and is recalled
-            # when any anchor matched; parse proved it never straddles tiers.
             defects: dict[str, bool] = {}
             for lb in tier_labels:
                 key = lb.defect_key
@@ -278,15 +255,11 @@ def score_records(
     )
 
 
-# --- rendering ---
-
-#: Adjudication text is model-generated, so an embedded escape could forge
-#: report structure.
+#: Adjudication text is model-generated: an escape could forge report structure.
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 
 def _sanitize(text: str) -> str:
-    """Untrusted record text made safe to interpolate into the report."""
     return _CONTROL_CHARS.sub("·", text)
 
 
@@ -299,7 +272,6 @@ def _tier_line(tier: TierScore) -> str:
 def _adjudication_lines(items: Sequence[Adjudication]) -> list[str]:
     out = []
     for item in items:
-        # Every interpolated field is external, so all are sanitized.
         pr_id = _sanitize(item.pr_id)
         file = _sanitize(item.file)
         loc = f"{file}:{item.line}" if item.line is not None else file
@@ -326,7 +298,6 @@ def _adjudication_lines(items: Sequence[Adjudication]) -> list[str]:
 
 
 def render_report(report: ScoreReport) -> str:
-    """The score report as text, adjudications last."""
     lines = [
         f"ground-truth fixture v{report.fixture_version} — "
         f"{report.confirmed_labels} confirmed labels"
