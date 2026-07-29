@@ -1,5 +1,3 @@
-"""Smoke tests for the click CLI surface."""
-
 from shipit import cli
 
 
@@ -92,8 +90,6 @@ def test_version():
 
 
 def test_version_shows_the_build_sha(capsys, monkeypatch):
-    # ADR-0033: --version must surface the running build's commit so an operator
-    # can tell WHICH build this is — not just the static package version.
     from shipit import buildid
     from shipit.identity import Sha
 
@@ -107,8 +103,6 @@ def test_version_shows_the_build_sha(capsys, monkeypatch):
 
 
 def test_version_handles_unresolved_build(capsys, monkeypatch):
-    # No install record, no embed, no checkout: say so plainly rather than
-    # crash or print a bare version that "identifies nothing".
     from shipit import buildid
 
     monkeypatch.setattr(buildid, "build_sha", lambda: None)
@@ -150,8 +144,6 @@ def test_session_help_lists_codex(capsys):
 
 
 def test_install_mode_flags_are_mutually_exclusive():
-    # --pr, --push, and --local are mutually exclusive modes; passing any two
-    # is a usage error (click exits 2), not a silently-resolved precedence.
     from click.testing import CliRunner
 
     for pair in (["--local", "--push"], ["--pr", "--local"], ["--pr", "--push"]):
@@ -161,9 +153,6 @@ def test_install_mode_flags_are_mutually_exclusive():
 
 
 def test_shipit_exec_override_emits_the_flow_event(monkeypatch):
-    # ADR-0033: an invocation running under the SHIPIT_EXEC override announces
-    # the pin bypass durably — the flow-log twin of the launcher's stderr line,
-    # emitted by the exec'd build itself at CLI entry.
     calls: list[str] = []
     monkeypatch.setattr(
         cli.events, "emit", lambda log, name, msg, *a, **k: calls.append(name)
@@ -186,19 +175,13 @@ def test_no_override_event_without_shipit_exec(monkeypatch):
 
 
 def test_provision_is_a_tombstone_that_always_refuses_with_the_remedy():
-    # ADR-0066 retired `provision`; #1070's call sites outlived it, in a dozen
-    # consumer-authored pixi lane tasks nothing reconciles. Those tasks already
-    # fail — the tombstone decides WHAT they say when they do. Without it the
-    # operator reads click's `No such command 'provision'`, which names neither
-    # lexd, nor the ADR, nor the one-line edit. It restores nothing: every
-    # invocation exits 1, whatever arguments it is handed.
     from click.testing import CliRunner
 
     for argv in (
         ["provision"],
-        ["provision", "lexd"],  # the fleet's call, verbatim
-        ["provision", "--force", "lexd"],  # options a caller may still pass
-        ["provision", "some-future-thing"],  # the verb generally, not one arg
+        ["provision", "lexd"],
+        ["provision", "--force", "lexd"],
+        ["provision", "some-future-thing"],
     ):
         result = CliRunner().invoke(cli.root, argv)
         assert result.exit_code == 1, argv
@@ -208,8 +191,6 @@ def test_provision_is_a_tombstone_that_always_refuses_with_the_remedy():
 
 
 def test_provision_tombstone_is_hidden_from_help(capsys):
-    # A gravestone answers when called; it does not advertise itself. Listing a
-    # retired verb in `shipit --help` reads as an offer to run it.
     rc = cli.main(["--help"])
     assert rc == 0
     assert "provision" not in capsys.readouterr().out

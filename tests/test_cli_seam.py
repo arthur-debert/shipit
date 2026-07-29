@@ -1,16 +1,3 @@
-"""Unit tests for the ADR-0030 CLI seam machinery (CLI01-WS01).
-
-The four seam pieces, each tested prstate-style — typed value in, typed value
-out, boundaries injected — plus the wiring smoke tests that prove the root
-context is resolved exactly ONCE per invocation and threaded via click's
-context through the real CLI entry:
-
-- :mod:`shipit.verbs._context` — RootContext + the one best-effort resolution
-- :mod:`shipit.verbs._params`  — value objects minted at parse; usage = exit 2
-- :mod:`shipit.verbs._errors`  — the runtime error shell; ``error: …`` + exit 1
-- :mod:`shipit.verbs._render`  — ``emit`` over a pure ``format_*`` renderer
-"""
-
 from __future__ import annotations
 
 import json
@@ -47,20 +34,15 @@ WD = WorkingDir(
 )
 
 
-# --- RootContext (_context) ---------------------------------------------------
-
-
 def test_resolve_root_context_wraps_the_working_dir(monkeypatch):
     monkeypatch.setattr(_context, "resolve_working_dir", lambda cwd: WD)
     root = resolve_root_context()
     assert root.working_dir is WD
-    assert root.repo.slug == "acme/widget"  # canonical, lowercased identity
+    assert root.repo.slug == "acme/widget"
 
 
 @pytest.mark.parametrize("boom", [ExecError(["git"], rc=1), ValueError("bad url")])
 def test_resolve_root_context_is_best_effort_outside_a_checkout(monkeypatch, boom):
-    """No origin remote / unparseable remote degrades to an EMPTY context —
-    whether that is fatal is each verb's decision, not the root's."""
 
     def raise_boom(cwd):
         raise boom
@@ -72,8 +54,6 @@ def test_resolve_root_context_is_best_effort_outside_a_checkout(monkeypatch, boo
 
 
 def test_require_repo_outside_a_checkout_is_the_one_uniform_refusal():
-    """A verb needing a repo outside a checkout fails with ONE uniform error —
-    a runtime refusal (the error shell's exit 1), not a usage error."""
     empty = RootContext(working_dir=None)
     with pytest.raises(NoAmbientRepoError) as exc:
         empty.require_repo()
@@ -98,18 +78,11 @@ def test_default_path_falls_back_to_ambient_then_cwd():
 
 
 def test_current_root_context_outside_click_is_empty():
-    """A direct (non-click) run() call still gets a usable, empty context."""
     root = current_root_context()
     assert root.working_dir is None
 
 
-# --- wiring: resolved ONCE at the root, threaded via click ctx ------------------
-
-
 def test_root_context_resolved_once_and_threaded_via_the_cli_entry(monkeypatch, capsys):
-    """Through the REAL CLI entry: the root callback resolves the context exactly
-    once per invocation and a downstream command reads THE SAME object off
-    click's context via `current_root_context()`."""
     from shipit import cli
 
     calls: list[int] = []
@@ -132,12 +105,11 @@ def test_root_context_resolved_once_and_threaded_via_the_cli_entry(monkeypatch, 
         cli.root.commands.pop("ctx-probe", None)
 
     assert rc == 0
-    assert calls == [1]  # resolved exactly ONCE per invocation
+    assert calls == [1]
     assert capsys.readouterr().out.strip() == "acme/widget"
 
 
 def test_pr_status_invocation_resolves_the_root_context_once(monkeypatch):
-    """A real verb invocation pays exactly one ambient resolution — the root's."""
     from shipit import cli
     from shipit.verbs.pr import status as status_verb
 
@@ -149,8 +121,6 @@ def test_pr_status_invocation_resolves_the_root_context_once(monkeypatch):
 
     monkeypatch.setattr(cli, "resolve_root_context", fake_resolve)
     monkeypatch.setattr(cli, "configure_logging", lambda **kw: None)
-    # The resolver receives the ROOT context's repo — the one ambient
-    # resolution — as the PrId's identity half (WS02, #336).
     seen: list = []
     monkeypatch.setattr(
         status_verb, "resolve_pr", lambda pr, repo, branch: seen.append(repo) or None
@@ -163,11 +133,7 @@ def test_pr_status_invocation_resolves_the_root_context_once(monkeypatch):
     assert seen == [WD.repo]
 
 
-# --- the parameter library (_params) -------------------------------------------
-
-
 def _seam_group(root: RootContext) -> click.Group:
-    """A minimal group whose callback threads ``root`` the way the CLI root does."""
 
     @click.group()
     @click.pass_context
@@ -185,12 +151,10 @@ def test_repo_slug_param_mints_the_canonical_repo():
 
     result = CliRunner().invoke(probe, ["Acme/Widget"])
     assert result.exit_code == 0
-    assert result.output.strip() == "acme/widget"  # the ONE canonical parser
+    assert result.output.strip() == "acme/widget"
 
 
 def test_repo_slug_param_malformed_is_a_usage_error_exit_2():
-    """Construction-is-validation: a malformed slug is click's usage error —
-    exit 2 at parse, never verb-body code."""
 
     @click.command()
     @click.argument("repo", type=REPO_SLUG)
@@ -224,11 +188,6 @@ def test_bare_semver_param_passes_a_concrete_version_through():
     ],
 )
 def test_bare_semver_param_rejects_non_concrete_versions_exit_2(raw, message):
-    """The tag-state re-derivation verbs (#898) take the version read OFF the
-    tag (ADR-0041), validated through the release version grammar: a 'v'
-    prefix, a bump word, build metadata (a shape `release prepare` could
-    never have cut), or garbage is a usage error at parse — exit 2, never
-    verb-body code."""
 
     @click.command()
     @click.argument("version", type=BARE_SEMVER)
@@ -267,8 +226,6 @@ def test_repo_argument_explicit_overrides_the_ambient_default():
 
 
 def test_repo_argument_outside_a_checkout_defaults_to_none():
-    """No ambient repo -> the verb receives None; whether that is fatal is the
-    verb's require_repo() call, not the parser's."""
     grp = _seam_group(RootContext(working_dir=None))
 
     @grp.command()
@@ -309,8 +266,6 @@ def test_path_argument_explicit_overrides_and_cwd_fallback():
 
 
 def test_shared_flag_decorators_are_reusable_across_commands():
-    """--json / --dry-run are defined ONCE and applied per command — each
-    application binds its own option instance."""
 
     @click.command()
     @json_option
@@ -329,9 +284,6 @@ def test_shared_flag_decorators_are_reusable_across_commands():
     assert runner.invoke(two, ["--dry-run"]).output.strip() == "False True"
 
 
-# --- the error shell (_errors) ---------------------------------------------------
-
-
 @pytest.mark.parametrize(
     "boom",
     [
@@ -345,7 +297,7 @@ def test_shared_flag_decorators_are_reusable_across_commands():
 )
 def test_cli_errors_maps_the_known_set_to_error_line_and_exit_1(capsys, boom):
     @cli_errors
-    def run() -> int:  # the verb's run() shape
+    def run() -> int:
         raise boom
 
     assert run() == 1
@@ -355,9 +307,6 @@ def test_cli_errors_maps_the_known_set_to_error_line_and_exit_1(capsys, boom):
 
 
 def test_cli_errors_collapses_a_multiline_message_to_one_stderr_line(capsys):
-    """The ``error: …`` contract is ONE stderr line: a known error whose message
-    carries embedded newlines (an ExecError tailing multi-line stderr) is
-    collapsed to a single line so stderr stays parseable."""
 
     @cli_errors
     def run() -> int:
@@ -365,9 +314,9 @@ def test_cli_errors_collapses_a_multiline_message_to_one_stderr_line(capsys):
 
     assert run() == 1
     err = capsys.readouterr().err
-    assert err == "".join(err.splitlines()) + "\n"  # exactly one line
+    assert err == "".join(err.splitlines()) + "\n"
     assert err.startswith("error: ")
-    assert "line one" in err and "line two" in err  # detail preserved, inline
+    assert "line one" in err and "line two" in err
 
 
 def test_cli_errors_passes_the_success_return_through(capsys):
@@ -381,8 +330,6 @@ def test_cli_errors_passes_the_success_return_through(capsys):
 
 
 def test_cli_errors_lets_an_unknown_exception_propagate():
-    """An exception outside the known set is a BUG — a loud traceback, never
-    dressed up as a clean runtime failure."""
 
     @cli_errors
     def run() -> int:
@@ -392,12 +339,7 @@ def test_cli_errors_lets_an_unknown_exception_propagate():
         run()
 
 
-# --- the render seam (_render) ----------------------------------------------------
-
-
 class _Result:
-    """A minimal typed result: to_dict() is the JSON surface."""
-
     def to_dict(self) -> dict:
         return {"state": "ready", "pr": 42}
 

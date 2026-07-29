@@ -1,21 +1,3 @@
-"""Unit tests for `shipit.review.calibrator` — the one fixed judge (RVW02-WS04,
-ADR-0045).
-
-Two surfaces are pinned here, per the RVW02 testing decision that the
-calibrator's WISDOM is never unit-tested (that is the offline A/B harness's
-job), only its I/O contract:
-
-  * :func:`parse_calibration` — the contract boundary: schema shape, a known
-    disposition on every judged finding, exact union coverage (never
-    originates / never double-judges / never silently drops), the fail-safe
-    severity, the code-enforced evidence floor, and the merged-dedup
-    materialization; and
-  * :func:`run_calibrator` — the launch seam: read-only reviewer posture in
-    the shared Tree, the config's model/timeout threading, the claude result
-    envelope unwrap (session_id → run id), and the timeout / nonzero-child
-    error normalization.
-"""
-
 from __future__ import annotations
 
 import json
@@ -67,11 +49,7 @@ def _entry(i: int, **overrides) -> dict:
     return base
 
 
-# --- CalibratorConfig: construction is validation ------------------------------
-
-
 def test_default_calibrator_is_claude_at_high_reasoning():
-    """The ADR-0045 shipped default: the claude backend at high ReasoningLevel."""
     config = calibrator.DEFAULT_CALIBRATOR
     assert config.backend == "claude"
     assert config.model is None
@@ -93,9 +71,6 @@ def test_config_rejects_bad_reasoning_and_timeout():
         CalibratorConfig(model="  ")
 
 
-# --- parse_calibration: the I/O contract ---------------------------------------
-
-
 def test_happy_path_judges_every_candidate():
     union = [_candidate(0, severity="nit"), _candidate(1)]
     payload = {
@@ -108,20 +83,15 @@ def test_happy_path_judges_every_candidate():
     result = parse_calibration(payload, union)
     assert result.overall_feedback == "looks solid"
     by_id = {e.id: e for e in result.entries}
-    # Severity is NORMALIZED by the judge (the pass's own claim is a prior).
     assert by_id[0].finding.severity is Severity.MAJOR
     assert by_id[0].disposition is Disposition.POST
     assert by_id[1].disposition is Disposition.OUT_OF_SCOPE
-    # Location/category/confidence always come from the union candidate.
     assert by_id[0].finding.file == "src/mod0.py"
     assert by_id[0].finding.line == 10
     assert by_id[0].finding.confidence == 0.8
 
 
 def test_merged_dedup_materializes_duplicates_with_the_inverse_edge():
-    """A merged id is judged THROUGH its canonical twin: it appears in the
-    result as its own entry (its OWN union text/location) carrying the twin's
-    severity + disposition and the `duplicate_of` inverse edge."""
     union = [_candidate(0), _candidate(1), _candidate(2)]
     payload = {
         "summary": {"overall_feedback": ""},
@@ -138,12 +108,10 @@ def test_merged_dedup_materializes_duplicates_with_the_inverse_edge():
     assert by_id[2].duplicate_of == 0
     assert by_id[2].disposition is by_id[0].disposition
     assert by_id[2].finding.severity is Severity.CRITICAL
-    assert by_id[2].finding.text == "claim 2"  # its OWN union content
+    assert by_id[2].finding.text == "claim 2"
 
 
 def test_originated_finding_is_a_contract_violation():
-    """The never-originates rule, enforced where checkable: an id outside the
-    union is rejected loud — never posted, never recorded as judged."""
     union = [_candidate(0)]
     payload = {"findings": [_entry(0), _entry(7)]}
     with pytest.raises(CalibrationContractError, match="never originates"):
@@ -173,8 +141,6 @@ def test_unknown_disposition_and_bad_shapes_are_contract_violations():
 
 
 def test_unparseable_severity_lands_on_the_major_fail_safe():
-    """The domain fail-safe (ADR-0044): an unparseable judged severity is
-    `major` — it forces a round rather than slipping past the Breaker."""
     union = [_candidate(0)]
     result = parse_calibration({"findings": [_entry(0, severity="HIGH")]}, union)
     assert result.entries[0].finding.severity is Severity.MAJOR
@@ -192,38 +158,21 @@ def test_blank_judged_fields_fall_back_to_the_union_candidate():
 
 
 def test_post_without_evidence_flips_to_drop_unverified():
-    """The verification floor, code-enforced: 'quoted evidence always' — a
-    post-disposition finding with no evidence (judged NOR union) is routed
-    drop-unverified, never posted, never downgraded-and-kept."""
     union = [_candidate(0, evidence="")]
     result = parse_calibration(
         {"findings": [_entry(0, evidence="", disposition="post")]}, union
     )
     assert result.entries[0].disposition is Disposition.DROP_UNVERIFIED
-    # Severity untouched: dropped, never downgraded.
     assert result.entries[0].finding.severity is Severity.MINOR
-
-
-# --- build_calibrator_task: the F2 reproduction-based verification floor -------
-#
-# The calibrator's WISDOM is not unit-tested (the A/B harness measures that),
-# but the PROMPT's verification-floor framing is a contract the F2 fix
-# (RVW02-WS08, #665) turns on: drop only on active REFUTATION, never on mere
-# uncertainty. A regression that reverts the prompt to "prove-it-or-drop" would
-# silently reintroduce the true-positive over-pruning, so pin the framing.
 
 
 def test_calibrator_task_drops_only_on_refutation_not_uncertainty():
     task = build_calibrator_task("[]", pr_number=42)
     lowered = task.lower()
-    # The drop test is reproduction/refutation, not failure-to-justify.
     assert "refute" in lowered
     assert "reproduces" in lowered
     assert 'drop-unverified" only when you can actively refute' in lowered
-    # Uncertainty is explicitly NOT grounds to drop a reproducing finding.
     assert "not grounds to drop" in lowered
-    # The preserved-discipline invariants stay: evidence always, concrete
-    # failure scenario for major+, never downgrade.
     assert "evidence" in lowered
     assert "concrete failure scenario" in lowered
     assert "never downgrade" in lowered
@@ -237,17 +186,12 @@ def test_calibrator_task_pr_ground_truth_is_the_pr_diff():
 
 
 def test_calibrator_task_range_ground_truth_is_the_offline_git_diff():
-    # RVW03-WS01: an offline fan-out replay's judge reads the SAME range diff
-    # the passes did (`git diff <base>..<head>`) — never `gh` — and is told the
-    # result is recorded locally, not posted.
     task = build_calibrator_task("[]", commit_range=("a" * 40, "b" * 40))
     assert f"git diff {'a' * 40}..{'b' * 40}" in task
     assert "gh pr diff" not in task
     assert "Do NOT call `gh`" in task
     assert "NO pull request" in task
     assert "records it locally" in task
-    # The rest of the body follows the offline framing too — the scope and
-    # result-sink nouns never contradict it by naming a PR or a GitHub post.
     assert "this PR's diff" not in task
     assert "this range's diff" in task
     assert "the posted review's summary" not in task
@@ -261,13 +205,8 @@ def test_calibrator_task_range_ground_truth_is_the_offline_git_diff():
     ],
 )
 def test_calibrator_task_requires_exactly_one_ground_truth_source(kwargs):
-    # The judge needs ONE diff to verify against: neither source and both
-    # sources are caller errors, refused loud before any prompt is composed.
     with pytest.raises(ValueError, match="exactly one"):
         build_calibrator_task("[]", **kwargs)
-
-
-# --- run_calibrator: the launch seam -------------------------------------------
 
 
 def _union() -> list[dict]:
@@ -286,10 +225,6 @@ def _calibration_json() -> str:
 def test_run_calibrator_launches_claude_read_only_and_unwraps_the_envelope(
     monkeypatch,
 ):
-    """The claude path: the argv is the read-only reviewer posture carrying the
-    config's model AND its reasoning as the real `--effort` knob (RVW03-WS04);
-    the result envelope is unwrapped — session_id becomes the run id, and the
-    envelope's usage block becomes the run's measured token cost."""
     monkeypatch.setattr(calibrator.shutil, "which", lambda binary: "/usr/bin/claude")
     seen: dict = {}
 
@@ -319,18 +254,14 @@ def test_run_calibrator_launches_claude_read_only_and_unwraps_the_envelope(
     cmd = seen["cmd"]
     assert cmd[0] == "claude"
     assert cmd[cmd.index("--model") + 1] == "opus-x"
-    # The config's reasoning reaches REAL argv (claude --effort, RVW03-WS04)
-    # and the capture reports the applied level — what the record stamps.
     assert cmd[cmd.index("--effort") + 1] == "high"
     assert judged.reasoning == "high"
-    assert "--tools" in cmd  # the read-only reviewer posture
+    assert "--tools" in cmd
     assert seen["cwd"] == "/tree"
     assert seen["timeout"] == 30.0
-    # The envelope's usage block is the launch-result-level measurement (#667).
     assert judged.usage.total_tokens == 10 + 40 + 1000 + 200
     assert judged.usage.input_tokens == 10
     assert judged.usage.output_tokens == 40
-    # The task embeds the candidates and the judge contract.
     assert "NEVER originate" in judged.task
     assert '"id": 0' in judged.task
 
@@ -338,10 +269,6 @@ def test_run_calibrator_launches_claude_read_only_and_unwraps_the_envelope(
 def test_run_calibrator_raw_output_log_carries_the_correlation_extras(
     monkeypatch, caplog
 ):
-    """The judge's raw-output DEBUG record (issue #681 item 2) carries the
-    fan-out's correlation extras, so `shipit logs --run calibrator --round <id>`
-    slices it alongside the round's progress events rather than leaving it
-    filterable only by `pr`."""
     import logging
 
     monkeypatch.setattr(calibrator.shutil, "which", lambda binary: "/usr/bin/claude")
@@ -380,14 +307,11 @@ def test_run_calibrator_bare_json_mints_a_run_id(monkeypatch):
     judged = run_calibrator(
         CalibratorConfig(), _union(), pr_number=9, cwd="/tree", launcher=fake_runner
     )
-    assert judged.run_id  # minted — never an empty run identity
-    # A bare (non-envelope) answer carries no usage: explicitly unknown.
+    assert judged.run_id
     assert judged.usage.total_tokens is None
 
 
 def test_run_calibrator_codex_backend_reads_usage_from_stderr(monkeypatch):
-    # RVW03-WS04: a codex calibrator's usage rides its stderr "tokens used"
-    # figure (probed 0.139) — captured at launch-result level like the passes'.
     monkeypatch.setattr(calibrator.shutil, "which", lambda binary: "/usr/bin/codex")
     seen: dict = {}
 
@@ -407,15 +331,11 @@ def test_run_calibrator_codex_backend_reads_usage_from_stderr(monkeypatch):
         launcher=fake_runner,
     )
     assert judged.usage.total_tokens == 2500
-    # The reasoning knob reaches codex argv and is reported as applied.
     assert "model_reasoning_effort=medium" in seen["cmd"]
     assert judged.reasoning == "medium"
 
 
 def test_run_calibrator_agy_backend_records_reasoning_unset(monkeypatch):
-    # agy has NO reasoning knob (probed 1.1.1): the config level must NOT be
-    # echoed — the capture reports None (→ the record reads unset, #685) and
-    # usage is explicitly unknown (agy reports none).
     monkeypatch.setattr(calibrator.shutil, "which", lambda binary: "/usr/bin/agy")
     seen: dict = {}
 
@@ -482,10 +402,8 @@ def test_run_calibrator_nonzero_child_and_unparseable_output_raise(monkeypatch):
 
 
 def test_run_calibrator_contract_violation_propagates(monkeypatch):
-    """Parseable output that violates the judge contract fails the calibration
-    loud — an uncalibrated union is never posted."""
     monkeypatch.setattr(calibrator.shutil, "which", lambda binary: "/usr/bin/claude")
-    bad = json.dumps({"findings": [_entry(3)]})  # id 3 not in the union
+    bad = json.dumps({"findings": [_entry(3)]})
 
     def fake_runner(cmd, *, cwd, env, timeout=None):
         return LaunchResult(returncode=0, stdout=bad, stderr="")
@@ -494,11 +412,6 @@ def test_run_calibrator_contract_violation_propagates(monkeypatch):
         run_calibrator(
             CalibratorConfig(), _union(), pr_number=9, cwd="/tree", launcher=fake_runner
         )
-
-
-# ---------------------------------------------------------------------------
-# RVW03-WS02 — the calibrator run fills its artifact bundle, every path
-# ---------------------------------------------------------------------------
 
 
 def test_run_calibrator_fills_the_bundle_and_records_the_true_run_id(
@@ -522,8 +435,6 @@ def test_run_calibrator_fills_the_bundle_and_records_the_true_run_id(
         artifacts=bundle,
     )
     assert judged.run_id == "sess-7"
-    # The exact prompt + raw streams landed, and the meta carries the TRUE
-    # (post-unwrap) run id — the bundle's dir name is fixed, the id is data.
     assert (bundle.dir / "prompt.txt").read_text() == judged.task
     assert "sess-7" in (bundle.dir / "stdout.raw").read_text()
     assert (bundle.dir / "stderr.raw").read_text() == "warn line"
@@ -534,9 +445,6 @@ def test_run_calibrator_fills_the_bundle_and_records_the_true_run_id(
 
 
 def test_run_calibrator_failure_bundle_keeps_full_raw(monkeypatch, tmp_path, caplog):
-    """A nonzero judge (previously surviving only as detail[:500]) leaves its
-    FULL raw output in the bundle; a LOCAL log points at it, while the raised
-    message keeps the absolute path OUT (it reaches the GitHub check summary)."""
     import logging
 
     from shipit.review.artifacts import RunArtifacts
@@ -562,8 +470,6 @@ def test_run_calibrator_failure_bundle_keeps_full_raw(monkeypatch, tmp_path, cap
         )
     assert str(bundle.dir) not in str(exc.value)
     assert str(bundle.dir) in caplog.text
-    # The breadcrumb WARNING carries the same correlation extras as the DEBUG
-    # raw-output record, so `shipit logs --run calibrator --round …` selects it.
     [breadcrumb] = [r for r in caplog.records if "full raw output at" in r.getMessage()]
     assert breadcrumb.run_id == "calibrator"
     assert breadcrumb.round_id == "round-abc"
@@ -574,9 +480,6 @@ def test_run_calibrator_failure_bundle_keeps_full_raw(monkeypatch, tmp_path, cap
 
 
 def test_calibrator_task_never_carries_the_run_id_plumbing(monkeypatch):
-    """The union candidates carry the RVW03-WS02 `run_id` correlation; the
-    judge's serialized candidates must NOT (plumbing is the record's business,
-    and prompt bytes are variant-hashed)."""
     monkeypatch.setattr(calibrator.shutil, "which", lambda binary: "/usr/bin/claude")
 
     def fake_runner(cmd, *, cwd, env, timeout=None):

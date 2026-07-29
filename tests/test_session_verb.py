@@ -13,22 +13,11 @@ from shipit.tree.create import Tree
 from shipit.verbs import session
 from shipit.verbs.hook import worktreecreate
 
-#: Deterministic flat-leaf naming coordinates for the specs the launch paths mint
-#: (ADR-0074): the backend binary <agent>, the <timestamp> stamp, and the full-UUID
-#: <id>. `new_tree_naming` replaces the retired `new_agent_hash` — the naming half of
-#: the spec is now three fields (agent/created/tree_id), not one hash on the dir leaf.
 CREATED = "20260709-082101"
 TREE_ID = "019f5115-fb40-7db2-a82f-d2fc02a1da22"
 
 
 def _stub_naming(monkeypatch, module):
-    """Pin ``module.new_tree_naming`` to deterministic coordinates.
-
-    Preserves the caller's ``agent`` (the backend binary) and any explicit
-    ``tree_id`` (the coordinator arm passes the harness session UUID), so the stub
-    is faithful to each creation path's <id> provenance while the timestamp/id stay
-    fixed for assertion.
-    """
     monkeypatch.setattr(
         module,
         "new_tree_naming",
@@ -56,9 +45,6 @@ def test_run_codex_creates_ephemeral_tree_and_execs_codex(
     capture = LaunchCapture()
     source = tmp_path / "source"
     session_id = "codex-20260709-082101-4242"
-    # ADR-0074: the Tree dir is the single flat leaf <repo>-<agent>-<timestamp>-<id>,
-    # one segment below the root — no `ephemeral/` kind segment. The ephemeral session
-    # id lives on the BRANCH now, not the dir.
     tree_path = tmp_path / "trees" / f"shipit-codex-{CREATED}-{TREE_ID}"
 
     monkeypatch.setattr(session.git, "repo_root", lambda: str(source))
@@ -103,8 +89,6 @@ def test_run_codex_creates_ephemeral_tree_and_execs_codex(
     assert rc == 0
     assert capture.spec is not None
     assert capture.spec.repo == Repo("arthur-debert", "shipit")
-    # The naming half is now three flat-leaf fields: the backend binary <agent>, the
-    # <timestamp> stamp, and the full-UUID <id> — no `agent_hash`.
     assert capture.spec.agent == session.bootstrap.CODEX.binary
     assert capture.spec.created == CREATED
     assert capture.spec.tree_id == TREE_ID
@@ -442,15 +426,6 @@ def test_resume_cli_last_rejects_a_native_id_as_an_explicit_target():
 def test_run_codex_spec_matches_the_coordinator_worktreecreate_spec(
     monkeypatch, tmp_path
 ):
-    # The parity pin (#631, ADR-0074): `run_codex` and the Claude coordinator fork of
-    # the WorktreeCreate hook (`worktreecreate._create_tree(ephemeral=...)`) build the
-    # SAME ephemeral TreeSpec SHAPE by shared construction only — no type or helper
-    # links the two call sites. Under the flat grammar three fields legitimately differ
-    # per path: `agent` (the backend binary — `codex` vs `claude`), `tree_id` (the
-    # coordinator uses the harness session UUID from the payload; codex mints its own),
-    # and `ephemeral` (each mints its own session id). Drive both paths and assert every
-    # OTHER field agrees, so a future one-sided change — a slug, a session, a root, an
-    # issue added to one path — fails here instead of silently forking the shape per host.
     specs: dict[str, object] = {}
     source = tmp_path / "source"
     repo = repo_from_slug("arthur-debert/shipit")
@@ -487,10 +462,6 @@ def test_run_codex_spec_matches_the_coordinator_worktreecreate_spec(
     )
     _stub_naming(monkeypatch, worktreecreate)
     monkeypatch.setattr(worktreecreate, "create_from_source", creator("claude"))
-    # The spike-verified coordinator launch payload: no `prompt_id` — the ephemeral
-    # fork (ADR-0027). Under ADR-0074 it also carries the harness `session_id` (the
-    # full UUID that becomes the flat dir's <id> — the resume handle); `name` is the
-    # `--worktree` value that becomes the `ephemeral/<id>` BRANCH.
     payload = json.dumps(
         {
             "name": "sess-20260709-082101-4242",
@@ -502,16 +473,11 @@ def test_run_codex_spec_matches_the_coordinator_worktreecreate_spec(
     assert worktreecreate.run(stdin=io.StringIO(payload), stdout=out) == 0
 
     codex_spec, claude_spec = specs["codex"], specs["claude"]
-    # Both are the ephemeral shape, each carrying its own minted branch session id...
     assert codex_spec.ephemeral == "codex-20260709-082101-4242"
     assert claude_spec.ephemeral == "sess-20260709-082101-4242"
-    # ...the coordinator arm names the dir after the HARNESS session UUID (the resume
-    # handle), while codex mints its own; the <agent> is the backend binary either way.
     assert codex_spec.agent == session.bootstrap.CODEX.binary
     assert claude_spec.agent == "claude"
     assert claude_spec.tree_id == "7f3c9d20-1a2b-4c3d-8e4f-56789abcdef0"
-    # ...and EVERY OTHER field is identical across the two hosts' paths — normalize the
-    # three fields that legitimately differ per creation path, then compare the rest.
     normalized = dict(
         agent=claude_spec.agent,
         tree_id=claude_spec.tree_id,
@@ -577,9 +543,6 @@ def test_run_claude_resume_execs_native_resume_through_worktree(
     assert capture.env is not None
     assert capture.env["PATH"] == "/bin"
     assert "PIXI_PROJECT_ROOT" not in capture.env
-    # Every stale domain key is scrubbed EXCEPT session, which carries the freshly minted
-    # id forward so SessionStart records the resumed session under that same id (one flow,
-    # one ResumeTarget) rather than falling back to the flat Tree's leaf UUID.
     session_key = session.logcontext.ENV_PREFIX + "SESSION"
     assert capture.env[session_key] == "sess-20260709-082101-4242"
     for key in session.logcontext.DOMAIN_KEYS:
@@ -599,22 +562,6 @@ def test_run_claude_resume_execs_native_resume_through_worktree(
 def test_claude_resume_folds_launch_and_sessionstart_into_one_session(
     monkeypatch, tmp_path
 ):
-    """FINDING 2 regression: one native resume launch mints ONE session identity.
-
-    The pre-exec launch record is logged under the freshly minted ``sess-...``, but
-    ``_claude_resume_env`` scrubbed all log context before exec. SessionStart then found no
-    exported session key and fell back to the flat Tree's leaf UUID
-    (``current_session_id`` -> ``leaf.tree_id``), recording the resumed session under a
-    DIFFERENT id — so the two records folded into TWO ``ResumeTarget``s for one native id
-    and ``resume.resolve(native)`` rejected it as ambiguous. The fix exports the minted
-    ``sess-...`` as ``SHIPIT_LOG_CTX_SESSION`` into the exec env, so ``current_session_id``
-    (env-first, the same reader SessionStart uses) returns it even when cwd is a flat Tree
-    whose leaf UUID differs.
-
-    Teeth: the flat Tree cwd's leaf UUID is what the PRE-fix fallback would have used, so
-    without the export the first assertion fails (the SessionStart session resolves to
-    ``leaf_uuid``, not the launch id) — and the fold then yields two ambiguous targets.
-    """
     repo = repo_from_slug("arthur-debert/shipit")
     trees_root = tmp_path / "trees"
     monkeypatch.setenv(layout.CENTRAL_ROOT_ENV, str(trees_root))
@@ -642,15 +589,10 @@ def test_claude_resume_folds_launch_and_sessionstart_into_one_session(
     )
 
     minted_session_id = "sess-20260709-082101-4242"
-    # SessionStart resolves the session from the exec env FIRST; the export makes it the
-    # launch's minted id rather than the flat Tree's differing leaf UUID.
     sessionstart_session = current_session_id(env=capture.env, cwd=leaf)
     assert sessionstart_session == minted_session_id
     assert sessionstart_session != leaf_uuid, "still falling back to the leaf UUID"
 
-    # Fold the two records one launch emits — the pre-exec launch record and the
-    # SessionStart witness, both now carrying the SAME session — and assert the native id
-    # resolves to exactly ONE ResumeTarget.
     log = tmp_path / "logs" / repo.owner.login / repo.name / "shipit.log"
     log.parent.mkdir(parents=True)
     log.write_text(

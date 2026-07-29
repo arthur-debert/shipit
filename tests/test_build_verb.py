@@ -1,13 +1,3 @@
-"""`shipit build` — the effectful shell over the build planner (TOL01-WS02).
-
-Recorded-invocation tests through the injected exec boundary (prior art: the
-`shipit test` verb tests over the one-exec seam, ADR-0028): exact builder
-command lines — direct argv, NEVER `pixi run`-wrapped (PRD story 9) — env per
-step (go's CGO_ENABLED=0), version injection only when supplied (ADR-0041),
-the uniform exit contract (0 all steps build / 1 any fails / 2 usage), the
-hard-fail on a missing builder, and the pointed missing-map error.
-"""
-
 from pathlib import Path
 
 import pytest
@@ -17,10 +7,6 @@ from shipit.verbs import build as build_verb
 
 
 class _Recorder:
-    """A fake exec boundary: records (argv, cwd, env), returns scripted
-    outcomes. ``outcomes`` maps a binary name to an int rc, a ``(rc, output)``
-    pair, or an exception to raise; unmapped binaries succeed."""
-
     def __init__(self, outcomes=None):
         self.calls: list[tuple[tuple[str, ...], Path, dict[str, str]]] = []
         self.outcomes = outcomes or {}
@@ -38,7 +24,6 @@ class _Recorder:
 
 @pytest.fixture
 def tauri_repo(tmp_path, monkeypatch):
-    """A two-leg repo (rust root + npm web path) with a declared artifact."""
     (tmp_path / ".shipit.toml").write_text(
         "[toolchains]\n"
         '"." = "rust"\n'
@@ -55,7 +40,6 @@ def tauri_repo(tmp_path, monkeypatch):
 
 @pytest.fixture
 def go_repo(tmp_path, monkeypatch):
-    """A single-leg go repo with a version-var-declaring artifact."""
     (tmp_path / ".shipit.toml").write_text(
         "[toolchains]\n"
         '"." = "go"\n'
@@ -66,11 +50,6 @@ def go_repo(tmp_path, monkeypatch):
     )
     monkeypatch.chdir(tmp_path)
     return tmp_path
-
-
-# --------------------------------------------------------------------------
-# Recorded invocations — direct builder argv, cwd per leg, env per step
-# --------------------------------------------------------------------------
 
 
 def test_bare_run_dispatches_every_step_narrowed_by_the_artifact_map(
@@ -90,10 +69,6 @@ def test_bare_run_dispatches_every_step_narrowed_by_the_artifact_map(
 
 
 def test_target_cross_compiles_the_rust_leg_and_leaves_npm_alone(tauri_repo):
-    # `--target <triple>` (TOL02-WS11) threads to the rust step alone: cargo
-    # gains --target (writes target/<triple>/release/), the npm leg is
-    # untouched (no per-target build). The wf-build fan passes its matrix
-    # triple here for the cross platforms a native runner cannot build.
     rec = _Recorder()
     rc = build_verb.run((), target="x86_64-unknown-linux-musl", run_step=rec)
     assert rc == 0
@@ -116,8 +91,6 @@ def test_target_cross_compiles_the_rust_leg_and_leaves_npm_alone(tauri_repo):
 
 
 def test_pixi_is_never_the_build_backend(tauri_repo):
-    # PRD story 9: the verb execs the real builder directly; pixi provisions,
-    # never builds — no argv is `pixi run`-wrapped.
     rec = _Recorder()
     assert build_verb.run((), run_step=rec) == 0
     assert all(argv[0] != "pixi" for argv, _, _ in rec.calls)
@@ -139,11 +112,9 @@ def test_go_step_records_the_static_env_and_no_injection_without_a_version(
     rec = _Recorder()
     assert build_verb.run((), run_step=rec) == 0
     ((argv, cwd, env),) = rec.calls
-    # go-cli's legacy contract, pinned: static build, trimpath, stripped.
     assert env == {"CGO_ENABLED": "0"}
     assert "-trimpath" in argv
     assert "-s -w" in argv
-    # ADR-0041: no supplied version -> the -X injection NEVER appears.
     assert not any("-X" in a for a in argv)
 
 
@@ -188,11 +159,6 @@ def test_leg_output_prints_verbatim_even_when_green(tauri_repo, capsys):
     assert "Finished `release` profile" in capsys.readouterr().out
 
 
-# --------------------------------------------------------------------------
-# The exit contract (ADR-0030): 0 / 1 / 2, and the hard-fail
-# --------------------------------------------------------------------------
-
-
 def test_any_failing_step_fails_the_run_naming_the_step(tauri_repo, capsys):
     rec = _Recorder(outcomes={"npm": (1, "build script failed")})
     rc = build_verb.run((), run_step=rec)
@@ -206,7 +172,7 @@ def test_unknown_selector_is_usage_rc2_naming_known_legs(tauri_repo, capsys):
     rec = _Recorder()
     rc = build_verb.run(("python",), run_step=rec)
     assert rc == 2
-    assert rec.calls == []  # rejected before any step runs
+    assert rec.calls == []
     err = capsys.readouterr().err
     assert "unknown leg 'python'" in err
     assert "rust (.)" in err and "npm (web)" in err
@@ -216,14 +182,11 @@ def test_multi_leg_passthrough_without_selector_is_usage_rc2(tauri_repo, capsys)
     rec = _Recorder()
     rc = build_verb.run(("--frozen",), run_step=rec)
     assert rc == 2
-    assert rec.calls == []  # a hard error, never a broadcast
+    assert rec.calls == []
     assert "rust (.)" in capsys.readouterr().err
 
 
 def test_missing_builder_is_hard_127_never_a_skip(tauri_repo, capsys):
-    # cargo is a pixi-managed builder, so the hard 127 names the install
-    # reconcile that provisions it (#890 wired the prepare/publish loops'
-    # translation into the build stage) — never a raw missing-binary note.
     boom = execrun.ExecError(["cargo"], rc=None, cause=execrun.CAUSE_MISSING_BINARY)
     rec = _Recorder(outcomes={"cargo": boom})
     rc = build_verb.run((), run_step=rec)
@@ -232,14 +195,10 @@ def test_missing_builder_is_hard_127_never_a_skip(tauri_repo, capsys):
     assert "pixi.toml#shipit-rust-release-toolchain" in out
     assert "`shipit install --pr`" in out
     assert "BUILD: FAILED (rust (.) [app])" in out
-    # The other step still ran: one broken step never silences the rest.
     assert any(argv[0] == "npm" for argv, _, _ in rec.calls)
 
 
 def test_missing_unmanaged_builder_keeps_the_generic_provision_note(go_repo, capsys):
-    # go is NOT a pixi-managed tool (open hole 4): its missing-binary death
-    # keeps the generic hard-fail note — the reconcile remedy is scoped to
-    # the tools the managed pixi surface actually delivers.
     boom = execrun.ExecError(["go"], rc=None, cause=execrun.CAUSE_MISSING_BINARY)
     rec = _Recorder(outcomes={"go": boom})
     rc = build_verb.run((), run_step=rec)
@@ -250,10 +209,6 @@ def test_missing_unmanaged_builder_keeps_the_generic_provision_note(go_repo, cap
 
 
 def test_missing_tree_sitter_gets_the_reconcile_remedy(tmp_path, monkeypatch, capsys):
-    """#890 (TOL02-WS17 hole 7, the WS16 first live fire): `tree-sitter
-    generate` dying missing-binary at build names the tree-sitter-release-deps
-    block's COMMITTING install reconcile — never a raw 127 that tells the
-    operator nothing, and never a run-time install (#582)."""
     (tmp_path / ".shipit.toml").write_text(
         '[toolchains]\n"." = "tree-sitter"\n', encoding="utf-8"
     )
@@ -272,11 +227,6 @@ def test_missing_tree_sitter_gets_the_reconcile_remedy(tmp_path, monkeypatch, ca
     assert "BUILD: FAILED" in out
 
 
-# --------------------------------------------------------------------------
-# The map reads — pointed errors, through the cli_errors shell (exit 1)
-# --------------------------------------------------------------------------
-
-
 def test_missing_map_is_a_pointed_error_naming_the_verb(tmp_path, monkeypatch, capsys):
     (tmp_path / "go.mod").write_text("module x\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
@@ -290,8 +240,6 @@ def test_missing_map_is_a_pointed_error_naming_the_verb(tmp_path, monkeypatch, c
 def test_orphaned_build_target_toolchain_is_refused_loudly(
     tmp_path, monkeypatch, capsys
 ):
-    # An artifact whose target names a toolchain with no [toolchains] leg
-    # would silently never build — a config inconsistency, not a quiet skip.
     (tmp_path / ".shipit.toml").write_text(
         "[toolchains]\n"
         '"." = "python"\n'
@@ -308,9 +256,6 @@ def test_orphaned_build_target_toolchain_is_refused_loudly(
 
 
 def test_whitespace_version_is_usage_rc2_before_any_build(go_repo, capsys):
-    # The version rides go's -ldflags value as one token the go tool re-splits
-    # on whitespace, so a whitespace version would fragment into stray tokens
-    # (or injected linker flags) — refused as a usage error before any build.
     rec = _Recorder()
     assert build_verb.run((), version="1.2.3 -X evil=pwned", run_step=rec) == 2
     assert rec.calls == []
@@ -318,9 +263,6 @@ def test_whitespace_version_is_usage_rc2_before_any_build(go_repo, capsys):
 
 
 def _two_go_paths_one_target(tmp_path):
-    # Two go legs (two paths) and an artifact target naming `go` with a package:
-    # the join keys on toolchain only, so `go build ./cmd/x` would run in BOTH
-    # paths' cwd (wrong for at least one) — the ambiguity the verb refuses.
     (tmp_path / ".shipit.toml").write_text(
         "[toolchains]\n"
         '"svc-a" = "go"\n'
@@ -339,8 +281,6 @@ def test_target_toolchain_on_multiple_selected_paths_is_refused(
     _two_go_paths_one_target(tmp_path)
     monkeypatch.chdir(tmp_path)
     rec = _Recorder()
-    # Bare fan-out selects both go legs -> the producing path is ambiguous, so
-    # the verb refuses BEFORE running any wrong-cwd build.
     assert build_verb.run((), run_step=rec) == 1
     assert rec.calls == []
     err = capsys.readouterr().err
@@ -351,8 +291,6 @@ def test_a_path_selector_resolves_the_ambiguity_to_one_leg(tmp_path, monkeypatch
     _two_go_paths_one_target(tmp_path)
     monkeypatch.chdir(tmp_path)
     rec = _Recorder()
-    # Selecting a single path narrows to one go leg — no ambiguity, a clean
-    # build in that path's cwd.
     assert build_verb.run(("svc-a",), run_step=rec) == 0
     assert rec.calls == [
         (
@@ -375,11 +313,6 @@ def test_malformed_artifact_map_is_one_clean_error_line(tmp_path, monkeypatch, c
     assert "unknown endpoint `snapstore`" in err
 
 
-# --------------------------------------------------------------------------
-# The exec boundary — the stated timeout and env ride the wire (ADR-0028)
-# --------------------------------------------------------------------------
-
-
 def test_run_step_states_its_timeout_check_false_and_env(tmp_path, monkeypatch):
     captured = {}
 
@@ -391,8 +324,6 @@ def test_run_step_states_its_timeout_check_false_and_env(tmp_path, monkeypatch):
 
     monkeypatch.setattr(build_verb.execrun, "run", fake_run)
     build_verb._run_step(("go", "build"), tmp_path, {"CGO_ENABLED": "0"})
-    # A build legitimately compiles a workspace cold — the bound is the
-    # verb's own (an hour), stated on the wire, never the runner's default.
     assert captured["timeout"] == build_verb.BUILD_TIMEOUT
     assert captured["check"] is False
     assert captured["cwd"] == str(tmp_path)
@@ -410,6 +341,4 @@ def test_run_step_passes_no_env_when_the_step_adds_none(tmp_path, monkeypatch):
 
     monkeypatch.setattr(build_verb.execrun, "run", fake_run)
     build_verb._run_step(("uv", "build"), tmp_path, {})
-    # None (inherit untouched), not {} — {} with replace_env=False is merged
-    # anyway, but None keeps the runner's "no env shaping" fast path honest.
     assert captured["env"] is None

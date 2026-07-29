@@ -1,5 +1,3 @@
-"""Model-level invariants: thread accessors and head/resolved filtering."""
-
 from __future__ import annotations
 
 from shipit.identity import Sha
@@ -44,9 +42,6 @@ def test_reviews_on_head_filters_stale():
 
 
 def test_reviews_on_head_case_mismatch_cannot_flip_staleness():
-    # COR02 (#251): the head and the review's commit are both `Sha`s —
-    # lowercase-normalized at construction — so a case-varying source can no
-    # longer make a current-head review silently read stale.
     ctx = readiness_view(
         number=1,
         head_sha=str(HEAD).upper(),
@@ -57,8 +52,6 @@ def test_reviews_on_head_case_mismatch_cannot_flip_staleness():
 
 
 def test_review_with_unknown_commit_is_not_on_head():
-    # A review whose wire node carried no commit is honestly-unknown (None) — it
-    # never counts as on-head.
     ctx = readiness_view(
         number=1,
         head_sha=HEAD,

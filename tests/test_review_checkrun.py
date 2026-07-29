@@ -1,15 +1,3 @@
-"""Tests for `shipit.review.checkrun` — the local-review funnel breadcrumb.
-
-OBS02-WS01: at local-review *kickoff*, shipit opens a GitHub Check Run named
-`review: <reviewer>` (`status=in_progress`, `started_at=now`), authored by the
-reviewer's App via the installation-token boundary. These tests assert the
-breadcrumb shipit WRITES with the App-token boundary (`ghauth.installation_token`)
-and the `gh` check-run POST seam FAKED — never live GitHub.
-
-OBS02-WS02 adds the terminal `transition` (a single PATCH closing the SAME run to
-its mapped conclusion + output + completed_at); its tests follow the create tests.
-"""
-
 from __future__ import annotations
 
 import datetime as _dt
@@ -23,8 +11,6 @@ from shipit.review import checkrun
 
 
 def _fake_token(monkeypatch, sink: dict, value: str = "ghs_tok") -> None:
-    """Make `ghauth.installation_token` return a fixed token, recording its args —
-    the PEM→JWT→token mint is faked in-memory; nothing touches disk or the wire."""
 
     def _mint(backend, repo):
         sink["backend"] = backend
@@ -35,8 +21,6 @@ def _fake_token(monkeypatch, sink: dict, value: str = "ghs_tok") -> None:
 
 
 def test_create_opens_in_progress_run_with_name_status_started_at(monkeypatch):
-    """The kickoff create POSTs a check run with the right name, in_progress
-    status, the PR head sha, and an honest `started_at` timestamp."""
     auth: dict = {}
     _fake_token(monkeypatch, auth)
     seen: dict = {}
@@ -59,14 +43,11 @@ def test_create_opens_in_progress_run_with_name_status_started_at(monkeypatch):
     assert body["name"] == "review: codex-local"
     assert body["status"] == "in_progress"
     assert body["head_sha"] == "deadbeef"
-    # `started_at` is the load-bearing output: an honest, parseable UTC "now".
     started = _dt.datetime.fromisoformat(body["started_at"])
-    assert started.tzinfo is not None  # tz-aware (UTC), not naive
+    assert started.tzinfo is not None
 
 
 def test_create_names_run_per_reviewer(monkeypatch):
-    """The run name carries the *reviewer* (`<agent>-local`), so the funnel reads
-    one run per reviewer kind."""
     _fake_token(monkeypatch, {})
     seen: dict = {}
     monkeypatch.setattr(
@@ -81,9 +62,6 @@ def test_create_names_run_per_reviewer(monkeypatch):
 
 
 def test_create_authored_via_installation_token(monkeypatch):
-    """The run is authored AS the reviewer's App — the create call mints the
-    per-agent installation token and injects it on the `gh` POST (the bot-token
-    seam), never the user's own `gh` login. The PEM/JWT mint is in-memory only."""
     auth: dict = {}
     _fake_token(monkeypatch, auth, value="ghs_appInstallToken")
     seen: dict = {}
@@ -96,15 +74,11 @@ def test_create_authored_via_installation_token(monkeypatch):
 
     checkrun.create(agent_backend.CODEX, "owner/repo", "deadbeef")
 
-    # The token was minted for THIS agent+repo and threaded onto the POST.
     assert auth == {"backend": agent_backend.CODEX, "repo": "owner/repo"}
     assert seen["token"] == "ghs_appInstallToken"
 
 
 def test_create_run_is_non_required(monkeypatch):
-    """The funnel run is non-required: it is created via the check-runs endpoint
-    and never registered as a required check (no branch-protection write, no
-    `required` flag in the body), so it is visible but never blocks merge."""
     _fake_token(monkeypatch, {})
     seen: dict = {}
 
@@ -117,16 +91,12 @@ def test_create_run_is_non_required(monkeypatch):
 
     checkrun.create(agent_backend.CODEX, "owner/repo", "deadbeef")
 
-    # Created as an ordinary check run — not via the branch-protection /
-    # required-status-checks surface, and carrying no "required" marker.
     assert seen["path"] == "/repos/owner/repo/check-runs"
     assert "protection" not in seen["path"]
     assert "required" not in seen["body"]
 
 
 def test_create_never_logs_the_token(monkeypatch, caplog):
-    """A record produced over the secret-bearing create path must NOT contain the
-    installation-token value — mirror `post.py`'s discipline."""
     secret = "ghs_funnelInstallToken1234567890"
     _fake_token(monkeypatch, {}, value=secret)
     monkeypatch.setattr(
@@ -141,10 +111,6 @@ def test_create_never_logs_the_token(monkeypatch, caplog):
 
 
 def test_create_propagates_auth_failure(monkeypatch):
-    """`create` itself is honest — it RAISES on a mint/POST failure (e.g. the
-    403 before the `checks:write` re-grant). The best-effort swallowing lives in
-    `service._open_breadcrumb`, not here (so WS02's `transition` shares the same
-    honest base)."""
 
     def boom(backend, repo):
         raise checkrun.ghauth.ReviewAuthError(
@@ -156,15 +122,7 @@ def test_create_propagates_auth_failure(monkeypatch):
         checkrun.create(agent_backend.CODEX, "owner/repo", "deadbeef")
 
 
-# --------------------------------------------------------------------------
-# transition — OBS02-WS02 terminal conclusion
-# --------------------------------------------------------------------------
-
-
 def test_transition_patches_run_to_terminal_conclusion(monkeypatch):
-    """The terminal transition PATCHes the SAME run id (no second create) to
-    completed + the mapped conclusion, with an output message and an honest
-    tz-aware `completed_at` timestamp."""
     _fake_token(monkeypatch, {})
     seen: dict = {}
 
@@ -191,14 +149,11 @@ def test_transition_patches_run_to_terminal_conclusion(monkeypatch):
     assert body["status"] == "completed"
     assert body["conclusion"] == "success"
     assert body["output"] == {"title": "Local review posted", "summary": "done"}
-    # `completed_at` mirrors `started_at`: an honest, parseable, tz-aware UTC "now".
     completed = _dt.datetime.fromisoformat(body["completed_at"])
     assert completed.tzinfo is not None
 
 
 def test_transition_authored_via_installation_token(monkeypatch):
-    """The transition is authored AS the reviewer's App — it mints the per-agent
-    installation token and injects it on the PATCH, never the user's `gh` login."""
     auth: dict = {}
     _fake_token(monkeypatch, auth, value="ghs_appInstallToken")
     seen: dict = {}
@@ -223,9 +178,6 @@ def test_transition_authored_via_installation_token(monkeypatch):
 
 
 def test_transition_run_is_non_required(monkeypatch):
-    """The transition rides the same non-required check-runs surface — never the
-    branch-protection endpoint, never a `required` marker — so the run stays
-    visible-but-non-blocking through its terminal state too."""
     _fake_token(monkeypatch, {})
     seen: dict = {}
 
@@ -250,8 +202,6 @@ def test_transition_run_is_non_required(monkeypatch):
 
 
 def test_transition_never_logs_the_token(monkeypatch, caplog):
-    """A record produced over the secret-bearing transition path must NOT contain
-    the installation-token value — mirror `create`/`post.py` discipline."""
     secret = "ghs_transitionInstallToken1234567890"
     _fake_token(monkeypatch, {}, value=secret)
     monkeypatch.setattr(
@@ -271,9 +221,6 @@ def test_transition_never_logs_the_token(monkeypatch, caplog):
 
 
 def test_transition_propagates_failure(monkeypatch):
-    """`transition` is honest like `create` — it RAISES on a mint/PATCH failure
-    (e.g. the 403 before the `checks:write` re-grant). The best-effort swallowing
-    lives in `service._close_funnel_breadcrumb`, not here."""
     _fake_token(monkeypatch, {})
 
     def boom(path, *, method=None, body=None, token=None):
@@ -291,15 +238,7 @@ def test_transition_propagates_failure(monkeypatch):
         )
 
 
-# --------------------------------------------------------------------------
-# find_nonterminal — OBS03-WS03 idempotency read
-# --------------------------------------------------------------------------
-
-
 def test_find_nonterminal_returns_id_for_in_progress_run(monkeypatch):
-    """The reconcile read GETs the check runs on the head commit and returns the id
-    of an IN-FLIGHT (`in_progress`) funnel run — the run a re-request reconciles
-    against instead of opening a duplicate."""
     _fake_token(monkeypatch, {})
     seen: dict = {}
 
@@ -316,7 +255,6 @@ def test_find_nonterminal_returns_id_for_in_progress_run(monkeypatch):
     run_id = checkrun.find_nonterminal(agent_backend.CODEX, "owner/repo", "deadbeef")
 
     assert run_id == 4242
-    # A read (GET) of the head commit's check runs, filtered by the reviewer name.
     assert seen["method"] in (None, "GET")
     assert "/repos/owner/repo/commits/deadbeef/check-runs" in seen["path"]
     assert "check_name" in seen["path"]
@@ -324,10 +262,6 @@ def test_find_nonterminal_returns_id_for_in_progress_run(monkeypatch):
 
 @pytest.mark.parametrize("status", ["waiting", "requested", "pending", "queued"])
 def test_find_nonterminal_returns_id_for_other_unfinished_statuses(monkeypatch, status):
-    """`completed` is the SOLE terminal status — every other status the Checks API
-    can surface (`waiting` / `requested` / `pending` / `queued`) is still IN FLIGHT.
-    A run in any of them must reconcile as in-flight so reconcile catches it instead
-    of opening + spawning a DUPLICATE review."""
     _fake_token(monkeypatch, {})
     monkeypatch.setattr(
         checkrun.gh,
@@ -343,8 +277,6 @@ def test_find_nonterminal_returns_id_for_other_unfinished_statuses(monkeypatch, 
 
 
 def test_find_nonterminal_returns_none_for_terminal_run(monkeypatch):
-    """A run that has already CLOSED (status=completed) is terminal, not in flight —
-    `find_nonterminal` returns None so the caller opens a fresh run."""
     _fake_token(monkeypatch, {})
     monkeypatch.setattr(
         checkrun.gh,
@@ -360,7 +292,6 @@ def test_find_nonterminal_returns_none_for_terminal_run(monkeypatch):
 
 
 def test_find_nonterminal_returns_none_when_absent(monkeypatch):
-    """No funnel run on the head commit → None (nothing to reconcile against)."""
     _fake_token(monkeypatch, {})
     monkeypatch.setattr(
         checkrun.gh,
@@ -376,8 +307,6 @@ def test_find_nonterminal_returns_none_when_absent(monkeypatch):
 
 
 def test_find_nonterminal_authored_via_installation_token(monkeypatch):
-    """The reconcile read is authored AS the reviewer's App — it mints the per-agent
-    installation token and threads it on the GET, mirroring create/transition."""
     auth: dict = {}
     _fake_token(monkeypatch, auth, value="ghs_appInstallToken")
     seen: dict = {}
@@ -395,8 +324,6 @@ def test_find_nonterminal_authored_via_installation_token(monkeypatch):
 
 
 def test_find_nonterminal_filters_by_reviewer_name(monkeypatch):
-    """The query filters server-side by the per-reviewer run name (`<agent>-local`),
-    url-encoded so the space + colon make a well-formed query string."""
     from urllib.parse import quote
 
     _fake_token(monkeypatch, {})

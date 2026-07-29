@@ -1,19 +1,3 @@
-"""The Review Lab's cell runner + convergence-curve report (ADR-0049, RVW03-WS07).
-
-`lab run` resolves a declarative Cell onto the sanctioned offline replay
-driver — foreground, idempotent by the full key (cell, fixture PR, fixture
-version, variant, replicate, sweep), banked records reused, never re-paid —
-and tags every resulting review-round record with `round.cell`. `lab report`
-pools those records through the ONE deterministic scorer into a convergence
-curve, compared against the baseline cell at equal budget. These tests pin the
-runner's contract (idempotency + --force, informed-sweep composition at the
-runner layer, checkout preflight, per-dimension Invocation overrides through
-the driver), the pure curve mechanics (cumulative points, missing sweeps,
-last-record-wins, latency-only cost), the CLI verbs' user-facing errors, and
-the acceptance end-to-end: a control + one-axis treatment pair runs over a
-real checkout (model launch faked) and produces a scored curve.
-"""
-
 from __future__ import annotations
 
 import json
@@ -35,8 +19,6 @@ from shipit.verbs.lab import lab_group
 from shipit.verbs.lab import report as report_verb
 from shipit.verbs.lab import run as run_verb
 
-# A single-pass review whose finding lexically matches the fixture label below
-# (same file, line in range, claim-token overlap above the threshold).
 _REVIEW = json.dumps(
     {
         "summary": {"status": "COMMENT", "overall_feedback": "ok"},
@@ -64,7 +46,6 @@ def _git(repo, *args):
 
 @pytest.fixture
 def checkout(tmp_path):
-    """A real two-commit checkout with an origin remote (the record's repo key)."""
     repo = tmp_path / "repo"
     repo.mkdir()
     _git(repo, "init", "-q", "-b", "main")
@@ -82,7 +63,6 @@ def checkout(tmp_path):
 
 @pytest.fixture
 def launcher(monkeypatch):
-    """A launch fake capturing every run's prompt; answers a valid review."""
     monkeypatch.setattr(producer.shutil, "which", lambda binary: f"/usr/bin/{binary}")
     captured: dict = {"launches": []}
 
@@ -95,10 +75,6 @@ def launcher(monkeypatch):
 
 
 def _fixture_for(view):
-    """A one-pin fixture over the test checkout's real range, with one
-    confirmed real major label the fake review's finding matches (the runner
-    tests exercise execution/idempotency, not FP scoring — see `_curve_fixture`
-    for the real + not-real pair the curve tests score)."""
     return parse_fixture(
         {
             "schema": 1,
@@ -154,9 +130,6 @@ def _read_records(paths):
 
 def _store_records(base_dir):
     return _read_records(sorted(base_dir.rglob("*.jsonl")))
-
-
-# --- long-form CLI help ---------------------------------------------------------
 
 
 def test_lab_long_form_help_command(capsys):
@@ -358,15 +331,9 @@ def test_lab_report_cell_still_reaches_the_report_callback(monkeypatch):
     }
 
 
-# --- the runner: execution, tagging, idempotency ----------------------------------
-
-
 def test_run_cell_executes_the_plan_and_tags_every_record(
     checkout, launcher, tmp_path, capsys
 ):
-    """The sweep plan runs foreground over the replay driver; each record is a
-    normal review-round record (round.pr None) tagged with the cell's FULL
-    idempotency key on round.cell."""
     view = replay.resolve_range("HEAD~1..HEAD", workdir=str(checkout))
     cell = _control_cell()
     state = tmp_path / "state"
@@ -397,8 +364,6 @@ def test_run_cell_executes_the_plan_and_tags_every_record(
 def test_run_cell_is_idempotent_by_key_and_force_reruns(
     checkout, launcher, tmp_path, capsys
 ):
-    """ADR-0049's banked-reuse: the second run reuses every point (extending a
-    curve pays only for new points); --force is the explicit re-execute."""
     view = replay.resolve_range("HEAD~1..HEAD", workdir=str(checkout))
     cell = _control_cell()
     fixture = _fixture_for(view)
@@ -408,11 +373,11 @@ def test_run_cell_is_idempotent_by_key_and_force_reruns(
     first_launches = len(launcher["launches"])
     again = run_cell(cell, fixture, launcher=launcher["launch"], **kwargs)
     assert not again.executed and len(again.reused) == 2
-    assert len(launcher["launches"]) == first_launches  # nothing re-billed
+    assert len(launcher["launches"]) == first_launches
     assert "banked — reused" in capsys.readouterr().out
     forced = run_cell(cell, fixture, launcher=launcher["launch"], force=True, **kwargs)
     assert len(forced.executed) == 2
-    assert len(_store_records(state)) == 4  # re-runs append; the report keeps last
+    assert len(_store_records(state)) == 4
 
 
 def test_extending_the_sweep_count_pays_only_for_the_new_points(
@@ -431,7 +396,6 @@ def test_extending_the_sweep_count_pays_only_for_the_new_points(
 
 
 def _fanout_cell(dims, cell_id="ctl", **overrides):
-    """A fanout-shaped control cell over the test pin, dimensions explicit."""
     data = {
         "schema": 1,
         "id": cell_id,
@@ -449,11 +413,6 @@ def _fanout_cell(dims, cell_id="ctl", **overrides):
 def test_changing_the_dimension_set_re_keys_banked_fanout_points(
     checkout, launcher, tmp_path
 ):
-    """#713 regression: the run key's variant folds the RESOLVED dimension set
-    (names + focus texts), so a fan-out cell re-run under a different
-    `dimensions` list RE-EXECUTES — it must never reuse points banked under
-    the other prompt (the idempotency hole: focus texts are prompt material
-    that never reached the hash). The same set still banks and reuses."""
     view = replay.resolve_range("HEAD~1..HEAD", workdir=str(checkout))
     fixture = _fixture_for(view)
     state = tmp_path / "state"
@@ -463,23 +422,16 @@ def test_changing_the_dimension_set_re_keys_banked_fanout_points(
     first = run_cell(_fanout_cell(["correctness"]), fixture, **kwargs)
     assert len(first.executed) == 1
     swapped = run_cell(_fanout_cell(["sev-critical-high"]), fixture, **kwargs)
-    assert len(swapped.executed) == 1 and not swapped.reused  # re-paid, not reused
+    assert len(swapped.executed) == 1 and not swapped.reused
     again = run_cell(_fanout_cell(["sev-critical-high"]), fixture, **kwargs)
-    assert not again.executed and len(again.reused) == 1  # same set still banks
+    assert not again.executed and len(again.reused) == 1
     variants = {record["round.cell"]["variant"] for record in _store_records(state)}
-    assert len(variants) == 2  # one instructions file, two arms, two keys
+    assert len(variants) == 2
 
 
 def test_per_dimension_invocation_overrides_re_key_banked_fanout_points(
     checkout, launcher, tmp_path
 ):
-    """#713 regression at the RUNNER boundary: the run key folds per-dimension
-    Invocation overrides too, not just the dimension NAMES — two fan-out cells
-    with the SAME `dimensions` list but different `[invocation.dimensions]`
-    blocks run different prompt material (a pass under a different model), so
-    the second RE-EXECUTES and never reuses the first's banked point. Guards the
-    'keyed on cell.dimensions but dropped cell.dimension_invocations' regression
-    the names-only test cannot see. The same overrides still bank and reuse."""
     view = replay.resolve_range("HEAD~1..HEAD", workdir=str(checkout))
     fixture = _fixture_for(view)
     state = tmp_path / "state"
@@ -495,19 +447,16 @@ def test_per_dimension_invocation_overrides_re_key_banked_fanout_points(
     first = run_cell(plain, fixture, **kwargs)
     assert len(first.executed) == 1
     swapped = run_cell(overridden, fixture, **kwargs)
-    assert len(swapped.executed) == 1 and not swapped.reused  # re-paid, not reused
+    assert len(swapped.executed) == 1 and not swapped.reused
     again = run_cell(overridden, fixture, **kwargs)
-    assert not again.executed and len(again.reused) == 1  # same override still banks
+    assert not again.executed and len(again.reused) == 1
     variants = {record["round.cell"]["variant"] for record in _store_records(state)}
-    assert len(variants) == 2  # same dimension list, two override blocks, two keys
+    assert len(variants) == 2
 
 
 def test_informed_sweeps_compose_prior_findings_at_the_runner_layer(
     checkout, launcher, tmp_path
 ):
-    """Sweep 2 of an informed cell is primed with sweep 1's POSTED findings in
-    its instructions text — runner-layer composition, no driver change: the
-    launched prompt itself carries the priors."""
     view = replay.resolve_range("HEAD~1..HEAD", workdir=str(checkout))
     cell = _control_cell(sweeps={"count": 2, "mode": "informed"})
     run_cell(
@@ -528,7 +477,7 @@ def test_informed_sweeps_compose_prior_findings_at_the_runner_layer(
 def test_blind_sweeps_never_compose_priors(checkout, launcher, tmp_path):
     view = replay.resolve_range("HEAD~1..HEAD", workdir=str(checkout))
     run_cell(
-        _control_cell(),  # blind K=2
+        _control_cell(),
         _fixture_for(view),
         checkouts=[str(checkout)],
         base_dir=tmp_path / "state",
@@ -541,12 +490,6 @@ def test_blind_sweeps_never_compose_priors(checkout, launcher, tmp_path):
 def test_every_point_launches_the_up_front_bytes_not_a_re_read_of_the_original(
     checkout, tmp_path, monkeypatch
 ):
-    """The idempotency key hashes the instructions read ONCE up front, so every
-    point must launch those exact bytes. The replay driver re-reads its
-    instructions path at launch; handing it the original file would let an edit
-    landing mid-run bill the model bytes the record is not keyed under. run_cell
-    materializes the hashed bytes per point, so a rewrite of the original never
-    reaches a launch — even a later blind sweep."""
     view = replay.resolve_range("HEAD~1..HEAD", workdir=str(checkout))
     monkeypatch.setattr(producer.shutil, "which", lambda binary: f"/usr/bin/{binary}")
     monkeypatch.chdir(checkout)
@@ -554,8 +497,6 @@ def test_every_point_launches_the_up_front_bytes_not_a_re_read_of_the_original(
     instr.mkdir(parents=True)
     (instr / "base.txt").write_text("ORIGINAL-BYTES-MARKER\n", encoding="utf-8")
 
-    # A launcher that rewrites the original instructions file on its first call —
-    # an edit/swap landing mid-run between the up-front read and a later launch.
     launches: list = []
 
     def _mutating_launch(cmd, *, cwd, env, timeout=None):
@@ -564,13 +505,13 @@ def test_every_point_launches_the_up_front_bytes_not_a_re_read_of_the_original(
         return LaunchResult(returncode=0, stdout=_REVIEW, stderr="")
 
     run_cell(
-        _control_cell(instructions={"path": "lab/instructions/base.txt"}),  # blind K=2
+        _control_cell(instructions={"path": "lab/instructions/base.txt"}),
         _fixture_for(view),
         checkouts=[str(checkout)],
         base_dir=tmp_path / "state",
         launcher=_mutating_launch,
     )
-    assert len(launches) == 2  # both points ran
+    assert len(launches) == 2
     for launch in launches:
         prompt = launch["cmd"][-1]
         assert "ORIGINAL-BYTES-MARKER" in prompt
@@ -580,10 +521,8 @@ def test_every_point_launches_the_up_front_bytes_not_a_re_read_of_the_original(
 def test_missing_checkout_is_a_loud_preflight_refusal(
     checkout, launcher, tmp_path, monkeypatch
 ):
-    """A pin with no matching clone refuses BEFORE any model run bills —
-    never a silent skip that would shrink the curve's denominator."""
     view = replay.resolve_range("HEAD~1..HEAD", workdir=str(checkout))
-    monkeypatch.chdir(tmp_path)  # cwd is not a clone of anything
+    monkeypatch.chdir(tmp_path)
     with pytest.raises(CellError, match="acme/widget"):
         run_cell(
             _control_cell(),
@@ -595,10 +534,6 @@ def test_missing_checkout_is_a_loud_preflight_refusal(
 
 
 def test_unfetched_pin_sha_refuses_before_any_launch(checkout, launcher, tmp_path):
-    """The all-or-nothing preflight resolves EVERY pin's range up front: a
-    second pin naming an unfetched SHA refuses before the FIRST pin's point ever
-    launches — locking the documented contract that a multi-pin run never bills
-    pin 1 and then dies on pin 2's missing commit, leaving a half-run curve."""
     view = replay.resolve_range("HEAD~1..HEAD", workdir=str(checkout))
     fixture = parse_fixture(
         {
@@ -613,7 +548,7 @@ def test_unfetched_pin_sha_refuses_before_any_launch(checkout, launcher, tmp_pat
                     "head_sha": str(view.head_sha),
                 },
                 {
-                    "id": "widget-2",  # same repo/checkout, but SHAs never fetched
+                    "id": "widget-2",
                     "repo": "acme/widget",
                     "pr": 8,
                     "base_sha": "0" * 40,
@@ -631,7 +566,7 @@ def test_unfetched_pin_sha_refuses_before_any_launch(checkout, launcher, tmp_pat
             base_dir=tmp_path / "state",
             launcher=launcher["launch"],
         )
-    assert not launcher["launches"]  # all-or-nothing: nothing billed
+    assert not launcher["launches"]
 
 
 def test_fixture_version_drift_refuses_to_run(checkout, launcher, tmp_path):
@@ -640,7 +575,7 @@ def test_fixture_version_drift_refuses_to_run(checkout, launcher, tmp_path):
     with pytest.raises(CellError, match="never compare"):
         run_cell(
             cell,
-            _fixture_for(view),  # v1
+            _fixture_for(view),
             checkouts=[str(checkout)],
             base_dir=tmp_path / "state",
             launcher=launcher["launch"],
@@ -659,8 +594,6 @@ def test_resolve_pins_validates_subset_membership(checkout):
 
 
 def test_plan_points_orders_sweeps_innermost():
-    """Informed sweeps need their priors banked first: per pin, per replicate,
-    sweeps run 1..K before the next replicate starts."""
     cell = _control_cell(sweeps={"count": 2, "replicates": 2})
     fixture = parse_fixture(
         {
@@ -686,11 +619,6 @@ def test_plan_points_orders_sweeps_innermost():
 
 
 def test_plan_points_refuses_a_runaway_total_before_building_the_tuple():
-    """The per-axis cap still lets the product blow up (1000 × 1000 per pin);
-    a total past MAX_PLANNED_POINTS is a config typo, not an experiment, and
-    must refuse loudly before enumerating a million points or billing them."""
-    # Each axis is individually valid (≤ MAX_SWEEP_COUNT), but 1000 × 100 = 100k
-    # points is a runaway total for one pin.
     cell = _control_cell(sweeps={"count": 100, "replicates": 1000})
     fixture = parse_fixture(
         {
@@ -713,10 +641,6 @@ def test_plan_points_refuses_a_runaway_total_before_building_the_tuple():
 def test_safe_instructions_path_refuses_a_symlink_escaping_the_repo(
     tmp_path, monkeypatch
 ):
-    """The parse guard blocks absolute / `~` / `..`, but an IN-repo symlink
-    pointing out still resolves to a secret; the read boundary re-checks that the
-    resolved real path stays within the repo root, so a symlink escape is a loud
-    refusal (the in-repo-files-only promise holds for symlinks too)."""
     from shipit.review.labrun import safe_instructions_path
 
     monkeypatch.chdir(tmp_path)
@@ -726,21 +650,14 @@ def test_safe_instructions_path_refuses_a_symlink_escaping_the_repo(
     (tmp_path / "lab" / "instructions" / "evil.txt").symlink_to(secret)
     with pytest.raises(CellError, match="outside the working directory"):
         safe_instructions_path("lab/instructions/evil.txt")
-    # An in-repo real file resolves fine; the bundled default (None) passes through.
     (tmp_path / "lab" / "instructions" / "ok.txt").write_text("hi", encoding="utf-8")
     assert safe_instructions_path("lab/instructions/ok.txt").endswith("ok.txt")
     assert safe_instructions_path(None) is None
 
 
-# --- per-dimension Invocation overrides through the driver --------------------------
-
-
 def test_fanout_cell_applies_per_dimension_invocation_overrides(
     checkout, launcher, tmp_path
 ):
-    """The experiment-only capability (ADR-0049): the overridden pass launches
-    AND records with its own model; every other pass keeps the cell's — read
-    off round.runs, so the arm is never mislabeled."""
     view = replay.resolve_range("HEAD~1..HEAD", workdir=str(checkout))
     cell = parse_cell(
         {
@@ -773,10 +690,6 @@ def test_fanout_cell_applies_per_dimension_invocation_overrides(
     models = {run["dimension"]: run["model"] for run in record["round.runs"]}
     assert models == {"correctness": "pro", "test-quality": "o3"}
     assert record["round.cell"]["id"] == "ctl"
-    # The override must reach the DRIVER, not merely the record: the two passes
-    # launch with DISTINCT process deadlines (correctness's 600s vs the
-    # overridden test-quality's 120s), so the timeout override — which round.runs
-    # does NOT stamp — is verified end-to-end at the launch seam, not assumed.
     launch_timeouts = {launch["timeout"] for launch in launcher["launches"]}
     assert None not in launch_timeouts and len(launch_timeouts) == 2
 
@@ -784,11 +697,6 @@ def test_fanout_cell_applies_per_dimension_invocation_overrides(
 def test_semantic_dedup_cell_collapses_the_reworded_duplicate_in_the_record(
     checkout, tmp_path, monkeypatch
 ):
-    """`dedup = "semantic"` (#750) resolved end-to-end: the cell's declared
-    treatment reaches the replay driver, and two passes' REWORDINGS of one
-    defect at one location land in the round record as ONE posted canonical
-    plus a merged-away duplicate carrying its `duplicate_of` provenance edge —
-    the exact-claim mechanical key could not have merged them."""
     monkeypatch.setattr(producer.shutil, "which", lambda binary: f"/usr/bin/{binary}")
 
     def _review(text):
@@ -810,9 +718,6 @@ def test_semantic_dedup_cell_collapses_the_reworded_duplicate_in_the_record(
             }
         )
 
-    # The documented #673 shape: one defect, two wordings (claim-token overlap
-    # ~0.7 — above the seam's threshold, invisible to the exact-claim key).
-    # Keyed off the pass PROMPT (deterministic), not launch order.
     by_pass = {
         True: _review(
             "GPU readback failure zero-fills the comparison buffer, so the "
@@ -856,13 +761,13 @@ def test_semantic_dedup_cell_collapses_the_reworded_duplicate_in_the_record(
     )
     [record] = _store_records(state)
     findings = record["round.findings"]
-    assert len(findings) == 2  # both union findings persist, never erased
+    assert len(findings) == 2
     posted = [
         f for f in findings if f["disposition"] == "post" and f["duplicate_of"] is None
     ]
     assert len(posted) == 1
     [duplicate] = [f for f in findings if f["duplicate_of"] is not None]
-    assert duplicate["duplicate_of"] == 0  # the lowest-union-id equal-severity twin
+    assert duplicate["duplicate_of"] == 0
     assert record["round.cell"]["id"] == "semdedup"
 
 
@@ -885,9 +790,6 @@ def test_fanout_rejects_overrides_in_an_incremental_round():
             incremental=True,
             invocation_overrides={"correctness": {"model": "o3"}},
         )
-
-
-# --- the convergence curve (pure) ----------------------------------------------------
 
 
 def _tagged_record(
@@ -986,7 +888,6 @@ def _treatment_cell(sweeps=3):
 def test_convergence_curve_reports_cumulative_points_and_missing_sweeps():
     fixture = _curve_fixture()
     records = [
-        # Sweep 1: misses everything relevant, burns 1M tokens.
         _tagged_record(
             sweep=1,
             findings=[("h.txt", 1, "unrelated observation entirely")],
@@ -994,8 +895,6 @@ def test_convergence_curve_reports_cumulative_points_and_missing_sweeps():
             head="b" * 40,
             tokens=1_000_000,
         ),
-        # Sweep 2: recalls the real label AND hits the banked not-real (an FP);
-        # no token count (the WS04 capture not present) — cost goes partial.
         _tagged_record(
             sweep=2,
             findings=[
@@ -1013,16 +912,14 @@ def test_convergence_curve_reports_cumulative_points_and_missing_sweeps():
     p1, p2, p3 = curve.points
     assert (p1.recalled, p1.positives) == (0, 1)
     assert p1.tokens == 1_000_000 and p1.tokens_complete
-    assert p1.unadjudicated == 1  # the unmatched emission awaits adjudication
+    assert p1.unadjudicated == 1
     assert (p2.recalled, p2.positives) == (1, 1)
     assert p2.false_positives == 1 and p2.precision == 0.5
-    assert p2.tokens == 1_000_000 and not p2.tokens_complete  # a floor, not truth
+    assert p2.tokens == 1_000_000 and not p2.tokens_complete
     assert p2.duration_ms == 120_000
     assert not p2.missing
-    # Sweep 3 is declared but not banked: the point renders as the gap it is,
-    # carrying the prior sweeps' cumulative numbers.
     assert p3.missing and (p3.recalled, p3.positives) == (1, 1)
-    assert p1.underpowered  # 1 major-or-worse positive < the floor
+    assert p1.underpowered
 
 
 def test_convergence_curve_latency_only_and_last_record_wins():
@@ -1043,9 +940,7 @@ def test_convergence_curve_latency_only_and_last_record_wins():
         _treatment_cell(sweeps=1), fixture, [stale, rerun], variant_hash="sha256:base"
     )
     [point] = curve.points
-    # A --force re-run supersedes its predecessor: both never score together.
     assert point.records == 1 and point.recalled == 1
-    # No record carries a token count: the point is honestly latency-only.
     assert point.tokens is None and not point.tokens_complete
 
 
@@ -1076,10 +971,6 @@ def test_convergence_curve_ignores_other_cells_and_other_fixture_versions():
 
 
 def test_convergence_curve_ignores_a_pin_outside_the_cells_subset():
-    """A record whose cell id + fixture version match but whose PR is a
-    DIFFERENT fixture pin (one the cell does not declare, sharing the same repo
-    store) must NOT pool into the curve. The report filters by the FULL expected
-    key — pin included — so a stray pin never inflates recall or the denominator."""
     fixture = parse_fixture(
         {
             "version": 1,
@@ -1092,7 +983,7 @@ def test_convergence_curve_ignores_a_pin_outside_the_cells_subset():
                     "head_sha": "b" * 40,
                 },
                 {
-                    "id": "widget-2",  # same repo, NOT in the cell's declared subset
+                    "id": "widget-2",
                     "repo": "acme/widget",
                     "pr": 8,
                     "base_sha": "c" * 40,
@@ -1114,7 +1005,6 @@ def test_convergence_curve_ignores_a_pin_outside_the_cells_subset():
             ],
         }
     )
-    # A well-scoring record, but tagged for widget-2 — the cell declares widget-1.
     stray = _tagged_record(
         sweep=1,
         findings=[("f.txt", 2, "the staging buffer misses row padding here")],
@@ -1126,13 +1016,10 @@ def test_convergence_curve_ignores_a_pin_outside_the_cells_subset():
         _treatment_cell(sweeps=1), fixture, [stray], variant_hash="sha256:base"
     )
     [point] = curve.points
-    assert point.records == 0 and point.missing  # the stray pin never pooled
+    assert point.records == 0 and point.missing
 
 
 def test_convergence_curve_survives_a_corrupt_banked_record():
-    """A malformed stored record whose `round.cell` key holds a non-scalar (a
-    hand-edited or corrupt store line) is SKIPPED, not fed as an unhashable
-    element into the O(1) key-tuple set — no `TypeError: unhashable type`."""
     fixture = _curve_fixture()
     good = _tagged_record(
         sweep=1,
@@ -1143,7 +1030,7 @@ def test_convergence_curve_survives_a_corrupt_banked_record():
     corrupt = _tagged_record(
         sweep=1, findings=[("x.txt", 1, "noise")], base="a" * 40, head="b" * 40
     )
-    corrupt["round.cell"]["id"] = []  # unhashable — a corrupt key field
+    corrupt["round.cell"]["id"] = []
     curve = convergence_curve(
         _treatment_cell(sweeps=1),
         fixture,
@@ -1151,7 +1038,7 @@ def test_convergence_curve_survives_a_corrupt_banked_record():
         variant_hash="sha256:base",
     )
     [point] = curve.points
-    assert point.records == 1 and point.recalled == 1  # only the good record pooled
+    assert point.records == 1 and point.recalled == 1
 
 
 def test_render_curve_report_carries_the_honesty_markers():
@@ -1183,17 +1070,13 @@ def test_render_curve_report_carries_the_honesty_markers():
     text = render_curve_report(curve, baseline_curve)
     assert "convergence curve — cell treat" in text
     assert "EQUAL BUDGET" in text
-    assert "[UNDERPOWERED]" in text  # 1 positive < the ADR-0048 floor
-    assert "n/a (latency-only)" in text  # no token counts banked yet
-    assert "[missing] sweep 2" in text  # declared, not banked
+    assert "[UNDERPOWERED]" in text
+    assert "n/a (latency-only)" in text
+    assert "[missing] sweep 2" in text
     assert "baseline ctl (control):" in text
 
 
 def test_render_curve_report_labels_a_treatment_baseline_by_its_axis():
-    """A composition cell's IMMEDIATE baseline is an intermediate treatment,
-    not the control (sevtiers-informed baselines fanout-sevtiers, #719). The
-    baseline heading must cite that baseline's own axis, never mislabel it
-    `(control)` — only the self-baselined control arm reads `(control)`."""
     fixture = _curve_fixture()
     curve = convergence_curve(
         _treatment_cell(sweeps=2), fixture, [], variant_hash="sha256:base"
@@ -1215,9 +1098,6 @@ def test_render_curve_report_labels_a_treatment_baseline_by_its_axis():
     text = render_curve_report(curve, baseline_curve)
     assert "baseline mid (axis: dimensions):" in text
     assert "(control)" not in text
-
-
-# --- the CLI verbs (thin boundary + acceptance end-to-end) ---------------------------
 
 
 def _write(path, text):
@@ -1272,9 +1152,6 @@ ref = "abc1234"
 def test_lab_demo_pair_end_to_end_produces_a_scored_curve(
     checkout, launcher, tmp_path, capsys
 ):
-    """The acceptance walk: a control + one-axis treatment cell pair runs
-    end-to-end against a fixture (model launch faked) and `lab report` renders
-    a scored convergence curve with the equal-budget baseline beside it."""
     from shipit.verbs.lab import report as report_verb
     from shipit.verbs.lab import run as run_verb
 
@@ -1319,7 +1196,7 @@ def test_lab_demo_pair_end_to_end_produces_a_scored_curve(
     assert "baseline ctl (control):" in out
     assert "sweep 1: recall 1/1 (100%)" in out
     assert "sweep 2: recall 1/1 (100%)" in out
-    assert "n/a (latency-only)" in out  # CLI backends bank no token totals yet
+    assert "n/a (latency-only)" in out
 
 
 def test_lab_run_refuses_an_unfair_pair_as_one_clean_error_line(
@@ -1333,9 +1210,6 @@ def test_lab_run_refuses_an_unfair_pair_as_one_clean_error_line(
         cells / "ctl.toml",
         _cell_toml("ctl", baseline="ctl", axis="control", mode="blind"),
     )
-    # A genuinely-unfair pair: the treatment scores a DIFFERENT pin subset than
-    # the control (not just a different spelling of the same one — an empty
-    # `prs` would resolve to the same single fixture pin and be fair).
     unfair = _cell_toml(
         "treat", baseline="ctl", axis="pr subset", mode="blind"
     ).replace('prs = ["widget-1"]', 'prs = ["widget-2"]')
@@ -1372,14 +1246,10 @@ def test_lab_run_missing_baseline_file_is_one_clean_error_line(tmp_path, capsys)
     assert rc == 1
     err = capsys.readouterr().err
     assert err.startswith("error:") and "does not exist" in err
-    # The lineage error names the missing cell id and the cells dir searched.
     assert "'ctl'" in err and str(cells) in err
 
 
 def test_lab_run_refuses_a_cyclic_baseline_chain(tmp_path, capsys):
-    """Two treatments naming each other share fixture/pins, so every EDGE is
-    fair — only the lineage walk (#719) sees the chain never reaches a
-    control. `lab run` must refuse loud before any token burns."""
     from shipit.verbs.lab import run as run_verb
 
     cells = tmp_path / "cells"
@@ -1396,13 +1266,10 @@ def test_lab_run_refuses_a_cyclic_baseline_chain(tmp_path, capsys):
     assert rc == 1
     err = capsys.readouterr().err
     assert err.startswith("error:") and "cyclic baseline chain" in err
-    assert "'a' -> 'b' -> 'a'" in err  # ids quoted (repr) so control chars can't leak
+    assert "'a' -> 'b' -> 'a'" in err
 
 
 def test_lab_report_missing_baseline_file_is_one_clean_error_line(tmp_path, capsys):
-    """`lab report` walks the same lineage as `lab run` (#718's agy thread:
-    this path had no coverage) — and its missing-ancestor error names the
-    missing cell id and the cells dir it searched."""
     from shipit.verbs.lab import report as report_verb
 
     cells = tmp_path / "cells"
@@ -1435,9 +1302,6 @@ def test_lab_report_unknown_cell_is_one_clean_error_line(tmp_path, capsys):
 def test_lab_report_selects_fanout_records_by_the_folded_key(
     checkout, launcher, tmp_path, capsys
 ):
-    """#713: `lab report`'s variant hash must fold the dimension set EXACTLY
-    as the runner does — a fan-out cell's banked points render as a scored
-    curve, never as missing points under a mismatched key."""
     from shipit.verbs.lab import report as report_verb
     from shipit.verbs.lab import run as run_verb
 
@@ -1487,14 +1351,7 @@ count = 1
     assert "missing" not in out
 
 
-# --- the committed cells ---------------------------------------------------------------
-
-
 def test_the_committed_cells_load_and_pair_fairly():
-    """Every in-repo treatment cell (lab/cells/) must load, walk its WHOLE
-    baseline lineage to the committed control (per-hop fair-pair, no missing
-    ancestor, no cycle — #719), and resolve every pin against the committed
-    fixture."""
     import dataclasses
     from pathlib import Path
 
@@ -1502,11 +1359,6 @@ def test_the_committed_cells_load_and_pair_fairly():
     from shipit.review.groundtruth import load_fixture
 
     cells_dir = Path("lab/cells")
-    # Discover EVERY committed cell so a newly added one is covered without
-    # editing this test: partition by is_control (exactly one control), and an
-    # unauthorized new cell trips the allowed_deltas KeyError below (agy
-    # review). A hardcoded stem list would silently skip a new cell's
-    # lineage/fairness checks and let the docstring's "Every" claim lapse.
     cells = [load_cell(path) for path in sorted(cells_dir.glob("*.toml"))]
     controls = [c for c in cells if c.is_control]
     treatments = [c for c in cells if not c.is_control]
@@ -1517,16 +1369,9 @@ def test_the_committed_cells_load_and_pair_fairly():
     assert control.is_control
     by_id = {cell.id: cell for cell in (control, *treatments)}
     for treatment in treatments:
-        # Each treatment's FULL baseline chain — the control one hop away for
-        # the first-generation cells; two hops for the composition cell
-        # sevtiers-informed (#717) — must load from lab/cells/, fair-pair per
-        # hop, and terminate at the committed control. A cell naming an
-        # uncommitted baseline (or a cyclic/control-less lineage) is the
-        # validator's loud CellError naming the offender, not a raw KeyError.
         chain = load_baseline_lineage(treatment, fixture, cells_dir)
         assert chain[-1].id == control.id and chain[-1].is_control
         assert treatment.axis != "control"
-    # Pin the committed lineage SHAPE: who each treatment measures against.
     assert by_id["fanout-informed"].baseline == "fanout-baseline"
     assert by_id["fanout-semdedup"].baseline == "fanout-baseline"
     assert by_id["fanout-sevtiers"].baseline == "fanout-baseline"
@@ -1536,11 +1381,6 @@ def test_the_committed_cells_load_and_pair_fairly():
         c.id
         for c in load_baseline_lineage(by_id["sevtiers-informed"], fixture, cells_dir)
     ] == ["sevtiers-informed", "fanout-sevtiers", "fanout-baseline"]
-    # Each treatment must be byte-identical to its declared baseline in EVERY
-    # experiment-defining field except its declared axis's own knob — pin the
-    # full delta set, not just the fields the axis names, so a stray edit to
-    # e.g. `model`, `timeout`, or `dedup` on one cell of a pair fails here
-    # instead of silently confounding the one-axis comparison (#718 review).
     identity_fields = {"id", "baseline", "axis", "description"}
     allowed_deltas = {
         "fanout-informed": {"sweep_mode"},
@@ -1561,9 +1401,6 @@ def test_the_committed_cells_load_and_pair_fairly():
             f"{sorted(deltas)}; only {sorted(allowed_deltas[treatment.id])} "
             "may differ (the declared axis)"
         )
-    # Pin the committed run shape so a cost-visible drift (e.g. an accidental
-    # revert to replicates = 1) fails here rather than silently shrinking the
-    # runs: check_fair_pair only equates the pair, it does not fix the count.
     for cell in (control, *treatments):
         assert cell.sweeps == 2
         assert cell.replicates == 2
@@ -1572,15 +1409,6 @@ def test_the_committed_cells_load_and_pair_fairly():
             "app-391",
             "lex-820",
         ]
-    # The severity-tier cells' pass set (ADR-0051; every other cell's omitted
-    # `dimensions` means the shipped concern-scoped set) and every cell's sweep
-    # mode. Select by id, not list position — brittle if a cell is added or the
-    # order changes — and pin EVERY cell's `dimensions` and `sweep_mode`:
-    # check_fair_pair leaves "only one axis changed" to human review, so a
-    # stray `dimensions` block or mode flip on a control or the wrong treatment
-    # would confound an experiment while this test stayed green. The
-    # composition cell sevtiers-informed (#717) must match its fanout-sevtiers
-    # baseline on dimensions exactly and differ ONLY on mode.
     sev_tiers = ("sev-critical-high", "sev-medium", "sev-low")
     assert by_id["fanout-sevtiers"].dimensions == sev_tiers
     assert by_id["sevtiers-informed"].dimensions == sev_tiers
@@ -1592,11 +1420,6 @@ def test_the_committed_cells_load_and_pair_fairly():
     assert by_id["fanout-informed"].sweep_mode == "informed"
     assert by_id["sevtiers-informed"].sweep_mode == "informed"
     assert by_id["singlepass"].sweep_mode == "blind"
-    # The #666 single-pass treatment's one axis IS the pipeline shape: pin
-    # EVERY committed cell's shape (mirroring the dimensions/sweep_mode blocks
-    # above) so a stray `shape` edit — a fan-out revert on singlepass, or a
-    # `single` slip on any fan-out cell — fails here, not only on the
-    # singlepass pair.
     assert by_id["singlepass"].shape == "single"
     assert by_id["fanout-baseline"].shape == "fanout"
     assert by_id["fanout-informed"].shape == "fanout"

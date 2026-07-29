@@ -1,12 +1,3 @@
-"""Tests for `shipit.review.diff` — PR resolution + workdir normalization.
-
-The full `resolve_pr` rides the git adapter + `gh`; here we cover the workdir
-normalization seam (`_git_toplevel`) and that `resolve_pr` anchors the agent's
-cwd to the repo root even when invoked from a nested subdir, with the
-`shipit.git` adapter and gh boundary stubbed (PROC02-WS03: the review-diff
-path builds no git argv of its own — it patches the adapter's typed reads).
-"""
-
 from __future__ import annotations
 
 import json
@@ -16,19 +7,12 @@ import pytest
 from shipit.identity import Sha, repo_from_slug
 from shipit.review import diff, post
 
-#: The full 40-hex PR head every stubbed `gh pr view` payload carries (COR02).
 HEAD = "cafe" * 10
-#: The full 40-hex PR base (baseRefOid) the stubbed payloads carry — minted
-#: into a `Sha` at the resolve_pr boundary (PROC03), so the stub must be a
-#: valid full sha.
 BASE = "beef" * 10
-#: The merge base the stubbed `git.merge_base` answers — the adapter returns a
-#: typed `Sha` (PROC03), so the fakes model that contract.
 MERGE_BASE = Sha("ba5e" * 10)
 
 
 def _present_recording(seen: list):
-    """A `git.commit_present` fake that records each cwd and answers True."""
 
     def fake(sha, *, cwd):
         seen.append(cwd)
@@ -38,8 +22,6 @@ def _present_recording(seen: list):
 
 
 def _merge_base_recording(seen: list):
-    """A `git.merge_base` fake that records each cwd and answers a fixed `Sha`
-    — the adapter's typed return (PROC03)."""
 
     def fake(a, b, *, cwd):
         seen.append(cwd)
@@ -49,8 +31,6 @@ def _merge_base_recording(seen: list):
 
 
 def test_git_toplevel_returns_repo_root(monkeypatch):
-    # Routes through the single `git.repo_root(cwd=...)` boundary (ADR-0024), passing
-    # the workdir through as `cwd` and returning its resolved toplevel.
     calls: list[str] = []
 
     def fake_repo_root(*, cwd):
@@ -63,14 +43,11 @@ def test_git_toplevel_returns_repo_root(monkeypatch):
 
 
 def test_git_toplevel_none_outside_checkout(monkeypatch):
-    # The boundary returns None outside a checkout; `_git_toplevel` passes it through.
     monkeypatch.setattr(diff.git, "repo_root", lambda *, cwd: None)
     assert diff._git_toplevel("/tmp/not-a-repo") is None
 
 
 def test_resolve_pr_normalizes_workdir_to_toplevel(monkeypatch):
-    """`resolve_pr` invoked from a nested subdir resolves the diff (and the
-    agent's cwd) against the repo ROOT, not the subdir."""
     monkeypatch.setattr(diff, "_git_toplevel", lambda wd: "/repo/root")
     monkeypatch.setattr(
         diff.gh,
@@ -100,30 +77,14 @@ def test_resolve_pr_normalizes_workdir_to_toplevel(monkeypatch):
 
     ctx = diff.resolve_pr(5, workdir="/repo/root/src/deep")
     assert ctx.workdir == "/repo/root"
-    # The ReviewView base is the authoritative base sha (baseRefOid), not a local
-    # `origin/<base>` ref — minted into a typed `Sha` at the boundary (PROC03).
     assert ctx.base_sha == Sha(BASE)
     assert isinstance(ctx.base_sha, Sha)
-    # The diff endpoint is the MERGE BASE of the authoritative base + head (the PR
-    # branch point) — GitHub's three-dot diff — computed explicitly, not the raw
-    # base tip. The endpoints flow through as typed `Sha`s (PROC03) — no raw
-    # string crosses the review-diff path.
     assert seen_diff_specs == [(MERGE_BASE, Sha(HEAD)), (MERGE_BASE, Sha(HEAD))]
     assert all(isinstance(end, Sha) for spec in seen_diff_specs for end in spec)
-    # Every git invocation ran against the toplevel, not the nested subdir.
     assert set(seen) == {"/repo/root"}
 
 
 def test_resolve_pr_omitted_repo_canonicalizes_via_gh_not_alias_origin(monkeypatch):
-    """Regression (codex ERROR): with `--repo` OMITTED, `resolve_pr` must NOT adopt
-    the checkout's (possibly stale/alias) origin slug as the authoritative
-    ``ctx.repo``. `identity.resolve_repo` is deliberately offline/Tree-safe and does
-    NOT follow GitHub's 307, so a checkout whose ``origin`` still points at an
-    old/transferred slug would make downstream POST reviews / mint app-auth against
-    the ALIAS (which 307s on write). The fix keeps the locally-derived slug
-    non-authoritative: ``ctx.repo`` stays the honest-None placeholder so
-    ``post._resolve_repo`` falls back to ``gh repo view`` and canonicalizes exactly as
-    before this epic."""
     monkeypatch.setattr(diff, "_git_toplevel", lambda wd: "/repo/root")
     monkeypatch.setattr(
         diff.gh,
@@ -139,9 +100,6 @@ def test_resolve_pr_omitted_repo_canonicalizes_via_gh_not_alias_origin(monkeypat
     monkeypatch.setattr(diff.git, "diff_range", lambda base, head, *, cwd: "the diff\n")
     monkeypatch.setattr(diff.git, "diff_name_only", lambda base, head, *, cwd: [])
 
-    # If resolve_pr fell back to the local origin (an alias, here), it would surface
-    # a truthy slug and downstream would skip `gh repo view`. Guard against that by
-    # making any accidental local-origin resolution loud.
     monkeypatch.setattr(
         diff.gh,
         "current_repo",
@@ -149,13 +107,9 @@ def test_resolve_pr_omitted_repo_canonicalizes_via_gh_not_alias_origin(monkeypat
         raising=False,
     )
 
-    ctx = diff.resolve_pr(5, workdir="/repo/root")  # --repo OMITTED
-    # The locally-derived origin is NOT authoritative — repo stays None so the
-    # downstream `gh repo view` (307) fallback still runs.
+    ctx = diff.resolve_pr(5, workdir="/repo/root")
     assert ctx.repo is None
 
-    # Downstream POST path: `gh repo view` canonicalizes the alias origin to the
-    # repo's CURRENT slug, and the review posts there — never the alias.
     monkeypatch.setattr(
         post.gh,
         "current_repo",
@@ -165,8 +119,6 @@ def test_resolve_pr_omitted_repo_canonicalizes_via_gh_not_alias_origin(monkeypat
 
 
 def test_resolve_pr_no_common_ancestor_fails_loud(monkeypatch):
-    """When the authoritative base and head share no merge base, resolve_pr fails
-    loud rather than degrading to a base-tip diff."""
     monkeypatch.setattr(diff, "_git_toplevel", lambda wd: "/repo/root")
     monkeypatch.setattr(
         diff.gh,
@@ -177,7 +129,6 @@ def test_resolve_pr_no_common_ancestor_fails_loud(monkeypatch):
         ),
     )
     monkeypatch.setattr(diff.git, "commit_present", lambda sha, *, cwd: True)
-    # merge-base finds no common ancestor.
     monkeypatch.setattr(diff.git, "merge_base", lambda a, b, *, cwd: None)
 
     diff_attempted = False
@@ -196,8 +147,6 @@ def test_resolve_pr_no_common_ancestor_fails_loud(monkeypatch):
 
 
 def test_resolve_pr_missing_base_oid_fails_loud(monkeypatch):
-    """A `gh pr view` with no baseRefOid fails loud — the resolver never guesses
-    a base, so the review can't run against a wrong one."""
     monkeypatch.setattr(diff, "_git_toplevel", lambda wd: "/repo/root")
     monkeypatch.setattr(
         diff.gh,
@@ -213,8 +162,6 @@ def test_resolve_pr_missing_base_oid_fails_loud(monkeypatch):
 
 
 def test_resolve_pr_malformed_base_oid_fails_loud(monkeypatch):
-    """A `baseRefOid` that does not validate as a full sha fails loud at the
-    minting boundary (PROC03) — the review never carries a bogus base identity."""
     monkeypatch.setattr(diff, "_git_toplevel", lambda wd: "/repo/root")
     monkeypatch.setattr(
         diff.gh,
@@ -230,9 +177,6 @@ def test_resolve_pr_malformed_base_oid_fails_loud(monkeypatch):
 
 
 def test_resolve_pr_stale_base_fetch_fails_loud(monkeypatch):
-    """When the base sha (baseRefOid) can't be made present — a stale/missing
-    `origin/<base>` and an unfetchable sha — resolve_pr fails loud instead of
-    silently degrading to a local ref or the base tip (no wrong-base diff)."""
     monkeypatch.setattr(diff, "_git_toplevel", lambda wd: "/repo/root")
     monkeypatch.setattr(
         diff.gh,
@@ -242,14 +186,9 @@ def test_resolve_pr_stale_base_fetch_fails_loud(monkeypatch):
             f'"baseRefName": "main", "baseRefOid": "{BASE}"}}'
         ),
     )
-    # The head is present; the base sha never becomes present (every fetch is a
-    # no-op — the classic stale/missing `origin/main`). The adapter probe takes
-    # the typed identity (PROC03), so the fake compares Sha-to-Sha.
     monkeypatch.setattr(
         diff.git, "commit_present", lambda sha, *, cwd: sha == Sha(HEAD)
     )
-    # `fetch_ref` is the deliberately-str refspec seam: record what crosses it
-    # and pin that the caller stringified the typed sha there.
     fetched: list = []
 
     def fake_fetch_ref(refspec, *, cwd):
@@ -271,10 +210,7 @@ def test_resolve_pr_stale_base_fetch_fails_loud(monkeypatch):
 
     with pytest.raises(diff.ReviewError, match=f"base {BASE}"):
         diff.resolve_pr(5, workdir="/repo/root")
-    # It failed BEFORE computing any diff — never produced a wrong-base diff.
     assert diff_attempted is False
-    # The bare-sha fetch attempts crossed the refspec seam as plain strings —
-    # the ONE place the typed shas stringify (base branch first, then the sha).
     assert fetched == ["main", BASE]
     assert all(isinstance(r, str) for r in fetched)
 
@@ -286,42 +222,31 @@ def test_resolve_pr_rejects_non_checkout(monkeypatch):
 
 
 def test_review_view_repo_is_slug_when_known():
-    """A view built with an explicit slug reports it — the resolved-PR source of
-    truth downstream posters/producers post to."""
     ctx = diff.review_view(
         number=5,
         repo="owner/repo",
-        head_sha="ab" * 20,  # a full 40-hex sha (COR02)
+        head_sha="ab" * 20,
         base_ref="main",
-        base_sha="ba" * 20,  # a full 40-hex sha — minted into Sha (PROC03)
+        base_sha="ba" * 20,
         diff="",
         is_draft=False,
     )
     assert ctx.repo == "owner/repo"
-    # The builder mints the raw base string into the typed identity, mirroring
-    # head_sha — the composed view is fully typed however it was built.
     assert ctx.base_sha == Sha("ba" * 20)
     assert isinstance(ctx.base_sha, Sha)
 
 
 def test_review_view_repo_is_none_for_handbuilt_context():
-    """A hand-built view WITHOUT a slug reports `repo is None` — NOT the
-    `local/local` placeholder slug — so downstream `_resolve_repo` /
-    `_resolve_org_repo` honestly fall back to `gh repo view` instead of silently
-    posting/provisioning against a placeholder (ADR-0024 falsey-repo contract)."""
     ctx = diff.review_view(
         number=5,
         repo=None,
-        head_sha="ab" * 20,  # a full 40-hex sha (COR02)
+        head_sha="ab" * 20,
         base_ref="main",
-        base_sha="ba" * 20,  # a full 40-hex sha — minted into Sha (PROC03)
+        base_sha="ba" * 20,
         diff="",
         is_draft=False,
     )
     assert ctx.repo is None
-
-
-# --- rescoped_view: the incremental fix-range re-diff (RVW02-WS06) -----------
 
 
 def test_rescoped_view_rediffs_over_the_fix_range(monkeypatch):
@@ -330,7 +255,7 @@ def test_rescoped_view_rediffs_over_the_fix_range(monkeypatch):
         repo="owner/repo",
         head_sha="c" * 40,
         base_ref="main",
-        base_sha="a" * 40,  # the PR merge base (full-round base)
+        base_sha="a" * 40,
         diff="full pr diff",
         is_draft=False,
         changed_files=["a.py", "b.py"],
@@ -347,13 +272,10 @@ def test_rescoped_view_rediffs_over_the_fix_range(monkeypatch):
     monkeypatch.setattr(diff.git, "diff_name_only", lambda base, head, *, cwd: ["b.py"])
 
     rescoped = diff.rescoped_view(view, "b" * 40)
-    # The new base is the last-reviewed head; the diff/changed-files are re-scoped.
     assert rescoped.base_sha == Sha("b" * 40)
     assert rescoped.diff == "fix range diff"
     assert rescoped.changed_files == ["b.py"]
-    # Diffed base..head in the view's workdir.
     assert seen["range"] == ("b" * 40, "c" * 40, "/wd")
-    # The PR identity, head, workdir, and head branch are unchanged.
     assert rescoped.head_sha == Sha("c" * 40)
     assert rescoped.number == 5
     assert rescoped.repo == "owner/repo"
@@ -361,9 +283,6 @@ def test_rescoped_view_rediffs_over_the_fix_range(monkeypatch):
 
 
 def test_rescoped_view_wraps_a_git_failure_in_review_error(monkeypatch):
-    # The incremental re-diff fails LOUD (ReviewError carrying the PR + range),
-    # never a raw git error or a silently empty review — by round >= 2 both
-    # endpoints are proven present, so a diff failure is exceptional.
     view = diff.review_view(
         number=5,
         repo="owner/repo",

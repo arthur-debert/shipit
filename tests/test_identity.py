@@ -1,12 +1,3 @@
-"""identity — value objects + resolvers, unit-tested in isolation (ADR-0024).
-
-Covers the three load-bearing properties: (1) `Repo` identity derives LOCALLY from
-the origin remote and works with NO network (an injected fake boundary that would
-raise on any API call); (2) `OwnerKind` is an optional enrichment EXCLUDED from
-`Repo` equality/hash; (3) the resolvers are free functions over a git boundary,
-injectable so the module needs neither git nor `gh` to test.
-"""
-
 from __future__ import annotations
 
 import dataclasses
@@ -30,12 +21,6 @@ from shipit.identity import (
 
 
 class FakeGit:
-    """A stand-in git boundary — no subprocess, no network.
-
-    ``owner_kind`` defaults to raising, so any resolver that touches it without the
-    test opting in fails loudly — proving identity resolution never needs the API.
-    """
-
     def __init__(
         self,
         *,
@@ -75,11 +60,6 @@ class FakeGit:
         return self._owner_type
 
 
-# ---------------------------------------------------------------------------
-# parse_remote_url — the pure parser
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize(
     "url,expected",
     [
@@ -90,7 +70,6 @@ class FakeGit:
         ("ssh://git@github.com/acme/widget.git", ("acme", "widget")),
         ("https://github.com/acme/widget/", ("acme", "widget")),
         ("  git@github.com:acme/widget.git\n", ("acme", "widget")),
-        # A dotted repo name keeps its dots; only a trailing `.git` is stripped.
         ("https://github.com/arthur-debert/repo.js.git", ("arthur-debert", "repo.js")),
     ],
 )
@@ -103,23 +82,16 @@ def test_parse_remote_url_rejects_a_urlless_string():
         parse_remote_url("not-a-remote")
 
 
-# ---------------------------------------------------------------------------
-# Value objects — identity, equality, composition
-# ---------------------------------------------------------------------------
-
-
 def test_ownerkind_is_excluded_from_owner_equality_and_hash():
     bare = Owner(login="acme")
     enriched = Owner(login="acme", kind=OwnerKind.ORGANIZATION)
     other_kind = Owner(login="acme", kind=OwnerKind.USER)
-    # Same login → same identity regardless of kind (equality AND hash).
     assert bare == enriched == other_kind
     assert hash(bare) == hash(enriched) == hash(other_kind)
     assert len({bare, enriched, other_kind}) == 1
 
 
 def test_repo_identity_ignores_owner_kind():
-    # A Repo composes an Owner, so kind enrichment must not move Repo identity.
     bare = Repo(owner=Owner("acme"), name="widget")
     enriched = Repo(owner=Owner("acme", OwnerKind.ORGANIZATION), name="widget")
     assert bare == enriched
@@ -138,26 +110,15 @@ def test_value_objects_are_frozen():
         repo.name = "other"  # type: ignore[misc]
 
 
-# ---------------------------------------------------------------------------
-# Resolvers — free functions over an injected boundary
-# ---------------------------------------------------------------------------
-
-
 def test_resolve_repo_derives_identity_locally_offline():
-    # No network: FakeGit.owner_kind raises, so a passing resolve proves identity
-    # comes purely from the LOCAL origin remote, never an API call.
     git = FakeGit(remote_url="git@github.com:acme/widget.git")
     repo = resolve_repo("/checkout/widget/src/deep", boundary=git)
     assert repo == Repo(owner=Owner("acme"), name="widget")
-    assert repo.owner.kind is None  # kind is not resolved during identity
+    assert repo.owner.kind is None
     assert git.remote_url_cwds == ["/checkout/widget/src/deep"]
 
 
 def test_resolve_repo_is_case_insensitive_like_github():
-    # GitHub owner/repo are case-INSENSITIVE, but origin URLs vary in case between
-    # clones (`Acme/Widget` vs `acme/widget`). resolve_repo lowercases to the
-    # canonical form so both clones yield the SAME Repo identity — otherwise the
-    # single-store goal fragments per case, the same class as the `-` collision.
     mixed = resolve_repo(
         "/checkout", boundary=FakeGit(remote_url="git@github.com:Acme/Widget.git")
     )
@@ -180,7 +141,6 @@ def test_resolve_working_dir_composes_path_repo_and_revision():
         repo=Repo(owner=Owner("acme"), name="widget"),
         revision=Revision(branch="COR01/WS01", commit=Sha("cafe1234" + "0" * 32)),
     )
-    # The toplevel is resolved from the given cwd; identity/revision read the ROOT.
     assert git.toplevel_cwds == ["/checkout/widget/src"]
     assert git.remote_url_cwds == ["/checkout/widget"]
 
@@ -193,9 +153,6 @@ def test_resolve_working_dir_falls_back_to_cwd_when_no_toplevel():
 
 
 def test_repo_from_slug_matches_local_identity():
-    # THE canonical slug parser: a slug-derived Repo shares identity with a
-    # locally-resolved one (both lowercased), so an API-cased slug can never split
-    # one repo's identity from its origin-derived twin (ADR-0024).
     assert repo_from_slug("Octocat/Hello-World") == Repo(
         owner=Owner(login="octocat"), name="hello-world"
     )
@@ -203,9 +160,6 @@ def test_repo_from_slug_matches_local_identity():
 
 
 def test_repo_from_slug_agrees_with_resolve_repo_across_case_variants():
-    # The case-divergence fix, end to end at the identity layer: a MIXED-case origin
-    # remote and a MIXED-case API slug land the SAME Repo — the identity every
-    # Tree path and log dir is keyed by.
     git = FakeGit(remote_url="git@github.com:AcMe/WiDgEt.git")
     assert resolve_repo("/checkout", boundary=git) == repo_from_slug("ACME/Widget")
 
@@ -236,10 +190,6 @@ def test_resolve_owner_kind_rejects_unknown_type():
 
 
 def test_default_boundaries_are_the_tool_adapters():
-    # The git-read resolvers default their boundary to the `shipit.git` adapter and
-    # the one API-touching resolver to `shipit.gh` (the PROC02 adapter split), so
-    # production callers get the real implementation without threading it through
-    # every call site.
     import inspect
 
     for resolver in (resolve_repo, resolve_working_dir):

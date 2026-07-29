@@ -1,22 +1,3 @@
-"""gc as a plan + a sweep (CLI02-WS03, ADR-0030).
-
-Typed tests for :mod:`shipit.tree.gc` — the promoted domain half of
-``shipit tree gc``:
-
-- :func:`~shipit.tree.gc.plan` is PURE — the partition and the incomplete-view
-  counts are asserted as values, no fleet on disk;
-- :func:`~shipit.tree.gc.sweep` is the effectful apply — driven against tmp
-  clones (and an injected ``remove`` for the failure paths), asserting on the
-  typed :class:`~shipit.tree.gc.GcResult` instead of captured stdout, and on
-  the ``on_removed`` sink for the streamed audit trail (#1011), which is
-  captured as a list here: the domain prints nothing, so the sink is a value
-  like any other;
-- :func:`~shipit.tree.gc.plan_fleet` is the gather — its one boundary read
-  (:func:`~shipit.tree.registry.scan`) is patched at its seam. Since ADR-0072
-  the rule reads nothing but the scanned record, so there is nothing else to
-  patch: no PR read, no liveness probe, no provisioning record.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -26,15 +7,10 @@ from shipit.tree import gc, registry
 from shipit.tree.cleanup import IDLE_THRESHOLD_SECONDS, Cleanup
 from shipit.tree.registry import TreeRecord
 
-#: A `now` far past the 48h default boundary for `newest_mtime=0.0` records.
 AGED_NOW = 20 * 86_400.0
 
 
 def _record(**over) -> TreeRecord:
-    # The removable baseline: clean, every commit on some remote (`unpushed_shas=()`)
-    # and idle since the epoch. All three TreeRecord unreadable defaults (`unpushed_shas`,
-    # `newest_mtime` and `last_commit` = None) read as KEEP, so a removable row must pin
-    # them.
     base = dict(
         path="/trees/acme/widget/issues/7/work-aaaa",
         branch="issues/7/work",
@@ -47,14 +23,8 @@ def _record(**over) -> TreeRecord:
         newest_mtime=0.0,
     )
     base.update(over)
-    # Idle is the newest of the walk and the commit stamp, and either one unreadable
-    # blanks it, so the stamp tracks the walk unless a row names it: a row that says
-    # `newest_mtime=None` means "activity is unknown", not "unknown walk, fresh commit".
     base.setdefault("last_commit", base["newest_mtime"])
     return TreeRecord(**base)
-
-
-# --- plan: the pure decision -------------------------------------------------------
 
 
 def test_plan_partitions_the_fleet():
@@ -71,12 +41,6 @@ def test_plan_partitions_the_fleet():
 
 
 def test_unexamined_counts_the_signals_that_actually_suppress_a_removal():
-    # #1012's property, repointed: the count names Trees kept because a signal could
-    # not be READ, which is now the unpushed list and the activity signal — BOTH of the
-    # latter's halves, since idle is the newest of the walk and the commit stamp and
-    # either one unknown blanks it. Each is a silent conservative keep, and a
-    # fleet-wide failure of any would keep everything while reporting `removed 0` —
-    # the #1011 shape, on the new signals.
     walk_failed = _record(path="/t/1", newest_mtime=None)
     rev_list_failed = _record(path="/t/2", unpushed_shas=None)
     stamp_failed = _record(path="/t/4", last_commit=None)
@@ -87,17 +51,11 @@ def test_unexamined_counts_the_signals_that_actually_suppress_a_removal():
     assert plan.unexamined == 3
     assert plan.judged == 1
     assert plan.incomplete is True
-    # The invariant that makes the report honest: unexamined is a subset of `keep`,
-    # so a counted Tree can never be one the same run removed.
     assert {r.path for r in plan.partition.keep} == {"/t/1", "/t/2", "/t/4"}
     assert [r.path for r in plan.partition.removable] == ["/t/3"]
 
 
 def test_a_definite_keep_is_examined_even_if_another_signal_is_unreadable():
-    # `unexamined` asks which signal DECIDED, in the rule's short-circuit order. A
-    # dirty Tree is kept on positive evidence; the walk under it was never reached, so
-    # its failure changes nothing and must not inflate the incomplete-view count into
-    # crying wolf on every Tree with an unreadable corner.
     plan = gc.plan(
         [_record(path="/t/1", dirty=True, newest_mtime=None)],
         now=AGED_NOW,
@@ -108,7 +66,6 @@ def test_a_definite_keep_is_examined_even_if_another_signal_is_unreadable():
 
 
 def test_plan_threshold_overrides_the_idle_boundary():
-    # `plan` threads idle_threshold_seconds down to `classify` — the ONE boundary.
     record = _record(newest_mtime=0.0)
     idle_only_for_a_short_threshold = gc.plan(
         [record],
@@ -120,7 +77,6 @@ def test_plan_threshold_overrides_the_idle_boundary():
     assert [r.path for r in idle_only_for_a_short_threshold.partition.removable] == [
         record.path
     ]
-    # 2h idle is well inside the 48h default.
     assert [r.path for r in kept_by_default.partition.keep] == [record.path]
 
 
@@ -129,9 +85,6 @@ def test_plan_empty_fleet_is_a_valid_plan():
     assert plan == gc.GcPlan(
         partition=Cleanup(removable=[], keep=[]), total=0, unexamined=0
     )
-
-
-# --- sweep: the effectful apply ------------------------------------------------------
 
 
 def _clone(root, rel: str):
@@ -183,18 +136,15 @@ def test_sweep_continues_past_a_failed_delete(tmp_path):
 
     result = gc.sweep(plan, remove=flaky)
 
-    assert bad.exists()  # the failed delete left it on disk
-    assert not good.exists()  # the sweep continued and reclaimed the next one
+    assert bad.exists()
+    assert not good.exists()
     assert result.removed == (str(good),)
     assert result.failed == (gc.GcFailure(path=str(bad), error="read-only file"),)
 
 
 def test_sweep_does_not_count_an_already_gone_tree(tmp_path):
-    # A removable Tree whose directory is ALREADY gone (a concurrent sweep, a
-    # manual rm) is neither counted nor reported: `removed` reflects what came
-    # off disk, not what was merely planned.
     present = _clone(tmp_path, "issues/1/work-present")
-    gone = tmp_path / "issues/2/work-gone"  # never created on disk
+    gone = tmp_path / "issues/2/work-gone"
     plan = _plan_of(
         Cleanup(
             removable=[_record(path=str(present)), _record(path=str(gone))], keep=[]
@@ -216,12 +166,7 @@ def test_sweep_carries_the_plan_counts_through():
     assert result.incomplete is True
 
 
-# --- sweep: streaming the destroyed set (#1011) --------------------------------------
-
-
 def test_sweep_announces_each_path_as_it_comes_off_disk(tmp_path):
-    # The sink fires DURING the sweep, not after it: at the moment each path is
-    # announced, that Tree is already gone from disk and the later ones are not.
     first = _clone(tmp_path, "issues/1/work-a")
     second = _clone(tmp_path, "issues/2/work-b")
     plan = _plan_of(
@@ -237,17 +182,13 @@ def test_sweep_announces_each_path_as_it_comes_off_disk(tmp_path):
     result = gc.sweep(plan, on_removed=sink)
 
     assert disk_at_announce == [
-        (str(first), False, True),  # announced with the second Tree still standing
+        (str(first), False, True),
         (str(second), False, False),
     ]
-    assert result.removed == (str(first), str(second))  # the typed result is intact
+    assert result.removed == (str(first), str(second))
 
 
 def test_interrupted_sweep_still_announced_what_it_destroyed(tmp_path):
-    # THE regression (#1011): a sweep killed mid-fleet (a timeout, the Ctrl-C a
-    # silent multi-minute delete invites) took its GcResult with it and left no
-    # record of the Trees it had already destroyed. The sink is that record, so
-    # it must survive the exception that eats the return value.
     doomed = _clone(tmp_path, "issues/1/work-doomed")
     interrupted_at = _clone(tmp_path, "issues/2/work-interrupted")
     never_reached = _clone(tmp_path, "issues/3/work-never")
@@ -272,18 +213,14 @@ def test_interrupted_sweep_still_announced_what_it_destroyed(tmp_path):
     with pytest.raises(KeyboardInterrupt):
         gc.sweep(plan, remove=killed_mid_sweep, on_removed=announced.append)
 
-    # No GcResult came back at all — and the destroyed Tree is still named.
     assert announced == [str(doomed)]
     assert not doomed.exists()
     assert never_reached.exists()
 
 
 def test_sweep_announces_only_what_actually_came_off_disk(tmp_path):
-    # The sink mirrors `removed` exactly: a failed delete and an already-gone Tree
-    # are not announced, because the audit trail must not claim a Tree it did not
-    # destroy.
     failed = _clone(tmp_path, "issues/1/work-failed")
-    gone = tmp_path / "issues/2/work-gone"  # never created on disk
+    gone = tmp_path / "issues/2/work-gone"
     good = _clone(tmp_path, "issues/3/work-good")
     plan = _plan_of(
         Cleanup(
@@ -309,7 +246,6 @@ def test_sweep_announces_only_what_actually_came_off_disk(tmp_path):
 
 
 def test_sweep_without_a_sink_is_unchanged(tmp_path):
-    # `on_removed` is optional: the domain has no default sink to print through.
     removable = _clone(tmp_path, "issues/1/work-idle")
     plan = _plan_of(Cleanup(removable=[_record(path=str(removable))], keep=[]))
 
@@ -319,13 +255,7 @@ def test_sweep_without_a_sink_is_unchanged(tmp_path):
     assert not removable.exists()
 
 
-# --- the incomplete-view predicate ---------------------------------------------------
-
-
 def test_incomplete_is_the_unexamined_count_on_both_plan_and_result():
-    # One predicate, shared by the two gc tails: any Tree kept on an unreadable signal
-    # means the fleet was only partly judged, whatever the removable count says. It
-    # reports on the run's COVERAGE; it decides no Tree.
     partial = gc.plan(
         [_record(path="/t/1"), _record(path="/t/2", newest_mtime=None)],
         now=AGED_NOW,
@@ -338,12 +268,7 @@ def test_incomplete_is_the_unexamined_count_on_both_plan_and_result():
     assert gc.sweep(_plan_of(whole.partition, total=1)).incomplete is False
 
 
-# --- plan_fleet: the effectful gather -------------------------------------------------
-
-
 def test_plan_fleet_composes_scan_and_classify(monkeypatch):
-    # Everything the rule needs rides the records the scan returns — the activity
-    # signal included — so the gather adds no per-Tree reads of its own.
     import time as _time
 
     now = _time.time()
@@ -361,10 +286,6 @@ def test_plan_fleet_composes_scan_and_classify(monkeypatch):
 
 
 def test_plan_fleet_keeps_a_tree_someone_is_working_in_whatever_its_kind(monkeypatch):
-    # The #1018 shape at the gather: an ephemeral session Tree, clean, no PR, whose
-    # only sign of life is a file written a minute ago. It must survive the sweep — and
-    # a review/write Tree in the same state must too: kind is not a decision input
-    # (ADR-0072).
     import time as _time
 
     now = _time.time()
@@ -400,9 +321,6 @@ def test_plan_fleet_threshold_defaults_to_48h(monkeypatch):
     assert [r.path for r in plan.partition.keep] == ["/t/just-under"]
 
 
-# --- gc makes zero network calls (ADR-0072's headline; WS03) --------------------------
-
-
 def _git(cwd, *args):
     import subprocess
 
@@ -410,12 +328,6 @@ def _git(cwd, *args):
 
 
 def test_gc_makes_zero_network_calls(tmp_path, monkeypatch):
-    # ADR-0072's headline: the whole gc gather (`plan_fleet` -> `registry.scan` ->
-    # `classify`) reads only the local clone. The per-repo `gh` PR batch that once fed
-    # the reclaim ladder is deleted with it (#1011 was the >10-minute sweep it caused),
-    # so a fleet-wide sweep never touches GitHub. Sabotage EVERY public `gh` entrypoint
-    # into a fatal, then run the real gather (real `git` subprocesses) over a real
-    # clone: any surviving network read would raise here.
     def _explode(*_a, **_k):
         raise AssertionError("gc made a network (gh) call")
 

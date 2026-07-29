@@ -1,8 +1,3 @@
-"""The Ground-truth fixture domain (ADR-0048, RVW03-WS06): parse/validate the
-in-repo corpus, bank Adjudication verdicts (label + alias, each bumping the
-version), serialize deterministically. Also pins the SHIPPED lab/fixture.toml:
-it must load, satisfy the v1 acceptance bars, and round-trip canonically."""
-
 from __future__ import annotations
 
 from pathlib import Path
@@ -70,8 +65,6 @@ class TestParseFixture:
         assert label.provenance == Provenance("fix-commit", "f211ab3")
 
     def test_repo_slug_is_canonicalized_to_lowercase(self):
-        # A mixed-case slug validates but is stored canonical, so two pins that
-        # differ only by case share one identity (no double-read in eval score).
         fixture = parse_fixture(data(prs=[dict(PR, repo="Phos-Editor/Core")]))
         assert fixture.prs[0].repo == "phos-editor/core"
 
@@ -88,18 +81,18 @@ class TestParseFixture:
             {"version": "one"},
             {"schema": FIXTURE_SCHEMA_VERSION + 1},
             {"prs": [dict(PR, base_sha="not-a-sha")]},
-            {"prs": [dict(PR, head_sha="abc")]},  # too short
-            {"prs": [dict(PR, repo="not-a-slug")]},  # not owner/name
-            {"prs": [dict(PR, repo="owner/name/extra")]},  # too many segments
-            {"prs": [dict(PR, title=123)]},  # soft field, wrong type (no coercion)
-            {"prs": [dict(PR), dict(PR)]},  # duplicate pr id
+            {"prs": [dict(PR, head_sha="abc")]},
+            {"prs": [dict(PR, repo="not-a-slug")]},
+            {"prs": [dict(PR, repo="owner/name/extra")]},
+            {"prs": [dict(PR, title=123)]},
+            {"prs": [dict(PR), dict(PR)]},
             {"labels": [label_data(pr="unknown-pr")]},
-            {"labels": [label_data(severity="blocker")]},  # retired ladder
+            {"labels": [label_data(severity="blocker")]},
             {"labels": [label_data(verdict="maybe")]},
             {"labels": [label_data(lines=[9, 3])]},
             {"labels": [label_data(provenance={"kind": "vibes", "ref": "x"})]},
             {"labels": [label_data(provenance=None)]},
-            {"labels": [label_data(), label_data()]},  # duplicate label id
+            {"labels": [label_data(), label_data()]},
             {"labels": [label_data(confirmed="yes")]},
         ],
     )
@@ -115,9 +108,6 @@ class TestParseFixture:
 
 
 class TestDefectFamilies:
-    """The explicit equivalence-family identity (#751): one defect, several
-    valid anchors, declared in fixture data — never inferred similarity."""
-
     def test_defect_family_parses_and_keys(self):
         fixture = parse_fixture(
             data(
@@ -140,7 +130,6 @@ class TestDefectFamilies:
     @pytest.mark.parametrize(
         "second",
         [
-            # a family may not straddle verdicts, severities, or pinned ranges.
             label_data(id="core-G2", defect="fam", verdict="not-real"),
             label_data(id="core-G2", defect="fam", severity="nit"),
         ],
@@ -234,7 +223,7 @@ class TestDefectFamilies:
             id="core-G2",
             pr_id="core-440",
             file="phos-editor/src/graph_session.rs",
-            severity=Severity.NIT,  # the family is major
+            severity=Severity.NIT,
             verdict="real",
             claim="c",
             provenance=Provenance("adjudication", "r"),
@@ -259,9 +248,8 @@ class TestBanking:
         banked = bank_label(fixture, new)
         assert banked.version == 2
         assert banked.label_by_id("core-A1").confirmed is True
-        # not-real is a first-class verdict: the banked refutation is scoreable.
         assert banked.label_by_id("core-A1").verdict == "not-real"
-        assert fixture.version == 1  # pure: the input fixture is untouched
+        assert fixture.version == 1
 
     def test_bank_label_rejects_duplicate_id_and_unknown_pr(self):
         fixture = parse_fixture(data())
@@ -315,7 +303,6 @@ class TestSerialization:
         path = tmp_path / "fixture.toml"
         save_fixture(fixture, path)
         assert load_fixture(path) == fixture
-        # deterministic: same fixture, same bytes (ADR-0048 re-run property).
         text = path.read_text()
         save_fixture(fixture, path)
         assert path.read_text() == text
@@ -331,9 +318,6 @@ class TestSerialization:
         )
 
     def test_non_bmp_claim_round_trips(self, tmp_path):
-        # An emoji (or any non-BMP char) in a claim must serialize as literal
-        # UTF-8, not a `🚀` surrogate pair — TOML forbids surrogate
-        # escapes, so the pair would make save's own round-trip parse reject it.
         fixture = parse_fixture(
             data(labels=[label_data(claim="rocket 🚀 in the readback path")])
         )
@@ -342,16 +326,12 @@ class TestSerialization:
         assert load_fixture(path).labels[0].claim == "rocket 🚀 in the readback path"
 
     def test_del_control_char_in_claim_round_trips(self, tmp_path):
-        # DEL (U+007F) is the one char json.dumps leaves literal but TOML forbids
-        # in a basic string — it must be escaped or the save round-trip crashes.
         fixture = parse_fixture(data(labels=[label_data(claim="before\x7fafter")]))
         path = tmp_path / "fixture.toml"
         save_fixture(fixture, path)
         assert load_fixture(path).labels[0].claim == "before\x7fafter"
 
     def test_save_is_atomic_and_leaves_no_temp(self, tmp_path):
-        # Overwrite an existing file, then assert only the target remains (the
-        # same-directory temp is always cleaned up — no `.tmp-<pid>` litter).
         path = tmp_path / "fixture.toml"
         save_fixture(parse_fixture(data()), path)
         save_fixture(parse_fixture(data(version=2)), path)
@@ -359,8 +339,6 @@ class TestSerialization:
         assert [p.name for p in tmp_path.iterdir()] == ["fixture.toml"]
 
     def test_save_validates_a_programmatic_fixture(self, tmp_path):
-        # One rule set: a Label assembled in code (bad verdict) must fail the
-        # same parse contract a hand-written file does, before touching disk.
         bad = Fixture(
             version=1,
             prs=(
@@ -396,13 +374,6 @@ def shipped():
 
 
 class TestShippedFixture:
-    """The committed lab/fixture.toml IS product data — pin its acceptance bars.
-
-    The version pin tracks the fixture's current banked version: every
-    adjudication session bumps it (v1 → v35 at the first cells banking), and
-    this test is updated in the same diff as the deliberate bump.
-    """
-
     def test_loads_and_pins_current_version(self, shipped):
         assert shipped.version == 39
 
@@ -425,9 +396,6 @@ class TestShippedFixture:
         assert len({p.language for p in shipped.prs if p.language}) >= 3
 
     def test_673_residual_families_are_declared(self, shipped):
-        # The v35–v37 adjudication evidence on #673: each documented cross-file
-        # residual's promoted labels share one explicit defect family (#751) —
-        # graph-session, distance, native-spec, and GPU-residency.
         families = {}
         for label in shipped.labels:
             if label.defect is not None:

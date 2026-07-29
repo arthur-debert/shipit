@@ -1,23 +1,9 @@
-"""Wiring smoke tests for the ``shipit spawn`` verb layer (ADR-0030, CLI02-WS02).
-
-The THIN layer over the promoted pipeline: the domain behavior (every stage,
-every refusal) is covered typed-in/typed-out in ``test_spawn_subagent.py``;
-these tests prove only the click binding, the byte-stable agent-parsed SPAWNED
-render, and the exit contract — a completed spawn exits 0 with the sentinel
-block, a pipeline refusal reaches the shared error shell as one clean
-``error: …`` stderr line + exit 1 (never a traceback, never a SPAWNED block),
-and a malformed OPTION (unknown backend) is click's usage error, exit 2.
-"""
-
 from __future__ import annotations
 
 import json
 from dataclasses import replace
 
 from click.testing import CliRunner
-
-# The typed suite's boundary fakes are reused wholesale: the smoke layer needs
-# the same fake edges, not a second copy of them.
 from test_spawn_subagent import _PR, bounds
 
 from shipit import gh
@@ -44,10 +30,6 @@ def test_spawn_subagent_help_documents_the_verb():
 
 
 def test_spawn_brief_prints_the_template_with_every_mandatory_slot():
-    """`shipit spawn brief <role>` is the coordinator's expansion surface (RVW02):
-    it prints the bundled template BODY (the autogen banner and `# Title` H1
-    stripped by `_fragment_body()`), unfilled slots and all — filling is the
-    coordinator's job, so the output must still carry every `{{slot}}`."""
     for role in prompts.BRIEF_ROLES:
         result = CliRunner().invoke(spawn_verb.spawn, ["brief", role.value])
 
@@ -57,17 +39,12 @@ def test_spawn_brief_prints_the_template_with_every_mandatory_slot():
 
 
 def test_spawn_brief_refuses_a_role_without_a_template():
-    """The ROLE argument is a click.Choice over BRIEF_ROLES — a role with no
-    template (reviewer, explorer, coordinator) is a usage error, exit 2."""
     result = CliRunner().invoke(spawn_verb.spawn, ["brief", "explorer"])
 
     assert result.exit_code == 2
 
 
 def test_run_renders_the_byte_stable_spawned_block(tmp_path, capsys):
-    """argv → exit code round trip on the write path: exit 0 and the frozen
-    agent-parsed surface — the SPAWNED sentinel line + the indented-JSON payload,
-    byte-identical to the pre-promotion output."""
     b, _calls = bounds(tmp_path)
 
     rc = spawn_verb.run(
@@ -88,13 +65,10 @@ def test_run_renders_the_byte_stable_spawned_block(tmp_path, capsys):
         "pr_state": "OPEN",
         "pr_is_draft": True,
     }
-    # Byte-stable: exactly the old print("SPAWNED") + print(json.dumps(indent=2)).
     assert out == "SPAWNED\n" + json.dumps(payload, indent=2) + "\n"
 
 
 def test_reviewer_spawned_block_omits_the_pr_linkage(tmp_path, capsys):
-    """A reviewer reports through the EXISTING PR: its SPAWNED payload carries
-    the coordinates only — no pr/pr_state/pr_is_draft keys."""
     b, _calls = bounds(tmp_path)
 
     rc = spawn_verb.run(
@@ -115,8 +89,6 @@ def test_reviewer_spawned_block_omits_the_pr_linkage(tmp_path, capsys):
 
 
 def test_a_pipeline_refusal_maps_to_the_error_shell(tmp_path, capsys):
-    """A refusal (here: the handshake audit — a non-draft PR) reaches the shared
-    shell: exit 1, ONE `error: …` stderr line, no SPAWNED block, no traceback."""
     b, _calls = bounds(tmp_path, pr=replace(_PR, is_draft=False))
 
     rc = spawn_verb.run(
@@ -128,13 +100,10 @@ def test_a_pipeline_refusal_maps_to_the_error_shell(tmp_path, capsys):
     assert "SPAWNED" not in captured.out
     assert captured.err.startswith("error: ")
     assert "is not a draft" in captured.err
-    assert captured.err == "".join(captured.err.splitlines()) + "\n"  # one line
+    assert captured.err == "".join(captured.err.splitlines()) + "\n"
 
 
 def test_cli_reviewer_spawn_without_issue_is_not_a_usage_error(tmp_path, monkeypatch):
-    """--issue stays optional at the click layer: a reviewer spawn (which needs
-    no issue) must reach the pipeline, never be rejected at parse (exit 2). The
-    pipeline is faked at the verb's seam; the spec it receives is asserted."""
     seen: dict = {}
 
     def fake_pipeline(spec, bounds=None):
@@ -158,15 +127,12 @@ def test_cli_reviewer_spawn_without_issue_is_not_a_usage_error(tmp_path, monkeyp
         ],
     )
 
-    assert result.exit_code == 1  # the pipeline's clean refusal, NOT click's 2
+    assert result.exit_code == 1
     assert seen["spec"].role == "reviewer"
-    assert seen["spec"].issue is None  # no --issue reached the spec as None
+    assert seen["spec"].issue is None
 
 
 def test_cli_write_spawn_without_issue_is_a_clean_runtime_refusal():
-    """A write role with no --issue is the pipeline's shape refusal (exit 1 with
-    the positive-integer message through the shell) — not a click usage error.
-    Reached with NO fakes: the shape gate fires before any I/O."""
     result = CliRunner().invoke(
         spawn_verb.spawn,
         [
@@ -188,9 +154,6 @@ def test_cli_write_spawn_without_issue_is_a_clean_runtime_refusal():
 
 
 def test_cli_unknown_backend_is_a_usage_error_exit_2():
-    """--backend is gated by click.Choice over the adapter registry: a name
-    outside it is a parse-time usage error (the exit-2 tier), while the
-    pipeline's own gate guards programmatic callers (typed test)."""
     result = CliRunner().invoke(
         spawn_verb.spawn,
         [
@@ -211,8 +174,6 @@ def test_cli_unknown_backend_is_a_usage_error_exit_2():
 
 
 def test_format_spawned_is_a_pure_string_function(tmp_path):
-    """The renderer is drivable with no terminal: sentinel + indented payload,
-    no trailing newline (the shared emit owns the terminal write)."""
     result = gh.HeadPr(number=9, state="OPEN", is_draft=True, base_ref="main")
     spawned = spawn_verb.subagent.SpawnResult(
         tree="/trees/x",

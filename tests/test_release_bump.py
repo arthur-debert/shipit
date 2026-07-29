@@ -1,12 +1,3 @@
-"""The bump-adapter registry's tests (TOL02-WS01, PRD story 22/25).
-
-The registry is CLOSED and mirrors the toolchain registry exactly — pinned
-here, along with the "tauri is never a dispatch label" invariant. Command
-lines are asserted exactly (recorded-invocation discipline: the argv IS the
-adapter's contract), and the pure rewrites (python's pyproject bump, the
-bundle-config hook) are fixture-tested.
-"""
-
 import pytest
 
 from shipit.release import ReleaseError, bump
@@ -14,18 +5,14 @@ from shipit.tools import registry
 
 
 def test_registry_mirrors_the_toolchain_set():
-    """One bump adapter per registered toolchain — the closed mirror (ADR-0041)."""
     assert set(bump.ADAPTERS) == set(registry.names())
 
 
 def test_tauri_is_never_a_dispatch_label():
-    """Story 25: bundle-level files ride the artifact-declared hook, so no
-    "tauri" key may ever appear in the bump dispatch registry."""
     assert "tauri" not in bump.ADAPTERS
 
 
 def test_rust_command_lines():
-    """Workspace-wide bump (intra-workspace deps included), lock refreshed."""
     assert bump.adapter_for("rust").commands("1.2.3") == (
         ("cargo", "set-version", "--workspace", "1.2.3"),
         ("cargo", "update", "--workspace"),
@@ -41,14 +28,12 @@ def test_rust_stages_workspace_manifests_and_lock():
 
 
 def test_npm_command_line():
-    """The package's own version bump, git side suppressed (prepare owns it)."""
     assert bump.adapter_for("npm").commands("2.0.0-rc.1") == (
         ("npm", "version", "2.0.0-rc.1", "--no-git-tag-version"),
     )
 
 
 def test_python_is_a_pure_edit_with_no_commands():
-    """Deliberately toolchain-free: a pyproject rewrite, zero commands."""
     adapter = bump.adapter_for("python")
     assert adapter.commands("1.2.3") == ()
     assert adapter.edit_path == "pyproject.toml"
@@ -56,9 +41,6 @@ def test_python_is_a_pure_edit_with_no_commands():
 
 
 def test_go_is_a_first_class_zero_file_adapter():
-    """PRD story 22 / ADR-0041: go's projection set is EMPTY — the tag alone
-    carries the version (injected at build via -ldflags) — and that is a
-    registry entry, not an exception."""
     adapter = bump.adapter_for("go")
     assert adapter.commands("1.2.3") == ()
     assert adapter.edit_path is None
@@ -67,8 +49,6 @@ def test_go_is_a_first_class_zero_file_adapter():
 
 
 def test_tree_sitter_is_a_zero_file_adapter():
-    """TOL02-WS16 #792: the generated-parser tarball is content-addressed by
-    the tag (ADR-0041), npm publish off — no manifest projection, the go shape."""
     adapter = bump.adapter_for("tree-sitter")
     assert adapter.commands("1.2.3") == ()
     assert adapter.edit_path is None
@@ -77,8 +57,6 @@ def test_tree_sitter_is_a_zero_file_adapter():
 
 
 def test_lua_is_a_pure_edit_of_the_plugin_entry_file():
-    """TOL03-WS01 #972: lua projects the version by rewriting `M.version` in the
-    plugin's leg-relative `init.lua` — a pure edit like python, zero commands."""
     adapter = bump.adapter_for("lua")
     assert adapter.commands("1.2.3") == ()
     assert adapter.edit_path == "init.lua"
@@ -90,10 +68,6 @@ def test_adapter_for_unknown_toolchain_is_loud():
     with pytest.raises(ReleaseError, match="no bump adapter"):
         bump.adapter_for("tauri")
 
-
-# --------------------------------------------------------------------------
-# bump_pyproject — the toolchain-free python projection
-# --------------------------------------------------------------------------
 
 _PYPROJECT = """\
 [build-system]
@@ -113,7 +87,7 @@ version = "9.9.9"
 def test_bump_pyproject_rewrites_only_the_project_version():
     out = bump.bump_pyproject(_PYPROJECT, "0.2.0")
     assert 'version = "0.2.0"' in out
-    assert 'version = "9.9.9"' in out  # [tool.other] untouched
+    assert 'version = "9.9.9"' in out
     assert out == _PYPROJECT.replace('version = "0.1.0"', 'version = "0.2.0"')
 
 
@@ -123,8 +97,6 @@ def test_bump_pyproject_crosses_arrays_but_not_tables():
 
 
 def test_bump_pyproject_preserves_single_quote_style():
-    """A TOML literal string (single-quoted) is a valid version line; the bump
-    keeps the consumer's quote style."""
     text = "[project]\nname = 'x'\nversion = '1.0.0'\n"
     assert (
         bump.bump_pyproject(text, "2.0.0")
@@ -138,16 +110,11 @@ def test_bump_pyproject_without_project_version_is_loud():
 
 
 def test_bump_pyproject_ignores_version_of_other_tables_only():
-    """A version line in a LATER table never satisfies the [project] match."""
     with pytest.raises(ReleaseError):
         bump.bump_pyproject(
             '[project]\nname = "x"\n\n[tool.y]\nversion = "1.0"\n', "2.0.0"
         )
 
-
-# --------------------------------------------------------------------------
-# bump_lua_version — the toolchain-free Neovim-plugin projection (TOL03-WS01)
-# --------------------------------------------------------------------------
 
 _INIT_LUA = """\
 local M = {}
@@ -165,13 +132,10 @@ return M
 def test_bump_lua_version_rewrites_the_module_version_verbatim():
     out = bump.bump_lua_version(_INIT_LUA, "0.2.0")
     assert 'M.version = "0.2.0"' in out
-    # Only the M.version line changes; the rest is byte-for-byte identical.
     assert out == _INIT_LUA.replace('M.version = "0.1.0"', 'M.version = "0.2.0"')
 
 
 def test_bump_lua_version_writes_a_prerelease_semver_verbatim():
-    """A Lua string is arbitrary text — no PEP 440 constraint, so the semver
-    the tag names is written as-is (the npm shape, not python's)."""
     out = bump.bump_lua_version('M.version = "0.0.0"\n', "1.0.0-rc.1")
     assert out == 'M.version = "1.0.0-rc.1"\n'
 
@@ -191,9 +155,6 @@ def test_bump_lua_version_bumps_only_the_first_occurrence():
 
 
 def test_bump_lua_version_skips_a_leading_comment_line():
-    """A commented-out `-- M.version = ...` before the real assignment must NOT
-    be bumped — the regex anchors to a real assignment line, not the first
-    textual occurrence (round 1, codex)."""
     text = (
         '-- M.version = "0.0.1" (old, kept as a note)\n'
         "local M = {}\n"
@@ -201,40 +162,31 @@ def test_bump_lua_version_skips_a_leading_comment_line():
         "return M\n"
     )
     out = bump.bump_lua_version(text, "0.2.0")
-    assert '-- M.version = "0.0.1" (old, kept as a note)' in out  # comment untouched
+    assert '-- M.version = "0.0.1" (old, kept as a note)' in out
     assert 'M.version = "0.2.0"' in out
     assert out == text.replace('M.version = "0.1.0"', 'M.version = "0.2.0"')
 
 
 def test_bump_lua_version_skips_a_version_inside_a_string():
-    """A `M.version = ...` embedded in a string literal before the real line is
-    not an assignment and must not be bumped."""
     text = 'local doc = "M.version = 9.9.9"\nM.version = "0.1.0"\n'
     out = bump.bump_lua_version(text, "0.2.0")
-    assert 'local doc = "M.version = 9.9.9"' in out  # the string is untouched
+    assert 'local doc = "M.version = 9.9.9"' in out
     assert out == 'local doc = "M.version = 9.9.9"\nM.version = "0.2.0"\n'
 
 
 def test_bump_lua_version_inserts_the_value_literally_not_as_a_backreference():
-    """The replacement is a callable, so a version carrying regex-replacement
-    metachars (a backslash, `\\g<...>`) is inserted VERBATIM rather than
-    re-parsed as a backreference (round 1, agy). Real semver never contains
-    these, but the rewrite must not depend on that."""
     assert bump.bump_lua_version('M.version = "0.0.0"\n', r"1.0.0-\g<head>") == (
         'M.version = "1.0.0-\\g<head>"\n'
     )
 
 
 def test_bump_lua_version_bumps_an_indented_assignment():
-    """The line anchor allows leading indentation and preserves it."""
     assert bump.bump_lua_version('\tM.version = "0.1.0"\n', "0.2.0") == (
         '\tM.version = "0.2.0"\n'
     )
 
 
 def test_bump_lua_version_ignores_a_longer_identifier():
-    """The `\\b` guard keeps the rewrite off `someM.version` — only the module
-    table `M`'s version is the plugin's declared version."""
     text = 'someM.version = "0.1.0"\n'
     with pytest.raises(ReleaseError, match=r"M\.version"):
         bump.bump_lua_version(text, "0.2.0")
@@ -246,41 +198,29 @@ def test_bump_lua_version_without_a_version_line_is_loud():
 
 
 def test_edit_for_dispatches_lua_to_the_lua_rewrite():
-    """The edit dispatch keys on toolchain: a lua adapter routes to
-    bump_lua_version, not bump_pyproject."""
     adapter = bump.adapter_for("lua")
     assert bump.edit_for(adapter, 'M.version = "0.1.0"\n', "0.2.0") == (
         'M.version = "0.2.0"\n'
     )
 
 
-# --------------------------------------------------------------------------
-# to_pep440 — the semver→PEP 440 manifest normalization (issue #807)
-# --------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize(
     ("semver", "pep440"),
     [
-        # Stable versions are identical in both spellings — passed through.
         ("1.0.0", "1.0.0"),
         ("0.1.0", "0.1.0"),
         ("10.20.30", "10.20.30"),
-        # The reserved live-fire suffix → a deterministic throwaway rc0 (the
-        # tag keeps -release-rc; the RC guard keys off the tag).
         ("1.0.0-release-rc", "1.0.0rc0"),
         ("2.3.4-release-rc.2", "2.3.4rc2"),
-        # General prerelease forms → their PEP 440 equivalents.
         ("1.2.3-rc.1", "1.2.3rc1"),
         ("1.2.3-alpha.2", "1.2.3a2"),
         ("1.2.3-beta.3", "1.2.3b3"),
-        # Aliases and the numberless / single-identifier spellings.
         ("1.2.3-c.1", "1.2.3rc1"),
         ("1.2.3-preview.5", "1.2.3rc5"),
         ("1.2.3-rc", "1.2.3rc0"),
         ("1.2.3-rc1", "1.2.3rc1"),
         ("1.2.3-alpha", "1.2.3a0"),
-        ("1.2.3-Beta.4", "1.2.3b4"),  # case-insensitive phase word
+        ("1.2.3-Beta.4", "1.2.3b4"),
     ],
 )
 def test_to_pep440_maps_semver_to_pep440(semver, pep440):
@@ -290,11 +230,11 @@ def test_to_pep440_maps_semver_to_pep440(semver, pep440):
 @pytest.mark.parametrize(
     "bad",
     [
-        "1.2.3-snapshot.1",  # unknown phase word
-        "1.2.3-dev.1",  # not a PEP 440 prerelease phase
-        "1.2.3-1",  # purely numeric prerelease — no phase
-        "1.2.3-rc.1.2",  # multi-segment run
-        "1.2.3-rc.foo",  # non-numeric number component
+        "1.2.3-snapshot.1",
+        "1.2.3-dev.1",
+        "1.2.3-1",
+        "1.2.3-rc.1.2",
+        "1.2.3-rc.foo",
     ],
 )
 def test_to_pep440_refuses_unmappable_suffix_loudly(bad):
@@ -305,25 +245,16 @@ def test_to_pep440_refuses_unmappable_suffix_loudly(bad):
 @pytest.mark.parametrize(
     "annotated",
     [
-        "1.0.0+build.1",  # stable version with build metadata
-        "1.2.3-rc.1+build.1",  # prerelease with build metadata
+        "1.0.0+build.1",
+        "1.2.3-rc.1+build.1",
     ],
 )
 def test_to_pep440_refuses_build_metadata_loudly(annotated):
-    """Build metadata is forbidden across the release version flow
-    (parse_spec rejects it, version_tags disqualifies it), so a +-annotated
-    version never reaches a legitimate manifest write. to_pep440 refuses it
-    LOUDLY rather than silently dropping the +segment on prereleases (or
-    passing it through on stable versions) — the manifest value is exactly
-    what the tag names (ADR-0041)."""
     with pytest.raises(ReleaseError, match="build metadata is not allowed"):
         bump.to_pep440(annotated)
 
 
 def test_bump_pyproject_normalizes_a_prerelease_to_pep440():
-    """The #807 root cause: a -release-rc semver written verbatim is valid
-    semver but invalid PEP 440 and breaks the source build at the tag. The
-    manifest gets the PEP 440 form; the tag (elsewhere) stays semver."""
     text = '[project]\nname = "x"\nversion = "0.0.0"\n'
     assert bump.bump_pyproject(text, "1.0.0-release-rc") == (
         '[project]\nname = "x"\nversion = "1.0.0rc0"\n'
@@ -335,10 +266,6 @@ def test_bump_pyproject_refuses_an_unmappable_prerelease():
     with pytest.raises(ReleaseError, match="no PEP 440 mapping"):
         bump.bump_pyproject(text, "1.0.0-snapshot.1")
 
-
-# --------------------------------------------------------------------------
-# bump_bundle_config — the artifact-declared hook's rewrite (story 25)
-# --------------------------------------------------------------------------
 
 _TAURI_CONF = """{
   "productName": "demo",
@@ -366,41 +293,26 @@ def test_bump_bundle_config_requires_top_level_version():
 
 
 def test_bump_bundle_config_refuses_a_nested_first_version():
-    """A nested "version" appearing before the top-level member would make the
-    textual rewrite ambiguous — refused, never a silent wrong edit."""
     text = '{"app": {"version": "0.0.9"}, "version": "0.1.0"}'
     with pytest.raises(ReleaseError, match="not the top-level"):
         bump.bump_bundle_config(text, "0.2.0")
 
 
-# --------------------------------------------------------------------------
-# explain_command_failure — the #793 unprovisioned-cargo-edit translation
-# --------------------------------------------------------------------------
-
-
 def test_missing_cargo_set_version_gets_the_reconcile_remedy():
-    """Issue #793: `cargo set-version` dying with cargo's unknown-subcommand
-    error means cargo-edit is unprovisioned — the message names the managed
-    block and the install reconcile, NEVER a run-time install (#582)."""
     message = bump.explain_command_failure(
         ("cargo", "set-version", "--workspace", "1.2.3"),
         "error: no such command: `set-version`",
     )
     assert message is not None
     assert "cargo-edit" in message
-    # A COMMITTING install, not plain tree-mode: only --pr/--local run the
-    # unlocked self-cert solve that regenerates and stages pixi.lock (#793
-    # review, codex); plain `shipit install` leaves the committed lock stale.
     assert "`shipit install --pr`" in message
     assert "`shipit install --local`" in message
     assert "pixi.toml#shipit-rust-release-deps" in message
-    assert "pixi.lock" in message  # the reconcile commit must carry the lock
-    assert "cargo install" not in message  # the superseded #795/#796 shape
+    assert "pixi.lock" in message
+    assert "cargo install" not in message
 
 
 def test_a_different_cargo_set_version_failure_stays_untranslated():
-    """A failing bump for any OTHER reason (broken manifest, dirty workspace)
-    is not the provisioning gap — it re-raises as the original ExecError."""
     assert (
         bump.explain_command_failure(
             ("cargo", "set-version", "--workspace", "1.2.3"),
@@ -411,8 +323,6 @@ def test_a_different_cargo_set_version_failure_stays_untranslated():
 
 
 def test_other_commands_never_match_even_with_the_marker():
-    """The translation is argv-scoped: only the rust adapter's set-version
-    command maps to the cargo-edit remedy, whatever the stderr says."""
     assert (
         bump.explain_command_failure(("npm", "version", "1.2.3"), "no such command")
         is None

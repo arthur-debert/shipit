@@ -1,13 +1,3 @@
-"""LOG02-WS04: verbs + remaining subsystems narrate their lifecycle (ADR-0029).
-
-Convention-level assertions ONLY (PRD glassbox, Testing Decisions): the key
-lifecycle events exist at the conventional level and carry their required flat
-fields — matched by FIELD PRESENCE, never per-message string assertions, so
-wording can evolve without breaking the pin. Covered surfaces: install/reconcile
-actions, gh-setup mutations, the lint orchestration summary, and the verify-apps
-liveness verdict (LOG03-WS03).
-"""
-
 from __future__ import annotations
 
 import logging
@@ -23,25 +13,16 @@ from shipit.verbs import install, lint, verify_apps
 
 
 def _with_fields(records, level, *fields):
-    """Records at ``level`` that carry ALL of ``fields`` as flat attributes."""
     return [
         r for r in records if r.levelno == level and all(hasattr(r, f) for f in fields)
     ]
 
 
-# --------------------------------------------------------------------------
-# install — reconcile writes, the PR milestone, and the failing boundary
-# --------------------------------------------------------------------------
-
-
 class _GhRecorder:
-    """A do-nothing git/PR boundary so install runs against a tmp consumer."""
-
     def __init__(self):
         self.fail_switch = False
 
     def default_branch(self, *, cwd, remote="origin"):
-        # The MODE_PR staging-branch base (#852); a pure query, no side effect.
         return "main"
 
     def fetch(self, *, cwd, remote="origin"):
@@ -55,19 +36,15 @@ class _GhRecorder:
         pass
 
     def read_tree(self, ref, *, cwd, index_file):
-        # The MODE_PR isolated-index seed (#992); a no-op stub here.
         pass
 
     def add(self, paths, *, cwd, index_file=None):
         pass
 
     def rm_cached(self, paths, *, cwd, index_file=None):
-        # The MODE_PR retired-removal staging (#986 review); a no-op stub here.
         pass
 
     def staged_paths(self, paths, *, cwd, index_file=None):
-        # The MODE_PR no-op guard (#991) over the scratch index (#992); the whole
-        # queried set so the commit proceeds.
         return sorted(paths)
 
     def reset_index(self, *, cwd):
@@ -77,7 +54,6 @@ class _GhRecorder:
         pass
 
     def commit_all(self, message, *, cwd, no_verify=False, index_file=None):
-        # The MODE_PR whole-INDEX reconcile commit (#991); a no-op stub here.
         pass
 
     def push(self, branch, *, cwd, remote="origin", force=False, no_verify=False):
@@ -115,8 +91,6 @@ def rec(monkeypatch):
     for name in ("pr_url_for_head", "pr_create"):
         monkeypatch.setattr(gh, name, getattr(r, name))
     monkeypatch.setattr(install_apply, "_shipit_version", lambda: "testhash")
-    # Stub the ADR-0033 self-certification boundaries: these tests pin the
-    # LOGGING spray, not the postconditions (covered in test_install_selfcert).
     from shipit.install import selfcert as _selfcert
 
     monkeypatch.setattr(
@@ -140,12 +114,10 @@ def rec(monkeypatch):
 def test_install_logs_the_write_and_pr_milestones(tmp_path, rec, caplog):
     with caplog.at_level(logging.DEBUG, logger="shipit.install"):
         assert install.run(str(tmp_path), pr=True) == 0
-    # The reconcile milestone: the managed set landed, with the decided counts.
     written = _with_fields(
         caplog.records, logging.INFO, "root", "adds", "updates", "overrides", "seeds"
     )
     assert written and written[0].adds > 0
-    # The PR milestone: the branch and its draft-PR URL, timed.
     pr = _with_fields(caplog.records, logging.INFO, "branch", "url", "duration_ms")
     assert pr and pr[0].branch == install_apply.INSTALL_BRANCH
 
@@ -155,17 +127,6 @@ def test_noop_reinstall_emits_no_mutation_milestone(tmp_path, rec, caplog):
     caplog.clear()
     with caplog.at_level(logging.DEBUG, logger="shipit.install"):
         assert install.run(str(tmp_path)) == 0
-    # Nothing MUTATED, so no mutation milestone narrates at INFO — mechanics
-    # stay at DEBUG. The #434 dev-cycle events (install.started/completed) are
-    # the run's flow narration, not a mutation milestone, so they are excluded.
-    #
-    # Scoped to the install family's own logger (the whole family narrates on
-    # `shipit.install`), because a mutation milestone is BY DEFINITION install's
-    # own record: `caplog` collects the whole process, and a no-op run in a
-    # non-git `tmp_path` also carries `shipit.exec`'s ERROR for the fail-open
-    # `git remote get-url` the session-store seam is allowed to fail on
-    # (TREE03-WS04) — a transport record from a probe, not a milestone, and
-    # absent in any real checkout, where resolving the remote succeeds.
     from shipit.events import EXTRA_KEY
 
     assert not [
@@ -183,11 +144,6 @@ def test_install_boundary_failure_is_an_error_with_the_exception(tmp_path, rec, 
         assert install.run(str(tmp_path), pr=True) == 1
     errors = [r for r in caplog.records if r.levelno == logging.ERROR]
     assert errors and any(r.exc_info for r in errors)
-
-
-# --------------------------------------------------------------------------
-# gh-setup — ruleset/label/secret mutations, and the never-log-a-secret pin
-# --------------------------------------------------------------------------
 
 
 class _FakeGh:
@@ -240,7 +196,6 @@ def test_secret_set_is_logged_by_name_and_the_value_never_appears(
         )
     recs = _with_fields(caplog.records, logging.INFO, "repo", "secret")
     assert recs and recs[0].secret == "A"
-    # The value must never reach a record — message OR any flat field.
     for r in caplog.records:
         assert secret_value not in r.getMessage()
         assert all(secret_value not in str(v) for v in r.__dict__.values())
@@ -256,11 +211,6 @@ def test_unresolvable_secret_degrades_to_warning_with_the_exception(
         )
     warnings = _with_fields(caplog.records, logging.WARNING, "repo", "secret")
     assert warnings and any(r.exc_info for r in warnings)
-
-
-# --------------------------------------------------------------------------
-# lint — the orchestration summary, and a launch failure at ERROR
-# --------------------------------------------------------------------------
 
 
 def _discover(files):
@@ -295,7 +245,6 @@ def test_lint_summary_carries_the_run_fields(tmp_path, caplog):
         "duration_ms",
     )
     assert summaries and summaries[0].rc == 0 and summaries[0].checks > 0
-    # A clean run carries NO failed_checks field — absent, not null-stuffed.
     assert not hasattr(summaries[0], "failed_checks")
 
 
@@ -326,11 +275,6 @@ def test_lint_launch_failure_is_an_error_with_the_exception(tmp_path, caplog):
     assert rc == 1
     errors = _with_fields(caplog.records, logging.ERROR, "lang", "tool", "rc")
     assert errors and any(r.exc_info for r in errors)
-
-
-# --------------------------------------------------------------------------
-# verify-apps — the App-liveness verdict (the report a rollout reads)
-# --------------------------------------------------------------------------
 
 
 def _minted(checks: str | None) -> dict:
@@ -373,11 +317,8 @@ def test_verify_apps_verdict_carries_the_run_fields(capsys, caplog):
     assert verdicts and verdicts[0].repo == "o/r" and verdicts[0].rc == 0
     assert verdicts[0].apps > 0 and verdicts[0].live == verdicts[0].apps
     assert verdicts[0].verdict == verify_apps.VERDICT_LIVE
-    # An all-live run carries NO not_live_apps / unverified_apps field — absent,
-    # not null-stuffed.
     assert not hasattr(verdicts[0], "not_live_apps")
     assert not hasattr(verdicts[0], "unverified_apps")
-    # Per-App passes are mechanics: each probe's outcome lands at DEBUG.
     probes = _with_fields(
         caplog.records, logging.DEBUG, "repo", "agent", "app", "status", "duration_ms"
     )
@@ -392,7 +333,6 @@ def test_verify_apps_failing_verdict_names_the_not_live_apps(capsys, caplog):
     verdicts = _with_fields(caplog.records, logging.INFO, "rc", "not_live_apps")
     assert verdicts and verdicts[0].rc == 1 and verdicts[0].live == 0
     assert verdicts[0].verdict == verify_apps.VERDICT_NOT_LIVE
-    # The probe raising (App not installed) is the failure path: ERROR + exception.
     errors = _with_fields(
         caplog.records, logging.ERROR, "repo", "agent", "app", "status", "duration_ms"
     )
@@ -401,11 +341,6 @@ def test_verify_apps_failing_verdict_names_the_not_live_apps(capsys, caplog):
 
 
 def test_verify_apps_unverified_run_is_recorded_apart_from_a_gap(capsys, caplog):
-    """#969: "nobody could check" is its own record shape, not a not-live one.
-
-    A rollout reads these records; conflating the two is how a fleet concludes its
-    Apps are missing when only the machine running the check is unconfigured.
-    """
     with caplog.at_level(logging.DEBUG, logger="shipit.verifyapps"):
         rc = verify_apps.run("o/r", mint=_mint_unconfigured)
     assert rc == verify_apps.RC_UNVERIFIED
@@ -413,8 +348,6 @@ def test_verify_apps_unverified_run_is_recorded_apart_from_a_gap(capsys, caplog)
     assert verdicts and verdicts[0].verdict == verify_apps.VERDICT_UNVERIFIED
     assert verdicts[0].live == 0
     assert not hasattr(verdicts[0], "not_live_apps")
-    # EXPECTED and operator-actionable: a WARNING with the fact, never an ERROR
-    # carrying a traceback.
     assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
     warnings = _with_fields(
         caplog.records, logging.WARNING, "repo", "agent", "app", "status"
@@ -428,7 +361,6 @@ def test_verify_apps_degraded_permission_is_a_warning(capsys, caplog):
     with caplog.at_level(logging.DEBUG, logger="shipit.verifyapps"):
         rc = verify_apps.run("o/r", agents=["codex"], mint=_mint_degraded)
     assert rc == verify_apps.RC_NOT_LIVE
-    # Reachable but missing checks:write — degraded, so WARNING, not ERROR.
     warnings = _with_fields(
         caplog.records, logging.WARNING, "repo", "agent", "app", "status", "duration_ms"
     )
@@ -451,7 +383,6 @@ def test_verify_apps_no_repo_dead_end_is_an_error_with_the_exception(
 
 
 def test_verify_apps_printed_report_is_unchanged_by_the_spray(capsys, caplog):
-    """The log records are additive: the printed report stays the verb's product."""
     with caplog.at_level(logging.DEBUG, logger="shipit.verifyapps"):
         verify_apps.run("o/r", mint=_mint_live)
     results = [

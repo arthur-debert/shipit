@@ -1,13 +1,3 @@
-"""Review-round record: pure build, disposition seam, store write, service tee.
-
-The record is the persisted product of one review round (RVW02-WS03): findings
-WITH dispositions (routed-out ones included — the Opportunity-harvest seam),
-the coverage attestation, the range reviewed, the invocation, and the
-review-instructions **Variant** — appended to the review-rounds kind of the ONE
-harness store family, never a repo file. The service tee is fail-open: a record
-miss never degrades the review; the posting path is untouched.
-"""
-
 from __future__ import annotations
 
 import json
@@ -70,7 +60,6 @@ def test_record_carries_product_range_invocation_and_round_trips_json():
     assert record["round.range"] == {"base": "a" * 40, "head": "b" * 40}
     assert record["round.reviewer"] == "codex"
     assert record["round.status"] == "REQUEST_CHANGES"
-    # The coverage attestation rides verbatim — silence means "clean", not "skipped".
     assert record["round.coverage"]["skipped"][0]["reason"] == "generated"
     assert record["round.invocation"] == {
         "model": "pro",
@@ -83,21 +72,16 @@ def test_record_carries_product_range_invocation_and_round_trips_json():
     assert finding["severity"] == "major"
     assert finding["disposition"] == "post"
     assert finding["confidence"] == 0.9
-    # One JSONL line — the record must serialize as-is.
     assert json.loads(json.dumps(record)) == record
 
 
 def test_offline_replay_round_has_no_pr():
-    # A range replay touches no PR: the record says so honestly (`round.pr` None)
-    # while still carrying the range it reviewed.
     record = _build(pr=None)
     assert record["round.pr"] is None
     assert record["round.range"] == {"base": "a" * 40, "head": "b" * 40}
 
 
 def test_routed_out_findings_are_recorded_with_their_disposition():
-    # The Opportunity-harvest seam: a dropped finding is RETAINED with its
-    # disposition — the record is never just the posted subset.
     dropped = Finding(severity=Severity.MINOR, text="pre-existing", file="old.py")
     posted = Finding(severity=Severity.MAJOR, text="real", file="src/a.py", line=3)
     record = _build(
@@ -111,19 +95,12 @@ def test_routed_out_findings_are_recorded_with_their_disposition():
 
 
 def test_contributing_runs_ride_verbatim_as_the_ws04_seam():
-    # `round.runs` carries every contributing run's entry (run ids + variant
-    # hashes + per-run usage, RVW03-WS04) verbatim — the eval report's review
-    # axis reads cost straight off the record. The single-pass replay
-    # contributes none; the shape is the fan-out's seam.
     runs = [{"run_id": "agent-a7c77e10", "variant": {"content_hash": "sha256:x"}}]
     assert _build(runs=runs)["round.runs"] == runs
     assert _build()["round.runs"] == []
 
 
 def test_dispositioned_maps_every_comment_to_post_via_the_trust_boundary():
-    # Pre-calibrator, the whole judged output reaches the PR — every finding is
-    # `post`, coerced through the SAME trust boundary the posting path uses (a
-    # malformed severity lands on the `major` fail-safe, not a crash).
     review = {
         "comments": [
             {"file": "a.py", "line": 1, "text": "x", "severity": "nonsense"},
@@ -137,17 +114,12 @@ def test_dispositioned_maps_every_comment_to_post_via_the_trust_boundary():
 
 
 def test_malformed_summary_never_crashes_the_build():
-    # The agy path is schema-unenforced: a non-dict summary/coverage degrades to
-    # None fields, never an exception at the record seam.
     record = _build(review={"summary": "not-a-dict", "comments": []})
     assert record["round.status"] is None
     assert record["round.coverage"] is None
 
 
 def test_record_round_appends_to_the_review_rounds_store(tmp_path, monkeypatch):
-    # The boundary: timestamps, hashes the review INSTRUCTIONS as the round's
-    # variant (the experiment-arm handle), and appends to the review-rounds KIND
-    # of the one store family — repo-keyed, outside any repo tree.
     monkeypatch.setenv("SHIPIT_EVAL_VARIANT_LABEL", "arm-a")
     instructions = tmp_path / "instructions.txt"
     instructions.write_text("review carefully", encoding="utf-8")
@@ -173,11 +145,9 @@ def test_record_round_appends_to_the_review_rounds_store(tmp_path, monkeypatch):
     record = json.loads(line)
     assert record["round.pr"] == 7
     assert record["round.usage"]["duration_ms"] == 99
-    # The variant is the instructions content-hash + the env label: identical
-    # instructions pool across PRs; an edited prompt separates arms.
     assert record["round.variant"]["content_hash"].startswith("sha256:")
     assert record["round.variant"]["label"] == "arm-a"
-    assert record["round.timestamp"]  # stamped at the boundary
+    assert record["round.timestamp"]
 
 
 def _write_round(tmp_path, *, pr, reviewer, head, base="0" * 40):
@@ -196,8 +166,6 @@ def _write_round(tmp_path, *, pr, reviewer, head, base="0" * 40):
 
 
 def test_last_reviewed_head_returns_the_most_recent_differing_head(tmp_path):
-    # The incremental round's fix-range BASE (RVW02-WS06): the head this reviewer
-    # most recently reviewed on this PR, other than the head now being reviewed.
     _write_round(tmp_path, pr=7, reviewer="codex", head="a" * 40)
     _write_round(tmp_path, pr=7, reviewer="codex", head="b" * 40)
     got = roundrecord.last_reviewed_head(
@@ -207,16 +175,16 @@ def test_last_reviewed_head_returns_the_most_recent_differing_head(tmp_path):
         new_head="c" * 40,
         base_dir=tmp_path / "state",
     )
-    assert got == "b" * 40  # the most recent, append order = chronological
+    assert got == "b" * 40
 
 
 def test_last_reviewed_head_scopes_to_pr_and_reviewer_and_excludes_the_new_head(
     tmp_path,
 ):
     _write_round(tmp_path, pr=7, reviewer="codex", head="a" * 40)
-    _write_round(tmp_path, pr=7, reviewer="agy", head="d" * 40)  # other reviewer
-    _write_round(tmp_path, pr=9, reviewer="codex", head="e" * 40)  # other PR
-    _write_round(tmp_path, pr=7, reviewer="codex", head="c" * 40)  # == new_head
+    _write_round(tmp_path, pr=7, reviewer="agy", head="d" * 40)
+    _write_round(tmp_path, pr=9, reviewer="codex", head="e" * 40)
+    _write_round(tmp_path, pr=7, reviewer="codex", head="c" * 40)
     got = roundrecord.last_reviewed_head(
         repo_slug="acme/widget",
         pr=7,
@@ -224,14 +192,10 @@ def test_last_reviewed_head_scopes_to_pr_and_reviewer_and_excludes_the_new_head(
         new_head="c" * 40,
         base_dir=tmp_path / "state",
     )
-    # Only codex@pr7 with head != new_head qualifies → the "a" round.
     assert got == "a" * 40
 
 
 def test_last_reviewed_head_none_when_no_prior_round(tmp_path):
-    # No prior differing-head record → None → the caller plans a full round 1
-    # (fail toward over-reviewing). An offline replay (round.pr is None) never
-    # matches a real PR number, so it can't be mistaken for a prior round.
     _write_round(tmp_path, pr=None, reviewer="codex", head="a" * 40)
     got = roundrecord.last_reviewed_head(
         repo_slug="acme/widget",
@@ -272,11 +236,6 @@ def test_same_instructions_pool_and_edited_instructions_separate(tmp_path):
 
 
 def test_fanout_round_variant_folds_the_dimension_set(tmp_path):
-    """#713: rounds sharing ONE instructions file but running different
-    dimension sets stamp DIFFERENT round.variant hashes (`eval score` can
-    separate the arms); a non-fan-out round (dimension_names None) hashes the
-    instructions alone, exactly as before, so single-pass variants pool with
-    their own history."""
     from shipit.harness.eval.variant import variant_of
     from shipit.review.dimensions import DEFAULT_DIMENSION_NAMES
 
@@ -308,11 +267,8 @@ def test_fanout_round_variant_folds_the_dimension_set(tmp_path):
         dimension_names=DEFAULT_DIMENSION_NAMES,
         dimension_overrides={"correctness": {"model": "o3"}},
     )
-    assert plain == variant_of("same instructions").content_hash  # unchanged path
-    assert len({plain, concern, tiers, overridden}) == 4  # every arm separates
-
-
-# --- the service tee (generate time, fail-open, posting path untouched) --------
+    assert plain == variant_of("same instructions").content_hash
+    assert len({plain, concern, tiers, overridden}) == 4
 
 
 def _tee_ctx(repo="acme/widget"):
@@ -355,30 +311,16 @@ def test_generate_review_tees_a_round_record(monkeypatch, tmp_path):
     assert kwargs["head_sha"] == "b" * 40
     assert kwargs["reviewer"] == "codex"
     assert kwargs["duration_ms"] >= 0
-    # ADR-0052: the default round-1 shape is ONE unscoped monolithic pass — no
-    # dimension slice in the prompt, so no set folds into round.variant (the
-    # instructions file alone is the prompt material, matching the Lab's
-    # `single` shape hashing).
     assert kwargs["dimension_names"] is None
 
 
 def test_generate_review_explicit_dimensions_fold_into_the_record(
     monkeypatch, tmp_path
 ):
-    """#713 still holds behind the opt-in (ADR-0052): a round-1 fan-out
-    forwards its RESOLVED pass set so the record's round.variant folds the
-    dimension prompt material."""
     from shipit.agent import backend as agent_backend
     from shipit.review import service
 
     review = {"summary": {"status": "COMMENT", "overall_feedback": ""}, "comments": []}
-    # ADR-0052 makes `dimensions` the SHAPE SWITCH: forwarding it selects the
-    # fan-out, omitting it runs the default single pass. The record's
-    # `dimension_names` is derived from generate_review's OWN argument, so it
-    # would still fold correctly even if the arg stopped reaching
-    # run_fanout_review (the real review would then run the mislabeled single
-    # pass). Capture the fan-out kwargs and assert the tuple was forwarded, so
-    # this test pins the forwarding, not just the record derivation.
     forwarded: dict = {}
     monkeypatch.setattr(
         service.fanout,
@@ -407,9 +349,6 @@ def test_generate_review_explicit_dimensions_fold_into_the_record(
 def test_generate_review_incremental_rescopes_and_records_the_fix_range(
     monkeypatch, tmp_path
 ):
-    # RVW02-WS06 wiring: given an incremental plan, generate_review re-diffs ctx
-    # to the fix range, runs the fan-out in incremental mode, and the tee records
-    # the fix range (base = last-reviewed head, head = new head) like round 1.
     from shipit.agent import backend as agent_backend
     from shipit.identity import Sha
     from shipit.review import service
@@ -456,21 +395,13 @@ def test_generate_review_incremental_rescopes_and_records_the_fix_range(
     )
     service.generate_review(agent_backend.CODEX, _tee_ctx())
     assert captured["incremental"] is True
-    assert captured["base"] == "d" * 40  # the fan-out saw the fix-range base
+    assert captured["base"] == "d" * 40
     [kw] = written
     assert kw["base_sha"] == "d" * 40 and kw["head_sha"] == "b" * 40
-    # #713: an incremental round ran ONE fix-range pass, not the dimension
-    # set — nothing folds into its round.variant.
     assert kw["dimension_names"] is None
 
 
 def test_generate_review_force_push_fallback_keeps_full_range(monkeypatch, tmp_path):
-    # RVW02-WS06 wiring: a rebase/force-push plan (incremental=False with a
-    # fallback_reason) must NOT rescope — generate_review runs the fan-out in FULL
-    # mode over the resolved view and the tee records the full base..head range,
-    # exactly like round 1. The incremental test above only covers the incremental
-    # plan at this seam; this pins the fallback branch here too, so a regression
-    # that rescoped or narrowed a fallback round would fail.
     from shipit.agent import backend as agent_backend
     from shipit.identity import Sha
     from shipit.review import service
@@ -512,9 +443,9 @@ def test_generate_review_force_push_fallback_keeps_full_range(monkeypatch, tmp_p
         lambda r, **kw: written.append(kw) or tmp_path / "s",
     )
     service.generate_review(agent_backend.CODEX, _tee_ctx())
-    assert rescoped == []  # a full/fallback round never rescopes the view
-    assert captured["incremental"] is False  # the fan-out runs the FULL round
-    assert captured["base"] == "a" * 40  # over the resolved view's full range
+    assert rescoped == []
+    assert captured["incremental"] is False
+    assert captured["base"] == "a" * 40
     [kw] = written
     assert kw["base_sha"] == "a" * 40 and kw["head_sha"] == "b" * 40
 
@@ -538,7 +469,7 @@ def test_tee_failure_is_fail_open_and_never_degrades_the_review(monkeypatch, cap
     monkeypatch.setattr(service.roundrecord, "record_round", _boom)
     with caplog.at_level(logging.WARNING, logger="shipit.review"):
         result = service.generate_review(agent_backend.CODEX, _tee_ctx())
-    assert result == review  # the review is unaffected
+    assert result == review
     assert any("review-round record" in r.getMessage() for r in caplog.records)
 
 
@@ -560,14 +491,10 @@ def test_tee_skips_cleanly_when_ctx_has_no_repo_identity(monkeypatch, caplog):
     )
     with caplog.at_level(logging.WARNING, logger="shipit.review"):
         service.generate_review(agent_backend.CODEX, _tee_ctx(repo=None))
-    assert called == []  # no record — and no crash — for a repo-less ctx
+    assert called == []
 
 
 def test_record_round_persists_calibrator_findings_and_runs(tmp_path):
-    # RVW02-WS04: the PR path passes the Calibrator's REAL routing plus the
-    # contributing runs (every dimension pass + the calibrator, run ids +
-    # variant hashes) — the record retains routed-out findings, never just the
-    # posted subset, and `round.runs` is the eval report's per-run surface.
     findings = [
         JudgedFinding(
             Finding(severity=Severity.MAJOR, text="bug", file="a.py"), Disposition.POST
@@ -576,9 +503,6 @@ def test_record_round_persists_calibrator_findings_and_runs(tmp_path):
             Finding(severity=Severity.NIT, text="style", file="b.py"),
             Disposition.NIT_SUPPRESSED,
         ),
-        # A merged-away duplicate: it carries its twin's `post` disposition but
-        # its `duplicate_of` edge must persist so the report never counts it as
-        # posted (RVW02-WS04 dedup edge).
         JudgedFinding(
             Finding(severity=Severity.MAJOR, text="bug-dup", file="c.py"),
             Disposition.POST,
@@ -631,9 +555,6 @@ def test_record_round_persists_calibrator_findings_and_runs(tmp_path):
 
 
 def test_tee_forwards_the_fanout_findings_and_runs(monkeypatch, tmp_path):
-    # The service tee hands the fan-out's routed findings + run trail through
-    # to the record boundary verbatim — the record can never disagree with the
-    # calibration that produced the posted review.
     from shipit.agent import backend as agent_backend
     from shipit.review import service
 
@@ -663,9 +584,6 @@ def test_tee_forwards_the_fanout_findings_and_runs(monkeypatch, tmp_path):
 
 
 def test_record_round_threads_the_measured_round_token_total(tmp_path):
-    # RVW03-WS04 (#667): `total_tokens` — the sum of the runs' CLI-reported
-    # usage — reaches `round.usage.total_tokens`, and each run's own `usage`
-    # block rides `round.runs` verbatim. No transcript/run_id join involved.
     runs = [
         {
             "run_id": "pass-1",
@@ -702,8 +620,6 @@ def test_record_round_threads_the_measured_round_token_total(tmp_path):
 
 
 def test_tee_threads_the_fanout_round_token_total(monkeypatch, tmp_path):
-    # The generate-time tee forwards the fan-out's measured round total into
-    # the record (RVW03-WS04) — the seam that used to silently drop it (#667).
     from shipit.agent import backend as agent_backend
     from shipit.review import service
 
@@ -724,11 +640,6 @@ def test_tee_threads_the_fanout_round_token_total(monkeypatch, tmp_path):
     service.generate_review(agent_backend.CODEX, _tee_ctx())
     [kw] = written
     assert kw["total_tokens"] == 12000
-
-
-# ---------------------------------------------------------------------------
-# RVW03-WS02 — round.id / round.artifacts + finding↔pass run_id correlation
-# ---------------------------------------------------------------------------
 
 
 def test_build_carries_round_identity_artifacts_and_finding_run_ids():
@@ -759,14 +670,9 @@ def test_build_carries_round_identity_artifacts_and_finding_run_ids():
         artifacts_dir="/state/review-artifacts/owner/repo/round-hex",
         timestamp="2026-01-01T00:00:00+00:00",
     )
-    # Bumped to 4 when RVW03-WS07 added `round.cell` (the field-set convention:
-    # any aggregator reading mixed stores keys off this).
     assert record["round.schema_version"] == 4
     assert record["round.id"] == "round-hex"
     assert record["round.artifacts"] == "/state/review-artifacts/owner/repo/round-hex"
-    # Each persisted finding carries its originating pass's run id (None when
-    # the producing pipeline had no per-pass identity — never erased, never
-    # invented).
     assert [f["run_id"] for f in record["round.findings"]] == ["pass-1", None]
 
 
@@ -796,7 +702,6 @@ def test_dispositioned_stamps_the_single_pass_run_id():
     }
     judged = roundrecord.dispositioned(review, run_id="range-run")
     assert [j.run_id for j in judged] == ["range-run"]
-    # And the default stays correlation-free, exactly as before.
     assert [j.run_id for j in roundrecord.dispositioned(review)] == [None]
 
 

@@ -1,6 +1,3 @@
-"""Unit tests for secret-source resolution — the optional-skip rule, and the
-``doppler`` boundary speaking the Exec runner's result/error contract."""
-
 import pytest
 
 from shipit import execrun, secretsrc
@@ -57,11 +54,6 @@ def test_prompt_without_prompt_fn_raises():
         secretsrc.resolve(src, prompt=None)
 
 
-# --------------------------------------------------------------------------
-# The real doppler boundary — through the Exec runner (faked here)
-# --------------------------------------------------------------------------
-
-
 def _doppler_result(rc: int, stdout: str = "", stderr: str = "") -> execrun.ExecResult:
     return execrun.ExecResult(
         argv=("doppler",), rc=rc, stdout=stdout, stderr=stderr, duration_ms=1
@@ -69,10 +61,6 @@ def _doppler_result(rc: int, stdout: str = "", stderr: str = "") -> execrun.Exec
 
 
 def test_doppler_get_runs_the_canonical_argv_check_false(monkeypatch):
-    # check=False is load-bearing twice over: a nonzero rc is this layer's
-    # SEMANTIC failure, and a completed run's Exec record then carries argv only
-    # — never the secret riding stdout. secret_stdout closes the timeout gap: a
-    # killed fetch's partial stdout is suppressed from the failure record too.
     captured = {}
 
     def fake_run(argv, *, check=True, secret_stdout=False, **kw):
@@ -86,8 +74,6 @@ def test_doppler_get_runs_the_canonical_argv_check_false(monkeypatch):
     assert secretsrc.doppler_get("GH_PAT") == "s3cret"
     assert captured["check"] is False
     assert captured["secret_stdout"] is True
-    # The stated network-ish bound rides the wire (ADR-0028): it EQUALS the
-    # runner's default, but deliberately — stated, never inherited implicitly.
     assert captured["timeout"] == secretsrc.DOPPLER_TIMEOUT
     assert captured["argv"] == [
         "doppler",
@@ -124,8 +110,6 @@ def test_doppler_get_missing_binary_raises_semantic_error(monkeypatch):
 
 
 def test_doppler_get_other_transport_failure_raises_semantic_error(monkeypatch):
-    # A timeout (or any other launch-level failure) also lands as the semantic
-    # error — no raw ExecError escapes the secrets layer.
     def boom(argv, **kw):
         raise execrun.ExecError(argv, rc=None, cause=execrun.CAUSE_TIMEOUT)
 

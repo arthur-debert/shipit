@@ -1,12 +1,3 @@
-"""The pure leg planner (TOL01-WS01) — the ADR-0039 selector/passthrough rules.
-
-Fixture-driven over typed :class:`shipit.config.ToolchainEntry` values, no
-I/O: fan-out order, selector filtering, the unknown-selector error naming the
-known legs, the multi-leg + passthrough + no-selector hard error listing the
-legs, the single-leg no-selector sugar, and the per-path override replacing
-the registry default for its leg only.
-"""
-
 import pytest
 
 from shipit import config
@@ -39,7 +30,6 @@ def test_selector_filters_to_one_toolchains_legs():
 
 
 def test_selector_matches_a_map_path_too():
-    # A repo with several legs of ONE toolchain addresses each by its map path.
     two_crates = (_entry("crates/a", "rust"), _entry("crates/b", "rust"))
     planned = legs.plan_legs(two_crates, tool="test", selector="crates/b")
     assert [leg.path for leg in planned] == ["crates/b"]
@@ -61,7 +51,6 @@ def test_passthrough_forwards_verbatim_to_the_selected_leg():
 
 
 def test_passthrough_without_selector_on_a_multi_leg_repo_is_a_hard_error():
-    # Never a broadcast: the error lists the legs so the fix is one retype.
     with pytest.raises(legs.LegPlanError) as exc_info:
         legs.plan_legs(TAURI_SHAPE, tool="test", passthrough=("-k", "foo"))
     message = str(exc_info.value)
@@ -104,14 +93,9 @@ def test_passthrough_appends_after_an_override_too():
 
 
 def test_empty_map_is_the_empty_fan_out_not_an_index_error():
-    # A public pure function: an empty map fans out to nothing rather than
-    # raising (the verb rejects an empty map earlier, but the planner is
-    # called directly in tests and by future callers).
     assert legs.plan_legs((), tool="test") == ()
 
 
 def test_empty_map_with_passthrough_is_a_clean_usage_error():
-    # The passthrough-needs-a-leg rule, at the empty edge: no leg to append to
-    # is a LegPlanError, never an IndexError on selected[0].
     with pytest.raises(legs.LegPlanError, match="no test legs declared"):
         legs.plan_legs((), tool="test", passthrough=("-k", "foo"))

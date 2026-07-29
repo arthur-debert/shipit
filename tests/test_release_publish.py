@@ -1,19 +1,3 @@
-"""`shipit release publish` — the terminal stage's cores and adapters.
-
-The pure cores (:mod:`shipit.release.publish`) are fixture-tested straight:
-the scar-#3 refusal gate over EVERY upstream-result × stage-liveness
-combination (plus the plan-fact liveness derivations, issue #745), the central
-``-release-rc`` guard, the release-before-derived ordering plan, the crates
-topological order, and the brew render core (:mod:`shipit.release.brew`).
-The adapters are driven with the ONE effectful boundary recorded (PRD
-Testing Decisions): the Exec seam (``run_cmd``/``probe`` — exact command
-lines, exact cwds, exact env) plus fake gh/git adapters, so every
-acceptance assertion — the RC guard's "no external invocation recorded",
-crates' resume-past-published, gh-release's create-vs-edit with the
-prerelease flag re-asserted, brew's unchanged-formula no-op push — reads
-off recorded invocations. Prior art: the bundle stage's recorder tests.
-"""
-
 import functools
 import io
 import itertools
@@ -53,13 +37,6 @@ def _fail(argv, stderr, rc=101):
 
 
 class SeamRecorder:
-    """The recorded Exec seam: exact argv, cwd, env — with scripted answers.
-
-    ``answers`` maps a command head (or an ``argv`` prefix tuple) to either a
-    ready :class:`ExecResult`-factory ``callable(argv) -> ExecResult`` or a
-    static stdout string (wrapped as rc=0). Unscripted commands succeed empty.
-    """
-
     def __init__(self, answers=None):
         self.calls = []
         self.answers = dict(answers or {})
@@ -81,8 +58,6 @@ class SeamRecorder:
 
 
 class FakeGh:
-    """The recorded gh-adapter seam: release calls + repo reads."""
-
     def __init__(self, *, exists=False, private=False, slug="acme/widget"):
         self.calls = []
         self.exists = exists
@@ -117,10 +92,6 @@ class FakeGh:
 
 
 class FakeGit:
-    """The recorded git-adapter seam for the tap push (clone → status →
-    add/commit/push). ``dirty`` scripts the post-copy porcelain answer —
-    the changed-vs-unchanged formula branch."""
-
     def __init__(self, *, dirty=True, root=None):
         self.calls = []
         self.dirty = dirty
@@ -196,15 +167,7 @@ def _request(
     )
 
 
-# --------------------------------------------------------------------------
-# The refusal gate (scar #3, story 32) — every result combination
-# --------------------------------------------------------------------------
-
-
 def _stage_admits(result: str, live: bool) -> bool:
-    """The gate's per-stage contract (issue #745): a LIVE build/bundle must
-    be success; a plan-proven non-live one may be success or skipped;
-    failure/cancelled always block."""
     return result == "success" if live else result in ("success", "skipped")
 
 
@@ -223,10 +186,6 @@ def _stage_admits(result: str, live: bool) -> bool:
 def test_gate_admits_exactly_per_stage_liveness_contract(
     build, bundle, sign, build_live, bundle_live
 ):
-    """The full result × liveness matrix (all 256 combinations): publish
-    proceeds ONLY when build and bundle each satisfy their liveness contract
-    (live → success; non-live → success-or-skipped; failure/cancelled always
-    block) and sign is success-or-skipped regardless of liveness."""
     allowed = (
         _stage_admits(build, build_live)
         and _stage_admits(bundle, bundle_live)
@@ -244,9 +203,6 @@ def test_gate_admits_exactly_per_stage_liveness_contract(
 
 
 def test_gate_defaults_to_live_strict():
-    """Omitted liveness facts keep the strict contract: a skipped
-    build/bundle blocks unless the plan PROVED the stage non-live — the
-    laptop/direct-caller default never weakens the gate."""
     with pytest.raises(ReleaseError, match="live build requires success"):
         publish_mod.check_gate("skipped", "success", "skipped")
     with pytest.raises(ReleaseError, match="live bundle requires success"):
@@ -254,10 +210,6 @@ def test_gate_defaults_to_live_strict():
 
 
 def test_gate_empty_matrix_shape_publishes():
-    """The confirmed #745 shape: an empty-matrix plan drives the composed
-    chain to build=bundle=skipped (the caller job of an if-skipped inner job
-    concludes skipped — canary-confirmed), and the gate accepts it because
-    the plan proves both stages non-live."""
     publish_mod.check_gate(
         "skipped", "skipped", "skipped", build_live=False, bundle_live=False
     )
@@ -270,11 +222,6 @@ def test_gate_refusal_names_every_blocking_input():
     assert "build=failure" in message
     assert "bundle=cancelled" in message
     assert "sign=failure" in message
-
-
-# --------------------------------------------------------------------------
-# The liveness facts (issue #745) — plan JSON verbatim, never result strings
-# --------------------------------------------------------------------------
 
 
 def test_build_is_live_iff_the_plan_matrix_is_non_empty():
@@ -294,44 +241,27 @@ def test_bundle_is_live_iff_the_plan_stages_name_bundle():
 
 @pytest.mark.parametrize("raw", ["", "not json", '{"a":1}'])
 def test_liveness_facts_refuse_malformed_plan_json_loudly(raw):
-    # A garbled fact must never silently read as live OR non-live.
     with pytest.raises(ReleaseError, match="--matrix"):
         publish_mod.build_is_live(raw)
     with pytest.raises(ReleaseError, match="--stages"):
         publish_mod.bundle_is_live(raw)
 
 
-# --------------------------------------------------------------------------
-# The RC guard predicate (story 33)
-# --------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize(
     ("version", "live"),
     [
         ("1.2.3-release-rc", True),
-        ("1.2.3-release-rc.2", True),  # the legacy contains('-release-rc.') arm
-        ("1.2.3-rc.1", False),  # a plain prerelease is NOT live-fire
+        ("1.2.3-release-rc.2", True),
+        ("1.2.3-rc.1", False),
         ("1.2.3", False),
-        ("1.2.3-release-rcx", False),  # suffix must be exact or dotted
+        ("1.2.3-release-rcx", False),
     ],
 )
 def test_is_live_fire(version, live):
     assert publish_mod.is_live_fire(version) is live
 
 
-# --------------------------------------------------------------------------
-# The ordering plan (story 35) + the closed registry
-# --------------------------------------------------------------------------
-
-
 def test_registry_mirrors_the_config_endpoint_set_and_stages():
-    """The closed registry: exactly the config boundary's ENDPOINTS (now
-    including the two VS Code marketplace endpoints, TOL02-WS13, the
-    notify-downstreams cascade, TOL02-WS16, and the conda Artifact-channel
-    producer, ARF01-WS01); brew + notify-downstreams + conda the derived
-    entries; brew + notify-downstreams the stable-only pair (#792 — conda is
-    rc-inclusive, ADR-0064); gh-release the one the RC guard keeps."""
     assert publish_mod.names() == config.ENDPOINTS
     assert [a.name for a in publish_mod.ADAPTERS if a.stage == "derived"] == [
         "brew",
@@ -340,24 +270,17 @@ def test_registry_mirrors_the_config_endpoint_set_and_stages():
         "zed",
     ]
     assert [a.name for a in publish_mod.ADAPTERS if not a.external] == ["gh-release"]
-    # conda is external (a -release-rc live-fire stays gh-release-only) but NOT
-    # stable_only — a plain prerelease still publishes it (rc-inclusive). zed is
-    # stable_only (the registry serves stable versions, ADR-0068), like brew.
     assert [a.name for a in publish_mod.ADAPTERS if a.stable_only] == [
         "brew",
         "notify-downstreams",
         "zed",
     ]
-    # The repo-reading endpoints: brew (asset URLs) + notify-downstreams
-    # (dispatch payload) + conda (per-repo channel root) + zed (submodule rev) —
-    # the verb resolves the source slug only for these.
     assert [a.name for a in publish_mod.ADAPTERS if a.needs_repo] == [
         "brew",
         "notify-downstreams",
         "conda",
         "zed",
     ]
-    # The marketplace endpoints are external (RC-guarded) release-stage entries.
     assert {"vscode-marketplace", "open-vsx"} <= {a.name for a in publish_mod.ADAPTERS}
     for name in ("vscode-marketplace", "open-vsx"):
         adapter = publish_mod.adapter_for(name)
@@ -365,11 +288,6 @@ def test_registry_mirrors_the_config_endpoint_set_and_stages():
 
 
 def test_registry_secret_names_mirror_the_derivation_authority():
-    """Story 43: each adapter's declared secret names ARE
-    `secretreq.ENDPOINT_SECRETS` (the one derivation authority, WS02) — publish
-    consumes that map rather than re-declaring names that could drift from what
-    gh-setup syncs and preflight validates. gh-release declares none (ambient
-    gh auth)."""
     declared = {a.name: a.secrets for a in publish_mod.ADAPTERS}
     assert declared == dict(secretreq_mod.ENDPOINT_SECRETS)
 
@@ -383,8 +301,6 @@ def test_plan_orders_release_endpoints_before_derived():
     )
     dispatched = publish_mod.plan(artifacts, prerelease=False, live_fire=False)
     order = [(d.artifact.name, d.adapter.name) for d in dispatched]
-    # brew is DECLARED FIRST on lex but dispatches LAST: every release-stage
-    # endpoint (declaration order across artifacts) precedes the derived one.
     assert order == [
         ("lex", "crates"),
         ("lex", "gh-release"),
@@ -395,8 +311,6 @@ def test_plan_orders_release_endpoints_before_derived():
 
 
 def test_plan_rc_guard_keeps_only_gh_release():
-    """Story 33: a live-fire cut skips EVERY external endpoint centrally —
-    the skip verdicts are data, one implementation, no per-job YAML."""
     artifacts = _artifacts(
         {"lex": {"endpoints": ["gh-release", "crates", "pypi", "npm", "brew"]}}
     )
@@ -408,8 +322,6 @@ def test_plan_rc_guard_keeps_only_gh_release():
 
 
 def test_plan_prerelease_skips_only_brew():
-    """A plain -rc.N prerelease still publishes externally (testpypi is the
-    staging lane) but NEVER moves the tap formula (stable channel)."""
     artifacts = _artifacts({"lex": {"endpoints": ["gh-release", "crates", "brew"]}})
     dispatched = publish_mod.plan(artifacts, prerelease=True, live_fire=False)
     verdicts = {d.adapter.name: d.skip for d in dispatched}
@@ -430,8 +342,6 @@ def _notify_artifacts(downstreams=("lex-fmt/vscode", "lex-fmt/nvim")):
 
 
 def test_plan_notify_downstreams_is_derived_after_gh_release():
-    """The cascade endpoint is derived: gh-release must land the release
-    before the downstreams are told to rebuild against it (#792)."""
     dispatched = publish_mod.plan(
         _notify_artifacts(), prerelease=False, live_fire=False
     )
@@ -441,10 +351,6 @@ def test_plan_notify_downstreams_is_derived_after_gh_release():
 
 
 def test_plan_notify_downstreams_alone_refuses_without_an_unskipped_gh_release():
-    """notify-downstreams tells the downstreams to rebuild against this
-    release; without an unskipped gh-release in the plan it would notify them
-    of a release that never landed on GitHub — a hard plan refusal, mirroring
-    the brew→gh-release invariant (#792)."""
     artifacts = _artifacts(
         {"parser": {"endpoints": ["notify-downstreams"], "downstreams": ["a/b"]}}
     )
@@ -453,9 +359,6 @@ def test_plan_notify_downstreams_alone_refuses_without_an_unskipped_gh_release()
 
 
 def test_plan_notify_downstreams_skipped_never_trips_the_gh_release_invariant():
-    """The invariant reads the UNSKIPPED set: a prerelease skips
-    notify-downstreams, so a plan without gh-release is valid — the endpoint
-    fires no cascade to strand."""
     artifacts = _artifacts(
         {"parser": {"endpoints": ["notify-downstreams"], "downstreams": ["a/b"]}}
     )
@@ -464,8 +367,6 @@ def test_plan_notify_downstreams_skipped_never_trips_the_gh_release_invariant():
 
 
 def test_plan_prerelease_skips_notify_downstreams():
-    """Fires on REAL releases only: a plain prerelease notifies no one — its
-    own stated reason, distinct from brew's stable-only skip (#792)."""
     dispatched = publish_mod.plan(_notify_artifacts(), prerelease=True, live_fire=False)
     verdicts = {d.adapter.name: d.skip for d in dispatched}
     assert verdicts["gh-release"] is None
@@ -473,8 +374,6 @@ def test_plan_prerelease_skips_notify_downstreams():
 
 
 def test_plan_live_fire_skips_notify_downstreams_via_rc_guard():
-    """An rc live-fire cut skips it as an external endpoint — the RC guard
-    wins over the stable-only skip (checked first), keeping only gh-release."""
     dispatched = publish_mod.plan(_notify_artifacts(), prerelease=True, live_fire=True)
     verdicts = {d.adapter.name: d.skip for d in dispatched}
     assert verdicts["gh-release"] is None
@@ -482,8 +381,6 @@ def test_plan_live_fire_skips_notify_downstreams_via_rc_guard():
 
 
 def test_plan_unknown_endpoint_is_a_hard_error_naming_the_known_set():
-    """The config boundary already rejects unknown names; the registry
-    re-refuses for hand-built artifacts — never a quiet skip."""
     rogue = config.Artifact(name="ext", endpoints=("zed-extensions",))
     with pytest.raises(ReleaseError, match="unknown endpoint") as err:
         publish_mod.plan([rogue], prerelease=False, live_fire=False)
@@ -493,17 +390,12 @@ def test_plan_unknown_endpoint_is_a_hard_error_naming_the_known_set():
 
 
 def test_plan_brew_alone_refuses_without_an_unskipped_gh_release():
-    """The brew formula points at gh-release assets; a brew endpoint with no
-    unskipped gh-release in the plan would push a formula referencing a release
-    this run never created — a hard plan refusal, not a broken tap."""
     artifacts = _artifacts({"lex": {"endpoints": ["brew"]}})
     with pytest.raises(ReleaseError, match="brew endpoint renders a formula"):
         publish_mod.plan(artifacts, prerelease=False, live_fire=False)
 
 
 def test_plan_brew_with_gh_release_on_any_artifact_is_valid():
-    """One unskipped gh-release (any artifact) uploads the whole asset tree, so
-    it satisfies every brew formula's asset URLs — the invariant is plan-wide."""
     artifacts = _artifacts(
         {"lex": {"endpoints": ["brew"]}, "core": {"endpoints": ["gh-release"]}}
     )
@@ -515,24 +407,12 @@ def test_plan_brew_with_gh_release_on_any_artifact_is_valid():
 
 
 def test_plan_brew_needs_gh_release_unskipped_not_merely_present(tmp_path):
-    """A prerelease that skips brew never trips the invariant; but a stable cut
-    whose only gh-release was RC-skipped would — the check reads the UNSKIPPED
-    set. Here brew is skipped by the prerelease rule, so the plan is valid even
-    without gh-release."""
     artifacts = _artifacts({"lex": {"endpoints": ["brew"]}})
     dispatched = publish_mod.plan(artifacts, prerelease=True, live_fire=False)
     assert dispatched[0].skip == publish_mod.SKIP_STABLE_ONLY
 
 
-# --------------------------------------------------------------------------
-# --endpoint selector (ARF02-WS01 #1000, ADR-0070) — a plan-level filter
-# --------------------------------------------------------------------------
-
-
 def _seed_artifacts():
-    """The ADR-0070 motivating shape: one repo whose sibling artifacts declare
-    the channel endpoint (conda) alongside irreversible third-party registries
-    (crates, npm) — all fired today by the same event."""
     return _artifacts(
         {
             "lexd": {"endpoints": ["gh-release", "crates", "conda"]},
@@ -542,8 +422,6 @@ def _seed_artifacts():
 
 
 def test_plan_absent_selector_fires_the_full_plan():
-    """`selector=None` — what an absent --endpoint parses to — is today's
-    behavior EXACTLY: nothing is selector-skipped (ADR-0070)."""
     dispatched = publish_mod.plan(
         _seed_artifacts(), prerelease=True, live_fire=False, selector=None
     )
@@ -551,10 +429,6 @@ def test_plan_absent_selector_fires_the_full_plan():
 
 
 def test_plan_selector_seeds_the_channel_without_collateral():
-    """The ADR-0070 headline: a plain prerelease + `--endpoint gh-release
-    --endpoint conda` publishes the complete Release and the .conda, while the
-    live third-party registries record their OWN selector skip — the seed the
-    Artifact channel was previously unable to make without collateral."""
     dispatched = publish_mod.plan(
         _seed_artifacts(),
         prerelease=True,
@@ -566,15 +440,10 @@ def test_plan_selector_seeds_the_channel_without_collateral():
     assert verdicts["conda"] is None
     assert verdicts["crates"] == publish_mod.SKIP_SELECTOR
     assert verdicts["npm"] == publish_mod.SKIP_SELECTOR
-    # The skip is DATA on the plan, so the preview states it before anything
-    # external happens — the distinct reason, not the RC guard's.
     assert publish_mod.SKIP_SELECTOR != publish_mod.SKIP_RC_GUARD
 
 
 def test_plan_selector_cannot_deselect_gh_release():
-    """gh-release IS the Release, not a distribution channel: the selector
-    narrows distribution only, so deselecting it is refused rather than
-    producing the partial release ADR-0009 exists to prevent."""
     with pytest.raises(ReleaseError, match="cannot deselect `gh-release`"):
         publish_mod.plan(
             _seed_artifacts(), prerelease=True, live_fire=False, selector=["conda"]
@@ -582,8 +451,6 @@ def test_plan_selector_cannot_deselect_gh_release():
 
 
 def test_plan_selector_unknown_endpoint_is_loud_and_names_the_known_set():
-    """A misspelling must never be a silent no-op that publishes nothing
-    (ADR-0070): the closed registry validates the selector."""
     with pytest.raises(ReleaseError, match="unknown endpoint") as err:
         publish_mod.plan(
             _seed_artifacts(),
@@ -592,15 +459,10 @@ def test_plan_selector_unknown_endpoint_is_loud_and_names_the_known_set():
             selector=["gh-release", "conda-forge"],
         )
     assert "`conda-forge`" in str(err.value)
-    # Derived from the registry, not hard-coded: the point is that the known set
-    # is NAMED, not that it has a particular order — a new endpoint must not
-    # break this test.
     assert ", ".join(publish_mod.names()) in str(err.value)
 
 
 def test_plan_selector_undeclared_endpoint_is_loud():
-    """The silent no-op in its most confusing form: a registry-VALID endpoint
-    no artifact declares would publish everything but what was asked for."""
     with pytest.raises(ReleaseError, match="which no artifact in this repo declares"):
         publish_mod.plan(
             _seed_artifacts(),
@@ -611,10 +473,6 @@ def test_plan_selector_undeclared_endpoint_is_loud():
 
 
 def test_plan_selector_derived_endpoint_without_its_base_is_refused():
-    """Selecting a derived endpoint whose base is absent from the plan is
-    REFUSED, not silently repaired — ADR-0009's release-before-derived ordering
-    holds under the selector (brew's gh-release invariant; conda is exempt under
-    conda-direct, ADR-0077, so brew carries this coverage now)."""
     artifacts = _artifacts({"lexd": {"endpoints": ["brew", "crates"]}})
     with pytest.raises(ReleaseError, match="a brew endpoint renders"):
         publish_mod.plan(
@@ -623,10 +481,6 @@ def test_plan_selector_derived_endpoint_without_its_base_is_refused():
 
 
 def test_plan_selector_intersects_with_the_rc_guard():
-    """The guards compose by INTERSECTION: a -release-rc cut still skips every
-    external endpoint including a SELECTED conda, so the selector can never
-    resurrect a live-fire rehearsal into a real publish (a seed uses an
-    ordinary prerelease tag). The guard's reason is the one stated."""
     dispatched = publish_mod.plan(
         _seed_artifacts(),
         prerelease=True,
@@ -639,8 +493,6 @@ def test_plan_selector_intersects_with_the_rc_guard():
 
 
 def test_plan_selector_intersects_with_the_stable_only_rule():
-    """A selected stable_only endpoint on a prerelease keeps its OWN reason:
-    the selector adds skips, it never removes one."""
     artifacts = _artifacts({"lex": {"endpoints": ["gh-release", "brew", "crates"]}})
     dispatched = publish_mod.plan(
         artifacts, prerelease=True, live_fire=False, selector=["gh-release", "brew"]
@@ -651,8 +503,6 @@ def test_plan_selector_intersects_with_the_stable_only_rule():
 
 
 def test_plan_selector_keeps_the_two_stage_ordering():
-    """The selector is a FILTER, not a reordering: release-stage endpoints
-    still precede derived ones, skips included (story 35)."""
     dispatched = publish_mod.plan(
         _seed_artifacts(),
         prerelease=True,
@@ -668,7 +518,6 @@ def test_missing_secrets_reports_planned_unskipped_dispatches_only():
         {"lex": {"endpoints": ["gh-release", "crates", "npm", "brew"]}}
     )
     live = publish_mod.plan(artifacts, prerelease=True, live_fire=True)
-    # RC guard active: externals are skipped, so NO tokens are required.
     assert publish_mod.missing_secrets(live, {}, testpypi=False) == ()
     final = publish_mod.plan(artifacts, prerelease=False, live_fire=False)
     missing = publish_mod.missing_secrets(final, {}, testpypi=False)
@@ -689,11 +538,6 @@ def test_required_env_keys_testpypi_swaps_the_pypi_token():
     )
 
 
-# --------------------------------------------------------------------------
-# gh-release — create-or-edit + asset upload
-# --------------------------------------------------------------------------
-
-
 def _staged_assets(tmp_path, names):
     dist = tmp_path / "dist"
     dist.mkdir(parents=True, exist_ok=True)
@@ -703,8 +547,6 @@ def _staged_assets(tmp_path, names):
 
 
 def _pyproject(dir_path, name):
-    """A minimal ``pyproject.toml`` naming the distribution — what the pypi
-    adapter reads to scope its upload to this artifact."""
     dir_path.mkdir(parents=True, exist_ok=True)
     (dir_path / "pyproject.toml").write_text(
         f'[project]\nname = "{name}"\nversion = "0"\n', encoding="utf-8"
@@ -717,8 +559,8 @@ def test_gh_release_creates_with_prerelease_from_the_suffix_and_uploads(tmp_path
         tmp_path,
         [
             f"lex-{MAC_ARM}.tar.gz",
-            "lex.unsigned-app.tar.gz",  # the reseal payload never ships
-            ".DS_Store",  # hidden files never ship
+            "lex.unsigned-app.tar.gz",
+            ".DS_Store",
         ],
     )
     ghio = FakeGh(exists=False)
@@ -732,7 +574,7 @@ def test_gh_release_creates_with_prerelease_from_the_suffix_and_uploads(tmp_path
         "create",
         "v1.2.3-rc.1",
         str(tmp_path / "RELEASE_NOTES.md"),
-        True,  # prerelease derived from the semver suffix
+        True,
     )
     kind, tag, files = ghio.calls[2]
     assert (kind, tag) == ("upload", "v1.2.3-rc.1")
@@ -741,9 +583,6 @@ def test_gh_release_creates_with_prerelease_from_the_suffix_and_uploads(tmp_path
 
 
 def test_gh_release_resume_edits_and_reasserts_the_prerelease_flag(tmp_path):
-    """The release#726 scar: `gh release edit` leaves the prerelease flag
-    unchanged unless passed — the resume path states it explicitly (False
-    for a final), and edits rather than duplicating."""
     (tmp_path / "RELEASE_NOTES.md").write_text("notes\n", encoding="utf-8")
     ghio = FakeGh(exists=True)
     artifact = _artifacts({"lex": {"endpoints": ["gh-release"]}})[0]
@@ -759,11 +598,6 @@ def test_gh_release_without_the_notes_file_refuses(tmp_path):
     artifact = _artifacts({"lex": {"endpoints": ["gh-release"]}})[0]
     with pytest.raises(ReleaseError, match="no notes file"):
         publish_mod._publish_gh_release(_request(tmp_path, artifact))
-
-
-# --------------------------------------------------------------------------
-# crates — topological order + already-published resume (story 36)
-# --------------------------------------------------------------------------
 
 
 def _cargo_metadata(
@@ -782,8 +616,6 @@ def _cargo_metadata(
                 "id": f"id-{name}",
                 "name": name,
                 "dependencies": dependencies,
-                # cargo metadata renders `publish = false` as `[]`; the
-                # publish-anywhere default is `null`.
                 "publish": [] if name in unpublished else None,
             }
         )
@@ -803,8 +635,6 @@ def test_crates_publish_order_is_topological_with_stable_ties():
 
 
 def test_crates_publish_order_ignores_dev_dependency_cycles():
-    """A lib's test helper depending back on the lib is legal and must not
-    read as a publish cycle — dev-dependencies are excluded."""
     metadata = json.loads(
         _cargo_metadata({"core": [], "helper": ["core"]}, dev={"core": ["helper"]})
     )
@@ -812,11 +642,6 @@ def test_crates_publish_order_ignores_dev_dependency_cycles():
 
 
 def test_crates_publish_order_excludes_publish_false_members():
-    """A `publish = false` workspace member (test helper, example crate) must
-    not appear in the derived order — a real publish would abort on it
-    (issue #849, found by the standout ADP02-WS08 cutover). Dependents may
-    still dev-depend on it; that link is already excluded as a dev-dep, and
-    the member itself is dropped even when publishable crates sort after it."""
     metadata = json.loads(
         _cargo_metadata(
             {"app": ["core"], "core": [], "test-helper": ["core"]},
@@ -827,8 +652,6 @@ def test_crates_publish_order_excludes_publish_false_members():
 
 
 def test_crates_publish_order_keeps_registry_restricted_members():
-    """`publish = ["some-registry"]` restricts WHERE a crate may go; only the
-    empty list (`publish = false`) means never-publish and is excluded."""
     metadata = json.loads(_cargo_metadata({"core": []}))
     metadata["packages"][0]["publish"] = ["my-registry"]
     assert publish_mod.crates_publish_order(metadata) == ("core",)
@@ -841,9 +664,6 @@ def test_crates_publish_order_refuses_a_real_cycle():
 
 
 def test_crates_publishes_in_order_and_resumes_past_already_published(tmp_path):
-    """Mid-workspace resumption: crate `core` is already on the registry
-    (a prior partial run) — cargo's nonzero already-uploaded answer is
-    SUCCESS and the walk continues to the dependents."""
     artifact = _artifacts(
         {
             "lex": {
@@ -878,9 +698,6 @@ def test_crates_publishes_in_order_and_resumes_past_already_published(tmp_path):
         ("cargo", "publish", "-p", "core"),
         ("cargo", "publish", "-p", "app"),
     ]
-    # The registry token rides the child env (never argv, never the ambient
-    # process env) — so an injected `env` authenticates the publish, exactly
-    # like the pypi/npm adapters.
     assert [env for _, _, env in probe.calls] == [
         {"CARGO_REGISTRY_TOKEN": "tok"},
         {"CARGO_REGISTRY_TOKEN": "tok"},
@@ -917,19 +734,14 @@ def test_crates_without_a_rust_leg_refuses(tmp_path):
         publish_mod._publish_crates(req)
 
 
-# --------------------------------------------------------------------------
-# pypi — wheel+sdist selection, --skip-existing, the testpypi lane
-# --------------------------------------------------------------------------
-
-
 def test_pypi_uploads_selects_the_named_distribution_wheel_and_sdist_only():
     names = [
         "pkg-1.0.0-py3-none-any.whl",
         "pkg-1.0.0.tar.gz",
-        "other_pkg-2.0.0-py3-none-any.whl",  # another artifact's wheel
-        "other_pkg-2.0.0.tar.gz",  # ...and its sdist: both out of scope
-        f"lex-{LINUX}.tar.gz",  # an archive-composition tarball: NOT python
-        "pkg-9.9.9.tar.gz",  # an sdist with no matching wheel: not selected
+        "other_pkg-2.0.0-py3-none-any.whl",
+        "other_pkg-2.0.0.tar.gz",
+        f"lex-{LINUX}.tar.gz",
+        "pkg-9.9.9.tar.gz",
     ]
     assert publish_mod.pypi_uploads(names, "pkg") == (
         "pkg-1.0.0-py3-none-any.whl",
@@ -938,9 +750,6 @@ def test_pypi_uploads_selects_the_named_distribution_wheel_and_sdist_only():
 
 
 def test_pypi_uploads_matches_a_legacy_hyphenated_sdist_canonically():
-    """A wheel PEP 427-escapes the dist name to underscores, but a legacy
-    sdist may keep the original hyphens/dots — the match is canonical, so the
-    sdist is still selected (never silently skipped)."""
     names = [
         "my_awesome_pkg-1.0.0-py3-none-any.whl",
         "my-awesome-pkg-1.0.0.tar.gz",
@@ -952,9 +761,6 @@ def test_pypi_uploads_matches_a_legacy_hyphenated_sdist_canonically():
 
 
 def test_pypi_scopes_the_upload_to_the_artifact_distribution(tmp_path):
-    """A multi-artifact bundle tree carries another artifact's wheel; publish
-    uploads ONLY this artifact's distribution — never leaks a foreign wheel to
-    the index under this token (registry publishes are irreversible)."""
     dist = _staged_assets(
         tmp_path,
         [
@@ -1050,12 +856,6 @@ def test_pypi_pyproject_without_a_name_refuses(tmp_path):
         publish_mod._publish_pypi(req)
 
 
-# --------------------------------------------------------------------------
-# npm — the staged tarball IS the artifact, no rebuild, publish-over-existing
-# is success (TOL02-WS12 #788)
-# --------------------------------------------------------------------------
-
-
 def _stage_npm_tarball(tmp_path, name):
     dist = tmp_path / "dist"
     dist.mkdir(parents=True, exist_ok=True)
@@ -1064,9 +864,6 @@ def _stage_npm_tarball(tmp_path, name):
 
 
 def test_npm_publishes_the_staged_tarball_without_rebuilding(tmp_path):
-    # The declared npm package name (`product-name`) flattens to the `npm pack`
-    # tarball name (`@lex-fmt/lex-wasm` -> `lex-fmt-lex-wasm-<version>.tgz`),
-    # and that same declaration scopes the publish to THIS artifact's tarball.
     (artifact,) = _artifacts(
         {"wasm": {"product-name": "@lex-fmt/lex-wasm", "endpoints": ["npm"]}}
     )
@@ -1075,18 +872,15 @@ def test_npm_publishes_the_staged_tarball_without_rebuilding(tmp_path):
     req = _request(
         tmp_path,
         artifact,
-        env={"NPM_TOKEN": "npm-tok"},  # looked up under the secret name
+        env={"NPM_TOKEN": "npm-tok"},
         probe=probe,
     )
 
     published = publish_mod._publish_npm(req)
 
     argv, cwd, env = probe.calls[0]
-    # the STAGED tarball (an absolute path), never a rebuild from a source tree
     assert argv == ("npm", "publish", str(tarball), "--ignore-scripts")
     assert cwd == tmp_path
-    # ...and the token is fed to npm under the var npm reads (NODE_AUTH_TOKEN),
-    # not the secret name — the two-vocabulary indirection secretreq owns.
     assert env == {"NODE_AUTH_TOKEN": "npm-tok"}
     assert published.actions == (
         "published @lex-fmt/lex-wasm 1.2.3 (lex-fmt-lex-wasm-1.2.3.tgz)",
@@ -1094,8 +888,6 @@ def test_npm_publishes_the_staged_tarball_without_rebuilding(tmp_path):
 
 
 def test_npm_missing_staged_tarball_is_a_loud_refusal(tmp_path):
-    # No tarball staged -> the bundle stage never ran (or the name mismatched);
-    # publish refuses loudly rather than a silent no-op or scanning the tree.
     (artifact,) = _artifacts(
         {"wasm": {"product-name": "@lex-fmt/lex-wasm", "endpoints": ["npm"]}}
     )
@@ -1128,18 +920,11 @@ def test_npm_publish_over_existing_is_success(tmp_path):
     assert published.actions == ("@lex-fmt/lex-wasm 1.2.3 already published — resumed",)
 
 
-# --------------------------------------------------------------------------
-# vscode-marketplace / open-vsx — per-target .vsix publish (external, RC-guarded)
-# --------------------------------------------------------------------------
-
-
 def _stage_vsix(assets_dir: Path, *names: str) -> None:
-    """Drop empty per-target .vsix files (plus a non-vsix asset) in the staged
-    tree — the bundle stage's vsix-composition output the endpoints publish."""
     assets_dir.mkdir(parents=True, exist_ok=True)
     for name in names:
-        (assets_dir / name).write_bytes(b"PK\x03\x04")  # a zip magic; content unused
-    (assets_dir / "ext-linux-x64.tar.gz").write_bytes(b"")  # never a .vsix upload
+        (assets_dir / name).write_bytes(b"PK\x03\x04")
+    (assets_dir / "ext-linux-x64.tar.gz").write_bytes(b"")
 
 
 def test_vsix_uploads_selects_only_the_vsix_files():
@@ -1151,15 +936,10 @@ def test_vsix_uploads_selects_only_the_vsix_files():
 
 
 def test_vsix_uploads_scopes_to_the_artifact_never_a_sibling():
-    # A multi-artifact release coalesces every artifact's .vsix into one
-    # assets_dir; publish must ship only THIS artifact's outputs. Both the
-    # `<artifact>-` prefix AND the `<vsce-target>` middle must match — a
-    # sibling extension's .vsix (or one whose name merely starts the same) is
-    # never shipped under this artifact's endpoint/token.
     names = [
-        "ext-darwin-arm64.vsix",  # this artifact
-        "other-darwin-arm64.vsix",  # a sibling extension
-        "ext-9.9.9.vsix",  # `ext-`-prefixed but not a vsce target middle
+        "ext-darwin-arm64.vsix",
+        "other-darwin-arm64.vsix",
+        "ext-9.9.9.vsix",
     ]
     assert publish_mod.vsix_uploads(names, "ext") == ("ext-darwin-arm64.vsix",)
 
@@ -1175,8 +955,6 @@ def test_vscode_marketplace_publishes_each_staged_vsix(tmp_path):
 
     published = publish_mod._publish_vscode_marketplace(req)
 
-    # One `npm exec -- vsce publish` per staged .vsix, sorted, --packagePath at
-    # the staged path; vsce rides `npm exec` (the node_modules/.bin dep).
     argv0, cwd0, env0 = probe.calls[0]
     assert argv0 == (
         "npm",
@@ -1187,9 +965,7 @@ def test_vscode_marketplace_publishes_each_staged_vsix(tmp_path):
         "--packagePath",
         str(req.assets_dir / "ext-darwin-arm64.vsix"),
     )
-    # Runs from the npm leg dir — vsce reads that leg's package.json manifest.
     assert cwd0 == tmp_path / "editors/vscode"
-    # Token rides the env under the var vsce reads (VSCE_PAT), never argv.
     assert env0 == {"VSCE_PAT": "pat-tok"}
     assert [c[0][-1] for c in probe.calls] == [
         str(req.assets_dir / "ext-darwin-arm64.vsix"),
@@ -1263,8 +1039,6 @@ def test_open_vsx_publishes_with_ovsx_and_its_own_token(tmp_path):
     published = publish_mod._publish_open_vsx(req)
 
     argv0, cwd0, env0 = probe.calls[0]
-    # ovsx rides `npm exec` and takes the .vsix positionally (no --packagePath),
-    # token under OVSX_PAT; runs from the npm leg dir.
     assert argv0 == (
         "npm",
         "exec",
@@ -1280,9 +1054,6 @@ def test_open_vsx_publishes_with_ovsx_and_its_own_token(tmp_path):
 
 
 def test_open_vsx_publish_over_existing_is_success(tmp_path):
-    # The ovsx path shares the idempotent-resume rule (already-published stderr
-    # is success) — covered independently of vscode-marketplace so a regression
-    # in the ovsx argv/token leg cannot hide behind the vsce tests.
     artifact = _artifacts({"ext": {"endpoints": ["open-vsx"]}})[0]
     entries = _entries({"editors/vscode": "npm"})
     probe = SeamRecorder(
@@ -1329,10 +1100,6 @@ def test_open_vsx_missing_token_refuses(tmp_path):
 
 
 def test_marketplace_endpoints_refuse_without_an_npm_leg(tmp_path):
-    # Both marketplace adapters run from the npm leg dir (vsce/ovsx are the
-    # extension's node_modules/.bin devDependencies, and `vsce publish` reads
-    # the leg's package.json). With a token present but no npm leg mapped, the
-    # leg resolution is a loud refusal — never a silent run from req.root.
     for endpoint, token, publish in (
         ("vscode-marketplace", "VSCE_PAT", publish_mod._publish_vscode_marketplace),
         ("open-vsx", "OVSX_PAT", publish_mod._publish_open_vsx),
@@ -1345,9 +1112,6 @@ def test_marketplace_endpoints_refuse_without_an_npm_leg(tmp_path):
 
 
 def test_plan_rc_guard_skips_both_marketplace_endpoints(tmp_path):
-    """A -release-rc live-fire cut keeps ONLY gh-release: the two marketplace
-    endpoints are external, so the RC guard skips them (rc = gh-release only —
-    the WS13 acceptance: marketplace honors the RC guard)."""
     artifacts = _artifacts(
         {"ext": {"endpoints": ["gh-release", "vscode-marketplace", "open-vsx"]}}
     )
@@ -1358,10 +1122,6 @@ def test_plan_rc_guard_skips_both_marketplace_endpoints(tmp_path):
         skip = next(d.skip for d in dispatched if d.adapter.name == name)
         assert skip == publish_mod.SKIP_RC_GUARD
 
-
-# --------------------------------------------------------------------------
-# brew — render, syntax check, tap push (derived; unchanged = no-op)
-# --------------------------------------------------------------------------
 
 _BREW_METADATA = json.dumps(
     {
@@ -1408,7 +1168,6 @@ def test_brew_renders_against_final_asset_urls_and_shas_and_pushes(tmp_path):
     published = publish_mod._publish_brew(req)
 
     rendered = (tmp_path / "dist" / "brew" / "lex.rb").read_text(encoding="utf-8")
-    # Final release-asset URLs (the derived-stage contract) + local sha256s.
     assert (
         f"https://github.com/acme/widget/releases/download/v1.2.3/lex-{MAC_ARM}.tar.gz"
         in rendered
@@ -1420,13 +1179,10 @@ def test_brew_renders_against_final_asset_urls_and_shas_and_pushes(tmp_path):
         (tmp_path / "dist" / f"lex-{MAC_ARM}.tar.gz").read_bytes()
     ).hexdigest()
     assert expected_sha in rendered
-    # The wheel-ish tarball never reads as a target triple.
     assert "pkg-1.0.0" not in rendered
-    # ruby -c syntax-checked the rendered file through the exec seam.
     assert ("ruby", "-c", str(tmp_path / "dist" / "brew" / "lex.rb")) in [
         argv for argv, _, _ in run_cmd.calls
     ]
-    # Tap push: token-authenticated clone, identity stated, formula committed.
     kinds = [call[0] for call in gitio.calls]
     assert kinds == ["clone", "status", "identity", "add", "commit", "push"]
     assert (
@@ -1443,7 +1199,7 @@ def test_brew_unchanged_formula_is_a_noop_push(tmp_path):
     published = publish_mod._publish_brew(req)
 
     kinds = [call[0] for call in gitio.calls]
-    assert kinds == ["clone", "status"]  # no add, no commit, no push
+    assert kinds == ["clone", "status"]
     assert any("unchanged — nothing to push" in a for a in published.actions)
 
 
@@ -1465,9 +1221,6 @@ def test_brew_without_archives_refuses(tmp_path):
 
 
 def test_brew_refuses_an_unresolved_source_repo(tmp_path):
-    """The verb resolves the source slug for a live needs_repo dispatch; a
-    direct caller that omits it gets a loud ReleaseError (not a strippable
-    assert) — the formula's asset URLs need the `owner/name`."""
     artifact = _artifacts({"lex": {"endpoints": ["brew"]}})[0]
     req = _request(tmp_path, artifact, env={"HOMEBREW_TAP_TOKEN": "tok"}, repo=None)
     with pytest.raises(ReleaseError, match="no source repo resolved"):
@@ -1486,14 +1239,11 @@ def test_brew_render_core():
     )
     assert "class LexCli < Formula" in text
     assert "on_arm do" in text and "on_intel do" in text
-    assert "on_linux" not in text  # no linux target: no empty block
+    assert "on_linux" not in text
     assert 'bin.install "lex-cli"' in text
 
 
 def test_brew_render_escapes_ruby_string_metadata():
-    """Metadata carrying a double quote, a backslash, or a ``#{`` interpolation
-    still renders a formula ``ruby -c`` accepts — the literals are escaped, so
-    a valid crate description never breaks the tap publish."""
     text = brew_mod.render(
         binary="lex-cli",
         version="1.2.3",
@@ -1504,8 +1254,6 @@ def test_brew_render_escapes_ruby_string_metadata():
         private=False,
     )
     assert r'desc "He said \"hi\" \\ and used \#{ENV}"' in text
-    # Every inner double quote is backslash-escaped (no bare `"` closes the
-    # literal early) and the interpolation is defused.
     desc_line = next(
         line for line in text.splitlines() if line.strip().startswith("desc ")
     )
@@ -1520,10 +1268,6 @@ def test_brew_metadata_for_hard_errors_on_missing_fields():
     with pytest.raises(ReleaseError, match="missing description"):
         brew_mod.metadata_for(metadata, artifact)
 
-
-# --------------------------------------------------------------------------
-# The verb — gate first, RC guard through the exec seam, ordering, tokens
-# --------------------------------------------------------------------------
 
 REPO_TOML = """
 [toolchains]
@@ -1553,8 +1297,6 @@ def _spec(raw):
 
 
 def test_publish_gate_refusal_dispatches_nothing(tmp_path, monkeypatch, capsys):
-    """Story 32, all-blocking: a failed bundle refuses BEFORE any read or
-    dispatch — no git, no gh, no exec invocation recorded."""
     _publish_repo(tmp_path, monkeypatch)
     recorder = SeamRecorder()
     ghio = FakeGh()
@@ -1585,8 +1327,6 @@ def test_publish_failed_sign_blocks_and_skipped_sign_passes_the_gate():
         publish_mod.check_gate("success", "success", "failure")
 
 
-#: The no-build "tag is the release" map (issue #745): endpoints only —
-#: preflight plans an empty matrix and no bundle stage for it.
 TAG_ONLY_TOML = """
 [artifacts.lex]
 endpoints = ["gh-release"]
@@ -1596,10 +1336,6 @@ endpoints = ["gh-release"]
 def test_publish_verb_accepts_the_empty_matrix_skipped_results(
     tmp_path, monkeypatch, capsys
 ):
-    """The confirmed #745 chain shape end-to-end at the verb: the composed
-    caller passes build=bundle=skipped (the if-skipped wf-build caller job's
-    result, canary-confirmed) plus the plan facts verbatim — an empty matrix
-    and a bundle-less stages list — and publish proceeds to gh-release."""
     _publish_repo(tmp_path, monkeypatch, toml=TAG_ONLY_TOML)
     recorder = SeamRecorder()
     ghio = FakeGh(exists=False)
@@ -1620,8 +1356,6 @@ def test_publish_verb_accepts_the_empty_matrix_skipped_results(
     )
 
     assert rc == 0
-    # The tag IS the release: a notes-only GH release, no staged assets, no
-    # external endpoint touched.
     assert ("create", "v1.2.3", str(tmp_path / "RELEASE_NOTES.md"), False) in (
         ghio.calls
     )
@@ -1631,8 +1365,6 @@ def test_publish_verb_accepts_the_empty_matrix_skipped_results(
 
 
 def test_publish_verb_still_refuses_a_live_skipped_build(tmp_path, monkeypatch, capsys):
-    """A NON-empty matrix (live build) with a skipped result stays blocked —
-    liveness comes from the plan fact, never from the result string."""
     _publish_repo(tmp_path, monkeypatch)
     recorder = SeamRecorder()
     ghio = FakeGh()
@@ -1663,8 +1395,6 @@ def test_publish_verb_still_refuses_a_live_skipped_build(tmp_path, monkeypatch, 
 def test_publish_verb_refuses_failure_and_cancelled_even_when_non_live(
     tmp_path, monkeypatch, capsys
 ):
-    """failure/cancelled always block, live or not: a non-live stage's
-    tolerance covers exactly the legitimate skip, never a broken run."""
     _publish_repo(tmp_path, monkeypatch, toml=TAG_ONLY_TOML)
     for result in ("failure", "cancelled"):
         rc = release_verb.run_publish(
@@ -1685,9 +1415,6 @@ def test_publish_verb_refuses_failure_and_cancelled_even_when_non_live(
 
 
 def test_publish_verb_omitted_facts_keep_the_strict_gate(tmp_path, monkeypatch, capsys):
-    """The pre-#745 invocation (no --matrix/--stages) is the strict
-    contract: skipped build/bundle refuse — a caller that states no plan
-    never weakens the gate."""
     _publish_repo(tmp_path, monkeypatch, toml=TAG_ONLY_TOML)
     rc = release_verb.run_publish(
         _spec("1.2.3"),
@@ -1705,7 +1432,6 @@ def test_publish_verb_omitted_facts_keep_the_strict_gate(tmp_path, monkeypatch, 
 
 
 def test_publish_verb_malformed_fact_is_a_loud_refusal(tmp_path, monkeypatch, capsys):
-    """A garbled plan fact dies at the gate, before any read or dispatch."""
     _publish_repo(tmp_path, monkeypatch, toml=TAG_ONLY_TOML)
     ghio = FakeGh()
     rc = release_verb.run_publish(
@@ -1727,9 +1453,6 @@ def test_publish_verb_malformed_fact_is_a_loud_refusal(tmp_path, monkeypatch, ca
 
 
 def test_publish_rc_guard_records_no_external_invocation(tmp_path, monkeypatch, capsys):
-    """Story 33's acceptance shape: a -release-rc publish, with NO tokens in
-    the env and no CI environment, creates only the GH prerelease — the exec
-    seam records no cargo/twine/npm call, git records no tap push."""
     _publish_repo(tmp_path, monkeypatch, assets=[f"lex-{MAC_ARM}.tar.gz"])
     recorder = SeamRecorder()
     ghio = FakeGh(exists=False)
@@ -1744,12 +1467,12 @@ def test_publish_rc_guard_records_no_external_invocation(tmp_path, monkeypatch, 
         probe=recorder,
         ghio=ghio,
         gitio=gitio,
-        env={},  # no tokens needed: every external endpoint is skipped
+        env={},
     )
 
     assert rc == 0
-    assert recorder.calls == []  # no cargo publish, no twine, no npm, no ruby
-    assert [c[0] for c in gitio.calls if c[0] != "root"] == []  # no tap push
+    assert recorder.calls == []
+    assert [c[0] for c in gitio.calls if c[0] != "root"] == []
     assert (
         "create",
         "v1.2.3-release-rc",
@@ -1758,17 +1481,12 @@ def test_publish_rc_guard_records_no_external_invocation(tmp_path, monkeypatch, 
     ) in (ghio.calls)
     out = capsys.readouterr().out
     assert "live-fire -release-rc: GH release only" in out
-    assert out.count("skipped: rc-guard") == 2  # crates + brew
+    assert out.count("skipped: rc-guard") == 2
 
 
 def test_publish_selector_skips_need_no_tokens_and_dispatch_nothing(
     tmp_path, monkeypatch, capsys
 ):
-    """The verb end-to-end under `--endpoint gh-release` (ADR-0027 REPO_TOML
-    declares gh-release/crates/brew): a STABLE cut publishes the Release and
-    nothing else — no cargo publish, no tap push, and (like the RC guard's
-    skips) the selector-skipped endpoints require NO tokens, since token
-    validation reads the unskipped set."""
     _publish_repo(tmp_path, monkeypatch, assets=[f"lex-{MAC_ARM}.tar.gz"])
     recorder = SeamRecorder()
     ghio = FakeGh(exists=False)
@@ -1784,20 +1502,18 @@ def test_publish_selector_skips_need_no_tokens_and_dispatch_nothing(
         probe=recorder,
         ghio=ghio,
         gitio=gitio,
-        env={},  # no tokens: crates/brew are selector-skipped
+        env={},
     )
 
     assert rc == 0
-    assert recorder.calls == []  # no cargo publish, no ruby -c
-    assert [c[0] for c in gitio.calls if c[0] != "root"] == []  # no tap push
+    assert recorder.calls == []
+    assert [c[0] for c in gitio.calls if c[0] != "root"] == []
     out = capsys.readouterr().out
-    assert out.count("skipped: --endpoint selector") == 2  # crates + brew
-    assert "[gh-release]" in out  # the Release still fired
+    assert out.count("skipped: --endpoint selector") == 2
+    assert "[gh-release]" in out
 
 
 def test_publish_selector_refusal_dispatches_nothing(tmp_path, monkeypatch, capsys):
-    """A bad selection is refused at PLAN time — before any endpoint runs, so
-    a typo'd seed touches nothing external (ADR-0070)."""
     _publish_repo(tmp_path, monkeypatch, assets=[f"lex-{MAC_ARM}.tar.gz"])
     recorder = SeamRecorder()
     ghio = FakeGh(exists=False)
@@ -1808,7 +1524,7 @@ def test_publish_selector_refusal_dispatches_nothing(tmp_path, monkeypatch, caps
         build_result="success",
         bundle_result="success",
         sign_result="skipped",
-        endpoint_selector=["crates"],  # deselects gh-release — the Release
+        endpoint_selector=["crates"],
         run_cmd=recorder,
         probe=recorder,
         ghio=ghio,
@@ -1819,15 +1535,12 @@ def test_publish_selector_refusal_dispatches_nothing(tmp_path, monkeypatch, caps
     assert rc == 1
     assert "cannot deselect `gh-release`" in capsys.readouterr().err
     assert recorder.calls == []
-    assert ghio.calls == []  # no release created
+    assert ghio.calls == []
 
 
 def test_publish_cli_endpoint_is_repeatable_and_absent_means_the_full_plan(
     monkeypatch,
 ):
-    """The click boundary parses --endpoint to a VALUE (ADR-0030): repeated
-    flags become the ordered selection; an ABSENT flag is None — never an
-    empty selection that would publish nothing."""
     from click.testing import CliRunner
 
     seen: list = []
@@ -1857,8 +1570,6 @@ def test_publish_cli_endpoint_is_repeatable_and_absent_means_the_full_plan(
 
 
 def test_publish_missing_tokens_fail_before_any_dispatch(tmp_path, monkeypatch, capsys):
-    """Stories 43-45: a final publish with no tokens is ONE loud refusal
-    naming every missing token — nothing dispatched, never a silent skip."""
     _publish_repo(tmp_path, monkeypatch)
     recorder = SeamRecorder()
     ghio = FakeGh()
@@ -1887,8 +1598,6 @@ def test_publish_missing_tokens_fail_before_any_dispatch(tmp_path, monkeypatch, 
 def test_publish_final_walks_release_endpoints_before_brew(
     tmp_path, monkeypatch, capsys
 ):
-    """The end-to-end ordering read off the result: gh-release and crates
-    complete before brew renders against the uploaded assets."""
     _publish_repo(
         tmp_path,
         monkeypatch,
@@ -1918,12 +1627,10 @@ def test_publish_final_walks_release_endpoints_before_brew(
     assert rc == 0
     out = capsys.readouterr().out
     assert "published 1.2.3 to 3 endpoints" in out
-    # Ordering: the published list is plan-ordered — brew LAST.
     endpoints = [
         line.split("[")[1].split("]")[0] for line in out.splitlines() if "[" in line
     ]
     assert endpoints == ["gh-release", "crates", "brew"]
-    # gh-release uploaded before brew cloned the tap.
     assert any(c[0] == "upload" for c in ghio.calls)
     assert any(c[0] == "push" for c in gitio.calls)
 
@@ -1992,15 +1699,7 @@ build = ["rust"]
     assert "no endpoints declared" in capsys.readouterr().out
 
 
-# --------------------------------------------------------------------------
-# Missing pixi-managed endpoint tools (#801, TOL02-WS17 holes 1–3) — the
-# publish-side loud reconcile remediation
-# --------------------------------------------------------------------------
-
-
 def _raise_missing_binary(argv, cwd, env=None):
-    """An Exec seam whose tool is absent from the runner: what execrun raises
-    when argv[0] resolves to nothing (cause=missing-binary, no rc)."""
     raise execrun.ExecError(
         [str(a) for a in argv],
         rc=None,
@@ -2010,9 +1709,6 @@ def _raise_missing_binary(argv, cwd, env=None):
 
 
 def test_missing_twine_gets_the_reconcile_remedy(tmp_path, monkeypatch, capsys):
-    """TOL02-WS17 open hole 2, closed by #801: the pypi endpoint dying on a
-    missing `twine` names the python-release-deps block's COMMITTING install
-    reconcile — never a run-time install (#582), never a raw 127."""
     _publish_repo(
         tmp_path,
         monkeypatch,
@@ -2052,10 +1748,6 @@ endpoints = ["pypi"]
 def test_publish_missing_npm_binary_gets_the_reconcile_remedy(
     tmp_path, monkeypatch, capsys
 ):
-    """The npm endpoint's probe dying on a missing `npm` (the node-deps block
-    absent from the runner) translates at the dispatch loop exactly like the
-    run_cmd seam — the missing-binary launch failure raises through
-    check=False probes too (execrun's OSError path)."""
     _publish_repo(
         tmp_path,
         monkeypatch,
@@ -2063,8 +1755,6 @@ def test_publish_missing_npm_binary_gets_the_reconcile_remedy(
 [artifacts.pkg]
 endpoints = ["npm"]
 """,
-        # The staged tarball IS the artifact (WS12); stage it so the npm probe
-        # is REACHED — the missing-binary death is then what the remedy catches.
         assets=("pkg-1.2.3.tgz",),
     )
 
@@ -2106,8 +1796,6 @@ def test_publish_refuses_outside_a_git_checkout(tmp_path, monkeypatch, capsys):
 
 
 def test_publish_cli_rejects_a_bump_word_as_usage():
-    """The click boundary: publish ships the version prepare cut — a bump
-    word dies as exit 2, never re-resolved."""
     from click.testing import CliRunner
 
     result = CliRunner().invoke(
@@ -2128,8 +1816,6 @@ def test_publish_cli_rejects_a_bump_word_as_usage():
 
 
 def test_publish_cli_requires_the_result_inputs():
-    """Story 32: the results are EXPLICIT inputs — omitting one is a usage
-    error, so no caller can publish without stating the upstream verdicts."""
     from click.testing import CliRunner
 
     result = CliRunner().invoke(release_verb.release, ["publish", "1.2.3"])
@@ -2137,15 +1823,7 @@ def test_publish_cli_requires_the_result_inputs():
     assert "--build-result" in result.output
 
 
-# --------------------------------------------------------------------------
-# notify-downstreams adapter (TOL02-WS16 #792)
-# --------------------------------------------------------------------------
-
-
 def test_notify_downstreams_fires_one_dispatch_per_downstream(tmp_path):
-    """The cascade's happy path: one `upstream-release` repository_dispatch
-    per declared downstream, each carrying the source repo/tag/version/artifact
-    in its client payload, authenticated by the cross-repo PAT."""
     artifact = _notify_artifacts()[0]
     ghio = FakeGh()
     req = _request(
@@ -2175,10 +1853,6 @@ def test_notify_downstreams_fires_one_dispatch_per_downstream(tmp_path):
 
 
 def test_notify_downstreams_refuses_an_unresolved_source_repo(tmp_path):
-    """The verb resolves the source slug for a live needs_repo dispatch; a
-    direct caller that omits it gets a loud ReleaseError (not a strippable
-    assert, not a null-repo payload) — the payload names the upstream the
-    downstreams rebuild against."""
     artifact = _notify_artifacts()[0]
     ghio = FakeGh()
     req = _request(
@@ -2195,8 +1869,6 @@ def test_notify_downstreams_refuses_an_unresolved_source_repo(tmp_path):
 
 
 def test_notify_downstreams_refuses_without_the_cross_repo_token(tmp_path):
-    """The ambient GITHUB_TOKEN cannot dispatch cross-repo, so a missing
-    DOWNSTREAM_DISPATCH_TOKEN is a loud refusal — never a silent no-notify."""
     artifact = _notify_artifacts()[0]
     ghio = FakeGh()
     req = _request(tmp_path, artifact, version="1.2.3", env={}, ghio=ghio)
@@ -2206,8 +1878,6 @@ def test_notify_downstreams_refuses_without_the_cross_repo_token(tmp_path):
 
 
 def test_notify_downstreams_secret_mirrors_the_derivation_authority():
-    """The endpoint's secret name IS its `secretreq.ENDPOINT_SECRETS` entry —
-    gh-setup syncs it and preflight validates its presence from that one map."""
     assert (
         publish_mod.NOTIFY_SECRET
         == (secretreq_mod.ENDPOINT_SECRETS["notify-downstreams"][0])
@@ -2218,45 +1888,32 @@ def test_notify_downstreams_secret_mirrors_the_derivation_authority():
     assert adapter.stable_only and adapter.stage == "derived"
 
 
-# --------------------------------------------------------------------------
-# conda (derived) — the Artifact channel producer (ARF01-WS01 #950)
-# --------------------------------------------------------------------------
-
 LINUX_ARM = "aarch64-unknown-linux-gnu"
 WIN = "x86_64-pc-windows-msvc"
 MUSL = "x86_64-unknown-linux-musl"
 
 
 def test_conda_subdir_maps_served_and_drops_unserved():
-    """The closed four-subdir matrix (ADR-0064): the served triples map, the
-    unserved ones (osx-64, musl) are None — no invented subdir, matching
-    today's `provision` refusal for Intel-mac / musl."""
     assert publish_mod.conda_subdir(MAC_ARM) == "osx-arm64"
     assert publish_mod.conda_subdir(LINUX) == "linux-64"
     assert publish_mod.conda_subdir(LINUX_ARM) == "linux-aarch64"
     assert publish_mod.conda_subdir(WIN) == "win-64"
-    assert publish_mod.conda_subdir(MAC_X64) is None  # osx-64 unserved
-    assert publish_mod.conda_subdir(MUSL) is None  # musl unserved
+    assert publish_mod.conda_subdir(MAC_X64) is None
+    assert publish_mod.conda_subdir(MUSL) is None
 
 
 def test_conda_assets_derives_served_subdirs_from_the_platforms_declaration():
-    """conda-direct (ADR-0077): the served subdir/triple/name are DERIVED from
-    the artifact's declared `platforms` (the causal single source) and the
-    archive name is CONSTRUCTED (`<artifact>-<triple><ext>`), then included only
-    when that archive is STAGED — never reverse-engineered from a filename.
-    Unserved declared lanes (osx-64, musl) and served lanes whose archive is
-    absent both drop out."""
     artifact = _artifacts(
         {
             "lex": {
                 "endpoints": ["conda"],
                 "platforms": [
-                    "darwin-arm64",  # served — staged
-                    "linux-x86_64",  # served — staged
-                    "windows-x86_64",  # served — staged (.zip)
-                    "linux-arm64",  # served — NOT staged, drops out
-                    "darwin-x86_64",  # unserved (osx-64), drops out
-                    "linux-x86_64-musl",  # unserved (musl), drops out
+                    "darwin-arm64",
+                    "linux-x86_64",
+                    "windows-x86_64",
+                    "linux-arm64",
+                    "darwin-x86_64",
+                    "linux-x86_64-musl",
                 ],
             }
         }
@@ -2265,9 +1922,9 @@ def test_conda_assets_derives_served_subdirs_from_the_platforms_declaration():
         f"lex-{MAC_ARM}.tar.gz",
         f"lex-{LINUX}.tar.gz",
         f"lex-{WIN}.zip",
-        f"lex-{MAC_X64}.tar.gz",  # osx-64 staged but unserved → not packaged
-        f"lex-{MUSL}.tar.gz",  # musl staged but unserved → not packaged
-        "sibling-x86_64-pc-windows-msvc.zip",  # other artifact's prefix — ignored
+        f"lex-{MAC_X64}.tar.gz",
+        f"lex-{MUSL}.tar.gz",
+        "sibling-x86_64-pc-windows-msvc.zip",
     ]
     assets = publish_mod.conda_assets(artifact, staged)
     assert assets == {
@@ -2278,10 +1935,6 @@ def test_conda_assets_derives_served_subdirs_from_the_platforms_declaration():
 
 
 def test_conda_assets_ignores_a_staged_archive_for_an_undeclared_platform():
-    """The `platforms` declaration is authoritative: a served-triple archive
-    staged for a platform the artifact does NOT declare is never packaged (the
-    causal-declaration property — the subdir set is the declaration, not the
-    staged tree)."""
     artifact = _artifacts(
         {"lex": {"endpoints": ["conda"], "platforms": ["linux-x86_64"]}}
     )[0]
@@ -2292,9 +1945,6 @@ def test_conda_assets_ignores_a_staged_archive_for_an_undeclared_platform():
 
 
 def test_conda_assets_defaults_undeclared_platforms_to_the_linux_lane():
-    """An artifact declaring no `platforms` defaults to the single linux lane
-    (as preflight expands it), so it packages only linux-64 when that archive is
-    staged."""
     artifact = _artifacts({"lex": {"endpoints": ["conda"]}})[0]
     staged = [f"lex-{LINUX}.tar.gz", f"lex-{MAC_ARM}.tar.gz"]
     assert publish_mod.conda_assets(artifact, staged) == {
@@ -2303,10 +1953,6 @@ def test_conda_assets_defaults_undeclared_platforms_to_the_linux_lane():
 
 
 def test_conda_served_subdirs_projects_the_repos_own_platforms():
-    # #1076: the served subdirs a repo PUBLISHES are its conda-endpoint artifacts'
-    # declared platforms mapped through their triples — NOT the fixed all-of-served
-    # set. lexd's shape (linux x86_64/aarch64 + darwin-arm64, NO windows) yields
-    # exactly three subdirs, in SERVED_SUBDIRS order, with no win-64.
     artifacts = _artifacts(
         {
             "lexd": {
@@ -2325,9 +1971,6 @@ def test_conda_served_subdirs_projects_the_repos_own_platforms():
 
 
 def test_conda_served_subdirs_drops_unserved_and_non_conda():
-    # An unserved platform (osx-64/darwin-x86_64, musl) drops out via conda_subdir;
-    # a non-conda artifact contributes nothing; a win-64-declaring conda artifact
-    # keeps win-64.
     artifacts = _artifacts(
         {
             "cli": {
@@ -2338,19 +1981,14 @@ def test_conda_served_subdirs_drops_unserved_and_non_conda():
             "other": {
                 "build": ["rust"],
                 "platforms": ["linux-arm64"],
-                "endpoints": ["gh-release"],  # no conda → contributes nothing
+                "endpoints": ["gh-release"],
             },
         }
     )
-    # Only the served windows platform survives from the conda artifact; the
-    # gh-release-only artifact's linux-aarch64 is NOT counted.
     assert publish_mod.conda_served_subdirs(artifacts) == ("win-64",)
 
 
 def test_conda_served_subdirs_defaults_empty_platforms_to_the_linux_lane():
-    # A conda artifact with no explicit platforms defaults to the linux lane
-    # (preflight.DEFAULT_PLATFORM = linux-x86_64 → linux-64), exactly as the
-    # release matrix expands it.
     artifacts = _artifacts(
         {"lex": {"build": ["rust"], "endpoints": ["gh-release", "conda"]}}
     )
@@ -2358,23 +1996,16 @@ def test_conda_served_subdirs_defaults_empty_platforms_to_the_linux_lane():
 
 
 def test_conda_served_subdirs_empty_without_a_conda_producer():
-    # A repo with no conda endpoint publishes no channel subdirs at all.
     artifacts = _artifacts({"cli": {"build": ["rust"], "endpoints": ["gh-release"]}})
     assert publish_mod.conda_served_subdirs(artifacts) == ()
 
 
 def test_conda_package_name_is_the_lowercased_main_binary():
-    """The conda package name doubles as the consumer's `[artifact-deps.<key>]`
-    key (ADR-0064) — the artifact's main-binary name, lowercased to the conda
-    package-name vocabulary."""
     artifact = _artifacts({"lex": {"endpoints": ["conda"], "main-binary": "LexD"}})[0]
     assert publish_mod.conda_package_name(artifact) == "lexd"
 
 
 def test_conda_package_name_rejects_a_conda_invalid_derived_name():
-    """A derived name outside the conda vocabulary — a scoped wasm-pack identity
-    (`@scope/name`) or a spaced `product-name` — is a loud ReleaseError pointing
-    at the config fix, never handed to rattler-build as a doomed build."""
     scoped = _artifacts({"lex": {"endpoints": ["conda"], "main-binary": "@scope/lex"}})[
         0
     ]
@@ -2386,10 +2017,6 @@ def test_conda_package_name_rejects_a_conda_invalid_derived_name():
 
 
 def test_render_conda_recipe_repackages_the_prebuilt_binary():
-    """The recipe extracts the local release archive and copies the prebuilt
-    binary onto PATH under $PREFIX — unix into bin, windows into Scripts (the
-    layout is data, the single-runner repackage runs the copy in the host
-    shell)."""
     unix = publish_mod.render_conda_recipe(
         package="lexd",
         version="1.2.3",
@@ -2400,19 +2027,11 @@ def test_render_conda_recipe_repackages_the_prebuilt_binary():
     )
     assert "name: lexd" in unix
     assert 'version: "1.2.3"' in unix
-    # The archive path is quoted (survives spaces / `#`) — see the as_posix +
-    # quote fix so a Windows-native or spaced staging path stays one scalar.
     assert '- path: "/stage/lexd-aarch64-apple-darwin.tar.gz"' in unix
     assert 'cp "lexd" "${PREFIX}/bin/lexd"' in unix
-    # Relocation is OFF: the endpoint repackages a PREBUILT, already-SIGNED
-    # binary linking only system libraries — there are no conda-prefix paths to
-    # relocate, the default relink needs a per-OS toolchain the single runner
-    # lacks (macOS install_name_tool on Linux, #1052), and rewriting the
-    # Mach-O would invalidate the sign stage's signature.
     assert yaml.safe_load(unix)["build"]["dynamic_linking"] == {
         "binary_relocation": False
     }
-    # windows layout: the .exe copied into Scripts (on the win conda PATH).
     src, install_dir, install_bin = publish_mod._conda_binary_layout("win-64", "lexd")
     assert (src, install_dir, install_bin) == ("lexd.exe", "Scripts", "lexd.exe")
     win = publish_mod.render_conda_recipe(
@@ -2427,10 +2046,6 @@ def test_render_conda_recipe_repackages_the_prebuilt_binary():
 
 
 def test_render_conda_recipe_escapes_the_archive_path_scalar():
-    """The path scalar is JSON-escaped (a JSON string IS a valid YAML 1.2
-    double-quoted scalar), so a staging path bearing a `"` or `\\` renders as
-    valid YAML that parses back to the EXACT path — bare-quote concatenation
-    would break the recipe or silently re-point the source."""
     weird = '/weird/pa"th\\dir/lexd.tar.gz'
     recipe = publish_mod.render_conda_recipe(
         package="lexd",
@@ -2440,17 +2055,11 @@ def test_render_conda_recipe_escapes_the_archive_path_scalar():
         install_dir="bin",
         install_binary="lexd",
     )
-    # Round-trips through a real YAML parser to the exact input path.
     doc = yaml.safe_load(recipe)
     assert doc["source"][0]["path"] == weird
 
 
 class _CondaBuildRecorder(SeamRecorder):
-    """A recorded Exec seam that also MATERIALIZES rattler-build's output — a
-    `rattler-build build` writes the `.conda` its `--output-dir`/`--target-
-    platform` name, so the adapter's post-build glob finds a package (as a live
-    build would) without a real build."""
-
     def __call__(self, argv, cwd, env=None):
         argv_s = [str(a) for a in argv]
         if argv_s[:2] == ["rattler-build", "build"]:
@@ -2471,13 +2080,9 @@ def _conda_request(tmp_path, *, env=None, assets=None, ghio=None):
             f"lex-{MAC_ARM}.tar.gz",
             f"lex-{LINUX}.tar.gz",
             f"lex-{WIN}.zip",
-            f"lex-{MAC_X64}.tar.gz",  # unserved — never packaged
+            f"lex-{MAC_X64}.tar.gz",
         ],
     )
-    # conda-direct (ADR-0077): the served subdirs are DERIVED from the artifact's
-    # declared `platforms`, not reverse-engineered from staged filenames — so the
-    # fixture declares the four lanes whose archives it stages (darwin-x86_64 is
-    # unserved (osx-64) → its staged archive is never packaged).
     artifact = _artifacts(
         {
             "lex": {
@@ -2516,7 +2121,6 @@ def test_conda_builds_each_served_subdir_and_publishes_the_channel(tmp_path):
     builds = [
         argv for argv, _, _ in run_cmd.calls if argv[:2] == ("rattler-build", "build")
     ]
-    # One build per SERVED subdir (osx-64 dropped), each targeting its subdir.
     built_subdirs = sorted(argv[argv.index("--target-platform") + 1] for argv in builds)
     assert built_subdirs == ["linux-64", "osx-arm64", "win-64"]
     for argv in builds:
@@ -2528,8 +2132,6 @@ def test_conda_builds_each_served_subdir_and_publishes_the_channel(tmp_path):
             argv[argv.index("--test")],
             argv[argv.index("--test") + 1],
         )
-    # One publish (upload + reindex) of the built packages to the per-repo
-    # S3 channel, with the S3 endpoint/region/creds on the ENV, never argv.
     publishes = [
         (argv, env)
         for argv, _, env in run_cmd.calls
@@ -2540,22 +2142,16 @@ def test_conda_builds_each_served_subdir_and_publishes_the_channel(tmp_path):
     assert pub_argv[:3] == ("rattler-build", "publish", "--to")
     assert pub_argv[3] == "s3://shipit-artifacts-public/acme/widget"
     assert "--force" in pub_argv
-    # The three built .conda files ride as positionals.
     assert sum(1 for a in pub_argv if a.endswith(".conda")) == 3
-    # The literal AWS_* names are load-bearing: rattler-build resolves S3
-    # config via the AWS SDK credential chain and IGNORES the S3_* names
-    # ("Could not determine region from AWS SDK configuration", #1049).
     assert pub_env["AWS_ENDPOINT_URL"] == publish_mod.CONDA_S3_ENDPOINT
     assert pub_env["AWS_REGION"] == "auto"
     assert pub_env["AWS_ACCESS_KEY_ID"] == "chan-key-id"
     assert pub_env["AWS_SECRET_ACCESS_KEY"] == "chan-secret-key"
-    # The HMAC secret NEVER rides argv (it is env-only, redactor-registered).
     assert not any("chan-secret-key" in a for a in pub_argv)
     assert any("published 3 package(s)" in a for a in published.actions)
 
 
 def _conda_publish_target(req):
-    """The `--to` channel URL of the single `rattler-build publish` in a run."""
     (pub_argv,) = [
         argv
         for argv, _, _ in req.run_cmd.calls
@@ -2565,8 +2161,6 @@ def _conda_publish_target(req):
 
 
 def test_conda_publishes_a_public_repo_to_the_public_bucket(tmp_path):
-    # Tier is DERIVED from repo visibility (ADR-0065): a public repo → public
-    # bucket, authless-readable downstream.
     req, _ = _conda_request(tmp_path, ghio=FakeGh(private=False))
     publish_mod._publish_conda(req)
     assert _conda_publish_target(req) == "s3://shipit-artifacts-public/acme/widget"
@@ -2574,8 +2168,6 @@ def test_conda_publishes_a_public_repo_to_the_public_bucket(tmp_path):
 
 
 def test_conda_publishes_a_private_repo_to_the_private_bucket(tmp_path):
-    # A private producing repo (phos-shaped) → the private bucket, over the SAME
-    # S3-interop rail + write HMAC pair (only the bucket changes, ADR-0065).
     req, _ = _conda_request(tmp_path, ghio=FakeGh(private=True))
     published = publish_mod._publish_conda(req)
     assert _conda_publish_target(req) == "s3://shipit-artifacts-private/acme/widget"
@@ -2584,40 +2176,26 @@ def test_conda_publishes_a_private_repo_to_the_private_bucket(tmp_path):
 
 
 def test_conda_recipe_source_is_the_bare_binary_name(tmp_path):
-    """The rendered build script copies the BARE binary name from the work
-    root. The release archive stages the binary under a top-level
-    `<artifact>-<triple>/` dir (`bundle._compose_archive`'s contract), but
-    rattler-build STRIPS that single top-level dir on extraction, so a
-    `<artifact>-<triple>/<binary>` copy source fails `cp: cannot stat` —
-    the #1049 seed bug, validated against the real lexd release archive."""
     req, _ = _conda_request(tmp_path)
 
     publish_mod._publish_conda(req)
 
     recipe_root = req.assets_dir / publish_mod.CONDA_RECIPE_SCRATCH / req.artifact.name
-    # osx-arm64 (unix): the stripped-root binary copied into bin — no
-    # `lex-<triple>/` prefix on the cp source.
     unix_recipe = (recipe_root / "osx-arm64" / "recipe.yaml").read_text()
     assert 'cp "lex" "${PREFIX}/bin/lex"' in unix_recipe
     assert f"lex-{MAC_ARM}/lex" not in unix_recipe
-    # win-64: the `.exe` at the stripped root, copied into Scripts.
     win_recipe = (recipe_root / "win-64" / "recipe.yaml").read_text()
     assert 'cp "lex.exe" "${PREFIX}/Scripts/lex.exe"' in win_recipe
     assert f"lex-{WIN}/lex.exe" not in win_recipe
 
 
 def test_conda_scratch_is_namespaced_per_artifact(tmp_path):
-    """`assets_dir` is stage-wide, so the recipe/channel scratch trees are
-    rooted under the artifact name — a second conda artifact's post-build glob
-    must never capture this one's `.conda` files (cross-artifact leak)."""
     req, _ = _conda_request(tmp_path)
 
     publish_mod._publish_conda(req)
 
     recipe_root = req.assets_dir / publish_mod.CONDA_RECIPE_SCRATCH
     channel_root = req.assets_dir / publish_mod.CONDA_CHANNEL_SCRATCH
-    # The subdir trees live UNDER `<scratch>/<artifact>/`, not directly under
-    # the shared `<scratch>/` — so a sibling artifact gets its own root.
     assert (recipe_root / req.artifact.name / "osx-arm64" / "recipe.yaml").is_file()
     assert (channel_root / req.artifact.name / "osx-arm64").is_dir()
     assert not (recipe_root / "osx-arm64").exists()
@@ -2625,9 +2203,6 @@ def test_conda_scratch_is_namespaced_per_artifact(tmp_path):
 
 
 def test_conda_without_served_archives_refuses(tmp_path):
-    """No declared platform maps to a served subdir with a staged archive (the
-    only staged archives here are the unserved osx-64 / musl lanes) — a loud
-    refusal, never a silent empty publish."""
     req, _ = _conda_request(
         tmp_path, assets=[f"lex-{MAC_X64}.tar.gz", f"lex-{MUSL}.tar.gz"]
     )
@@ -2636,8 +2211,6 @@ def test_conda_without_served_archives_refuses(tmp_path):
 
 
 def test_conda_refuses_an_unresolved_source_repo(tmp_path):
-    """The per-repo channel root is `<bucket>/<owner/name>`; a direct caller
-    that omits the slug gets a loud ReleaseError, never a mis-rooted write."""
     _staged_assets(tmp_path, [f"lex-{MAC_ARM}.tar.gz"])
     artifact = _artifacts({"lex": {"endpoints": ["conda"]}})[0]
     req = _request(
@@ -2654,17 +2227,10 @@ def test_conda_refuses_an_unresolved_source_repo(tmp_path):
 
 
 def test_conda_requires_the_write_credentials(tmp_path):
-    """The write HMAC pair is the endpoint's secret — a missing key is one loud
-    refusal (the adapter-local belt; the verb validates the plan's tokens
-    first)."""
     req, _ = _conda_request(tmp_path, env={"ARTIFACT_CHANNEL_KEY_ID": "chan-key-id"})
     with pytest.raises(ReleaseError, match="ARTIFACT_CHANNEL_SECRET_KEY"):
         publish_mod._publish_conda(req)
 
-
-# --------------------------------------------------------------------------
-# conda NOARCH mode — cross-repo data artifacts (ARF02-WS07 #1064, ADR-0076)
-# --------------------------------------------------------------------------
 
 CONDA_CREDS = {
     "ARTIFACT_CHANNEL_KEY_ID": "chan-key-id",
@@ -2673,8 +2239,6 @@ CONDA_CREDS = {
 
 
 def _noarch_artifact():
-    """A `tarball`-composition DATA artifact declaring the conda endpoint — the
-    tree-sitter-grammar shape (one platform-independent archive, no triple)."""
     return _artifacts(
         {
             "grammar": {
@@ -2691,9 +2255,6 @@ def _noarch_artifact():
 
 
 def _wasm_noarch_artifact(scope="lex-fmt"):
-    """A `wasm-pack`-composition DATA artifact declaring the conda endpoint — the
-    lex-wasm shape (one platform-independent npm `.tgz`, no triple). A `scope`
-    gives it a SCOPED npm identity (`@scope/lex-wasm`); `scope=None` is unscoped."""
     bundle = {"composition": "wasm-pack"}
     if scope is not None:
         bundle["scope"] = scope
@@ -2703,14 +2264,8 @@ def _wasm_noarch_artifact(scope="lex-fmt"):
 
 
 def test_conda_noarch_eligible_for_every_platform_independent_composition():
-    """Eligibility (ADR-0076) is the composition's `platform_independent` flag —
-    one arch-independent archive to repackage — so BOTH the `tarball`/`zed`
-    (`<artifact>.tar.gz`) and the `wasm-pack` (npm `.tgz`) data compositions
-    qualify. A per-platform tool artifact (archive composition, or none) stays on
-    the triple→subdir path — NOT an empty `platforms` list."""
-    assert publish_mod.conda_noarch_eligible(_noarch_artifact())  # tarball
-    assert publish_mod.conda_noarch_eligible(_wasm_noarch_artifact())  # wasm-pack
-    # `zed` is platform_independent too (a source tarball) — also eligible.
+    assert publish_mod.conda_noarch_eligible(_noarch_artifact())
+    assert publish_mod.conda_noarch_eligible(_wasm_noarch_artifact())
     zed = _artifacts(
         {
             "ext": {
@@ -2725,8 +2280,6 @@ def test_conda_noarch_eligible_for_every_platform_independent_composition():
         }
     )[0]
     assert publish_mod.conda_noarch_eligible(zed)
-    # `archive`-composition tool artifact (lexd shape): platform-qualified, so
-    # NOT noarch-eligible.
     tool = _artifacts(
         {
             "lex": {
@@ -2737,15 +2290,11 @@ def test_conda_noarch_eligible_for_every_platform_independent_composition():
         }
     )[0]
     assert not publish_mod.conda_noarch_eligible(tool)
-    # No bundle at all → not eligible.
     bare = _artifacts({"lex": {"build": ["rust"], "endpoints": ["conda"]}})[0]
     assert not publish_mod.conda_noarch_eligible(bare)
 
 
 def test_conda_noarch_asset_is_the_single_untripled_archive():
-    """The `tarball` composition stages ONE `<artifact>.tar.gz` (no `-<triple>`
-    suffix); the noarch asset is matched by that KNOWN name, never a scrape. A
-    tree without it (or a per-triple archive) is None."""
     grammar = _noarch_artifact()
     assert (
         publish_mod.conda_noarch_asset(
@@ -2753,7 +2302,6 @@ def test_conda_noarch_asset_is_the_single_untripled_archive():
         )
         == "grammar.tar.gz"
     )
-    # A per-triple archive is NOT the noarch asset (that is the tool path).
     assert (
         publish_mod.conda_noarch_asset(grammar, "1.2.3", [f"grammar-{LINUX}.tar.gz"])
         is None
@@ -2762,22 +2310,14 @@ def test_conda_noarch_asset_is_the_single_untripled_archive():
 
 
 def test_conda_noarch_asset_for_wasm_pack_is_the_npm_tgz():
-    """A `wasm-pack` data artifact stages the npm `<flattened-pkg>-<version>.tgz`
-    (`npm pack`'s name off the `@scope/name` identity), NOT an `<artifact>.tar.gz`
-    — the noarch asset resolver branches on the composition."""
     wasm = _wasm_noarch_artifact()
     want = "lex-fmt-lex-wasm-1.2.3.tgz"
     assert publish_mod.conda_noarch_asset_name(wasm, "1.2.3") == want
     assert publish_mod.conda_noarch_asset(wasm, "1.2.3", [want, "other.tgz"]) == want
-    # The tarball-shape `<artifact>.tar.gz` is NOT the wasm asset.
     assert publish_mod.conda_noarch_asset(wasm, "1.2.3", ["lex-wasm.tar.gz"]) is None
 
 
 def test_conda_noarch_package_name_flattens_a_scoped_wasm_identity():
-    """A scoped wasm-pack `@scope/name` — which the strict `conda_package_name`
-    (tool path) rejects — is FLATTENED into a conda-safe `scope-name` on the
-    noarch path (mirroring `npm pack`'s tarball stem). An unscoped tarball name
-    is unchanged."""
     assert (
         publish_mod.conda_noarch_package_name(_wasm_noarch_artifact())
         == "lex-fmt-lex-wasm"
@@ -2787,8 +2327,6 @@ def test_conda_noarch_package_name_flattens_a_scoped_wasm_identity():
         == "lex-wasm"
     )
     assert publish_mod.conda_noarch_package_name(_noarch_artifact()) == "grammar"
-    # A residually-invalid identity (a spaced product-name) is still a loud
-    # refusal, not an opaque rattler-build failure.
     spaced = _artifacts(
         {
             "x": {
@@ -2808,10 +2346,6 @@ def test_conda_noarch_package_name_flattens_a_scoped_wasm_identity():
 
 
 def test_render_conda_noarch_recipe_is_generic_and_installs_the_payload():
-    """The recipe is `noarch: generic` (routes to `noarch/`), extracts into a
-    `payload/` subdir (so rattler-build's build scaffolding is NOT swept in), and
-    copies the payload into `$PREFIX/share/<package>` — no binary, no
-    dynamic_linking, and never a `--target-platform` (the recipe drives noarch)."""
     recipe = publish_mod.render_conda_noarch_recipe(
         package="grammar",
         version="1.2.3",
@@ -2829,9 +2363,6 @@ def test_render_conda_noarch_recipe_is_generic_and_installs_the_payload():
 
 
 def test_render_conda_noarch_recipe_escapes_the_archive_path_scalar():
-    """The path scalar is JSON-escaped, so a staging path bearing a `"` or `\\`
-    round-trips through a real YAML parser to the EXACT path (the tool recipe's
-    escaping, applied to the noarch source)."""
     weird = '/weird/pa"th\\dir/grammar.tar.gz'
     doc = yaml.safe_load(
         publish_mod.render_conda_noarch_recipe(
@@ -2842,11 +2373,6 @@ def test_render_conda_noarch_recipe_escapes_the_archive_path_scalar():
 
 
 class _CondaNoarchBuildRecorder(SeamRecorder):
-    """A recorded Exec seam that MATERIALIZES a noarch `.conda` under the build's
-    `--output-dir/noarch/` (a real `rattler-build build` writes there because the
-    recipe is `noarch: generic`), so the adapter's post-build glob finds a
-    package without a live build."""
-
     def __call__(self, argv, cwd, env=None):
         argv_s = [str(a) for a in argv]
         if argv_s[:2] == ["rattler-build", "build"]:
@@ -2870,10 +2396,6 @@ def _noarch_request(tmp_path, *, assets=None, run_cmd=None, ghio=None, env=None)
 
 
 def test_conda_noarch_builds_one_generic_package_and_publishes_to_noarch(tmp_path):
-    """The additive noarch path: ONE build (no `--target-platform`, driven by the
-    recipe's `noarch: generic`) and ONE publish of the built package to the
-    per-repo channel — the same S3 rail/env as the tool path, no per-triple
-    fan-out."""
     req, run_cmd = _noarch_request(tmp_path)
 
     published = publish_mod._publish_conda(req)
@@ -2883,11 +2405,9 @@ def test_conda_noarch_builds_one_generic_package_and_publishes_to_noarch(tmp_pat
     ]
     assert len(builds) == 1
     (build_argv,) = builds
-    # rattler-build REFUSES `--target-platform noarch`; the recipe drives it.
     assert "--target-platform" not in build_argv
     recipe_path = Path(build_argv[build_argv.index("--recipe") + 1])
     assert yaml.safe_load(recipe_path.read_text())["build"]["noarch"] == "generic"
-    # One publish (upload + reindex) of the one built package, S3 creds on ENV.
     publishes = [
         (argv, env)
         for argv, _, env in run_cmd.calls
@@ -2903,15 +2423,12 @@ def test_conda_noarch_builds_one_generic_package_and_publishes_to_noarch(tmp_pat
     assert sum(1 for a in pub_argv if a.endswith(".conda")) == 1
     assert pub_env["AWS_ENDPOINT_URL"] == publish_mod.CONDA_S3_ENDPOINT
     assert pub_env["AWS_ACCESS_KEY_ID"] == "chan-key-id"
-    # The HMAC secret NEVER rides argv (env-only, redactor-registered).
     assert not any("chan-secret-key" in a for a in pub_argv)
     assert any("noarch" in a for a in published.actions)
     assert published.endpoint == "conda"
 
 
 def test_conda_noarch_publishes_a_private_repo_to_the_private_bucket(tmp_path):
-    """Tier is DERIVED from repo visibility (ADR-0065) on the noarch path too: a
-    private producing repo → the private bucket, same S3 rail."""
     req, run_cmd = _noarch_request(tmp_path, ghio=FakeGh(private=True))
     publish_mod._publish_conda(req)
     (pub_argv,) = [
@@ -2924,9 +2441,6 @@ def test_conda_noarch_publishes_a_private_repo_to_the_private_bucket(tmp_path):
 
 
 def test_conda_noarch_scratch_is_namespaced_per_artifact(tmp_path):
-    """The recipe/channel scratch trees are rooted under the artifact name (as
-    the per-platform path is), so a sibling conda artifact's post-build glob
-    never captures this one's noarch `.conda`."""
     req, _ = _noarch_request(tmp_path)
     publish_mod._publish_conda(req)
     recipe = (
@@ -2939,13 +2453,10 @@ def test_conda_noarch_scratch_is_namespaced_per_artifact(tmp_path):
     channel = req.assets_dir / publish_mod.CONDA_CHANNEL_SCRATCH / "grammar" / "noarch"
     assert recipe.is_file()
     assert channel.is_dir()
-    # Not directly under the shared scratch root (that would leak across artifacts).
     assert not (req.assets_dir / publish_mod.CONDA_RECIPE_SCRATCH / "noarch").exists()
 
 
 def _wasm_noarch_request(tmp_path, *, assets=None, run_cmd=None):
-    """A `wasm-pack` noarch request — stages the npm `.tgz` (`npm pack`'s name
-    off the `@lex-fmt/lex-wasm` identity) the wasm data artifact repackages."""
     _staged_assets(
         tmp_path, assets if assets is not None else ["lex-fmt-lex-wasm-1.2.3.tgz"]
     )
@@ -2959,10 +2470,6 @@ def _wasm_noarch_request(tmp_path, *, assets=None, run_cmd=None):
 
 
 def test_conda_noarch_wasm_pack_takes_the_noarch_path(tmp_path):
-    """A `wasm-pack` DATA artifact (platform_independent, scoped npm identity)
-    takes the SAME additive noarch path as the tarball grammar (codex-major
-    #1065): ONE `noarch: generic` build off its npm `.tgz`, its recipe naming the
-    FLATTENED conda package `lex-fmt-lex-wasm`, published once to `noarch/`."""
     req, run_cmd = _wasm_noarch_request(tmp_path)
 
     published = publish_mod._publish_conda(req)
@@ -2976,10 +2483,8 @@ def test_conda_noarch_wasm_pack_takes_the_noarch_path(tmp_path):
     recipe = yaml.safe_load(
         Path(build_argv[build_argv.index("--recipe") + 1]).read_text()
     )
-    # The scoped `@lex-fmt/lex-wasm` is flattened to a conda-safe package name...
     assert recipe["package"]["name"] == "lex-fmt-lex-wasm"
     assert recipe["build"]["noarch"] == "generic"
-    # ...and the source is the npm `.tgz`, not an `<artifact>.tar.gz`.
     assert recipe["source"][0]["path"].endswith("lex-fmt-lex-wasm-1.2.3.tgz")
     publishes = [
         argv for argv, _, _ in run_cmd.calls if argv[:2] == ("rattler-build", "publish")
@@ -2990,9 +2495,6 @@ def test_conda_noarch_wasm_pack_takes_the_noarch_path(tmp_path):
 
 
 def test_conda_noarch_wasm_pack_without_the_tgz_refuses(tmp_path):
-    """A wasm noarch tree missing the npm `.tgz` is a loud refusal naming the
-    EXPECTED `.tgz` and the `wasm-pack` composition, never a silent empty
-    publish."""
     req, _ = _wasm_noarch_request(tmp_path, assets=["lex-wasm.tar.gz"])
     with pytest.raises(
         ReleaseError, match=r"no `lex-fmt-lex-wasm-1\.2\.3\.tgz`.*wasm-pack"
@@ -3001,26 +2503,18 @@ def test_conda_noarch_wasm_pack_without_the_tgz_refuses(tmp_path):
 
 
 def test_conda_noarch_without_the_archive_refuses(tmp_path):
-    """A staged tree with no `<artifact>.tar.gz` (the tarball composition never
-    ran) is a loud refusal, never a silent empty publish."""
     req, _ = _noarch_request(tmp_path, assets=[f"grammar-{LINUX}.tar.gz"])
     with pytest.raises(ReleaseError, match=r"no `grammar\.tar\.gz`"):
         publish_mod._publish_conda(req)
 
 
 def test_conda_noarch_requires_the_write_credentials(tmp_path):
-    """The write HMAC pair is required on the noarch path too — one loud
-    refusal, checked before any build."""
     req, _ = _noarch_request(tmp_path, env={"ARTIFACT_CHANNEL_KEY_ID": "chan-key-id"})
     with pytest.raises(ReleaseError, match="ARTIFACT_CHANNEL_SECRET_KEY"):
         publish_mod._publish_conda(req)
 
 
 def _conda_package_files(conda_path: Path) -> list[str]:
-    """The payload file paths inside a `.conda` (a zip of zstd-compressed tars),
-    excluding the `info/` metadata dir — for the REAL-build content assertion."""
-    # `importorskip`: a bare host with rattler-build but no `zstandard` python
-    # module skips cleanly instead of raising a `ModuleNotFoundError` mid-test.
     zstandard = pytest.importorskip("zstandard")
 
     names: list[str] = []
@@ -3039,10 +2533,6 @@ def _conda_package_files(conda_path: Path) -> list[str]:
 
 
 class _RealBuildFakePublish:
-    """Runs `rattler-build build` for REAL (through the one Exec runner) and
-    FAKES only the S3 `publish` (no cloud) — so the real test exercises an actual
-    noarch build end-to-end while never touching a bucket."""
-
     def __init__(self):
         self.calls = []
 
@@ -3061,15 +2551,6 @@ class _RealBuildFakePublish:
     reason="rattler-build not on PATH (present in the `test` env; a bare host skips)",
 )
 def test_conda_noarch_real_repackage_builds_a_generic_conda(tmp_path):
-    """REAL end-to-end noarch build (ADR-0076; the #1050/#1053 do-not-fake
-    lesson): an actual `rattler-build build` repackages a real
-    platform-independent archive into a genuine `noarch: generic` `.conda`, and
-    its files land under `share/<package>/` with NONE of rattler-build's build
-    scaffolding swept in (the recipe-copy class of bug, #1049). Only the S3
-    publish is faked."""
-    # A real archive shaped like the tree-sitter payload (multiple top-level
-    # entries, no single-dir wrap), built with python's tarfile (no macOS
-    # AppleDouble noise) to mirror `bundle._compose_tarball`'s output.
     payload = tmp_path / "payload"
     (payload / "src").mkdir(parents=True)
     (payload / "src" / "parser.c").write_text("/* generated */\n", encoding="utf-8")
@@ -3086,19 +2567,15 @@ def test_conda_noarch_real_repackage_builds_a_generic_conda(tmp_path):
 
     published = publish_mod._publish_conda(req)
 
-    # A genuine `.conda` landed under the noarch/ channel subdir.
     channel = req.assets_dir / publish_mod.CONDA_CHANNEL_SCRATCH / "grammar" / "noarch"
     built = list(channel.glob("*.conda"))
     assert len(built) == 1, f"expected one noarch .conda, got {built}"
-    # The payload is installed under share/grammar/ — and NOTHING else (no
-    # conda_build.sh / build_env.sh / .source_info.json scaffolding).
     files = sorted(_conda_package_files(built[0]))
     assert files == [
         "share/grammar/grammar.js",
         "share/grammar/queries/highlights.scm",
         "share/grammar/src/parser.c",
     ]
-    # The (faked) publish carried that real package to the noarch channel.
     (pub_argv, _, _) = next(
         c for c in run_cmd.calls if c[0][:2] == ("rattler-build", "publish")
     )
@@ -3115,14 +2592,6 @@ def test_conda_noarch_real_repackage_builds_a_generic_conda(tmp_path):
     reason="rattler-build not on PATH (present in the `test` env; a bare host skips)",
 )
 def test_conda_noarch_wasm_pack_real_repackage_builds_a_generic_conda(tmp_path):
-    """REAL end-to-end noarch build for the WASM shape (codex-major #1065): an
-    actual `rattler-build build` repackages a real npm `.tgz` — whose files are
-    wrapped in a single top-level `package/` dir, which rattler-build STRIPS —
-    into a genuine `noarch: generic` `.conda` whose files land under
-    `share/<flattened-pkg>/` with neither the `package/` wrapper nor any
-    rattler-build scaffolding swept in. Only the S3 publish is faked."""
-    # An npm-pack-shaped tarball: ALL entries under a single top-level `package/`
-    # dir (npm pack's wrap), which rattler-build strips on extraction.
     pkg = tmp_path / "package"
     (pkg / "snippets").mkdir(parents=True)
     (pkg / "lex_wasm_bg.wasm").write_bytes(b"\x00asm\x01\x00\x00\x00")
@@ -3143,8 +2612,6 @@ def test_conda_noarch_wasm_pack_real_repackage_builds_a_generic_conda(tmp_path):
     channel = req.assets_dir / publish_mod.CONDA_CHANNEL_SCRATCH / "lex-wasm" / "noarch"
     built = list(channel.glob("*.conda"))
     assert len(built) == 1, f"expected one noarch .conda, got {built}"
-    # The `package/` wrapper is stripped: files land directly under
-    # `share/lex-fmt-lex-wasm/` (the FLATTENED conda name), never `package/`.
     files = sorted(_conda_package_files(built[0]))
     assert files == [
         "share/lex-fmt-lex-wasm/lex_wasm.js",
@@ -3156,15 +2623,6 @@ def test_conda_noarch_wasm_pack_real_repackage_builds_a_generic_conda(tmp_path):
     assert any("noarch" in a for a in published.actions)
 
 
-# --------------------------------------------------------------------------
-# Per-platform REAL build (#1053) — the faked `_CondaBuildRecorder` seam hid the
-# 4 producer bugs (#1049 ×3 + #1052). These drive the REAL `rattler-build build`
-# through the actual producer (`_publish_conda`), faking only the S3 publish, so
-# a 5th bug can't hide behind an empty `.conda`.
-# --------------------------------------------------------------------------
-
-#: subdir → triple (reverse of publish.CONDA_SUBDIRS) — to stage the release
-#: archive for a chosen served subdir.
 _SUBDIR_TRIPLE = {
     subdir: triple for triple, subdir in publish_mod.CONDA_SUBDIRS.items()
 }
@@ -3172,10 +2630,6 @@ _SUBDIR_TRIPLE = {
 
 @functools.cache
 def _load_roundtrip_harness():
-    """The `tools/conda_channel_roundtrip.py` harness, loaded by path (`tools/`
-    is not an importable package). Reused for its host-subdir helper and the
-    file:// resolve step. Cached so the module is evaluated once per session
-    however many tests call it."""
     import importlib.util
 
     path = (
@@ -3190,13 +2644,6 @@ def _load_roundtrip_harness():
 
 
 def _conda_tool_artifact():
-    """A single-binary TOOL artifact (`lex`) declaring the conda endpoint — the
-    per-platform triple→subdir path (`_publish_conda`), NOT the noarch path.
-
-    Declares all four SERVED lanes (conda-direct, ADR-0077): the subdirs are
-    derived from `platforms`, so a real-build test staging one lane's archive
-    still gets exactly that lane's `.conda` (the other three declared lanes have
-    no staged archive and drop out)."""
     return _artifacts(
         {
             "lex": {
@@ -3214,17 +2661,10 @@ def _conda_tool_artifact():
 
 
 def _prebuilt_tool_archive(dist, artifact, triple, binary):
-    """Stage a `<artifact>-<triple>.tar.gz` release archive whose binary is
-    WRAPPED in a top-level `<artifact>-<triple>/` dir — the exact release-stage
-    shape (`bundle._compose_archive`) that rattler-build STRIPS on extraction
-    (#1049). A tiny shell script stands in for the prebuilt binary."""
     top = dist / f"{artifact}-{triple}"
     top.mkdir(parents=True, exist_ok=True)
     staged = top / binary
     staged.write_text("#!/bin/sh\necho hi\n", encoding="utf-8")
-    # A prebuilt binary is executable; the recipe `cp`s it verbatim, so a
-    # non-exec source would stage a `bin/<binary>` a consumer cannot run — the
-    # permission regression the round trip must be able to catch.
     staged.chmod(staged.stat().st_mode | 0o755)
     with tarfile.open(dist / f"{artifact}-{triple}.tar.gz", "w:gz") as tf:
         tf.add(top, arcname=top.name)
@@ -3235,26 +2675,7 @@ def _prebuilt_tool_archive(dist, artifact, triple, binary):
     reason="rattler-build not on PATH (present in the `test` env; a bare host skips)",
 )
 def test_conda_per_platform_real_repackage_cross_target_builds_a_conda(tmp_path):
-    """REAL end-to-end PER-PLATFORM build (#1053; the seam that hid the 4 producer
-    bugs): an actual `rattler-build build`, through the real producer
-    (`_publish_conda`), repackages a prebuilt-binary release archive — binary
-    wrapped in a top-level `<artifact>-<triple>/` dir rattler-build STRIPS
-    (#1049) — into a genuine per-platform `.conda` for a NON-NATIVE target subdir
-    (the cross-platform relink class #1052). Asserts the `.conda` lands in the
-    target subdir with the binary at `bin/lex` (and NOTHING else swept in) and
-    the recipe carries the no-relink guard. Only the S3 publish is faked.
-
-    Spot-check (acceptance): reverting fix #1049 (rendering the copy source as the
-    `<artifact>-<triple>/lex` prefix instead of the bare `lex`) makes this real
-    build fail with `cp: lex-<triple>/lex: No such file or directory`, since
-    rattler-build strips the wrapper dir — exactly the bug the faked seam missed.
-    """
     roundtrip = _load_roundtrip_harness()
-    # A NON-native served subdir, so the build is a real cross-compilation (the
-    # #1052 environment). Restricted to the unix subdirs (bin/lex layout);
-    # win-64's Scripts/.exe layout is out of scope for this fixture. Skip cleanly
-    # (not error) on an unmapped host — Windows/Intel-mac can't anchor the round
-    # trip, matching #1053's "skip cleanly when unsupported" acceptance.
     try:
         host = roundtrip.host_conda_subdir()
     except RuntimeError as exc:
@@ -3270,29 +2691,21 @@ def test_conda_per_platform_real_repackage_cross_target_builds_a_conda(tmp_path)
 
     published = publish_mod._publish_conda(req)
 
-    # Exactly one real build, for the non-native target subdir.
     builds = [c for c in run_cmd.calls if c[0][:2] == ("rattler-build", "build")]
     assert len(builds) == 1
     (build_argv, _, _) = builds[0]
     assert build_argv[build_argv.index("--target-platform") + 1] == target
 
-    # A genuine `.conda` landed under the target subdir, and the prebuilt binary
-    # is at bin/lex — the `<artifact>-<triple>/` wrapper stripped (#1049), with
-    # NONE of rattler-build's build scaffolding swept in.
     channel = req.assets_dir / publish_mod.CONDA_CHANNEL_SCRATCH / "lex" / target
     built = list(channel.glob("*.conda"))
     assert len(built) == 1, f"expected one {target} .conda, got {built}"
     assert sorted(_conda_package_files(built[0])) == ["bin/lex"]
 
-    # The rendered recipe carries the no-relink guard (#1052): rattler-build's
-    # default binary_relocation would need a per-OS relink toolchain the single
-    # cross-platform runner lacks and would break the sign stage's signature.
     recipe = yaml.safe_load(
         Path(build_argv[build_argv.index("--recipe") + 1]).read_text()
     )
     assert recipe["build"]["dynamic_linking"]["binary_relocation"] is False
 
-    # The (faked) publish carried that real per-platform package to the channel.
     (pub_argv, _, _) = next(
         c for c in run_cmd.calls if c[0][:2] == ("rattler-build", "publish")
     )
@@ -3305,17 +2718,7 @@ def test_conda_per_platform_real_repackage_cross_target_builds_a_conda(tmp_path)
     reason="rattler-build + pixi needed for the file:// round trip (both in `test`)",
 )
 def test_conda_file_channel_roundtrip_resolves_and_stages_the_binary(tmp_path):
-    """The ADR-0064 file:// round trip, automated (#1053): the REAL producer
-    (`_publish_conda`) builds a per-platform `.conda` for the HOST's native
-    subdir into a scratch channel, then a PLAIN `[workspace]` pixi project
-    (`channels = [file://…]`, NOT the GCS-hardcoded `[artifact-deps]` projection)
-    resolves + installs it, and the prebuilt binary stages at the env prefix's
-    `bin/lex`. Only the S3 publish is faked. This is the loop ARF02 Steps 1/2
-    (#1078 noarch UNION layout, #1079 the staging tool) run against."""
     roundtrip = _load_roundtrip_harness()
-    # NATIVE subdir — a foreign-subdir package resolves but will not install here.
-    # Skip cleanly (not error) on an unmapped host (Windows/Intel-mac), matching
-    # #1053's "skip cleanly when unsupported" acceptance.
     try:
         native = roundtrip.host_conda_subdir()
     except RuntimeError as exc:
@@ -3329,8 +2732,6 @@ def test_conda_file_channel_roundtrip_resolves_and_stages_the_binary(tmp_path):
     req = _request(tmp_path, _conda_tool_artifact(), env=CONDA_CREDS, run_cmd=run_cmd)
     publish_mod._publish_conda(req)
 
-    # The producer's scratch output-dir IS a valid file:// channel tree
-    # (`<subdir>/repodata.json` + `.conda`, indexed by the build).
     channel = req.assets_dir / publish_mod.CONDA_CHANNEL_SCRATCH / "lex"
     assert list((channel / native).glob("*.conda")), "producer built no .conda"
 
@@ -3342,17 +2743,10 @@ def test_conda_file_channel_roundtrip_resolves_and_stages_the_binary(tmp_path):
         scratch=tmp_path,
     )
 
-    # The prebuilt binary staged on PATH at the resolved env prefix — the exact
-    # bytes we shipped in the release archive, proving the full round trip.
     assert staged.exists()
     assert (staged.parent.name, staged.name) == ("bin", "lex")
     assert "echo hi" in staged.read_text(encoding="utf-8")
 
-    # And it is actually RUNNABLE from that prefix, not merely present: the
-    # executable bit survived the archive → recipe `cp` → `.conda` → pixi-stage
-    # round trip (a mode-0644 `bin/lex` a consumer can't invoke would fail here).
-    # Executed DIRECTLY via its own +x/shebang — never `/bin/sh <path>`, which
-    # would mask a non-executable stage.
     assert staged.stat().st_mode & 0o111, (
         f"staged {staged} is not executable (mode {oct(staged.stat().st_mode)}) — "
         f"a consumer resolving this package could not run it"
@@ -3367,17 +2761,6 @@ def test_conda_file_channel_roundtrip_resolves_and_stages_the_binary(tmp_path):
     reason="rattler-build + pixi needed for the file:// round trip (both in `test`)",
 )
 def test_conda_roundtrip_stage_from_prefix_copies_binary_into_resources(tmp_path):
-    """The T3 (#1079) DoD as a REAL local run: after the producer builds a genuine
-    per-platform `.conda` and pixi resolves it into a scratch env prefix (the same
-    round trip the test above proves), `shipit.staging.stage` — the generic
-    stage-from-prefix step — copies the resolved `bin/lex` into the consumer's
-    `resources/`, and the file lands there with its EXECUTABLE BIT intact.
-
-    This is the loop conda-direct T3 replaces `fetch-deps` with: source axis = the
-    resolved env prefix (not a gh-release download), manifest = the `[stage]` map.
-    Only the S3 publish is faked; the `.conda`, the pixi resolve, and the copy are
-    all real. Directory + non-exec-file staging and the escape/idempotency guards
-    are unit-tested in test_staging.py against a constructed prefix."""
     roundtrip = _load_roundtrip_harness()
     try:
         native = roundtrip.host_conda_subdir()
@@ -3402,9 +2785,6 @@ def test_conda_roundtrip_stage_from_prefix_copies_binary_into_resources(tmp_path
     )
     assert staged_bin.stat().st_mode & 0o111, "precondition: resolved binary runnable"
 
-    # The scratch project root the harness resolved into IS the consumer checkout:
-    # `staging.stage` resolves its env prefix as `<root>/.pixi/envs/default`, the
-    # exact prefix the harness staged `bin/lex` under.
     root = tmp_path / "resolve"
     assert (root / ".pixi" / "envs" / "default" / "bin" / "lex").exists()
 
@@ -3414,15 +2794,12 @@ def test_conda_roundtrip_stage_from_prefix_copies_binary_into_resources(tmp_path
     dest = root / "resources" / "lex"
     assert dest.is_file(), "the resolved binary was not copied under resources/"
     assert dest.read_text(encoding="utf-8") == staged_bin.read_text(encoding="utf-8")
-    # The executable bit survived the prefix -> resources copy (the DoD): a
-    # mode-0644 `resources/lex` the app ships would be a non-runnable LSP.
     assert dest.stat().st_mode & 0o111, (
         f"staged {dest} lost its exec bit (mode {oct(dest.stat().st_mode)}) — the "
         f"shipped bundle would carry a non-runnable binary"
     )
     ran = subprocess.run([str(dest)], capture_output=True, text=True, timeout=30)
     assert ran.returncode == 0 and "hi" in ran.stdout
-    # The reported StagedFile matches what landed.
     assert result == [
         staging.StagedFile(
             package="lex",
@@ -3435,17 +2812,6 @@ def test_conda_roundtrip_stage_from_prefix_copies_binary_into_resources(tmp_path
 
 
 def test_roundtrip_main_skips_cleanly_on_an_unmapped_host(monkeypatch, capsys):
-    """The standalone harness entry point (`_main`) SKIPs cleanly on an unmapped
-    host — a message and rc 0, never an uncaught `RuntimeError`/traceback. The
-    real tests skip via pytest; the runnable `__main__` path must skip too, so
-    running `python tools/conda_channel_roundtrip.py` on Windows/Intel-mac does
-    not crash. The unmapped-host skip must win REGARDLESS of installed tools, so
-    this forces the harder case: `_HOST_SUBDIR` emptied (every host unmapped) AND
-    `shutil.which` -> None (tools ALSO absent). rc must be 0 with the
-    unsupported-host message — never the tool-missing rc 2 — proving the host
-    skip is checked before the tool-presence gate. The `which` stub takes
-    `*args, **kwargs` to match the stdlib `which(cmd, mode=…, path=…)` signature
-    while the global patch is live."""
     roundtrip = _load_roundtrip_harness()
     monkeypatch.setattr(roundtrip.shutil, "which", lambda *args, **kwargs: None)
     monkeypatch.setattr(roundtrip, "_HOST_SUBDIR", {})
@@ -3458,48 +2824,34 @@ def test_roundtrip_main_skips_cleanly_on_an_unmapped_host(monkeypatch, capsys):
 
 
 def test_conda_secret_pair_mirrors_the_derivation_authority():
-    """conda's write-cred pair IS its `secretreq.ENDPOINT_SECRETS` entry — the
-    one derivation authority gh-setup syncs and preflight validates."""
     adapter = publish_mod.adapter_for("conda")
     assert adapter is not None
     assert adapter.secrets == secretreq_mod.ENDPOINT_SECRETS["conda"]
     assert (publish_mod.CONDA_KEY_ID_SECRET, publish_mod.CONDA_SECRET_KEY_SECRET) == (
         secretreq_mod.ENDPOINT_SECRETS["conda"]
     )
-    # rc-inclusive: external (a -release-rc stays gh-release-only) but not
-    # stable_only, so a plain prerelease still publishes.
     assert adapter.stage == "derived" and adapter.external and not adapter.stable_only
     assert adapter.needs_repo
 
 
 def test_plan_prerelease_keeps_conda_but_a_live_fire_skips_it():
-    """rc-inclusive (ADR-0064): a plain prerelease publishes conda (unlike brew,
-    which is stable_only); a -release-rc live-fire cut skips it (external)."""
     artifacts = _artifacts({"lex": {"endpoints": ["gh-release", "brew", "conda"]}})
     pre = publish_mod.plan(artifacts, prerelease=True, live_fire=False)
     verdicts = {d.adapter.name: d.skip for d in pre}
-    assert verdicts["conda"] is None  # rc-inclusive — published
-    assert verdicts["brew"] == publish_mod.SKIP_STABLE_ONLY  # stable-only — skipped
+    assert verdicts["conda"] is None
+    assert verdicts["brew"] == publish_mod.SKIP_STABLE_ONLY
     live = publish_mod.plan(artifacts, prerelease=True, live_fire=True)
     assert {d.adapter.name: d.skip for d in live}["conda"] == publish_mod.SKIP_RC_GUARD
 
 
 def test_plan_conda_alone_is_valid_without_a_gh_release():
-    """conda-direct (ADR-0077): conda packages the staged build output directly,
-    so it has NO gh-release dependency — a conda-only plan is VALID (the
-    release-before-derived ordering constraint that once required an unskipped
-    gh-release for conda is removed). brew/notify keep their gh-release
-    invariant; conda does not."""
     artifacts = _artifacts({"lex": {"endpoints": ["conda"]}})
     dispatched = publish_mod.plan(artifacts, prerelease=False, live_fire=False)
     verdicts = {d.adapter.name: d.skip for d in dispatched}
-    assert verdicts == {"conda": None}  # planned, unskipped, no gh-release needed
+    assert verdicts == {"conda": None}
 
 
 def test_plan_conda_direct_needs_no_gh_release_even_selected_alone():
-    """The selector can pick conda ALONE (no gh-release) and the plan stands —
-    conda-direct means no derived-without-base refusal for conda (contrast
-    brew/notify, still refused). A prerelease keeps conda (rc-inclusive)."""
     artifacts = _artifacts({"lex": {"endpoints": ["conda", "crates"]}})
     dispatched = publish_mod.plan(
         artifacts, prerelease=True, live_fire=False, selector=["conda"]
@@ -3510,10 +2862,6 @@ def test_plan_conda_direct_needs_no_gh_release_even_selected_alone():
 
 
 def test_missing_rattler_build_gets_the_reconcile_remedy(tmp_path, monkeypatch, capsys):
-    """A missing `rattler-build` (the conda-packager block absent from the
-    runner) names the block's COMMITTING install reconcile — never a raw 127,
-    the #801 translation applied to the conda endpoint (block re-gated onto the
-    conda endpoint in #1071)."""
     _publish_repo(
         tmp_path,
         monkeypatch,
@@ -3530,8 +2878,6 @@ platforms = ["darwin-arm64"]
     )
 
     def _seam(argv, cwd, env=None):
-        # gh-release rides the gh adapter (FakeGh), so the FIRST run_cmd tool is
-        # rattler-build — die missing-binary on it.
         if [str(a) for a in argv][:1] == ["rattler-build"]:
             _raise_missing_binary(argv, cwd, env)
         return _ok(argv)
@@ -3556,11 +2902,6 @@ platforms = ["darwin-arm64"]
     assert "[artifacts.lex] conda:" in err
     assert "pixi.toml#shipit-conda-packager" in err
     assert "`shipit install --pr`" in err
-
-
-# --------------------------------------------------------------------------
-# zed (derived) — the Zed-extension registry coordinates (TOL03-WS02 #973)
-# --------------------------------------------------------------------------
 
 
 def _zed_artifacts():
@@ -3589,21 +2930,18 @@ def test_zed_extension_id_refuses_a_manifest_without_a_string_id(text):
 @pytest.mark.parametrize(
     "ext_id",
     [
-        "../zed-registry",  # path traversal out of the scratch dir
+        "../zed-registry",
         "..",
-        "/tmp/x",  # absolute path
-        "foo/bar",  # a slash — a second path segment / submodule-dir escape
-        "foo.bar",  # a dot — blurs the `<id>.extensions-toml` filename
-        'x]\nversion = "0"',  # closes the TOML table key + injects a line
-        "Lex",  # uppercase is outside the lowercase registry vocabulary
+        "/tmp/x",
+        "foo/bar",
+        "foo.bar",
+        'x]\nversion = "0"',
+        "Lex",
         "with space",
-        "-leading",  # must start with an alphanumeric
+        "-leading",
     ],
 )
 def test_zed_extension_id_refuses_an_id_outside_the_grammar(ext_id):
-    # The id is untrusted repo content used as BOTH a TOML key and a filename,
-    # so a non-conforming id is a loud refusal — never a mis-scoped write or a
-    # malformed registry row (codex/copilot round-1 finding).
     manifest = f"id = {json.dumps(ext_id)}\n"
     with pytest.raises(ReleaseError, match="is not a valid Zed extension id"):
         publish_mod.zed_extension_id(manifest)
@@ -3620,8 +2958,6 @@ def test_zed_extension_id_refuses_unparseable_toml():
 
 
 def test_zed_publish_refuses_a_traversal_id_before_writing(tmp_path):
-    # End to end through the adapter: a malicious extension.toml id never
-    # reaches render/write — the scratch dir stays empty on refusal.
     artifact = _zed_artifacts()[0]
     (tmp_path / "extension.toml").write_text('id = "../escape"\n', encoding="utf-8")
     req = _request(
@@ -3640,18 +2976,13 @@ def test_render_zed_registry_entry_emits_the_row_and_submodule_rev():
     text = publish_mod.render_zed_registry_entry(
         ext_id="lex", version="1.2.3", repo="lex-fmt/zed-lex", tag="v1.2.3"
     )
-    # The extensions.toml row keyed by the extension id, with the bumped version…
     assert "[lex]\n" in text
     assert 'submodule = "extensions/lex"\n' in text
     assert 'version = "1.2.3"\n' in text
-    # …plus the submodule rev the manual PR advances the id's submodule to.
     assert "github.com/lex-fmt/zed-lex @ v1.2.3" in text
 
 
 def test_zed_renders_the_registry_entry_and_reports_the_manual_step(tmp_path):
-    """The happy path: read the extension id from extension.toml, render the
-    registry row + submodule rev into a scratch subdir, and report the manual
-    PR step. No cross-repo push, no tool invocation (ADR-0068)."""
     artifact = _zed_artifacts()[0]
     _write_zed_manifest(tmp_path, ext_id="lex")
     seam = SeamRecorder()
@@ -3664,7 +2995,6 @@ def test_zed_renders_the_registry_entry_and_reports_the_manual_step(tmp_path):
         repo="lex-fmt/zed-lex",
     )
     published = publish_mod._publish_zed(req)
-    # No effectful command ran — the endpoint only renders + reports.
     assert seam.calls == []
     rendered = tmp_path / "dist" / publish_mod.ZED_SCRATCH / "lex.extensions-toml"
     assert rendered.is_file()
@@ -3678,8 +3008,6 @@ def test_zed_renders_the_registry_entry_and_reports_the_manual_step(tmp_path):
 
 
 def test_zed_refuses_an_unresolved_source_repo(tmp_path):
-    """The submodule rev names github.com/<owner/name>@<tag>; a direct caller
-    that omits the repo gets a loud refusal, never a null-source row."""
     artifact = _zed_artifacts()[0]
     _write_zed_manifest(tmp_path)
     req = _request(
@@ -3694,9 +3022,7 @@ def test_zed_refuses_an_unresolved_source_repo(tmp_path):
 
 
 def test_zed_refuses_a_missing_extension_manifest(tmp_path):
-    """The zed composition ships extension.toml as the required core; its
-    absence at publish is a loud refusal (run bundle first), never a skip."""
-    artifact = _zed_artifacts()[0]  # no extension.toml written
+    artifact = _zed_artifacts()[0]
     req = _request(
         tmp_path,
         artifact,
@@ -3709,8 +3035,6 @@ def test_zed_refuses_a_missing_extension_manifest(tmp_path):
 
 
 def _zed_bundled_artifacts(*, leg="rust", payload=None, leg_name="rust"):
-    """A zed artifact that DECLARES its bundle — the shape the endpoint has to
-    follow, rather than assuming the crate leg."""
     return _artifacts(
         {
             "zed-lex": {
@@ -3731,19 +3055,10 @@ def _zed_bundled_artifacts(*, leg="rust", payload=None, leg_name="rust"):
 
 
 def test_zed_bundle_and_endpoint_read_the_same_declared_leg(tmp_path):
-    """CROSS-STAGE: the archive the tag ships and the registry row the endpoint
-    renders describe ONE extension, so both stages must resolve the SAME
-    directory from the SAME declaration. The endpoint used to look in the first
-    `rust` leg regardless of what the bundle declared, so a non-rust declared leg
-    is exactly where the two diverged — the archive came from `grammar/` while
-    the row was keyed by whatever `extension.toml` sat in the rust leg.
-    """
     artifact = _zed_bundled_artifacts(leg="tree-sitter", leg_name="tree-sitter")[0]
     (tmp_path / "grammar").mkdir()
     _write_zed_manifest(tmp_path / "grammar", ext_id="lex")
     (tmp_path / "grammar" / "shared").mkdir()
-    # A decoy in the rust leg: whichever stage reads the undeclared dir keys its
-    # output to an extension the other stage never saw.
     (tmp_path / "crate").mkdir()
     _write_zed_manifest(tmp_path / "crate", ext_id="decoy")
     entries = _entries({"grammar": "tree-sitter", "crate": "rust"})
@@ -3765,10 +3080,8 @@ def test_zed_bundle_and_endpoint_read_the_same_declared_leg(tmp_path):
         _request(tmp_path, artifact, entries=entries, repo="lex-fmt/zed-lex")
     )
 
-    # The bundle tarred from the declared leg…
     ((argv, *_rest),) = recorder.calls
     assert argv[argv.index("-C") + 1] == str(tmp_path / "grammar")
-    # …and the endpoint read its manifest from that same dir — not the decoy.
     assert "for lex 1.2.3" in published.actions[0]
     assert "decoy" not in published.actions[0]
     assert (
@@ -3777,10 +3090,6 @@ def test_zed_bundle_and_endpoint_read_the_same_declared_leg(tmp_path):
 
 
 def test_zed_refuses_a_declaration_that_omits_the_manifest(tmp_path):
-    """The registry row is keyed by the id read from extension.toml, so a
-    payload that may not carry that manifest would publish coordinates for a
-    package that does not hold them — refused at the endpoint boundary, even
-    though the manifest happens to sit on disk right now."""
     artifact = _zed_bundled_artifacts(payload=[{"path": "shared", "required": True}])[0]
     _write_zed_manifest(tmp_path, ext_id="lex")
     req = _request(
@@ -3799,8 +3108,6 @@ def test_zed_refuses_a_declaration_that_omits_the_manifest(tmp_path):
 
 
 def test_zed_refuses_a_manifest_declared_only_when_present(tmp_path):
-    """Declared but OPTIONAL is the same divergence one step later: the archive
-    may omit the manifest the row is keyed by."""
     artifact = _zed_bundled_artifacts(
         payload=[{"path": "shared", "required": True}, {"path": "extension.toml"}]
     )[0]
@@ -3817,10 +3124,7 @@ def test_zed_refuses_a_manifest_declared_only_when_present(tmp_path):
 
 
 def test_zed_endpoint_only_artifact_reads_the_crate_leg(tmp_path):
-    """An artifact with the zed ENDPOINT and no bundle declares no leg, so the
-    endpoint reads the rust leg a Zed extension crate lives in. This is the one
-    case with no declaration to follow — never a fallback for a declared one."""
-    artifact = _zed_artifacts()[0]  # endpoints only, no bundle
+    artifact = _zed_artifacts()[0]
     assert artifact.bundle is None
     (tmp_path / "crate").mkdir()
     _write_zed_manifest(tmp_path / "crate", ext_id="lex")
@@ -3836,22 +3140,15 @@ def test_zed_endpoint_only_artifact_reads_the_crate_leg(tmp_path):
 
 
 def test_zed_declares_no_secret_and_is_a_derived_stable_only_endpoint():
-    """The endpoint renders the manual-PR coordinates and never pushes into the
-    foreign registry, so it declares NO secret — its `secretreq.ENDPOINT_SECRETS`
-    entry is empty, like gh-release (ADR-0068)."""
     assert secretreq_mod.ENDPOINT_SECRETS["zed"] == ()
     adapter = publish_mod.adapter_for("zed")
     assert adapter is not None
     assert adapter.secrets == ()
-    # derived, stable_only (registry serves stable), external (rc = gh only),
-    # needs_repo (the submodule rev names the source slug @ tag).
     assert adapter.stage == "derived"
     assert adapter.stable_only and adapter.external and adapter.needs_repo
 
 
 def test_plan_prerelease_skips_zed_and_a_live_fire_skips_it_too():
-    """stable_only: a plain prerelease renders no registry entry (the registry
-    serves stable versions); external: a -release-rc live-fire is gh-only."""
     artifacts = _artifacts({"zed-lex": {"endpoints": ["gh-release", "zed"]}})
     pre = publish_mod.plan(artifacts, prerelease=True, live_fire=False)
     assert {d.adapter.name: d.skip for d in pre}[
@@ -3862,9 +3159,6 @@ def test_plan_prerelease_skips_zed_and_a_live_fire_skips_it_too():
 
 
 def test_plan_zed_alone_needs_no_gh_release():
-    """Unlike brew/notify/conda, zed references the `release prepare` tag (not
-    gh-release assets, ADR-0068), so a zed-only map is a valid plan — the
-    gh-release-must-exist invariant does not extend to it."""
     artifacts = _artifacts({"zed-lex": {"endpoints": ["zed"]}})
     dispatched = publish_mod.plan(artifacts, prerelease=False, live_fire=False)
     assert [d.adapter.name for d in dispatched] == ["zed"]

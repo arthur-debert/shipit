@@ -1,9 +1,3 @@
-"""The matching primitive (RVW03-WS06): ONE deterministic definition of "the same
-claim" — file + line-in-range + normalized claim-token overlap, aliases honored
-(ADR-0048) — shared by the Ground-truth scorer and #673's same-round dedup.
-Wording-variant cases are the point: the primitive must match rephrasings of one
-defect without an LLM anywhere near the ruler."""
-
 from __future__ import annotations
 
 import pytest
@@ -19,8 +13,6 @@ from shipit.review.match import (
     same_claim,
 )
 
-# The RVW02-WS05 app#391 ground truth in its two historical phrasings — the
-# recall-swinging finding the fixture exists to measure (issue #665).
 GT_CLAIM = (
     "the 0x0-frame short-circuit skips applyLayout, so a fully-offscreen pan "
     "leaves stale pixels on screen"
@@ -40,8 +32,6 @@ class TestNormalizeClaim:
         assert tokens == {"panic"}
 
     def test_identifier_survives_as_one_token(self):
-        # camelCase does not decompose — both sides normalize identically, so
-        # the identifier is a high-signal shared token.
         assert "applylayout" in normalize_claim("skips applyLayout on pan")
 
     def test_empty_text_normalizes_empty(self):
@@ -62,12 +52,9 @@ class TestClaimOverlap:
         assert claim_overlap("", GT_CLAIM) == 0.0
 
     def test_wording_variants_of_one_defect_clear_the_threshold(self):
-        # The load-bearing case: two historical phrasings of app-G1 must agree.
         assert claim_overlap(GT_CLAIM, EMITTED_VARIANT) >= CLAIM_THRESHOLD
 
     def test_dense_claim_inside_paragraph_scores_high(self):
-        # Overlap coefficient, not Jaccard: a paragraph-length finding text must
-        # not dilute its agreement with a one-sentence fixture claim.
         paragraph = (
             "In Editor.svelte the render path short-circuits when the frame is "
             "0x0 and returns before applyLayout runs. Because the offscreen pan "
@@ -109,8 +96,6 @@ class TestMatchClaim:
         assert match_claim(claim, **LABEL) is MatchVerdict.NO_MATCH
 
     def test_right_location_unknown_wording_is_a_near_miss(self):
-        # ADR-0048: right file, overlapping lines, claim below the lexical
-        # threshold → surfaced for adjudication (bank an alias), never dropped.
         claim = Claim(
             "src/lib/editor/Editor.svelte",
             2370,
@@ -157,8 +142,6 @@ class TestMatchClaim:
 
 
 class TestSameClaim:
-    """The #673 dedup seam: symmetric finding-vs-finding comparison."""
-
     def test_two_phrasings_at_nearby_lines_are_the_same(self):
         a = Claim("src/x.py", 100, GT_CLAIM)
         b = Claim("src/x.py", 105, EMITTED_VARIANT)

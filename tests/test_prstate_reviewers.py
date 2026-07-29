@@ -1,10 +1,3 @@
-"""Adapter detection over recorded PR scenarios.
-
-Each test asserts where the Copilot/Gemini adapters place a reviewer in the
-lifecycle, exercising the load-bearing rules: head-SHA filtering, the
-resolved-thread filter, and Gemini's weak (reaction/comment) signals.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -26,8 +19,6 @@ from shipit.prstate.reviewers import (
 from shipit.prstate.reviewers_config import default_roster
 from shipit.prstate.roster import Roster, RosterEntry
 
-# The typed PR target (CLI01-WS02 / ADR-0030): the act side takes a PrId — the
-# repo rides on the identity into `gh.pr_edit_reviewer` / the detach service.
 _TARGET_REPO = repo_from_slug("owner/repo")
 
 
@@ -35,8 +26,6 @@ def _target(number: int) -> PrId:
     return PrId(repo=_TARGET_REPO, number=number)
 
 
-# Full, validated commit identities (COR02): the current head, an earlier
-# (stale) head, and a generic head for single-commit scenarios.
 NEW = Sha("beef" * 10)
 OLD = Sha("dead" * 10)
 HEAD = Sha("abcd" * 10)
@@ -49,23 +38,14 @@ AGY = AgyAdapter()
 
 
 def _rerun_roster(name: str) -> Roster:
-    """A Roster flipping `name` to rerun=True — the head-strict opt-in as a value.
-
-    Since ADR-0043 / RVW02-WS06 this is also the CODE default, so it doubles as
-    "the shipped default policy expressed explicitly"."""
     return Roster((RosterEntry(name=name, required=True, rerun=True),))
 
 
 def _review_once_roster(name: str) -> Roster:
-    """A Roster opting `name` OUT to rerun=False — review-once, now the explicit
-    opt-out (ADR-0043 flipped the code default to head-strict)."""
     return Roster((RosterEntry(name=name, required=True, rerun=False),))
 
 
 def test_registry_catalogs_all_adapters():
-    # The registry is the CATALOG; which entries hold Ready is the config knob. The
-    # local backends (codex / agy) join the GitHub-App reviewers under one
-    # interface.
     assert [r.name for r in REGISTRY] == [
         "copilot",
         "coderabbit",
@@ -73,9 +53,6 @@ def test_registry_catalogs_all_adapters():
         "codex",
         "agy",
     ]
-    # `requestable` marks eligibility to be a required (holding) reviewer (a real request
-    # edge + the #614 attach-verification, or — for the local backends — a
-    # synchronous run-and-post), NOT the current required set.
     assert COPILOT.requestable is True
     assert CODERABBIT.requestable is True
     assert GEMINI.requestable is False
@@ -84,8 +61,6 @@ def test_registry_catalogs_all_adapters():
 
 
 def test_default_required_set_is_copilot_only():
-    # The shipped default config: Copilot holds Ready. CodeRabbit is a phos-org
-    # pilot — requestable (eligible), but required only where a repo opts in.
     assert [r.name for r in required_adapters(default_roster())] == ["copilot"]
 
 
@@ -110,8 +85,6 @@ def test_gemini_eyes_is_in_progress_copilot_requested(context):
 
 
 def test_stale_copilot_review_counts_as_done_when_review_once(context):
-    # DEFAULT policy is review-once (rerun=False): a review against an earlier
-    # commit still counts as done — the reviewer won't be asked to look again.
     ctx = context("copilot_stale_review")
     assert COPILOT.detect(ctx) in (
         ReviewLifecycle.DONE_CLEAN,
@@ -120,17 +93,12 @@ def test_stale_copilot_review_counts_as_done_when_review_once(context):
 
 
 def test_stale_copilot_review_does_not_count_as_done_when_rerun(context):
-    # rerun=True (opt-in, head-strict): a review against an earlier commit is
-    # stale and must not read as done on this head.
     ctx = context("copilot_stale_review")
     ctx.roster = _rerun_roster("copilot")
     assert COPILOT.detect(ctx) == ReviewLifecycle.REQUESTED
 
 
 def test_gemini_review_on_earlier_head_still_counts_as_done():
-    # The exact #345-fixup case: Gemini reviewed the OLD head, a fixup made a new
-    # head, and the lingering eyes reaction must NOT downgrade Gemini to
-    # in_progress — it reviews once and won't re-review the push.
     from shipit.prstate.model import Review, readiness_view
 
     ctx = readiness_view(
@@ -144,8 +112,6 @@ def test_gemini_review_on_earlier_head_still_counts_as_done():
 
 
 def test_copilot_review_on_earlier_head_counts_done_review_once():
-    # Review-once (the explicit opt-out, ADR-0043): an earlier-head Copilot review
-    # still counts as done — the reviewer won't be asked to look again.
     from shipit.prstate.model import Review, readiness_view
 
     ctx = readiness_view(
@@ -163,7 +129,6 @@ def test_copilot_review_on_earlier_head_counts_done_review_once():
 
 
 def test_copilot_review_on_earlier_head_does_NOT_count_done_when_rerun():
-    # rerun=True: Copilot is head-strict — a review on an old head is stale.
     from shipit.prstate.model import Review, readiness_view
 
     ctx = readiness_view(
@@ -178,8 +143,6 @@ def test_copilot_review_on_earlier_head_does_NOT_count_done_when_rerun():
 
 
 def test_copilot_never_reviewed_is_requested_or_not_requested():
-    # Never reviewed: REQUESTED when currently requested, else NOT_REQUESTED —
-    # independent of the rerun flag.
     from shipit.prstate.model import readiness_view
 
     requested = readiness_view(
@@ -191,8 +154,6 @@ def test_copilot_never_reviewed_is_requested_or_not_requested():
 
 
 def test_dismissed_copilot_review_on_head_does_NOT_count_done():
-    # A DISMISSED review (cleared by an admin/author) is retracted — even on the
-    # current head it must not read as done; the PR falls back to REQUESTED.
     from shipit.prstate.model import Review, readiness_view
 
     ctx = readiness_view(
@@ -206,7 +167,6 @@ def test_dismissed_copilot_review_on_head_does_NOT_count_done():
 
 
 def test_dismissed_gemini_review_does_NOT_count_done():
-    # Same for best-effort Gemini: a dismissed review is not a standing verdict.
     from shipit.prstate.model import Review, readiness_view
 
     ctx = readiness_view(
@@ -225,9 +185,6 @@ def test_resolved_thread_clears_open_but_keeps_authored(context):
     assert len(COPILOT.authored_threads(ctx)) == 1
 
 
-# --- the act side (request / cancel / instruction files; release#555) -------
-
-
 def test_by_name_resolves_registry_adapters():
     from shipit.prstate.reviewers import by_name
 
@@ -242,8 +199,6 @@ def test_by_name_resolves_registry_adapters():
 
 
 def test_copilot_request_goes_through_gh_pr_edit_graphql(monkeypatch):
-    # The GraphQL `gh pr edit --add-reviewer @copilot` path is load-bearing:
-    # the REST requested_reviewers POST silently no-ops for Copilot.
     from shipit import gh
 
     calls: list[tuple] = []
@@ -270,10 +225,9 @@ def test_copilot_cancel_removes_the_reviewer(monkeypatch):
 
 
 def test_gemini_request_and_cancel_are_noops(monkeypatch):
-    # Gemini auto-triggers and is best-effort: no request mechanism, no gh call.
     from shipit import gh
 
-    def _boom(*a, **k):  # any gh traffic is a bug
+    def _boom(*a, **k):
         raise AssertionError("gemini must not touch gh")
 
     monkeypatch.setattr(gh, "pr_edit_reviewer", _boom)
@@ -283,16 +237,11 @@ def test_gemini_request_and_cancel_are_noops(monkeypatch):
 
 
 def test_adapters_declare_their_instruction_files():
-    # Structure only (#555): the adapter declares where its review-instruction
-    # file lives; shipping content there is a separate onboarding decision.
     assert COPILOT.instruction_files == (".github/copilot-instructions.md",)
     assert CODERABBIT.instruction_files == (".coderabbit.yaml",)
     assert GEMINI.instruction_files == (".gemini/styleguide.md",)
     assert CODEX.instruction_files == (".github/codex-review-instructions.md",)
     assert AGY.instruction_files == (".github/agy-review-instructions.md",)
-
-
-# --- CodeRabbit adapter (release#622) ---------------------------------------
 
 
 def test_coderabbit_matches_its_bot_login():
@@ -302,7 +251,6 @@ def test_coderabbit_matches_its_bot_login():
 
 
 def test_coderabbit_done_on_head_with_open_comment():
-    # Head-strict + leaves a thread → DONE_COMMENTS, with the open thread tracked.
     from shipit.prstate.model import Review, ReviewComment, Thread, readiness_view
 
     thread = Thread(
@@ -322,8 +270,6 @@ def test_coderabbit_done_on_head_with_open_comment():
 
 
 def test_coderabbit_review_once_opt_out_counts_earlier_head():
-    # Review-once as the explicit opt-out (ADR-0043): an earlier-head CodeRabbit
-    # review counts as done.
     from shipit.prstate.model import Review, readiness_view
 
     ctx = readiness_view(
@@ -341,7 +287,6 @@ def test_coderabbit_review_once_opt_out_counts_earlier_head():
 
 
 def test_coderabbit_is_head_strict_when_rerun():
-    # rerun=True: a review on an earlier head is stale — must NOT read as done.
     from shipit.prstate.model import Review, readiness_view
 
     ctx = readiness_view(
@@ -369,8 +314,6 @@ def test_dismissed_coderabbit_review_does_not_count_done():
 
 
 def test_coderabbit_request_and_cancel_go_through_gh_pr_edit(monkeypatch):
-    # The same GraphQL add-reviewer path Copilot uses — it creates a real
-    # review_requested edge, so the generic #614 attach-verification applies.
     from shipit import gh
 
     calls: list[tuple] = []
@@ -387,50 +330,33 @@ def test_coderabbit_request_and_cancel_go_through_gh_pr_edit(monkeypatch):
     ]
 
 
-# --- local review backends: codex / agy (Phase 3) ---------------------------
-
-
 def test_codex_and_agy_match_their_bot_logins():
-    # Requires the `[bot]` suffix AND the stable `*-review` slug fragment —
-    # matches the `adr-*-review[bot]` logins (and any future prefix) WITHOUT
-    # hardcoding the user-specific `adr-` slug.
     assert CODEX.matches("adr-codex-review[bot]") is True
     assert CODEX.matches("adr-agy-review[bot]") is False
     assert AGY.matches("adr-agy-review[bot]") is True
     assert AGY.matches("adr-codex-review[bot]") is False
-    # agy keys off `agy-review`, NOT `gemini` (the bot login is `adr-agy-review`).
     assert AGY.matches("gemini-code-assist[bot]") is False
-    # Neither matches Copilot.
     assert CODEX.matches("copilot[bot]") is False
     assert AGY.matches("copilot[bot]") is False
 
 
 def test_codex_and_agy_do_not_match_human_logins():
-    # A human login that merely CONTAINS the substring (no `[bot]` suffix, no
-    # `*-review` fragment) must NOT misread as the bot — that would falsely
-    # report a DONE review.
     assert CODEX.matches("codexdev") is False
     assert CODEX.matches("codex-fan") is False
     assert CODEX.matches("codex") is False
     assert AGY.matches("agytron") is False
     assert AGY.matches("agy") is False
-    # `[bot]` alone isn't enough — the slug fragment must also be present.
     assert CODEX.matches("codexbot[bot]") is False
     assert AGY.matches("agy-helper[bot]") is False
 
 
 def test_codex_and_agy_require_bot_as_suffix_not_substring():
-    # `[bot]` must be a SUFFIX, not appear mid-string: a login carrying the
-    # slug fragment AND `[bot]` somewhere in the middle (but not at the end)
-    # must NOT match — `endswith`, not substring containment.
     assert CODEX.matches("adr-codex-review[bot]-staging") is False
     assert AGY.matches("adr-agy-review[bot]y") is False
-    # The slug fragment alone, with `[bot]` mid-string, is still False.
     assert CODEX.matches("codex-review[bot]x") is False
 
 
 def test_codex_detect_done_on_head():
-    # A review by the codex bot on the current head reads as done (head-strict).
     from shipit.prstate.model import Review, readiness_view
 
     ctx = readiness_view(
@@ -446,8 +372,6 @@ def test_codex_detect_done_on_head():
 
 
 def test_codex_detect_not_requested_when_empty():
-    # No review by the local reviewer → NOT_REQUESTED (no requested edge exists
-    # for a local backend, so requested_logins is never consulted).
     from shipit.prstate.model import readiness_view
 
     ctx = readiness_view(number=1, head_sha=HEAD, is_draft=True)
@@ -456,8 +380,6 @@ def test_codex_detect_not_requested_when_empty():
 
 
 def test_codex_detect_stale_review_counts_done_review_once():
-    # Review-once as the explicit opt-out (ADR-0043): an earlier-head local review
-    # still counts as done.
     from shipit.prstate.model import Review, readiness_view
 
     ctx = readiness_view(
@@ -474,9 +396,6 @@ def test_codex_detect_stale_review_counts_done_review_once():
 
 
 def test_codex_detect_stale_review_is_not_done_when_rerun():
-    # rerun=True: head-strict — a review against an earlier head is stale. A local
-    # backend has no requested edge, so a staled review reads NOT_REQUESTED (it
-    # must be re-run), never REQUESTED.
     from shipit.prstate.model import Review, readiness_view
 
     ctx = readiness_view(
@@ -502,10 +421,6 @@ def test_dismissed_codex_review_does_not_count_done():
 
 
 def test_local_request_detaches_via_service(monkeypatch, tmp_path):
-    # OBS03: requesting a codex/agy review LAZILY calls
-    # `shipit.review.service.start_detached_review` (open the in_progress funnel run
-    # + spawn the detached child) and returns True (in-flight; a local reviewer is
-    # never edge-verified). The detach boundary is faked here — no fork, no network.
     from shipit.review import service
 
     calls: list[tuple] = []
@@ -515,14 +430,10 @@ def test_local_request_detaches_via_service(monkeypatch, tmp_path):
         return True
 
     monkeypatch.setattr(service, "start_detached_review", fake_start_detached)
-    # No Roster entry passed → the all-defaults entry: no per-reviewer
-    # model/instructions/timeout options reach the child.
     monkeypatch.chdir(tmp_path)
 
     assert CODEX.request(_target(7)) is True
     assert AGY.request(_target(9)) is True
-    # The adapters hand the service their ONE registry identity (COR02-WS03)
-    # and the TYPED target (ADR-0030).
     assert calls[0][0] is _agent_backend.CODEX and calls[0][1] == _target(7)
     assert calls[0][2]["as_app"] is True
     assert calls[1][0] is _agent_backend.ANTIGRAVITY and calls[1][1] == _target(9)
@@ -531,10 +442,6 @@ def test_local_request_detaches_via_service(monkeypatch, tmp_path):
 def test_local_request_threads_model_and_instructions_from_the_entry(
     monkeypatch, tmp_path
 ):
-    # The per-reviewer `model` / `instructions` arrive on the reviewer's Roster
-    # ENTRY (CLI01-WS04) — loaded once from `[reviewers]` at the verb boundary
-    # and passed as a value — and are threaded to the detached child (force
-    # scope: codex need not be a required (holding) reviewer to carry options).
     from shipit.prstate.reviewers_config import load_roster
     from shipit.review import service
 
@@ -555,14 +462,10 @@ def test_local_request_threads_model_and_instructions_from_the_entry(
     entry = load_roster(str(tmp_path)).entry("codex")
     assert CODEX.request(_target(3), entry) is True
     assert captured["model"] == "flash"
-    # The instructions path was anchored to the config dir at LOAD (absolute).
     assert captured["instructions_path"] == str(tmp_path / "docs" / "rev.md")
 
 
 def test_local_request_normalizes_failure_to_prstateerror(monkeypatch, tmp_path):
-    # Any failure in the synchronous detach (a `gh`/auth failure, a spawn failure)
-    # is normalized to a clean PrStateError (the one error type the CLI renders + exit
-    # 1) — never a raw traceback.
     from shipit.review import service
 
     def boom(agent, pr, **kwargs):
@@ -573,8 +476,6 @@ def test_local_request_normalizes_failure_to_prstateerror(monkeypatch, tmp_path)
 
     with pytest.raises(PrStateError, match="codex-local review failed") as excinfo:
         CODEX.request(_target(7))
-    # The original failure was WRAPPED (normalized), not re-raised: the chained
-    # cause is the underlying RuntimeError, so no raw traceback escapes.
     assert isinstance(excinfo.value.__cause__, RuntimeError)
     assert "backend CLI exploded" in str(excinfo.value.__cause__)
 
@@ -582,9 +483,6 @@ def test_local_request_normalizes_failure_to_prstateerror(monkeypatch, tmp_path)
 def test_local_request_surfaces_reviewauth_hint_without_traceback_spray(
     monkeypatch, tmp_path, caplog
 ):
-    # #522: an EXPECTED auth failure — the operator's machine cannot mint the App
-    # token — must surface the ReviewAuthError's already-actionable remedy as a
-    # clean PrStateError, NOT a raw traceback sprayed at ERROR.
     import logging
 
     from shipit.review import service
@@ -605,16 +503,10 @@ def test_local_request_surfaces_reviewauth_hint_without_traceback_spray(
         with pytest.raises(PrStateError) as excinfo:
             CODEX.request(_target(7))
 
-    # The actionable remedy rode into the clean PrStateError message the CLI
-    # renders + exit 1.
     msg = str(excinfo.value)
     assert "Doppler" in msg
     assert "CODEX_REVIEW_APP_PRIVATE_KEY" in msg
-    # `from None` severs the chain: the hint already rode into the message above,
-    # so there is no `__cause__` left to spray a traceback for on this EXPECTED path.
     assert excinfo.value.__cause__ is None
-    # No ERROR-level record carrying a traceback (`exc_info`) escaped for this
-    # KNOWN case — the glassbox spray is reserved for genuinely-unexpected crashes.
     assert not [
         r
         for r in caplog.records
@@ -623,17 +515,11 @@ def test_local_request_surfaces_reviewauth_hint_without_traceback_spray(
 
 
 def test_local_cancel_is_a_noop():
-    # A posted review can't be withdrawn — cancel returns False, like a
-    # no-mechanism backend.
     assert CODEX.cancel(_target(7)) is False
     assert AGY.cancel(_target(9)) is False
 
 
 def test_local_request_threads_dimensions_and_table_policy(monkeypatch, tmp_path):
-    # RVW02-WS04: the per-reviewer `dimensions` ride the entry (same seam as
-    # model/instructions); the table-level calibrator + nit cap ride the
-    # ReviewPolicy — all threaded to the detached child as VALUES, never a
-    # config re-read inside the run path.
     from shipit.prstate.reviewers_config import load_roster
     from shipit.review import service
 
@@ -662,8 +548,6 @@ def test_local_request_threads_dimensions_and_table_policy(monkeypatch, tmp_path
 
 
 def test_local_request_omits_unset_fanout_config(monkeypatch, tmp_path):
-    # Unset values stay OMITTED so the run path's shipped defaults remain the
-    # single source of the default (no None-vs-default ambiguity in kwargs).
     from shipit.prstate.roster import ReviewPolicy
     from shipit.review import service
 

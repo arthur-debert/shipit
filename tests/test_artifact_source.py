@@ -1,13 +1,3 @@
-"""The artifact-source seam's local-build source (TOL01-WS03).
-
-Recorded-invocation tests through the injected step runner (prior art: the
-build verb tests over the one-exec seam, ADR-0028): the source drives the
-SAME WS02 build join `shipit build` runs — narrowed builder argv, direct
-(never pixi-wrapped), only the artifact's own toolchains — and returns the
-built binary's absolute, verified path; every could-not-produce outcome is
-a loud ArtifactSourceError, never a quiet skip.
-"""
-
 import os
 from pathlib import Path
 
@@ -18,10 +8,6 @@ from shipit.tools import artifact_source
 
 
 class _Recorder:
-    """A fake step runner: records (argv, cwd, env), returns scripted
-    outcomes keyed by binary name (int rc, `(rc, output)`, or an exception);
-    unmapped binaries succeed."""
-
     def __init__(self, outcomes=None):
         self.calls: list[tuple[tuple[str, ...], Path, dict[str, str]]] = []
         self.outcomes = outcomes or {}
@@ -72,20 +58,16 @@ def test_resolve_builds_the_artifact_and_returns_the_absolute_binary(tmp_path):
     rec = _Recorder()
     source, lines = _source(tmp_path, (_entry(".", "rust"),), rec)
     resolved = source.resolve(_rust_artifact())
-    # The WS02 build join, byte-for-byte: the narrowed release build.
     assert rec.calls == [
         (("cargo", "build", "--release", "-p", "app"), tmp_path, {}),
     ]
     assert resolved == binary.resolve()
     assert resolved.is_absolute()
-    # The source reports its steps and the builder's verbatim output.
     assert "e2e: build rust (.) [app]: cargo build --release -p app" in lines
     assert "cargo ran" in lines
 
 
 def test_resolve_builds_every_declared_target_but_only_the_artifacts_legs(tmp_path):
-    # A Tauri-shaped repo: rust + npm are the artifact's targets and both
-    # build; the python leg is NOT the artifact's and never runs.
     _place_binary(tmp_path, "target/release/app")
     (tmp_path / "web").mkdir()
     entries = (_entry(".", "rust"), _entry("web", "npm"), _entry("docs", "python"))
@@ -104,9 +86,6 @@ def test_resolve_builds_every_declared_target_but_only_the_artifacts_legs(tmp_pa
 
 
 def test_resolve_never_wraps_the_builder_in_pixi_and_supplies_no_version(tmp_path):
-    # PRD story 9 (pixi provisions, never builds) and ADR-0041: e2e builds
-    # the working tree's binary — no version is supplied, so a go target's
-    # declared version-var never produces a -X injection here.
     artifact = config.Artifact(
         name="padz",
         build=(
@@ -125,14 +104,11 @@ def test_resolve_never_wraps_the_builder_in_pixi_and_supplies_no_version(tmp_pat
 
 
 def test_builder_output_is_echoed_verbatim(tmp_path):
-    # Verbatim: the builder's output reaches `echo` with its content intact —
-    # trailing whitespace kept, only a single trailing newline dropped so the
-    # line-oriented echo (the verb's `print`) never doubles it.
     _place_binary(tmp_path, "target/release/app")
     rec = _Recorder(outcomes={"cargo": (0, "warning: unused  \n")})
     source, lines = _source(tmp_path, (_entry(".", "rust"),), rec)
     source.resolve(_rust_artifact())
-    assert "warning: unused  " in lines  # trailing spaces survive, newline dropped
+    assert "warning: unused  " in lines
 
 
 def test_failed_build_step_raises_naming_the_step_and_rc(tmp_path):
@@ -143,7 +119,6 @@ def test_failed_build_step_raises_naming_the_step_and_rc(tmp_path):
         match=r"artifact app failed: rust \(\.\) \[app\].*exited 101",
     ):
         source.resolve(_rust_artifact())
-    # The builder's output still surfaced before the refusal.
     assert "compile error" in lines
 
 
@@ -173,11 +148,6 @@ def test_non_executable_binary_is_refused(tmp_path):
 
 
 def test_orphaned_build_target_toolchain_is_refused_before_any_build(tmp_path):
-    # A Tauri-shaped artifact declares rust + npm, but only rust is mapped:
-    # the npm target would be SILENTLY dropped by the leg narrowing and the
-    # harness would still run against a partial build. The source refuses it
-    # loudly — the same orphan-target gate `shipit build` runs — and no
-    # builder is invoked (checked against the WHOLE map, before planning).
     _place_binary(tmp_path, "target/release/app")
     artifact = config.Artifact(
         name="app",
@@ -192,12 +162,6 @@ def test_orphaned_build_target_toolchain_is_refused_before_any_build(tmp_path):
 
 
 def test_ambiguous_producing_path_is_refused_before_any_build(tmp_path):
-    # The artifact targets `rust`, but the map carries TWO rust legs: the join
-    # keys on toolchain (ADR-0007), so the build would run in BOTH paths' cwd
-    # while `binary_location` verifies only the first — the wrong-cwd build the
-    # `shipit build` verb also refuses. The source applies the SAME guard
-    # before planning, so e2e's build really is the join `shipit build` runs;
-    # no builder is invoked.
     _place_binary(tmp_path, "target/release/app")
     rec = _Recorder()
     source, _ = _source(
@@ -209,25 +173,17 @@ def test_ambiguous_producing_path_is_refused_before_any_build(tmp_path):
 
 
 def test_declaration_inconsistencies_surface_as_config_errors(tmp_path):
-    # ConfigError from the pure rules surfaces through the seam untouched.
-    # An e2e artifact with no binary-producing target (npm mapped, so the
-    # orphan gate passes and binary_location does the refusing):
     source, _ = _source(tmp_path, (_entry(".", "npm"),), _Recorder())
     no_binary = config.Artifact(
         name="site", build=(config.BuildTarget("npm"),), e2e=config.E2eSpec()
     )
     with pytest.raises(config.ConfigError, match="no binary-producing"):
         source.resolve(no_binary)
-    # A target whose toolchain has no map leg: the shared orphan gate catches
-    # it first (before binary_location), naming `<artifact> -> <toolchain>`.
     with pytest.raises(config.ConfigError, match=r"no \[toolchains\] leg.*app -> rust"):
         source.resolve(_rust_artifact())
 
 
 def test_the_seam_signature_is_the_wf02_boundary():
-    # PRD story 12, pinned structurally: the protocol's one method takes the
-    # artifact declaration and returns a Path — later sources (CI-artifact
-    # download, the content-key store) implement exactly this.
     assert isinstance(
         artifact_source.LocalBuildSource(
             root=Path("."), entries=(), run_step=_Recorder()
@@ -237,7 +193,6 @@ def test_the_seam_signature_is_the_wf02_boundary():
 
 
 def test_os_access_x_ok_is_the_executability_check(tmp_path):
-    # Sanity-pin the platform assumption the two refusal tests rely on.
     binary = _place_binary(tmp_path, "bin")
     assert os.access(binary, os.X_OK)
     binary.chmod(0o644)

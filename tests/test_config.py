@@ -1,5 +1,3 @@
-"""Unit tests for .shipit.toml parsing — the [secrets] map."""
-
 import tomllib
 
 import pytest
@@ -26,7 +24,6 @@ def test_load_secrets_each_source_kind():
     assert by_name["B"] == config.SecretSource("B", "env", "VAR_B", False)
     assert by_name["C"] == config.SecretSource("C", "prompt", None, False)
     assert by_name["D"].optional is True
-    # Declaration order preserved.
     assert [s.name for s in sources] == ["A", "B", "C", "D"]
 
 
@@ -72,9 +69,6 @@ def test_load_malformed_toml_raises_config_error(tmp_path):
 
 
 def test_load_non_utf8_raises_config_error(tmp_path):
-    # tomllib decodes the file as UTF-8 before parsing, so a non-UTF-8 file
-    # used to leak UnicodeDecodeError (a ValueError) past the documented
-    # ConfigError contract — crashing callers that guard on ConfigError (#585).
     p = tmp_path / ".shipit.toml"
     p.write_bytes(b"\xff\xfe[secrets]\n")
     with pytest.raises(config.ConfigError, match="malformed"):
@@ -129,14 +123,7 @@ def test_custom_escape_hatch_alias_allowed(tmp_path):
     assert cfg["custom"]["anything"]["made_up"] == "fine"
 
 
-# --------------------------------------------------------------------------
-# [lint] — the consumer-owned lint-ignore seam (#484)
-# --------------------------------------------------------------------------
-
-
 def test_lint_table_is_a_known_table(tmp_path):
-    # [lint] is a first-class consumer table: it loads without tripping the
-    # closed-registry validation.
     p = tmp_path / ".shipit.toml"
     p.write_text('[lint]\nignore = ["tests/fixtures/**"]\n')
     assert config.load_lint_ignore(config.load(p)) == ["tests/fixtures/**"]
@@ -164,12 +151,6 @@ def test_lint_ignore_must_be_a_string_list():
         config.load_lint_ignore({"lint": {"ignore": ["ok", 42]}})
 
 
-# --------------------------------------------------------------------------
-# [lanes] — declared CI test units (TOL01, PRD story 14; WS06 declares the
-# fragment-sync check as the first one)
-# --------------------------------------------------------------------------
-
-
 def test_lanes_table_is_a_known_table(tmp_path):
     p = tmp_path / ".shipit.toml"
     p.write_text(
@@ -179,8 +160,6 @@ def test_lanes_table_is_a_known_table(tmp_path):
         'trigger = "pr"\n'
     )
     lanes = config.load_lanes(config.load(p))
-    # The declared fragment-sync lane parses to the SAME typed Lane as the
-    # shipped scaffold constant: one definition, laptop and CI identical.
     assert lanes == [config.CHANGELOG_SYNC_LANE]
 
 
@@ -214,10 +193,8 @@ def test_lanes_full_field_set_and_order():
         runner="ubuntu-latest",
         scope="packages/npm",
     )
-    # Defaults: advisory, not local, planner-default routing (trigger given).
     assert lanes[1] == config.Lane(name="nightly-e2e", run="e2e", trigger="nightly")
     assert lanes[1].required is False and lanes[1].local is False
-    # And an entry with only `run` is PR-triggered by default.
     assert config.load_lanes({"lanes": {"y": {"run": "lint"}}})[0].trigger == "pr"
 
 
@@ -230,14 +207,10 @@ def test_lanes_run_is_required():
 
 @pytest.mark.parametrize("key", ["runner", "scope"])
 def test_lanes_blank_runner_or_scope_dies_at_parse(key):
-    # A present-but-blank routing hint is a footgun, not a default: a blank
-    # runner is an invalid `runs-on`, a blank scope drops the lane every PR.
     with pytest.raises(config.ConfigError, match=rf"`{key}` must be a non-empty"):
         config.load_lanes({"lanes": {"x": {"run": "test", key: "   "}}})
-    # Absent stays the planner default (None), never rejected.
     lane = config.load_lanes({"lanes": {"x": {"run": "test"}}})[0]
     assert getattr(lane, key) is None
-    # A real value is stripped, mirroring `run`.
     stripped = config.load_lanes({"lanes": {"x": {"run": "test", key: " a "}}})[0]
     assert getattr(stripped, key) == "a"
 
@@ -253,8 +226,6 @@ def test_lanes_trigger_vocabulary_is_closed():
 
 
 def test_lanes_trigger_non_string_is_a_configerror_not_a_typeerror():
-    # TOML parses `trigger = ["pr"]` into a list; the unhashable value must be
-    # rejected as ConfigError (not crash the membership test with a TypeError).
     with pytest.raises(config.ConfigError, match="`trigger` must be one of"):
         config.load_lanes({"lanes": {"x": {"run": "lint", "trigger": ["pr"]}}})
 
@@ -266,13 +237,7 @@ def test_lanes_entry_must_be_a_table():
         config.load_lanes({"lanes": "off"})
 
 
-# --------------------------------------------------------------------------
-# [lanes].<lane>.secrets — the declared-secrets allowlist (#778)
-# --------------------------------------------------------------------------
-
-
 def test_lane_secrets_absent_defaults_to_empty_tuple():
-    # No allowlist = the lane is handed no secret (the default, least privilege).
     lane = config.load_lanes({"lanes": {"x": {"run": "test"}}})[0]
     assert lane.secrets == ()
 
@@ -285,8 +250,6 @@ def test_lane_secrets_allowlist_parses_to_an_ordered_tuple_of_names():
 
 
 def test_lane_secrets_must_be_a_list_not_a_bare_string():
-    # `secrets = "lane_token"` is the `secrets: inherit` shape this seam refuses
-    # — a scalar is rejected so the allowlist is always an explicit named set.
     with pytest.raises(config.ConfigError, match=r"`secrets` must be a list"):
         config.load_lanes({"lanes": {"x": {"run": "test", "secrets": "lane_token"}}})
 
@@ -296,21 +259,12 @@ def test_lane_secrets_must_be_a_list_not_a_bare_string():
     ["9lives", "has-dash", "has space", "GITHUB_TOKEN", "github_token", "", 42],
 )
 def test_lane_secrets_rejects_names_github_forbids(bad):
-    # Leading digit, dash/space, the reserved `GITHUB_` prefix (rejected
-    # case-insensitively, so lowercase `github_token` too), empty, and a
-    # non-string all die at parse — an unroutable name must never reach CI as a
-    # silently-dropped credential.
     with pytest.raises(config.ConfigError, match=r"not a valid GitHub secret name"):
         config.load_lanes({"lanes": {"x": {"run": "test", "secrets": [bad]}}})
 
 
 @pytest.mark.parametrize("unknown", ["lane_tokne", "PRIVATE_TOKEN", "other_token"])
 def test_lane_secrets_rejects_well_formed_but_unsupported_slots(unknown):
-    # A name that PASSES GitHub's shape rules but is not a slot the
-    # `wf-checks.yml` block declares (a typo of `lane_token`, a private token)
-    # must still die at parse: it would otherwise ride the matrix and receive
-    # nothing — the silently-dropped credential the closed slot registry exists
-    # to prevent (ADR-0040 routing-only).
     with pytest.raises(
         config.ConfigError, match=r"not a workflow-supported secret slot"
     ):
@@ -318,8 +272,6 @@ def test_lane_secrets_rejects_well_formed_but_unsupported_slots(unknown):
 
 
 def test_lane_secrets_deduplicates_preserving_order():
-    # A repeated slot yields a clean, deduped matrix payload (the GHA `contains`
-    # gate is indifferent to duplicates, but the emitted array should be tidy).
     lanes = config.load_lanes(
         {"lanes": {"x": {"run": "test", "secrets": ["lane_token", "lane_token"]}}}
     )
@@ -344,13 +296,6 @@ def test_lanes_bool_and_string_field_types():
         config.load_lanes({"lanes": {"x": {"run": "lint", "runner": 3}}})
 
 
-# --------------------------------------------------------------------------
-# The fleet manifest (#449 item 3, ADR-0033): [project.portfolio] carries the
-# adoption targets of the ADP fleet sweep (#426) — including shipit-canary,
-# the standing test bed — and none of the sweep's non-targets.
-# --------------------------------------------------------------------------
-
-
 def _portfolio_repos() -> set[str]:
     import tomllib
     from pathlib import Path
@@ -363,10 +308,8 @@ def _portfolio_repos() -> set[str]:
 
 def test_portfolio_contains_the_adoption_targets():
     repos = _portfolio_repos()
-    # The ADP00 canary and the tool itself are fleet rows (#426).
     assert "arthur-debert/shipit-canary" in repos
     assert "arthur-debert/shipit" in repos
-    # The WS07 sweep's other previously-missing targets.
     for slug in (
         "arthur-debert/supage",
         "lex-fmt/mkdocs-lex",
@@ -376,10 +319,6 @@ def test_portfolio_contains_the_adoption_targets():
 
 
 def test_portfolio_contains_the_adopted_editor_consumers():
-    # #1130: nvim and zed-lex were excluded as "editor-config / grammar-packaging
-    # repos" while both in fact carry a `.shipit.toml` with a `[shipit] version`
-    # pin — i.e. they are adopted consumers, so every fleet-wide reconcile driven
-    # off this table silently skipped them. Membership is adoption, not genre.
     repos = _portfolio_repos()
     for slug in ("lex-fmt/nvim", "lex-fmt/zed-lex"):
         assert slug in repos, slug
@@ -387,16 +326,10 @@ def test_portfolio_contains_the_adopted_editor_consumers():
 
 def test_portfolio_excludes_the_sweeps_non_target():
     repos = _portfolio_repos()
-    # The one genuine n/a row in the sweep: a docs repo with neither a
-    # `pixi.toml` nor a `.shipit.toml` on main, so nothing to reconcile.
     assert "lex-fmt/comms" not in repos
 
 
 def test_portfolio_excludes_the_dropped_non_targets():
-    # Deliberately dropped from the rollout manifest as non-adoption targets
-    # (fix(portfolio): drop 7 non-target repos). This guard is the regression
-    # cover codex asked for: it documents the intentional removal AND fails loud
-    # if any of these silently reappears in the portfolio.
     repos = _portfolio_repos()
     for slug in (
         "arthur-debert/dotcat",
@@ -423,11 +356,6 @@ def test_portfolio_entries_carry_repo_and_path():
             assert "path" in entry and entry["path"], (stack, entry)
 
 
-# --------------------------------------------------------------------------
-# [toolchains] — the path→toolchain map (TOL01-WS01, ADR-0007/0039)
-# --------------------------------------------------------------------------
-
-
 def _toolchains(toml: str) -> tuple[config.ToolchainEntry, ...]:
     return config.load_toolchains(tomllib.loads(toml))
 
@@ -440,7 +368,6 @@ def test_load_toolchains_bare_names_in_declaration_order():
         "."   = "rust"
         """
     )
-    # Declaration order IS the fan-out order (ADR-0039) — never re-sorted.
     assert [(e.path, e.toolchain) for e in entries] == [("web", "npm"), (".", "rust")]
     assert all(e.commands == {} for e in entries)
 
@@ -457,9 +384,6 @@ def test_load_toolchains_table_entry_with_per_path_test_override():
 
 
 def test_toolchain_entry_commands_are_read_only():
-    # The "typed frozen values" contract (ADR-0030): a parsed entry's override
-    # map cannot be mutated after the fact — frozen=True freezes the binding,
-    # and the map itself is wrapped read-only.
     entry = config.ToolchainEntry(path=".", toolchain="python", commands={})
     with pytest.raises(TypeError):
         entry.commands["test"] = ("pytest",)  # type: ignore[index]
@@ -475,8 +399,6 @@ def test_load_toolchains_unknown_toolchain_names_the_registry():
 
 
 def test_load_toolchains_unknown_tool_slot_rejected():
-    # The override keys are the CLOSED tool-slot vocabulary (test; WS02 adds
-    # build) — a typo dies fast, mirroring the known-tables validation.
     with pytest.raises(config.ConfigError, match="unknown tool slot `tets`"):
         _toolchains(
             '[toolchains]\n"." = { toolchain = "rust", tets = ["cargo", "test"] }\n'
@@ -484,7 +406,6 @@ def test_load_toolchains_unknown_tool_slot_rejected():
 
 
 def test_load_toolchains_override_must_be_a_non_empty_argv_list():
-    # An argv list, never a shell string (ADR-0028: no shell=True anywhere).
     with pytest.raises(config.ConfigError, match="argv list"):
         _toolchains('[toolchains]\n"." = { toolchain = "rust", test = "cargo test" }\n')
     with pytest.raises(config.ConfigError, match="argv list"):
@@ -502,15 +423,11 @@ def test_load_toolchains_rejects_absolute_paths():
 
 
 def test_load_toolchains_rejects_paths_escaping_the_checkout():
-    # A leg path is an adapter's cwd; a `..` segment would run the bump outside
-    # the tree, so it is refused alongside absolute paths.
     with pytest.raises(config.ConfigError, match="repo-relative"):
         _toolchains('[toolchains]\n"../evil" = "rust"\n')
 
 
 def test_load_toolchains_normalizes_paths_to_canonical_form():
-    # `./web` and `web/` must be stored as `web` so the leg's pathspecs match
-    # `git status --porcelain` output and never trip a false no-op bump.
     (entry,) = _toolchains('[toolchains]\n"./web" = "npm"\n')
     assert entry.path == "web"
     (root_entry,) = _toolchains('[toolchains]\n"." = "python"\n')
@@ -523,7 +440,5 @@ def test_load_toolchains_non_table_section_rejected():
 
 
 def test_toolchains_is_a_known_top_level_table():
-    # `load` validates top-level tables against the closed registry; the map
-    # must parse, not die as a typo.
     cfg = tomllib.loads('[toolchains]\n"." = "python"\n')
-    config._validate_known_tables(cfg)  # does not raise
+    config._validate_known_tables(cfg)
