@@ -37,8 +37,7 @@ def _log_request_transition(reviewer: str, pr: PrId, transition: str) -> None:
 # TIMED_OUT; overridable per-reviewer via the `[reviewers]` `window` option.
 DEFAULT_WAIT_WINDOW = timedelta(minutes=20)
 
-# The only funnel states the wait window ages; every other state is terminal or
-# has no request timestamp to age against.
+# Every other state is terminal or has no timestamp to age against.
 _AGEABLE = (FunnelState.IN_FLIGHT, FunnelState.REQUESTED)
 
 
@@ -101,7 +100,6 @@ class ReviewerAdapter:
         raise NotImplementedError
 
     def native_severity(self, body: str) -> Severity | None:
-        """This reviewer's native severity format mapped to the shared ladder."""
         return None
 
     def _rerun(self, ctx: ReadinessView) -> bool:
@@ -141,7 +139,6 @@ class ReviewerAdapter:
         raise NotImplementedError
 
     def cancel(self, pr: PrId) -> bool:
-        """Withdraw a pending review request; False when there is no mechanism."""
         raise NotImplementedError
 
     @property
@@ -179,7 +176,6 @@ class CopilotAdapter(ReviewerAdapter):
     name = "copilot"
     requestable = True
     instruction_files = (".github/copilot-instructions.md",)
-    # Copilot emits no severity vocabulary at all.
     unclassified_severity = Severity.MINOR
 
     def matches(self, login: str) -> bool:
@@ -208,7 +204,6 @@ class CodeRabbitAdapter(ReviewerAdapter):
     name = "coderabbit"
     requestable = True
     instruction_files = (".coderabbit.yaml",)
-    # The handle `gh pr edit --add-reviewer` resolves to the App's node id.
     _REVIEWER_HANDLE = "coderabbitai[bot]"
 
     # Matched case-insensitively as substrings; declaration order is precedence.
@@ -262,10 +257,8 @@ class GeminiAdapter(ReviewerAdapter):
         "medium": Severity.MINOR,
         "low": Severity.NIT,
     }
-    # The level rides the comment as a badge image, e.g.
-    # `![critical](https://www.gstatic.com/codereviewagent/critical-priority.svg)`.
-    # Anchoring on the `codereviewagent/` segment keeps an unrelated image
-    # that merely shares an alt text from reading as a badge.
+    # Anchoring on the `codereviewagent/` URL segment keeps an unrelated
+    # image that merely shares an alt text from reading as a badge.
     _BADGE_RE = re.compile(
         r"!\[(" + "|".join(map(re.escape, _SEVERITY_MAP)) + r")\]"
         r"\([^)]*codereviewagent/[^)]*\)",
@@ -285,7 +278,6 @@ class GeminiAdapter(ReviewerAdapter):
         entry: RosterEntry | None = None,
         policy: ReviewPolicy | None = None,
     ) -> bool:
-        # No request mechanism, so this is a no-op rather than an error.
         logger.debug(
             "reviewer %s: no request mechanism (auto-triggers) — no-op on pr#%s",
             self.name,
@@ -323,7 +315,6 @@ class _LocalReviewAdapter(ReviewerAdapter):
 
     requestable = True
     has_requested_edge = False
-    # The one agent-backend identity this adapter fronts.
     backend: _agent_backend.Backend
 
     @property
@@ -353,7 +344,6 @@ class _LocalReviewAdapter(ReviewerAdapter):
             run_kwargs["instructions_path"] = entry.instructions
         if entry.timeout is not None:
             run_kwargs["timeout"] = entry.timeout
-        # Unset values are omitted so the run path's own defaults win.
         if entry.dimensions is not None:
             run_kwargs["dimensions"] = entry.dimensions
         if policy is not None:
@@ -375,8 +365,7 @@ class _LocalReviewAdapter(ReviewerAdapter):
                 pr.number,
                 extra={"reviewer": self.display_name, "pr": pr.number},
             )
-            # `from None`: the remedy rides into the message via `{exc}`, and
-            # severing the chain keeps a downstream raise traceback-free.
+            # `from None`: the remedy already rides into the message.
             raise PrStateError(
                 f"{self.funnel_reviewer_name()} review failed on #{pr.number}: {exc}"
             ) from None
@@ -414,7 +403,6 @@ class _LocalReviewAdapter(ReviewerAdapter):
 
     @property
     def display_name(self) -> str:
-        # The name its check run is published under.
         return self.funnel_reviewer_name()
 
     def funnel_state(
@@ -444,16 +432,12 @@ class _LocalReviewAdapter(ReviewerAdapter):
 
 
 class CodexAdapter(_LocalReviewAdapter):
-    """Codex — a local review backend posted as `adr-codex-review[bot]`."""
-
     backend = _agent_backend.CODEX
     name = backend.funnel_agent or backend.name
     instruction_files = (".github/codex-review-instructions.md",)
 
 
 class AgyAdapter(_LocalReviewAdapter):
-    """Agy — a local review backend posted as `adr-agy-review[bot]`."""
-
     backend = _agent_backend.ANTIGRAVITY
     name = backend.funnel_agent or backend.name
     instruction_files = (".github/agy-review-instructions.md",)

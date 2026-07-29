@@ -14,8 +14,6 @@ from .roster import Roster
 
 
 class ReviewLifecycle(StrEnum):
-    """Where a single reviewer stands on a PR's *current head*."""
-
     NOT_REQUESTED = "not_requested"
     REQUESTED = "requested"
     IN_PROGRESS = "in_progress"
@@ -38,8 +36,6 @@ class FunnelState(StrEnum):
 
 @dataclass(frozen=True)
 class ReviewComment:
-    """One inline review comment; `review_id` groups findings into cycles."""
-
     comment_id: int
     path: str
     line: int | None
@@ -77,8 +73,6 @@ class Thread:
 
 @dataclass(frozen=True)
 class Review:
-    """A submitted review; ``commit_id`` is ``None`` when the wire carried none."""
-
     review_id: int
     author: str
     state: str
@@ -101,8 +95,6 @@ class ReviewFunnelCheck:
 
 @dataclass
 class ReadinessView:
-    """One PR's :class:`PR` plus the raw GitHub state the engine reads."""
-
     pr: PR
     mergeable: str | None = None
     reviews: list[Review] = field(default_factory=list)
@@ -146,7 +138,6 @@ class ReadinessView:
         return self.pr.merge_state
 
     def reviews_on_head(self) -> list[Review]:
-        """Reviews on the current head; a commit-less one is not-on-head."""
         return [
             r
             for r in self.reviews
@@ -187,8 +178,7 @@ def readiness_view(
     sightings: events.Sightings | None = None,
     emit_events: bool = True,
 ) -> ReadinessView:
-    """Compose a :class:`ReadinessView` from flattened core values; a raw
-    ``head_sha`` string is minted here, so a malformed head raises."""
+    """A raw ``head_sha`` string is minted here, so a malformed head raises."""
     pr = PR(
         id=PrId(repo=repo or _HANDBUILT_REPO, number=number),
         head_sha=head_sha if isinstance(head_sha, Sha) else Sha(head_sha),

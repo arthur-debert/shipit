@@ -15,8 +15,7 @@ from .reviewers import REGISTRY, ReviewerAdapter, required_adapters
 
 logger = logging.getLogger("shipit.prstate")
 
-# A required reviewer HOLDS the PR only while never-requested or still
-# pending; DEGRADED is the non-blocking subset of settled.
+# DEGRADED is the non-blocking subset of settled.
 _HOLDS = {
     FunnelState.NEVER_REQUESTED,
     FunnelState.REQUESTED,
@@ -131,7 +130,6 @@ def evaluate(
     registry: list[ReviewerAdapter] | None = None,
     required: list[ReviewerAdapter] | None = None,
 ) -> TaskStatus:
-    """Compute the PR's lifecycle state from a snapshot, logging the decision."""
     status = _evaluate(ctx, registry, required)
     fields: dict[str, object] = {
         "pr": status.pr,
@@ -295,8 +293,8 @@ def _evaluate(
                 request_names + rerequest_names, waiting_names
             )
             return status
-        # A dead run also outranks: `pr next` performs one act, so spending
-        # it on requests would hide the rerun advice for the whole round.
+        # A dead run also outranks: `pr next` performs one act, and the
+        # rerun advice must not stay hidden for the whole round.
         if checks == ChecksState.CANCELLED:
             status.state = TaskState.BLOCKED
             status.next_action = _checks_cancelled_deferral_action(
@@ -332,9 +330,8 @@ def _evaluate(
 
     # 3. Reviewed. Now evaluate mergeability + CI.
     #
-    # `mergeStateStatus` is the signal the merge obeys; `mergeable` is
-    # computed asynchronously and reads stale until the recompute lands, so
-    # CONFLICTING is only a fallback for an uncomputed merge state.
+    # `mergeStateStatus` is the signal the merge obeys; `mergeable` reads
+    # stale, so CONFLICTING is only a fallback for an uncomputed state.
     if ctx.merge_state == "DIRTY" or (
         ctx.merge_state in (None, "UNKNOWN") and ctx.mergeable == "CONFLICTING"
     ):
@@ -367,9 +364,8 @@ def _evaluate(
         return status
 
     # GitHub re-runs a skipped check on `ready_for_review`, flipping
-    # UNSTABLE for a beat while the rollup still reads green. GREEN is
-    # required, not merely "not failing/pending": an absent rollup is no
-    # evidence. BLOCKED/HAS_HOOKS can reflect a status the rollup never lists.
+    # UNSTABLE for a beat while the rollup still reads green. An absent
+    # rollup is no evidence, and BLOCKED/HAS_HOOKS it cannot disprove.
     if ctx.merge_state == "UNSTABLE" and checks == ChecksState.GREEN:
         status.state = TaskState.READY
         if ctx.is_draft:
@@ -388,7 +384,6 @@ def _evaluate(
             )
         return status
 
-    # CLEAN is the only merge-ready state and the single hand-off point.
     if ctx.merge_state == "CLEAN":
         status.state = TaskState.READY
         if ctx.is_draft:
@@ -403,7 +398,6 @@ def _evaluate(
             )
         return status
 
-    # Merge state not yet computed (UNKNOWN / null) — GitHub is working; re-poll.
     if ctx.merge_state in (None, "UNKNOWN"):
         status.state = TaskState.REVIEWED
         status.next_action = (
@@ -421,8 +415,7 @@ def _evaluate(
 
 
 def reviews_in(status: TaskStatus, required_names: Sequence[str]) -> bool:
-    """True iff no required reviewer holds; a name missing from
-    `reviewer_funnel` counts as holding."""
+    """True iff no required reviewer holds; an unevaluated name holds."""
     return all(
         name in status.reviewer_funnel
         and status.reviewer_funnel[name].state not in _HOLDS
@@ -435,7 +428,6 @@ def _classify_pending(
     pending: list[ReviewerAdapter],
     funnel_states: dict[str, FunnelState],
 ) -> tuple[list[str], list[str], list[str]]:
-    """Split the holding required reviewers into `(request, rerequest, wait)`."""
     request_names: list[str] = []  # no signal → request
     rerequest_names: list[str] = []  # reviewed an earlier head → re-request
     waiting_names: list[str] = []  # already requested/in-flight on head → wait
@@ -481,7 +473,6 @@ def _reviews_pending_action(
 def _checks_failing_deferral_action(
     deferred_names: list[str], waiting_names: list[str]
 ) -> str:
-    """Render the fix-CI-first prose, naming the deferred reviewers."""
     action = "CI check(s) failing — fix CI first"
     if deferred_names:
         action += f"; review requests deferred ({', '.join(deferred_names)} pending)"
@@ -491,8 +482,7 @@ def _checks_failing_deferral_action(
 
 
 def _checks_cancelled_action() -> str:
-    """Render the rerun prose for a dead-run head, including the "do NOT
-    fix-and-push" instruction."""
+    """Render the rerun prose, including the "do NOT fix-and-push" line."""
     return (
         "CI run cancelled/superseded, nothing still running — no code failure "
         "to fix: rerun the workflow on this head (`gh run rerun <run-id> "
@@ -503,7 +493,6 @@ def _checks_cancelled_action() -> str:
 def _checks_cancelled_deferral_action(
     deferred_names: list[str], waiting_names: list[str]
 ) -> str:
-    """Render the rerun-first prose, naming the deferred reviewers."""
     action = _checks_cancelled_action()
     if deferred_names:
         action += (
@@ -516,8 +505,7 @@ def _checks_cancelled_deferral_action(
 
 
 def _has_stale_review(ctx: ReadinessView, adapter: ReviewerAdapter) -> bool:
-    """True iff a push staled this reviewer's review; a commit-less review
-    counts as not-on-this-head."""
+    """True iff a push staled this review; a commit-less one counts stale."""
     if not adapter._rerun(ctx):
         return False
     return any(

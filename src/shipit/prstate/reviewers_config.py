@@ -18,7 +18,6 @@ DEFAULT_REVIEWERS: dict[str, bool] = {"copilot": False}
 
 
 def default_reviewers_scaffold_body() -> str:
-    """The `[reviewers]` TOML body the install scaffold seeds."""
     lines = [
         f"{name} = {{ rerun = {'true' if rerun else 'false'} }}"
         for name, rerun in DEFAULT_REVIEWERS.items()
@@ -29,17 +28,14 @@ def default_reviewers_scaffold_body() -> str:
 OVERRIDE_FILE = ".shipit.toml"
 OVERRIDE_KEY = "reviewers"
 
-# Policy values riding the `[reviewers]` table, not reviewer entries.
 ROUND_CAP_KEY = "round_cap"
 POLL_INTERVAL_KEY = "poll_interval"
 NIT_CAP_KEY = "nit_cap"
 CALIBRATOR_KEY = "calibrator"
 _RESERVED_KEYS = (ROUND_CAP_KEY, POLL_INTERVAL_KEY, NIT_CAP_KEY, CALIBRATOR_KEY)
 
-# The `calibrator` inline-table's accepted keys; unknown ones fail loud.
 _CALIBRATOR_OPTIONS = ("backend", "model", "reasoning", "timeout")
 
-# The accepted per-reviewer options; anything else fails loud.
 _RUN_STRING_OPTIONS = ("model", "instructions")
 _KNOWN_OPTIONS = ("rerun", "timeout", "window", "dimensions", *_RUN_STRING_OPTIONS)
 
@@ -49,7 +45,6 @@ class RequiredReviewersConfigError(PrStateError):
 
 
 def default_roster() -> Roster:
-    """The shipped-default :class:`Roster`, rendered from :data:`DEFAULT_REVIEWERS`."""
     return Roster(
         tuple(
             RosterEntry(name=name, required=True, rerun=rerun)
@@ -59,7 +54,6 @@ def default_roster() -> Roster:
 
 
 def load_roster(root: str | None = None) -> Roster:
-    """Read `.shipit.toml`, searching up from `root`, into one Roster."""
     config = _find_config(root)
     if config is None:
         return default_roster()
@@ -150,7 +144,6 @@ def _parse_table(value: object, *, config_dir: Path) -> list[RosterEntry]:
 
 
 def _parse_round_cap(table: dict[str, object]) -> int | None:
-    """Parse the table-level `round_cap`; absent is None."""
     value = table.get(ROUND_CAP_KEY)
     if value is None:
         return None
@@ -163,7 +156,7 @@ def _parse_round_cap(table: dict[str, object]) -> int | None:
 
 
 def _parse_nit_cap(table: dict[str, object]) -> int | None:
-    """Parse the table-level `nit_cap`; absent is None, ``0`` is legal."""
+    """``0`` is legal: floor the posted review at minor."""
     value = table.get(NIT_CAP_KEY)
     if value is None:
         return None
@@ -177,7 +170,6 @@ def _parse_nit_cap(table: dict[str, object]) -> int | None:
 
 
 def _parse_calibrator(table: dict[str, object]) -> CalibratorConfig | None:
-    """Parse the table-level `calibrator` table; absent is None."""
     value = table.get(CALIBRATOR_KEY)
     if value is None:
         return None
@@ -218,7 +210,6 @@ def _parse_calibrator(table: dict[str, object]) -> CalibratorConfig | None:
 
 
 def _parse_poll_interval(table: dict[str, object]) -> int | None:
-    """Parse the table-level `poll_interval`; absent is None."""
     value = table.get(POLL_INTERVAL_KEY)
     if value is None:
         return None
@@ -262,7 +253,6 @@ def _parse_entry(name: str, key: str, opts: object, *, config_dir: Path) -> Rost
     dimensions = _parse_dimensions(name, opts.get("dimensions"))
     instructions = opts.get("instructions")
     if instructions is not None:
-        # Anchored to the config's own directory, so it opens from any cwd.
         expanded = Path(instructions).expanduser()
         if not expanded.is_absolute():
             expanded = config_dir / expanded
@@ -289,7 +279,6 @@ def _parse_entry(name: str, key: str, opts: object, *, config_dir: Path) -> Rost
 
 
 def _parse_dimensions(name: str, value: object) -> tuple[str, ...] | None:
-    """Validate `dimensions` against the closed registry; None when unset."""
     if value is None:
         return None
     known = known_dimension_names()
@@ -320,7 +309,6 @@ def _parse_dimensions(name: str, value: object) -> tuple[str, ...] | None:
 
 
 def _build_entry(config_name: str, **kwargs: object) -> RosterEntry:
-    """Construct a :class:`RosterEntry`, translating its ``ValueError``."""
     try:
         return RosterEntry(**kwargs)  # type: ignore[arg-type]
     except ValueError as exc:
@@ -356,7 +344,7 @@ def _validate(names: tuple[str, ...]) -> None:
 
 
 def _canonical_name(name: str) -> str:
-    """The canonical adapter name; an unknown name passes through lowercased."""
+    """An unknown name passes through lowercased, for `_validate` to reject."""
     adapter = by_name(name)
     return adapter.name if adapter is not None else name.lower()
 
@@ -374,12 +362,11 @@ def _reject_duplicate_names(names: list[str]) -> None:
 
 
 def _duration_seconds(name: str, field: str, value: object) -> int:
-    """Validate a per-reviewer `timeout` / `window` into whole seconds."""
     return _duration_value(f"{OVERRIDE_KEY}.{name}.{field}", value)
 
 
 def _duration_value(label: str, value: object) -> int:
-    """Validate a duration into whole seconds; `label` names the bad key."""
+    """A positive int of seconds, or a digit string optionally suffixed `s`."""
     if isinstance(value, bool):
         raise RequiredReviewersConfigError(
             f"{OVERRIDE_FILE} `{label}` must be a duration "
@@ -409,7 +396,6 @@ def _duration_value(label: str, value: object) -> int:
 
 
 def _find_config(start: str | None = None) -> Path | None:
-    """Search up from `start` (default cwd) for the repo-root `.shipit.toml`."""
     here = Path(start) if start is not None else Path.cwd()
     here = here.resolve()
     for d in (here, *here.parents):

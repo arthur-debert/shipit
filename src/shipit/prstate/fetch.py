@@ -115,7 +115,6 @@ def _threads_and_review_requests(
 
 
 def _requested_at_times(events: list[dict]) -> dict[str, str]:
-    """Map each requested reviewer login to its LATEST request time."""
     out: dict[str, str] = {}
     for ev in events:
         reviewer = ev.get("requestedReviewer") or {}
@@ -213,16 +212,14 @@ query($owner: String!, $name: String!, $pr: Int!) {
 
 
 def _bind_branch_identity(head_ref: object) -> None:
-    """Bind the ``epic``/``ws`` a slash-namespaced head branch carries; the
-    stale halves are unbound first, since ``bind`` can never clear a key."""
+    """The stale halves are unbound first: ``bind`` can never clear a key."""
     identity = branchid.derive(head_ref)
     logcontext.unbind("epic", "ws")
     logcontext.bind(epic=identity.epic, ws=identity.ws)
 
 
 def bind_pr_identity(pr: PrId) -> None:
-    """Bind ``pr``/``repo`` + the head branch's ``epic``/``ws`` without a
-    gather, for a verb that mutates without building a snapshot."""
+    """For a verb that mutates without ever building a snapshot."""
     logcontext.bind(pr=pr.number, repo=pr.repo.slug)
     meta = gh.pr_view(str(pr.number), repo=pr.slug, json_fields=["headRefName"])
     _bind_branch_identity(meta.get("headRefName"))
@@ -305,7 +302,6 @@ def gather(
     meta = gh.pr_meta(pr)
     _bind_branch_identity(meta.get("headRefName"))
     thread_nodes, review_requests, requested_at = _threads_and_review_requests(pr)
-    # Bot-typed requests only surface through GraphQL.
     meta["reviewRequests"] = review_requests
     ctx = context_from_raw(
         repo=repo,
@@ -429,7 +425,6 @@ def _partition_checks(
 
 
 def _commit_id(oid: str | None) -> Sha | None:
-    """Mint a review's ``oid`` into a :class:`Sha`; a malformed one raises."""
     return None if oid is None else Sha(oid)
 
 
@@ -488,7 +483,6 @@ def _thread(node: dict) -> Thread:
 
 
 def _requested_logins(review_requests: list[dict]) -> list[str]:
-    # User/Bot requests carry `login`; team requests carry `name`/`slug`.
     out = [
         (rr.get("login") or rr.get("name") or rr.get("slug") or "")
         for rr in review_requests
