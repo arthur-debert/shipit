@@ -50,6 +50,8 @@ def bounds(
     umbrella: bool = True,
     org_repo: str = "acme/widget",
     status_lines: list[str] | None = None,
+    stdout: str = "{}",
+    stderr: str = "boom",
 ) -> tuple[Boundaries, dict]:
     calls: dict = {}
     parent = tmp_path / "repo"
@@ -69,7 +71,7 @@ def bounds(
         calls["cwd"] = cwd
         calls["env"] = env
         calls["timeout"] = timeout
-        return launch.LaunchResult(returncode=returncode, stdout="{}", stderr="boom")
+        return launch.LaunchResult(returncode=returncode, stdout=stdout, stderr=stderr)
 
     def pr_for_head(branch, *, cwd=None):
         calls["pr_branch"] = branch
@@ -692,11 +694,106 @@ def test_a_git_error_is_a_clean_refusal(tmp_path):
 
 
 def test_child_nonzero_exit_is_refused_with_its_stderr(tmp_path):
-    b, _ = bounds(tmp_path, returncode=2)
+    b, _ = bounds(tmp_path, returncode=2, stdout="")
     with pytest.raises(SpawnError) as exc:
         spawn_subagent(spec(), b)
     assert "claude child exited 2" in str(exc.value)
     assert "boom" in str(exc.value)
+
+
+def test_child_nonzero_exit_surfaces_stdout_when_stderr_is_empty(tmp_path):
+    b, _ = bounds(
+        tmp_path,
+        returncode=1,
+        stdout="Credit balance is too low to run this request",
+        stderr="",
+    )
+
+    with pytest.raises(SpawnError) as exc:
+        spawn_subagent(spec(), b)
+
+    assert "Credit balance is too low" in str(exc.value)
+
+
+def test_child_nonzero_exit_surfaces_both_streams_labelled(tmp_path):
+    b, _ = bounds(
+        tmp_path,
+        returncode=1,
+        stdout="stdout-said-this",
+        stderr="stderr-said-that",
+    )
+
+    with pytest.raises(SpawnError) as exc:
+        spawn_subagent(spec(), b)
+
+    message = str(exc.value)
+    assert "stdout-said-this" in message
+    assert "stderr-said-that" in message
+    assert "child stdout" in message and "child stderr" in message
+
+
+def test_silent_nonzero_child_refusal_says_so_and_names_the_tree(tmp_path):
+    b, _ = bounds(tmp_path, returncode=1, stdout="", stderr="   \n  ")
+
+    with pytest.raises(SpawnError) as exc:
+        spawn_subagent(spec(), b)
+
+    message = str(exc.value)
+    assert "claude child exited 1" in message
+    assert "wrote NOTHING to either stdout or stderr" in message
+    assert str(tmp_path / "tree") in message  # which tree to open
+    assert "ms" in message  # how long it ran before dying
+    assert "child stderr" not in message  # whitespace-only counts as empty
+
+
+def test_silent_nonzero_child_still_reports_uncommitted_work(tmp_path):
+    # The richer reason rides ALONGSIDE the salvage note, never displacing it.
+    b, _ = bounds(
+        tmp_path,
+        returncode=1,
+        stdout="",
+        stderr="",
+        status_lines=[" M a.py", " M b.py"],
+    )
+
+    with pytest.raises(SpawnError) as exc:
+        spawn_subagent(spec(), b)
+
+    message = str(exc.value)
+    assert "wrote NOTHING to either stdout or stderr" in message
+    assert "2 uncommitted change(s)" in message
+    assert "salvageable" in message
+
+
+def test_nonzero_child_refusal_logs_the_stream_sizes(tmp_path, caplog):
+    b, _ = bounds(tmp_path, returncode=1, stdout="", stderr="")
+
+    with caplog.at_level(logging.ERROR, logger="shipit.spawn"):
+        with pytest.raises(SpawnError):
+            spawn_subagent(spec(), b)
+
+    record = next(r for r in caplog.records if hasattr(r, "stdout_bytes"))
+    assert record.stdout_bytes == 0
+    assert record.stderr_bytes == 0
+    assert record.rc == 1
+
+
+def test_undecodable_child_output_still_refuses_with_the_childs_reason(tmp_path):
+    # A stream carrying a lone surrogate must not crash the failure handler and
+    # mask the child's own reason with a UnicodeEncodeError.
+    b, _ = bounds(
+        tmp_path,
+        returncode=1,
+        stdout="Credit balance is too low \udcff",
+        stderr="\udcfe",
+    )
+
+    with pytest.raises(SpawnError) as exc:
+        spawn_subagent(spec(), b)
+
+    message = str(exc.value)
+    assert "claude child exited 1" in message
+    assert "Credit balance is too low" in message
 
 
 def test_launch_transport_failure_is_a_clean_refusal(tmp_path):

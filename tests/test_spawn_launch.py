@@ -289,6 +289,106 @@ def test_scrub_tree_env_returns_a_fresh_dict():
     assert launch.scrub_tree_env(env) is not env
 
 
+def test_launch_scrubs_the_env_it_hands_the_runner():
+    seen: dict = {}
+
+    def fake_runner(cmd, *, cwd, env, timeout=None):
+        seen["env"] = env
+        return launch.LaunchResult(0, "", "")
+
+    launch.launch(
+        ["claude"],
+        cwd="/trees/child",
+        env={
+            "PATH": "/bin",
+            "PIXI_PROJECT_MANIFEST": "/trees/parent/pixi.toml",
+            "CONDA_PREFIX": "/trees/parent/.pixi/envs/default",
+        },
+        runner=fake_runner,
+    )
+
+    assert seen["env"] == {"PATH": "/bin"}
+
+
+def _failed(stdout: str = "", stderr: str = "", rc: int = 1) -> launch.LaunchResult:
+    return launch.LaunchResult(returncode=rc, stdout=stdout, stderr=stderr)
+
+
+def _detail(result: launch.LaunchResult) -> str:
+    return launch.child_failure_detail(
+        result, backend="claude", tree_path="/trees/child", duration_ms=388_000
+    )
+
+
+def test_child_failure_detail_reports_stdout_before_stderr():
+    detail = _detail(_failed(stdout="out-text", stderr="err-text"))
+
+    assert detail.index("out-text") < detail.index("err-text")
+    assert "--- child stdout (tail) ---" in detail
+    assert "--- child stderr (tail) ---" in detail
+
+
+@pytest.mark.parametrize(
+    ("stdout", "stderr", "expected"),
+    [
+        ("", "only-stderr", "only-stderr"),
+        ("only-stdout", "", "only-stdout"),
+    ],
+)
+def test_child_failure_detail_surfaces_whichever_stream_spoke(stdout, stderr, expected):
+    detail = _detail(_failed(stdout=stdout, stderr=stderr))
+
+    assert expected in detail
+    assert detail.count("(tail)") == 1  # the silent stream adds no empty section
+
+
+def test_child_failure_detail_always_names_the_exit_tree_and_duration():
+    detail = _detail(_failed(stdout="x", rc=137))
+
+    assert "claude child exited 137" in detail
+    assert "/trees/child" in detail
+    assert "388000ms" in detail
+
+
+def test_child_failure_detail_calls_out_a_wholly_silent_child():
+    detail = _detail(_failed(stdout="  ", stderr="\n\t"))
+
+    assert "wrote NOTHING to either stdout or stderr" in detail
+    assert "(tail)" not in detail
+    assert "/trees/child" in detail
+    assert "388000ms" in detail
+
+
+def test_stream_tail_keeps_a_short_stream_whole_and_stripped():
+    assert launch.stream_tail("\n  hello  \n") == "hello"
+
+
+def test_stream_tail_bounds_a_runaway_stream_to_its_end():
+    tail = launch.stream_tail("A" * 500 + "THE-REASON", limit=10)
+
+    assert tail.endswith("THE-REASON")
+    assert "A" * 20 not in tail
+    assert "500 earlier chars elided" in tail
+
+
+def test_stream_tail_default_limit_is_the_declared_cap():
+    assert len(launch.stream_tail("z" * 10_000)) > launch.STREAM_TAIL_CHARS
+    assert launch.stream_tail("z" * 10_000).count("z") == launch.STREAM_TAIL_CHARS
+
+
+def test_stream_bytes_measures_utf8_width():
+    assert launch.stream_bytes("") == 0
+    assert launch.stream_bytes("abc") == 3
+    assert launch.stream_bytes("é") == 2
+
+
+@pytest.mark.parametrize("surrogate", ["\udcff", "\ud800"])
+def test_stream_bytes_is_total_on_undecodable_content(surrogate):
+    # It is called from failure handlers, so it must never raise and shadow the
+    # failure being reported.
+    assert launch.stream_bytes(f"out{surrogate}") == 4
+
+
 def test_write_task_names_the_role_issue_and_branch():
     task = launch.write_task(
         "implementer", issue=156, branch="TRE03/WS02", base_branch="main", closes=False
