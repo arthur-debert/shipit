@@ -1,55 +1,4 @@
-"""wf verify-canary — the standing sign e2e, dispatched at will (#899).
-
-``shipit wf verify-canary`` drives shipit-canary's blessed stage-choice
-caller (workflows.lex §8, the shipit-release.yml shape) through the FULL
-sign matrix of proofs on live GitHub, and watches every run to its verdict:
-
-- ``full`` — one ``stage=full`` rc: the composed chain including
-  sign+notarize on a REAL macOS runner with the REAL fleet cert (the
-  #873/#889 class: codesign identity resolution against a temp keychain —
-  invisible to every unit test, because it needs the runner + cert).
-- ``staged`` — ``prepare`` → ``build`` → ``sign`` → ``publish`` as four
-  standalone dispatches, threading ``tag``/``run-id`` between them exactly
-  as workflows.lex §8 prescribes (every stage's run is a SUFFICIENT source
-  for its successor: build dispatches on the tag alone — its standalone
-  ``notes`` job re-derives ``release-notes`` there (#898) — sign feeds off
-  the build run, publish names the SIGN run): the REAL cross-run artifact
-  hand-off — the #898 regression surface, where a standalone sign dispatch
-  died relaying ``release-notes``.
-
-Why it exists (the owner directive behind #899): ``tests/test_release_sign.py``
-carries 70 unit tests and both live sign-path failures of the rollout were
-invisible to all of them, because the load-bearing facts only exist against
-real infrastructure. The canary chain run is the guard that proves sign
-changes BEFORE a consumer rc discovers them live; the runbook rule
-(workflows.lex §9) makes citing these runs mandatory for sign/relay/wf-yml
-PRs.
-
-Siting — why this is a live-GitHub dispatcher and NOT a test check: it
-dispatches real workflow runs (minutes to tens of minutes each, a real macOS
-runner, real Apple notarization) against the canary repo, so it must never
-run inside ``pixi run test`` / CI. It is an operator verb: explicit
-invocation, tag-stamped rc's, and a printed teardown block (canary rc's are
-torn down AFTER inspection, like every proof — the verb prints the exact
-commands, it never auto-deletes what you have not yet inspected).
-
-The pure cores — the per-mode version derivation (:func:`mode_versions`),
-the stage-input threading table (:func:`stage_inputs` / :data:`RELAY_SOURCE`),
-new-run discovery (:func:`new_run`) and the proof / teardown renderings —
-are kept out of the GitHub boundary so they are fixture-tested with no
-network anywhere near the tests, the same split ``wf test`` uses. Every gh
-exchange rides the ONE gh Tool adapter (ADR-0028): :func:`shipit.gh.workflow_run`
-dispatches, :func:`shipit.gh.run_list_dispatched` discovers the minted run,
-:func:`shipit.gh.run_verdict` follows it — verb tests fake exactly those
-three adapter calls, and the clock rides the ``sleep``/``monotonic`` seam
-``pr wait`` established (ADR-0034).
-
-Exit semantics are the uniform Tool contract: ``0`` when every dispatched
-chain ran green, ``1`` a failed verdict (a red or timed-out run, a relay
-stage skipped because its upstream failed), and a failed ``gh`` exec (missing
-binary, unknown workflow, auth) is the standard HARD-fail through the Exec
-runner's :class:`~shipit.execrun.ExecError` — never a silent skip.
-"""
+"""wf verify-canary — dispatch the canary's sign-proof chains on live GitHub and watch them; an operator verb, never part of ``pixi run test``."""
 
 from __future__ import annotations
 
@@ -65,42 +14,18 @@ from ._errors import cli_errors
 
 logger = logging.getLogger("shipit.wf")
 
-# --------------------------------------------------------------------------
-# The dispatch surface (pure data)
-# --------------------------------------------------------------------------
 
-#: The standing ADP00 probe — the ONE repo this verb exists for. Overridable
-#: (``--repo``) only so the harness can be pointed at a fork while the canary
-#: itself is being provisioned; the proof the runbook accepts is the canary's.
 CANARY_REPO = "arthur-debert/shipit-canary"
 
-#: The canary's blessed stage-choice caller file — the same name shipit's own
-#: dogfood caller wears (workflows.lex §8; the shape `shipit wf test` lints).
-#: One source of truth: the pin gate resolves this same caller's ``@vN`` pins
-#: (:data:`shipit.checks.RELEASE_CALLER_WORKFLOW`).
 CALLER_WORKFLOW = checks.RELEASE_CALLER_WORKFLOW
 
-#: The proof modes: the composed chain, the standalone-dispatch relay, or
-#: both (the default — the runbook rule requires BOTH cited green).
 MODE_FULL = "full"
 MODE_STAGED = "staged"
 MODE_BOTH = "both"
 MODES: tuple[str, ...] = (MODE_FULL, MODE_STAGED, MODE_BOTH)
 
-#: The staged relay, in dispatch order — the four standalone stage dispatches
-#: of workflows.lex §8 (the #898 regression surface).
 RELAY_ORDER: tuple[str, ...] = ("prepare", "build", "sign", "publish")
 
-#: Stage → the relay stage whose RUN feeds it as ``run-id`` (``None``: the
-#: stage consumes no prior run). Each artifact-consuming stage names its
-#: PREDECESSOR, because every stage's run is a SUFFICIENT source for its
-#: successor (workflows.lex §8's one-source-run rule): prepare and build
-#: consume nothing — build dispatches on the tag alone, its standalone
-#: `notes` job re-deriving ``release-notes`` there (#898: without it the
-#: build run lacks the notes and sign's carry-notes dies); sign names the
-#: build run (bundles + re-derived notes) and carries the base families
-#: onward; publish names the SIGN run — naming the build run instead would
-#: publish the unsigned bundles.
 RELAY_SOURCE: dict[str, str | None] = {
     "prepare": None,
     "build": None,
@@ -108,41 +33,22 @@ RELAY_SOURCE: dict[str, str | None] = {
     "publish": "sign",
 }
 
-#: How long a dispatched run may take to APPEAR in the run list before the
-#: chain is called failed (GitHub registers dispatch runs asynchronously).
 DISPATCH_TIMEOUT: float = 300.0
 
-#: Poll cadence while waiting for the dispatched run to appear.
 DISPATCH_POLL_SECONDS: float = 5.0
 
-#: How long one run may take to COMPLETE. Generous on purpose: the full
-#: composed chain queues a macOS runner and waits on Apple notarization.
 RUN_TIMEOUT: float = 3600.0
 
-#: Poll cadence while waiting for a started run's verdict.
 RUN_POLL_SECONDS: float = 30.0
 
 
-# --------------------------------------------------------------------------
-# Pure cores — versions, input threading, run discovery
-# --------------------------------------------------------------------------
-
-
 def tag_for(version: str) -> str:
-    """The release tag a version cuts — ``v<version>`` (ADR-0041). Pure."""
+    """The release tag a version cuts — ``v<version>``."""
     return f"v{version}"
 
 
 def mode_versions(version: str, mode: str) -> dict[str, str]:
-    """Mode → the rc version that mode's chain cuts. Pure.
-
-    A single mode uses ``version`` verbatim. ``both`` needs TWO distinct
-    versions — the staged relay's ``prepare`` creates its tag fresh, and the
-    full chain already created ``v<version>`` — so each mode gets a semver
-    prerelease suffix: ``1.2.3`` → ``1.2.3-full`` / ``1.2.3-staged``, and a
-    version already carrying a prerelease extends it with a dot identifier
-    (``1.2.3-rc`` → ``1.2.3-rc.full``), keeping both valid semver.
-    """
+    """Mode → the rc version that mode's chain cuts; ``both`` suffixes each with a semver prerelease identifier so the two chains cut distinct tags."""
     if mode != MODE_BOTH:
         return {mode: version}
     sep = "." if "-" in version else "-"
@@ -155,18 +61,7 @@ def mode_versions(version: str, mode: str) -> dict[str, str]:
 def stage_inputs(
     stage: str, *, version: str, run_ids: dict[str, int] | None = None
 ) -> dict[str, str]:
-    """The blessed caller's dispatch inputs for one stage. Pure.
-
-    The workflows.lex §8 aligned stage-input contract, as the dispatcher
-    threads it: ``full``/``prepare`` ride ``version`` (they create the tag);
-    the relay's later stages (``build``, ``sign``, ``publish``) ride ``tag``
-    (ADR-0041 — the version is read off it), plus ``run-id`` on the
-    artifact-consuming stages (``sign``, ``publish``) — the SOURCE run named
-    by :data:`RELAY_SOURCE`, looked up in ``run_ids`` (stage → completed run
-    id; a missing source is a caller bug and raises KeyError loudly).
-    ``build`` names no run: its standalone ``notes`` job re-derives
-    ``release-notes`` at the tag (#898).
-    """
+    """The blessed caller's dispatch inputs for one stage; a missing relay source run raises KeyError."""
     if stage in (MODE_FULL, "prepare"):
         return {"stage": stage, "version": version}
     inputs = {"stage": stage, "tag": tag_for(version)}
@@ -177,30 +72,16 @@ def stage_inputs(
 
 
 def new_run(runs: list[dict], baseline: frozenset[int] | set[int]) -> dict | None:
-    """The freshly-dispatched run: the newest listed run NOT in ``baseline``.
-
-    ``None`` while GitHub has not registered it yet (the caller keeps
-    polling). Two new runs at once (someone else dispatched the canary
-    concurrently) resolve to the newest — acceptable on a single-operator
-    probe repo, and the printed run URL makes a mix-up visible. Pure.
-    """
+    """The newest listed run not in ``baseline``, or None while GitHub has not registered it yet."""
     fresh = [r for r in runs if r.get("databaseId") not in baseline]
     if not fresh:
         return None
     return max(fresh, key=lambda r: r["databaseId"])
 
 
-# --------------------------------------------------------------------------
-# Results and renderings
-# --------------------------------------------------------------------------
-
-
 @dataclass(frozen=True)
 class ChainStep:
-    """One dispatched (or refused) step of a proof chain: which ``mode`` and
-    ``stage``, the rc ``version`` it rode, and the observed ``run_id`` /
-    ``url`` / ``conclusion`` (``run_id`` ``None`` when the step never
-    dispatched — an upstream relay failure skipped it)."""
+    """One dispatched (or refused) step of a proof chain; ``run_id`` is None when the step never dispatched."""
 
     mode: str
     stage: str
@@ -216,12 +97,7 @@ class ChainStep:
 
 
 def proof_block(steps: list[ChainStep]) -> str:
-    """The citation block a sign/relay/wf-yml PR pastes (workflows.lex §9).
-
-    One line per step: mode/stage, the rc version, the verdict, the run URL —
-    the runbook's required evidence, rendered so it can be cited verbatim.
-    Pure.
-    """
+    """The citation block a sign/relay/wf-yml PR pastes: one line per step."""
     lines = ["CANARY PROOF (cite on any shipit PR touching sign/relay/wf yml):"]
     for step in steps:
         label = step.mode if step.stage == MODE_FULL else f"{step.mode}/{step.stage}"
@@ -233,20 +109,13 @@ def proof_block(steps: list[ChainStep]) -> str:
 
 
 def teardown_block(repo: str, versions: dict[str, str]) -> str:
-    """The teardown commands — canary rc's are torn down AFTER inspection
-    (#899 discipline), so the verb prints them instead of running them. Pure.
-    """
+    """The teardown commands, printed rather than run so rc's are torn down after inspection."""
     lines = ["teardown (after inspection — canary rc's never linger):"]
     for version in versions.values():
         lines.append(
             f"  gh release delete {tag_for(version)} -R {repo} --yes --cleanup-tag"
         )
     return "\n".join(lines)
-
-
-# --------------------------------------------------------------------------
-# The dispatch-and-watch loop (gh boundary: the shipit.gh adapter, ADR-0028)
-# --------------------------------------------------------------------------
 
 
 def _dispatch_and_watch(
@@ -261,14 +130,7 @@ def _dispatch_and_watch(
     sleep: Callable[[float], None],
     monotonic: Callable[[], float],
 ) -> ChainStep:
-    """Dispatch one caller stage and watch its run to a verdict.
-
-    Snapshot the run-id baseline, dispatch, poll the list until the new run
-    appears (:data:`DISPATCH_TIMEOUT`), then poll the run until it completes
-    (:data:`RUN_TIMEOUT`). A timeout at either wait is a FAILED verdict
-    (conclusion ``dispatch-timeout`` / ``watch-timeout``), not an exception:
-    the operator inspects, tears down, re-runs.
-    """
+    """Dispatch one caller stage and watch its run to a verdict; a timeout at either wait is a failed verdict, not an exception."""
     inputs = stage_inputs(stage, version=version, run_ids=run_ids)
     baseline = {r.get("databaseId") for r in gh.run_list_dispatched(repo, workflow)}
     gh.workflow_run(workflow, repo=repo, ref=ref, fields=inputs)
@@ -300,11 +162,6 @@ def _dispatch_and_watch(
         sleep(RUN_POLL_SECONDS)
 
 
-# --------------------------------------------------------------------------
-# The verb
-# --------------------------------------------------------------------------
-
-
 @cli_errors
 def run(
     version: str,
@@ -316,16 +173,7 @@ def run(
     sleep: Callable[[float], None] = time.sleep,
     monotonic: Callable[[], float] = time.monotonic,
 ) -> int:
-    """Dispatch the selected proof chains on the canary and report.
-
-    ``full`` runs one ``stage=full`` composed-chain rc; ``staged`` runs the
-    four-dispatch relay, stopping at the first red stage (a later stage
-    dispatched against a failed source would prove nothing — the un-dispatched
-    remainder is recorded ``skipped``); ``both`` (default) runs full first,
-    then the relay, each on its own derived rc version
-    (:func:`mode_versions`). Prints the proof-citation block and the teardown
-    commands either way, and returns ``0`` only when EVERY step ran green.
-    """
+    """Dispatch the selected proof chains on the canary, print the proof and teardown blocks, and return 0 only when every step ran green."""
     started = monotonic()
     versions = mode_versions(version, mode)
     print(f"wf verify-canary: {repo} {workflow} (mode {mode})")
@@ -417,15 +265,5 @@ def run(
 def verify_canary_cmd(
     version: str, mode: str, repo: str, workflow: str, ref: str
 ) -> None:
-    """Dispatch the canary's sign-proof chains on live GitHub and watch them.
-
-    The standing sign e2e (#899): drives shipit-canary's blessed stage-choice
-    caller through the composed `full` chain (sign+notarize on a real macOS
-    runner) and/or the standalone-dispatch relay (prepare, build, sign,
-    publish — the real cross-run artifact hand-off), waits for every run's
-    verdict, prints the proof-citation block the sign runbook requires
-    (workflows.lex §9) plus the teardown commands, and exits 0 only when
-    every run is green. Live GitHub, real runs, real minutes: an operator
-    verb, never part of `pixi run test`.
-    """
+    """Dispatch the canary's sign-proof chains on live GitHub and watch them."""
     raise SystemExit(run(version, mode=mode, repo=repo, workflow=workflow, ref=ref))

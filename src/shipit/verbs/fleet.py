@@ -1,15 +1,4 @@
-"""``shipit fleet`` — fleet-wide verification over the declared portfolio.
-
-A NESTED click group (the ``tree``/``changelog`` shape): ``sweep`` is its one
-verb today — the TOL01 exit gate (docs/legacy-prd/tol01-ci-tools.md, stories 47/49).
-The verb is thin (ADR-0030): read the portfolio off the CURRENT checkout's
-``.shipit.toml`` (the sweep runs from the shipit repo — the portfolio's home),
-resolve the candidate build, hand typed entries to the domain orchestrator
-(:mod:`shipit.fleetsweep`), render through the one seam, and write the JSON
-report artifact. Exit derives from the matrix: 0 when no cell is red, 1
-otherwise; runtime failures map through the shared
-:func:`~._errors.cli_errors` shell.
-"""
+"""``shipit fleet`` — fleet-wide verification over the declared portfolio."""
 
 from __future__ import annotations
 
@@ -110,23 +99,7 @@ def sweep_cmd(
     out: Path | None,
     as_json: bool,
 ) -> None:
-    """Run every shipped tool verb against every portfolio repo it applies to.
-
-    For each `[project.portfolio]` repo this cuts a hermetic Tree (the existing
-    dissociated-clone machinery), derives tool applicability from the repo's OWN
-    declarations (lint everywhere; test + build where the path->toolchain map
-    declares a leg; e2e where an artifact declares a harness; the changelog
-    check where CHANGELOG/ exists), and runs each applicable tool through the
-    Tree's managed launcher under the candidate build (SHIPIT_EXEC, announced)
-    — routed through the Tree's OWN pixi env when it carries one, so the
-    dispatched runners resolve the Tree's provisioning, never the sweep's.
-
-    The deliverable is the per-tool x per-repo matrix report: pass / fail /
-    not-applicable / expected-fail, with the exact command and raw output on
-    every red cell — the TOL01 exit-gate evidence and ADP02's
-    adoption-readiness seed. A declared `expect_verify_fail` renders as
-    expected-fail with its reason. Exit: 0 when no cell is red, 1 otherwise.
-    """
+    """Run every shipped tool verb against every portfolio repo it applies to."""
     raise SystemExit(
         run_sweep(
             repos=repos,
@@ -152,21 +125,10 @@ def run_sweep(
     as_json: bool = False,
     sweep_fn: Callable[..., fleetsweep.SweepReport] | None = None,
 ) -> int:
-    """Read the portfolio -> orchestrate the sweep -> render + persist the report.
-
-    Returns the matrix verdict (0 no red cell, 1 otherwise); domain refusals —
-    an unknown ``--repo`` selector, an unresolvable candidate, a malformed
-    portfolio — map to ``error: …`` + exit 1 through the shared shell.
-    ``sweep_fn`` injects the orchestrator for tests.
-    """
+    """Read the portfolio → orchestrate the sweep → render + persist the report; returns 0 when no cell is red, 1 otherwise."""
     cfg = config.load(Path(config.CONFIG_NAME))
     entries = fleetsweep.load_portfolio(cfg)
     if repos:
-        # Match selectors and portfolio slugs through the ONE canonical parser
-        # (identity.repo_from_slug — the same normalization the rest of the CLI
-        # uses): case-insensitive so `Owner/Name` finds `owner/name`, and a
-        # MALFORMED selector is rejected as invalid rather than mislabeled "not
-        # in portfolio".
         try:
             wanted = {identity.repo_from_slug(slug).slug for slug in repos}
         except ValueError as exc:
@@ -192,8 +154,6 @@ def run_sweep(
         keep_trees=keep_trees,
     )
     emit(report, format_sweep, as_json=as_json)
-    # A filtered run is a fix-loop probe: it never overwrites the committed
-    # full-matrix evidence unless the operator names --out explicitly.
     filtered = bool(repos or tools)
     target = out if out is not None else (None if filtered else fleetsweep.REPORT_PATH)
     if target is not None:
@@ -201,9 +161,6 @@ def run_sweep(
         target.write_text(
             json.dumps(report.to_dict(), indent=2) + "\n", encoding="utf-8"
         )
-        # Human courtesy note only — suppressed under --json so stdout stays a
-        # single valid JSON document (emit() already wrote it); the path is on
-        # the structured record below for machine consumers either way.
         if not as_json:
             print(f"report written to {target}")
         logger.info(
@@ -213,8 +170,6 @@ def run_sweep(
     return report.verdict()
 
 
-#: Cell status -> matrix cell text. FAIL shouts (the fix queue); the others
-#: stay lowercase so a red cell is scannable in a 19-row table.
 _STATUS_LABELS = {
     fleetsweep.STATUS_PASS: "pass",
     fleetsweep.STATUS_FAIL: "FAIL",
@@ -224,8 +179,7 @@ _STATUS_LABELS = {
 
 
 def format_sweep(report: fleetsweep.SweepReport) -> str:
-    """The pure text renderer: the matrix as a fixed-width table, the per-repo
-    adoption-ready lines (the ADP02 seed), and the fleet verdict."""
+    """The pure text renderer: the matrix table, the per-repo adoption-ready lines, and the fleet verdict."""
     if not report.repos:
         return "fleet sweep: no portfolio repos selected."
     headers = ["REPO", *(tool.upper() for tool in report.tools)]

@@ -1,9 +1,4 @@
-"""Helpers for long-form human help surfaces.
-
-Click's ``--help`` remains the terse syntax/options map. This module serves
-standalone UTF-8 text bundled beside command modules for the longer,
-task-oriented help pages exposed as git-style ``help`` subcommands.
-"""
+"""Helpers for the long-form ``help`` subcommands, bundled as text beside command modules."""
 
 from __future__ import annotations
 
@@ -13,7 +8,6 @@ import click
 
 
 def load_help_text(package: str, resource: str) -> str:
-    """Return one package-relative help text file as UTF-8 text."""
     try:
         return resources.files(package).joinpath(resource).read_text(encoding="utf-8")
     except (FileNotFoundError, IsADirectoryError, ModuleNotFoundError) as exc:
@@ -35,14 +29,12 @@ def help_command(name: str = "help", *, package: str, resource: str) -> click.Co
 
 
 def register_help_command(group: click.Group, *, package: str, resource: str) -> None:
-    """Attach a ``help`` subcommand to ``group``."""
     group.add_command(help_command(package=package, resource=resource))
 
 
 def enable_leaf_help(
     command: click.Command, *, package: str, resource: str
 ) -> click.Command:
-    """Teach one leaf command to reserve leading ``help`` for long-form help."""
     if isinstance(command, click.Group):
         raise TypeError("enable_leaf_help only accepts leaf commands")
     if not isinstance(command, HelpableCommand):
@@ -55,11 +47,7 @@ def enable_leaf_help(
 def register_long_help(
     root: click.Group, specs: dict[tuple[str, ...], tuple[str, str]]
 ) -> None:
-    """Wire long-form help resources onto public commands named by path.
-
-    ``()`` names the root group. Hidden commands are intentionally refused so
-    internal entrypoints cannot accidentally join the human help surface.
-    """
+    """Wire long-form help resources onto public commands named by path; ``()`` names the root group and a hidden command is refused."""
     for path, (package, resource) in specs.items():
         command = _resolve_command(root, path)
         if getattr(command, "hidden", False):
@@ -88,12 +76,7 @@ def _resolve_command(root: click.Group, path: tuple[str, ...]) -> click.Command:
 
 
 class HelpableCommand(click.Command):
-    """A leaf command that reserves leading ``help`` for long-form help.
-
-    ``shipit lab run CELL`` is intentionally still a leaf command, not a group.
-    This shim intercepts a first positional ``help`` before Click treats it as
-    CELL, while leaving every other CELL value untouched.
-    """
+    """A leaf command that reserves a first positional ``help`` for long-form help."""
 
     def __init__(self, *args, help_package: str, help_resource: str, **kwargs) -> None:
         super().__init__(*args, **kwargs)

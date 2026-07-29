@@ -1,16 +1,4 @@
-"""``shipit lab report`` — render one Cell's convergence curve from banked records.
-
-The Review Lab's cell read-side (ADR-0049, RVW03-WS07): loads the cell + its
-whole baseline lineage (per-hop fair-pair, chain walked to the control, same
-as ``lab run`` — #719), the Ground-truth
-fixture, and the local review-round record stores of every repo the cell pins,
-then prints the deterministic convergence-curve report
-(:mod:`shipit.review.curve`): cumulative major-or-worse recall, false
-positives / adjudicated precision, token cost (latency-only when no record
-carries a count), and latency per sweep point — the treatment and its baseline
-side by side, read at equal budget. Zero tokens, zero network, free to re-run
-(the ADR-0048 property, one level up).
-"""
+"""``shipit lab report`` — render one Cell's convergence curve from banked records."""
 
 from __future__ import annotations
 
@@ -41,15 +29,7 @@ from .._help import HelpableCommand
 
 
 def _variant_hash(cell: Cell) -> str:
-    """The content hash of ``cell``'s variant text — the BASE instructions,
-    folded with a fan-out cell's resolved dimension set + per-dimension
-    overrides (:func:`~shipit.review.cell.instructions_variant_text`, #713) —
-    the variant half of the run key, computed EXACTLY as the runner does
-    (:mod:`shipit.review.labrun`) so the report selects the same records the
-    runs banked. The path is symlink-checked identically to the runner, and a
-    missing/unreadable instructions file is a loud :class:`CellError`, never a
-    silently-empty curve.
-    """
+    """The content hash of ``cell``'s variant text, computed exactly as the runner does; a missing instructions file raises CellError."""
     try:
         base_text = load_instructions(safe_instructions_path(cell.instructions_path))
     except OSError as exc:
@@ -61,9 +41,7 @@ def _variant_hash(cell: Cell) -> str:
 
 
 def _pin_records(cell: Cell, fixture, base_dir: Path | None) -> list[dict[str, Any]]:
-    """Every banked round record of every repo the cell's pins name — the same
-    origin-keyed stores the replay driver appended to (a missing store is
-    simply zero records: a pin nobody ran yet renders as missing points)."""
+    """Every banked round record of every repo the cell's pins name; a missing store is zero records."""
     pins = resolve_pins(cell, fixture)
     records: list[dict[str, Any]] = []
     for slug in sorted({pin.repo.lower() for pin in pins}):
@@ -84,17 +62,7 @@ def run(
     base_dir: Path | None = None,
     out: TextIO | None = None,
 ) -> int:
-    """Load + lineage check → pool banked records → print the curve. Exit code.
-
-    The whole baseline chain loads from the same cells directory and is
-    walked to its control (:func:`~shipit.review.cell.load_baseline_lineage`
-    — per-hop fair-pair; a missing ancestor, cycle, or unfair pair refuses,
-    #719); the IMMEDIATE baseline's curve renders beside the treatment (a
-    control cell renders alone — it IS the baseline).
-    :func:`resolve_pins` re-validates the fixture version pin, so a report
-    against a drifted fixture refuses instead of printing incomparable
-    numbers. ``base_dir`` overrides the store family root (tests).
-    """
+    """Load + lineage check → pool banked records → print the curve; returns an exit code."""
     out = out or sys.stdout
     cells_root = Path(cells_dir) if cells_dir is not None else DEFAULT_CELLS_DIR
     cell = load_cell(resolve_cell_path(cell_ref, cells_root))
