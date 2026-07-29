@@ -304,8 +304,6 @@ PLATFORMS: tuple[str, ...] = (
 
 @dataclass(frozen=True)
 class BuildTarget:
-    """One producing toolchain build target of an :class:`Artifact`."""
-
     toolchain: str
     package: str | None = None
     version_var: str | None = None
@@ -425,7 +423,6 @@ def _parse_build_target(where: str, spec: object) -> BuildTarget:
 
 
 def _parse_endpoints(where: str, value: object) -> tuple[str, ...]:
-    """The ``endpoints`` list, validated against the closed :data:`ENDPOINTS` registry."""
     if not isinstance(value, list) or not all(isinstance(e, str) for e in value):
         raise ConfigError(f"{where}: must be a list of endpoint names")
     for endpoint in value:
@@ -1167,14 +1164,12 @@ def shipit_pin(path: str | Path) -> str | None:
 
 
 def _toml_key(key: str) -> str:
-    """A TOML key, bare when it can be and quoted otherwise."""
     if _BARE_KEY.fullmatch(key):
         return key
     return '"' + key.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
 def _strip_tables(text: str, tables: set[str]) -> str:
-    """Drop the given top-level tables (header + body) from TOML ``text``."""
     out: list[str] = []
     skipping = False
     for line in text.splitlines():
@@ -1229,7 +1224,6 @@ _SECRETS_SCAFFOLD_HEADER = """\
 
 
 def secrets_scaffold() -> str:
-    """The ``[secrets]`` block ``shipit install`` seeds when a consumer has none."""
     names = seeded_app_secrets()
     width = max((len(n) for n in names), default=0)
     lines = [f'{n:<{width}} = {{ doppler = "{n}" }}' for n in names]
@@ -1249,7 +1243,6 @@ _REVIEWERS_SCAFFOLD_HEADER = """\
 
 
 def reviewers_scaffold() -> str:
-    """The ``[reviewers]`` block ``shipit install`` seeds when a consumer has none."""
     from .prstate import reviewers_config
 
     return f"{_REVIEWERS_SCAFFOLD_HEADER}\n{reviewers_config.default_reviewers_scaffold_body()}"
@@ -1272,7 +1265,6 @@ _LINT_SCAFFOLD_HEADER = """\
 
 
 def lint_scaffold() -> str:
-    """The ``[lint]`` block ``shipit install`` seeds when a consumer has none."""
     entries = ",\n".join(f'  "{g}"' for g in _LINT_SEED_IGNORE)
     return f"{_LINT_SCAFFOLD_HEADER}\n[lint]\nignore = [\n{entries},\n]"
 
@@ -1305,7 +1297,6 @@ _TOOLCHAINS_SCAFFOLD_HEADER = """\
 
 
 def toolchains_scaffold(entries: Sequence[tuple[str, str]]) -> str:
-    """The ``[toolchains]`` block ``shipit install`` seeds when a consumer has none."""
     lines = [f'"{path}" = "{toolchain}"' for path, toolchain in entries]
     return "\n".join([_TOOLCHAINS_SCAFFOLD_HEADER, *lines])
 

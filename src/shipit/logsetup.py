@@ -103,7 +103,6 @@ def _render_surface(
 
 
 def _surface_formatter() -> logging.Formatter:
-    """The human-format renderer shared by the console and CI sinks."""
     return structlog.stdlib.ProcessorFormatter(
         foreign_pre_chain=_PIPELINE,
         processors=[
@@ -142,7 +141,6 @@ def build_ci_handler() -> logging.Handler:
 
 
 def build_step_summary_handler(path: str) -> logging.Handler:
-    """Build a handler that appends records to ``$GITHUB_STEP_SUMMARY``."""
     handler = logging.FileHandler(path, mode="a", encoding="utf-8")
     handler.setLevel(logging.INFO)
     handler.setFormatter(_surface_formatter())
