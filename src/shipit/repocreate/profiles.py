@@ -1,22 +1,8 @@
-"""The closed Creation-profile registry (ADR-0056, ADR-0063).
+"""``repocreate/profiles`` — the closed Creation-profile registry.
 
-Each ``repo new --stack <key>`` value resolves to exactly one Creation profile:
-a shipit-owned, reviewed contributor of the initial project files and
-declarations for one toolchain. Profiles are inputs to creation only — the
-finished Repo persists its path-to-toolchain map and Artifacts, never a stack
-or whole-Repo Kind (ADR-0056) — and the registry is CLOSED (ADR-0063): adding
-Rust's future peers is a reviewed shipit change with packaged resources and
-fixtures, not runtime plugin discovery.
-
-A profile returns a :class:`Contribution` — the structured claims the central
-planner (:mod:`.plan`) composes into one Repo (ADR-0057). A profile owns the
-files exclusive to its toolchain (Cargo manifests, Rust source, the black-box
-test) and CONTRIBUTES to the shared, planner-rendered manifests (pixi
-dependencies, ``.gitignore`` lines, Artifact declarations); it never splices a
-shared manifest itself. Exclusively-owned structured files (Cargo manifests)
-are built as values and serialized through :mod:`.tomlio`; owned text (Rust
-source, the test) is templated through :mod:`.templates`. This is the WS01
-tracer: the one supported profile is ``rust``.
+A profile returns a :class:`Contribution` the central planner composes into one
+Repo; it never splices a shared manifest itself.
+See docs/adr/0063-creation-profiles-are-closed.md.
 """
 
 from __future__ import annotations
@@ -31,11 +17,7 @@ from .templates import render_text
 
 @dataclass(frozen=True)
 class OwnedFile:
-    """One consumer-owned file a profile (or the universal seed) writes.
-
-    ``path`` is repo-relative POSIX; ``text`` is the fully rendered content
-    (structured files are already serialized). ``executable`` marks scripts.
-    """
+    """``path`` is repo-relative POSIX; ``text`` is fully rendered."""
 
     path: str
     text: str
@@ -44,14 +26,7 @@ class OwnedFile:
 
 @dataclass(frozen=True)
 class ArtifactDecl:
-    """A profile's Artifact claim, rendered once into the shared ``.shipit.toml``.
-
-    ``name`` is the Artifact and ``toolchain``/``package`` its single Rust build
-    target (ADR-0057: the profile declares the primary product; the planner
-    serializes the ``[artifacts.<name>]`` table). No endpoint, bundle, or
-    signing policy — the tracer declaration only gives build an unambiguous
-    target (``docs/spec/repo-new.md`` §Proposed Shape).
-    """
+    """A profile's Artifact claim: a name and its single build target."""
 
     name: str
     toolchain: str
@@ -60,12 +35,8 @@ class ArtifactDecl:
 
 @dataclass(frozen=True)
 class Contribution:
-    """One profile's structured claims to the central planner (ADR-0057).
-
-    ``owned_files`` are files exclusive to this profile; ``pixi_dependencies``
-    and ``gitignore_lines`` are contributions the planner renders once into the
-    shared pixi manifest and ``.gitignore``; ``artifacts`` are the Artifact
-    declarations the planner writes into ``.shipit.toml``.
+    """``owned_files`` are exclusive to this profile; the rest are contributions
+    the planner renders once into the shared manifests.
     """
 
     owned_files: tuple[OwnedFile, ...] = ()
@@ -73,10 +44,6 @@ class Contribution:
     gitignore_lines: tuple[str, ...] = ()
     artifacts: tuple[ArtifactDecl, ...] = ()
 
-
-# --------------------------------------------------------------------------
-# Rust profile source — owned TEXT (templated) and owned STRUCTURED (via tomlio)
-# --------------------------------------------------------------------------
 
 _LIB_RS = """\
 //! {{ lib_pkg }} — the library half of the {{ cli_pkg }} workspace.
@@ -123,13 +90,7 @@ fn prints_hello_world() {
 
 
 def _workspace_manifest(name: ProjectName) -> str:
-    """The virtual workspace-root ``Cargo.toml`` (a workspace, not a package).
-
-    Resolver 3, edition 2024, version 0.1.0, and MIT licence live in
-    ``[workspace.package]`` and are inherited by both members
-    (``docs/spec/repo-new.md`` §Design Decisions). Member paths mirror package
-    names at ``crates/<name>`` and ``crates/lib<name>``.
-    """
+    """The VIRTUAL workspace-root ``Cargo.toml`` — a workspace, not a package."""
     return tomlio.dumps(
         {
             "workspace": {
@@ -149,8 +110,7 @@ def _workspace_manifest(name: ProjectName) -> str:
 
 
 def _cli_manifest(name: ProjectName) -> str:
-    """The CLI member ``Cargo.toml``: the ``<name>`` package/binary, whose only
-    runtime dependency is a path dependency on ``lib<name>``."""
+    """The CLI member ``Cargo.toml``; its only dependency is a path dep on the lib."""
     return tomlio.dumps(
         {
             "package": {
@@ -168,7 +128,6 @@ def _cli_manifest(name: ProjectName) -> str:
 
 
 def _lib_manifest(name: ProjectName) -> str:
-    """The library member ``Cargo.toml``: the library-only ``lib<name>`` package."""
     return tomlio.dumps(
         {
             "package": {
@@ -188,14 +147,6 @@ class RustProfile:
     key = "rust"
 
     def contribute(self, name: ProjectName) -> Contribution:
-        """Build this profile's structured claim for ``name``.
-
-        Owns the workspace + member manifests (structured, via
-        :mod:`.tomlio`), the CLI/library source and the one black-box test
-        (text, via :mod:`.templates`); contributes ``cargo-nextest`` to the
-        default pixi env, ``/target/`` to ``.gitignore``, and the CLI Artifact
-        declaration.
-        """
         ctx = {
             "cli_pkg": name.cli_pkg,
             "lib_pkg": name.lib_pkg,
@@ -220,18 +171,12 @@ class RustProfile:
         )
 
 
-#: The closed, shipit-owned registry, keyed by ``--stack`` value (ADR-0063).
+#: The closed registry, keyed by ``--stack`` value.
 _REGISTRY: dict[str, RustProfile] = {"rust": RustProfile()}
 
 
 def resolve_profiles(stacks: tuple[str, ...]) -> tuple[RustProfile, ...]:
-    """Resolve the repeated ``--stack`` values to their Creation profiles.
-
-    At least one stack is mandatory; unknown values and duplicate selections
-    are usage errors (``docs/spec/repo-new.md`` §Proposed Shape / User Stories
-    8–9), raised as :class:`CreationError` so the command never silently omits
-    or double-counts a requested capability.
-    """
+    """At least one stack is mandatory; unknown and duplicate values both refuse."""
     if not stacks:
         raise CreationError(
             "at least one --stack is required (v1 supports: "
