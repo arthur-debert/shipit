@@ -241,12 +241,18 @@ def load_declines(cfg: dict, raw: str) -> tuple[str, ...]:
             'e.g. ["bin/shipit"]'
         )
     if decline and not _has_table_header(raw, "managed.decline"):
+        # The correct spelling is DESCRIBED, not shown as a snippet (#1133): the
+        # CLI renders a ConfigError through `cli_errors`, whose contract collapses
+        # the message to one stderr line, so an embedded two-line example arrives
+        # as `[managed.decline] keep = [...]` — which does not parse. An error
+        # whose whole job is teaching the right spelling must not advertise a
+        # wrong one, so the two lines are named in prose that survives collapsing.
         raise ConfigError(
             "[managed.decline] must be spelled with its own header, not a "
             "dotted key under [managed] — install re-stamps the [managed] body "
-            "and would silently drop it. Write:\n"
-            "    [managed.decline]\n"
-            '    keep = ["bin/shipit"]'
+            "and would silently drop it. Write it as TWO lines: a "
+            "'[managed.decline]' header on a line of its own, then below it the "
+            'assignment keep = ["bin/shipit"].'
         )
     return tuple(keep)
 

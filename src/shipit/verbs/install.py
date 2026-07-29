@@ -52,6 +52,7 @@ from ..install.apply import (
     MODE_TREE,
     InstallResult,
     reject_lefthook_conflicts,
+    reject_pixi_key_conflicts,
     reject_stale_provision,
     reject_symlinked_dests,
 )
@@ -520,6 +521,18 @@ def run(
             # is current, so the plan carries no work and would otherwise exit 0
             # over a repo whose next CI run fails on the retired verb.
             reject_stale_provision(plan)
+            # Fail closed on an undeclined consumer key shadowing a managed pixi
+            # block in EVERY applying mode (#1116): the block's decision is
+            # already excluded, so what is refused is exiting 0 over a repo left
+            # on its own declaration of it. Placed before the no-op shortcut for
+            # the same reason as the tripwire above — the rest of the managed set
+            # is typically current, so the plan carries no work and would
+            # otherwise report success over a repo that silently under-delivered.
+            # Ordered after it for the reason apply() states: a repo can carry
+            # both, and a dead call is broken today while an undelivered
+            # declaration is drift. A
+            # DECLINED block is not a conflict, so a declared override installs.
+            reject_pixi_key_conflicts(plan)
         if plan.nothing_to_do or dry_run:
             # Dry-run has NO side effects (no writes, no deletes, no git, no PR);
             # a nothing-to-do plan is a clean no-op either way.
@@ -673,9 +686,16 @@ def format_plan_warnings(plan: Plan) -> str:
     file, each lefthook merge conflict (#544 — the committing modes also
     fail closed on these in apply; the warning is the working-tree/dry-run
     surface, worded off the same formatter so the two can never drift), and
-    each pixi block skipped over a consumer-owned duplicate key (#547) or a
-    consumer-owned same-named task (TOL01-WS01 — a pixi-task ambiguity; both
-    warn-only in every mode: the skip already keeps the write set safe), each
+    each pixi block that could not be delivered over a consumer-owned duplicate
+    key (#547/#1116 — EVERY applying mode also fails closed on these in
+    apply/verb, so this line is the dry-run surface, worded off the same
+    formatter), each pixi block skipped over a consumer-owned same-named task
+    (TOL01-WS01 — a pixi-task ambiguity) or a redeclared top-level table
+    (ARF01-WS04); those two stay warn-only in every mode — not because their skip
+    costs less (it leaves a managed block undelivered just the same) but because
+    refusing would make shipit refuse to install itself (its ``test`` task
+    conflict is deliberate and documented) or ship an untested refusal (the
+    fleet-wide table-conflict count is zero). Also each
     whole-file unit whose dest crosses a consumer symlink (#1088 review — EVERY
     applying mode also fails closed on these in apply/verb; the warning is the
     dry-run surface, worded off the same formatter so the two can never drift),
@@ -698,7 +718,7 @@ def format_plan_warnings(plan: Plan) -> str:
             f"install: lefthook config conflict: {format_lefthook_conflict(c)}"
         )
     for kc in plan.pixi_key_conflicts:
-        lines.append(f"install: pixi block skipped: {format_pixi_key_conflict(kc)}")
+        lines.append(f"install: pixi key conflict: {format_pixi_key_conflict(kc)}")
     for tc in plan.pixi_task_conflicts:
         lines.append(f"install: pixi block skipped: {format_pixi_task_conflict(tc)}")
     for bc in plan.pixi_table_conflicts:
