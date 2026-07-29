@@ -1,9 +1,4 @@
-"""List / reply / resolve PR review threads, over the `gh` boundary.
-
-Reply and resolve are the two write actions the review loop needs after
-triaging a comment (fix-and-push or push-back-with-rationale). Listing returns
-the open threads with the handles those actions require.
-"""
+"""List / reply / resolve PR review threads, over the `gh` boundary."""
 
 from __future__ import annotations
 
@@ -15,9 +10,6 @@ from . import fetch
 from .model import Thread
 from .roster import Roster
 
-#: The engine's logger (shared name with the rest of ``shipit.prstate``): a
-#: reply / resolve is a PR mutation, so it gets a lifecycle record here at the
-#: act (LOG03) — before this, the Exec debug transport line was its only trace.
 logger = logging.getLogger("shipit.prstate")
 
 _RESOLVE = """
@@ -30,27 +22,19 @@ mutation($threadId: ID!) {
 
 
 def open_threads(pr: PrId) -> list[Thread]:
-    """All unresolved review threads on the PR (each carries path/line/ids).
+    """All unresolved review threads on the PR, each carrying path/line/ids.
 
-    Thread listing is independent of reviewer configuration — `open_threads`
-    reads the raw thread set off the snapshot, which `gather` fetches regardless
-    of the Roster — so this passes the EMPTY :class:`Roster` rather than paying
-    for a config read (`load_roster`) whose per-reviewer settings nothing here
-    consults."""
+    Nothing here consults per-reviewer settings, so it passes the empty
+    Roster rather than paying for a config read.
+    """
     return fetch.gather(pr, Roster()).open_threads()
 
 
 def reply(pr: PrId, comment_id: int, body: str) -> None:
-    """Reply to a review comment, keeping the thread (does not resolve it).
-
-    The endpoint knowledge lives in the adapter (:func:`shipit.gh.pr_review_reply`)
-    — before the PROC02-WS01 merge this module re-spelled the same REST call.
-    """
+    """Reply to a review comment, keeping the thread (does not resolve it)."""
     try:
         gh.pr_review_reply(pr, comment_id, body)
     except Exception:
-        # A propagating failure (glassbox spray): the mutation died — record it
-        # at ERROR with the exception attached, then let it propagate unchanged.
         logger.error(
             "review-thread reply failed on pr#%s (comment %s)",
             pr.number,
@@ -68,12 +52,8 @@ def reply(pr: PrId, comment_id: int, body: str) -> None:
 
 
 def resolve(pr: PrId, thread_id: str) -> None:
-    """Mark a review thread resolved via the GraphQL mutation.
-
-    Takes the PR number alongside the thread handle so the mutation milestone
-    carries ``pr`` on the record itself (every caller holds it — threads come
-    from :func:`open_threads`), not only via an ambient context bind.
-    """
+    """Mark a review thread resolved; `pr` rides along so the milestone
+    record carries it rather than relying on an ambient bind."""
     try:
         gh.graphql(_RESOLVE, threadId=thread_id)
     except Exception:

@@ -1,40 +1,6 @@
-"""Role Profile registry — the structural answer to "how may this Role run?".
+"""``harness/roleprofile`` — the fixed, total registry of each Role's structural run shape.
 
-RPE01-WS01, governed by ``docs/spec/role-profiles-work-env.md`` and ADR-0047:
-one fixed, Shipit-owned, EXHAUSTIVE mapping from the closed :class:`Role`
-vocabulary to each role's structural execution shape. A profile is structural
-only — checkout strategy, enforcement posture, generated/brief surfaces,
-supported launch contexts, result channel; behavioral prose stays in the Lex
-Role definitions (ADR-0011). There is deliberately NO consumer configuration
-surface (ADR-0047): the registry is a module-level frozen value, not config.
-
-The checkout strategy is a STRUCTURED closed value, not the historical flat
-``session | write | read-only | ambient`` token list (which mixed allocation,
-attachment, lifetime, and mutation): one shape per role — the coordinator's
-ephemeral session Tree (ADR-0027), the implementer's new write Tree + branch,
-the shepherd's write attachment to an EXISTING PR (ADR-0035), the reviewer's
-per-Run read-only Tree pinned to a PR head (ADR-0018 / ADR-0074), and the explorer's
-ambient WorkingDir with no Tree at all. Enforcement posture is
-capability-shaped (per operation and resource), never a single mutation
-boolean — a reviewer posts its review (GitHub mutation) while its checkout
-stays immutable.
-
-Two role-parsing boundaries exist ON PURPOSE and must not converge:
-
-- :func:`parse_role` / :func:`validate_spawn` here are the STRICT public and
-  programmatic boundary — an unknown role or an unsupported role/launch pair
-  is a :class:`RoleValidationError` raised BEFORE any Tree provisioning or
-  backend launch, naming the role and the requested context.
-- :func:`shipit.harness.role.resolve_role` is the deliberately LENIENT native
-  hook boundary — an unknown non-empty native subagent identity stays an
-  unknown worker (never the coordinator), because the hook must govern
-  whatever identity the host hands it. That leniency never makes the unknown
-  identity spawnable here.
-
-Everything in this module is pure and deterministic: plain value lookups over
-frozen data — no filesystem mutation, process launch, provisioning, or network
-work (the spec's performance/purity invariant). Consumers with effects (spawn,
-prompts, enforcement) log their own decisions at their own seams.
+See docs/adr/0047-role-profiles-and-work-env-are-not-consumer-config.md.
 """
 
 from __future__ import annotations
@@ -49,52 +15,22 @@ from .role import Role
 
 
 class LaunchContext(StrEnum):
-    """The closed set of ways a Run can be launched today.
-
-    ``HOST_SESSION`` is the human-facing top-level session a host starts
-    (the coordinator's only context). ``DETACHED`` is ``shipit spawn
-    subagent`` — a headless backend child rooted in a shipit-provisioned
-    Tree (ADR-0019). ``NATIVE_SUBAGENT`` is a host-native in-session spawn
-    (e.g. the Claude Code Agent tool) governed through the hook boundary.
-    """
-
     HOST_SESSION = "host-session"
     DETACHED = "detached"
     NATIVE_SUBAGENT = "native-subagent"
 
 
 class ResultChannel(StrEnum):
-    """The closed set of channels a Run's result travels back through."""
-
-    #: The coordinator's result IS the human-facing orchestration session.
     ORCHESTRATION_SESSION = "orchestration-session"
-    #: One verified draft PR opened from the Run's branch (ADR-0019 §6).
     DRAFT_PR = "draft-pr"
-    #: Commits + resolved review threads on the EXISTING PR, across rounds.
     EXISTING_PR_ROUNDS = "existing-pr-rounds"
-    #: A captured structured review posted through the existing PR (ADR-0018).
     POSTED_REVIEW = "posted-review"
-    #: A report handed back to the coordinator in-session; nothing lands.
     COORDINATOR_REPORT = "coordinator-report"
-
-
-# ---------------------------------------------------------------------------
-# Checkout strategy — a structured closed value, one shape per allocation +
-# attachment pairing. The class-level axes let a consumer ask the orthogonal
-# questions (is a Tree materialized? may the checkout mutate? does it attach
-# to an existing PR?) without matching shape tokens — the exact confusion the
-# historical flat enum caused (spec §Design Decisions).
-# ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class SessionTree:
-    """The coordinator's checkout: an ephemeral per-session write Tree (ADR-0027).
-
-    Writable like an implementer Tree but with session lifetime and branch
-    behavior — minted at launch, switched to whatever branch the session
-    discovers it needs, never shared between concurrent sessions.
-    """
+    """The coordinator's checkout: an ephemeral, never-shared per-session write Tree."""
 
     tree_backed: ClassVar[bool] = True
     writable: ClassVar[bool] = True
@@ -103,12 +39,7 @@ class SessionTree:
 
 @dataclass(frozen=True)
 class NewWriteTree:
-    """The implementer's checkout: a new write Tree on a freshly cut branch.
-
-    Allocation AND attachment are new: the branch is cut from the intended
-    base (``origin/main`` or the epic umbrella) and the Run's draft-PR
-    handshake creates the PR the coordinator drives (ADR-0019 §6).
-    """
+    """The implementer's checkout: a new write Tree on a branch cut from the intended base."""
 
     tree_backed: ClassVar[bool] = True
     writable: ClassVar[bool] = True
@@ -117,12 +48,7 @@ class NewWriteTree:
 
 @dataclass(frozen=True)
 class ExistingPrWriteTree:
-    """The shepherd's checkout: a write Tree ATTACHED to an existing PR head.
-
-    Writable like the implementer's, but it attaches to the PR a prior Run
-    opened and persists across review rounds (ADR-0035) — never a new branch,
-    never a second draft-PR handshake.
-    """
+    """The shepherd's checkout: a write Tree attached to an existing PR head across rounds."""
 
     tree_backed: ClassVar[bool] = True
     writable: ClassVar[bool] = True
@@ -131,13 +57,7 @@ class ExistingPrWriteTree:
 
 @dataclass(frozen=True)
 class PerRunReadOnlyTree:
-    """The reviewer's checkout: a per-Run read-only Tree pinned to a PR head.
-
-    Per-Run now (ADR-0074): a reviewer still gets a ``chmod``'d read-only clone
-    (ADR-0018's read-only *mode* stands), but each reviewer Run gets its OWN flat
-    Tree rather than sharing one deterministic ``(repo, branch)`` leaf — branch
-    pinning, not read-only behavior alone, is why a Tree exists at all.
-    """
+    """The reviewer's checkout: a per-Run, ``chmod``'d read-only Tree pinned to a PR head."""
 
     tree_backed: ClassVar[bool] = True
     writable: ClassVar[bool] = False
@@ -146,20 +66,13 @@ class PerRunReadOnlyTree:
 
 @dataclass(frozen=True)
 class AmbientWorkingDir:
-    """The explorer's checkout: the ambient WorkingDir — no Tree, ever.
-
-    Open-ended investigation stays cheap and cannot accidentally become a
-    write Run; a detached spawn (which would mint a Tree) is refused at
-    preflight, not merely discouraged.
-    """
+    """The explorer's checkout: the ambient WorkingDir — no Tree, ever."""
 
     tree_backed: ClassVar[bool] = False
     writable: ClassVar[bool] = False
     attaches_to_existing_pr: ClassVar[bool] = False
 
 
-#: The closed union of checkout shapes — the "Tree Profile" vocabulary's
-#: structured implementation (spec §Design Decisions).
 CheckoutStrategy = (
     SessionTree
     | NewWriteTree
@@ -171,45 +84,21 @@ CheckoutStrategy = (
 
 @dataclass(frozen=True)
 class EnforcementPosture:
-    """A role's required capabilities, by operation and resource.
+    """A role's required capabilities, by operation and resource — a policy input, not a sandbox."""
 
-    A POLICY INPUT, not a sandbox claim (spec §Design Decisions): the
-    read-only Tree remains the load-bearing checkout guard for reviewers and
-    backend-native restrictions remain defense in depth. Capability-shaped on
-    purpose — a reviewer needs network reads and review posting while its
-    checkout stays immutable, which one mutation boolean cannot express.
-    """
-
-    #: May the Run mutate its checkout (edit/commit in the working tree)?
     checkout_mutation: bool
-    #: May the Run execute commands (builds, tests, git/gh reads via Bash)?
     command_execution: bool
-    #: Does the Run require network access (gh API, pushes, fetches)?
     network_access: bool
-    #: May the Run mutate Git remotes / GitHub (push, open PRs, post reviews)?
     github_mutation: bool
-    #: May the Run write temporary or artifact output outside the checkout?
     scratch_writes: bool
-    #: May the Run AUTHOR code changes itself (edit code paths), or must it
-    #: delegate implementation? Orthogonal to ``checkout_mutation`` on purpose:
-    #: the coordinator mutates its checkout (it commits docs, planning, config)
-    #: yet must NOT author code (ADR-0012) — one mutation flag cannot say both,
-    #: which is exactly why posture is capability-shaped. The harness edit guard
-    #: (:mod:`shipit.harness.policy`) reads this pairing via
-    #: :func:`delegates_code_authorship` instead of naming a role.
+    #: May the Run AUTHOR code itself? Orthogonal to ``checkout_mutation``: the
+    #: coordinator commits docs and config yet must not author code.
     code_authorship: bool
 
 
 @dataclass(frozen=True)
 class RoleProfile:
-    """One fixed Role's structural execution shape — never its prose.
-
-    References the Role it profiles; the Lex Role definition (composed by
-    :mod:`shipit.harness.prompts`) stays the sole source of behavioral
-    content. ``generates_agent_def`` / ``has_brief_template`` declare the
-    generated and brief SURFACES consumed by prompt and brief generation;
-    behavioral prose remains in the Role definitions (RPE01-WS02).
-    """
+    """One fixed Role's structural execution shape; behavioral prose lives in its Lex definition."""
 
     role: Role
     checkout: CheckoutStrategy
@@ -220,8 +109,6 @@ class RoleProfile:
     result_channel: ResultChannel
 
 
-#: A full-trust write posture — the implementer and the shepherd, the two roles
-#: that AUTHOR code (``code_authorship=True``).
 _WRITE_POSTURE = EnforcementPosture(
     checkout_mutation=True,
     command_execution=True,
@@ -231,10 +118,7 @@ _WRITE_POSTURE = EnforcementPosture(
     code_authorship=True,
 )
 
-#: The coordinator's posture: full write EXCEPT code authorship. It mutates its
-#: checkout (commits docs, planning, config) and drives GitHub, but delegates
-#: CODE changes rather than implementing them (ADR-0012) — the one posture whose
-#: ``checkout_mutation and not code_authorship`` pairing the edit guard fires on.
+#: Full write EXCEPT code authorship — the pairing the edit guard fires on.
 _ORCHESTRATOR_POSTURE = EnforcementPosture(
     checkout_mutation=True,
     command_execution=True,
@@ -244,18 +128,13 @@ _ORCHESTRATOR_POSTURE = EnforcementPosture(
     code_authorship=False,
 )
 
-#: The registry — TOTAL over the closed Role vocabulary, one profile per
-#: role, Shipit-owned (ADR-0047: no consumer configuration surface reads
-#: into this value). Wrapped read-only so a consumer cannot patch a profile
-#: at runtime; totality and one-to-one-ness are pinned by tests.
+#: The registry — TOTAL over the closed Role vocabulary, read-only at runtime.
 PROFILES: Mapping[Role, RoleProfile] = MappingProxyType(
     {
         Role.COORDINATOR: RoleProfile(
             role=Role.COORDINATOR,
             checkout=SessionTree(),
             enforcement=_ORCHESTRATOR_POSTURE,
-            # The coordinator is the top-level session: no agent-def, no
-            # brief — its prompt rides the injected context + deny reason.
             generates_agent_def=False,
             has_brief_template=False,
             launch_contexts=frozenset({LaunchContext.HOST_SESSION}),
@@ -278,9 +157,6 @@ PROFILES: Mapping[Role, RoleProfile] = MappingProxyType(
             enforcement=_WRITE_POSTURE,
             generates_agent_def=True,
             has_brief_template=True,
-            # The shepherd may be launched headless now that the detached path
-            # has its own existing-PR attachment lifecycle (RPE01-WS04). It
-            # never rides the implementer's new-branch/draft-PR handshake.
             launch_contexts=frozenset(
                 {LaunchContext.DETACHED, LaunchContext.NATIVE_SUBAGENT}
             ),
@@ -295,13 +171,10 @@ PROFILES: Mapping[Role, RoleProfile] = MappingProxyType(
                 network_access=False,
                 github_mutation=False,
                 scratch_writes=False,
-                # Read-only investigation: never authors code.
                 code_authorship=False,
             ),
             generates_agent_def=True,
             has_brief_template=False,
-            # Ambient native investigation ONLY — a detached spawn would mint
-            # a write Tree the explorer must never have.
             launch_contexts=frozenset({LaunchContext.NATIVE_SUBAGENT}),
             result_channel=ResultChannel.COORDINATOR_REPORT,
         ),
@@ -309,22 +182,15 @@ PROFILES: Mapping[Role, RoleProfile] = MappingProxyType(
             role=Role.REVIEWER,
             checkout=PerRunReadOnlyTree(),
             enforcement=EnforcementPosture(
-                # The one posture that PROVES capability shape: the reviewed
-                # checkout is immutable while the review itself is posted
-                # through GitHub and captured output may land as artifacts.
                 checkout_mutation=False,
                 command_execution=True,
                 network_access=True,
                 github_mutation=True,
                 scratch_writes=True,
-                # The review posts through GitHub, but never authors code.
                 code_authorship=False,
             ),
             generates_agent_def=True,
             has_brief_template=False,
-            # The detached review service owns the whole contract: shared
-            # read-only Tree allocation, structured output capture, and the
-            # posted review. No native boundary provides that lifecycle yet.
             launch_contexts=frozenset({LaunchContext.DETACHED}),
             result_channel=ResultChannel.POSTED_REVIEW,
         ),
@@ -333,37 +199,18 @@ PROFILES: Mapping[Role, RoleProfile] = MappingProxyType(
 
 
 class RoleValidationError(ValueError):
-    """A strict-boundary role refusal, minted BEFORE any provisioning or launch.
-
-    Raised by :func:`parse_role` / :func:`validate_spawn` when a public or
-    programmatic boundary receives an unknown role or an unsupported
-    role/launch-context pairing. The message names the offending role, the
-    requested context (when known), and the supported alternatives — the
-    spec's error contract. Never raised by the lenient hook boundary
-    (:func:`shipit.harness.role.resolve_role`), which stays fail-safe instead
-    of fail-closed on purpose.
-    """
+    """A strict-boundary role refusal, minted BEFORE any provisioning or launch."""
 
 
 def _known_roles() -> str:
-    """The closed vocabulary, rendered for refusal messages."""
     return ", ".join(role.value for role in Role)
 
 
 def profile_for(role: Role) -> RoleProfile:
-    """The profile lookup — total over :class:`Role`, pure, deterministic."""
     return PROFILES[role]
 
 
 def roles_with_checkout_strategy(checkout_type: type) -> tuple[Role, ...]:
-    """All roles whose profile uses ``checkout_type`` as its checkout strategy.
-
-    This is the registry-derived inverse lookup for call sites that need to name
-    a lifecycle family (for example, "roles that attach to an existing PR")
-    without restating today's role list. It remains pure and deterministic over
-    the fixed Shipit-owned registry; unsupported/custom role strings still fail
-    through :func:`parse_role` / :func:`validate_spawn`.
-    """
     return tuple(
         role
         for role, profile in PROFILES.items()
@@ -372,32 +219,13 @@ def roles_with_checkout_strategy(checkout_type: type) -> tuple[Role, ...]:
 
 
 def delegates_code_authorship(role: Role) -> bool:
-    """True iff ``role`` may mutate its checkout but must NOT author code itself.
-
-    The capability-shaped form of the ADR-0012 edit guard (spec §"Enforcement
-    posture is capability-shaped, not a mutation flag"): a role with a WRITABLE
-    checkout — it commits docs, planning, config — that still delegates CODE
-    changes rather than implementing them. Derived from posture
-    (``checkout_mutation and not code_authorship``), so the harness edit guard
-    (:mod:`shipit.harness.policy`) consumes profile posture instead of naming the
-    coordinator. It is exactly the coordinator today; any future role with the
-    same posture is guarded with no edit to the policy module, and a read-only
-    role (whose checkout cannot mutate at all) is NOT caught here — its tools and
-    read-only Tree are the load-bearing guard, as the spec requires. Pure.
-    """
+    """True iff ``role`` may mutate its checkout but must NOT author code itself."""
     posture = PROFILES[role].enforcement
     return posture.checkout_mutation and not posture.code_authorship
 
 
 def parse_role(name: str) -> Role:
-    """Parse a public/programmatic role input STRICTLY to the closed registry.
-
-    Normalizes whitespace and case (GitHub-style, matching the hook
-    resolver's normalization) but never falls back: an input outside the
-    closed vocabulary raises :class:`RoleValidationError` naming it. This is
-    the boundary that keeps an unknown native worker identity (which the hook
-    tolerates) from ever becoming a spawnable Role.
-    """
+    """Parse a role input STRICTLY: whitespace/case normalized, but never a fallback."""
     normalized = (name or "").strip().lower()
     if not normalized:
         raise RoleValidationError(
@@ -413,23 +241,11 @@ def parse_role(name: str) -> Role:
 
 
 def validate_spawn(name: str, context: LaunchContext) -> RoleProfile:
-    """The spawn preflight: parse the role, check the launch context, or refuse.
-
-    The registry-driven gate every spawn boundary runs BEFORE Tree
-    provisioning or backend launch (the acceptance invariant): an unknown
-    role, or a known role whose profile does not support ``context`` (a
-    detached explorer or detached coordinator), is a
-    :class:`RoleValidationError` naming the role, the requested
-    context, and the supported alternatives. Returns the role's profile on
-    success. Pure: a value check, no I/O of any kind.
-    """
+    """The spawn preflight, run BEFORE any provisioning: the profile, or a refusal."""
     try:
         role = parse_role(name)
     except RoleValidationError as exc:
-        # Preserve parse_role's specific diagnosis (empty vs unknown role) and
-        # append the launch context — rewriting every parse failure into
-        # "unknown role" would mislabel an empty input and diverge from
-        # parse_role's contract.
+        # Preserve parse_role's diagnosis (empty vs unknown) and append the context.
         raise RoleValidationError(
             f"{exc} Refused for a {context.value} launch before any Tree is "
             "provisioned or a backend launched."

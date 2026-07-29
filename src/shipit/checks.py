@@ -1,47 +1,6 @@
 """Required-status-check discovery for the branch ruleset.
 
-Ported from release-core's ``verbs/apply_ruleset.py``: the ruleset must require
-the TARGET repo's own checks, never a captured set from another repo. Two modes,
-tried in order:
-
-1. From runs — the job names of the latest default-branch run of each
-   required-PR-check workflow (purely the GitHub API; catches matrix expansion
-   and ``name:`` overrides that static parsing can't see).
-2. Static — when no runs exist yet (the onboarding case), the contexts the
-   workflow files themselves declare, resolving reusable-workflow calls to their
-   nested ``<caller> / <called>`` contexts.
-
-A workflow contributes a required check only when it triggers on ``pull_request``
-WITHOUT a ``paths:`` / ``paths-ignore:`` filter (a path-filtered job is
-conditional and would deadlock unrelated PRs — release#416) and is not
-``copilot-review`` (the retired Copilot-request caller: it only requested a
-review, never a check. ADR-0031 made the engine the sole requester and deleted
-the workflow here; the filter stays because portfolio repos still carry the
-file until their own cutover). The bare
-caller-job name of a reusable call is never a reported context and would deadlock
-every PR — release#602.
-
-Static discovery NEVER guesses a context it cannot name (#1056). A job whose
-reported check name is statically unpredictable — a ``${{ … }}`` display name,
-or a ``strategy.matrix`` job (it reports ``id (values)``, never the bare id) —
-is DROPPED, not resolved to its job id: guessing there minted a phantom
-``<caller> / run`` on ``lex-fmt/lex`` that no job ever reported, and requiring
-it bricked every PR. Each drop is warned loudly (stderr + WARNING, LOG02). The
-guard is per-workflow: :func:`discover` writes the ruleset only when EVERY PR
-workflow still contributes at least one certain context; if any PR workflow is
-left with zero, discovery REFUSES (a :class:`Discovery` carrying a ``refusal``
-message, no checks) rather than write a weaker rule, and gh-setup surfaces the
-refusal as a failed ruleset pass demanding explicit ``--checks``.
-
-This module also owns the workflow-file parsing seam gh-setup's Actions
-access-level verify pass (#739) uses: :func:`is_reusable_workflow` /
-:func:`publishes_reusable_workflows` detect ``workflow_call`` publishers, from
-the local checkout or via the contents API — same loader, same YAML-1.1
-``on:`` gotcha handling. And the CONSUMER side of the same grammar:
-:func:`workflow_pin_refs` enumerates the ``owner/repo/wf.yml@vN`` pins the
-RELEASE CALLER (:data:`RELEASE_CALLER_WORKFLOW`) dispatches, so the release
-preflight pin gate (#917) can verify each ``@vN`` resolves on its publisher
-before GitHub emits a raw HTTP 422 at dispatch.
+Runs-based first, static workflow parsing second; a context that cannot be named statically is dropped, never guessed.
 """
 
 from __future__ import annotations
@@ -58,25 +17,13 @@ import yaml
 
 from . import execrun, gh
 
-#: This module's logger (LOG02 convergence): the degraded discovery outcomes —
-#: a too-deep nesting, an unresolvable reusable workflow — used to go ONLY to
-#: stderr, reaching no sink; they now also record at WARNING (the prints stay
-#: as the user-facing surface).
 logger = logging.getLogger("shipit.checks")
 
 _NON_CHECK_WORKFLOWS = ("copilot-review.yml", "copilot-review.yaml")
 
 
 class _WorkflowLoader(yaml.SafeLoader):
-    """A YAML loader that does NOT treat ``on``/``off``/``yes``/``no`` as bools.
-
-    GitHub workflows key their triggers under ``on:``. PyYAML follows YAML 1.1,
-    where ``on`` is the boolean ``True`` — so a naive parse turns the ``on:`` key
-    into ``True`` and every workflow looks trigger-less. This loader strips the
-    YAML-1.1 bool resolver and re-adds a YAML-1.2 one (``true``/``false`` only),
-    so ``on`` stays the string key it is in the file (the same result ``yq``
-    gives, which is what release-core relied on).
-    """
+    """A YAML loader that does NOT treat ``on``/``off``/``yes``/``no`` as bools, so a workflow's ``on:`` key stays a string."""
 
 
 _WorkflowLoader.yaml_implicit_resolvers = {
@@ -87,43 +34,19 @@ _BOOL_1_2 = re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$")
 for _ch in "tTfF":
     _WorkflowLoader.add_implicit_resolver("tag:yaml.org,2002:bool", _BOOL_1_2, _ch)
 
-# Cross-repo reusable reference: owner/repo/.github/workflows/x.yml@ref
 _USES_RE = re.compile(
     r"^(?P<owner>[^/]+)/(?P<repo>[^/]+)/(?P<path>[^@]+\.ya?ml)@(?P<ref>.+)$"
 )
-# The floating v-major ref shape (ADR-0010): `v1`, `v2`, … — a BRANCH
-# advance-major.yml force-moves onto each stable tag. The pin gate enumerates
-# ONLY these (a `@main`, a SHA, a `@v1.2.3` release tag is outside the
-# bootstrap contract and gets no phantom "bootstrap the v-major branch"
-# remediation — #917, workflows.lex §10).
 _VN_RE = re.compile(r"^v\d+$")
 # GitHub caps reusable-workflow nesting at 4; the same cap bounds the recursion.
 _MAX_NESTING = 4
 
-#: The blessed stage-choice release-caller filename (workflows.lex §8, the
-#: shape `shipit wf test` lints) shipit installs and dogfoods — the ONE
-#: workflow a release dispatch resolves its ``@vN`` stage pins from. The pin
-#: gate scopes to it, NOT every ``.github/workflows`` file: an unrelated
-#: CI/manual/experimental workflow's stale cross-repo ref is not part of the
-#: release dispatch and must never block a cut (#917).
 RELEASE_CALLER_WORKFLOW = "shipit-release.yml"
-
-
-# --------------------------------------------------------------------------
-# Discovery value objects (#1056)
-# --------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class DroppedJob:
-    """A job static discovery could not statically name, so dropped (#1056).
-
-    ``job`` is the job label (caller-prefixed — ``<caller> / <called>`` — at
-    nested levels). ``reason`` is ``"matrix"`` (a ``strategy.matrix`` job reports
-    ``id (values)``, never the bare id) or ``"dynamic name"`` (its display name
-    carries a ``${{ … }}`` expression). Either way the reported context can't be
-    predicted statically, so the job contributes no required check.
-    """
+    """A job static discovery could not name: ``reason`` is ``"matrix"`` or ``"dynamic name"``."""
 
     job: str
     reason: str
@@ -131,13 +54,7 @@ class DroppedJob:
 
 @dataclass(frozen=True)
 class WorkflowContexts:
-    """One PR workflow's static-discovery outcome (#1056).
-
-    ``certain`` is the set of contexts its jobs reliably report (sorted, unique);
-    ``dropped`` is every job dropped as statically unpredictable. A workflow with
-    an empty ``certain`` is one discovery could not confidently name — it drives
-    :func:`discover`'s refusal.
-    """
+    """One PR workflow's static-discovery outcome: the contexts it certainly reports, and the jobs dropped."""
 
     workflow: str
     certain: tuple[str, ...]
@@ -146,25 +63,13 @@ class WorkflowContexts:
 
 @dataclass(frozen=True)
 class Discovery:
-    """The required-check discovery result (#1056).
-
-    ``checks`` is the set to require. ``refusal`` is ``None`` on success, or an
-    actionable message when static discovery left a PR workflow contributing zero
-    certain contexts: the caller must NOT write the ruleset (``checks`` is empty
-    then) and must surface the refusal as a failed pass demanding ``--checks``.
-    """
+    """The discovery result: ``checks`` to require, or a ``refusal`` message (with no checks) the caller must surface instead of writing the ruleset."""
 
     checks: tuple[str, ...]
     refusal: str | None = None
 
 
-# --------------------------------------------------------------------------
-# Pure helpers — no network, fixture-tested.
-# --------------------------------------------------------------------------
-
-
 def workflow_triggers(workflow: object) -> list[str]:
-    """The ``on:`` triggers of a parsed workflow, normalized to a flat list."""
     if not isinstance(workflow, dict):
         return []
     on = workflow.get("on")
@@ -178,23 +83,15 @@ def workflow_triggers(workflow: object) -> list[str]:
 
 
 def is_pr_workflow(workflow: object) -> bool:
-    """True if the workflow triggers on ``pull_request``."""
     return "pull_request" in workflow_triggers(workflow)
 
 
 def is_reusable_workflow(workflow: object) -> bool:
-    """True if the workflow triggers on ``workflow_call`` (a reusable-workflow
-    publisher — the callable side of ADR-0010's distribution model)."""
     return "workflow_call" in workflow_triggers(workflow)
 
 
 def pr_trigger_is_path_filtered(workflow: object) -> bool:
-    """True if the ``pull_request`` trigger carries a ``paths``/``paths-ignore``.
-
-    Path-filtered jobs are conditional, so requiring them deadlocks any PR that
-    doesn't touch the matching files (release#416). Only unfiltered
-    ``pull_request`` workflows are always-run checks and safe to require.
-    """
+    """True if the ``pull_request`` trigger carries a ``paths``/``paths-ignore``; such a workflow is conditional and unsafe to require."""
     if not isinstance(workflow, dict):
         return False
     on = workflow.get("on")
@@ -212,12 +109,7 @@ def checks_json(checks: list[str]) -> list[dict]:
 
 
 def job_display_name(job_id: str, job: object) -> str:
-    """A job's reported check name: a static ``name:`` override, else the job id.
-
-    A ``name:`` carrying a ``${{ … }}`` expression can't be resolved statically,
-    so the job id is used (runs-based detection sees the rendered name). Callers
-    that must NOT guess such a name gate on :func:`job_unpredictable` first.
-    """
+    """A job's reported check name: a static ``name:`` override, else the job id."""
     if isinstance(job, dict):
         name = job.get("name")
         if isinstance(name, str) and "${{" not in name:
@@ -226,16 +118,7 @@ def job_display_name(job_id: str, job: object) -> str:
 
 
 def job_unpredictable(job: object) -> str | None:
-    """Why a job's reported check name is statically unpredictable, else ``None``.
-
-    Returns ``"matrix"`` when the job has a ``strategy.matrix`` (each lane reports
-    ``id (values)`` / a per-lane ``name``, never the bare id) or ``"dynamic
-    name"`` when its ``name:`` carries a ``${{ … }}`` expression that only renders
-    at run time. Static discovery must DROP such a job rather than guess its job
-    id: on ``lex-fmt/lex`` a matrix ``run`` job minted the phantom ``checks /
-    run`` context that bricked every PR (#1056). Matrix is reported in preference
-    to a dynamic name (a matrix job's per-lane name is the same unpredictability).
-    """
+    """Why a job's reported check name is statically unpredictable (``"matrix"`` / ``"dynamic name"``), else ``None``."""
     if not isinstance(job, dict):
         return None
     strategy = job.get("strategy")
@@ -248,14 +131,7 @@ def job_unpredictable(job: object) -> str | None:
 
 
 def _called_job_included(job: object, with_values: dict) -> bool:
-    """Whether a called workflow's job contributes a required context.
-
-    A job-level ``if: inputs.<key>`` (optionally ``${{ … }}``-wrapped) is
-    resolved against the caller's ``with:`` — reusable CI conditions its optional
-    jobs exactly this way, so a consumer that doesn't enable the feature must
-    not have the context required. Any other ``if:`` is included: a skipped job
-    still reports a (``skipped``) check run, which satisfies the ruleset.
-    """
+    """Whether a called workflow's job contributes a context: a job-level ``if: inputs.<key>`` is resolved against the caller's ``with:``, any other ``if:`` is included."""
     if not isinstance(job, dict):
         return True
     cond = job.get("if")
@@ -273,11 +149,6 @@ def _called_job_included(job: object, with_values: dict) -> bool:
     return value is True or (isinstance(value, str) and value.lower() == "true")
 
 
-# --------------------------------------------------------------------------
-# Workflow loading — local fs and the contents API.
-# --------------------------------------------------------------------------
-
-
 def _load_yaml_text(text: str) -> object:
     return yaml.load(text, Loader=_WorkflowLoader)
 
@@ -288,12 +159,7 @@ def _load_yaml_file(path: str) -> object:
 
 
 def _fetch_called_workflow(uses: str, toplevel: str | None) -> object:
-    """The parsed definition of a ``uses:`` target.
-
-    A repo-local ``./…`` reference is read from the same working tree the caller
-    was read from; a cross-repo ``owner/repo/path@ref`` is fetched at its PINNED
-    ref via the contents API — the only source matching what the consumer runs.
-    """
+    """The parsed definition of a ``uses:`` target — local for ``./…``, else the contents API at the pinned ref."""
     if uses.startswith("./"):
         if toplevel is None:
             raise ValueError(f"local reusable ref with no checkout: {uses!r}")
@@ -318,19 +184,7 @@ def _job_contexts(
     cache: dict[str, object],
     depth: int = 0,
 ) -> tuple[list[str], list[DroppedJob]]:
-    """The status-check contexts one workflow job reports, and the jobs dropped.
-
-    A plain job reports its display name — UNLESS it is statically unpredictable
-    (a ``${{ … }}`` display name or a ``strategy.matrix``, see
-    :func:`job_unpredictable`), in which case it contributes no context and is
-    recorded as a :class:`DroppedJob` (#1056): guessing the bare job id there
-    minted phantom required checks that bricked rulesets. A job that CALLS a
-    reusable workflow reports one ``<caller> / <called>`` context per called job
-    (the bare caller name is never reported — release#602), recursing through
-    nesting; an unpredictable CALLER drops the whole subtree, since its
-    ``<caller>`` prefix can't be named. Nested drops are surfaced caller-prefixed
-    too, so the warning names the full path.
-    """
+    """The contexts one workflow job reports, and the jobs dropped; a reusable call reports ``<caller> / <called>`` per called job."""
     unpredictable = job_unpredictable(job)
     uses = job.get("uses") if isinstance(job, dict) else None
     display = job_display_name(job_id, job)
@@ -339,12 +193,8 @@ def _job_contexts(
             return [], [DroppedJob(job=job_id, reason=unpredictable)]
         return [display], []
     if unpredictable is not None:
-        # The caller's own name is unpredictable, so no nested `<caller> / …`
-        # context can be named — drop the entire subtree, don't recurse.
         return [], [DroppedJob(job=job_id, reason=unpredictable)]
     if depth >= _MAX_NESTING:
-        # Degraded-but-continuing (LOG02): discovery drops this job's contexts
-        # and carries on — loud on both the user surface and the durable record.
         logger.warning("reusable-workflow nesting too deep at job %r", job_id)
         print(
             f"warning: reusable-workflow nesting too deep at job {job_id!r}",
@@ -355,8 +205,6 @@ def _job_contexts(
         try:
             cache[uses] = _fetch_called_workflow(uses, toplevel)
         except (execrun.ExecError, ValueError, OSError, yaml.YAMLError) as exc:
-            # Degraded-but-continuing: the called workflow's contexts are
-            # skipped, not fatal — warning with the exception attached.
             logger.warning(
                 "cannot resolve reusable workflow %r called by job %r",
                 uses,
@@ -388,11 +236,6 @@ def _job_contexts(
     return out, dropped
 
 
-# --------------------------------------------------------------------------
-# Discovery — boundary calls into gh / the filesystem.
-# --------------------------------------------------------------------------
-
-
 def pr_workflow_paths(workflows_dir: str) -> list[str]:
     """``.github/workflows/<name>`` of the local always-run PR-check workflows."""
     names: list[str] = []
@@ -413,34 +256,7 @@ def pr_workflow_paths(workflows_dir: str) -> list[str]:
 
 
 def workflow_pin_refs(caller_path: str) -> list[tuple[str, str]]:
-    """The floating-major ``@vN`` reusable-workflow pins the RELEASE CALLER
-    dispatches, as sorted-unique ``(owner/repo, ref)`` tuples.
-
-    Reads the ONE release caller workflow (``caller_path`` — the blessed
-    :data:`RELEASE_CALLER_WORKFLOW` shape) and collects each job's
-    ``uses: owner/repo/path@vN`` — the pins GitHub resolves when it dispatches
-    that caller (#917). Scoped to the caller, NOT every ``.github/workflows``
-    file: an unrelated CI/manual/experimental workflow with a stale cross-repo
-    ref is not part of the release dispatch, so a missing ref there must never
-    block a cut. The caller's OWN direct pins are sufficient to catch the
-    missing-``@vN`` failure — the whole stage chain rides the SAME floating
-    ``@vN`` branch, so if that branch is absent the caller's very first pin
-    already fails at GitHub's workflow-resolution step.
-
-    Filtered to the ``@vN`` shape (:data:`_VN_RE`): the gate's refusal and the
-    §10 bootstrap contract are floating-v-major-BRANCH specific (advance-major
-    force-moves a ``vN`` branch — ADR-0010), so a non-``vN`` pin (``@main``, a
-    SHA, a ``@v1.2.3`` release tag) is outside this contract and gets no
-    phantom "bootstrap the v-major branch" remediation. NOT a pin either, so
-    skipped: a repo-local ``./…`` ``uses:`` (resolved against the caller's own
-    repo — no remote ref to miss) and a step/job ``uses:`` naming an ACTION
-    rather than a workflow (``actions/checkout@v6`` — no ``.yml`` path, so
-    :data:`_USES_RE` does not match). A caller that is absent or will not parse
-    contributes nothing (the same tolerance :func:`pr_workflow_paths` keeps).
-
-    Reuses the reusable-workflow ref grammar (:data:`_USES_RE`), the same
-    parser :func:`_fetch_called_workflow` resolves ``uses:`` targets with, so a
-    preflight pin gate enumerates exactly the refs a dispatch will resolve."""
+    """The floating-major ``@vN`` reusable-workflow pins the release caller at ``caller_path`` dispatches, as sorted-unique ``(owner/repo, ref)`` tuples."""
     try:
         doc = _load_yaml_file(caller_path)
     except (OSError, UnicodeDecodeError, yaml.YAMLError):
@@ -464,21 +280,7 @@ def workflow_pin_refs(caller_path: str) -> list[tuple[str, str]]:
 
 
 def publishes_reusable_workflows(repo: str, *, toplevel: str | None) -> bool:
-    """Whether ``repo`` publishes any reusable (``workflow_call``) workflow.
-
-    The publisher detection of gh-setup's access-level verify pass (#739).
-    With ``toplevel`` (the ambient-checkout case) the LOCAL
-    ``.github/workflows/`` files are scanned — the same source ruleset
-    discovery reads; a file that won't parse is skipped (it publishes
-    nothing). Without it (an explicitly named remote repo) the contents API
-    serves the listing and each file body; a missing workflows directory
-    (HTTP 404) means "not a publisher".
-
-    Raises :class:`~shipit.execrun.ExecError` on any OTHER remote read
-    failure (auth, transport), and :class:`ValueError` on a malformed remote
-    directory payload: the caller must report "could not inspect", never
-    mistake an unreadable repo for a verified non-publisher.
-    """
+    """Whether ``repo`` publishes any ``workflow_call`` workflow; raises rather than reporting False when the repo cannot be read."""
     if toplevel is not None:
         workflows_dir = os.path.join(toplevel, ".github", "workflows")
         paths: list[str] = []
@@ -496,7 +298,7 @@ def publishes_reusable_workflows(repo: str, *, toplevel: str | None) -> bool:
         listing = gh.rest(f"repos/{repo}/contents/.github/workflows")
     except execrun.ExecError as exc:
         if "HTTP 404" in exc.stderr:
-            return False  # no workflows directory at all — not a publisher
+            return False
         raise
     if not isinstance(listing, list):
         raise ValueError(
@@ -561,7 +363,7 @@ def checks_from_runs(repo: str, default_branch: str, paths: list[str]) -> list[s
 
 
 def _warn_dropped(workflow: str, dropped: DroppedJob) -> None:
-    """Loudly report one dropped job (LOG02): user-facing stderr + WARNING."""
+    """Loudly report one dropped job: user-facing stderr + WARNING."""
     logger.warning(
         "dropping statically-unpredictable job %r in %s (%s)",
         dropped.job,
@@ -577,14 +379,7 @@ def _warn_dropped(workflow: str, dropped: DroppedJob) -> None:
 
 
 def static_workflow_contexts(toplevel: str, paths: list[str]) -> list[WorkflowContexts]:
-    """Per-PR-workflow static discovery — one :class:`WorkflowContexts` per path.
-
-    Each entry names the workflow, the contexts its jobs certainly report, and
-    every job dropped as statically unpredictable (#1056); each drop is warned
-    loudly as it is found. A workflow that will not parse (or declares no
-    ``jobs``) yields an empty ``certain`` — :func:`discover` treats a
-    zero-certain workflow as one it could not name and refuses over it.
-    """
+    """Per-PR-workflow static discovery; a workflow that will not parse yields an empty ``certain``."""
     cache: dict[str, object] = {}
     results: list[WorkflowContexts] = []
     for path in paths:
@@ -615,13 +410,7 @@ def static_workflow_contexts(toplevel: str, paths: list[str]) -> list[WorkflowCo
 
 
 def checks_from_workflows(toplevel: str, paths: list[str]) -> list[str]:
-    """The flat certain-context set static discovery names across ``paths``.
-
-    A thin flattening of :func:`static_workflow_contexts` — the union of every
-    workflow's certain contexts, dropping the statically-unpredictable jobs
-    (#1056). Callers that need the per-workflow refusal guard use
-    :func:`discover`, which reads the structured contexts directly.
-    """
+    """The flat certain-context set static discovery names across ``paths``."""
     certain: set[str] = set()
     for wf in static_workflow_contexts(toplevel, paths):
         certain.update(wf.certain)
@@ -629,8 +418,7 @@ def checks_from_workflows(toplevel: str, paths: list[str]) -> list[str]:
 
 
 def _refusal_message(workflows: list[WorkflowContexts]) -> str:
-    """The actionable refusal shown when a PR workflow contributes zero certain
-    contexts (#1056): why the write is refused plus the per-workflow breakdown."""
+    """The actionable refusal shown when a PR workflow contributes zero certain contexts."""
     lines = [
         "required-check auto-discovery could not confidently name every PR "
         "workflow's checks, so it refuses to write a ruleset that would brick "
@@ -646,19 +434,7 @@ def _refusal_message(workflows: list[WorkflowContexts]) -> str:
 
 
 def discover(repo: str, default_branch: str, *, toplevel: str | None) -> Discovery:
-    """The required checks for ``repo``: runs-based first, static fallback (#1056).
-
-    ``toplevel`` is the local checkout root when shipit runs inside the target
-    repo (enabling the static fallback); ``None`` for a remote-only target, in
-    which case only runs-based discovery is available.
-
-    Runs-based discovery is authoritative (its names come from real runs) and
-    never refuses. Only the static fallback can refuse: when no runs exist yet
-    and static discovery leaves ANY PR workflow contributing zero certain
-    contexts (every nameable job dropped, or an unresolvable/unparseable file),
-    the returned :class:`Discovery` carries no checks and a ``refusal`` message —
-    the caller must not write the ruleset and must demand explicit ``--checks``.
-    """
+    """The required checks for ``repo``: runs-based first, then — when ``toplevel`` gives a local checkout — the static fallback, which may refuse."""
     paths: list[str] = []
     if toplevel is not None:
         workflows_dir = os.path.join(toplevel, ".github", "workflows")
@@ -669,8 +445,6 @@ def discover(repo: str, default_branch: str, *, toplevel: str | None) -> Discove
     if runs_checks:
         return Discovery(checks=tuple(runs_checks))
     if toplevel is None or not paths:
-        # No static fallback available (remote target, or no PR-check workflow at
-        # all) — an empty set is an honest "nothing to require", not a refusal.
         return Discovery(checks=())
     workflows = static_workflow_contexts(toplevel, paths)
     if any(not wf.certain for wf in workflows):

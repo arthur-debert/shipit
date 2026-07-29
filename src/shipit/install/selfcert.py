@@ -1,36 +1,8 @@
 """selfcert — install's staged postconditions, asserted before any commit/PR.
 
-ADR-0033: **install self-certifies, scoped to what it owns.** After staging the
-managed set (files written, manifest stamped, hooks activated), a committing
-install asserts four postconditions and fails CLOSED — no commit, no PR, a loud
-diagnostic — on any miss (:class:`~shipit.install.errors.SelfCertError` at the
-apply seam):
-
-1. **manifest** — the stamped ``.shipit.toml`` parses back, and the managed
-   lint environment SOLVES (``pixi install --environment lint`` against the
-   consumer's reconciled ``pixi.toml`` — which also proves that manifest
-   parses, pixi refuses a manifest it cannot read).
-2. **delivered lint** — the files install delivered pass the lint configs
-   install delivered: a SCOPED ``shipit lint`` run over exactly the written
-   WHOLE-FILE units, each tool executed through the freshly-solved lint env.
-   Block units (``pixi.toml``, ``AGENTS.md``, ``settings.json``) are excluded
-   deliberately: install delivered a region of those files, not the file, and
-   the surrounding consumer content is DEBT to report, never a blocker. This
-   is what makes "the managed set never fails its own checks" executable (the
-   WS09/WS10 canary class).
-3. **hooks** — the activation actually happened where install ran and left
-   live hook files behind (``lefthook install`` wrote ``.git/hooks``).
-4. **launcher** — the delivered ``bin/shipit`` launcher, run under its
-   :data:`PIN_CHECK_ENV` probe, resolves the freshly-stamped pin to exactly
-   the sha install stamped — the launcher's own parse over the real file, with
-   no uv resolve (the postcondition must not need the network). Skipped when
-   the consumer DECLINED the launcher unit (#600): install delivered nothing
-   to probe, and the consumer's own launcher is outside what install owns.
-
-The whole-tree check is the REPO'S bar (the ADP01 checklist's lint step), not
-install's: :func:`consumer_debt` counts the whole-tree failures best-effort so
-the reconcile PR body can REPORT pre-existing consumer lint debt without ever
-blocking on it (the WS08 canary deadlock this scoping breaks).
+Four checks over what install OWNS: the stamped manifest + lint-env solve,
+a scoped lint over the delivered whole-file units, live hooks, and the
+launcher resolving the stamped pin. See docs/adr/0033-repo-pins-its-shipit.md.
 """
 
 from __future__ import annotations
@@ -49,14 +21,8 @@ from .units import HOOK_RECOVERY_CMD, LINT_ENV, PIXI_FILE, SHIPIT_LAUNCHER_FILE
 
 logger = logging.getLogger("shipit.install")
 
-#: The launcher's self-certification probe (mirrored in the managed
-#: ``bin/shipit``): with this env var set, the launcher prints the pin it
-#: resolved and exits 0 INSTEAD of exec'ing uv — the real script's real parse
-#: over the real ``.shipit.toml``, with no network and no uv requirement.
 PIN_CHECK_ENV = "SHIPIT_PIN_CHECK"
 
-#: The launcher probe's stated timeout (ADR-0028): a bash parse of one small
-#: TOML file — local-tier work; a wedged probe is itself a failed postcondition.
 LAUNCHER_PROBE_TIMEOUT: float = 30.0
 
 CHECK_MANIFEST = "manifest parses + lint env solves"
@@ -107,31 +73,14 @@ def format_failure(report: CertReport) -> str:
 
 
 def delivered_lint_paths(plan: Plan) -> list[str]:
-    """The scoped lint set: every WHOLE-FILE unit this plan writes, sorted.
-
-    Block units are excluded by design (see the module docstring): the consumer
-    content around a managed block is reported debt, never a blocker.
-    """
+    """The scoped lint set: every WHOLE-FILE unit this plan writes, sorted; block units are excluded."""
     return sorted({d.unit.dest for d in plan.writes if d.unit.kind == "file"})
 
 
 def _lint_env_run_tool(
     root: Path, runner: Callable[..., execrun.ExecResult]
 ) -> Callable[[str, list[str], Path], execrun.ExecResult]:
-    """A ``shipit lint`` tool runner that executes each tool through the managed
-    lint env (``pixi run --environment lint``) — the exact toolchain install
-    just delivered and solved, never whatever happens to be on install's PATH.
-
-    The child runs under a SCRUBBED environment (:func:`pixienv.scrub_env` +
-    ``replace_env``): a parent dev session's leaked ``PIXI_*``/Conda activation
-    pointers must not bind these tool subprocesses to a different project than
-    the consumer checkout install is certifying — the same leak class every
-    Tree/provisioning scrub path closes. The timeout stays pixi's long-runner
-    bound (:data:`pixienv.INSTALL_TIMEOUT`): a ``pixi run``'s worst case is a
-    first activation re-solving the env (provisioning-shaped work), which is
-    exactly why the pixi-run seam takes that bound rather than the bare-tool
-    :data:`~shipit.lint.CHECK_TIMEOUT`.
-    """
+    """A ``shipit lint`` tool runner executing each tool through the managed lint env, under a scrubbed environment."""
     scrubbed = pixienv.scrub_env(os.environ)
 
     def run_tool(binary: str, args: list[str], cwd: Path) -> execrun.ExecResult:
@@ -148,13 +97,7 @@ def _lint_env_run_tool(
 
 
 def _scoped_lint(root: Path, paths: list[str], runner) -> tuple[int, str]:
-    """Run the lint orchestrator over exactly ``paths``, capturing its report.
-
-    Returns ``(rc, report_text)`` — the report surfaces only on failure (the
-    loud diagnostic); a green scoped run stays quiet on install's terminal.
-    """
-    # Imported at call time so install keeps its import graph light; this is the
-    # service, not the CLI error shell.
+    """Run the lint orchestrator over exactly ``paths``, returning ``(rc, captured report)``."""
     from .. import lint
 
     buffer = io.StringIO()
@@ -168,17 +111,7 @@ def _scoped_lint(root: Path, paths: list[str], runner) -> tuple[int, str]:
 
 
 def _check_manifest(root: Path, runner) -> CertCheck:
-    """Postcondition 1: the stamped config parses; the managed lint env solves.
-
-    The solve is deliberately UNLOCKED (no ``--locked``): a reconcile that
-    edits a managed pixi.toml block (e.g. the #793 cargo-edit release block)
-    leaves the committed ``pixi.lock`` stale, and pixi's workspace-coherent
-    re-solve here is what regenerates it — apply then stages the refreshed
-    lock into the same commit (:data:`shipit.install.apply.PIXI_LOCK`), so no
-    consumer ``pixi run --locked`` (wf-prepare's shipit execution included)
-    ever meets a manifest/lock mismatch. A failing solve fails CLOSED
-    (:class:`~shipit.install.errors.SelfCertError` upstream: no commit, no PR).
-    """
+    """Postcondition 1: the stamped config parses and the lint env solves — UNLOCKED, so it refreshes ``pixi.lock``."""
     try:
         config.load(root / config.CONFIG_NAME)
     except config.ConfigError as exc:
@@ -204,10 +137,6 @@ def _check_manifest(root: Path, runner) -> CertCheck:
 def _check_delivered_lint(root: Path, plan: Plan, runner) -> CertCheck:
     """Postcondition 2: the delivered files pass the delivered lint configs."""
     paths = delivered_lint_paths(plan)
-    # Self-cert runs AFTER staging: every whole-file unit in the plan's write set
-    # is a file install just delivered. One missing on disk is not "nothing to
-    # lint" — it is install failing to write a file it intended to (fail CLOSED,
-    # ADR-0033), so name the missing paths rather than silently skipping them.
     missing = [p for p in paths if not (root / p).is_file()]
     if missing:
         return CertCheck(
@@ -230,20 +159,8 @@ def _check_delivered_lint(root: Path, plan: Plan, runner) -> CertCheck:
 
 
 def _check_hooks(root: Path, plan: Plan, hooks_activated: bool | None) -> CertCheck:
-    """Postcondition 3: the checks install configured are LIVE where it ran.
-
-    The live-hook paths are resolved through the git adapter
-    (:func:`shipit.git.hooks_dir`, #914) so this postcondition reads the SHARED
-    common-dir hooks in a linked worktree (``.git`` is a file there), not a
-    hardcoded ``root / ".git" / "hooks"`` that does not exist — which would let a
-    worktree install pass a hooks check it never actually verified."""
+    """Postcondition 3: the checks install configured are LIVE where it ran; no claim when it never activated."""
     if not (plan.writes and plan.activates_hooks):
-        # Mirror apply's activation predicate exactly (apply.py): it only runs
-        # `lefthook install` on a WRITING install that manages the hooks. A plan
-        # with no lefthook unit, or one that writes nothing (a seed-only or
-        # retire-delete-only committing install with the managed set already
-        # current), never attempts activation — `hooks_activated` stays None and
-        # this postcondition makes no claim over hooks install did not touch.
         return CertCheck(CHECK_HOOKS, True)
     if hooks_activated is not True:
         return CertCheck(
@@ -273,15 +190,7 @@ def _check_hooks(root: Path, plan: Plan, hooks_activated: bool | None) -> CertCh
 
 
 def _check_launcher(root: Path, plan: Plan, stamped_pin: str, runner) -> CertCheck:
-    """Postcondition 4: the delivered launcher resolves the freshly-stamped pin.
-
-    Scoped to what install owns (the module contract): a consumer that DECLINED
-    the launcher unit (``[managed.decline].keep`` carrying ``bin/shipit``, #600
-    — the dogfood repo's source-deferring bootstrap is the standing case) keeps
-    its OWN launcher, which install neither delivered nor may make claims over
-    — so the probe is skipped, a no-claim pass like :func:`_check_hooks` on an
-    activation install never attempted.
-    """
+    """Postcondition 4: the delivered launcher resolves the stamped pin; skipped when the unit was declined."""
     if SHIPIT_LAUNCHER_FILE in plan.declined:
         return CertCheck(CHECK_LAUNCHER, True)
     launcher = root / SHIPIT_LAUNCHER_FILE
@@ -289,9 +198,6 @@ def _check_launcher(root: Path, plan: Plan, stamped_pin: str, runner) -> CertChe
         return CertCheck(
             CHECK_LAUNCHER, False, f"{SHIPIT_LAUNCHER_FILE} was not delivered"
         )
-    # The probe env: the launcher honors SHIPIT_EXEC BEFORE the pin parse, so a
-    # dev session's override must be stripped or the probe would exec a build
-    # instead of answering; the probe var itself turns the run into a pin print.
     env = {k: v for k, v in os.environ.items() if k != "SHIPIT_EXEC"}
     env[PIN_CHECK_ENV] = "1"
     try:
@@ -330,12 +236,7 @@ def certify(
     stamped_pin: str,
     runner=execrun.run,
 ) -> CertReport:
-    """Assert the four staged postconditions; run ALL of them (never fail-fast),
-    so the fail-closed diagnostic names every miss at once.
-
-    ``runner`` is the injectable Exec boundary (ADR-0028) — tests assert each
-    check's verdict logic without a live pixi/bash.
-    """
+    """Assert all four postconditions — never fail-fast, so the diagnostic names every miss; ``runner`` is the Exec boundary."""
     report = CertReport(
         checks=(
             _check_manifest(root, runner),
@@ -358,13 +259,8 @@ def certify(
 
 
 def consumer_debt(root: Path, *, runner=execrun.run) -> int | None:
-    """Best-effort whole-tree lint failure count — the DEBT the reconcile PR
-    body reports (never a blocker; the whole-tree gate is the repo's bar).
-
-    ``None`` when the whole-tree run could not complete at all (no verdict is
-    not zero debt); an int is the number of failing checks.
-    """
-    from .. import lint  # lazy — see `_scoped_lint`
+    """Best-effort whole-tree lint failure count; ``None`` when the run could not complete at all."""
+    from .. import lint
 
     runs: list[lint.ToolRun] = []
     try:
@@ -374,8 +270,7 @@ def consumer_debt(root: Path, *, runner=execrun.run) -> int | None:
                 run_tool=_lint_env_run_tool(root, runner),
                 runs_out=runs,
             )
-    except Exception:  # noqa: BLE001 — best-effort by contract: debt is
-        # reported when readable, never a blocker and never a crash.
+    except Exception:  # noqa: BLE001 — best-effort by contract, never a blocker
         logger.warning(
             "whole-tree debt lint could not run — the PR body will not "
             "carry a debt count",

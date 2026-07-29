@@ -1,20 +1,4 @@
-"""agent — the agent-harness deep module: Backend / Model / Invocation axes (ADR-0025).
-
-shipit's agent layer is **orthogonal axes sharing a single identity** — not one merged
-"reviewer/backend" type. This package is that model:
-
-  * :mod:`shipit.agent.backend` — the ONE agent-backend identity/alias registry
-    (:class:`Backend`): every alias (spawn ``--backend`` token, funnel login
-    ``adr-<agent>-review[bot]``, check-run ``<agent>-local``, Doppler App keys, model
-    aliases) defined once and referenced by BOTH the launch axis
-    (:mod:`shipit.spawn.backends`) and the PR-funnel axis
-    (:mod:`shipit.review.ghauth` / :mod:`shipit.prstate.reviewers`). Backend ⊥ Reviewer,
-    Backend ⊥ Role.
-  * :mod:`shipit.agent.invocation` — the launch-config value objects
-    (:class:`Provider`, :class:`ReasoningLevel`, :class:`Model`, :class:`Invocation`),
-    threaded spawn → Run → eval record as a group-by dimension for
-    ``shipit eval report``. Distinct from :class:`shipit.harness.eval.variant.Variant`.
-"""
+"""``shipit.agent`` — the Backend / Model / Invocation axes, orthogonal by design."""
 
 from __future__ import annotations
 

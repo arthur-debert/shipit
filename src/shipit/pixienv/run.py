@@ -1,28 +1,6 @@
-"""``pixienv/run`` — the execution side of the pixi Tool adapter (ADR-0028).
+"""``pixienv/run`` — the execution side of the pixi Tool adapter.
 
-Every ``pixi`` argv shipit *executes* (or hands to a launcher) is built HERE, in
-pixi's domain home — beside the read side (:mod:`shipit.pixienv.read`) and the
-activation model it drives (:mod:`shipit.pixienv.model`). Any pixi argv built
-outside this package is a review defect (ADR-0028). Three pieces:
-
-- :func:`install` — ``pixi install`` in a project root, carrying pixi's own
-  long-runner timeout default (:data:`INSTALL_TIMEOUT`): a cold install
-  (solve + download) is the legitimate long-runner ADR-0028 names, which the
-  Exec runner's 5-minute default must not kill.
-- :func:`run_argv` / :func:`run_in_env` — run-wrapping: re-express an argv as
-  ``pixi run --manifest-path <root>/pixi.toml -- <argv>`` so the child resolves
-  the project's OWN env (explicit ``--manifest-path`` overrides any leaked
-  ``PIXI_PROJECT_MANIFEST``; the ``--`` separates pixi's args from the child's).
-  ``run_argv`` is the pure builder (for launchers that execute through their own
-  seam, e.g. :func:`shipit.spawn.launch.route_argv`); ``run_in_env`` executes it.
-- :func:`cache_dir` / :func:`has_default_env` — pixi's on-disk knowledge: where
-  the package cache lives and whether a checkout carries a provisioned default
-  env (the sentinel the launch-routing gate keys on).
-
-The Exec boundary is injectable (``runner``, resolved to :func:`shipit.execrun.run`
-at CALL time so a patched ``execrun.run`` is honored), so argv/env/timeout are
-asserted without spawning a real ``pixi``. pixi stays a subprocess + JSON borrow
-(ADR-0022) — never a rust-binding import.
+Every ``pixi`` argv shipit executes or hands to a launcher is built here.
 """
 
 from __future__ import annotations
@@ -35,53 +13,25 @@ import platformdirs
 
 from .. import execrun
 
-#: pixi's manifest file name — the project marker every wrap/gate keys on.
 MANIFEST_NAME = "pixi.toml"
 
-#: The provisioned-env sentinel: a checkout carries a usable pixi env iff this
-#: directory exists under it (``pixi install`` materializes
-#: ``<root>/.pixi/envs/default``). See :func:`has_default_env`.
+#: The provisioned-env sentinel: a checkout has a usable env iff this dir exists.
 DEFAULT_ENV_DIR = (".pixi", "envs", "default")
 
-#: pixi's long-runner timeout, in seconds: 30 minutes. A cold ``pixi install``
-#: (solve + download on a slow link) is the legitimate long-runner ADR-0028 names,
-#: so the Exec runner's 5-minute default would kill it — but ``None`` would let a
-#: wedged solve hang forever. 30 minutes is generous enough for a cold install,
-#: tight enough that a wedged step still dies at a known bound with a durable
-#: record. :func:`run_in_env` shares it: its worst case is a first activation
-#: re-solving the env — provisioning-shaped work.
+#: pixi's long-runner bound: a cold install outlives the Exec runner's default,
+#: but ``None`` would let a wedged solve hang forever.
 INSTALL_TIMEOUT: float = 30 * 60.0
 
 
 def has_default_env(root: str | Path) -> bool:
-    """Whether ``root`` carries a provisioned default pixi env (the routing sentinel).
-
-    Pure (a filesystem ``is_dir`` probe only): ``pixi install`` materializes
-    :data:`DEFAULT_ENV_DIR` as a directory, so its presence is the gate for
-    "route this child through ``pixi run``" — absent (a reviewer's read-only
-    Tree, ADR-0018, or a non-pixi repo), wrapping would force a solve into a
-    chmod'd tree or fail outright. ``is_dir`` (not ``exists``) matches the
-    sentinel's intent: a stray file at that path is not a provisioned env
-    (agy review).
-    """
+    """A stray FILE at :data:`DEFAULT_ENV_DIR` is not a provisioned env."""
     return Path(root).joinpath(*DEFAULT_ENV_DIR).is_dir()
 
 
 def run_argv(
     argv: list[str], root: str | Path, *, environment: str | None = None
 ) -> list[str]:
-    """``argv`` re-expressed to run THROUGH ``root``'s pixi env — the pure builder.
-
-    ``pixi run --manifest-path <root>/pixi.toml -- <argv>``: the explicit
-    ``--manifest-path`` overrides any leaked ``PIXI_PROJECT_MANIFEST`` so the child
-    resolves ``root``'s OWN manifest, and the ``--`` separates pixi's args from the
-    child argv. ``environment`` pins a non-default pixi environment
-    (``--environment <name>``) — the same selector the read verbs take — for a
-    child that lives in a feature env rather than the default (e.g. the managed
-    lint env's ``lefthook``). Pure argv-in/argv-out, for callers that execute
-    through their own Exec seam (the backend launch contract,
-    :mod:`shipit.spawn.launch`).
-    """
+    """The explicit ``--manifest-path`` overrides any leaked ``PIXI_PROJECT_MANIFEST``."""
     cmd = ["pixi", "run", "--manifest-path", str(Path(root) / MANIFEST_NAME)]
     if environment is not None:
         cmd += ["--environment", environment]
@@ -95,20 +45,7 @@ def install(
     env: Mapping[str, str] | None = None,
     runner=None,
 ) -> execrun.ExecResult:
-    """Run ``pixi install`` in ``root`` and return the step's :class:`ExecResult`.
-
-    ``environment`` pins a non-default pixi environment (``--environment
-    <name>``) — the selector install self-certification uses to solve exactly
-    the managed lint env (ADR-0033) rather than the consumer's default.
-    ``env``, when given, is the COMPLETE child environment (``replace_env=True``) —
-    callers hand in a scrubbed snapshot (:func:`shipit.pixienv.scrub_env`) so a
-    parent's leaked project pointers cannot creep back in via a merge over
-    ``os.environ``; ``None`` inherits the current environment unchanged. The Exec
-    carries pixi's own long-runner bound (:data:`INSTALL_TIMEOUT`) and raises
-    :class:`~shipit.execrun.ExecError` on failure like any checked Exec — the runner's
-    durable ERROR record carries both stream tails, which is where a broken install
-    writes its real diagnostics.
-    """
+    """``env``, when given, REPLACES the child environment; ``None`` inherits it."""
     if runner is None:
         runner = execrun.run
     argv = ["pixi", "install"]
@@ -133,16 +70,6 @@ def run_in_env(
     timeout: float | None = INSTALL_TIMEOUT,
     runner=None,
 ) -> execrun.ExecResult:
-    """Execute ``argv`` through ``root``'s pixi env (:func:`run_argv`), one Exec.
-
-    ``environment`` pins a non-default pixi environment (see :func:`run_argv`);
-    ``env`` follows :func:`install`'s contract (complete child env when given,
-    inherit when ``None``); ``check=False`` makes a nonzero child a normal
-    :class:`ExecResult` for probe-shaped callers. The default ``timeout`` is
-    pixi's long-runner bound: a ``pixi run``'s worst case is a first activation
-    re-solving the env — provisioning-shaped work, so it shares provisioning's
-    bound rather than the runner's 5-minute default.
-    """
     if runner is None:
         runner = execrun.run
     return runner(
@@ -165,20 +92,7 @@ def run_task(
     timeout: float | None = INSTALL_TIMEOUT,
     runner=None,
 ) -> execrun.ExecResult:
-    """Run the pixi TASK ``task`` in ``root`` (``pixi run <task>``), one Exec.
-
-    Unlike :func:`run_in_env` — which wraps an arbitrary argv behind ``pixi run
-    … -- <argv>`` (a COMMAND) — this invokes a named pixi TASK directly, exactly
-    as a user typing ``pixi run lint`` would. ``shipit repo new`` certifies a
-    staged Repo through this seam (ADR-0062): the three public ``lint``/``test``/
-    ``build`` tasks run from a child rooted in the staged Repo, with an explicit
-    ``--manifest-path`` so inherited pixi activation cannot select a different
-    manifest. ``env`` follows :func:`install`'s contract (complete child env when
-    given — a scrubbed snapshot — inherit when ``None``); ``check=False`` makes a
-    nonzero task a normal :class:`ExecResult` for callers that read the rc as a
-    verdict. The ``timeout`` shares provisioning's long-runner bound: a first
-    ``pixi run`` may re-solve the env before the task runs.
-    """
+    """Run the named pixi TASK ``task``, not an argv wrapped behind ``pixi run --``."""
     if runner is None:
         runner = execrun.run
     cmd = ["pixi", "run", "--manifest-path", str(Path(root) / MANIFEST_NAME)]
@@ -196,13 +110,6 @@ def run_task(
 
 
 def cache_dir() -> Path:
-    """The directory pixi/rattler caches downloaded packages in.
-
-    Honors ``PIXI_CACHE_DIR`` / ``RATTLER_CACHE_DIR`` overrides, else the platform
-    default (``<user-cache>/rattler/cache``) — the same location ``pixi info``
-    reports as ``cache_dir``, computed pure (env + platformdirs) so warn-only
-    callers (the #119 same-filesystem check) never need a subprocess to answer it.
-    """
     override = os.environ.get("PIXI_CACHE_DIR") or os.environ.get("RATTLER_CACHE_DIR")
     if override:
         return Path(override)

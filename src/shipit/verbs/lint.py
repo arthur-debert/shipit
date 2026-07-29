@@ -1,8 +1,4 @@
-"""CLI-facing wrapper for ``shipit lint``.
-
-The lint service lives in :mod:`shipit.lint`; this verb module keeps only the
-CLI runtime-error shell and delegates the work.
-"""
+"""CLI-facing wrapper for ``shipit lint``; the service lives in :mod:`shipit.lint`."""
 
 from __future__ import annotations
 

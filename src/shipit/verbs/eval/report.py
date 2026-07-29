@@ -1,40 +1,4 @@
-"""``shipit eval report`` — aggregate the local JSONL eval store (HAR02-WS04).
-
-A THIN wrapper over DuckDB/SQL (PRD har02 module #6): the harness terminal-hooks
-append one **eval record** per run to a never-committed JSONL store keyed by repo
-(:mod:`shipit.harness.eval.store`); this verb reads that store *directly* with
-DuckDB's ``read_json_auto`` and rolls it up five ways —
-
-- **by role** (``gen_ai.agent.name``): how implementer runs are doing vs shepherd
-  vs coordinator (PRD user story 6);
-- **by variant** (``eval.variant``): which version of a role prompt / policy
-  produced which results, so an A/B is separable (user stories 7-8);
-- **by invocation** (``eval.invocation``): which Backend × Model × ReasoningLevel
-  launch config produced which results, so configurations are comparable (ADR-0025);
-- **trend over time** (the ``eval.timestamp`` day): metrics run-over-run, so the
-  harness's improvement (or regression) is a query, not a guess (user story 11);
-- **the review axis** (RVW02-WS03 / RVW03-WS04): **review-round records** grouped
-  by their review-instructions **Variant** — rounds / findings / posted vs
-  routed-out dispositions / cost — with token cost read DIRECTLY off each
-  round's own ``round.usage.total_tokens`` (measured from the CLI's output at
-  launch-result level). The old eval-record run-id join is retired: the funnel's
-  run ids are minted uuids that never match a transcript stem, so that join was
-  broken by construction (#667). A Variant none of whose rounds reported usage
-  renders as an explicit **latency-only** cell, never a fake zero — so "which
-  prompt variant produced what recall at what cost" is one report, not
-  intuition (PRD rvw02, user story 24).
-
-The aggregation is a pure function of the store *paths* (:func:`aggregate`), with
-the click command (:func:`cmd`) / :func:`run` as the thin boundary that resolves
-both kind stores from the ONE family root and renders the result (ADR-0012
-pure-core / thin-boundary). DuckDB is imported lazily so the rest of the CLI
-never pays its import cost; the review axis — a small join over the (one line
-per round) rounds store — is plain Python over the same JSONL, so nested
-finding/disposition lists never depend on DuckDB's struct inference.
-
-No platform, no infra: the query engine reads the on-disk JSONL and exits — the
-substrate stays a local file (ADR-0013).
-"""
+"""``shipit eval report`` — roll the local JSONL eval store up by role, variant, invocation, day, and review Variant."""
 
 from __future__ import annotations
 
@@ -54,30 +18,16 @@ from ...harness.eval import store
 
 logger = logging.getLogger("shipit.harness")
 
-#: The eval-record fields the aggregator groups and measures over (the WS01 record
-#: shape). Quoted in SQL because the JSON keys carry dots (OTel ``gen_ai.*`` /
-#: harness-local ``eval.*`` names), which DuckDB reads as literal column names.
 _ROLE_FIELD = '"gen_ai.agent.name"'
 _VARIANT_FIELD = '"eval.variant"'
 _INVOCATION_FIELD = '"eval.invocation"'
 _TIMESTAMP_FIELD = '"eval.timestamp"'
 _TOOL_CALLS_FIELD = '"eval.tool_call_count"'
 
-#: Substituted for a NULL group key so a row with no variant (a fail-open run writes
-#: ``None``) still aggregates under a stable, printable bucket instead of vanishing.
 _NO_VARIANT = "(none)"
 _NO_INVOCATION = "(none)"
 _UNKNOWN_ROLE = "(unknown)"
 
-#: The variant is persisted as a nested object — ``{"content_hash": …, "label": …}``
-#: (:meth:`shipit.harness.eval.variant.Variant.as_record`), which ``read_json_auto``
-#: reads as a STRUCT (or, when every row's variant is null, a plain JSON column).
-#: Grouping must key on the variant's IDENTITY, not the struct's text repr: the
-#: content-hash, refined by the optional A/B label so two arms of the same prompt
-#: separate (CONTEXT.md "variant"; PRD user stories 7-8). A null variant — or a
-#: null content-hash — buckets under :data:`_NO_VARIANT`; a null label collapses to
-#: the bare content-hash. Struct-field access is null-safe across both inferred
-#: column types, so a store of only-null variants does not error.
 _VARIANT_HASH = f"{_VARIANT_FIELD}.content_hash"
 _VARIANT_LABEL = f"{_VARIANT_FIELD}.label"
 _VARIANT_KEY = f"""CASE
@@ -86,20 +36,6 @@ _VARIANT_KEY = f"""CASE
         ELSE CAST({_VARIANT_HASH} AS VARCHAR) || ' [' || CAST({_VARIANT_LABEL} AS VARCHAR) || ']'
     END"""
 
-#: The invocation is persisted as ``{"observed": {backend, model, provider,
-#: reasoning_level, permission_mode}, "intended": …}`` (ADR-0025;
-#: :func:`shipit.harness.eval.record._invocation_record`). Grouping keys on the
-#: OBSERVED launch config — the ``backend/model (reasoning_level)`` tuple the harness
-#: compares configurations by — so two Runs of the same role under different backends
-#: or reasoning levels separate. A null invocation (an old/fail-open record) buckets
-#: under :data:`_NO_INVOCATION`; a null backend/model collapses to ``?``; a null
-#: reasoning level drops the suffix. Struct-field access is null-safe across the
-#: inferred column types (STRUCT for a populated store, JSON for an all-null one), so a
-#: store of only-null invocations does not error. A store predating v3 has NO
-#: ``eval.invocation`` column at all (not merely null rows) — DuckDB would fail to bind
-#: it, so :func:`aggregate` checks the column's PRESENCE (:func:`_present_columns`) and
-#: substitutes the constant ``(none)`` bucket when it is absent (forward-compat within
-#: the store's own history — pre-v3 rows show a null invocation dimension).
 _INV_OBSERVED = f"{_INVOCATION_FIELD}.observed"
 _INV_BACKEND = f"{_INV_OBSERVED}.backend"
 _INV_MODEL = f"{_INV_OBSERVED}.model"
@@ -118,8 +54,7 @@ _INVOCATION_KEY = f"""CASE
 
 @dataclass(frozen=True)
 class GroupRow:
-    """One aggregated bucket: a group ``key``, its run ``count``, and the mean
-    tool-call count across those runs."""
+    """One aggregated bucket: a group ``key``, its run ``count``, and the mean tool-call count."""
 
     key: str
     runs: int
@@ -128,21 +63,7 @@ class GroupRow:
 
 @dataclass(frozen=True)
 class ReviewRoundRow:
-    """One review-axis bucket: a round-record **Variant** (the experiment-arm
-    handle), its round/finding volumes split by disposition, and its own
-    recorded cost — latency always, tokens where measured.
-
-    ``posted`` vs ``dropped`` is the disposition split (``post`` AND canonical
-    — a merged-away duplicate shares its twin's ``post`` but never reached the
-    PR — vs every routed-out finding + duplicate) — the recall/FP raw material.
-    ``token_rounds`` / ``avg_round_tokens`` come from each round's OWN
-    ``round.usage.total_tokens`` (RVW03-WS04: usage measured from the CLI's
-    output at launch-result level — the broken eval-record run-id join is
-    retired): ``token_rounds`` counts the rounds that reported a total, and the
-    average is over exactly those. ``avg_round_tokens is None`` (no round
-    reported) is the LATENCY-ONLY marker the renderer surfaces explicitly —
-    "unmeasured", never zero.
-    """
+    """One review-axis bucket by Variant; ``avg_round_tokens is None`` means no round reported usage (latency-only), never zero cost."""
 
     key: str
     rounds: int
@@ -156,8 +77,7 @@ class ReviewRoundRow:
 
 @dataclass(frozen=True)
 class EvalReport:
-    """The full aggregation: the total run count plus the roll-ups (role, variant,
-    invocation, day) and the review axis (round records by variant, RVW02-WS03)."""
+    """The full aggregation: the total run count, the roll-ups, and the review axis."""
 
     total_runs: int
     by_role: list[GroupRow]
@@ -167,29 +87,17 @@ class EvalReport:
     review: list[ReviewRoundRow] = field(default_factory=list)
 
 
-#: The "no runs recorded" report — returned for an empty/missing store AND when the
-#: target path has no per-repo store to read (not a checkout / no origin remote).
 _EMPTY_REPORT = EvalReport(
     total_runs=0, by_role=[], by_variant=[], by_invocation=[], by_day=[]
 )
 
 
-#: Default roll-up ordering: most runs first, then key — a "top buckets" view for
-#: the role/variant groupings. The day trend overrides this (see ``_ORDER_BY_KEY``)
-#: because a time series must read chronologically, not by run-count.
 _ORDER_BY_RUNS = "runs DESC, key"
-#: Chronological ordering for the day roll-up: the key is the ISO date prefix, so
-#: ordering by key alone reads oldest→newest regardless of each day's run count.
 _ORDER_BY_KEY = "key"
 
 
 def _group_query(key_expr: str, order_by: str) -> str:
-    """A GROUP-BY query rolling the store up by ``key_expr``, ordered by ``order_by``.
-
-    The single ``?`` parameter is the store path; the FROM clause reads the JSONL
-    directly. ``order_by`` is a fixed SQL fragment (one of the module ``_ORDER_BY_*``
-    constants, never user input) so the rendered table — and the tests — are stable.
-    """
+    """A GROUP-BY query rolling the store up by ``key_expr``; the one ``?`` parameter is the store path and ``order_by`` is a fixed fragment, never user input."""
     return f"""
         SELECT
             {key_expr} AS key,
@@ -203,18 +111,7 @@ def _group_query(key_expr: str, order_by: str) -> str:
 
 @contextmanager
 def _shared_lock(path: Path) -> Iterator[None]:
-    """Hold a shared lock (:func:`~shipit.harness.eval.store.lock_shared`) on
-    ``path`` for the wrapped block.
-
-    For a reader whose actual file I/O is NOT its own locked handle — DuckDB's
-    ``read_json_auto`` opens the store itself (:func:`aggregate`) — so the lock
-    rides a separate fd held open around the read. Advisory locking is
-    cooperative: while this shared lock is held, a concurrent appender's
-    :func:`~shipit.harness.eval.store.append_record` cannot take its exclusive
-    lock, so no half-flushed line is visible to the read (RVW03-WS03). Released
-    when the fd closes at block exit; a no-op on Windows (the store seam's
-    single-writer assumption, #893). ``path`` must exist (the caller checks).
-    """
+    """Hold a shared lock on ``path`` for the wrapped block, so a concurrent appender cannot expose a half-flushed line; ``path`` must exist."""
     with path.open(encoding="utf-8") as fh:
         store.lock_shared(fh)
         yield
@@ -223,20 +120,7 @@ def _shared_lock(path: Path) -> Iterator[None]:
 def aggregate(
     store_path: str | Path, rounds_path: str | Path | None = None
 ) -> EvalReport:
-    """Roll the JSONL eval store at ``store_path`` up by role, variant, and day —
-    plus, when ``rounds_path`` names the repo's review-rounds store, the review
-    axis (:func:`review_axis`: round records by variant, cost read off the
-    rounds themselves).
-
-    Pure of any global state: it opens an in-memory DuckDB, reads the files, and
-    returns the structured result. A store that does not exist yet (or is empty)
-    yields an empty roll-up rather than an error — "no runs recorded" is a valid,
-    common state, not a failure — and the two stores are independent: review
-    rounds report even when no eval record exists yet (replay against CLI
-    backends writes rounds but no eval records), and the review axis reads its
-    cost off the round records themselves (RVW03-WS04), so it never needs the
-    eval store at all.
-    """
+    """Roll the JSONL eval store at ``store_path`` up, plus the review axis from ``rounds_path``; a missing or empty store yields an empty roll-up."""
     review = review_axis(rounds_path) if rounds_path is not None else []
     path = Path(store_path)
     if not path.exists() or path.stat().st_size == 0:
@@ -249,23 +133,11 @@ def aggregate(
             review=review,
         )
 
-    import duckdb  # lazy: only the eval verb needs the query engine.
+    import duckdb
 
     con = duckdb.connect(":memory:")
     try:
-        # DuckDB's `read_json_auto` reads the store at the OS level, BYPASSING the
-        # per-open lock `_read_jsonl` / `store.read_records` take — so hold a shared
-        # lock across EVERY DuckDB read of the file (RVW03-WS03): it blocks a
-        # concurrent appender's exclusive lock for the span, so DuckDB can never
-        # read a half-flushed final line and crash the whole query with a JSON parse
-        # error. (The `total`/`EvalReport` build below touches no file, so it needs
-        # no lock.)
         with _shared_lock(path):
-            # A store whose rows predate a field's introduction has NO such column
-            # at all, so a query referencing it would fail to bind. Consult the
-            # inferred schema and fall back to the constant bucket for an absent
-            # group column, so the report is tolerant of a mixed-schema store (e.g.
-            # pre-v3 records with no `eval.invocation`) instead of raising.
             present = _present_columns(con, str(path))
             role_key = f"COALESCE(CAST({_ROLE_FIELD} AS VARCHAR), '{_UNKNOWN_ROLE}')"
             variant_key = _VARIANT_KEY
@@ -274,16 +146,11 @@ def aggregate(
                 if _column(_INVOCATION_FIELD) in present
                 else f"'{_NO_INVOCATION}'"
             )
-            # The day bucket is the ISO timestamp's date prefix — taken as the
-            # leading 10 chars so it never depends on DuckDB parsing the timezone
-            # offset.
             day_key = f"SUBSTR(CAST({_TIMESTAMP_FIELD} AS VARCHAR), 1, 10)"
 
             by_role = _run_group(con, role_key, str(path), _ORDER_BY_RUNS)
             by_variant = _run_group(con, variant_key, str(path), _ORDER_BY_RUNS)
             by_invocation = _run_group(con, invocation_key, str(path), _ORDER_BY_RUNS)
-            # The day trend orders chronologically by the date key, not by run
-            # count, so a busy older day cannot jump ahead of a quieter newer one.
             by_day = _run_group(con, day_key, str(path), _ORDER_BY_KEY)
         total = sum(row.runs for row in by_role)
         return EvalReport(
@@ -299,25 +166,7 @@ def aggregate(
 
 
 def review_axis(rounds_path: str | Path | None) -> list[ReviewRoundRow]:
-    """The review axis: round records grouped by **Variant** (RVW02-WS03 /
-    RVW03-WS04; PRD rvw02 user story 24).
-
-    Plain Python over the rounds JSONL store — one line per review round (small
-    by construction), and the nested findings/dispositions lists stay out of
-    DuckDB's struct inference. Per variant bucket: rounds, findings split
-    ``posted`` (disposition ``post`` AND canonical — a merged-away duplicate
-    shares its twin's ``post`` but never reached the PR) vs ``dropped`` (every
-    routed-out finding + duplicate — the recall/FP raw material), the round's
-    own mean duration, and the round's own MEASURED token cost — read directly
-    off ``round.usage.total_tokens`` (RVW03-WS04: usage captured from the CLI's
-    output at launch-result level; the eval-record run-id join is retired as
-    broken by construction, #667). A round whose backend reported no usage
-    contributes latency only; a bucket where NO round reported renders as an
-    explicit latency-only cell. A missing store or a malformed line degrades
-    per-item (skip / None), never errors: the report reads whatever history the
-    store holds. Buckets order most-rounds first, then key — the same "top
-    buckets" ordering as the DuckDB roll-ups.
-    """
+    """Round records grouped by Variant, with each round's own measured duration and token cost."""
     rounds = _read_jsonl(rounds_path)
     if not rounds:
         return []
@@ -341,11 +190,6 @@ def review_axis(rounds_path: str | Path | None) -> list[ReviewRoundRow]:
             if not isinstance(finding, Mapping):
                 continue
             bucket["findings"] += 1
-            # "posted" is disposition==post AND canonical: a merged-away
-            # duplicate carries its twin's post disposition but never reached the
-            # PR, so counting it would double the posted-vs-dropped split
-            # (RVW02-WS04 fan-out dedup edge; duplicate_of absent on pre-WS04
-            # single-pass records → all such findings are canonical).
             if (
                 finding.get("disposition") == "post"
                 and finding.get("duplicate_of") is None
@@ -377,14 +221,11 @@ def review_axis(rounds_path: str | Path | None) -> list[ReviewRoundRow]:
 
 
 def _mean(values: list[float]) -> float | None:
-    """The arithmetic mean of ``values``, or ``None`` for an empty list."""
     return sum(values) / len(values) if values else None
 
 
 def _variant_bucket(variant: object) -> str:
-    """A round-record variant → its report bucket key — the SAME rendering the
-    DuckDB eval roll-up's variant key produces (``hash``, ``hash [label]``, or
-    :data:`_NO_VARIANT`), so the two variant axes read alike."""
+    """A round-record variant → its report bucket key, matching the DuckDB roll-up's variant key."""
     if not isinstance(variant, Mapping) or not variant.get("content_hash"):
         return _NO_VARIANT
     content_hash = str(variant["content_hash"])
@@ -393,23 +234,7 @@ def _variant_bucket(variant: object) -> str:
 
 
 def _read_jsonl(path: str | Path | None) -> list[dict]:
-    """Every parseable JSON OBJECT line of ``path`` — missing/empty store → ``[]``.
-
-    Tolerant by design (the stores are local, append-only telemetry): a
-    malformed or non-object line is skipped, never an error, so one bad write
-    cannot take the whole report down — but it is skipped LOUDLY (RVW03-WS03),
-    a warning naming the file and 1-based line number, mirroring
-    :func:`shipit.harness.eval.store.read_records`: a corrupted round must
-    never silently read as "this arm found nothing". The file is STREAMED
-    line-by-line (not ``read_text().splitlines()``) so an unbounded append-only
-    store does not allocate the whole file plus a split-line list at once.
-
-    Takes a SHARED lock (:func:`~shipit.harness.eval.store.lock_shared`; a
-    no-op on Windows, #893) before iterating, mirroring
-    :func:`shipit.harness.eval.store.read_records` (RVW03-WS03): it waits out an
-    in-flight exclusive append rather than streaming a half-flushed final line —
-    which would otherwise LOUDLY warn and drop a valid record mid-append.
-    """
+    """Every parseable JSON object line of ``path`` (missing store → ``[]``), streamed under a shared lock; a malformed line is skipped with a warning."""
     if path is None:
         return []
     target = Path(path)
@@ -445,19 +270,11 @@ def _read_jsonl(path: str | Path | None) -> list[dict]:
 
 
 def _column(field: str) -> str:
-    """The bare column name for a quoted SQL field literal (``"eval.invocation"`` →
-    ``eval.invocation``) — how it appears in the inferred schema (:func:`_present_columns`)."""
     return field.strip('"')
 
 
 def _present_columns(con: object, path: str) -> set[str]:
-    """The top-level column names DuckDB infers for the store at ``path``.
-
-    A store whose rows all predate a field (a pre-v3 record with no
-    ``eval.invocation``) yields NO such column, so a query naming it fails to bind.
-    The aggregator consults this to fall back to a constant bucket for an absent group
-    column, keeping the report tolerant of the store's own schema history (NOT compat
-    with the orphaned path-keyed stores — those stay orphaned)."""
+    """The top-level column names DuckDB infers for the store at ``path``."""
     rows = con.execute(  # type: ignore[attr-defined]
         "DESCRIBE SELECT * FROM read_json_auto(?, format='newline_delimited')",
         [path],
@@ -466,7 +283,6 @@ def _present_columns(con: object, path: str) -> set[str]:
 
 
 def _run_group(con: object, key_expr: str, path: str, order_by: str) -> list[GroupRow]:
-    """Execute the group query for ``key_expr`` and map its rows to ``GroupRow``."""
     rows = con.execute(_group_query(key_expr, order_by), [path]).fetchall()  # type: ignore[attr-defined]
     return [
         GroupRow(key=str(key), runs=int(runs), avg_tool_calls=float(avg or 0.0))
@@ -475,7 +291,6 @@ def _run_group(con: object, key_expr: str, path: str, order_by: str) -> list[Gro
 
 
 def _render_section(title: str, key_header: str, rows: list[GroupRow]) -> list[str]:
-    """Render one roll-up as an aligned text table (a list of lines)."""
     lines = [title]
     if not rows:
         lines.append("  (no runs)")
@@ -488,15 +303,7 @@ def _render_section(title: str, key_header: str, rows: list[GroupRow]) -> list[s
 
 
 def _render_review_section(rows: list[ReviewRoundRow]) -> list[str]:
-    """Render the review axis as an aligned text table (a list of lines).
-
-    The disposition split (posted vs dropped) and the measured token cost are
-    the load-bearing columns — what a review-prompt A/B actually compares. The
-    tokens column shows the mean per-round total where rounds reported usage
-    (RVW03-WS04); a variant NONE of whose rounds reported prints an explicit
-    ``latency-only`` marker — an unmeasured cell must read as unmeasured, never
-    as zero cost.
-    """
+    """Render the review axis as an aligned text table (a list of lines)."""
     lines = ["Review rounds (by variant):"]
     if not rows:
         lines.append("  (no review rounds)")
@@ -521,13 +328,7 @@ def _render_review_section(rows: list[ReviewRoundRow]) -> list[str]:
 
 
 def format_report(report: EvalReport) -> str:
-    """Render ``report`` as readable, plain-text sections.
-
-    Kept separate from :func:`aggregate` so the structured result is what tests
-    assert on (external behaviour), and the formatting stays trivially eyeballable.
-    The empty-store message fires only when BOTH stores are empty: review rounds
-    exist without eval records (a replay against a CLI backend), and must render.
-    """
+    """Render ``report`` as readable, plain-text sections."""
     if report.total_runs == 0 and not report.review:
         return "No eval records yet — the store is empty."
     sections = [
@@ -547,17 +348,7 @@ def format_report(report: EvalReport) -> str:
 
 
 def _resolve_repo(start: str) -> identity.Repo:
-    """The :class:`shipit.identity.Repo` identity for the checkout at ``start``.
-
-    Mirrors the hook's resolution so the verb reads exactly the store the hook
-    wrote: keyed by the repo's origin ``owner/name`` identity (ADR-0024), not its
-    filesystem path. Derived LOCALLY from the origin remote (offline / Tree-safe).
-
-    ``start`` may name a *file* inside the repo, but the git boundary needs a
-    directory, so a file path is normalized to its parent first. Raises
-    :class:`shipit.execrun.ExecError` (no checkout / no origin) or :class:`ValueError`
-    (unparseable remote) — the caller degrades those to an empty report.
-    """
+    """The Repo identity for the checkout at ``start``; raises ExecError (no checkout/origin) or ValueError (unparseable remote)."""
     cwd = Path(start)
     if cwd.is_file():
         cwd = cwd.parent
@@ -570,18 +361,7 @@ def run(
     base_dir: str | Path | None = None,
     out: TextIO | None = None,
 ) -> int:
-    """Aggregate the local eval store for a repo and print the report. Returns 0.
-
-    ``repo_root`` is a path inside the repo whose stores to read; it defaults to
-    the current checkout, resolved to its origin ``owner/name`` identity (the
-    store key, ADR-0024). ``base_dir`` overrides the store FAMILY root (injected
-    by tests, mirroring :func:`shipit.harness.eval.store.store_path`) — one root
-    resolves BOTH kind stores (eval + review-rounds). The store paths are computed by the
-    store module — the single source of truth — so reader and writer can never
-    disagree about where records live. A path that is not a checkout (or has no
-    origin) has no per-repo store, so it prints the empty report rather than
-    erroring.
-    """
+    """Aggregate the local eval store for a repo and print the report. Returns 0."""
     out = out or sys.stdout
     try:
         repo = _resolve_repo(repo_root if repo_root is not None else ".")
@@ -599,10 +379,5 @@ def run(
 @click.command(name="report")
 @click.argument("repo_root", required=False)
 def cmd(repo_root: str | None) -> None:
-    """Aggregate the local objective-eval store: by role, by variant, and over time.
-
-    REPO_ROOT is a path inside the repo whose store to read; omitted, it defaults
-    to the current directory. The store is the never-committed JSONL the harness
-    terminal-hooks append to — this verb only reads it.
-    """
+    """Aggregate the local objective-eval store: by role, by variant, and over time."""
     raise SystemExit(run(repo_root))

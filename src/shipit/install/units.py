@@ -1,11 +1,8 @@
 """The managed-set catalog — the :class:`Unit` model and the packaged desired state.
 
-A Unit is one managed thing: a whole file or a marker-delimited block inside a
-consumer-owned file. ``load_units()`` is the catalog — the skills tree, the
-AGENTS.md block, the bootstrap launchers, the lint-check units, the HAR01
-agent-defs, the settings.json JSON-hook entries, and the CDX01 Codex project
-layer (``.codex/``) — each carrying its desired bytes, so "what does shipit
-distribute" is a value, not a directory walk at the call site.
+A Unit is one managed thing: a whole file, or a marker-delimited block inside a
+consumer-owned file. :func:`load_units` is the catalog, each unit carrying its
+desired bytes.
 """
 
 from __future__ import annotations
@@ -25,32 +22,8 @@ AGENTS_KEY = "AGENTS.md#shipit-block"
 BLOCK_OPEN = "<!-- Managed by shipit; do not edit. Regenerate via shipit install. -->"
 BLOCK_CLOSE = "<!-- End shipit-managed block. -->"
 
-# The lint-check units Step 2 deferred to Step 3 (docs/legacy-prd/lint-checks.md). The consumer gets
-# the thin lefthook caller (whole file) and a `lint = "./bin/shipit lint"` task
-# BLOCK in its own pixi.toml — anchored in `[feature.lint.tasks]`, the ONE
-# environment carrying the pinned toolchain (#1066; see PIXI_LINT_TASK_KEY). The
-# pixi blocks use TOML-comment markers (HTML comments
-# are invalid TOML) and anchor under a table header so the managed keys land in
-# the right table on a first install.
 LEFTHOOK_FILE = "lefthook.yml"
 
-# The lint tool configs the managed gate needs (ADP00-WS10, #436). The managed
-# lefthook caller runs the whole-tree lint, and markdownlint/yamllint/prettier
-# auto-discover their config from the repo root — so the exact configs
-# shipit's own gate relies on are managed whole-file units, and a stock
-# consumer lints with what shipit dogfoods (drift is caught by the
-# reconcile-to-noop tests over shipit's own copies, the WS01 pattern).
-# Packaged names drop the leading dot so the data files stay visible to
-# directory listings and packaging globs; ``dest`` restores it.
-#
-# prettier joins the set (LNT01-WS06 #519): prettier is the ONE managed config
-# with a second authority — the TS/Svelte repos run their own prettier via npm
-# scripts/editors, which read a committed `.prettierrc` — so shipping it as a
-# managed unit resolves that two-authority drift (the injected `--config` already
-# governs the shipit gate; the committed file governs the repo's own prettier).
-# ruff/rustfmt/golangci stay injection-only: no repo runs them a second way, so
-# a committed copy would be dead weight. prettier accepts a YAML body in
-# `.prettierrc`, so the canonical `prettierrc.yaml` ships byte-identical.
 MARKDOWNLINT_FILE = ".markdownlint.yaml"
 MARKDOWNLINTIGNORE_FILE = ".markdownlintignore"
 YAMLLINT_FILE = ".yamllint.yaml"
@@ -62,19 +35,6 @@ LINT_CONFIG_UNITS = (
     (PRETTIERRC_FILE, "prettierrc.yaml"),
 )
 
-# The managed `.gitignore` release-output block (#906). shipit's OWN release
-# stages write transient artifacts at the repo ROOT — `shipit release notes`
-# writes RELEASE_NOTES.md (shipit/verbs/release.py: DEFAULT_NOTES_FILE), the
-# sign stage stages `dist-signed/` (wf-sign-mac.yml `--out dist-signed`), and
-# compositions write `dist/` (DEFAULT_BUNDLE_DIR). For a consumer whose
-# publishable crate IS the repo root (a single-crate package, not a `crates/`
-# workspace), `cargo publish` runs its VCS-dirty check against that root and
-# ABORTS when these artifacts sit there uncommitted — the simple-gal
-# `v0.20.6-rc.1` failure. So the managed set ignores them fleet-wide: a marker
-# block in the consumer-owned `.gitignore` (comment markers — `#` is a valid
-# gitignore comment; consumer entries outside the block are untouched, spliced
-# in / created at the repo root by the standard block splicer). NOT
-# `--allow-dirty`, which would bake the artifacts into the published .crate.
 GITIGNORE_FILE = ".gitignore"
 GITIGNORE_KEY = ".gitignore#shipit-release-outputs"
 GITIGNORE_OPEN = "# >>> shipit-managed release-output ignores (do not edit; regenerate via `shipit install`) >>>"
@@ -88,50 +48,6 @@ PIXI_OPEN = (
 PIXI_CLOSE = "# <<< shipit-managed tasks <<<"
 PIXI_ANCHOR = "[tasks]"
 
-# The `lint` task (#1066) — the ONE public lint entry point, and the reason it
-# is its OWN block anchored in the lint FEATURE rather than a line in the
-# default-[tasks] block above.
-#
-# A pixi task is reachable from the environments whose features declare it, and
-# the default feature is in every environment — so a `lint` line in [tasks] runs
-# in the DEFAULT env, while the fleet-pinned toolchain it shells out to
-# (PIXI_LINT_DEPS_ANCHOR below) materializes only in the `lint` env. The public,
-# documented `pixi run lint` therefore executed against whatever linter versions
-# the default env happened to resolve, disagreeing with the commit hook
-# (`pixi run -e lint lint`) and the CI lane. That is not theoretical: on
-# 2026-07-19 it misclassified four clean consumer reconcile PRs as prettier debt
-# (default-env prettier 3.9 vs the pinned 3.8), and `shipit lint --fix` run that
-# way reformatted correct files into a state the hook then rejected.
-#
-# Anchoring the task in `[feature.lint.tasks]` declares it in exactly ONE
-# feature; it then exists in exactly ONE environment as long as the manifest
-# composes that feature exactly once — which is what an installed manifest does,
-# and pixi resolves a bare `pixi run <task>` to the single environment defining
-# it. `pixi run lint` (and `pixi run lint --fix`, whose trailing args pixi
-# forwards to the task) therefore run the pinned toolchain with no `-e` and no
-# `pixi shell`. The hooks' explicit `pixi run -e lint lint` pins the environment
-# pixi would select anyway: ONE task, ONE environment, one gate for laptop,
-# hook, and CI. This is the `test` task's shape (see PIXI_TEST_TASK_KEY) applied
-# to lint.
-#
-# WHERE the one-ENVIRONMENT half comes from is worth being exact about, since
-# #1107 has to enforce it. On a FRESH install the packaged `[environments]` seed
-# (PIXI_ENVS_KEY, `pixi-lint-env-block.toml`) writes `lint = ["lint",
-# "shipit-lexd"]`, so the feature is composed once by construction. On an
-# EXISTING consumer environment that same unit is a MEMBERSHIP MERGE, not an
-# owner: it adds `shipit-lexd` and leaves the base features — `lint` among them
-# — as consumer config (ADR-0047; see its `required_features` in load_units).
-# So exactly-once composition is a property of the CONSUMER's manifest that
-# install preserves, never a claim the managed unit can make, and the anchor
-# cannot enforce it either: a consumer that composed the `lint` feature into a
-# second environment, or declared its own `lint` task in another enabled
-# feature, would put the name in two envs and make the bare form ambiguous
-# again — the same latent hole the shipped `test` task carries. Detecting that
-# at reconcile is #1107 (which the existing `PixiTaskConflict` guard cannot
-# cover: it only reads `[tasks]`-anchored units), sequenced after #1105 and
-# #1101 settle install/reconcile.py. It is latent, not live: every portfolio
-# repo composes `lint` into exactly one environment (verified fleet-wide,
-# 2026-07-27).
 PIXI_LINT_TASK_KEY = "pixi.toml#shipit-lint-task"
 PIXI_LINT_TASK_OPEN = (
     "# >>> shipit-managed lint task (do not edit; regenerate via `shipit install`) >>>"
@@ -139,158 +55,33 @@ PIXI_LINT_TASK_OPEN = (
 PIXI_LINT_TASK_CLOSE = "# <<< shipit-managed lint task <<<"
 PIXI_LINT_TASKS_ANCHOR = "[feature.lint.tasks]"
 
-# The thin `test` caller (TOL01-WS01, ADR-0039): `test = "./bin/shipit test"`
-# in the consumer's default [tasks] — the pinned-launcher form, like the
-# managed `lint` task (which anchors in the lint FEATURE, not here: its tooling
-# is pinned per-environment, a test suite's is not) — so laptop, hook, and CI run
-# the identical verb. Its
-# OWN block (not a line in the tasks block above) so it can be skipped
-# INDEPENDENTLY: pixi refuses a bare `pixi run test` when a task named `test`
-# exists in several environments, so a consumer whose own manifest already
-# defines a `test` task in a feature (shipit's own repo does — the full-gate
-# task in [feature.test.tasks] needs its rust toolchain env) keeps that task
-# authoritative and this block is NOT delivered
-# (the reconcile's task-ambiguity guard, `PixiTaskConflict` — the #547
-# key-conflict guard's pixi-run-level sibling), while the lint/logs tasks block
-# still lands. A `test` key in [tasks] itself is
-# caught by the existing duplicate-key guard.
 PIXI_TEST_TASK_KEY = "pixi.toml#shipit-test-task"
 PIXI_TEST_TASK_OPEN = (
     "# >>> shipit-managed test task (do not edit; regenerate via `shipit install`) >>>"
 )
 PIXI_TEST_TASK_CLOSE = "# <<< shipit-managed test task <<<"
 
-# The ADP00 managed consumer environment (docs/legacy-prd/adoption.md: THE MANAGED SET
-# OWNS THE CONSUMER ENVIRONMENT). Two sibling units join the tasks block in the
-# consumer's pixi.toml: the lint feature/dependency block (a marker block carrying
-# the fleet-pinned toolchain) and the lint environment definition — so the managed
-# lefthook caller's `pixi run -e lint lint` works on a stock consumer with
-# nothing pre-installed. This AMENDS the lint PRD's "task line only, never a
-# dependency block" decision. Canonical versions live in the packaged
-# `pixi-lint-deps-block.toml` (a bump is one data edit, rolled out on each
-# consumer's next install reconcile); shipit's own pixi.toml carries the same
-# blocks verbatim — its Tree provisioning self-installs, so anything else would
-# splice duplicates into its hand-kept manifest — and a drift test asserts the
-# packaged block agrees with shipit's own lint environment (the dogfood
-# guarantee). lexd is NOT part of the lint-deps block: it rides its own reserved
-# `[feature.shipit-lexd]` block (below, PIXI_LEXD_KEY), which carries the
-# Artifact channel the lint-deps' conda-forge tools do not need (ARF02-WS06),
-# composed into the lint env by the environments unit below.
 PIXI_LINT_DEPS_KEY = "pixi.toml#shipit-lint-deps"
 PIXI_LINT_DEPS_OPEN = (
     "# >>> shipit-managed lint deps (do not edit; regenerate via `shipit install`) >>>"
 )
 PIXI_LINT_DEPS_CLOSE = "# <<< shipit-managed lint deps <<<"
 PIXI_LINT_DEPS_ANCHOR = "[feature.lint.dependencies]"
-# The lint ENVIRONMENT unit is an FMT_ENV_MEMBER MERGE, not a marker block: it owns
-# only `shipit-lexd`'s MEMBERSHIP in the `lint` env (the managed invariant), while
-# WHICH base features the env carries stays the consumer's own config (ADR-0047). A
-# marker block would own the whole `lint = [...]` line and collide with a
-# consumer's own `[environments] lint`, get skipped by the key-conflict guard, and
-# leave lexd unwired (lint breaks, no `provision` fallback — the #1062 finding). So
-# the markers below are vestigial (kept only so the six sibling pixi blocks stay
-# fence-distinct); the anchor keeps the unit out of the anchor-less table-conflict
-# guard. The consumer read/write is :func:`splice.extract_env_member` /
-# :func:`splice.splice_env_member`, hashed on :func:`env_member_token`.
 PIXI_ENVS_KEY = "pixi.toml#shipit-environments"
 PIXI_ENVS_OPEN = "# >>> shipit-managed environments (do not edit; regenerate via `shipit install`) >>>"
 PIXI_ENVS_CLOSE = "# <<< shipit-managed environments <<<"
 PIXI_ENVS_ANCHOR = "[environments]"
 
-# The managed lexd block (ARF02-WS06, ADR-0066). `provision lexd` is retired:
-# lexd — the one lint-gate tool that was not on conda-forge — is now published
-# to the public Artifact channel (ADR-0064) and resolves as an ordinary conda
-# dependency through pixi.lock. The block is a dedicated shipit-reserved FEATURE
-# (`shipit-lexd`) carrying the channel + the fleet-pinned lexd version, MERGED
-# into the lint environment's feature list by the environments unit above
-# (`lint` composes `shipit-lexd`). A fresh reserved `[feature.shipit-lexd]`
-# table appended at EOF (anchor-less, the artifact-dep pattern) never
-# re-declares a table a consumer owns, so the block is collision-free and
-# consumer-non-editable — a consumer cannot drift its lexd version (ADR-0047,
-# fleet uniformity). shipit's own pixi.toml carries the block verbatim (its Tree
-# provisioning self-installs); a drift test (tests/test_install.py) asserts the
-# packaged block agrees with shipit's own reserved feature (the dogfood
-# guarantee). The block's `[target]` set is GENERATED per-repo (:func:`lexd_block`,
-# #1072) — see its comment; win-64 is served but owner-paused (#895, ADR-0071), so
-# a win-64-DECLARING repo's lint solve fails closed with no fallback.
 PIXI_LEXD_KEY = "pixi.toml#shipit-lexd"
 PIXI_LEXD_OPEN = "# >>> shipit-managed lexd feature (do not edit; regenerate via `shipit install`) >>>"
 PIXI_LEXD_CLOSE = "# <<< shipit-managed lexd feature <<<"
-#: The fleet-pinned lexd version (ARF02-WS06, ADR-0066/0047), exact-pinned (`==`)
-#: so fleet uniformity is a single version, never a resolved range. THE single
-#: source of the pin: :func:`lexd_block` stamps it into every generated
-#: `[feature.shipit-lexd.target.<plat>.dependencies]` table, and a drift test
-#: pins it to shipit's own manifest. A bump is this one edit, rolled fleet-wide on
-#: each consumer's next `shipit install` reconcile.
 LEXD_PIN = "==0.19.10"
 
-# The UNCONDITIONAL launcher-deps block (#758, closed by TOL02-WS17 #794):
-# `uv` for the pinned ADR-0033 `bin/shipit` launcher, in the DEFAULT env's
-# [dependencies] — every workflow block (wf-checks and the wf-release family)
-# runs `pixi run --locked ./bin/shipit`, and hosted runners carry no uv, so
-# the launcher's one prerequisite must ride the managed pixi surface (the
-# #582 doctrine: provisioning lands in setup-pixi's lockfile-keyed cache,
-# never a run-time install). Unconditional — unlike the per-toolchain blocks
-# below, EVERY consumer's managed tasks resolve through `bin/shipit` — and
-# pinned in lockstep with Layer 0's UV_PIN (bin/setup-dev-env.sh), drift-
-# tested in tests/test_install.py. A consumer that already pins `uv` in its
-# own [dependencies] (the #758 consumer-side workaround) keeps its pin via
-# the PixiKeyConflict first-splice guard, exactly like the cargo-edit
-# precedent (#793) — their entry stays until their own reconcile.
 PIXI_LAUNCHER_DEPS_KEY = "pixi.toml#shipit-launcher-deps"
 PIXI_LAUNCHER_DEPS_OPEN = "# >>> shipit-managed launcher deps (do not edit; regenerate via `shipit install`) >>>"
 PIXI_LAUNCHER_DEPS_CLOSE = "# <<< shipit-managed launcher deps <<<"
 PIXI_LAUNCHER_DEPS_ANCHOR = "[dependencies]"
 
-# The CONDITIONAL per-toolchain dep blocks (#547 Layer 1): a consumer whose
-# tracked manifests signal a toolchain (a `Cargo.toml` anywhere → rust, `go.mod`
-# → go, `package.json` → node, a `pyproject.toml` → python — for the compiled
-# toolchains the same per-manifest discovery that makes the corresponding
-# `shipit lint` leg run, see shipit/lint.py) gets that toolchain
-# pinned through pixi/conda-forge, so the lint legs stop hard-failing (127)
-# wherever the host happens to lack cargo/go/node — the #526 "clippy is
-# local-only" CI gap. rust and go anchor under the lint feature (they provision
-# LINTER toolchains, siblings of the managed lint-deps block above); node
-# anchors under `[dependencies]` — it provisions the repo's OWN node/pnpm
-# runtime, not a linter. The rust signal delivers TWO more blocks in
-# `[dependencies]` (#793/#801, the #784-F2 class): the release-side bump tool
-# (cargo-edit, whose `cargo set-version` is the rust bump adapter's projection
-# command, shipit/release/bump.py) and the rust RELEASE toolchain itself
-# (`rust` — cargo for prepare/build/publish; hosted images no longer carry
-# Rust, and the lint-feature rust block is invisible to the release runs'
-# default env — TOL02-WS17 open hole 1, closed by #801). The python signal
-# delivers the release-side publish tool (twine, the pypi endpoint's uploader
-# — open hole 2, #801). The tree-sitter signal delivers the grammar
-# toolchain's own CLI (`tree-sitter-cli` — `tree-sitter generate` at build,
-# the corpus `tree-sitter test` lane; #890 closes open hole 7). The lua signal
-# delivers the lua LINT toolchain (`stylua` + `selene`, under the lint feature
-# like rust/go — TOL03-WS01 #972), and like tree-sitter it fires off the
-# DECLARATION (a nvim plugin has no manifest to detect), so both anchor the
-# provisions_signal mechanism on their respective (release / lint) axes. Unlike
-# the manifest-detected signals these fire off the DECLARATION — a `.shipit.toml`
-# [toolchains] tree-sitter or lua leg, no manifest signals a grammar or a nvim
-# plugin — via the same union mechanics as the wasm-pack→node-deps delivery
-# (:attr:`shipit.tools.registry.Toolchain.provisions_signal`, read by
-# :func:`shipit.verbs.install._declared_signals`). All the release-side
-# blocks anchor under
-# `[dependencies]`, NOT the lint feature, because the wf-release stages
-# execute shipit in the DEFAULT pixi env (`pixi run --locked ./bin/shipit`)
-# and the tools must be on THAT run's PATH. Each single-purpose block is
-# deliberately its OWN unit (never merged into a shared one) so the
-# key-conflict guard below can skip exactly the key a consumer already pins
-# without losing the sibling deliveries.
-# Provisioning rides pixi/conda-forge under setup-pixi's lockfile-keyed cache
-# (the #582 doctrine); the release verbs never install at run time —
-# they fail loudly naming this reconcile instead. Delivered only when
-# :func:`load_units` is passed the
-# toolchain signal (`toolchains=`), so the zero-arg catalog is byte-identical
-# to the pre-#547 one. A consumer who ALREADY pins one of a block's keys in its
-# anchor table keeps their pin: the first splice would duplicate the TOML key
-# and break pixi.toml, so the reconcile skips delivering that block with a loud
-# warning instead (:class:`shipit.install.reconcile.PixiKeyConflict`). Accepted
-# residue: a consumer that later DELETES its last signal manifest keeps the
-# spliced block + `[managed]` hash until manually removed (block-retirement
-# machinery is out of scope; the block's own comment says how).
 TOOLCHAIN_RUST = "rust"
 TOOLCHAIN_GO = "go"
 TOOLCHAIN_NODE = "node"
@@ -303,10 +94,6 @@ PIXI_RUST_DEPS_CLOSE = "# <<< shipit-managed rust lint toolchain <<<"
 PIXI_GO_DEPS_KEY = "pixi.toml#shipit-go-lint-toolchain"
 PIXI_GO_DEPS_OPEN = "# >>> shipit-managed go lint toolchain (do not edit; regenerate via `shipit install`) >>>"
 PIXI_GO_DEPS_CLOSE = "# <<< shipit-managed go lint toolchain <<<"
-# The lua lint toolchain (TOL03-WS01 #972): stylua + selene, siblings of the
-# rust/go lint blocks under the lint feature. Unlike them it fires off the
-# DECLARED `[toolchains]` lua leg (no manifest signals a nvim plugin), via the
-# registry entry's provisions_signal — the tree-sitter mechanics on the lint axis.
 PIXI_LUA_DEPS_KEY = "pixi.toml#shipit-lua-lint-toolchain"
 PIXI_LUA_DEPS_OPEN = "# >>> shipit-managed lua lint toolchain (do not edit; regenerate via `shipit install`) >>>"
 PIXI_LUA_DEPS_CLOSE = "# <<< shipit-managed lua lint toolchain <<<"
@@ -329,8 +116,7 @@ PIXI_TREE_SITTER_DEPS_KEY = "pixi.toml#shipit-tree-sitter-release-deps"
 PIXI_TREE_SITTER_DEPS_OPEN = "# >>> shipit-managed tree-sitter release deps (do not edit; regenerate via `shipit install`) >>>"
 PIXI_TREE_SITTER_DEPS_CLOSE = "# <<< shipit-managed tree-sitter release deps <<<"
 PIXI_TREE_SITTER_DEPS_ANCHOR = "[dependencies]"
-# (unit key, toolchain signal, open, close, anchor, packaged data file) — the
-# catalog rows :func:`load_units` appends per requested toolchain, in this order.
+# Rows of (unit key, toolchain signal, open, close, anchor, packaged data file).
 TOOLCHAIN_UNITS = (
     (
         PIXI_RUST_DEPS_KEY,
@@ -398,32 +184,12 @@ TOOLCHAIN_UNITS = (
     ),
 )
 
-# The CONDITIONAL conda-endpoint packager block (#1071, ADR-0064/0070). Unlike
-# the per-toolchain blocks above, this one is gated on a declared distribution
-# ENDPOINT, not a toolchain: `rattler-build` (`rattler-build build`/`publish`)
-# is the conda endpoint's packager, so it must ride wherever a repo declares a
-# `conda` endpoint on ANY `[artifacts.*]` — a rust binary, a tree-sitter
-# `tarball` grammar, a future python/lua producer — toolchain-INDEPENDENT. It
-# used to live in the rust release-deps block (rust repos were the first conda
-# producers), which starved a non-rust conda producer of its packager (the
-# #1071 seed failure: tree-sitter-lex declared conda but `publish` died
-# `No such file … rattler-build`). It anchors in the DEFAULT env's
-# [dependencies] — the wf-release stages run shipit via bare
-# `pixi run --locked ./bin/shipit`, so the packager must be on THAT run's PATH —
-# beside the release-side toolchain blocks. Delivered by :func:`load_units`
-# only when the caller passes the `conda` endpoint signal (`endpoints=`),
-# detected from the consumer's `[artifacts.*]` endpoint declarations
-# (:func:`shipit.verbs.install._declared_endpoints`). Provisioning rides
-# pixi/conda-forge under setup-pixi's lockfile-keyed cache (the #582 doctrine);
-# the publish verb never installs at run time — it fails loudly naming this
-# reconcile instead (:mod:`shipit.release.provisioning`).
 ENDPOINT_CONDA = "conda"
 PIXI_CONDA_PACKAGER_KEY = "pixi.toml#shipit-conda-packager"
 PIXI_CONDA_PACKAGER_OPEN = "# >>> shipit-managed conda packager (do not edit; regenerate via `shipit install`) >>>"
 PIXI_CONDA_PACKAGER_CLOSE = "# <<< shipit-managed conda packager <<<"
 PIXI_CONDA_PACKAGER_ANCHOR = PIXI_NODE_DEPS_ANCHOR  # [dependencies]
-# (unit key, endpoint signal, open, close, anchor, packaged data file) — the
-# endpoint-gated catalog rows :func:`load_units` appends per declared endpoint.
+# Rows of (unit key, endpoint signal, open, close, anchor, packaged data file).
 ENDPOINT_UNITS = (
     (
         PIXI_CONDA_PACKAGER_KEY,
@@ -435,58 +201,25 @@ ENDPOINT_UNITS = (
     ),
 )
 
-#: The name of the managed lint environment the env block above defines
-#: (``pixi-lint-env-block.toml``: ``lint = ["lint"]``) — where the fleet-pinned
-#: toolchain (including ``lefthook``) lives on every consumer. Callers that must
-#: run a lint-env binary (Tree provisioning's hook activation, #443) pin this
-#: environment rather than guessing at PATH.
 LINT_ENV = "lint"
 
-#: The ONE operator-facing recovery command for "(re)activate the checks".
-#: Hook activation is a side effect of ``shipit install`` — there is NO
-#: standalone hook-activation verb — so every operator-facing recovery
-#: instruction speaks *shipit* and re-runs install (idempotent), never the
-#: internal ``lefthook``/``pixi`` layer under it. The pinned launcher form
-#: (``./bin/shipit install``) is what a consumer has on PATH; prose may say
-#: ``shipit install``. Referenced everywhere an operator is told how to fix a
-#: missing/failed activation, so the guidance can never drift or leak the
-#: internal layer (reviewers re-flag a leaked ``lefthook install`` every round).
+# The ONE operator-facing "(re)activate the checks" command: there is no
+# standalone hook-activation verb, and operator guidance never names the
+# internal lefthook/pixi layer under it.
 HOOK_RECOVERY_CMD = "./bin/shipit install"
 
-# The pixi-manifest seed (ADP00-WS09, #432). A stock consumer with NO pixi.toml
-# is the headline adoption case, but the three managed blocks above are tables
-# and keys only — pixi refuses a manifest with no `[workspace]`/`[project]`/
-# `[package]` table — so splicing them into an empty file self-blocks the very
-# first install commit (the freshly-synced pre-commit hook shells into pixi,
-# which rejects the manifest). When the consumer has no pixi.toml at all, a
-# fresh install first seeds this minimal VALID `[workspace]` table and then
-# splices the managed blocks under it. The seed is SCAFFOLD, not a managed
-# unit: written once, never hashed into `[managed]`, consumer-owned (and
-# freely editable) from its first commit — a consumer WITH a manifest never
-# sees it, and a re-install never rewrites it.
 PIXI_SEED_CHANNELS = ("conda-forge",)
 PIXI_SEED_PLATFORMS = ("linux-64", "linux-aarch64", "osx-arm64")
 
 
 def workspace_name(raw: str) -> str:
-    """A pixi-safe workspace name from a repo directory name.
-
-    Conservative slug: keep the characters directory-and-repo names ordinarily
-    carry (alphanumerics, ``-``, ``_``, ``.``), collapse anything else to ``-``,
-    and never return empty — so an exotic directory name can neither break the
-    seeded TOML string nor produce a name pixi rejects.
-    """
+    """A pixi-safe workspace name from a repo directory name; never empty."""
     name = re.sub(r"[^A-Za-z0-9._-]+", "-", raw).strip("-.")
     return name or "workspace"
 
 
 def pixi_manifest_seed(name: str) -> str:
-    """The minimal VALID pixi manifest seeded when a consumer has none.
-
-    Just the required ``[workspace]`` table — name from the consumer root,
-    default channels/platforms — so pixi parses the file from the first
-    commit. The managed blocks splice in beneath it via their own anchors.
-    """
+    """The minimal VALID pixi manifest seeded when a consumer has none — just ``[workspace]``."""
     channels = ", ".join(f'"{c}"' for c in PIXI_SEED_CHANNELS)
     platforms = ", ".join(f'"{p}"' for p in PIXI_SEED_PLATFORMS)
     return (
@@ -500,25 +233,7 @@ def pixi_manifest_seed(name: str) -> str:
 
 
 def lexd_block(platforms: frozenset[str]) -> str:
-    """The managed ``[feature.shipit-lexd]`` block, its ``[target]`` set GENERATED
-    per-repo (#1072).
-
-    The block header (feature table + channel + the explanatory comment) is the
-    packaged ``pixi-lexd-block.toml`` verbatim; the per-platform lexd pin tables
-    are generated as **(the repo's declared platforms) ∩ the channel's closed
-    served set** (:data:`shipit.channel.buckets.SERVED_SUBDIRS`), emitted in the
-    served set's canonical order and pinned at :data:`LEXD_PIN`.
-
-    Scoping to the repo's OWN platforms is the #1072 fix: a static all-of-served
-    set emitted a ``[target.win-64.dependencies]`` table on every consumer, but no
-    repo currently declares ``win-64`` (Windows paused, #895), so pixi warned
-    (``target selector 'win-64' does not match … the platforms supported by the
-    workspace``) on every invocation — fleet-wide noise. A repo now carries a
-    ``win-64`` target ONLY when it declares ``win-64`` (keeping the ADR-0071
-    fail-closed for a real Windows consumer), and none otherwise. The served-set
-    intersection is the #1068 half (a platform outside the set — osx-64 — carries
-    no lexd dep, so its lint env still solves).
-    """
+    """The managed ``[feature.shipit-lexd]`` block, its targets = ``platforms`` ∩ the channel's served set."""
     header = data_bytes("pixi-lexd-block.toml").decode("utf-8").rstrip("\n")
     lines = [header]
     for plat in buckets.SERVED_SUBDIRS:
@@ -528,205 +243,56 @@ def lexd_block(platforms: frozenset[str]) -> str:
     return "\n".join(lines) + "\n"
 
 
-# The HAR01 agent harness (docs/legacy-prd/har01-coordinator-guard-and-role-prompts.md):
-# the three GENERATED subagent agent-defs and the committed `PreToolUse` hook line
-# join the managed set so a consumer's agents follow the same dev cycle + guard.
-#
-# Agent-defs: whole-file units, sourced from `.claude/agents/<role>.md` — the same
-# repo-root-in-dev / wheel-package-data split skills use (force-included via
-# pyproject). They are generated (`pixi run regen-roles`); install only vendors the
-# committed output, it never regenerates.
-#
-# settings hook: NOT a whole-file unit. `.claude/settings.json` is Claude-Code-owned
-# structured JSON a consumer fills with their own permissions/env/hooks; shipit owns
-# ONLY its one `PreToolUse` entry. So it is a `kind="block"` unit with a JSON splice
-# (`fmt=FMT_JSON_HOOK`) instead of comment-marker text splice: the managed "inner" is
-# shipit's canonical PreToolUse entry, identified in the consumer file by its command
-# marker. Reconciliation is the standard four-case `decide()` on that entry's hash —
-# the consumer's other settings are merged through untouched, never clobbered, and a
-# consumer edit to shipit's own entry surfaces as an OVERRIDE like any other unit.
-#
-# This entry's COMMAND carries a stricter contract than the other four managed
-# settings-hook units below: it is the ADR-0012 coordinator-edit guard, so its
-# command (`pixi run --manifest-path "$CLAUDE_PROJECT_DIR"/pixi.toml -- ./bin/shipit
-# hook pretooluse`, ADR-0038 — the manifest pin mirrors the pixienv adapter so a
-# leaked PIXI_PROJECT_MANIFEST can't resolve the wrong project) fails CLOSED — a
-# non-zero exit from the resolution chain blocks the tool call (`exit 2`) —
-# where the other four legitimately fail open on a missing launcher (#491). See
-# `tests.conftest.managed_pretooluse_hook_command` (the single source of this
-# exact string) vs `managed_cc_hook_command` (the other four).
 AGENTS_DEF_DIR = ".claude/agents"
-#: The single real skill DISCOVERY dir (issue #1088, ADR-0077):
-#: ``.agents/skills/`` is where agy/codex load skills AND the ONE place
-#: :func:`load_units` emits fundamental skill content. Claude Code reads its own
-#: ``.claude/skills/`` — but rather than DUPLICATE the content there, install
-#: makes ``.claude/skills`` a whole-directory SYMLINK to this dir (see
-#: :data:`CLAUDE_SKILLS_DIR` / :data:`CLAUDE_SKILLS_LINK_TARGET`), so Claude sees
-#: the identical set without a second physical copy. The
-#: ``src/shipit/data/skills/`` store is source-only — read by :func:`skills_root`,
-#: never a shipped consumer dest — because no runtime loads that directory.
 AGENTS_SKILLS_DIR = ".agents/skills"
-#: The Claude discovery dir, a structural whole-directory symlink install ensures
-#: (NOT a content unit): ``.claude/skills`` -> :data:`CLAUDE_SKILLS_LINK_TARGET`.
-#: The everyone-but-claude split is CANCELLED by this design — Claude sees
-#: everything ``.agents/skills`` holds, ``pixi`` included (ADR-0077).
+# `.claude/skills` is a whole-directory SYMLINK install ensures, never content
+# units: the target is resolved from the link's own dir (`.claude/`).
 CLAUDE_SKILLS_DIR = ".claude/skills"
-#: The relative target of the ``.claude/skills`` symlink, resolved from the
-#: link's own dir (``.claude/``): ``../.agents/skills`` -> ``<root>/.agents/skills``.
 CLAUDE_SKILLS_LINK_TARGET = "../.agents/skills"
-#: The AGY native custom-agent def dir (issue #989): the generated
-#: ``.agents/agents/<name>/agent.md`` defs `agy --agent <name>` reads. Managed as
-#: whole-file units the same way as the Claude agent-defs, sourced from
-#: :func:`agy_agents_root` (the force-included wheel data, or the dev checkout).
 AGY_AGENTS_DEF_DIR = ".agents/agents"
 SETTINGS_FILE = ".claude/settings.json"
 SETTINGS_KEY = ".claude/settings.json#shipit-pretooluse-hook"
-# The substring that identifies shipit's managed PreToolUse entry in a consumer's
-# settings.json, independent of the runner prefix (`pixi run`, a bare path, etc.).
 SETTINGS_HOOK_MARKER = "shipit hook pretooluse"
 
-#: The substring EVERY shipit-managed hook entry's command carries — the
-#: markers here are all ``shipit hook <verb>`` forms. The retired-hooks pass
-#: (#619) uses it as its protection predicate: a consumer-local entry matching
-#: a retirement marker is removed only when it is NOT shipit's own managed
-#: entry. Needed because the managed SessionStart command itself runs
-#: ``./bin/setup-dev-env.sh`` inline, which the setup-dev-env retirement
-#: marker would otherwise match (see :func:`shipit.install.splice.is_retired_hook`).
+# The substring EVERY shipit-managed hook command carries; the retired-hooks
+# pass uses it to avoid removing shipit's own entries.
 MANAGED_HOOK_COMMAND_MARKER = "shipit hook"
 
-# The HAR02 eval wire (docs/legacy-prd/har02-run-eval.md) adds two more committed
-# settings.json hook lines — the terminal-hook eval boundary — each its own
-# event array + command marker, reconciled by the SAME event-keyed JSON-hook
-# splice as PreToolUse. Stop/SubagentStop entries carry no `matcher` (they bind
-# to no tool), so the entry shape is just `{"hooks": [...]}`.
 SETTINGS_STOP_KEY = ".claude/settings.json#shipit-stop-hook"
 SETTINGS_STOP_MARKER = "shipit hook stop"
 SETTINGS_SUBAGENTSTOP_KEY = ".claude/settings.json#shipit-subagentstop-hook"
 SETTINGS_SUBAGENTSTOP_MARKER = "shipit hook subagent-stop"
 
-#: The pinned ``bin/shipit`` launcher's unit key AND dest (ADR-0033) — the
-#: whole-file bootstrap unit that execs the repo's pinned build via uv. Named
-#: so its consumers (the catalog below, selfcert's launcher probe, a
-#: ``[managed.decline]`` entry, #600) spell one identifier, never a scattered
-#: literal.
 SHIPIT_LAUNCHER_FILE = "bin/shipit"
 
-# The Layer 0 bootstrap script (#547): provisions the base system (pixi + uv
-# at their pins, then the pixi env solves) that everything above — the managed
-# lint env, the pinned launcher's uv resolve — rides on. Shipped like
-# `bin/shipit` (an executable whole-file bootstrap unit); shipit-self commits
-# a byte-identical copy at the same path (the reconcile-to-noop dogfood
-# guarantee).
 SETUP_DEV_ENV_FILE = "bin/setup-dev-env.sh"
 
-# The CDX01 generic `./agent-start` launcher (#627): ONE managed entry point
-# (`./agent-start <agent> [args...]`) whose common start path — usage, host
-# dispatch, CLI presence check, arg forwarding — is written once, dispatching
-# through a small host strategy table to narrow per-host launch functions
-# (docs/dev/agent-host-seams.md): `claude` mints a `sess-<utc>-<pid>` id and
-# execs `claude --worktree <id>` (the WorktreeCreate pre-launch seam, SES01
-# Layer D / ADR-0027); `codex` execs the pinned `./bin/shipit session codex`
-# (no pre-launch seam — explicit Tree provisioning, then codex). Ships like
-# `bin/shipit` (an executable whole-file bootstrap unit at the repo root).
 AGENT_LAUNCHER_FILE = "agent-start"
 
-# The SES01 session-bootstrap set (docs/legacy-prd/session-bootstrap.md, ADR-0027):
-# the SessionStart activation hook line (Layer A — `shipit hook sessionstart`
-# writes the repo's toolchain activation into CLAUDE_ENV_FILE). It joins the
-# managed set so adopting a repo turns the capability on with no manual wiring.
-# The hook line is one more JSON-hook unit over the same settings.json, owning
-# its event. (The Layer D repo-root launcher is the generic `./agent-start`
-# unit — see AGENT_LAUNCHER_FILE; the agent-specific `claude-start`/`codex-start`
-# shims were retired in #815.)
-#
-# Failure posture (#848, decided — copilot asked whether the missing fail-open
-# guard on the trailing `./bin/shipit hook sessionstart` was deliberate): the
-# ABSENCE cases are fail-open (`cd` failing and the launcher-presence probe both
-# skip with exit 0 — an unprovisioned checkout must never brick a session), but
-# a PRESENT launcher's exit code propagates UNCHANGED, deliberately fail-loud.
-# SessionStart is non-blocking in Claude Code (a non-zero hook surfaces stderr
-# without denying anything), and a launcher that ran and errored is degraded
-# activation the operator must see — wrapping it in `|| exit 0` would hide that
-# behind a green session start. Same split as the additive-hook shape in
-# tests/conftest.py `managed_cc_hook_command`: fail-open is for a runtime that
-# is genuinely absent, never for a hook that ran and errored.
 SETTINGS_SESSIONSTART_KEY = ".claude/settings.json#shipit-sessionstart-hook"
 SETTINGS_SESSIONSTART_MARKER = "shipit hook sessionstart"
 
-# The ADR-0027 WorktreeCreate adapter wiring (#443, Finding B): the managed
-# `agent-start` launcher promises that `claude --worktree` provisions the
-# session Tree via `shipit hook worktreecreate`, and shipit's own settings wire
-# that hook — but the managed settings variant drifted and never did, so a
-# stock consumer's `--worktree` fell through to Claude Code's NATIVE worktree
-# (`.claude/worktrees/<id>`), contradicting ADR-0014/0027 (Trees are
-# dissociated clones, never native worktrees). One more JSON-hook unit over the
-# same settings.json, owning its event, reconciled like the other four.
 SETTINGS_WORKTREECREATE_KEY = ".claude/settings.json#shipit-worktreecreate-hook"
 SETTINGS_WORKTREECREATE_MARKER = "shipit hook worktreecreate"
 
-# The CDX01 Codex project layer (#603): codex 0.139+ loads trusted repo-local
-# `.codex/config.toml` and `.codex/hooks.json`, and its hook commands run with
-# the SESSION CWD — so the managed hook entries route straight to the shared
-# `./bin/shipit hook ...` verbs with only that env adaptation (no
-# `$CLAUDE_PROJECT_DIR` cd; the commands resolve the git root from the session
-# cwd before calling the root-pinned launcher/manifest), never a Codex fork of
-# the lifecycle logic.
-#
-# config.toml is a WHOLE-FILE unit: repo-local `.codex/config.toml` is new
-# surface (no repo carries one; shipit's own repo carried only a hand-written
-# hooks.json, now spliced into line), the layer is deliberately thin, and
-# personal Codex config belongs in `~/.codex/config.toml` ($CODEX_HOME), which
-# codex layers over this file anyway — so shipit owns the repo-local file
-# outright and a consumer edit surfaces as an OVERRIDE like any other
-# whole-file unit.
-#
-# hooks.json REUSES the settings.json JSON-hook splice unchanged (the splicer
-# is already dest/event/marker-generic): two `FMT_JSON_HOOK` block units over
-# the one file, each owning shipit's single entry in its event array — the
-# SessionStart activation/advisory hook (fail-open, additive; the entry
-# synthesizes the verb's `{"cwd": ...}` payload via python `os.getcwd()` because
-# codex supplies no Claude-shaped payload on stdin) and the PreToolUse
-# coordinator tool-guard (fail-CLOSED, the ADR-0038 posture: a resolution
-# failure blocks the tool call with exit 2 rather than silently allowing an
-# unchecked edit; this entry synthesizes NO payload — it resolves the git root
-# via `git rev-parse --show-toplevel` and passes codex's native stdin through). The
-# guard entry carries NO matcher: Codex tool names are not Claude's, so the
-# entry binds to every tool event and the shared verb's own `is_edit_tool`
-# gate scopes the verdict (a non-edit payload is allowed through silently).
-# The consumer's other hooks — and their other keys — merge through untouched,
-# exactly as on `.claude/settings.json`. The event names and command markers
-# are shared with the Claude units on purpose: the verbs (and their marker
-# substrings) are the SAME lifecycle logic, only the host file differs.
 CODEX_CONFIG_FILE = ".codex/config.toml"
 CODEX_HOOKS_FILE = ".codex/hooks.json"
 CODEX_SESSIONSTART_KEY = ".codex/hooks.json#shipit-sessionstart-hook"
 CODEX_PRETOOLUSE_KEY = ".codex/hooks.json#shipit-pretooluse-hook"
 
-# The settings.json hooks-event arrays each JSON-hook unit owns one entry of.
 EVENT_PRETOOLUSE = "PreToolUse"
 EVENT_STOP = "Stop"
 EVENT_SUBAGENTSTOP = "SubagentStop"
 EVENT_SESSIONSTART = "SessionStart"
 EVENT_WORKTREECREATE = "WorktreeCreate"
 
-FMT_MARKERS = "markers"  # block splice via open/close comment markers (default)
-FMT_JSON_HOOK = "json-hook"  # block splice into a settings.json hooks-event array
-FMT_ENV_MEMBER = (
-    "env-member"  # merge a managed feature into a pixi [environments] entry
-)
+FMT_MARKERS = "markers"
+FMT_JSON_HOOK = "json-hook"
+FMT_ENV_MEMBER = "env-member"
 
 
 def env_member_token(env: str, required: Sequence[str]) -> str:
-    """The canonical membership token an ``FMT_ENV_MEMBER`` unit hashes on.
-
-    The unit's managed contribution is not a text block but an INVARIANT — that
-    ``env`` composes every ``required`` feature — so both the desired hash and the
-    consumer read (:func:`shipit.install.splice.extract_env_member`) reduce to
-    this one string. It is deliberately independent of the consumer's OTHER
-    features in ``env``: those are the consumer's own config (ADR-0047), so a
-    consumer who wired the feature into a hand-authored env still reconciles to a
-    clean NOOP.
-    """
+    """The canonical membership token an ``FMT_ENV_MEMBER`` unit hashes on — independent of the env's other features."""
     return json.dumps(
         {"environment": env, "requires": sorted(required)}, sort_keys=True
     )
@@ -734,37 +300,19 @@ def env_member_token(env: str, required: Sequence[str]) -> str:
 
 @dataclass(frozen=True)
 class Unit:
-    """One managed unit — a whole file or a marker-delimited block.
+    """One managed unit; ``content`` is the desired bytes — a whole file, or a block's inner text."""
 
-    ``content`` is the desired bytes: a file's full contents, or (for a block)
-    the inner text that lives between the markers.
-    """
-
-    key: str  # the [managed] table key
-    dest: str  # path relative to the consumer root
-    kind: str  # "file" | "block"
+    key: str
+    dest: str
+    kind: str
     content: bytes
     executable: bool = False
-    # Block units only: the delimiters that fence shipit's region in a
-    # consumer-owned file, and (for a TOML table) the header the block anchors
-    # under on a first insert. Default to the AGENTS.md HTML-comment markers.
     open_marker: str = BLOCK_OPEN
     close_marker: str = BLOCK_CLOSE
     anchor: str | None = None
-    # Block units only: how the managed region is extracted from / spliced into the
-    # consumer file. ``FMT_MARKERS`` (default) uses the comment-marker pair above;
-    # ``FMT_JSON_HOOK`` parses ``settings.json`` and owns just shipit's one entry in
-    # the ``event`` hooks-array (identified by ``marker``), so the consumer's other
-    # settings — and shipit's other hook entries — merge through untouched;
-    # ``FMT_ENV_MEMBER`` owns just the ``required_features`` MEMBERSHIP in the pixi
-    # ``[environments]`` entry named ``env_name`` (the consumer's other features in
-    # that env are their own config), so ``content`` is the packaged default line
-    # used only when the env is absent — the hash is over the membership invariant.
     fmt: str = FMT_MARKERS
     event: str = EVENT_PRETOOLUSE
     marker: str = SETTINGS_HOOK_MARKER
-    # FMT_ENV_MEMBER only: the environment whose feature list must compose every
-    # feature in ``required_features`` (a managed invariant, ADR-0047/ADR-0066).
     env_name: str | None = None
     required_features: tuple[str, ...] = ()
 
@@ -788,38 +336,12 @@ def data_bytes(*parts: str) -> bytes:
 
 
 def skills_root():
-    """The bundled skills store — the read SOURCE, ordinary ``shipit.data`` package data.
-
-    Returns the ``shipit/data/skills`` Traversable, which resolves the same way in
-    an installed wheel and in a dev checkout (the store is
-    ``src/shipit/data/skills/``, bundled by ``packages = ["src/shipit"]``), so
-    there is no repo-root fallback branch. It honors the ``iterdir`` / ``is_dir``
-    / ``is_file`` / ``read_bytes`` protocol :func:`walk_files` uses.
-
-    The store used to live at the repo root as ``.shipit-skills/`` and be
-    force-included into the wheel (#921). It moved under ``src/`` (#1115) so the
-    repo-root path is live NOWHERE and can be retired fleet-wide: a
-    ``retired-files.toml`` entry matches on content hash globally, with no
-    producing-repo exemption, so a store still sitting at ``.shipit-skills/``
-    would be deleted by shipit's own self-install.
-
-    This store is **source-only** (ADR-0077): :func:`load_units` PROJECTS each
-    file out of here into the single real discovery dir :data:`AGENTS_SKILLS_DIR`
-    (Claude's :data:`CLAUDE_SKILLS_DIR` is a whole-dir symlink to it) — the store
-    dir itself is never a shipped consumer dest, because no agent runtime loads
-    it (#1088).
-    """
+    """The bundled skills store Traversable — a read SOURCE only, never a shipped consumer dest."""
     return resources.files("shipit.data").joinpath("skills")
 
 
 def agents_root():
-    """The bundled subagent agent-defs — wheel package data, or the repo root in dev.
-
-    Mirrors :func:`skills_root`: the generated ``.claude/agents/<role>.md`` files
-    live at the repo root (where Claude Code reads them for shipit-self) and are
-    force-included into the wheel at ``shipit/data/agents`` (pyproject). Returns a
-    Traversable (installed wheel) or a :class:`Path` (editable checkout).
-    """
+    """The bundled subagent agent-defs — wheel package data, or the repo root in dev."""
     bundled = resources.files("shipit.data").joinpath("agents")
     if bundled.is_dir():
         return bundled
@@ -827,15 +349,7 @@ def agents_root():
 
 
 def agy_agents_root():
-    """The bundled AGY native custom-agent defs — wheel package data, or the repo
-    root in dev (issue #989).
-
-    The AGY sibling of :func:`agents_root`: the generated
-    ``.agents/agents/<name>/agent.md`` defs live at the repo root (where ``agy
-    --agent <name>`` reads them for shipit-self) and are force-included into the
-    wheel at ``shipit/data/agy-agents`` (pyproject). Returns a Traversable
-    (installed wheel) or a :class:`Path` (editable checkout).
-    """
+    """The bundled AGY custom-agent defs — wheel package data, or the repo root in dev."""
     bundled = resources.files("shipit.data").joinpath("agy-agents")
     if bundled.is_dir():
         return bundled
@@ -843,13 +357,7 @@ def agy_agents_root():
 
 
 def canonical_hook_entry(entry: dict) -> str:
-    """The stable serialization of a settings.json hooks-event entry.
-
-    Both the desired (bundled) entry and the consumer's extracted entry pass through
-    this one function, so the unit's hash compares STRUCTURE, not byte-formatting —
-    a consumer who reformats settings.json (whitespace, key order) still reconciles
-    to NOOP as long as shipit's entry is semantically unchanged.
-    """
+    """The stable serialization of a hooks-event entry, so a unit's hash compares structure, not formatting."""
     return json.dumps(entry, indent=2, sort_keys=True)
 
 
@@ -869,44 +377,13 @@ def load_units(
     endpoints: frozenset[str] = frozenset(),
     platforms: frozenset[str] = frozenset(PIXI_SEED_PLATFORMS),
 ) -> list[Unit]:
-    """The managed set, in a stable order (skills, then the AGENTS block, then bootstrap).
+    """The managed set, in a stable order (skills, the AGENTS block, then bootstrap).
 
-    ``toolchains`` (#547 Layer 1) names the conditional per-toolchain pixi dep
-    blocks to include — any of :data:`TOOLCHAIN_RUST` / :data:`TOOLCHAIN_GO` /
-    :data:`TOOLCHAIN_NODE` / :data:`TOOLCHAIN_PYTHON`, as detected from the
-    consumer's tracked manifests
-    (:func:`shipit.install.reconcile.detect_toolchains`), or
-    :data:`TOOLCHAIN_TREE_SITTER`, unioned off the consumer's DECLARED
-    tree-sitter toolchain leg (#890 — no manifest signals a grammar;
-    :func:`shipit.verbs.install._declared_signals`).
-
-    ``endpoints`` (#1071) names the conditional per-ENDPOINT pixi blocks —
-    currently only :data:`ENDPOINT_CONDA`, delivering the conda packager
-    (``rattler-build``) — gated on the consumer's declared distribution
-    endpoints (:func:`shipit.verbs.install._declared_endpoints`) rather than a
-    toolchain, so a NON-rust conda producer gets its packager too.
-
-    ``platforms`` (#1072) is the consumer's declared ``[workspace].platforms``
-    (:func:`shipit.verbs.install._declared_platforms`); it scopes the managed
-    lexd block's ``[target]`` set to the repo's OWN served platforms
-    (:func:`lexd_block`), so pixi never warns about a target selector for a
-    platform the workspace does not declare. Defaults to :data:`PIXI_SEED_PLATFORMS`
-    (the seeded default set — what a virgin repo receives), so the zero-arg call
-    returns the unconditional catalog — which since #794 includes the
-    launcher-deps block (uv for the pinned ``bin/shipit``, #758): every
-    consumer's managed tasks resolve through the launcher, so its
-    prerequisite is signal-independent.
+    ``toolchains`` and ``endpoints`` gate the conditional pixi dep blocks;
+    ``platforms`` scopes the lexd block's targets to what the workspace declares.
     """
     units: list[Unit] = []
 
-    # The fundamental skill store (issue #1088, ADR-0077): each store file is
-    # emitted ONCE, into the single real discovery dir :data:`AGENTS_SKILLS_DIR`
-    # (`.agents/skills/`). Claude's `.claude/skills` is a whole-directory SYMLINK
-    # to it (a STRUCTURAL step install ensures — :func:`plan_claude_skills_link`,
-    # not a content unit), so Claude reads the identical set without a second
-    # physical copy. The source-only `src/shipit/data/skills/` store is never a
-    # consumer dest (no runtime loads it). Same `Unit(kind="file")` shape as the agent-defs
-    # fan-out below, so every reconcile/override/retire guarantee carries over.
     for rel, content in walk_files(skills_root()):
         units.append(
             Unit(
@@ -926,11 +403,6 @@ def load_units(
         )
     )
 
-    # The managed `.gitignore` release-output block (#906): a marker block in the
-    # consumer-owned `.gitignore` ignoring shipit's own repo-root release-stage
-    # outputs, so a root-level single-crate `cargo publish` stops aborting on the
-    # dirty tree they create — see the GITIGNORE_* constants' comment. No anchor:
-    # the block appends at EOF (creating `.gitignore` if the consumer has none).
     units.append(
         Unit(
             key=GITIGNORE_KEY,
@@ -952,15 +424,6 @@ def load_units(
         )
     )
 
-    # The Layer 0 base-system bootstrap (#547): reconcile pixi + uv to their
-    # pins from sha256-verified GitHub release tarballs, then pre-solve the
-    # pixi envs — what makes a fresh clone / cloud session / stock Ubuntu box
-    # survive its first `pixi run` (and gives the ADR-0033 `bin/shipit`
-    # launcher the uv it rides). Runs from the managed SessionStart hook,
-    # ahead of `shipit hook sessionstart`; fail-open, loud, idempotent. On
-    # repos still carrying the retired release-sync script this managed unit
-    # takes over the SAME path (their old copy surfaces as an OVERRIDE at the
-    # reconcile — the human decides at merge).
     units.append(
         Unit(
             key=SETUP_DEV_ENV_FILE,
@@ -971,9 +434,6 @@ def load_units(
         )
     )
 
-    # The CDX01 generic `./agent-start` launcher (#627): the one repo-root
-    # entry point (`./agent-start <agent> [args...]`) dispatching through the
-    # host strategy table — see the AGENT_LAUNCHER_FILE constant's comment.
     units.append(
         Unit(
             key=AGENT_LAUNCHER_FILE,
@@ -984,8 +444,6 @@ def load_units(
         )
     )
 
-    # The lint-check units (docs/legacy-prd/lint-checks.md): the thin lefthook caller and the
-    # `lint = "shipit lint"` task block in the consumer's pixi.toml.
     units.append(
         Unit(
             key=LEFTHOOK_FILE,
@@ -994,9 +452,6 @@ def load_units(
             content=data_bytes("lefthook.yml"),
         )
     )
-    # The lint tool configs (#436): markdownlint and yamllint auto-discover
-    # these at the repo root, so delivering them is what makes the managed
-    # caller's whole-tree lint green on a stock consumer right after install.
     for dest, data_file in LINT_CONFIG_UNITS:
         units.append(
             Unit(key=dest, dest=dest, kind="file", content=data_bytes(data_file))
@@ -1012,10 +467,6 @@ def load_units(
             anchor=PIXI_ANCHOR,
         )
     )
-    # The thin `test` caller (TOL01-WS01, ADR-0039) — its own sibling block in
-    # the same [tasks] table, so the reconcile's task-ambiguity guard can skip
-    # it alone for a consumer whose own manifest already defines a `test` task
-    # (see the PIXI_TEST_TASK_KEY comment above).
     units.append(
         Unit(
             key=PIXI_TEST_TASK_KEY,
@@ -1027,11 +478,6 @@ def load_units(
             anchor=PIXI_ANCHOR,
         )
     )
-    # The public `lint` entry point (#1066), anchored in the lint FEATURE — the
-    # one an installed manifest composes into a single env, so a bare `pixi run
-    # lint` resolves to the fleet-pinned toolchain rather than the default env's
-    # ambient one. See the PIXI_LINT_TASK_KEY comment for the whole story,
-    # including who owns that composition and what it does not guarantee.
     units.append(
         Unit(
             key=PIXI_LINT_TASK_KEY,
@@ -1044,9 +490,6 @@ def load_units(
         )
     )
 
-    # The ADP00 managed consumer environment (docs/legacy-prd/adoption.md): the lint
-    # feature/dependency block (fleet-pinned toolchain) and the lint environment
-    # definition, siblings of the tasks block in the same consumer pixi.toml.
     units.append(
         Unit(
             key=PIXI_LINT_DEPS_KEY,
@@ -1067,25 +510,12 @@ def load_units(
             open_marker=PIXI_ENVS_OPEN,
             close_marker=PIXI_ENVS_CLOSE,
             anchor=PIXI_ENVS_ANCHOR,
-            # A MEMBERSHIP merge, not a marker block: the lint env must compose the
-            # managed `shipit-lexd` feature (ADR-0066), but WHICH base features the
-            # env carries is consumer config (ADR-0047). Owning the whole `lint`
-            # line would collide with a consumer's own `[environments] lint` and be
-            # skipped — leaving lexd unwired (lint breaks, no `provision` fallback).
-            # So this unit owns only `shipit-lexd`'s membership: the packaged
-            # `content` seeds a fresh env, and an existing consumer env has
-            # `shipit-lexd` merged in (append, never replace).
             fmt=FMT_ENV_MEMBER,
             env_name="lint",
             required_features=("shipit-lexd",),
         )
     )
 
-    # The managed lexd feature (ARF02-WS06, ADR-0066): the reserved
-    # `[feature.shipit-lexd]` block (channel + fleet-pinned lexd), a fresh table
-    # appended at EOF (anchor-less, so it never re-declares a consumer table),
-    # wired into the lint env by the environments block above. Replaces the
-    # retired `provision lexd` — see the PIXI_LEXD_KEY comment for the whole story.
     units.append(
         Unit(
             key=PIXI_LEXD_KEY,
@@ -1098,9 +528,6 @@ def load_units(
         )
     )
 
-    # The unconditional launcher-deps block (#758, TOL02-WS17 #794): uv for
-    # the pinned bin/shipit launcher, in the default env — see the
-    # PIXI_LAUNCHER_DEPS_KEY comment above for the whole story.
     units.append(
         Unit(
             key=PIXI_LAUNCHER_DEPS_KEY,
@@ -1113,13 +540,6 @@ def load_units(
         )
     )
 
-    # The conditional per-toolchain dep blocks (#547 Layer 1): the ONLY
-    # signal-gated rows — appended only when the caller detected the signal.
-    # The unconditional catalog above (launcher-deps included) ships on every
-    # call regardless; these rows add only the toolchain-specific blocks.
-    # rust/go splice under the same `[feature.lint.dependencies]` anchor as the
-    # managed lint-deps block — sibling marker blocks in one table (splice_block
-    # places each right after the anchor header; coexistence is fine).
     for key, signal, open_marker, close_marker, anchor, data_file in TOOLCHAIN_UNITS:
         if signal in toolchains:
             units.append(
@@ -1134,11 +554,6 @@ def load_units(
                 )
             )
 
-    # The conditional per-ENDPOINT blocks (#1071): the conda packager
-    # (rattler-build) rides wherever the consumer declares a `conda` endpoint —
-    # a different axis from the toolchain signal above, so a non-rust conda
-    # producer gets it too. A [dependencies] sibling of the release-side
-    # toolchain blocks; a rust+conda repo splices it exactly once beside them.
     for key, signal, open_marker, close_marker, anchor, data_file in ENDPOINT_UNITS:
         if signal in endpoints:
             units.append(
@@ -1153,9 +568,6 @@ def load_units(
                 )
             )
 
-    # The HAR01 harness (docs/legacy-prd/har01-coordinator-guard-and-role-prompts.md): the
-    # generated subagent agent-defs (whole files) and the committed PreToolUse hook
-    # line (a JSON splice into the consumer's settings.json).
     for rel, content in walk_files(agents_root()):
         units.append(
             Unit(
@@ -1166,12 +578,6 @@ def load_units(
             )
         )
 
-    # The AGY native custom-agent defs (#989): `.agents/agents/<name>/agent.md`,
-    # delivered as whole-file units exactly like the Claude agent-defs above so
-    # `agy --agent reviewer` reads shipit's managed reviewer posture from a
-    # consumer's checkout. Guarded on the source dir existing (a checkout that
-    # predates the generated def, or a wheel built without it, simply carries no
-    # AGY unit) so `load_units` never raises on a missing source tree.
     agy_root = agy_agents_root()
     if agy_root.is_dir():
         for rel, content in walk_files(agy_root):
@@ -1184,14 +590,6 @@ def load_units(
                 )
             )
 
-    # Store each desired entry already canonicalized, so its hash matches a consumer
-    # entry extracted + canonicalized through the same function (formatting-immune).
-    # The PreToolUse coordinator-guard (HAR01), the HAR02 eval terminal hooks
-    # (Stop = the coordinator run, SubagentStop = each subagent run), the SES01
-    # SessionStart activation hook (coordinator env into CLAUDE_ENV_FILE), and the
-    # ADR-0027 WorktreeCreate adapter (#443: `claude --worktree` mints a central-root
-    # Tree, never a native worktree) are five JSON-hook units over the SAME
-    # settings.json, each owning one event array.
     for key, marker, event, data_file in (
         (
             SETTINGS_KEY,
@@ -1237,11 +635,6 @@ def load_units(
             )
         )
 
-    # The CDX01 Codex project layer (#603): the thin whole-file config and the
-    # two `.codex/hooks.json` JSON-hook units — the SessionStart hook and the
-    # PreToolUse tool guard — routing to the same shared `shipit hook` verbs as
-    # the Claude units above (see the CODEX_* constants' comment for the whole
-    # design: whole-file vs splice, the cwd/env adaptation, the fail postures).
     units.append(
         Unit(
             key=CODEX_CONFIG_FILE,

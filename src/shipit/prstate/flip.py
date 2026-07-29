@@ -1,19 +1,6 @@
-"""The guarded draft→ready flip — the hand-off SERVICE of the PR state engine.
-
-The flip is the one signal that says "done iterating — a human can validate and
-merge", so it is GUARDED: it refuses unless the engine says the PR is READY (all
-three Ready pillars — Reviewed + CI green + authoritative-mergeable). The refusal
-is the :class:`NotReady` domain exception carrying the real status, so a caller
-can report exactly why it refused — never a silent no-op.
-
-The guarded re-check lives here (promoted out of ``verbs/pr/`` — CLI01-WS03) so
-both `pr ready` and `pr next`'s ready act flip through the SAME guard:
-re-evaluate the live snapshot, flip only on READY. Re-checking at flip time (not
-trusting a status computed moments earlier) is what makes the flip safe against
-a state that moved. Per ADR-0029 the flip and its refusal leave their durable
-log twins HERE; the adapter that performs the flag flip (:func:`shipit.gh.
-pr_ready`) additionally records the boundary milestone.
-"""
+"""The guarded draft→ready flip: it refuses unless the engine calls the PR
+READY, raising :class:`NotReady` with the real status rather than no-oping
+silently. Both `pr ready` and `pr next` flip through this one guard."""
 
 from __future__ import annotations
 
@@ -26,9 +13,6 @@ from .reviewers_config import load_roster
 from .roster import Roster
 from .state import TaskState, TaskStatus, evaluate
 
-#: The engine's logger (shared name across :mod:`shipit.prstate`): the flip is
-#: THE lifecycle milestone of the whole loop, its refusal the
-#: degraded-but-continuing counterpart (LOG02 spray, ADR-0029).
 logger = logging.getLogger("shipit.prstate")
 
 
@@ -51,34 +35,8 @@ def guarded_flip(
     evaluate_status=None,
     sightings: events.Sightings | None = None,
 ) -> TaskStatus:
-    """Re-evaluate the live PR and flip draft→ready ONLY if it is READY.
-
-    The shared guarded re-check behind both `pr ready` and `pr next`'s ready act.
-    The target arrives as the typed :class:`~shipit.pr.PrId` (ADR-0030) — the
-    repo rides on the identity through both the re-gather and the flip, never
-    re-derived. Gathers a FRESH snapshot and re-runs the engine (never trusting
-    a status computed earlier — the PR may have moved); on READY it performs the
-    flip and returns the READY status, otherwise it raises :class:`NotReady`
-    carrying the real status so the caller can report why it refused.
-
-    `roster` is the reviewer configuration as ONE value (CLI01-WS04): a caller
-    that already loaded it this invocation (`pr next`'s ready act) passes it in
-    so the flip never resolves reviewer settings twice; ``None`` (the standalone
-    `pr ready` shape) loads it here — the verb's one config read. The SNAPSHOT is
-    re-gathered either way; only the config ride-along is reused (config cannot
-    change mid-command), and `evaluate` reads the required set off `ctx.roster`.
-
-    `flip` / `evaluate_status` are injected for testing: `flip` is the
-    draft→ready boundary (default :func:`shipit.gh.pr_ready`); `evaluate_status`
-    yields the fresh `TaskStatus` (default: `gather` + `evaluate` over the roster
-    above). A test injects both to drive the guard without a network.
-
-    `sightings` is the caller's first-sight registry for the observational
-    dev-cycle events (ADR-0032): `pr next`'s ready act threads its
-    invocation-wide registry so the re-gather here re-tags nothing that gather
-    already witnessed; ``None`` (the standalone `pr ready` shape) lets the
-    re-gather mint its own — that gather is the invocation's only one.
-    """
+    """Re-evaluate the live PR and flip draft→ready only if it is READY; a
+    fresh snapshot is always gathered, since the PR may have moved."""
     if evaluate_status is None:
         status = evaluate(
             gather(
@@ -90,9 +48,6 @@ def guarded_flip(
     else:
         status = evaluate_status(pr)
     if status.state is not TaskState.READY:
-        # A refused flip is a degraded-but-continuing outcome: nothing mutated —
-        # loud in the record (WARNING), surfaced to the caller as the domain
-        # refusal, never dressed up as success.
         logger.warning(
             "pr#%s flip refused — not Ready (state=%s)",
             pr.number,
@@ -101,11 +56,7 @@ def guarded_flip(
         )
         raise NotReady(status)
     flip(pr)
-    # The performed flip IS the `pr.ready` dev-cycle event (ADR-0032,
-    # verb-witnessed): the guarded flip is the one place a draft→ready happens,
-    # so the milestone emits here — once per actual flip, never on a refusal.
-    # The epic/ws the head branch carries were bound at the re-gather's fetch
-    # seam and ride in via the pipeline.
+    # Emitted once per actual flip, never on a refusal.
     events.emit(
         logger,
         "pr.ready",
@@ -118,18 +69,8 @@ def guarded_flip(
 
 
 def undo_flip(pr: PrId, *, flip=gh.pr_ready, bind_identity=bind_pr_identity) -> None:
-    """Revert ready→draft — the flip's UNDO, always allowed, never guarded.
-
-    Sending a PR back to draft is a human pushing it back into the agent's
-    court, so no readiness hold applies. Promoted here (out of the `pr ready
-    --undo` verb glue) so the undo mirrors the flip: one engine seam performs
-    the act and leaves its durable twin — the ``pr.unready`` dev-cycle event
-    (ADR-0032), the guarded flip's ``pr.ready`` counterpart. The undo performs
-    no gather, so the per-operation ``epic``/``ws`` binding comes from
-    ``bind_identity`` (one light ``headRefName`` read through the one
-    branch-identity parser); ``flip`` / ``bind_identity`` are injected for
-    tests, defaulting to the real gh adapter + fetch seam.
-    """
+    """Revert ready→draft — always allowed, never guarded. It performs no
+    gather, so the ``epic``/``ws`` binding comes from ``bind_identity``."""
     bind_identity(pr)
     flip(pr, undo=True)
     events.emit(

@@ -1,13 +1,4 @@
-"""`shipit stage` — copy resolved conda files from the env prefix into the app
-consumer's bundle (conda-direct #1079), as ADR-0030 glue + a pure renderer.
-
-The manifest-driven mirror of the legacy `fetch-deps`: it reads the consumer's
-`[stage]` map (:func:`shipit.config.load_stage`) and copies each declared
-source-in-prefix → dest-under-resources pair off the already-resolved pixi env
-(:func:`shipit.staging.stage`). The domain does the work and construction-time
-validation; this module validates the one primitive (PATH is an existing dir),
-calls the domain, and renders the outcome.
-"""
+"""`shipit stage` — copy resolved conda files from the env prefix into the app bundle."""
 
 from __future__ import annotations
 
@@ -35,30 +26,13 @@ logger = logging.getLogger("shipit.stage")
     "where conda-direct's plain consumer-owned deps resolve).",
 )
 def cmd(path: str | None, feature: str | None) -> None:
-    """Copy this repo's `[stage]` files from the resolved conda env prefix into its bundle.
-
-    PATH defaults to the current directory. For each `[stage.<pkg>]` entry —
-    a source-in-prefix path (`bin/<tool>` for a tool, `share/<pkg>/…` for a data
-    artifact) mapped to a dest under the staging root `resources/…` — this copies
-    the file or directory pixi already extracted into `<PATH>/.pixi/envs/<env>`.
-    Run it AFTER `shipit install`/`pixi install` has resolved the deps; a source
-    that is not materialized is a hard error pointing at install (the step copies,
-    it never fetches). A tool binary keeps its executable bit. Exit: 0 on success
-    (an empty `[stage]` map is a clean no-op), 1 on a missing source, a source that
-    escapes the prefix, or a dest outside the staging root, 2 usage.
-    """
+    """Copy this repo's `[stage]` files from the resolved conda env prefix into its bundle."""
     raise SystemExit(run(path, feature=feature))
 
 
 @cli_errors
 def run(path: str | None = None, *, feature: str | None = None) -> int:
-    """Load the `[stage]` map and stage every entry from the env prefix.
-
-    Returns an int exit code: 0 on success (a repo with no `[stage]` map stages
-    nothing and returns 0), with the domain's :class:`~shipit.staging.StagingError`
-    and malformed-config :class:`~shipit.config.ConfigError` mapped to ``error: …``
-    + exit 1 by the :func:`~._errors.cli_errors` shell.
-    """
+    """Load the `[stage]` map and stage every entry from the env prefix."""
     root = Path(path or ".").resolve()
     entries = config.load_stage(load_config(root))
     staged = staging.stage(root, entries, feature=feature)
@@ -67,13 +41,7 @@ def run(path: str | None = None, *, feature: str | None = None) -> int:
 
 
 def format_staged(staged: list[staging.StagedFile]) -> str:
-    """The per-copy report: one line per staged file/dir, off the result.
-
-    An empty stage says so plainly rather than printing a bare header that pretends
-    work happened — covering all three ways the copy list comes back empty: no
-    `.shipit.toml`, a config with no `[stage]` table, or a `[stage]` map that
-    declared nothing to copy.
-    """
+    """One line per staged file or dir, off the typed result."""
     if not staged:
         return "stage: nothing to stage — the [stage] map is absent or empty."
     lines = [f"stage: copied {len(staged)} item(s) from the env prefix:"]
