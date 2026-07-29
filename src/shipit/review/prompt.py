@@ -1,7 +1,4 @@
-"""The review-task bodies the review producers launch with.
-
-See docs/adr/0050-review-scope-is-the-diff-context-is-the-checkout.md.
-"""
+"""The review-task bodies the producers launch with. See docs/adr/0050-review-scope-is-the-diff-context-is-the-checkout.md."""
 
 from __future__ import annotations
 
@@ -12,9 +9,7 @@ from .schema import REVIEW_SCHEMA
 
 
 def _scope_and_context(diff_noun: str = "this PR's diff") -> str:
-    """The scope/context baseline every reviewer arm carries; ``diff_noun`` MUST
-    name the diff the arm just told the agent to fetch.
-    """
+    """The shared scope baseline; ``diff_noun`` MUST name the diff the arm just fetched."""
     return f"""\
 SCOPE AND CONTEXT — report only on the diff; read anything; run nothing:
 * SCOPE is the diff: report ONLY findings {diff_noun} INTRODUCED or EXPOSED. \
@@ -29,8 +24,7 @@ files, do NOT execute build, test, or shell commands and do NOT start \
 background tasks — this is a read-only review, not an agentic session."""
 
 
-# The expected JSON shape for a backend without native schema enforcement, built
-# by serializing the actual REVIEW_SCHEMA so the prompt cannot drift from it.
+# Serialized from the actual REVIEW_SCHEMA so the prompt cannot drift from it.
 _SCHEMA_PROSE = (
     "Your output must satisfy this JSON Schema:\n"
     + json.dumps(REVIEW_SCHEMA, indent=2)
@@ -38,8 +32,7 @@ _SCHEMA_PROSE = (
     "line — use null rather than inventing a line number to fill the field."
 )
 
-# Appended only for backends without native schema enforcement, which tend to emit
-# prose, markdown fences, or JSON truncated mid-object.
+# For backends with no native schema enforcement, which emit prose and fences.
 _JSON_VALIDITY_INSTRUCTION = """\
 CRITICAL OUTPUT REQUIREMENT: Your ENTIRE response must be a single, complete, \
 valid JSON object matching the schema above — and NOTHING else. Do not write any \
@@ -160,7 +153,6 @@ emit the JSON and stop. shipit captures your output and records it locally."""
 
 
 def _authoritative_diff_json(diff: str) -> str:
-    """Encode supplied diff bytes as one JSON value, not sentinel-delimited text."""
     return json.dumps({"unified_diff": diff}, ensure_ascii=False)
 
 

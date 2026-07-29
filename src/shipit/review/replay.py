@@ -1,8 +1,4 @@
-"""Review an arbitrary commit range offline: a record is written, no PR is touched.
-
-Replay never reaches the network, and the record write is its product, not
-telemetry — a write failure fails the verb.
-"""
+"""Review a commit range offline, writing a record and touching no PR."""
 
 from __future__ import annotations
 
@@ -27,11 +23,7 @@ logger = logging.getLogger("shipit.review")
 
 
 def parse_range(spec: str) -> tuple[str, str, bool]:
-    """Split ``A..B`` or ``A...B`` into ``(base, head, merge_base_wanted)``; pure.
-
-    A revision may carry an internal dot but never a boundary one, so a boundary
-    dot is always a malformed separator and raises ``ReviewError``.
-    """
+    """Split ``A..B`` or ``A...B`` into ``(base, head, merge_base_wanted)``; a boundary dot is malformed."""
     spec = spec.strip()
     if "..." in spec:
         base, _, head = spec.partition("...")
@@ -158,9 +150,7 @@ def run_replay(
     launcher=None,
     base_dir: Path | None = None,
 ) -> dict:
-    """Review ``view``'s range as one pass and write the round record; returns
-    ``{"review": …, "record_path": …}``.
-    """
+    """Review ``view``'s range as one pass and write the round record."""
 
     agent = backend.funnel_agent or backend.name
     round_id = uuid.uuid4().hex
@@ -195,8 +185,7 @@ def run_replay(
             artifacts=bundle,
         )
     except Exception as exc:
-        # Settle the bundle before propagating, so the prompt and raw streams
-        # already on disk are joined by the outcome.
+        # Settle the bundle before propagating, joining the outcome to the streams.
         bundle.record(
             outcome="timed_out" if getattr(exc, "timed_out", False) else "failed",
             duration_ms=int((time.monotonic() - start) * 1000),
@@ -259,11 +248,8 @@ def run_fanout_replay(
     launcher: launch.Runner | None = None,
     base_dir: Path | None = None,
 ) -> dict:
-    """Fan-out-review ``view``'s range and write the round record; returns
-    ``{"review": …, "record_path": …}``.
-    """
-    # Calling this driver is itself the fan-out opt-in, so an unnamed
-    # `dimensions` means the default SET, not the orchestrator's single pass.
+    """Fan-out-review ``view``'s range and write the round record."""
+    # This driver is itself the opt-in, so unnamed means the default SET.
     dimensions = tuple(dimensions) if dimensions else DEFAULT_DIMENSION_NAMES
     _provision_replay_defs(view, backend, calibrator_on=calibrator is not None)
     agent = backend.funnel_agent or backend.name
@@ -317,11 +303,7 @@ def run_fanout_replay(
 
 
 def _provision_bundled_tree(root: Path, rel_dir: str, source) -> list[Path]:
-    """Exclusive-create every bundled file under ``source`` into ``root/rel_dir``.
-
-    Missing-only, and a symlink anywhere in the destination chain aborts the tree:
-    the checkout replay runs over may be untrusted.
-    """
+    """Exclusive-create missing bundled files into ``root/rel_dir``; a symlinked component aborts."""
     from ..install.units import walk_files
 
     # Guard every component of the base dir chain before writing anything.
@@ -339,8 +321,7 @@ def _provision_bundled_tree(root: Path, rel_dir: str, source) -> list[Path]:
     written: list[Path] = []
     for rel, content in walk_files(source):
         dest = dest_dir / rel
-        # Guard each intermediate dir a nested file needs. Once any destination
-        # component is attacker-controlled the whole tree is suspect, so a
+        # One attacker-controlled component makes the whole tree suspect, so a
         # symlink aborts rather than skips.
         probe = dest_dir
         symlinked = False

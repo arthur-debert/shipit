@@ -1,7 +1,4 @@
-"""The versioned, in-repo Ground-truth fixture review experiments are scored against.
-
-See docs/adr/0048-ground-truth-fixture-deterministic-scorer.md.
-"""
+"""The versioned Ground-truth fixture experiments are scored against. See docs/adr/0048-ground-truth-fixture-deterministic-scorer.md."""
 
 from __future__ import annotations
 
@@ -31,18 +28,14 @@ __all__ = [
     "save_fixture",
 ]
 
-#: Bump when the fixture FILE FORMAT changes (field set / shapes). Distinct from
-#: the fixture's own ``version``, which bumps when the LABEL SET changes.
+#: Bumps when the file FORMAT changes; a fixture's ``version`` tracks its labels.
 FIXTURE_SCHEMA_VERSION = 1
 
-#: Where the fixture lives, relative to the repo root.
 DEFAULT_FIXTURE_PATH = Path("lab") / "fixture.toml"
 
-#: The admissible evidence kinds behind a label.
 PROVENANCE_KINDS = ("fix-commit", "confirmed-thread", "adjudication")
 
-#: A label's verdict vocabulary: ``real`` feeds recall, ``not-real`` is a banked
-#: refutation whose match is a measured false positive.
+#: ``real`` feeds recall; matching a ``not-real`` label is a false positive.
 VERDICTS = ("real", "not-real")
 
 
@@ -90,19 +83,15 @@ class Label:
 
     @property
     def texts(self) -> tuple[str, ...]:
-        """Every admissible phrasing of this defect: the claim + its aliases."""
         return (self.claim, *self.aliases)
 
     @property
     def defect_key(self) -> str:
-        """The identity recall counts under: the family id when set, else the label id."""
         return self.defect or self.id
 
 
 @dataclass(frozen=True)
 class Fixture:
-    """The whole corpus: pinned ranges + labels + the version scores cite."""
-
     version: int
     prs: tuple[PinnedRange, ...] = ()
     labels: tuple[Label, ...] = ()
@@ -119,7 +108,6 @@ class Fixture:
         )
 
     def label_by_id(self, label_id: str) -> Label:
-        """The one label with ``label_id``; loud :class:`FixtureError` if absent."""
         for label in self.labels:
             if label.id == label_id:
                 return label
@@ -157,8 +145,7 @@ def _parse_pr(raw: Any, index: int) -> PinnedRange:
             raise FixtureError(f"{where}: {name!r} must be a hex SHA (≥7 chars)")
     raw_repo = _require_str(raw, "repo", where)
     try:
-        # Store the canonical (lowercased) slug so two pins differing only in
-        # case share one identity, rather than double-counting one store.
+        # Canonicalize so two pins differing only in case share one store.
         parsed = repo_from_slug(raw_repo)
     except ValueError as exc:
         raise FixtureError(f"{where}: {exc}") from exc
@@ -293,7 +280,6 @@ def parse_fixture(data: dict[str, Any]) -> Fixture:
 
 
 def load_fixture(path: Path) -> Fixture:
-    """Read + validate the fixture file at ``path``. The one read boundary."""
     try:
         with path.open("rb") as fh:
             data = tomllib.load(fh)
@@ -336,12 +322,11 @@ def bank_alias(fixture: Fixture, label_id: str, alias: str) -> Fixture:
 
 
 def _toml_str(value: str) -> str:
-    """One TOML basic string; TOML also forbids the literal DEL that JSON permits."""
+    """One TOML basic string; TOML forbids the literal DEL that JSON permits."""
     return json.dumps(value, ensure_ascii=False).replace("\x7f", "\\u007f")
 
 
 def dump_fixture(fixture: Fixture) -> str:
-    """The fixture as canonical TOML text; pure and deterministic."""
     out: list[str] = [
         "# Ground-truth fixture — versioned corpus for the deterministic review",
         "# scorer (ADR-0048). Format + banking flow: lab/README.md.",

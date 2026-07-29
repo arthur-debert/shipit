@@ -1,7 +1,4 @@
-"""Decide a review round's scope: a full round 1, or an incremental fix range.
-
-See docs/adr/0045-dimension-fanout-single-calibrator.md.
-"""
+"""Decide a round's scope: full, or an incremental fix range. See docs/adr/0045-dimension-fanout-single-calibrator.md."""
 
 from __future__ import annotations
 
@@ -17,13 +14,7 @@ logger = logging.getLogger("shipit.review")
 
 @dataclass(frozen=True)
 class RoundPlan:
-    """The resolved scope of one review round.
-
-    ``base``/``head`` are diff endpoints the caller re-diffs over only when
-    ``incremental``; on a full round ``base`` is the PR base ref tip, recorded but
-    not re-diffed. ``fallback_reason`` is set only when a round that could have
-    been incremental was forced full.
-    """
+    """The resolved scope of one review round; ``base``/``head`` are diff endpoints only when ``incremental``."""
 
     incremental: bool
     base: Sha
@@ -38,12 +29,7 @@ def decide_round(
     last_reviewed_head: Sha | None,
     last_is_ancestor: bool,
 ) -> RoundPlan:
-    """Decide one round's scope from its shas + the ancestry fact; pure.
-
-    ``last_is_ancestor`` is meaningful only when ``last_reviewed_head`` is set.
-    Every ambiguous case falls back to a full round: over-reviewing is the safe
-    direction.
-    """
+    """Decide one round's scope; every ambiguous case falls back to a full round."""
     if last_reviewed_head is None or last_reviewed_head == new_head:
         return RoundPlan(incremental=False, base=base_ref, head=new_head)
     if not last_is_ancestor:
@@ -65,9 +51,7 @@ def plan_for_view(
     *,
     base_dir=None,
 ) -> RoundPlan:
-    """Resolve the round scope for a review of ``ctx`` by ``reviewer``; callers gate
-    on :func:`planable` first.
-    """
+    """Resolve the round scope for ``ctx``; callers gate on :func:`planable` first."""
     new_head = _as_sha(ctx.head_sha)
     base_ref = _as_sha(ctx.base_sha)
     repo_slug = ctx.repo
@@ -134,5 +118,4 @@ def planable(ctx) -> bool:
 
 
 def _as_sha(value) -> Sha:
-    """Coerce a :class:`~shipit.identity.Sha` or raw string to a :class:`Sha`."""
     return value if isinstance(value, Sha) else Sha(str(value))

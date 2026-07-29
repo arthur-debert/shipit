@@ -1,7 +1,4 @@
-"""The one fixed judge between a reviewer's passes and the posted review.
-
-See docs/adr/0045-dimension-fanout-single-calibrator.md.
-"""
+"""The one judge between a reviewer's passes and the posted review. See docs/adr/0045-dimension-fanout-single-calibrator.md."""
 
 from __future__ import annotations
 
@@ -84,11 +81,7 @@ class CalibrationContractError(RuntimeError):
 
 @dataclass(frozen=True)
 class CalibratedFinding:
-    """One judged union finding: the final domain Finding + its routing.
-
-    ``merged`` holds the union ids deduped into this one; ``duplicate_of`` is the
-    inverse edge, set on an entry merged away — such an entry never posts.
-    """
+    """One judged union finding; an entry with ``duplicate_of`` set was merged away and never posts."""
 
     id: int
     finding: Finding
@@ -99,8 +92,6 @@ class CalibratedFinding:
 
 @dataclass(frozen=True)
 class CalibrationResult:
-    """The calibrator's validated output: the judged findings + its summary."""
-
     overall_feedback: str
     entries: tuple[CalibratedFinding, ...]
 
@@ -153,8 +144,7 @@ def build_calibrator_task(
             "offline and touches nothing on GitHub. Read the surrounding code in "
             "this checkout wherever you need context to judge a candidate."
         )
-        # The nouns below follow the offline framing so the body never
-        # contradicts `situation` by naming a PR or a GitHub post.
+        # Follow the offline framing so the body never names a PR or a post.
         result_fate = "recorded in the local replay record"
         diff_noun = "this range's diff"
         summary_owner = "the review's"
@@ -238,12 +228,7 @@ and {settle}."""
 def parse_calibration(
     payload: Mapping[str, object], union: Sequence[Mapping[str, object]]
 ) -> CalibrationResult:
-    """Validate a calibrator ``payload`` against the input ``union``; pure.
-
-    ``union`` is indexed by candidate id. Contract breaches raise
-    :class:`CalibrationContractError`; an unparseable severity and a blank judged
-    field are fail-safe coercions, not breaches.
-    """
+    """Validate a calibrator ``payload`` against the ``union`` it judged, indexed by candidate id."""
     if not isinstance(payload, Mapping):
         raise CalibrationContractError(
             f"calibrator output must be a JSON object, got {type(payload).__name__}"
@@ -353,9 +338,7 @@ def parse_calibration(
             "judged finding needs a disposition; none may be silently dropped"
         )
 
-    # Materialize the inverse dedup edge so the round record retains every union
-    # finding. Every canonical is already appended and the duplicates appended
-    # below are never merge targets, so this index stays complete.
+    # The duplicates appended below are never merge targets, so this stays complete.
     canonical_by_id = {e.id: e for e in entries}
     for merged_id, canonical_id in duplicate_of.items():
         canonical = canonical_by_id[canonical_id]
@@ -397,8 +380,6 @@ def _text_or(value: object, fallback: object) -> str:
 
 @dataclass(frozen=True)
 class CalibratorRun:
-    """A validated calibration plus the launch's run id, prompt, usage and applied reasoning."""
-
     result: CalibrationResult
     run_id: str
     task: str
@@ -417,7 +398,6 @@ def run_calibrator(
     artifacts: RunArtifacts | None = None,
     correlation: Mapping[str, object] | None = None,
 ) -> CalibratorRun:
-    """Launch the calibrator over ``union`` in the checkout at ``cwd``."""
     sink = artifacts if artifacts is not None else RunArtifacts.disabled()
     identity = agent_backend.by_name(config.backend)
     if shutil.which(identity.binary) is None:
@@ -426,8 +406,7 @@ def run_calibrator(
             f"{identity.binary!r} CLI on your PATH, but it was not found. "
             "Install it (and log it in), then re-run."
         )
-    # Prompt bytes are variant-hashed, so pass plumbing in the task would split
-    # experiment arms on non-content: serialize only the candidate shape.
+    # Prompt bytes are variant-hashed, so plumbing would split arms on non-content.
     candidates = [{k: v for k, v in c.items() if k != "run_id"} for c in union]
     task = build_calibrator_task(
         json.dumps(candidates, indent=2),
@@ -483,8 +462,7 @@ def run_calibrator(
     if result.returncode != 0:
         detail = (result.stderr or "").strip() or (result.stdout or "").strip()
         if sink.dir is not None:
-            # The path stays out of the BackendError message, which the service
-            # surfaces in the GitHub-facing funnel check summary.
+            # The path stays out of the GitHub-facing BackendError message.
             logger.warning(
                 "the calibrator (%s) exited %d — full raw output at %s",
                 config.backend,
@@ -521,14 +499,12 @@ def _adapter_for(config: CalibratorConfig):
     if config.backend == "claude":
         return ClaudeAdapter(model=config.model, reasoning=config.reasoning)
     if config.backend == "codex":
-        # A None model defers to the adapter's own default rather than
-        # duplicating a model literal that could drift from the backend.
+        # A None model defers to the adapter's own default, never a literal here.
         if config.model is None:
             return CodexAdapter(reasoning=config.reasoning)
         return CodexAdapter(model=config.model, reasoning=config.reasoning)
     if config.backend == "antigravity":
-        # agy has no reasoning knob, so the config level is dropped rather than
-        # stamped on a record as applied.
+        # agy has no reasoning knob, so the level is dropped, not stamped as applied.
         if config.model is None:
             return AntigravityAdapter(timeout=config.timeout)
         return AntigravityAdapter(model=config.model, timeout=config.timeout)
@@ -536,9 +512,7 @@ def _adapter_for(config: CalibratorConfig):
 
 
 def _unwrap_output(stdout: str, *, backend: str) -> tuple[dict, str, TokenUsage]:
-    """Parse a calibrator's stdout — bare or in a claude result envelope — into
-    ``(payload, run_id, usage)``; a run id is minted when the output carries none.
-    """
+    """Parse a calibrator's stdout, bare or enveloped, into ``(payload, run_id, usage)``."""
     try:
         parsed = extract_json(stdout)
     except ValueError as exc:

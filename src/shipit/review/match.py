@@ -1,7 +1,4 @@
-"""The deterministic same-claim matching primitive; no LLM is ever part of it.
-
-See docs/adr/0048-ground-truth-fixture-deterministic-scorer.md.
-"""
+"""The deterministic same-claim matching primitive. See docs/adr/0048-ground-truth-fixture-deterministic-scorer.md."""
 
 from __future__ import annotations
 
@@ -31,17 +28,13 @@ class MatchVerdict(Enum):
     NO_MATCH = "no-match"
 
 
-#: Overlap coefficient at or above this is a MATCH, given file + line agree.
+#: Overlap at or above this is a MATCH; at or above the floor, a NEAR_MISS.
 CLAIM_THRESHOLD = 0.5
-
-#: Below the threshold but at/above this floor makes a NEAR_MISS, not silence.
 NEAR_MISS_FLOOR = 0.2
 
-#: How far outside a label's range a claim-passing finding may sit and still
-#: near-miss; a MATCH gets zero slack.
+#: Slack a near-miss allows outside a label's range; a MATCH gets none.
 NEAR_MISS_LINE_SLACK = 10
 
-#: Tokens carrying no claim identity. Deliberately small and generic.
 _STOPWORDS = frozenset(
     """
     a an and are as at be but by for from has have if in into is it its no not
@@ -70,7 +63,6 @@ def claim_overlap(a: str, b: str) -> float:
 
 
 def best_overlap(text: str, texts: tuple[str, ...] | list[str]) -> float:
-    """The best :func:`claim_overlap` of ``text`` against any of ``texts``."""
     return max((claim_overlap(text, other) for other in texts), default=0.0)
 
 
@@ -84,10 +76,7 @@ class Claim:
 
 
 def _in_range(line: int | None, lines: tuple[int, int] | None, slack: int = 0) -> bool:
-    """Is ``line`` within ``lines`` (inclusive), widened by ``slack``?
-
-    A location-less claim can never hard-match a ranged label, but may near-miss.
-    """
+    """Is ``line`` within ``lines`` (inclusive), widened by ``slack``?"""
     if lines is None:
         return True
     if line is None:
@@ -104,10 +93,7 @@ def match_claim(
     texts: tuple[str, ...] | list[str],
     threshold: float = CLAIM_THRESHOLD,
 ) -> MatchVerdict:
-    """Match one emitted claim against one label, decomposed into ``file``/``lines``/``texts``.
-
-    A different file is always NO_MATCH: file identity is non-negotiable.
-    """
+    """Match one claim against a label decomposed into ``file``/``lines``/``texts``."""
     if claim.file != file:
         return MatchVerdict.NO_MATCH
     overlap = best_overlap(claim.text, texts)
@@ -129,10 +115,7 @@ def same_claim(
     line_slack: int = NEAR_MISS_LINE_SLACK,
     threshold: float = CLAIM_THRESHOLD,
 ) -> bool:
-    """Are two emitted claims the same claim? The symmetric finding-vs-finding rule.
-
-    A missing line on either side falls back to file scope.
-    """
+    """Are two emitted claims the same claim? A missing line falls back to file scope."""
     if a.file != b.file:
         return False
     if a.line is not None and b.line is not None and abs(a.line - b.line) > line_slack:

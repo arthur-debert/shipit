@@ -1,7 +1,4 @@
-"""Launches a review backend and captures its structured output; never posts.
-
-See docs/adr/0020-backend-adapter-contract.md.
-"""
+"""Launches a review backend and captures its output. See docs/adr/0020-backend-adapter-contract.md."""
 
 from __future__ import annotations
 
@@ -63,8 +60,8 @@ class _BackendSpec:
     schema_inline: bool
     native_schema: bool
     native_timeout: bool
-    adapter_factory: object  # Callable[[str, str, str | None], BackendAdapter]
-    usage_parser: object  # Callable[[launch.LaunchResult], TokenUsage]
+    adapter_factory: object  # (model, timeout, reasoning) -> BackendAdapter
+    usage_parser: object  # (LaunchResult) -> TokenUsage
     retry_on_parse_failure: bool
 
 
@@ -75,19 +72,16 @@ def _codex_adapter(model: str, timeout: str, reasoning: str | None) -> BackendAd
 
 
 def _agy_adapter(model: str, timeout: str, reasoning: str | None) -> BackendAdapter:
-    # agy has no reasoning knob, so the requested level is dropped rather than
-    # stamped on a record as applied.
+    # agy has no reasoning knob, so the level is dropped, not stamped as applied.
     del reasoning
     return AntigravityAdapter(model=model, timeout=timeout)
 
 
 def _codex_usage(result: launch.LaunchResult) -> TokenUsage:
-    """codex reports its token total on stderr."""
     return from_codex_stderr(result.stderr or "")
 
 
 def _agy_usage(result: launch.LaunchResult) -> TokenUsage:
-    """agy reports no usage anywhere."""
     del result
     return UNREPORTED
 
@@ -115,8 +109,7 @@ _SPECS: dict[Backend, _BackendSpec] = {
 }
 
 
-#: Seconds the seam deadline is set PAST a backend's own native timeout flag, so
-#: the native (salvageable-output) path wins the race and the seam only backstops.
+#: Seconds the seam deadline sits past a backend's own timeout flag.
 _SEAM_HEADROOM_SECONDS = 60.0
 
 
@@ -127,12 +120,10 @@ def _seam_deadline(timeout: str, spec: _BackendSpec) -> float:
 
 
 def _sha256(text: str) -> str:
-    """Digest prompt/diff bytes for review-run provenance."""
     return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def _permission_posture(spec: _BackendSpec, *, substrate: str) -> str:
-    """Stable provenance label for the launch posture and execution substrate."""
     if substrate not in {"read-only-tree", "ambient-checkout"}:
         raise ValueError(f"unknown review substrate {substrate!r}")
     if spec.delivery_mode == "supplied-diff":
@@ -616,8 +607,7 @@ def _attempt(
             error=str(exc),
         )
         if not timed_out:
-            # A nonzero child is a LaunchResult, never raised, so this is always
-            # a transport failure — leave it for the service's `failed` mapping.
+            # A nonzero child is a LaunchResult, so this is always transport.
             raise
         raise BackendError(
             f"{agent} timed out before returning a review — the launch seam "
@@ -638,8 +628,7 @@ def _attempt(
     try:
         review = _capture(agent, result, artifacts=sink, run_id=run_id)
     except BackendError as exc:
-        # An exit-0 launch can still be a timeout (the marker is in stdout), so
-        # correct the optimistic `timed_out=False` recorded just above.
+        # An exit-0 launch can still be a timeout, so correct the optimism above.
         sink.record(
             timed_out=exc.timed_out,
             outcome="timed_out" if exc.timed_out else "failed",
@@ -663,18 +652,13 @@ def _capture(
     artifacts: RunArtifacts | None = None,
     run_id: str | None = None,
 ) -> dict:
-    """Turn the launched reviewer's result into a review dict, or raise.
-
-    Raised messages must stay free of local filesystem paths: they cross into the
-    GitHub-facing funnel breadcrumb.
-    """
+    """Turn the reviewer's result into a review dict; raised messages carry no local paths."""
     stdout = result.stdout or ""
     stderr = result.stderr or ""
     if result.returncode != 0:
         haystack = f"{stdout}\n{stderr}".lower()
         if _TIMEOUT_MARKER in haystack:
-            # The marker may live in stderr rather than the salvageable stdout, so
-            # the timeout is signalled structurally, not by echoing the message.
+            # The marker may live in stderr, so signal the timeout structurally.
             raise BackendError(
                 f"{agent} timed out before returning a complete review "
                 "(try a faster model or a smaller diff)",
@@ -725,7 +709,6 @@ def _dry_run(
             "summary": {"status": "COMMENT", "overall_feedback": "(dry-run)"},
             "comments": [],
         },
-        # A dry run launches nothing, so nothing was actually applied.
         usage=UNREPORTED,
         reasoning=None,
     )
@@ -779,7 +762,6 @@ def _resolve_repo(ctx) -> Repo:
 
 
 def _github_url(ctx) -> str:
-    """The clone URL for the read-only Tree — the consumer checkout's ``origin`` remote."""
     return git.remote_url(cwd=ctx.workdir)
 
 

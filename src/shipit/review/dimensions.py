@@ -1,7 +1,4 @@
-"""The closed Dimension-pass registry, its default set, and the one name resolver.
-
-See docs/adr/0045-dimension-fanout-single-calibrator.md.
-"""
+"""The closed Dimension-pass registry and its resolver. See docs/adr/0045-dimension-fanout-single-calibrator.md."""
 
 from __future__ import annotations
 
@@ -19,9 +16,8 @@ class Dimension:
     focus: str
 
 
-#: The concern-scoped decomposition — the fan-out's default set. Each ``focus``
-#: tells its pass to ignore everything outside its dimension; overlap between
-#: passes is fine, but defects belonging to no bucket can fall between them.
+#: The fan-out's default set. Each ``focus`` tells its pass to ignore everything
+#: outside its dimension, so a defect belonging to no bucket can fall between them.
 _CONCERN_DIMENSIONS: tuple[Dimension, ...] = (
     Dimension(
         name="correctness",
@@ -75,9 +71,8 @@ _CONCERN_DIMENSIONS: tuple[Dimension, ...] = (
     ),
 )
 
-#: The experiment-only severity-tier set, never part of the default: only an
-#: explicit ``dimensions`` list selects these. The focus texts are experiment
-#: material — editing one changes the variant hash and orphans banked lab points.
+#: Experiment-only, selected solely by an explicit list. Editing a focus text
+#: changes the variant hash and orphans banked lab points.
 _SEVERITY_TIER_DIMENSIONS: tuple[Dimension, ...] = (
     Dimension(
         name="sev-critical-high",
@@ -129,7 +124,6 @@ _BY_NAME: dict[str, Dimension] = {d.name: d for d in DIMENSIONS}
 
 
 def known_dimension_names() -> tuple[str, ...]:
-    """Every registered dimension's config token, in registry order."""
     return tuple(d.name for d in DIMENSIONS)
 
 
@@ -150,12 +144,7 @@ def fanout_variant_text(
     names: Sequence[str] | None,
     overrides: Mapping[str, Mapping[str, str]] | None = None,
 ) -> str:
-    """The text a fan-out round's instructions-variant hash covers; pure.
-
-    Dimensions sort by name because passes run in parallel, so a reordered
-    config list is the same experiment. Every folded field is JSON-encoded so no
-    value can forge a line boundary and collide two distinct sets into one hash.
-    """
+    """The text a fan-out round's instructions-variant hash covers; JSON-encoded per field."""
     lines = [instructions_text, "", "--- dimension set (variant material) ---"]
     for dim in sorted(resolve_dimensions(names), key=lambda d: d.name):
         lines.append(f"[dimension: {json.dumps(dim.name, ensure_ascii=False)}]")

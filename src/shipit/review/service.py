@@ -1,7 +1,4 @@
-"""The run/post/detach paths for a local review backend.
-
-``prstate`` imports this module; ``review`` never imports ``prstate``.
-"""
+"""The run/post/detach paths for a local review backend."""
 
 from __future__ import annotations
 
@@ -210,8 +207,7 @@ def _generate_post_and_close(
             as_app=as_app,
         )
     except BackendError as exc:
-        # Read the structured flag, not the message text: a timeout whose signal
-        # lived in stderr must still class as `timed_out`.
+        # Read the structured flag: a stderr-only timeout must still class as one.
         outcome = "timed_out" if exc.timed_out else "empty"
         _maybe_post_salvage(backend, ctx, exc, as_app=as_app, dry_run=dry_run)
         _close_funnel_breadcrumb(
@@ -227,8 +223,7 @@ def _generate_post_and_close(
     return {"review": review, "post": result, "ctx_repo": ctx.repo, "pr": ctx.number}
 
 
-#: Cap on the salvaged raw text posted to a PR comment. GitHub's review-body limit
-#: is 65536 chars; stay under it to leave room for the marker + code fences.
+#: Cap on salvaged raw text; GitHub's review-body limit is 65536 chars.
 _SALVAGE_MAX = 60000
 
 
@@ -254,11 +249,7 @@ def _salvage_body(agent: str | None, raw: str) -> tuple[str, bool]:
 def _maybe_post_salvage(
     backend: Backend, ctx, exc: BackendError, *, as_app: bool, dry_run: bool
 ) -> None:
-    """Post unparseable-but-non-empty agent output as a top-level review comment.
-
-    Best-effort and never flips the run to success; the event is forced to
-    ``COMMENT`` because there is no parsed status to approve or reject on.
-    """
+    """Post unparseable-but-non-empty agent output as a best-effort ``COMMENT`` review."""
     raw = (getattr(exc, "raw", "") or "").strip()
     if not raw:
         return
@@ -309,9 +300,7 @@ def start_detached_review(
     spawn: Callable[[Sequence[str], Mapping[str, str]], None] | None = None,
     find: Callable[[Backend, str, str], int | None] | None = None,
 ) -> bool:
-    """Open the in_progress funnel run and detach the review; ``True`` when a fresh
-    child was spawned, ``False`` when it reconciled against an in-flight run.
-    """
+    """Open the funnel run and detach the review; ``False`` means it reconciled instead."""
     logger.info(
         "review detach requested for pr#%s (agent=%s) — resolving + detaching",
         pr.number,
@@ -403,8 +392,7 @@ def run_detached_review(
             extra={"reviewer": agent, "pr": pr.number},
         )
     except Exception as exc:  # noqa: BLE001 - any resolve failure must still resolve the run
-        # This region sits outside `_generate_post_and_close`'s own close, so
-        # without this the parent-opened run would stay stuck `in_progress`.
+        # Outside `_generate_post_and_close`'s close: without this the run sticks.
         duration_ms = int((time.monotonic() - start) * 1000)
         if run_id is not None:
             _close_funnel_breadcrumb(
@@ -493,11 +481,7 @@ def _child_argv(
     nit_cap: int | None = None,
     as_app: bool,
 ) -> list[str]:
-    """The argv for the detached child — a ``shipit pr review _run`` subinvocation.
-
-    The child shares no state with the parent, so every value it needs must be an
-    explicit argument here; flags at their shipped default are omitted.
-    """
+    """The argv for the detached child, which shares no state with this parent."""
     argv = [
         sys.executable,
         "-m",
@@ -534,9 +518,7 @@ def _child_argv(
     return argv
 
 
-#: Funnel outcome → (check-run ``conclusion``, output ``title``, output ``summary``).
-#: The readiness snapshot reads only the conclusion, never the output text, so
-#: ``empty`` needs its own conclusion to stay distinguishable from ``failed``.
+#: The readiness snapshot reads only the conclusion, so ``empty`` needs its own.
 _FUNNEL_TERMINAL: dict[str, tuple[str, str, str]] = {
     "success": (
         "success",
@@ -570,12 +552,7 @@ def _reconcile_inflight(
     *,
     auth_fatal: bool,
 ) -> int | None:
-    """The in-flight funnel run to reconcile against, else ``None`` — best-effort.
-
-    A read failure degrades to ``None`` (at worst a duplicate run), but with
-    ``auth_fatal`` a :class:`~shipit.review.ghauth.ReviewAuthError` propagates: the
-    child needs the same auth, so proceeding would report a false in-flight.
-    """
+    """The in-flight funnel run to reconcile against, else ``None``; ``auth_fatal`` un-swallows an auth error."""
     try:
         return (find or checkrun.find_nonterminal)(backend, repo, head_sha)
     except Exception as exc:  # noqa: BLE001 - the reconcile read is best-effort
@@ -594,11 +571,7 @@ def _reconcile_inflight(
 def _open_breadcrumb(
     backend: Backend, repo: str, head_sha: str, *, auth_fatal: bool
 ) -> int | None:
-    """Open the ``in_progress`` funnel check run on ``repo@head_sha`` — best-effort.
-
-    Any failure degrades to ``None`` (no breadcrumb, the review still posts), but
-    with ``auth_fatal`` a :class:`~shipit.review.ghauth.ReviewAuthError` propagates.
-    """
+    """Open the ``in_progress`` funnel check run, or ``None``; ``auth_fatal`` un-swallows an auth error."""
     try:
         run_id = checkrun.create(backend, repo, head_sha)
         logger.info(

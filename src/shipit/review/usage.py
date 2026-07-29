@@ -7,24 +7,18 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-#: ``source`` tokens — where a usage figure came from, so a record consumer can
-#: tell a measured number from an explicitly-unknown one without sniffing nulls.
+#: Where a usage figure came from, so a consumer need not sniff nulls.
 SOURCE_CLAUDE_ENVELOPE = "claude-envelope"
 SOURCE_CODEX_STDERR = "codex-stderr"
 SOURCE_UNREPORTED = "unreported"
 
-#: Matches codex's stderr usage line, tolerating both the same-line
-#: (``tokens used: 11,943``) and next-line renderings.
+#: Matches codex's stderr usage line, same-line or next-line.
 _CODEX_TOKENS_LINE = re.compile(r"tokens used:?\s*\n?\s*([\d,]+)", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
 class TokenUsage:
-    """One launch's token cost as its CLI reported it, or explicitly unknown.
-
-    ``total_tokens`` is ``None`` only for :data:`SOURCE_UNREPORTED`, never for a
-    parse miss. A coarse source leaves the input/output split ``None``.
-    """
+    """One launch's token cost; ``total_tokens`` is ``None`` only for :data:`SOURCE_UNREPORTED`."""
 
     total_tokens: int | None
     source: str = SOURCE_UNREPORTED
@@ -33,7 +27,6 @@ class TokenUsage:
 
     @property
     def reported(self) -> bool:
-        """True when this is a real measurement (a non-null total)."""
         return self.total_tokens is not None
 
     def as_record(self) -> dict[str, Any]:
@@ -51,11 +44,7 @@ UNREPORTED = TokenUsage(total_tokens=None)
 
 
 def from_claude_envelope(envelope: Mapping[str, Any]) -> TokenUsage:
-    """Usage from a ``claude -p --output-format json`` result envelope.
-
-    Input and output counters are required and the cache counters optional; any
-    shape drift degrades to :data:`UNREPORTED` rather than a partial total.
-    """
+    """Usage from a claude result envelope; any shape drift degrades to :data:`UNREPORTED`."""
     usage = envelope.get("usage")
     if not isinstance(usage, Mapping):
         return UNREPORTED

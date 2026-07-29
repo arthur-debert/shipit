@@ -1,7 +1,4 @@
-"""The local-review funnel breadcrumb, as an App-authored check run.
-
-See docs/adr/0005-local-review-funnel-via-check-runs.md.
-"""
+"""The local-review funnel breadcrumb, as an App-authored check run. See docs/adr/0005-local-review-funnel-via-check-runs.md."""
 
 from __future__ import annotations
 
@@ -16,21 +13,16 @@ from . import ghauth
 #: The minted installation token is NEVER passed to a record.
 logger = logging.getLogger("shipit.review")
 
-#: The sole terminal check-run status; every other status the Checks API can
-#: surface means the run is still in flight.
+#: The sole terminal check-run status; any other means the run is in flight.
 _TERMINAL_STATUS = "completed"
 
 
 def _run_name(backend: Backend) -> str:
-    """The full funnel check-run name — ``review: <agent>-local``."""
     return f"review: {backend.check_run_name}"
 
 
 def create(backend: Backend, repo: str, head_sha: str) -> int | None:
-    """Open the in-progress funnel check run for ``backend`` on ``repo``@``head_sha``.
-
-    Every failure propagates; the best-effort swallowing lives in the caller.
-    """
+    """Open the in-progress funnel check run; every failure propagates to the caller."""
     name = _run_name(backend)
     token = ghauth.installation_token(backend, repo)
     body = {
@@ -63,10 +55,7 @@ def transition(
     title: str,
     summary: str,
 ) -> None:
-    """Close the funnel check run ``run_id`` to its terminal ``conclusion``.
-
-    Every failure propagates; the best-effort swallowing lives in the caller.
-    """
+    """Close check run ``run_id`` to ``conclusion``; every failure propagates to the caller."""
     name = _run_name(backend)
     token = ghauth.installation_token(backend, repo)
     body = {
@@ -96,14 +85,10 @@ def transition(
 
 
 def find_nonterminal(backend: Backend, repo: str, head_sha: str) -> int | None:
-    """The id of an in-flight funnel run for ``backend`` on ``repo``@``head_sha``, else ``None``.
-
-    Every failure propagates; the best-effort swallowing lives in the caller.
-    """
+    """The id of an in-flight funnel run, else ``None``; every failure propagates."""
     name = _run_name(backend)
     token = ghauth.installation_token(backend, repo)
-    # The `check_name` value carries a space + colon — url-encode it so the query
-    # string is well formed (`gh api` passes the path through verbatim).
+    # `gh api` passes the path through verbatim, so encode the space + colon.
     path = f"/repos/{repo}/commits/{head_sha}/check-runs?check_name={quote(name)}"
     logger.debug(
         "check run %r read on %s @ %s (as the %r app)",
