@@ -1,31 +1,7 @@
 """``shipit.pixienv`` — the pixi Tool adapter: env model, reads, execution, scrub.
 
-The pixi domain home (ADR-0022 / ADR-0028): shipit **rides pixi's
-environment/path/activation model instead of reinventing it**, and every piece of
-pixi knowledge — argv, env-scrub rules, cache location, timeout defaults — lives
-HERE, in exactly one adapter. pixi is a Rust CLI consumed via subprocess + JSON;
-there is no pixi Python library and this module deliberately does **not** reach under
-it to ``py-rattler`` (the conda layer beneath pixi). Four layers:
-
-- :mod:`~shipit.pixienv.model` — the pure core: pixi's JSON shapes as thin, frozen
-  value objects (:class:`EnvIdentity`, :class:`Activation`,
-  :class:`InstalledPackage`, :class:`Info`) plus the pure env transforms
-  (:func:`activation_delta` / :func:`activated_env`) — shipit never re-derives
-  activation.
-- :mod:`~shipit.pixienv.read` — the read-side I/O boundary: ``conda-meta`` files on
-  disk, and the native-JSON read verbs ``shell-hook`` / ``list`` / ``info``.
-- :mod:`~shipit.pixienv.run` — the execution side: ``pixi install`` (with pixi's
-  own long-runner timeout default) and run-wrapping (``pixi run --manifest-path …
-  -- <argv>``), plus pixi's on-disk knowledge (manifest name, provisioned-env
-  sentinel, cache dir).
-- :mod:`~shipit.pixienv.scrub` — the env-scrub rules: which inherited vars bind a
-  child to the PARENT pixi/Conda project (the one predicate every scrub path
-  shares).
-
-The sccache build env that used to be hand-built in Python now lives in pixi
-``[activation.env]``, so pixi sets it on every activation and it reaches the agent's
-own in-Tree ``cargo`` — one more "stop computing what pixi already computes"
-(docs/dev/pixi).
+Every piece of pixi knowledge lives here, in exactly one adapter.
+See docs/adr/0022-layer-boundary-model-vs-borrow-pixi.md.
 """
 
 from __future__ import annotations

@@ -1,28 +1,6 @@
-"""Run locator — resolve a just-closed **run**'s on-disk files from the hook payload.
+"""``harness/eval/locate`` — resolve a just-closed run's transcript and meta from the hook payload.
 
-`locate_run(hook_input) -> RunFiles | None` is the filesystem boundary of the eval
-wire. The terminal-hook payload carries `transcript_path`; the locator turns that
-into the run's transcript plus its `.meta.json` sidecar — handling BOTH run kinds
-(CONTEXT.md "Run"):
-
-  - the **coordinator** run is the top-level session transcript `<session_id>.jsonl`,
-    which has NO meta sidecar;
-  - a **subagent** run is `…/subagents/agent-<id>.jsonl`, co-located with a sibling
-    `agent-<id>.meta.json` carrying `agentType` / `spawnMode`.
-
-The split is read off the transcript filename (`agent-` prefix ⇒ subagent), so the
-locator is a pure function of the payload + existence probes. `None` means the
-payload named no transcript, or named one that does not exist — the caller fails
-open (no record, no crash).
-
-Run KIND is not the same as ROLE. A top-level session ⇒ the coordinator RUN KIND,
-but a headless `shipit spawn subagent --role R` Run is its OWN top-level session
-(no `agent-` prefix, no `.meta.json`) — a coordinator-KIND run that is really the
-role it was spawned as. The locator does not see that; the role override lives at
-the record seam, which reads the spawned role from the launch context
-(`SHIPIT_LOG_CTX_ROLE`) and stamps it in place of the coordinator label
-(:func:`shipit.harness.eval.record.build`). Run KIND (and the coordinator-only
-exit-hygiene check gated on it) is unchanged.
+Run KIND (coordinator vs subagent) is read off the filename; ROLE is not.
 """
 
 from __future__ import annotations
@@ -32,55 +10,31 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-#: Subagent transcripts (and their meta sidecars) are named `agent-<id>.*`; the
-#: coordinator session transcript is `<session_id>.jsonl` with no such prefix.
+#: Subagent transcripts are `agent-<id>.*`; the coordinator's has no such prefix.
 _SUBAGENT_PREFIX = "agent-"
 _META_SUFFIX = ".meta.json"
 
 
 @dataclass(frozen=True)
 class RunFiles:
-    """The on-disk files of one run: its transcript, and its meta sidecar if any.
-
-    ``meta`` is ``None`` for the coordinator run (the session transcript has no
-    sidecar); a subagent run carries its ``agent-<id>.meta.json``.
-    """
+    """One run's on-disk files; ``meta`` is ``None`` for the coordinator run."""
 
     transcript: Path
     meta: Path | None
 
     @property
     def run_id(self) -> str:
-        """The run's stable on-disk identity — the transcript filename's stem
-        (``agent-<id>`` for a subagent, the session id for the coordinator).
-
-        This is the ``eval.run_id`` the record stamps (RVW02-WS03), and so the
-        join key a **review-round record**'s contributing runs carry: both sides
-        name the run by the one identity the harness already assigns it — its
-        transcript file — so no second id scheme is minted.
-        """
+        """The run's stable identity — the transcript filename's stem, minting no second id."""
         return self.transcript.stem
 
     @property
     def is_coordinator(self) -> bool:
-        """True for the coordinator run (the session transcript, no `agent-` prefix).
-
-        Run KIND is read off the transcript filename — the SAME signal the locator
-        uses to decide whether a meta sidecar exists — NOT off whether a meta dict
-        parsed. A subagent run with a missing/unreadable sidecar is still a subagent,
-        so the coordinator-only checks (exit-hygiene) must not run for it.
-        """
+        """True for the coordinator run, read off the filename, NOT off whether meta parsed."""
         return not self.transcript.name.startswith(_SUBAGENT_PREFIX)
 
 
 def locate_run(hook_input: Mapping[str, Any]) -> RunFiles | None:
-    """Resolve the run's transcript + meta from a `Stop` / `SubagentStop` payload.
-
-    Returns ``None`` when the payload names no ``transcript_path`` OR names one
-    that does not exist on disk — the boundary treats either as "nothing to
-    evaluate" and falls through to a no-op, honouring the fail-open contract that
-    a missing transcript writes nothing (rather than a hollow count-0 record).
-    """
+    """The run's files, or ``None`` when the payload names no transcript or a missing one."""
     raw = hook_input.get("transcript_path")
     if not raw:
         return None
@@ -91,13 +45,7 @@ def locate_run(hook_input: Mapping[str, Any]) -> RunFiles | None:
 
 
 def _sibling_meta(transcript: Path) -> Path | None:
-    """The `agent-<id>.meta.json` next to a subagent transcript, or ``None``.
-
-    Only subagent transcripts (``agent-`` prefix) have a meta sidecar; the
-    coordinator session transcript has none. The sidecar is returned only when it
-    actually exists, so a renamed/missing meta degrades to a coordinator-shaped
-    record rather than a dangling path.
-    """
+    """The existing `agent-<id>.meta.json` next to a subagent transcript, else ``None``."""
     if not transcript.name.startswith(_SUBAGENT_PREFIX):
         return None
     candidate = transcript.with_name(transcript.stem + _META_SUFFIX)

@@ -1,11 +1,4 @@
-"""Records and selection — the pure halves LOG04 built, in their domain home.
-
-One JSONL line becomes at most one record (:func:`parse_record`), a set of
-CLI filters becomes ONE predicate (:class:`Filter`), and a Work Stream's
-display form becomes the int the record carries (:func:`normalize_ws`).
-Moved as-is from the verb layer (CLI02 / ADR-0030) — same contracts, now
-importable without a terminal in sight.
-"""
+"""``logread/records`` — parse one JSONL line into a record, and AND-compose the selection."""
 
 from __future__ import annotations
 
@@ -14,13 +7,7 @@ from typing import Any
 
 
 def parse_record(line: str) -> dict[str, Any] | None:
-    """The line as ONE JSONL record (a JSON object), or ``None``.
-
-    The single parse every selecting/rendering path shares: only a JSON object
-    is a record — any other parse (a torn write, a bare JSON string) is the
-    caller's cue to apply its own resilience contract (skip with a note, drop
-    silently under a filter), never a crash.
-    """
+    """The line as ONE record, or ``None``: only a JSON object counts, and nothing raises."""
     try:
         record = json.loads(line)
     except json.JSONDecodeError:
@@ -31,14 +18,7 @@ def parse_record(line: str) -> dict[str, Any] | None:
 def normalize_ws(value: int | str) -> int:
     """The Work Stream index ``value`` names, as the INT the record carries.
 
-    The CLI never punishes the display form (PRD): ``1``, ``01``, and ``WS01``
-    (any case) all name Work Stream 1 — the ``WS`` prefix and zero-padding are
-    rendering, stripped here, because the durable record's ``ws`` domain key is
-    int-typed (ADR-0032) and selection compares against THAT. Anything else —
-    garbage text, or a non-positive index the branch grammar could never have
-    written (``shipit.branchid`` derives ``WS00`` to nothing for the same
-    reason) — raises :class:`ValueError` for the caller to report as a usage
-    error.
+    ``1``, ``01``, and ``WS01`` all name Work Stream 1; anything else raises.
     """
     text = str(value).strip()
     if text.upper().startswith("WS"):
@@ -57,34 +37,11 @@ def normalize_ws(value: int | str) -> int:
 
 
 class Filter:
-    """The record filters (LOG04) as ONE predicate.
+    """The record filters as ONE predicate, AND-composed and applied BEFORE the tail count.
 
-    Filters compose as AND and are applied BEFORE the tail count and before
-    either output mode, so ``-n 5 --pr 231`` means "the last 5 records about
-    pr#231" and ``--raw`` pipes exactly the matching stored lines to jq.
-    Selection is on the record's flat fields: ``events_only`` keeps only
-    records carrying an ``event`` field (a dev-cycle event, ADR-0032 —
-    presence is the test, never a name list of the reader's own); each
-    domain-key filter (``pr``, ``session``, ``epic``, ``ws``, ``agent``,
-    ``role``) keeps records whose key EQUALS the value — typed as the record
-    carries it (``pr``/``ws`` int, the rest strings, ADR-0029/0032), which is
-    why the CLI boundary normalizes ``WS01`` to ``1`` before it gets here. A
-    record without the key cannot match it: absent means unbound, not
-    wildcard.
-
-    The review-observability trio (RVW03-WS02) selects the same way on the
-    review sub-agent EXTRAS the fan-out stamps per record — not domain keys,
-    but flat fields all the same: ``reviewer`` (the reviewing agent),
-    ``run_id`` (one pass/calibrator run), ``round_id`` (one fan-out round) —
-    so ``shipit logs --run <id>`` isolates one pass's interleaved lines and
-    ``--round <id>`` groups a whole round's.
-
-    Filtering requires parsing, so with any filter ACTIVE a non-record line
-    (blank padding, a torn write) simply cannot match and is dropped silently —
-    in both modes: a malformed line's fields are unknowable, and surfacing it
-    under a field filter would be a false positive. With NO filter active the
-    predicate is vacuously true and both modes keep their unfiltered contracts
-    (raw passes malformed lines through; rendered notes them on stderr).
+    Each filter compares a flat record field for EQUALITY, typed as the record
+    carries it; an absent key means unbound, never wildcard. With any filter
+    active a non-record line cannot match and is dropped silently.
     """
 
     def __init__(
