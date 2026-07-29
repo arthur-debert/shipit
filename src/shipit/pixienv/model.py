@@ -1,7 +1,6 @@
 """``pixienv/model`` — pixi's env/activation model, mirrored as frozen value objects.
 
-Pure: each parse takes already-captured pixi JSON. Activation is consumed from
-pixi, never re-derived. See docs/adr/0022-borrow-pixis-model.md.
+See docs/adr/0022-borrow-pixis-model.md.
 """
 
 from __future__ import annotations

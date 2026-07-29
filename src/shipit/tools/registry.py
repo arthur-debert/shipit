@@ -1,6 +1,5 @@
 """``tools/registry`` — the closed toolchain registry, the Tool verbs' dispatch axis.
 
-Each entry carries the default producing argv per tool slot; a slot may be empty.
 See docs/adr/0039-tool-verbs.md.
 """
 

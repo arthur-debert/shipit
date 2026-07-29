@@ -1,7 +1,6 @@
 """``tools/lanes`` — pure planner: (declared lanes, event, path-diff) → job matrix.
 
-Applies the trigger ladder, the scope thin/full rule, and the per-lane routing
-and provisioning fields. ``run`` is opaque here.
+Applies the trigger ladder and the scope thin/full rule; ``run`` is opaque here.
 """
 
 from __future__ import annotations

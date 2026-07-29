@@ -1,7 +1,6 @@
 """``session/current`` — which session is "this one"?
 
-Resolved from the SessionStart hook's exported env key, else from the containing
-flat Tree's ``<id>``. Best-effort: never raises. See docs/adr/0074-trees-are-flat.md.
+The exported env key, else the containing flat Tree's ``<id>``. Never raises.
 """
 
 from __future__ import annotations

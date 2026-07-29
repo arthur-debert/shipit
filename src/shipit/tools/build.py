@@ -1,6 +1,5 @@
 """``tools/build`` — pure planner: (legs, artifacts, version) → build steps.
 
-Joins the path→toolchain leg axis with the ``[artifacts]`` build-target axis.
 See docs/adr/0007-artifacts-are-a-map.md.
 """
 

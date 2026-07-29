@@ -1,7 +1,6 @@
 """``harness/eval/extractors`` — objective metrics read from a run's transcript.
 
-Each metric is a pure function over the parsed JSONL events; :func:`extract` is
-the orchestrator. :func:`exit_hygiene` is the one live process/fs check.
+Pure over the parsed JSONL events, except the live :func:`exit_hygiene`.
 """
 
 from __future__ import annotations

@@ -1,7 +1,6 @@
 """``pixienv/run`` — the execution side of the pixi Tool adapter.
 
 Every ``pixi`` argv shipit executes or hands to a launcher is built here.
-See docs/adr/0028-tool-adapters.md.
 """
 
 from __future__ import annotations

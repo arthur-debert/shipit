@@ -1,7 +1,6 @@
 """``session/resume`` — backend-neutral coordinator session resume resolution.
 
-Read-only: turns shipit's durable per-repo JSONL records into a typed target.
-Launch mechanics stay in the verb.
+Read-only: turns durable JSONL records into a typed target, never launching one.
 """
 
 from __future__ import annotations

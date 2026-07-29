@@ -1,7 +1,6 @@
 """``harness/worktree_adapter`` — pure resolution for the WorktreeCreate hook.
 
-Tells the coordinator launch from a helper spawn and resolves the helper's
-``<epic>/agent-<id>`` holding branch. See docs/adr/0027-ephemeral-session-tree.md.
+See docs/adr/0027-ephemeral-session-tree.md.
 """
 
 from __future__ import annotations

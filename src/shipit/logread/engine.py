@@ -1,6 +1,6 @@
 """``logread/engine`` — JSONL file reading, tail, and live follow, as iterators.
 
-Lines are yielded verbatim; follow buffers torn writes whole and survives rotation.
+Follow buffers torn writes whole and survives rotation; lines are yielded verbatim.
 """
 
 from __future__ import annotations

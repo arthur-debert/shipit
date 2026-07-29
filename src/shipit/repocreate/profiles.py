@@ -1,7 +1,5 @@
 """``repocreate/profiles`` — the closed Creation-profile registry.
 
-A profile returns a :class:`Contribution` the central planner composes into one
-Repo; it never splices a shared manifest itself.
 See docs/adr/0063-creation-profiles-are-closed.md.
 """
 

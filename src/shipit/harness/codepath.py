@@ -1,7 +1,6 @@
 """``harness/codepath`` — does this path touch code the coordinator must delegate?
 
-Pure, path-string only. Biased to NON-code when unsure: a misclassification that
-blocks legitimate work is worse than one that lets an edit through.
+Pure, path-string only, and biased to NON-code when unsure.
 """
 
 from __future__ import annotations

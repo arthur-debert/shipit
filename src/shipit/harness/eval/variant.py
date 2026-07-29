@@ -1,7 +1,6 @@
 """``harness/eval/variant`` — content-hash the role prompt that produced a run.
 
 Identical prompts hash identically, so runs pool; a changed prompt separates them.
-An optional label names a deliberate A/B arm.
 """
 
 from __future__ import annotations

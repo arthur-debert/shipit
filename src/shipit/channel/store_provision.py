@@ -1,7 +1,5 @@
 """``channel/store_provision`` — provision the Artifact channel's two GCS buckets.
 
-Public tier (``allUsers`` reader, UBLA on) and private tier (a dedicated reader
-service account, public-access-prevention enforced).
 See docs/adr/0065-artifact-channel-store.md.
 """
 

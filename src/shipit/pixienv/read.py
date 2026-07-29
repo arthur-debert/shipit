@@ -1,7 +1,6 @@
 """``pixienv/read`` — the I/O boundary that hands pixi's JSON to the pure parsers.
 
-Reads ``conda-meta/pixi`` and pixi's ``--json`` read verbs; every Exec takes an
-injectable runner.
+Every Exec takes an injectable runner.
 """
 
 from __future__ import annotations

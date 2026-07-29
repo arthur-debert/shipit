@@ -1,7 +1,6 @@
 """``agent/backend`` — the one agent-backend identity/alias registry.
 
-One :class:`Backend` per harness/CLI, carrying every alias the launch axis and the
-PR-funnel axis reference. See docs/adr/0025-agent-axes.md.
+See docs/adr/0025-agent-axes.md.
 """
 
 from __future__ import annotations

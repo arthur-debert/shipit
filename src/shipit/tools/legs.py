@@ -1,7 +1,6 @@
 """``tools/legs`` — pure: (map entries, tool, selector, passthrough) → legs.
 
-A bare invocation fans out over every leg in map order; a selector narrows it;
-passthrough reaches exactly one leg or refuses. See docs/adr/0039-tool-verbs.md.
+See docs/adr/0039-tool-verbs.md.
 """
 
 from __future__ import annotations
