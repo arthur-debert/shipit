@@ -375,11 +375,21 @@ def test_portfolio_contains_the_adoption_targets():
         assert slug in repos, slug
 
 
+def test_portfolio_contains_the_adopted_editor_consumers():
+    # #1130: nvim and zed-lex were excluded as "editor-config / grammar-packaging
+    # repos" while both in fact carry a `.shipit.toml` with a `[shipit] version`
+    # pin — i.e. they are adopted consumers, so every fleet-wide reconcile driven
+    # off this table silently skipped them. Membership is adoption, not genre.
+    repos = _portfolio_repos()
+    for slug in ("lex-fmt/nvim", "lex-fmt/zed-lex"):
+        assert slug in repos, slug
+
+
 def test_portfolio_excludes_the_sweeps_non_targets():
     repos = _portfolio_repos()
-    # n/a rows in the sweep: docs, editor config, grammar packaging.
-    for slug in ("lex-fmt/comms", "lex-fmt/nvim", "lex-fmt/zed-lex"):
-        assert slug not in repos, slug
+    # The one genuine n/a row in the sweep: a docs repo with neither a
+    # `pixi.toml` nor a `.shipit.toml` on main, so nothing to reconcile.
+    assert "lex-fmt/comms" not in repos
 
 
 def test_portfolio_excludes_the_dropped_non_targets():

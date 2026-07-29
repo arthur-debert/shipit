@@ -210,10 +210,16 @@ trigger = "pr"
 # Reconciled against the ADP fleet sweep (#426, epic #413): every adoption
 # target of the swept fleet is listed — including shipit itself (dogfooding is
 # a row in the sweep) and shipit-canary (the standing ADP00 test bed) — and the
-# sweep's non-targets (lex-fmt/comms, lex-fmt/nvim, lex-fmt/zed-lex: docs /
-# editor-config / grammar-packaging repos) are OUT. The sweep's bird's-eye
-# table is the derived human view; THIS table is the machine-readable fleet
-# manifest (ADR-0033).
+# sweep's one non-target (lex-fmt/comms: a docs repo carrying neither a
+# `pixi.toml` nor a `.shipit.toml`) is OUT. The sweep's bird's-eye table is the
+# derived human view; THIS table is the machine-readable fleet manifest
+# (ADR-0033).
+#
+# The membership test is ADOPTION, not repo genre: a repo carrying a
+# `.shipit.toml` with a `[shipit] version` pin IS a consumer and belongs here,
+# whatever it packages. lex-fmt/nvim and lex-fmt/zed-lex were excluded as
+# "editor-config / grammar-packaging repos" while both were in fact adopted and
+# pinned, so every fleet-wide reconcile silently skipped them (#1130).
 #
 # Secondary stacks are deferred (out of scope for now): the brew-tap stack
 # (arthur-debert/homebrew-tools — formulas land via release-workflow pushes, not the PR
@@ -233,8 +239,10 @@ lex = [
   { repo = "lex-fmt/lex", path = "lex-fmt/lex" },
   { repo = "lex-fmt/lexed", path = "lex-fmt/lexed" },
   { repo = "lex-fmt/mkdocs-lex", path = "lex-fmt/mkdocs-lex" },
+  { repo = "lex-fmt/nvim", path = "lex-fmt/nvim" },
   { repo = "lex-fmt/tree-sitter-lex", path = "lex-fmt/tree-sitter-lex" },
   { repo = "lex-fmt/vscode", path = "lex-fmt/vscode" },
+  { repo = "lex-fmt/zed-lex", path = "lex-fmt/zed-lex" },
 ]
 lookma = [{ repo = "arthur-debert/lookma", path = "lookma" }]
 padz = [{ repo = "arthur-debert/padz", path = "padz" }]
