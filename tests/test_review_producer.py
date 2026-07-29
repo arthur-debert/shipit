@@ -112,6 +112,21 @@ def test_codex_launches_in_the_tree_and_captures_the_review(_faked):
     assert _faked["timeout"] == 600.0
 
 
+def test_reviewer_child_env_drops_the_parent_project_pointer(_faked, monkeypatch):
+    # #1153: the reviewer child is rooted in its OWN read-only Tree, so inheriting
+    # the parent's `PIXI_PROJECT_MANIFEST` gives it an env naming a manifest that
+    # belongs to a different Tree — pixi recovers by preferring the local manifest
+    # (hence only a WARN), but the leak is the class rooting exists to prevent.
+    monkeypatch.setenv("PIXI_PROJECT_MANIFEST", "/trees/parent/pixi.toml")
+    monkeypatch.setenv("CONDA_PREFIX", "/trees/parent/.pixi/envs/default")
+
+    producer.run_tree_review(agent_backend.CODEX, _ctx(), launcher=_faked["launcher"])
+
+    assert "PIXI_PROJECT_MANIFEST" not in _faked["env"]
+    assert "CONDA_PREFIX" not in _faked["env"]
+    assert _faked["env"]["PATH"]  # the scrub is surgical, not a wipe
+
+
 def test_tree_review_logs_readonly_work_env_evidence(_faked, caplog):
     caplog.set_level(logging.INFO, logger="shipit.review")
 

@@ -64,6 +64,8 @@ def bounds(
     umbrella: bool = True,
     org_repo: str = "acme/widget",
     status_lines: list[str] | None = None,
+    stdout: str = "{}",
+    stderr: str = "boom",
 ) -> tuple[Boundaries, dict]:
     """Fake every effectful edge as a recording callable; return (bounds, calls).
 
@@ -73,7 +75,9 @@ def bounds(
     audits against is the true one, never a hardcoded string. The runner
     records the launch contract (cmd/cwd/env) and never spawns anything.
     ``status_lines`` is what the salvage probe's porcelain read reports (#587)
-    — the default ``None`` means a clean tree.
+    — the default ``None`` means a clean tree. ``stdout``/``stderr`` are the
+    streams the fake child reports back, which drive the failure-reporting
+    matrix (#1153).
     """
     calls: dict = {}
     parent = tmp_path / "repo"
@@ -93,7 +97,7 @@ def bounds(
         calls["cwd"] = cwd
         calls["env"] = env
         calls["timeout"] = timeout
-        return launch.LaunchResult(returncode=returncode, stdout="{}", stderr="boom")
+        return launch.LaunchResult(returncode=returncode, stdout=stdout, stderr=stderr)
 
     def pr_for_head(branch, *, cwd=None):
         calls["pr_branch"] = branch
@@ -827,12 +831,104 @@ def test_a_git_error_is_a_clean_refusal(tmp_path):
 
 
 def test_child_nonzero_exit_is_refused_with_its_stderr(tmp_path):
-    b, _ = bounds(tmp_path, returncode=2)
+    b, _ = bounds(tmp_path, returncode=2, stdout="")
     with pytest.raises(SpawnError) as exc:
         spawn_subagent(spec(), b)
     # The child's stderr is surfaced in the refusal, not swallowed.
     assert "claude child exited 2" in str(exc.value)
     assert "boom" in str(exc.value)
+
+
+def test_child_nonzero_exit_surfaces_stdout_when_stderr_is_empty(tmp_path):
+    # #1153, the failure that cost five DOC01 Runs their reason: a headless
+    # `claude -p` reports its own errors on STDOUT, and the refusal used to read
+    # stderr only — so five real failures rendered as a bare `child exited 1`
+    # with nothing else. The child's account must reach the operator whichever
+    # stream carried it.
+    b, _ = bounds(
+        tmp_path,
+        returncode=1,
+        stdout="Credit balance is too low to run this request",
+        stderr="",
+    )
+
+    with pytest.raises(SpawnError) as exc:
+        spawn_subagent(spec(), b)
+
+    assert "Credit balance is too low" in str(exc.value)
+
+
+def test_child_nonzero_exit_surfaces_both_streams_labelled(tmp_path):
+    # Neither stream is preferred away: a child that wrote to both gets both
+    # reported, each labelled, so the operator can tell which said what.
+    b, _ = bounds(
+        tmp_path,
+        returncode=1,
+        stdout="stdout-said-this",
+        stderr="stderr-said-that",
+    )
+
+    with pytest.raises(SpawnError) as exc:
+        spawn_subagent(spec(), b)
+
+    message = str(exc.value)
+    assert "stdout-said-this" in message
+    assert "stderr-said-that" in message
+    assert "child stdout" in message and "child stderr" in message
+
+
+def test_silent_nonzero_child_refusal_says_so_and_names_the_tree(tmp_path):
+    # The four DOC01 Runs that died with a CLEAN tree and both streams empty: with
+    # nothing to quote, the refusal must say the child produced no account at all
+    # and hand over the two coordinates that remain actionable — which tree to open
+    # and how long the child ran (204s of silence reads very differently from 2s).
+    b, _ = bounds(tmp_path, returncode=1, stdout="", stderr="   \n  ")
+
+    with pytest.raises(SpawnError) as exc:
+        spawn_subagent(spec(), b)
+
+    message = str(exc.value)
+    assert "claude child exited 1" in message
+    assert "wrote NOTHING to either stdout or stderr" in message
+    assert str(tmp_path / "tree") in message  # which tree to open
+    assert "ms" in message  # how long it ran before dying
+    # Whitespace-only is EMPTY: an empty labelled section is worse than none.
+    assert "child stderr" not in message
+
+
+def test_silent_nonzero_child_still_reports_uncommitted_work(tmp_path):
+    # The salvage note is what made WS11/WS15 recoverable (#587) — the richer
+    # reason must ride ALONGSIDE it, never displace it.
+    b, _ = bounds(
+        tmp_path,
+        returncode=1,
+        stdout="",
+        stderr="",
+        status_lines=[" M a.py", " M b.py"],
+    )
+
+    with pytest.raises(SpawnError) as exc:
+        spawn_subagent(spec(), b)
+
+    message = str(exc.value)
+    assert "wrote NOTHING to either stdout or stderr" in message
+    assert "2 uncommitted change(s)" in message
+    assert "salvageable" in message
+
+
+def test_nonzero_child_refusal_logs_the_stream_sizes(tmp_path, caplog):
+    # The durable record carries the stream sizes as greppable extras, so "the
+    # child said nothing" is answerable from the JSONL log without re-running it.
+    b, _ = bounds(tmp_path, returncode=1, stdout="", stderr="")
+
+    with caplog.at_level(logging.ERROR, logger="shipit.spawn"):
+        with pytest.raises(SpawnError):
+            spawn_subagent(spec(), b)
+
+    record = next(r for r in caplog.records if hasattr(r, "stdout_bytes"))
+    assert record.stdout_bytes == 0
+    assert record.stderr_bytes == 0
+    assert record.rc == 1
 
 
 def test_launch_transport_failure_is_a_clean_refusal(tmp_path):

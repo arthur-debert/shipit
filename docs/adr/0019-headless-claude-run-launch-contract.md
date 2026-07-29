@@ -160,6 +160,6 @@ and provisioning paths. `--clean-env` is **NOT** used.
   `--manifest-path` already overrides a leaked `PIXI_PROJECT_MANIFEST`, so the env scrub
   is belt-and-suspenders for activation (it still cleans the agent's own `pixi` calls).
 
-Implemented in `src/shipit/spawn/launch.py` (`pixi_wrap` / `scrub_tree_env`), wired at the
-`shipit.spawn.subagent` launch call sites (the domain pipeline; the verb is glue, CLI02-WS02). The full verified contract lives in
-`docs/dev/pixi.lex` §7/§8.
+Implemented in `src/shipit/spawn/launch.py` (`pixi_wrap` / `scrub_tree_env`), applied by
+`launch()` itself so every Tree-rooted launch site is scrubbed and none can omit it
+(#1153). The full verified contract lives in `docs/dev/pixi.lex` §7/§8.

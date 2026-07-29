@@ -470,7 +470,7 @@ def _run_child(
         result = launch.launch(
             cmd,
             cwd=tree.path,
-            env=launch.scrub_tree_env(logcontext.env_export(adapter.child_env())),
+            env=logcontext.env_export(adapter.child_env()),
             runner=bounds.runner,
         )
     except execrun.ExecError as exc:
@@ -478,13 +478,18 @@ def _run_child(
         raise _refusal(str(exc), exc=exc, backend=adapter.name) from exc
     child_ms = _elapsed_ms(launch_start)
     if result.returncode != 0:
-        detail = result.stderr.strip()
         raise _refusal(
-            f"{adapter.name} child exited {result.returncode}"
-            + (f"\n{detail}" if detail else ""),
+            launch.child_failure_detail(
+                result,
+                backend=adapter.name,
+                tree_path=tree.path,
+                duration_ms=child_ms,
+            ),
             backend=adapter.name,
             rc=result.returncode,
             duration_ms=child_ms,
+            stdout_bytes=len(result.stdout.encode("utf-8")),
+            stderr_bytes=len(result.stderr.encode("utf-8")),
         )
     events.emit(
         logger,

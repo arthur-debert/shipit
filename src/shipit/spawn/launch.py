@@ -29,6 +29,10 @@ class LaunchResult:
 #: The injectable subprocess seam; a ``None`` ``timeout`` means unbounded.
 Runner = Callable[..., LaunchResult]
 
+#: The per-stream cap on a failed child's reported tail: wide enough for a headless
+#: backend's error block, bounded so a runaway stream cannot bury the refusal.
+STREAM_TAIL_CHARS = 2000
+
 
 def launch(
     cmd: list[str],
@@ -38,10 +42,10 @@ def launch(
     timeout: float | None = LAUNCH_TIMEOUT,
     runner: Runner | None = None,
 ) -> LaunchResult:
-    """Run the backend child rooted at ``cwd``; ``timeout`` is its process deadline."""
+    """Run the backend child rooted at ``cwd`` on a SCRUBBED env; ``timeout`` is its deadline."""
     if runner is None:
         runner = _exec_runner
-    return runner(cmd, cwd=str(cwd), env=dict(env), timeout=timeout)
+    return runner(cmd, cwd=str(cwd), env=scrub_tree_env(env), timeout=timeout)
 
 
 def _exec_runner(
@@ -103,6 +107,45 @@ def scrub_tree_env(env: Mapping[str, str]) -> dict[str, str]:
             extra={"dropped": len(dropped)},
         )
     return scrubbed
+
+
+def stream_tail(text: str, *, limit: int = STREAM_TAIL_CHARS) -> str:
+    """``text`` stripped, kept to its trailing ``limit`` chars; a trim is marked inline."""
+    trimmed = text.strip()
+    if len(trimmed) <= limit:
+        return trimmed
+    return f"…({len(trimmed) - limit} earlier chars elided)…\n{trimmed[-limit:]}"
+
+
+def child_failure_detail(
+    result: LaunchResult,
+    *,
+    backend: str,
+    tree_path: str,
+    duration_ms: int,
+) -> str:
+    """A nonzero child's refusal text: a bounded tail of BOTH streams, or why there is none."""
+    headline = (
+        f"{backend} child exited {result.returncode} after {duration_ms}ms "
+        f"in the tree at {tree_path}"
+    )
+    # stdout FIRST: a headless backend reports its own errors there, so stderr-only
+    # reporting is structurally blind to the most common failure (#1153).
+    streams = [
+        f"--- child {name} (tail) ---\n{tail}"
+        for name, tail in (
+            ("stdout", stream_tail(result.stdout)),
+            ("stderr", stream_tail(result.stderr)),
+        )
+        if tail
+    ]
+    if not streams:
+        return (
+            f"{headline}, and wrote NOTHING to either stdout or stderr — it left no "
+            "account of why it failed. Inspect that tree and the child's own "
+            "transcript; the exit code is the only signal it produced."
+        )
+    return "\n".join([headline, *streams])
 
 
 def write_task(
