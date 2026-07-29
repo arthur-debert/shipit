@@ -48,12 +48,10 @@ S3_OPTIONS_CLOSE = "# <<< shipit-managed artifact-dep s3-options <<<"
 
 
 def public_channel_url(repo_slug: str) -> str:
-    """The authless HTTPS per-repo channel URL for a PUBLIC producing repo."""
     return f"{PUBLIC_CHANNEL_HOST}/{PUBLIC_ARTIFACT_BUCKET}/{repo_slug}"
 
 
 def private_channel_url(repo_slug: str) -> str:
-    """The ``s3://`` S3-interop per-repo channel URL for a PRIVATE producing repo."""
     return f"{PRIVATE_CHANNEL_SCHEME}{PRIVATE_ARTIFACT_BUCKET}/{repo_slug}"
 
 
@@ -113,7 +111,6 @@ def materialized_bin_path(root: Path, dep: ArtifactDep, *, target: str) -> Path:
 
 
 def _toml_str_list(values: Sequence[str]) -> str:
-    """A TOML inline array of double-quoted string VALUES — no escaping; keys go through :func:`_toml_key`."""
     return "[" + ", ".join(f'"{v}"' for v in values) + "]"
 
 
@@ -157,7 +154,6 @@ def _feature_unit(
 
 
 def _environments_unit(features: Sequence[str | None]) -> Unit:
-    """The one consolidated block wiring every target's feature into its environment."""
     lines = [
         f"{_toml_key(env_name(f))} = {_toml_str_list([_feature_name(f)])}"
         for f in features
@@ -181,7 +177,6 @@ def _s3_bucket(url: str) -> str | None:
 
 
 def _s3_options_block(buckets: Sequence[str]) -> str:
-    """One ``[s3-options.<bucket>]`` table per private bucket, templated directly into TOML."""
     force = "true" if S3_OPTIONS_FORCE_PATH_STYLE else "false"
     tables = [
         "\n".join(
@@ -198,7 +193,6 @@ def _s3_options_block(buckets: Sequence[str]) -> str:
 
 
 def _s3_options_unit(buckets: Sequence[str]) -> Unit:
-    """The one consolidated ``[s3-options]`` block for every private bucket in play."""
     return Unit(
         key=S3_OPTIONS_KEY,
         dest=PIXI_FILE,
