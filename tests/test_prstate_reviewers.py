@@ -582,23 +582,21 @@ def test_local_request_normalizes_failure_to_prstateerror(monkeypatch, tmp_path)
 def test_local_request_surfaces_reviewauth_hint_without_traceback_spray(
     monkeypatch, tmp_path, caplog
 ):
-    # #522: an EXPECTED auth failure — the `review` extra / pyjwt is absent when the
-    # coordinator drives `shipit pr next` in the default env — must surface the
-    # ReviewAuthError's already-actionable install hint as a clean PrStateError,
-    # NOT a raw `ModuleNotFoundError` traceback sprayed at ERROR.
+    # #522: an EXPECTED auth failure — the operator's machine cannot mint the App
+    # token — must surface the ReviewAuthError's already-actionable remedy as a
+    # clean PrStateError, NOT a raw traceback sprayed at ERROR.
     import logging
 
     from shipit.review import service
-    from shipit.review.ghauth import ReviewAuthError
+    from shipit.review.ghauth import UNCONFIGURED, ReviewAuthError
 
     hint = (
-        "Posting a review as a GitHub App needs PyJWT ... re-run the same command "
-        "there, e.g. `pixi run -e review shipit pr next`. Or install it directly: "
-        "shipit with the `review` extra."
+        "Could not source the private key for the 'codex' review app from Doppler "
+        "(key 'CODEX_REVIEW_APP_PRIVATE_KEY'): doppler: command not found"
     )
 
     def boom(agent, pr, **kwargs):
-        raise ReviewAuthError(hint)
+        raise ReviewAuthError(hint, kind=UNCONFIGURED)
 
     monkeypatch.setattr(service, "start_detached_review", boom)
     monkeypatch.chdir(tmp_path)
@@ -607,11 +605,11 @@ def test_local_request_surfaces_reviewauth_hint_without_traceback_spray(
         with pytest.raises(PrStateError) as excinfo:
             CODEX.request(_target(7))
 
-    # The actionable hint (naming the `review` env / extra) rode into the clean
-    # PrStateError message the CLI renders + exit 1.
+    # The actionable remedy rode into the clean PrStateError message the CLI
+    # renders + exit 1.
     msg = str(excinfo.value)
-    assert "pixi run -e review" in msg
-    assert "`review` extra" in msg
+    assert "Doppler" in msg
+    assert "CODEX_REVIEW_APP_PRIVATE_KEY" in msg
     # `from None` severs the chain: the hint already rode into the message above,
     # so there is no `__cause__` left to spray a traceback for on this EXPECTED path.
     assert excinfo.value.__cause__ is None

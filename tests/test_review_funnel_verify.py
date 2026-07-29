@@ -196,7 +196,9 @@ def test_verify_records_auth_failure_without_raising(monkeypatch):
     monkeypatch.setattr(funnel_verify.gh, "rest", fake.rest)
 
     def boom(agent, repo):
-        raise funnel_verify.ghauth.ReviewAuthError("app not installed")
+        raise funnel_verify.ghauth.ReviewAuthError(
+            "app not installed", kind=funnel_verify.ghauth.NOT_INSTALLED
+        )
 
     monkeypatch.setattr(funnel_verify.ghauth, "installation_auth", boom)
 

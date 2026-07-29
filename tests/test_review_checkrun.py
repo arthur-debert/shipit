@@ -147,7 +147,9 @@ def test_create_propagates_auth_failure(monkeypatch):
     honest base)."""
 
     def boom(backend, repo):
-        raise checkrun.ghauth.ReviewAuthError("403 Resource not accessible")
+        raise checkrun.ghauth.ReviewAuthError(
+            "403 Resource not accessible", kind=checkrun.ghauth.API_ERROR
+        )
 
     monkeypatch.setattr(checkrun.ghauth, "installation_token", boom)
     with pytest.raises(checkrun.ghauth.ReviewAuthError):

@@ -14,6 +14,7 @@ monkeypatched at the dispatch module — prstate style, no click.
 from __future__ import annotations
 
 import logging
+import pathlib
 
 import pytest
 from conftest import load_context
@@ -409,7 +410,11 @@ def test_request_act_selects_never_requested_and_stale(monkeypatch):
     assert line == "requested review(s): copilot, coderabbit"
 
 
-def test_request_act_tries_local_before_remote_to_make_reroute_atomic(monkeypatch):
+def test_request_act_tries_local_before_remote(monkeypatch):
+    """No-edge locals are requested FIRST, so a synchronous local failure cannot
+    land after a remote request edge was already placed — and the failure then
+    propagates to the caller's error shell rather than being sniffed for a reroute
+    into a pixi env that only exists in shipit's own repo (#969)."""
     adapters = [
         FakeAdapter("copilot"),
         FakeAdapter("codex", has_requested_edge=False),
@@ -419,19 +424,14 @@ def test_request_act_tries_local_before_remote_to_make_reroute_atomic(monkeypatc
 
     def fail_local_auth(pr, selected, roster, *, force):
         seen["order"] = [adapter.name for adapter in selected]
-        raise PrStateError("Posting a review as a GitHub App needs PyJWT")
+        raise PrStateError("codex review failed on #42: no App credentials here")
 
     monkeypatch.setattr(dispatch_mod, "request_reviewers", fail_local_auth)
-    monkeypatch.setattr(
-        dispatch_mod,
-        "rerun_pr_next_in_review_env",
-        lambda pr: "requested review(s) via review env",
-    )
 
-    line = NextActs(TARGET).request_review(_pending(["copilot", "codex"]))
+    with pytest.raises(PrStateError, match="no App credentials here"):
+        NextActs(TARGET).request_review(_pending(["copilot", "codex"]))
 
     assert seen["order"] == ["codex", "copilot"]
-    assert line == "requested review(s) via review env"
 
 
 def test_request_act_dropped_edge_raises_prstate_error(monkeypatch):
@@ -465,21 +465,18 @@ def test_request_act_without_a_requestable_adapter_reports(monkeypatch):
     assert line.startswith("no requestable reviewer")
 
 
-def test_review_env_rerun_maps_nonzero_to_domain_error(monkeypatch):
-    from shipit.execrun import ExecResult
+def test_dispatcher_never_reruns_itself_in_a_pixi_env():
+    """The engine takes its act HERE — it does not re-exec itself elsewhere (#969).
 
-    monkeypatch.setattr(dispatch_mod.git, "repo_root", lambda: "/repo")
-    seen = {}
-
-    def fake_run(argv, root, **kwargs):
-        seen.update(argv=argv, root=root, kwargs=kwargs)
-        return ExecResult(tuple(argv), 1, "", "auth still unavailable", 12)
-
-    monkeypatch.setattr(dispatch_mod.pixienv, "run_in_env", fake_run)
-    with pytest.raises(PrStateError, match="review-env rerun failed") as exc:
-        dispatch_mod.rerun_pr_next_in_review_env(TARGET)
-    assert "auth still unavailable" in str(exc.value)
-    assert seen["kwargs"] == {"environment": "review", "check": False}
+    The retired reroute made `pr next` work in shipit's own checkout and fail in
+    every consumer repo, where no `review` pixi environment exists. Nothing in the
+    dispatcher may name one again.
+    """
+    src = pathlib.Path(dispatch_mod.__file__).read_text()
+    assert "run_in_env" not in src
+    assert "-e review" not in src
+    assert not hasattr(dispatch_mod, "rerun_pr_next_in_review_env")
+    assert not hasattr(dispatch_mod, "REVIEW_ENV_NAME")
 
 
 def test_flip_act_goes_through_the_shared_guard(monkeypatch):

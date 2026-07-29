@@ -532,8 +532,8 @@ def start_detached_review(
     with ``run_id=None`` (no in_progress marker, but the review still posts).
     ONE precondition pierces that rule (#347, #343 gap 6): with ``as_app`` a
     :class:`~shipit.review.ghauth.ReviewAuthError` on the synchronous path (the
-    App token could not be minted — PyJWT absent outside the `review` env, missing
-    Doppler creds, the App not installed) PROPAGATES instead of being swallowed:
+    App token could not be minted — no App credentials on this machine, the App not
+    installed) PROPAGATES instead of being swallowed:
     the detached child needs that SAME auth to post the review and close its run,
     so proceeding would fire a doomed child with NO visible breadcrumb while this
     parent reports a false in-flight — the caller would render
@@ -948,8 +948,7 @@ def _reconcile_inflight(
 
     The one exception (#347): with ``auth_fatal`` (the review posts AS the App),
     a :class:`~shipit.review.ghauth.ReviewAuthError` — the App token could not even
-    be MINTED (PyJWT absent outside the `review` env, missing Doppler creds, the
-    App not installed) — is a PRECONDITION failure, not a degraded read: the child
+    be MINTED (no App credentials on this machine, the App not installed) — is a PRECONDITION failure, not a degraded read: the child
     needs the SAME auth to post the review, so swallowing it here would detach a
     doomed child and report a false in-flight. It propagates.
     """

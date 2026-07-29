@@ -175,9 +175,12 @@ def verify_apps_cmd(repo: str | None, agents: tuple[str, ...]) -> None:
     REPO is owner/name; omitted, it defaults to the current checkout's repo. For
     each App (adr-codex-review / adr-agy-review) this mints the App installation
     token and checks the granted permissions carry `checks: write` — a cheap read,
-    not a check-run create. Prints a pass-or-instruct line per App and exits 0 only
-    when ALL are live, 1 otherwise, so a rollout can branch on it mechanically. It
-    only VERIFIES; the one-time install/consent is per docs/dev/review-app-provisioning.md.
+    not a check-run create. Prints a line per App and exits 0 when ALL are live, 1
+    when the repo has a real gap (an App not installed, or missing checks:write),
+    and 2 when nothing could be verified from here (no App credentials on this
+    machine, or the probe itself failed) — three different jobs, never conflated.
+    It only VERIFIES; the one-time install/consent is per
+    docs/dev/review-app-provisioning.md.
     """
     rc = verify_apps.run(repo, agents=list(agents) or None)
     raise SystemExit(rc)
