@@ -13,8 +13,6 @@ from . import gh, git
 
 
 class GitBoundary(Protocol):
-    """The narrow git surface the identity resolvers depend on — an injected boundary."""
-
     def remote_url(self, *, cwd: str, remote: str = "origin") -> str: ...
 
     def repo_root(self, *, cwd: str | None = None) -> str | None: ...
@@ -108,8 +106,6 @@ class Repo:
 
 @dataclass(frozen=True)
 class Revision:
-    """The revision half of a :class:`WorkingDir`; both fields are best-effort and may be ``None``."""
-
     branch: str | None = None
     commit: Sha | None = None
 

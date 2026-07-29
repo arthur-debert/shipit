@@ -208,7 +208,6 @@ def rest(
 
 
 def _merge_paginated(output: str) -> list:
-    """Concatenate the JSON arrays ``gh api --paginate`` emits back-to-back."""
     merged: list = []
     decoder = json.JSONDecoder()
     idx = 0
@@ -288,7 +287,6 @@ def pr_view(pr: str, *, repo: str | None = None, json_fields: list[str]) -> dict
 
 
 def pr_core(pr: PrId) -> PR:
-    """The typed :class:`shipit.pr.PR` core of ``pr``."""
     from .pr import CORE_JSON_FIELDS, core_from_node
 
     node = pr_view(str(pr.number), repo=pr.slug, json_fields=list(CORE_JSON_FIELDS))
@@ -322,7 +320,6 @@ def owner_kind(login: str) -> str:
 
 
 def default_branch(repo: str) -> str:
-    """The repo's default branch name; a response carrying none raises :class:`ValueError`."""
     info = rest(f"repos/{repo}")
     if not isinstance(info, dict) or "default_branch" not in info:
         raise ValueError(f"could not resolve default branch for {repo}")
@@ -528,7 +525,6 @@ def repository_dispatch(
 
 
 def repo_is_private(slug: str) -> bool:
-    """Whether the ``owner/name`` repo is private."""
     data = rest(f"repos/{slug}")
     if not isinstance(data, dict) or not isinstance(data.get("private"), bool):
         raise ValueError(f"malformed repos/{slug} payload: no boolean `private`")
@@ -627,7 +623,6 @@ def resolve_pr(number: int | None, repo: Repo, branch: str | None) -> PrId | Non
 
 
 def pr_url_for_head(branch: str, *, cwd: str | None = None) -> str | None:
-    """The URL of the open PR whose head is ``branch``, or ``None``."""
     out = _run(
         [
             "gh",

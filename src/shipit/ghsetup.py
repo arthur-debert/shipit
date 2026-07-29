@@ -42,7 +42,6 @@ def load_template() -> dict:
 
 
 def load_labels() -> list[Label]:
-    """The standard label set, in declaration order."""
     text = (resources.files("shipit.data") / "issue-labels.toml").read_text(
         encoding="utf-8"
     )
@@ -267,7 +266,6 @@ def apply_ruleset(
 def ensure_labels(
     repo: str, labels: list[Label], *, dry_run: bool
 ) -> tuple[LabelOutcome, ...]:
-    """Pass (b). Create-or-update each label; returns one outcome per label."""
     outcomes: list[LabelOutcome] = []
     for label in labels:
         if dry_run:

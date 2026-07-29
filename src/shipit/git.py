@@ -146,7 +146,6 @@ def remote_url(*, cwd: str, remote: str = "origin") -> str:
 
 
 def status_porcelain(*, cwd: str) -> list[str]:
-    """``git status --porcelain`` lines, non-empty only; an empty list means a clean tree."""
     out = _git(["status", "--porcelain"], cwd=cwd)
     return [line for line in out.splitlines() if line.strip()]
 
@@ -342,7 +341,6 @@ def tag_annotated(name: str, message: str, *, cwd: str) -> None:
 
 
 def push_tag(name: str, *, cwd: str, remote: str = "origin") -> None:
-    """Publish one tag, spelled as the full ``refs/tags/<name>`` ref."""
     _git(["push", remote, f"refs/tags/{name}"], cwd=cwd, timeout=_NETWORK_TIMEOUT)
 
 
@@ -356,7 +354,6 @@ def push_atomic(branch: str, tag: str, *, cwd: str, remote: str = "origin") -> N
 
 
 def delete_tag(name: str, *, cwd: str) -> None:
-    """Remove the LOCAL tag ``name``."""
     _git(["tag", "-d", name], cwd=cwd)
 
 
@@ -573,7 +570,6 @@ def fetch(*, cwd: str, remote: str = "origin") -> None:
 
 
 def clone(url: str, dest: str, *, depth: int | None = 1) -> None:
-    """A plain, non-dissociated clone; ``depth=1`` by default, ``None`` for full history."""
     args = ["clone"]
     if depth is not None:
         args += ["--depth", str(depth)]
