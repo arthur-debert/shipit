@@ -215,7 +215,6 @@ def _write_notes(notes_path: Path, text: str) -> None:
 
 
 def _unquote_status_path(field: str) -> str:
-    """Decode one ``git status --porcelain`` path field."""
     if not field.startswith('"'):
         return field
     inner = field[1:-1]

@@ -354,7 +354,6 @@ def run_gc(
 
 
 def _print_removed(path: str) -> None:
-    """The streaming sink: announce one Tree the sweep just took off disk."""
     print(f"REMOVED {path}", flush=True)
 
 

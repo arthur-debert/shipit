@@ -120,7 +120,6 @@ def _require_model(tree: ChangelogTree) -> None:
 
 
 def _today() -> str:
-    """The cut date stamped into a rolled section (UTC, ``YYYY-MM-DD``)."""
     return datetime.now(UTC).strftime("%Y-%m-%d")
 
 

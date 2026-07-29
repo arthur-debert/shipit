@@ -351,6 +351,5 @@ def _display_argv(argv: Sequence[str], *, prompt: str | None) -> list[str]:
 
 
 def _format_claude_resume_launch(session_id: str, argv: Sequence[str]) -> str:
-    """Human scrollback line-set before Claude takes over the terminal."""
 
     return f"claude session {session_id}\nexec {shlex.join(list(argv))}"
