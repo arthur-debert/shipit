@@ -91,10 +91,6 @@ def test_codex_launches_in_the_tree_and_captures_the_review(_faked):
 
 
 def test_reviewer_child_env_drops_the_parent_project_pointer(_faked, monkeypatch):
-    # #1153: the reviewer child is rooted in its OWN read-only Tree, so inheriting
-    # the parent's `PIXI_PROJECT_MANIFEST` gives it an env naming a manifest that
-    # belongs to a different Tree — pixi recovers by preferring the local manifest
-    # (hence only a WARN), but the leak is the class rooting exists to prevent.
     monkeypatch.setenv("PIXI_PROJECT_MANIFEST", "/trees/parent/pixi.toml")
     monkeypatch.setenv("CONDA_PREFIX", "/trees/parent/.pixi/envs/default")
 

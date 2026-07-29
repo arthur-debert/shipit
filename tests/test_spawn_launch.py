@@ -290,11 +290,6 @@ def test_scrub_tree_env_returns_a_fresh_dict():
 
 
 def test_launch_scrubs_the_env_it_hands_the_runner():
-    # #1153: the scrub is applied BY the launch seam, not by each caller. Every
-    # child launched here is rooted at a Tree `cwd`, so a caller that forgot the
-    # scrub handed its child an env naming the PARENT's project — the exact
-    # cross-Tree leak rooting exists to prevent. Making it structural means the
-    # next call site cannot reintroduce it.
     seen: dict = {}
 
     def fake_runner(cmd, *, cwd, env, timeout=None):
@@ -315,9 +310,6 @@ def test_launch_scrubs_the_env_it_hands_the_runner():
     assert seen["env"] == {"PATH": "/bin"}
 
 
-# --- a failed child's reason (#1153) -----------------------------------------
-
-
 def _failed(stdout: str = "", stderr: str = "", rc: int = 1) -> launch.LaunchResult:
     return launch.LaunchResult(returncode=rc, stdout=stdout, stderr=stderr)
 
@@ -329,8 +321,6 @@ def _detail(result: launch.LaunchResult) -> str:
 
 
 def test_child_failure_detail_reports_stdout_before_stderr():
-    # stdout leads because a headless `claude -p` writes its errors there; reading
-    # stderr alone (the pre-#1153 behaviour) is blind to the common failure.
     detail = _detail(_failed(stdout="out-text", stderr="err-text"))
 
     assert detail.index("out-text") < detail.index("err-text")
@@ -349,8 +339,7 @@ def test_child_failure_detail_surfaces_whichever_stream_spoke(stdout, stderr, ex
     detail = _detail(_failed(stdout=stdout, stderr=stderr))
 
     assert expected in detail
-    # The silent stream contributes NO empty labelled section.
-    assert detail.count("(tail)") == 1
+    assert detail.count("(tail)") == 1  # the silent stream adds no empty section
 
 
 def test_child_failure_detail_always_names_the_exit_tree_and_duration():
@@ -362,8 +351,6 @@ def test_child_failure_detail_always_names_the_exit_tree_and_duration():
 
 
 def test_child_failure_detail_calls_out_a_wholly_silent_child():
-    # Both streams empty is the DOC01 shape: no text to quote, so the refusal must
-    # say the child produced no account rather than emit a bare exit code.
     detail = _detail(_failed(stdout="  ", stderr="\n\t"))
 
     assert "wrote NOTHING to either stdout or stderr" in detail
@@ -377,8 +364,6 @@ def test_stream_tail_keeps_a_short_stream_whole_and_stripped():
 
 
 def test_stream_tail_bounds_a_runaway_stream_to_its_end():
-    # The TAIL is what matters — a crashing child's reason is its last output, and
-    # an unbounded stream would bury the headline it is attached to.
     tail = launch.stream_tail("A" * 500 + "THE-REASON", limit=10)
 
     assert tail.endswith("THE-REASON")
@@ -389,6 +374,19 @@ def test_stream_tail_bounds_a_runaway_stream_to_its_end():
 def test_stream_tail_default_limit_is_the_declared_cap():
     assert len(launch.stream_tail("z" * 10_000)) > launch.STREAM_TAIL_CHARS
     assert launch.stream_tail("z" * 10_000).count("z") == launch.STREAM_TAIL_CHARS
+
+
+def test_stream_bytes_measures_utf8_width():
+    assert launch.stream_bytes("") == 0
+    assert launch.stream_bytes("abc") == 3
+    assert launch.stream_bytes("é") == 2
+
+
+@pytest.mark.parametrize("surrogate", ["\udcff", "\ud800"])
+def test_stream_bytes_is_total_on_undecodable_content(surrogate):
+    # It is called from failure handlers, so it must never raise and shadow the
+    # failure being reported.
+    assert launch.stream_bytes(f"out{surrogate}") == 4
 
 
 def test_write_task_names_the_role_issue_and_branch():

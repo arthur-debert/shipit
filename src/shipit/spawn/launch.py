@@ -29,8 +29,7 @@ class LaunchResult:
 #: The injectable subprocess seam; a ``None`` ``timeout`` means unbounded.
 Runner = Callable[..., LaunchResult]
 
-#: The per-stream cap on a failed child's reported tail: wide enough for a headless
-#: backend's error block, bounded so a runaway stream cannot bury the refusal.
+#: The per-stream cap on a failed child's reported tail.
 STREAM_TAIL_CHARS = 2000
 
 
@@ -117,6 +116,11 @@ def stream_tail(text: str, *, limit: int = STREAM_TAIL_CHARS) -> str:
     return f"…({len(trimmed) - limit} earlier chars elided)…\n{trimmed[-limit:]}"
 
 
+def stream_bytes(text: str) -> int:
+    """The UTF-8 size of a child stream; total — never raises on undecodable content."""
+    return len(text.encode("utf-8", errors="replace"))
+
+
 def child_failure_detail(
     result: LaunchResult,
     *,
@@ -124,13 +128,11 @@ def child_failure_detail(
     tree_path: str,
     duration_ms: int,
 ) -> str:
-    """A nonzero child's refusal text: a bounded tail of BOTH streams, or why there is none."""
+    """A nonzero child's refusal text: bounded tails of stdout THEN stderr, or neither."""
     headline = (
         f"{backend} child exited {result.returncode} after {duration_ms}ms "
         f"in the tree at {tree_path}"
     )
-    # stdout FIRST: a headless backend reports its own errors there, so stderr-only
-    # reporting is structurally blind to the most common failure (#1153).
     streams = [
         f"--- child {name} (tail) ---\n{tail}"
         for name, tail in (

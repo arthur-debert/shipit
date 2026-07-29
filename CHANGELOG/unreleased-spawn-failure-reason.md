@@ -13,6 +13,11 @@
   the two recoveries possible, rides alongside it unchanged; the durable record
   gains `stdout_bytes` / `stderr_bytes` so "the child said nothing" is
   answerable from the log without re-running anything.
+- spawn, review: measuring a child stream's size for the durable record can no
+  longer raise on undecodable output. A lone surrogate in the stream raised
+  `UnicodeEncodeError` from inside the failure handler itself, masking the child
+  failure being reported with a traceback; the same shape was live in the review
+  producer's timeout/transport handler.
 - spawn: the parent-project env scrub moved INTO `launch()`, so no launch site
   can omit it. The reviewer producer and the calibrator both built their child
   env straight from the backend adapter and never scrubbed, handing a child

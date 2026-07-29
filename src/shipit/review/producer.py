@@ -601,8 +601,8 @@ def _attempt(
             duration_ms=int((time.monotonic() - start) * 1000),
             exit_code=None,
             timed_out=timed_out,
-            stdout_bytes=len((exc.stdout or "").encode("utf-8")),
-            stderr_bytes=len((exc.stderr or "").encode("utf-8")),
+            stdout_bytes=launch.stream_bytes(exc.stdout or ""),
+            stderr_bytes=launch.stream_bytes(exc.stderr or ""),
             outcome="timed_out" if timed_out else "failed",
             error=str(exc),
         )
@@ -622,8 +622,8 @@ def _attempt(
         duration_ms=int((time.monotonic() - start) * 1000),
         exit_code=result.returncode,
         timed_out=False,
-        stdout_bytes=len((result.stdout or "").encode("utf-8")),
-        stderr_bytes=len((result.stderr or "").encode("utf-8")),
+        stdout_bytes=launch.stream_bytes(result.stdout or ""),
+        stderr_bytes=launch.stream_bytes(result.stderr or ""),
     )
     try:
         review = _capture(agent, result, artifacts=sink, run_id=run_id)

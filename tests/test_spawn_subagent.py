@@ -702,11 +702,6 @@ def test_child_nonzero_exit_is_refused_with_its_stderr(tmp_path):
 
 
 def test_child_nonzero_exit_surfaces_stdout_when_stderr_is_empty(tmp_path):
-    # #1153, the failure that cost five DOC01 Runs their reason: a headless
-    # `claude -p` reports its own errors on STDOUT, and the refusal used to read
-    # stderr only — so five real failures rendered as a bare `child exited 1`
-    # with nothing else. The child's account must reach the operator whichever
-    # stream carried it.
     b, _ = bounds(
         tmp_path,
         returncode=1,
@@ -721,8 +716,6 @@ def test_child_nonzero_exit_surfaces_stdout_when_stderr_is_empty(tmp_path):
 
 
 def test_child_nonzero_exit_surfaces_both_streams_labelled(tmp_path):
-    # Neither stream is preferred away: a child that wrote to both gets both
-    # reported, each labelled, so the operator can tell which said what.
     b, _ = bounds(
         tmp_path,
         returncode=1,
@@ -740,10 +733,6 @@ def test_child_nonzero_exit_surfaces_both_streams_labelled(tmp_path):
 
 
 def test_silent_nonzero_child_refusal_says_so_and_names_the_tree(tmp_path):
-    # The four DOC01 Runs that died with a CLEAN tree and both streams empty: with
-    # nothing to quote, the refusal must say the child produced no account at all
-    # and hand over the two coordinates that remain actionable — which tree to open
-    # and how long the child ran (204s of silence reads very differently from 2s).
     b, _ = bounds(tmp_path, returncode=1, stdout="", stderr="   \n  ")
 
     with pytest.raises(SpawnError) as exc:
@@ -754,13 +743,11 @@ def test_silent_nonzero_child_refusal_says_so_and_names_the_tree(tmp_path):
     assert "wrote NOTHING to either stdout or stderr" in message
     assert str(tmp_path / "tree") in message  # which tree to open
     assert "ms" in message  # how long it ran before dying
-    # Whitespace-only is EMPTY: an empty labelled section is worse than none.
-    assert "child stderr" not in message
+    assert "child stderr" not in message  # whitespace-only counts as empty
 
 
 def test_silent_nonzero_child_still_reports_uncommitted_work(tmp_path):
-    # The salvage note is what made WS11/WS15 recoverable (#587) — the richer
-    # reason must ride ALONGSIDE it, never displace it.
+    # The richer reason rides ALONGSIDE the salvage note, never displacing it.
     b, _ = bounds(
         tmp_path,
         returncode=1,
@@ -779,8 +766,6 @@ def test_silent_nonzero_child_still_reports_uncommitted_work(tmp_path):
 
 
 def test_nonzero_child_refusal_logs_the_stream_sizes(tmp_path, caplog):
-    # The durable record carries the stream sizes as greppable extras, so "the
-    # child said nothing" is answerable from the JSONL log without re-running it.
     b, _ = bounds(tmp_path, returncode=1, stdout="", stderr="")
 
     with caplog.at_level(logging.ERROR, logger="shipit.spawn"):
@@ -791,6 +776,24 @@ def test_nonzero_child_refusal_logs_the_stream_sizes(tmp_path, caplog):
     assert record.stdout_bytes == 0
     assert record.stderr_bytes == 0
     assert record.rc == 1
+
+
+def test_undecodable_child_output_still_refuses_with_the_childs_reason(tmp_path):
+    # A stream carrying a lone surrogate must not crash the failure handler and
+    # mask the child's own reason with a UnicodeEncodeError.
+    b, _ = bounds(
+        tmp_path,
+        returncode=1,
+        stdout="Credit balance is too low \udcff",
+        stderr="\udcfe",
+    )
+
+    with pytest.raises(SpawnError) as exc:
+        spawn_subagent(spec(), b)
+
+    message = str(exc.value)
+    assert "claude child exited 1" in message
+    assert "Credit balance is too low" in message
 
 
 def test_launch_transport_failure_is_a_clean_refusal(tmp_path):

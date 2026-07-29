@@ -488,8 +488,8 @@ def _run_child(
             backend=adapter.name,
             rc=result.returncode,
             duration_ms=child_ms,
-            stdout_bytes=len(result.stdout.encode("utf-8")),
-            stderr_bytes=len(result.stderr.encode("utf-8")),
+            stdout_bytes=launch.stream_bytes(result.stdout),
+            stderr_bytes=launch.stream_bytes(result.stderr),
         )
     events.emit(
         logger,
