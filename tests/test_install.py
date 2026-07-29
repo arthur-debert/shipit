@@ -44,6 +44,10 @@ from shipit.install.errors import InstallError, SelfCertError
 from shipit.verbs import install as verb
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+#: The source-only skill store shipit READS from (#1115): ordinary package data
+#: under `src/`, so the repo-root `.shipit-skills/` path it used to occupy is live
+#: nowhere and is retired fleet-wide (retired-files.toml).
+SKILL_STORE = REPO_ROOT / "src" / "shipit" / "data" / "skills"
 
 
 def _exec_result(rc: int, stdout: str = "", stderr: str = "") -> execrun.ExecResult:
@@ -1224,7 +1228,7 @@ def test_managed_markdownlintignore_covers_managed_paths_and_testdata():
     conventions (#500) — never other consumer-authored prose (a consumer's
     README.md is theirs; shipit's own README is skipped only because it is a lex
     projection, which `shipit lint` routes to the lexd leg with no ignore entry —
-    tested in test_lint.py). The managed .shipit-skills/ tree is deliberately NOT
+    tested in test_lint.py). The managed .agents/skills/ tree is deliberately NOT
     exempt (#777): it is shipped content that must pass the delivered markdownlint gate,
     so self-cert and this repo lint it at source. The test-data globs match
     lint.PROTECTED_TESTDATA_GLOBS: the fixer refuses to auto-rewrite them AND
@@ -1237,7 +1241,7 @@ def test_managed_markdownlintignore_covers_managed_paths_and_testdata():
         if line and not line.startswith("#")
     ]
     # #777 — shipped skills are gated, not exempt (the exhaustive equality below
-    # locks it in: `.shipit-skills/` is absent from the managed ignore entries).
+    # locks it in: `.agents/skills/` is absent from the managed ignore entries).
     assert entries == ["AGENTS.md", *lint.PROTECTED_TESTDATA_GLOBS]
 
 
@@ -1423,7 +1427,7 @@ def test_install_blocks_and_preserves_an_existing_real_claude_skills_dir(tmp_pat
     guidance; install deletes NOTHING and creates no symlink until the operator
     removes it. (This dissolves the whole destructive-migration risk class.)"""
     real = tmp_path / ".claude" / "skills"
-    shutil.copytree(REPO_ROOT / ".shipit-skills", real)
+    shutil.copytree(SKILL_STORE, real)
     assert real.is_dir() and not real.is_symlink()
 
     plan = _plan(tmp_path)
@@ -7582,6 +7586,13 @@ Any further notes about the feature.
 
 </prd-template>
 """
+#: The bytes shipit last DELIVERED at `skills/shipit-grill-with-docs/ADR-FORMAT.md`,
+#: snapshotted from this repo's history. Retired-path tests feed this, not the live
+#: store file: the manifest hash describes what a consumer is holding at the dead
+#: path, and that is frozen even as the store content moves on.
+PRISTINE_GRILL_ADR_FORMAT_SKILL = (
+    Path(__file__).parent / "data" / "grill-adr-format-skill-pristine"
+)
 RETIRED_SKILL_HASHES = {
     "skills/shipit-planning/SKILL.md": (
         "sha256:a16ac4744238b3a5b59da8a887bb6268742fd01a8a285797e0198aba49e44336",
@@ -7748,13 +7759,123 @@ RELOCATED_SKILL_STORE_PATHS = (
 )
 
 
+# The last bytes shipit DELIVERED for the coordinating skill, snapshotted from
+# this repo's history the way the launcher-shim fixtures below are. A retired
+# entry matches on the content a CONSUMER is holding, which is frozen at the last
+# version delivered to that path — so the end-to-end tests feed that pristine
+# snapshot, never the live store file. Reading the live file instead would couple
+# every retired-path test to the next edit of a skill whose content is free to
+# move on (the ADR-FORMAT fixture below is the same fixture for the same reason).
+PRISTINE_COORDINATING_SKILL = (
+    Path(__file__).parent / "data" / "coordinating-skill-pristine"
+)
+
+
+# The versions the manifest lists at each relocated `skills/<rel>` path, pinned as
+# an EXACT closed set — the `skills/<rel>` half of the same authoritative history
+# guard RETIRED_SHIPIT_SKILLS_STORE_HASHES gives the `.shipit-skills/<rel>` half
+# below. A retired entry's hash list is the only thing that makes `shipit install`
+# shed an orphan, so silently dropping a hash, truncating one, or swapping in an
+# unrelated one strands that version in every consumer holding it — exact equality
+# is what catches that, and well-formedness ("looks like a sha256") does not.
+#
+# KNOWN-WRONG DATA, frozen deliberately (#1131). Marked per hash below: six of the
+# eleven entries do not match what git says was delivered at the path — eight
+# listed hashes were never shipped there (seven of them `.shipit-skills/`-era
+# content), and five genuinely-shipped versions are missing. The cause was the
+# very coupling this PR removed: the old `desired_hash() in pristine_hashes`
+# assert went red on each skill edit and was greened by appending the live store
+# hash to the RETIRED entry. Correcting the data changes what `shipit install`
+# DELETES in a consumer — a reconcile behaviour change, not a test fix — so it is
+# its own change. Pinning the drift here keeps it visible and makes the correction
+# a deliberate, reviewed edit instead of a silent one.
+RETIRED_RELOCATED_SKILL_HASHES = {
+    "skills/coordinating/SKILL.md": (
+        "sha256:065a793b117dcfbb1e97fea0a80b405c69995850af9a350061dbcc1f4ea4976a",
+        "sha256:d39855cd948076fd3d25b10ba345efd4e0f6f8eea26fcc546723cc063c4511bc",
+    ),
+    "skills/grill-me-with-docs/ADR-FORMAT.md": (
+        "sha256:f1f36cd3f8d3b6474ddd5855da4e233bfc4ae1a1c5024909ccf11871819a41b2",
+    ),
+    # #1131: missing 886ce0e9…, which WAS delivered here.
+    "skills/grill-me-with-docs/CONTEXT-FORMAT.md": (
+        "sha256:d7f1244807b547de07073244e67279eda8bb0fd681428114bce8452c979ab72c",
+    ),
+    # #1131: missing af2e662a… and bb493824…, which WERE delivered here.
+    "skills/grill-me-with-docs/SKILL.md": (
+        "sha256:a4eefcb8f9af47b5b2f99a85bde5e52c4b2275c6660c964021f6d186f05b72fd",
+        # never shipped at this path — matches no blob at any skills path (#1131)
+        "sha256:a7e8a73594379e378ca2700cd8cb5c8a0b91c32aeaad919b487a52461f1b5c4c",
+        # never shipped here — `.shipit-skills/` content (#1131)
+        "sha256:06428ff9352d2765056d1af43f9a21592b0ea6e59ab7b72f200710678fcdddea",
+    ),
+    "skills/implementing/SKILL.md": (
+        "sha256:fd7d90eff365955e096dbdf2c72ac6bf32a33b12609d7749aa8a544b8cb259a0",
+        "sha256:02040db0bd1aedce096473bdbc9d65ec741a81c989f97121fedc242e172a4932",
+        # never shipped here — `.shipit-skills/` content (#1131)
+        "sha256:9aad3759cc233430e9d5a896a33ead5c6ae81e71b5a78af35e8b15133ef5cc69",
+    ),
+    "skills/lex-primer/SKILL.md": (
+        "sha256:eb7c4d13f980dbbf0fdc81998ce6d8815783af5f13fabb18decb7e834bfddee0",
+        "sha256:ff616c1c447661298fb8e06a8a8a6ce60400d838c7c881b9e8bd526128e32901",
+    ),
+    "skills/planning/SKILL.md": (
+        "sha256:e26fe5ef4bba7d0bffd09f2dbbf61ba9ea8b0a8aa77a50bb794481766f8fa791",
+        "sha256:172678dc99e45431970d2cdd31c6c910622590e7e6893b26026a282fcdc49919",
+        # never shipped here — `.shipit-skills/` content (#1131)
+        "sha256:843d0a0c3dddb6d1ba1b5db6d494e650fdbc40035cb98def47b964d264b8e57c",
+    ),
+    # #1131: missing 3e402469…, which WAS delivered here.
+    "skills/shepherding-prs/SKILL.md": (
+        "sha256:8f627079f3d9846069742dd77cf4987eb550ff9a6c5e575f751ea8edf958ee2b",
+        "sha256:b7250030fa91282fa6d7d5a65073363edbc4522e31984dd8983994dcf9a5aa85",
+        # never shipped here — `.shipit-skills/` content (#1131)
+        "sha256:fed591f8346731ac2e4bb8de18c5fce0f6edd199c2f3ee5bf1cb036114cd4063",
+    ),
+    "skills/shipit-session-status/SKILL.md": (
+        "sha256:4720ad9b381d57c32dfd2aca6cb2a4b338dfa69cac90eedd85a71f7f2f8db962",
+    ),
+    "skills/to-spec/SKILL.md": (
+        "sha256:9f7e5216675070146daabdc0f63ddb8cc8ecf37843ab5d3290354bf57d8097c0",
+        "sha256:c614f7c42621a51dc5c4f9b27d0d74c52e43d87483fc56d45ce9127a8a6e2484",
+        # never shipped here — `.shipit-skills/` content (#1131)
+        "sha256:eafedcd9b9797aa3d9e97ee466e40000cc74de2d86f86e855f6e1e36219d3cce",
+    ),
+    # #1131: missing 2eaa2611…, which WAS delivered here.
+    "skills/to-tickets/SKILL.md": (
+        "sha256:38df45b1560de0e10be3ab8f7ef4113114ee851e3790ac9087b4c9560c7dc6df",
+        "sha256:271ffbaaa98315c752ddf9c2d01e504b041140bdc9c5a21fc7ac152891931b16",
+        # never shipped here — `.shipit-skills/` content (#1131)
+        "sha256:d922c867458135ebf665233149268b25ba8ea3147a59e5b7ffcc9c3748fda3d5",
+        # never shipped here — `.shipit-skills/` content (#1131)
+        "sha256:11419ddc56ed6a6b07cc780b1c38aa5cf20bcdfb89479bda2f4e032a4ea80b57",
+    ),
+}
+
+
 def test_retired_manifest_carries_the_relocated_skill_store():
     # The store moved out of `skills/` to `.shipit-skills/` (#921) and now
     # PROJECTS into the single real `.agents/skills/<rel>` dir (#1088): each of the
-    # ELEVEN relocated skills must still be delivered (its content hash unchanged
-    # by the dest move) AND have its OLD `skills/<rel>` path retired, carrying the
-    # current content hash so a consumer sheds the polluting old copy on install
-    # (leaving consumer-authored `skills/` files alone — not in this manifest).
+    # ELEVEN relocated skills must still be delivered AND have its OLD
+    # `skills/<rel>` path retired, carrying the versions delivered there so a
+    # consumer sheds the polluting old copy on install (leaving consumer-authored
+    # `skills/` files alone — not in this manifest). Six of the eleven lists are
+    # known to be wrong about which versions those are; see
+    # RETIRED_RELOCATED_SKILL_HASHES and #1131.
+    #
+    # The hash lists are pinned to an EXACT closed set (dropping, truncating or
+    # swapping one strands that version in a consumer), but the pin is
+    # RETIRED_RELOCATED_SKILL_HASHES — NOT the live store, which is deliberately
+    # not consulted here. What shipit shipped at a retired path is closed, while
+    # the store content is free to move on, so requiring today's hash to be in that
+    # set is a time bomb that goes off on the next skill edit — and the only way to
+    # "fix" a red build then is to append a hash never shipped at `skills/<rel>`.
+    # That is not hypothetical: it is where the drift #1131 tracks came from.
+    # Keyed off the eleven paths, not off the pin's own keys: a pin that lost an
+    # entry would otherwise just check one path fewer, in silence.
+    assert set(RETIRED_RELOCATED_SKILL_HASHES) == {
+        f"skills/{rel}" for rel in RELOCATED_SKILL_STORE_PATHS
+    }
     retired = {r.path: r for r in irec.load_retired()}
     units = {u.key: u for u in iunits.load_units()}
     for rel in RELOCATED_SKILL_STORE_PATHS:
@@ -7762,24 +7883,29 @@ def test_retired_manifest_carries_the_relocated_skill_store():
         old_path = f"skills/{rel}"
         assert new_key in units, f"{new_key} no longer delivered"
         assert old_path in retired, f"{old_path} not retired"
-        assert units[new_key].desired_hash() in retired[old_path].pristine_hashes
+        assert (
+            retired[old_path].pristine_hashes
+            == RETIRED_RELOCATED_SKILL_HASHES[old_path]
+        )
 
 
 def test_install_deletes_a_pristine_relocated_skill_and_installs_new_store(
     tmp_path, rec
 ):
     # End-to-end for the store move: a consumer with a pristine copy of the OLD
-    # `skills/coordinating/SKILL.md` sheds it on install, while the same content
-    # is (re)installed at the real `.agents/skills/coordinating/SKILL.md` dir
-    # (#1088). The store at `.shipit-skills/` is the read source.
+    # `skills/coordinating/SKILL.md` sheds it on install, while the current store
+    # content is (re)installed at the real `.agents/skills/coordinating/SKILL.md`
+    # dir (#1088). The store at `src/shipit/data/skills/` is the read source
+    # (#1115); the VICTIM is the snapshotted last-delivered copy, which is what a
+    # consumer actually holds.
     old_path = "skills/coordinating/SKILL.md"
-    source = REPO_ROOT / ".shipit-skills/coordinating/SKILL.md"
-    assert config.content_hash(source.read_bytes()) in {
+    old_bytes = PRISTINE_COORDINATING_SKILL.read_bytes()
+    assert config.content_hash(old_bytes) in {
         h for r in irec.load_retired() if r.path == old_path for h in r.pristine_hashes
     }
     victim = tmp_path / old_path
     victim.parent.mkdir(parents=True)
-    victim.write_bytes(source.read_bytes())
+    victim.write_bytes(old_bytes)
 
     plan = _plan(tmp_path)
     assert old_path in [d.retired.path for d in plan.retire_deletes]
@@ -7788,6 +7914,155 @@ def test_install_deletes_a_pristine_relocated_skill_and_installs_new_store(
     assert (tmp_path / ".agents/skills/coordinating/SKILL.md").is_file()
     # Claude reaches the same skill through the structural symlink.
     assert (tmp_path / ".claude/skills/coordinating/SKILL.md").is_file()
+
+
+# The `.shipit-skills/<rel>` copies shipit DELIVERED between #921 and #1088, now
+# retired (#1115). Pinned explicitly, for the same reason
+# RELOCATED_SKILL_STORE_PATHS is: "every store file has a retired
+# `.shipit-skills/<rel>`" is a one-time MIGRATION invariant — a skill added after
+# the move was never shipped there, and deriving from the live units would mint a
+# bogus retirement. The hashes are every version reachable from `main` at each
+# path; deleting one here would strand that copy in a consumer forever.
+RETIRED_SHIPIT_SKILLS_STORE_HASHES = {
+    ".shipit-skills/coordinating/SKILL.md": (
+        "sha256:065a793b117dcfbb1e97fea0a80b405c69995850af9a350061dbcc1f4ea4976a",
+    ),
+    ".shipit-skills/grill-me-with-docs/ADR-FORMAT.md": (
+        "sha256:f1f36cd3f8d3b6474ddd5855da4e233bfc4ae1a1c5024909ccf11871819a41b2",
+    ),
+    ".shipit-skills/grill-me-with-docs/CONTEXT-FORMAT.md": (
+        "sha256:d7f1244807b547de07073244e67279eda8bb0fd681428114bce8452c979ab72c",
+    ),
+    ".shipit-skills/grill-me-with-docs/SKILL.md": (
+        "sha256:06428ff9352d2765056d1af43f9a21592b0ea6e59ab7b72f200710678fcdddea",
+    ),
+    ".shipit-skills/implementing/SKILL.md": (
+        "sha256:fd7d90eff365955e096dbdf2c72ac6bf32a33b12609d7749aa8a544b8cb259a0",
+        "sha256:9aad3759cc233430e9d5a896a33ead5c6ae81e71b5a78af35e8b15133ef5cc69",
+    ),
+    ".shipit-skills/lex-primer/SKILL.md": (
+        "sha256:eb7c4d13f980dbbf0fdc81998ce6d8815783af5f13fabb18decb7e834bfddee0",
+    ),
+    ".shipit-skills/planning/SKILL.md": (
+        "sha256:843d0a0c3dddb6d1ba1b5db6d494e650fdbc40035cb98def47b964d264b8e57c",
+    ),
+    ".shipit-skills/shepherding-prs/SKILL.md": (
+        "sha256:8f627079f3d9846069742dd77cf4987eb550ff9a6c5e575f751ea8edf958ee2b",
+        "sha256:fed591f8346731ac2e4bb8de18c5fce0f6edd199c2f3ee5bf1cb036114cd4063",
+    ),
+    ".shipit-skills/shipit-session-status/SKILL.md": (
+        "sha256:4720ad9b381d57c32dfd2aca6cb2a4b338dfa69cac90eedd85a71f7f2f8db962",
+    ),
+    ".shipit-skills/to-spec/SKILL.md": (
+        "sha256:eafedcd9b9797aa3d9e97ee466e40000cc74de2d86f86e855f6e1e36219d3cce",
+    ),
+    ".shipit-skills/to-tickets/SKILL.md": (
+        "sha256:d922c867458135ebf665233149268b25ba8ea3147a59e5b7ffcc9c3748fda3d5",
+        "sha256:11419ddc56ed6a6b07cc780b1c38aa5cf20bcdfb89479bda2f4e032a4ea80b57",
+    ),
+}
+
+
+def test_retired_manifest_carries_the_shipit_skills_store_history():
+    # The history guard for #1115: the eleven delivered `.shipit-skills/<rel>`
+    # paths, each with EVERY version shipit shipped there. A consumer stuck on an
+    # older pin sheds its copy only if that version's hash is listed.
+    #
+    # Same completeness check as the `skills/<rel>` twin: driving the loop off the
+    # pin's own keys would let a dropped entry shrink the guard unnoticed.
+    assert set(RETIRED_SHIPIT_SKILLS_STORE_HASHES) == {
+        f".shipit-skills/{rel}" for rel in RELOCATED_SKILL_STORE_PATHS
+    }
+    retired = {r.path: r for r in irec.load_retired()}
+    for path, expected_hashes in RETIRED_SHIPIT_SKILLS_STORE_HASHES.items():
+        assert retired[path].pristine_hashes == expected_hashes
+
+
+def test_every_shipit_skills_store_path_is_retired_and_still_delivered():
+    # The migration invariant, the same shape as the `skills/<rel>` one above:
+    # every retired `.shipit-skills/<rel>` is still DELIVERED at
+    # `.agents/skills/<rel>` — a rename in effect, which the schema cannot say, so
+    # the pairing is asserted here instead.
+    #
+    # The retired entry's HASHES are not compared with the live store: what shipit
+    # shipped at `.shipit-skills/<rel>` is closed (nothing is delivered there
+    # again), while the store content keeps moving, so requiring today's hash to be
+    # in that set would fail on the next skill edit and push whoever fixes it into
+    # appending a hash that was never shipped at the retired path. That the
+    # orphaned consumer copy is covered is asserted where it is a fact rather than
+    # a coincidence: the exact-equality history guard above, and the end-to-end
+    # delete below driven by the snapshotted last-delivered bytes.
+    retired = {r.path: r for r in irec.load_retired()}
+    units = {u.key: u for u in iunits.load_units()}
+    for rel in RELOCATED_SKILL_STORE_PATHS:
+        old_path = f".shipit-skills/{rel}"
+        new_key = f"{iunits.AGENTS_SKILLS_DIR}/{rel}"
+        assert new_key in units, f"{new_key} no longer delivered"
+        assert old_path in retired, f"{old_path} not retired"
+
+
+def test_no_retired_path_is_live_in_shipits_own_repo():
+    # The root-cause guard for #1115 (ADR-0077 amendment). A retired entry matches
+    # on content hash GLOBALLY — the pass has no producing-repo exemption — and
+    # shipit dogfoods `shipit install` on itself, so ANY manifest path that is
+    # also a live file here is a path shipit deletes from its own tree. That is
+    # exactly why the skill store had to move under `src/` before
+    # `.shipit-skills/*` could be retired; this guard fails the next such entry at
+    # authoring time instead of at the next self-install.
+    live = [r.path for r in irec.load_retired() if (REPO_ROOT / r.path).exists()]
+    assert live == []
+
+
+def test_skills_root_is_ordinary_package_data_under_src():
+    # #1115: one `shipit.data` resources lookup, resolving the same way in a wheel
+    # and in this checkout — no repo-root fallback, no wheel force-include. The
+    # store is package data under `src/`, so the repo root carries no copy that a
+    # self-install would retire out from under the producer.
+    assert Path(str(iunits.skills_root())) == SKILL_STORE
+    assert not (REPO_ROOT / ".shipit-skills").exists()
+    # The force-include table no longer vendors the store (packages= bundles it).
+    pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_bytes().decode())
+    force = pyproject["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"]
+    assert ".shipit-skills" not in force
+
+
+def test_install_deletes_a_pristine_shipit_skills_store_copy(tmp_path, rec):
+    # End-to-end for the orphan the projection pin left behind: a consumer
+    # carrying a PRISTINE `.shipit-skills/coordinating/SKILL.md` sheds it on the
+    # reconcile that crosses the pin, while the same content lives on at the real
+    # `.agents/skills/` dest — no two divergent copies, no stale instructions the
+    # managed set no longer owns. The victim is the snapshotted last-delivered
+    # copy (what the orphaned consumer holds), not the live store file.
+    old_path = ".shipit-skills/coordinating/SKILL.md"
+    old_bytes = PRISTINE_COORDINATING_SKILL.read_bytes()
+    assert config.content_hash(old_bytes) in {
+        h for r in irec.load_retired() if r.path == old_path for h in r.pristine_hashes
+    }
+    victim = tmp_path / old_path
+    victim.parent.mkdir(parents=True)
+    victim.write_bytes(old_bytes)
+
+    plan = _plan(tmp_path)
+    assert old_path in [d.retired.path for d in plan.retire_deletes]
+    _apply(tmp_path)
+    assert not victim.exists()
+    assert (tmp_path / ".agents/skills/coordinating/SKILL.md").is_file()
+
+
+def test_install_keeps_a_hand_edited_shipit_skills_store_copy(tmp_path, rec):
+    # The safety half (#1115 asks for it explicitly): a consumer who EDITED a
+    # store copy matches no known shipped version, so the retired pass KEEPS it
+    # and warns. shipit never destroys local edits.
+    old_path = ".shipit-skills/coordinating/SKILL.md"
+    victim = tmp_path / old_path
+    victim.parent.mkdir(parents=True)
+    victim.write_text("my own notes on coordinating\n")
+
+    plan = _plan(tmp_path)
+    assert old_path not in [d.retired.path for d in plan.retire_deletes]
+    assert old_path in [d.retired.path for d in plan.retired if d.action == irec.KEEP]
+    _apply(tmp_path)
+    assert victim.read_text() == "my own notes on coordinating\n"
 
 
 # The agent-specific launcher shims (#815): repo-root whole-file units shipit
@@ -7855,15 +8130,16 @@ def test_install_deletes_a_pristine_retired_file(tmp_path, rec):
 
 def test_install_deletes_a_pristine_retired_skill_file(tmp_path, rec):
     # A consumer upgrading across the skill rename sheds the old path when its
-    # content is a known pristine copy, while the new skill path is installed.
+    # content is a known pristine copy, while the new skill path is installed. The
+    # victim is the bytes last DELIVERED at the retired path (snapshotted), which
+    # is what the upgrading consumer holds and what the manifest hash describes —
+    # the live store file is free to diverge from it.
     retired_path = "skills/shipit-grill-with-docs/ADR-FORMAT.md"
-    source = REPO_ROOT / ".shipit-skills/grill-me-with-docs/ADR-FORMAT.md"
-    assert (
-        config.content_hash(source.read_bytes()) in RETIRED_SKILL_HASHES[retired_path]
-    )
+    old_bytes = PRISTINE_GRILL_ADR_FORMAT_SKILL.read_bytes()
+    assert config.content_hash(old_bytes) in RETIRED_SKILL_HASHES[retired_path]
     victim = tmp_path / retired_path
     victim.parent.mkdir(parents=True)
-    victim.write_bytes(source.read_bytes())
+    victim.write_bytes(old_bytes)
 
     plan = _plan(tmp_path)
     assert retired_path in [d.retired.path for d in plan.retire_deletes]

@@ -28,12 +28,15 @@ to one place.
 
 - **`.agents/skills/<rel>`** is the single real, managed, reconciled dir — the
   ONE place `load_units()` emits skill content. `skills_root()` stays the read
-  source (`.shipit-skills/` in shipit-self / the force-included wheel data).
+  source (`.shipit-skills/` in shipit-self / the force-included wheel data —
+  **amended by #1115 below**: the store is now `src/shipit/data/skills/`,
+  ordinary package data with no repo-root copy).
 - **`.claude/skills`** is a whole-directory **symlink** → `../.agents/skills`
   (relative, resolved from the link's own `.claude/` dir). It is **not** a
   content unit — a structural pointer `install` ensures, like lefthook
   activation. Committed/tracked, idempotent create-if-absent.
-- **`.shipit-skills/`** stays source-only, unchanged.
+- **`.shipit-skills/`** stays source-only, unchanged (**amended by #1115**: the
+  store moved to `src/shipit/data/skills/` and the repo-root path is retired).
 
 ### The everyone-but-claude split collapses, permanently
 
@@ -110,9 +113,53 @@ write-through.
   `.shipit-skills/*` is the pristine source, so a content-hash-global retirement
   would delete it. Orphaned `.shipit-skills/*` copies in already-installed
   consumers are accepted residue — `[managed]` drops the stale keys on the next
-  install.
+  install. **The `.shipit-skills/*` half of this is AMENDED by #1115 below**; the
+  `.claude/skills/*` half stands.
 - **Managed markdownlint** lints the real `.agents/skills/*` (non-exempt stance
   kept) and needs NO `.claude/skills` ignore entry: `shipit lint` discovers files
   via `git ls-files`, which yields the whole-dir symlink as one non-`.md` entry,
   so the files under it are never enumerated through the link — no double-linting
   (verified).
+
+## Amendment (#1115) — the source store moves under `src/`, and `.shipit-skills/*` IS retired
+
+The "accepted residue" consequence above is **withdrawn**. It was accepted for a
+specific reason, and that reason has been removed rather than worked around.
+
+**What the residue cost.** Every consumer crossing the projection pin kept its
+previously-delivered `.shipit-skills/*` files tracked and owned by nobody.
+Dropping the `[managed]` keys does not delete files, so the repo ends up with two
+divergent copies of each skill and the **unmanaged** one is the stale one — the
+pre-#1066 copies still instruct the reader to run `shipit lint --fix` where the
+current instruction is `pixi run lint --fix`. That is a dead mechanism that still
+looks authoritative, read by the very agents these files exist to steer.
+Confirmed hand-cleaned in two consumers (`lex-fmt/vscode`, `lex-fmt/mkdocs-lex`);
+every portfolio repo but one was on the same path.
+
+**Why it was accepted, and why that no longer holds.** A `retired-files.toml`
+match is on CONTENT HASH and is GLOBAL — the pass has no producing-repo
+exemption, and shipit dogfoods `shipit install` on itself. With the store at the
+repo root, its own files ARE the pristine content, so `.shipit-skills/*` entries
+would have made shipit delete its own source store on the next self-install.
+
+The fix is subtraction, not a special case (a "not on the producing repo"
+exemption in a mechanism whose whole value is uniformity was considered and
+rejected). The store moves to **`src/shipit/data/skills/`**:
+
+- the `[tool.hatch.build.targets.wheel.force-include]` entry
+  `".shipit-skills" = "shipit/data/skills"` is **deleted** — `packages =
+  ["src/shipit"]` already bundles the store as ordinary package data;
+- the dual-root branch in `skills_root()` (bundled-Traversable else
+  `parents[3]/.shipit-skills`) is **deleted** — one `shipit.data` resources
+  lookup resolves identically in a wheel and a dev checkout.
+
+The repo-root path is then live NOWHERE, so the eleven `.shipit-skills/<rel>`
+entries in `retired-files.toml` are safe with no special-casing. Nothing else
+about the design changes: `.agents/skills/<rel>` remains the one real dest,
+`.claude/skills` remains the create-only-when-absent symlink with no retirement
+of its own, and the retired pass keeps a **hand-edited** copy (content matching
+no known shipped version) with a warning rather than destroying it.
+
+The schema cannot express a rename, so this lands as a delete of the old path
+plus the already-shipped unit at the new one — two facts linked by a manifest
+comment and a test invariant.
