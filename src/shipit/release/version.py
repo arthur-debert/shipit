@@ -1,26 +1,7 @@
-"""The version resolver — the Release pipeline's pure core (ADR-0041, PRD 21/23).
+"""The version resolver: the caller SUPPLIES the version, nothing infers it.
 
-The caller SUPPLIES the version — an explicit bare semver, or a bump word
-(``major`` / ``minor`` / ``patch``) resolved against the latest existing
-version tag. Nothing here infers a version from fragments or commit messages
-(ADR-0041: bump-level inference has real ambiguity, and nothing in the fleet
-asks for it). Two pure steps, two callers:
-
-- :func:`parse_spec` — argv string → :class:`VersionSpec`, at the CLICK
-  boundary (ADR-0030): a leading ``v``, build metadata, or a string that is
-  neither semver nor a bump word raises :class:`ValueError` there, so a
-  malformed argument dies as a usage error (exit 2) and never reaches a verb
-  body.
-- :func:`resolve` — (:class:`VersionSpec`, the repo's existing tag names) →
-  :class:`ResolvedVersion`: the concrete version, its ``v<version>`` tag, the
-  semver-suffix prerelease flag, the ``-release-rc`` live-fire (tag-only)
-  flag, and the RESUME verdict — tag already exists → prepare skips the bump
-  entirely and re-emits the tag's SHA (ADR-0009's resumability, ADR-0041
-  consequence).
-
-Fixture-tested pure core (PRD Testing Decisions); the effectful shell that
-feeds it real tags and acts on the verdict is ``shipit release prepare``
-(:mod:`shipit.verbs.release`).
+An explicit bare semver, or a bump word resolved against the latest version
+tag. See docs/adr/0041-tag-authoritative-version-supplied-not-computed.md.
 """
 
 from __future__ import annotations
@@ -29,33 +10,23 @@ from dataclasses import dataclass
 
 from ..changelog import SEMVER_RE, is_prerelease, sort_versions_desc
 
-#: The bump-word vocabulary (PRD story 21) — resolved against the latest tag.
+#: Resolved against the latest version tag.
 BUMP_WORDS: tuple[str, ...] = ("major", "minor", "patch")
 
-#: The reserved live-fire prerelease suffix (legacy release#663 verify mode):
-#: a ``<semver>-release-rc`` cut is a prerelease whose bump commit travels on
-#: the TAG ONLY — the branch ref is never advanced — so pipeline verification
-#: cuts leave the branch's version line clean.
+#: The reserved live-fire suffix: its bump commit travels on the TAG ONLY, so
+#: a pipeline-verification cut leaves the branch's version line clean.
 RELEASE_RC_PRE: str = "release-rc"
 
-#: The tag prefix — the ONE place ``v`` decorates a version (ADR-0041: the tag
-#: decorates, the version string never carries it).
+#: The ONE place ``v`` decorates a version; the version string never carries it.
 TAG_PREFIX: str = "v"
 
-#: The bump-word base when the repo has no version tag yet: the triple bumps
-#: resolve against ``0.0.0`` (so a first ``patch`` cut is ``0.0.1``).
+#: The bump base when the repo has no version tag yet.
 _ZERO: tuple[int, int, int] = (0, 0, 0)
 
 
 @dataclass(frozen=True)
 class VersionSpec:
-    """A PARSED version argument — exactly one of the two shapes (story 21).
-
-    ``semver`` is the explicit bare version (validated by :func:`parse_spec`:
-    no leading ``v``, no build metadata); ``bump`` is one of
-    :data:`BUMP_WORDS`. Construction happens only through :func:`parse_spec`,
-    at the click boundary.
-    """
+    """A PARSED version argument — exactly one of the two shapes."""
 
     semver: str | None = None
     bump: str | None = None
@@ -63,14 +34,11 @@ class VersionSpec:
 
 @dataclass(frozen=True)
 class ResolvedVersion:
-    """The resolver's verdict — everything prepare branches on, decided pure.
+    """The resolver's verdict: everything prepare branches on, decided pure.
 
-    ``version`` is the concrete bare semver; ``tag`` its ``v``-prefixed tag
-    name; ``prerelease`` the semver-suffix detection (``-rc.N``,
-    ``-release-rc`` — ADR-0041); ``tag_only`` the ``-release-rc`` live-fire
-    contract (push the tag, never advance the branch ref); ``resume`` whether
-    the tag ALREADY exists — prepare then skips bump/commit/push and re-emits
-    the tag's SHA (ADR-0009).
+    ``tag_only`` is the ``-release-rc`` contract (push the tag, never advance the
+    branch ref); ``resume`` means the tag ALREADY exists, so prepare skips
+    bump/commit/push and re-emits its SHA.
     """
 
     version: str
@@ -81,13 +49,8 @@ class ResolvedVersion:
 
 
 def parse_spec(raw: str) -> VersionSpec:
-    """Parse a version argument into a :class:`VersionSpec`. Pure.
-
-    Accepts a bump word (:data:`BUMP_WORDS`) or a bare semver. Rejections are
-    :class:`ValueError` — the click boundary turns each into a usage error
-    (exit 2, ADR-0030): a leading ``v`` (the tag decorates, the version string
-    does not), build metadata (``+…`` — a release version is exactly what the
-    tag names, never annotated), and anything that is neither shape.
+    """Parse a version argument into a :class:`VersionSpec`; rejections are
+    :class:`ValueError`, which the click boundary turns into a usage error.
     """
     if raw in BUMP_WORDS:
         return VersionSpec(bump=raw)
@@ -111,16 +74,11 @@ def parse_spec(raw: str) -> VersionSpec:
 
 
 def version_tags(tags: list[str] | tuple[str, ...]) -> list[str]:
-    """The BARE versions of the ``v<semver>`` tags in ``tags``, descending
-    semver order (newest first). Pure.
+    """The BARE versions of the ``v<semver>`` tags, newest first.
 
-    Non-version tags (no ``v`` prefix, or an invalid semver after it) are
-    ignored — a repo's odd tags (``deploy-2024``, ``tip``) never poison the
-    latest-tag resolution. Build metadata (``+…``) also disqualifies a tag: a
-    release version is exactly what the tag names (:func:`parse_spec` rejects
-    ``+`` in the supplied version), and build metadata is ignored for semver
-    precedence, so admitting such a tag would make ordering and resume
-    detection inconsistent with the versions the caller can ever supply.
+    Non-version tags are ignored. Build metadata disqualifies a tag too: semver
+    precedence ignores it, so admitting one would make ordering and resume
+    detection inconsistent with the versions a caller can supply.
     """
     versions = [
         tail
@@ -143,18 +101,11 @@ def _triple(version: str) -> tuple[int, int, int]:
 
 
 def _bump(word: str, latest: str | None) -> str:
-    """Apply ``word`` to the latest version (``None`` → :data:`_ZERO`). Pure.
+    """Apply ``word`` to the latest version (``None`` -> :data:`_ZERO`). Pure.
 
-    Standard semver increment semantics (npm ``semver.inc``'s): a bump word on
-    a PRERELEASE of the exact target triple FINALIZES it rather than climbing
-    past it — the rc led to that release, so the word that names it closes it:
-
-    - ``major`` → ``X+1.0.0``, but ``X.0.0-rc.1`` → ``X.0.0`` (finalize).
-    - ``minor`` → ``X.Y+1.0``, but ``X.Y.0-rc.1`` → ``X.Y.0`` (finalize).
-    - ``patch`` → ``X.Y.Z+1``, but any ``X.Y.Z-rc.1`` → ``X.Y.Z`` (finalize).
-
-    Without this, a prerelease could only be finalized via ``patch`` and every
-    ``major``/``minor`` on an rc would skip a whole release.
+    A bump word on a PRERELEASE of the exact target triple FINALIZES it rather than
+    climbing past it — the rc led to that release, so the word that names it closes
+    it. Otherwise a prerelease could only be finalized via ``patch``.
     """
     if latest is None:
         major, minor, patch = _ZERO
@@ -176,14 +127,8 @@ def _bump(word: str, latest: str | None) -> str:
 
 
 def resolve(spec: VersionSpec, tags: list[str] | tuple[str, ...]) -> ResolvedVersion:
-    """Resolve ``spec`` against the repo's existing ``tags``. Pure.
-
-    An explicit semver passes through; a bump word resolves against the
-    LATEST version tag (semver §11 order over the ``v<semver>`` tags; no tags
-    → ``0.0.0``). ``resume`` is set when the resolved version's tag already
-    exists — the caller re-emits that tag's SHA instead of bumping anything
-    (ADR-0009/0041). Prerelease stays semver-suffix detection; the reserved
-    ``-release-rc`` suffix additionally marks the cut tag-only.
+    """Resolve ``spec`` against the repo's existing ``tags``; a bump word resolves
+    against the latest version tag, and ``resume`` is set when its tag exists.
     """
     existing = version_tags(tags)
     if spec.semver is not None:
