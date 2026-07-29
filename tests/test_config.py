@@ -385,7 +385,7 @@ def test_portfolio_contains_the_adopted_editor_consumers():
         assert slug in repos, slug
 
 
-def test_portfolio_excludes_the_sweeps_non_targets():
+def test_portfolio_excludes_the_sweeps_non_target():
     repos = _portfolio_repos()
     # The one genuine n/a row in the sweep: a docs repo with neither a
     # `pixi.toml` nor a `.shipit.toml` on main, so nothing to reconcile.
