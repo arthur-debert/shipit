@@ -1,34 +1,6 @@
-"""``shipit session`` — coordinator-session bootstrap/resume verbs.
+"""``shipit session`` — coordinator-session bootstrap and resume verbs.
 
-The command group for launching the coordinator's OWN isolated session — the one
-Tree ``shipit spawn subagent`` structurally cannot mint (it provisions Trees for
-Runs the coordinator launches, not for the session itself). A fresh Claude Code
-launch needs no shipit verb here: its cwd is fixed before any shipit code runs,
-so its session Tree rides the ``--worktree`` pre-launch seam (the
-``WorktreeCreate`` hook + ``agent-start claude``, ADR-0027). Codex has no such
-seam — but shipit launches the codex process itself,
-so ``shipit session codex`` CAN provision first and exec second, which is exactly
-what it does (issue #604):
-
-mint the per-launch session id → create the ephemeral session Tree
-(``ephemeral/<id>`` off ``origin/main``, the SAME pure planner + orchestrator the
-WorktreeCreate hook uses — never a parallel Tree implementation) → ``chdir`` into
-it → ``execvpe`` interactive ``codex --cd <tree>`` in the low-friction coordinator
-posture, with the session-identity env exports riding along.
-
-The verb is thin (ADR-0030): the launch contract — id grammar, argv posture, env
-scrubs/exports — is the pure core in :mod:`shipit.session.bootstrap`; this module
-holds click glue, the effectful seams (Tree creation, ``chdir``/``exec``), and the
-exit mapping. The managed ``./agent-start codex`` launcher (laid down by
-``shipit install``) is a thin alias onto this verb.
-
-The backend-neutral ``shipit session resume`` surface sits alongside those
-launch paths. It resolves a human-facing shipit session id, backend-native id, or
-``--last --repo`` from durable shipit JSONL records, then deliberately drops back
-to each backend's own resume contract: Codex provisions a fresh Tree explicitly
-and execs ``codex resume --cd <tree> …``; Claude execs
-``claude --worktree <new-session> --resume …`` from a deterministic source
-checkout so the WorktreeCreate hook remains the Tree creator.
+See docs/adr/0027-coordinator-session-tree-ephemeral.md.
 """
 
 from __future__ import annotations
@@ -52,9 +24,6 @@ from ..tree.layout import TreeSpec
 from ._errors import cli_errors
 from ._params import REPO_SLUG
 
-#: The session axis' logger (ADR-0029): the launch narrates its milestone here —
-#: the exec replaces this process, so the record written BEFORE it is the durable
-#: trace that this session id/Tree pair was launched at all.
 logger = logging.getLogger("shipit.session")
 
 
@@ -76,23 +45,7 @@ def session() -> None:
 @session.command(name="codex", context_settings={"ignore_unknown_options": True})
 @click.argument("codex_args", nargs=-1, type=click.UNPROCESSED)
 def codex_cmd(codex_args: tuple[str, ...]) -> None:
-    """Launch an interactive Codex coordinator session in a fresh session Tree.
-
-    Mints a recognizable per-launch session id (``codex-<utc-stamp>-<pid>``),
-    provisions the central-root ephemeral Tree for it (branch ``ephemeral/<id>``,
-    base ``origin/main`` — ADR-0027, the same Tree machinery every shape uses),
-    then REPLACES this process with interactive ``codex --cd <tree>`` in the
-    low-friction coordinator posture (unsandboxed — the Tree is the external
-    isolation; ADR-0020 §codex). Auth is whatever codex already holds: the
-    ChatGPT login stays first-class (the API-billing env keys are scrubbed,
-    ``CODEX_ACCESS_TOKEN`` passes through). Extra CODEX_ARGS are forwarded to
-    codex verbatim (``shipit session codex --model foo``).
-
-    On success this command never returns — codex takes the terminal over.
-    Exits 127 when the codex binary is missing from PATH; exits 1 (clean stderr
-    message) when run outside a git checkout, when Tree creation fails, or when
-    the codex binary cannot be exec'd.
-    """
+    """Launch an interactive Codex coordinator session in a fresh session Tree."""
     args = list(codex_args)
     if len(args) >= 2 and args[0] == "resume":
         raise SystemExit(run_codex(args[2:], resume_thread_id=args[1]))
@@ -124,21 +77,8 @@ def resume_cmd(
     prompt: str | None,
     args: tuple[str, ...],
 ) -> None:
-    """Resume a coordinator session by shipit session id or backend-native id.
+    """Resume a coordinator session by shipit session id or backend-native id."""
 
-    The resolver reads durable shipit records to map the requested identity to a
-    repository, backend, and backend-native conversation id. The actual launch
-    remains backend-specific: Codex uses the existing re-rooted
-    ``codex resume --cd <fresh-tree>`` path; Claude uses native
-    ``claude --worktree <fresh-session> --resume <native-id>`` so the
-    WorktreeCreate hook still provisions the Tree.
-    """
-
-    # One variadic argument avoids Click assigning an unknown backend flag to an
-    # optional ``target`` positional. Under ``--last`` every leading bare token
-    # is retained as a target so mutual exclusivity fails closed (a native UUID
-    # and a prompt are otherwise indistinguishable). Intentional prompts use the
-    # explicit --prompt surface; leading backend options remain pass-through.
     last_with_target = last and bool(args) and not args[0].startswith("-")
     target = args[0] if last_with_target or (not last and args) else None
     backend_args = args[1:] if target is not None else args
@@ -166,17 +106,9 @@ def run_resume(
     codex_runner: Callable[..., int] | None = None,
     claude_runner: Callable[..., int] | None = None,
 ) -> int:
-    """Resolve a backend-neutral resume target and launch the matching backend.
-
-    Returns only on launch failure; successful launches replace the process.
-    ``resolver`` and the backend runners are injectable so tests assert the
-    resolver precedence and argv/env contracts without starting real CLIs.
-    """
+    """Resolve a backend-neutral resume target and launch the matching backend."""
 
     resolved = resolver(target, repo=repo_identity, last=last)
-    # This process may itself have been invoked from another live coordinator.
-    # The resume target starts a distinct session and may name a different repo,
-    # so clear every inherited in-process correlation before binding its truth.
     logcontext.unbind(*logcontext.DOMAIN_KEYS)
     logcontext.bind(repo=resolved.repo.slug)
     logsetup.configure_logging(
@@ -223,24 +155,7 @@ def run_codex(
     environ: Mapping[str, str] | None = None,
     activation_runner: Callable[..., execrun.ExecResult] = execrun.run,
 ) -> int:
-    """Mint id → create the ephemeral Tree → chdir → exec codex. Returns only on failure.
-
-    ``creator``/``chdir``/``execute``/``which``/``environ`` are the injectable
-    effect seams (defaults: the real Tree orchestrator, ``os.chdir``,
-    ``os.execvpe``, ``shutil.which``, ``os.environ``) so tests assert the whole
-    launch contract — the
-    :class:`TreeSpec` the Tree is minted from, the cwd handoff, the argv and env
-    the exec receives — without cloning a repo or spawning codex. With the real
-    seams a successful call never returns (``execvpe`` replaces the process);
-    the ``return 0`` tail exists for injected non-replacing executors.
-
-    Failure mapping (mirrors ``tree create``'s run): not-a-checkout, a rejected
-    spec (``ValueError``), a git/provisioning Exec failure, a filesystem error,
-    a missing ``codex`` binary (preflighted before provisioning, exit 127), and a
-    failed exec each print one clean ``session codex: …`` line to stderr — plus
-    the durable ERROR record for post-provisioning failures. No traceback for a
-    known refusal.
-    """
+    """Create the ephemeral Tree and exec codex in it; returns only on failure."""
     root = source_repo if source_repo is not None else git.repo_root()
     if not root:
         print("session codex: not inside a git checkout", file=sys.stderr)
@@ -291,10 +206,6 @@ def run_codex(
         activation=activation,
     )
     print(bootstrap.format_launch(session_id, tree.path, display_argv), flush=True)
-    # The launch milestone, written BEFORE the exec replaces this process: the
-    # last record this pid can leave, and the one that joins the session id/Tree
-    # pair to the codex launch in the flow log. (The Tree's own birth already
-    # emitted `tree.created` with the session bound — ADR-0027/0032.)
     with logcontext.scoped(session=session_id, tree=tree.path):
         session_env = workenv.resolve_session_env(
             repo=spec.repo,
@@ -329,8 +240,6 @@ def run_codex(
                 **({"codex_thread": resume_thread_id} if resume_thread_id else {}),
             },
         )
-    # chdir FIRST: codex hook commands and child shells inherit the process cwd,
-    # so it must agree with --cd's agent root — both point at the Tree.
     try:
         chdir(tree.path)
     except OSError as exc:
@@ -362,15 +271,7 @@ def run_claude_resume(
     which: Callable[[str], str | None] = shutil.which,
     environ: Mapping[str, str] | None = None,
 ) -> int:
-    """Exec Claude's native resume through the WorktreeCreate session-Tree seam.
-
-    Claude owns Tree provisioning for top-level sessions through
-    ``--worktree``. This path therefore mints a new shipit session id, changes
-    into a deterministic source checkout for the target repo, and execs
-    ``claude --worktree <new-id> --resume <native-id>``. The hook then creates
-    the fresh ephemeral Tree from ``origin/main`` and SessionStart preserves the
-    usual Claude env-file, hook, permission, and guard behavior.
-    """
+    """Exec Claude's native resume through the WorktreeCreate session-Tree seam."""
 
     if which(CLAUDE.binary) is None:
         print(
@@ -381,11 +282,6 @@ def run_claude_resume(
     session_id = (
         f"sess-{time.strftime('%Y%m%d-%H%M%S', time.gmtime(time.time()))}-{os.getpid()}"
     )
-    # The Tree is minted by the WorktreeCreate hook AFTER exec (`claude --worktree`),
-    # and under the flat grammar its dir `<id>` is the HARNESS session UUID the hook
-    # reads from the payload (ADR-0074) — NOT derivable here. So this launch no longer
-    # precomputes the dir; the branch (`ephemeral/<session_id>`) is still the birth
-    # branch the hook builds. `session_id` remains the pre-exec log-context key.
     argv = [
         CLAUDE.binary,
         "--worktree",
@@ -440,19 +336,7 @@ def run_claude_resume(
 def _claude_resume_env(
     parent_env: Mapping[str, str], session_id: str
 ) -> dict[str, str]:
-    """Claude resume env: scrub stale Tree/log identity, export the MINTED session id.
-
-    Scrubs the inherited Tree pointers and every ``SHIPIT_LOG_CTX_*`` key (a global resume
-    may target a different repo/task than the shell that launched it), then exports THIS
-    launch's freshly minted ``session_id`` as ``SHIPIT_LOG_CTX_SESSION`` — the same var
-    :func:`shipit.session.current.current_session_id` reads first and the SessionStart hook
-    re-exports. Without it that resolver finds no exported key and falls back to the flat
-    Tree's leaf UUID, so SessionStart records the resumed session under a DIFFERENT id than
-    the pre-exec launch record used — splitting one launch's flow log across two ids and
-    minting two ``ResumeTarget``s for one native id. Exporting it here folds both events
-    into one session. (Only ``session`` is exported, not the Tree: the resume's Tree is
-    minted by the WorktreeCreate hook AFTER exec and is not knowable at this seam.)
-    """
+    """Scrub stale Tree/log identity and export the minted session id."""
 
     env = scrub_tree_env(dict(parent_env))
     env = logcontext.scrub_env(env)
@@ -467,11 +351,6 @@ def _display_argv(argv: Sequence[str], *, prompt: str | None) -> list[str]:
 
 
 def _format_claude_resume_launch(session_id: str, argv: Sequence[str]) -> str:
-    """Human scrollback line-set before Claude takes over the terminal.
-
-    No ``tree`` line: the resume's Tree is minted by the WorktreeCreate hook after
-    exec and its flat dir ``<id>`` is the harness session UUID (ADR-0074), so it is
-    not knowable at this pre-exec seam.
-    """
+    """Human scrollback line-set before Claude takes over the terminal."""
 
     return f"claude session {session_id}\nexec {shlex.join(list(argv))}"
