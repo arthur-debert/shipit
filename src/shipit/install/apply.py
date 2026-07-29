@@ -854,10 +854,12 @@ def reject_pixi_key_conflicts(plan: Plan) -> None:
     The conflicted block's decision is already excluded from the plan, so nothing
     unparseable is ever written — what this guard refuses is EXITING 0 over it.
     Warning and continuing treated a block that could not be DELIVERED as a block
-    that did not need delivering: the repo silently stayed off the fleet pin the
-    block exists to carry, in a reconcile that reported success. 16 of 20
-    portfolio repos were in exactly that state, most of them over a hand-pin
-    whose own comment named the shipit gap the managed block had since closed.
+    that did not need delivering: the repo silently kept its own version of
+    whatever the block carries, in a reconcile that reported success. In the
+    #1116 incident that was always a dependency pin — 16 of 20 portfolio repos,
+    most over a hand-pin whose own comment named the shipit gap the managed block
+    had since closed — but the guard is not pin-specific and neither is its
+    message: a ``[tasks]``-anchored block collides the same way (#1133 round 1).
 
     The supported way to keep owning the key is DECLARING it —
     ``[managed.decline].keep`` in ``.shipit.toml``, which
@@ -878,9 +880,13 @@ def reject_pixi_key_conflicts(plan: Plan) -> None:
     :class:`InstallError` (an operator-fixable state), never a
     :class:`SelfCertError`."""
     if plan.pixi_key_conflicts:
+        # "under-deliver its managed set", not "stay off the managed pin" (#1133
+        # round 1): a key conflict anchors under `[tasks]` as readily as under a
+        # dependency table, so pin-specific framing misdescribes a colliding task
+        # to the operator whose install just refused over it.
         raise InstallError(
             "pixi key conflict — refusing to reconcile a repo that would silently "
-            "stay off the managed pin:\n"
+            "under-deliver its managed set:\n"
             + "\n".join(
                 f"  {format_pixi_key_conflict(kc)}" for kc in plan.pixi_key_conflicts
             )

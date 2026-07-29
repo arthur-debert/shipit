@@ -691,10 +691,17 @@ class PixiKeyConflict:
 
     Anything else here is a REFUSAL, not a skip: every applying mode fails closed
     on this record (:func:`shipit.install.apply.reject_pixi_key_conflicts`).
-    Continuing would leave the repo off the fleet pin the block exists to deliver,
+    Continuing would leave the repo without whatever the block exists to deliver,
     with only a warning in a reconcile that ends "success" — the drift the managed
     set exists to prevent, in the repos most likely to have hand-edited their
     manifest.
+
+    ``anchor`` is ANY anchor a marker-formatted pixi block declares under, not
+    just a dependency table: ``[tasks]`` and ``[feature.lint.tasks]`` units are
+    checked on the same path, so a consumer's own ``test`` task collides exactly
+    like a hand-rolled ``uv`` pin. The #1116 fleet incident happened to be all
+    dependency pins, but nothing here is pin-specific — which is why
+    :func:`format_pixi_key_conflict` words the message over DECLARATIONS.
     """
 
     unit_key: str  # the [managed] table key, e.g. "pixi.toml#shipit-node-deps"
@@ -714,6 +721,13 @@ def format_pixi_key_conflict(conflict: PixiKeyConflict) -> str:
     DESCRIBED rather than offered as a paste-able snippet, because no single-line
     spelling of it is valid.
 
+    Worded over DECLARATIONS, never over pins (#1133 round 1). A
+    :class:`PixiKeyConflict` can anchor under ``[tasks]`` or
+    ``[feature.lint.tasks]`` just as readily as under a dependency table, so
+    "also pins" / "off the fleet pin" would misdescribe a colliding ``test``
+    task to the operator whose install just refused over it — on the one surface
+    that has to be accurate, since it is all they get.
+
     That wording is deliberate (#1133 round 1). The remedy needs two lines — a
     ``[managed.decline]`` header then its ``keep`` assignment — and there is no
     one-line alternative: :func:`shipit.config.load_declines` refuses the dotted
@@ -728,12 +742,13 @@ def format_pixi_key_conflict(conflict: PixiKeyConflict) -> str:
     keys = " and ".join(f"'{k}'" for k in conflict.keys)
     return (
         f"this repo's pixi.toml already declares {keys} in {conflict.anchor}, "
-        f"which the managed block '{conflict.unit_key}' also pins — splicing it "
-        f"would duplicate the key(s) and make pixi.toml unparseable, so the "
-        f"block CANNOT be delivered and this repo would stay off the fleet pin. "
-        f"Remedy — pick one: (1) delete this repo's own entry and re-run "
-        f"`shipit install` to take the managed pin (usually right: these entries "
-        f"are hand-pins shipit's managed set has since taken over); or (2) to "
+        f"which the managed block '{conflict.unit_key}' also declares — splicing "
+        f"it would duplicate the key(s) and make pixi.toml unparseable, so the "
+        f"block CANNOT be delivered and this repo would stay on its own version "
+        f"of it. Remedy — pick one: (1) delete this repo's own entry and re-run "
+        f"`shipit install` to adopt the managed one (usually right: these are "
+        f"typically hand-rolled entries shipit's managed set has since taken "
+        f"over); or (2) to "
         f"keep this repo's own entry, declare the override in .shipit.toml as "
         f"TWO lines — a '[managed.decline]' header on a line of its own, then "
         f'below it the assignment keep = ["{conflict.unit_key}"] (the header '
@@ -2085,8 +2100,9 @@ class Plan:
     # pixi.toml — so their decisions are excluded outright (never a broken write,
     # in any mode) and EVERY applying mode then fails closed on this record
     # (#1116, `shipit.install.apply.reject_pixi_key_conflicts`). Undeliverable is
-    # not "did not need delivering": continuing leaves the repo off the fleet pin
-    # the block exists to deliver while the reconcile reports success. A block the
+    # not "did not need delivering": continuing leaves the repo without whatever
+    # the block carries — a pin, a task — while the reconcile reports success. A
+    # block the
     # consumer DECLINED never lands here — that declaration IS the way to own the
     # key. Unlike the two conflict siblings below, which stay warn-only.
     pixi_key_conflicts: tuple[PixiKeyConflict, ...] = ()

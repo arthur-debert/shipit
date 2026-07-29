@@ -524,7 +524,7 @@ def run(
             # Fail closed on an undeclined consumer key shadowing a managed pixi
             # block in EVERY applying mode (#1116): the block's decision is
             # already excluded, so what is refused is exiting 0 over a repo left
-            # off the fleet pin. Placed before the no-op shortcut for the same
+            # on its own version of it. Placed before the no-op shortcut for the same
             # reason as the tripwire above — the rest of the managed set is
             # typically current, so the plan carries no work and would otherwise
             # report success over a repo that silently under-delivered. Ordered

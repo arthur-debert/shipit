@@ -4380,6 +4380,38 @@ def test_the_advertised_decline_remedy_is_never_advertised_as_invalid_toml(
     )
 
 
+def test_a_key_conflict_message_never_assumes_the_collision_is_a_version_pin(
+    tmp_path,
+):
+    # #1133 round 1: PixiKeyConflict is anchor-agnostic — the managed tasks block
+    # anchors under [tasks], so a consumer with their OWN `logs` task collides
+    # exactly like a hand-rolled dependency pin. The #1116 incident was all
+    # dependency pins, so the message had drifted into pin-specific framing
+    # ("also pins", "off the fleet pin", "take the managed pin"), which
+    # misdescribes a colliding TASK to the operator whose install just refused —
+    # the one surface that has to be accurate, since it is all they get.
+    (tmp_path / "pixi.toml").write_text(
+        _CONSUMER_PIXI_WITH_NODE.replace("nodejs", "cmake")
+        + '\n[tasks]\nlogs = "tail -f my.log"\n'
+    )
+    plan = _plan(tmp_path)
+
+    # The collision is REAL, not hypothetical — a [tasks] anchor, not a pin table.
+    conflict = next(c for c in plan.pixi_key_conflicts if c.unit_key == iunits.PIXI_KEY)
+    assert conflict.anchor == "[tasks]"
+    assert conflict.keys == ("logs",)
+
+    # The message describes it in terms of DECLARATIONS, on every surface.
+    message = irec.format_pixi_key_conflict(conflict)
+    assert "logs" in message and "[tasks]" in message
+    for pin_framing in ("also pins", "fleet pin", "managed pin", "hand-pins"):
+        assert pin_framing not in message
+    with pytest.raises(InstallError) as excinfo:
+        iapply.reject_pixi_key_conflicts(plan)
+    assert "off the managed pin" not in str(excinfo.value)
+    assert "under-deliver its managed set" in str(excinfo.value)
+
+
 def test_node_block_delivers_when_the_consumer_has_no_clashing_key(tmp_path):
     # Contrast: a [dependencies] table WITHOUT the block's keys is no conflict.
     (tmp_path / "pixi.toml").write_text(
