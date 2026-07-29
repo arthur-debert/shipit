@@ -691,9 +691,11 @@ def format_plan_warnings(plan: Plan) -> str:
     apply/verb, so this line is the dry-run surface, worded off the same
     formatter), each pixi block skipped over a consumer-owned same-named task
     (TOL01-WS01 — a pixi-task ambiguity) or a redeclared top-level table
-    (ARF01-WS04); those two stay warn-only in every mode: the skip keeps the
-    write set safe and costs no pin, and shipit's own repo carries a deliberate
-    task conflict. Also each
+    (ARF01-WS04); those two stay warn-only in every mode — not because their skip
+    costs less (it leaves a managed block undelivered just the same) but because
+    refusing would make shipit refuse to install itself (its ``test`` task
+    conflict is deliberate and documented) or ship an untested refusal (the
+    fleet-wide table-conflict count is zero). Also each
     whole-file unit whose dest crosses a consumer symlink (#1088 review — EVERY
     applying mode also fails closed on these in apply/verb; the warning is the
     dry-run surface, worded off the same formatter so the two can never drift),

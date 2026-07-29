@@ -871,12 +871,13 @@ def reject_pixi_key_conflicts(plan: Plan) -> None:
     :func:`reject_stale_provision`, the refusal is about the state of the
     consumer's manifest rather than about publishing, so a working-tree refresh
     that "succeeded" while under-delivering would just relocate the discovery to
-    a fleet audit months later. The two conflict SIBLINGS stay warn-only:
-    :class:`~shipit.install.reconcile.PixiTaskConflict` is a deliberate,
-    documented shape in shipit's OWN repo (refusing would make shipit refuse to
-    install itself) and it costs a task caller, not a pin;
-    :class:`~shipit.install.reconcile.PixiTableConflict` has a fleet-wide count of
-    zero, so refusing on it would ship an untested refusal. A plain
+    a fleet audit months later. The two conflict SIBLINGS strand a managed block
+    just as this one does; what keeps them warn-only is the cost of refusing on
+    THEM: :class:`~shipit.install.reconcile.PixiTaskConflict` is a deliberate,
+    documented shape in shipit's OWN repo, so refusing would make shipit refuse to
+    install itself; :class:`~shipit.install.reconcile.PixiTableConflict` has a
+    fleet-wide count of zero, so refusing on it would ship an untested
+    refusal. A plain
     :class:`InstallError` (an operator-fixable state), never a
     :class:`SelfCertError`."""
     if plan.pixi_key_conflicts:

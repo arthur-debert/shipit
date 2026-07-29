@@ -85,13 +85,16 @@ is NOT in shipit's reserved namespace — the private-tier
 consumer declare by hand — would, on a first splice over a pre-existing table,
 declare that table twice and make ``pixi.toml`` unparseable, so the block is
 skipped and the consumer's own table stays authoritative
-(:class:`PixiTableConflict`). Both siblings stay WARN-ONLY on purpose (#1116):
-shipit's own repo carries a deliberate, documented ``test`` task conflict, so
-refusing on task ambiguity would make shipit refuse to install itself, and the
-fleet-wide table-conflict count is zero — an untested refusal nobody has ever
-hit. Only the KEY conflict refuses, because only it silently drops a managed
-DECLARATION (a pin in the #1116 incident, but a ``[tasks]`` entry just as
-readily) out of a reconcile that reports success.
+(:class:`PixiTableConflict`). All THREE conflicts leave a managed block
+undelivered out of a reconcile that reports success — what separates them is the
+fail-closed POLICY, not the effect. Both siblings stay WARN-ONLY on purpose
+(#1116) because refusing on them costs more than the drift does: shipit's own
+repo carries a deliberate, documented ``test`` task conflict, so refusing on task
+ambiguity would make shipit refuse to install itself, and the fleet-wide
+table-conflict count is zero — an untested refusal nobody has ever hit. The KEY
+conflict carries neither counterweight and the fleet-proven drift above to its
+name (a pin in the #1116 incident, but a ``[tasks]`` entry just as readily), so
+it is the one that refuses.
 
 Install also runs a RETIRED-COMMAND tripwire over the consumer's pixi tasks
 (#1070, ADR-0066): ``shipit provision lexd`` was deleted with no fallback, but
@@ -2109,9 +2112,10 @@ class Plan:
     # (#1116, `shipit.install.apply.reject_pixi_key_conflicts`). Undeliverable is
     # not "did not need delivering": continuing leaves the repo without whatever
     # the block carries — a pin, a task — while the reconcile reports success. A
-    # block the
-    # consumer DECLINED never lands here — that declaration IS the way to own the
-    # key. Unlike the two conflict siblings below, which stay warn-only.
+    # block the consumer DECLINED never lands here — that declaration IS the way
+    # to own the key. The two siblings below strand a managed block the same way;
+    # they stay warn-only over the cost of refusing on THEM, not over a lesser
+    # effect (see the module docstring).
     pixi_key_conflicts: tuple[PixiKeyConflict, ...] = ()
     # Pixi blocks SKIPPED over a task-name AMBIGUITY (TOL01-WS01): the splice
     # would define a default-env task a consumer feature also defines, making
