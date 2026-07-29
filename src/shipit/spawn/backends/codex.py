@@ -1,50 +1,4 @@
-"""``spawn/backends/codex`` — the ``codex`` backend adapter (ADR-0020 §codex, WS02).
-
-The second :class:`~shipit.spawn.backends.base.BackendAdapter`, wired from the WS00
-spike's **probed** findings (`codex-cli` 0.139.0 — ADR-0020 §Decision-per-backend),
-NOT from guessed flags. Three facts are load-bearing and non-obvious:
-
-- **The bypass posture is mandatory for a WRITE Run.** ``codex exec`` defaults to a
-  ``workspace-write`` sandbox under which the spike confirmed codex can edit files but
-  is **denied ``.git/index.lock``** (``Operation not permitted``) and has **no network**
-  — so it cannot ``git commit``, ``git push``, or run ``gh``. A Run whose deliverable is
-  a *draft PR* therefore needs ``--dangerously-bypass-approvals-and-sandbox``: the flag
-  codex documents for *"environments that are externally sandboxed"*, which our chmod'd
-  Tree (ADR-0018) **is**. With the flag the spike landed a real commit; without it the
-  Run cannot produce its result. ``--skip-git-repo-check`` lets codex run in the Tree
-  without re-litigating that it is a git checkout.
-- **There is NO native ``--agent`` flag.** codex does **not** run under the shipit
-  harness or its ``PreToolUse`` guard — it is a foreign runtime. The generated role
-  slice is therefore passed through Codex's native ``developer_instructions`` config
-  override, while the positional prompt contains only the task brief. Writing the role
-  into an ``AGENTS.md`` / ``experimental_instructions_file`` in the Tree remains
-  rejected because it would pollute the PR.
-- **codex auth is ChatGPT OAuth** (tokens in ``~/.codex/auth.json`` / ``$CODEX_HOME``),
-  inherited by the child. The spike found a bogus ``OPENAI_API_KEY`` did *not* break
-  codex 0.139 on the probe box (it preferred the stored tokens), but the safe
-  generalization of ADR-0019 §3 still holds: :meth:`child_env` scrubs the **API-billing**
-  keys ``OPENAI_API_KEY`` and ``CODEX_API_KEY`` so a stale key can never shadow the
-  login or silently flip a Run onto API billing — the ChatGPT subscription stays the
-  first-class auth. ``CODEX_ACCESS_TOKEN`` (:data:`ACCESS_TOKEN_VAR`) is different in
-  kind — the *subscription-token* trusted-automation conduit codex consumes natively
-  from the env — and deliberately PASSES THROUGH (CDX01-WS03 probe). **No** secret is
-  ever written into the Tree.
-
-**Reviewer (read-only) posture — WS04a, probed, NOT the ADR's first guess.** The ADR
-recorded ``--ephemeral --sandbox read-only`` for a reviewer Run, but WS04a probed
-codex 0.139 directly and found ``--sandbox read-only`` **blocks the network**
-(``curl … → Could not resolve host``), so a read-only-sandbox reviewer cannot fetch PR
-context with ``gh pr diff``. Per ADR-0020 §Decision 3 the load-bearing read-only
-guarantee is the **chmod'd Tree** (the FS layer), not the native sandbox, so the chosen
-reviewer posture is the *least-privilege codex sandbox that still grants the network*:
-``--ephemeral --sandbox workspace-write -c sandbox_workspace_write.network_access=true``
-(probe-confirmed to reach the network). It deliberately does **NOT** carry the write Run's
-``--dangerously-bypass-approvals-and-sandbox``: the chmod'd Tree makes the workspace
-non-writable (the real guard), and ``workspace-write`` still confines any escape to
-``[workdir, /tmp, $TMPDIR]`` as best-effort defense-in-depth. Selected by ``read_only=True``
-on :meth:`build_command`. **WS04a scope ends at the reviewer launch posture** — the funnel
-replacement + check-run/readiness wiring is WS04b.
-"""
+"""The ``codex`` backend adapter."""
 
 from __future__ import annotations
 
@@ -57,93 +11,37 @@ from ...harness.prompts import load_role_defs, render
 from ...harness.role import Role
 from .base import BackendAdapter
 
-#: The codex auth-env vars :meth:`CodexAdapter.child_env` scrubs (ADR-0020 §codex
-#: Auth, generalizing ADR-0019 §3): the two **API-billing** keys. codex 0.139 documents
-#: ``CODEX_API_KEY`` as the opt-in for *API-billed* ``codex exec``, and
-#: ``OPENAI_API_KEY`` is the shared OpenAI-SDK var that lingers in dotfiles for other
-#: tools — so a stale key left in the env could shadow the ChatGPT login or silently
-#: flip a Run off the subscription onto API billing. Scrub both so the OAuth session
-#: wins; everything else inherits.
+#: Scrubbed: either would shadow the ChatGPT login or flip the Run onto API billing.
 AUTH_ENV_VARS = ("OPENAI_API_KEY", "CODEX_API_KEY")
 
-#: The ONE codex auth var that deliberately PASSES THROUGH ``child_env`` (CDX01-WS03,
-#: probed on codex 0.139): ``CODEX_ACCESS_TOKEN`` is codex's trusted-automation conduit
-#: — a ChatGPT **subscription** token consumed natively from the env, taking precedence
-#: over the stored ``$CODEX_HOME`` login (probe: a bogus value fails LOUD with
-#: ``invalid agent identity JWT format``, never silently), and the var ``codex login
-#: --with-access-token`` documents by name. It is NOT scrubbed because it cannot flip
-#: billing (still subscription-billed), it only exists when an operator exports it
-#: deliberately *for codex automation* (unlike ``OPENAI_API_KEY``, which other tools
-#: set), and headless automation with no persisted login NEEDS it to reach codex at
-#: all. It rides the child env only — never persisted, never written into the Tree or
-#: any managed file.
+#: Deliberately NOT scrubbed: headless automation with no persisted login needs it.
 ACCESS_TOKEN_VAR = "CODEX_ACCESS_TOKEN"
 
-#: Legacy review aliases → Codex model ids — sourced from the ONE agent-backend
-#: identity registry (:data:`shipit.agent.backend.CODEX`), NOT a duplicate table here
-#: (ADR-0025: the alias table is defined once and shared by the launch + funnel axes).
-#: The funnel's per-reviewer ``model`` config (``.shipit.toml [reviewers]``) speaks the
-#: legacy ``pro`` / ``flash`` aliases, so a capture reviewer constructed with one
-#: resolves it here; a write Run takes :data:`DEFAULT_MODEL`. A verbatim id passes through.
 MODEL_ALIASES = _IDENTITY.model_aliases
 
-#: The default codex model for a write Run — the capable "pro" tier (from the shared
-#: identity). The registry instantiates :class:`CodexAdapter` with this; the funnel
-#: constructs its own instance with the per-reviewer model. ``resolve_model`` leaves it
-#: unchanged (already a verbatim id), so the write path is byte-for-byte unchanged. The
-#: identity types ``default_model`` as ``str | None`` (a backend MAY require an explicit
-#: model), but codex always pins one, so narrow to a definite ``str`` — the adapter's
-#: ``model`` default expects a non-optional value.
+#: The identity types it optional; codex always pins one, so narrow to ``str``.
 assert _IDENTITY.default_model is not None
 DEFAULT_MODEL: str = _IDENTITY.default_model
 
 
 def resolve_model(model: str) -> str:
-    """Map a legacy review alias to its Codex model id (pass-through otherwise).
-
-    Delegates to the shared agent-backend identity so there is ONE alias table."""
     return _IDENTITY.resolve_model(model)
 
 
-#: The codex ``-c`` override that enables outbound network inside the reviewer's
-#: ``workspace-write`` sandbox (WS04a probe). Without it the sandbox blocks the network
-#: a captured reviewer needs for ``gh pr diff`` (``read-only`` blocks the network
-#: outright, with no override that re-grants it). Value is a TOML literal codex parses
-#: (``foo.bar=true``).
+#: Re-grants the network the reviewer's ``workspace-write`` sandbox would block.
 NETWORK_ACCESS_OVERRIDE = "sandbox_workspace_write.network_access=true"
 
-#: The codex ``-c`` config key that pins the model's reasoning effort (RVW03-WS04,
-#: #685) — codex's native ReasoningLevel knob, applied as ``-c
-#: model_reasoning_effort=<level>``. Probed on codex 0.139.0 (2026-07-10): the
-#: override is accepted and the run header echoes ``reasoning effort: <level>``,
-#: so the flag demonstrably reaches the model config (it is not a silent no-op).
-#: The :class:`~shipit.agent.invocation.ReasoningLevel` tokens (``low`` /
-#: ``medium`` / ``high``) are valid values verbatim.
 REASONING_EFFORT_KEY = "model_reasoning_effort"
 
-# Codex's developer-level instruction override. Spawned roles use this for the
-# generated role slice (ADR-0011) while the positional prompt stays the filled
-# task brief.
+# Carries the generated role slice; the positional prompt stays the task brief.
 DEVELOPER_INSTRUCTIONS_KEY = "developer_instructions"
 
 
 def _role_preamble(role: str) -> str:
-    """The fallback developer instruction for an unknown/custom role.
-
-    Known shipit roles use their generated role-scoped prompt. A custom role has
-    no generated slice, so this minimal identity travels through the same Codex
-    ``developer_instructions`` override; it is never prepended to the task prompt.
-    """
     return f"You are acting as the '{role}' role for this Run."
 
 
 def _role_instructions(role: str) -> str:
-    """The developer-instruction payload for a spawned Codex role.
-
-    Known shipit roles get the generated role-scoped prompt. Unknown role names
-    keep the old minimal role line so a custom/non-registered worker still has a
-    sane identity without pretending to have a generated slice.
-    """
     try:
         known = Role(role)
     except ValueError:
@@ -152,20 +50,14 @@ def _role_instructions(role: str) -> str:
 
 
 class CodexAdapter(BackendAdapter):
-    """The headless-``codex`` backend (ADR-0020 §codex), adapter #1 of the seam."""
+    """The headless-``codex`` backend."""
 
     name = _IDENTITY.name
 
     def __init__(
         self, model: str = DEFAULT_MODEL, reasoning: str | None = None
     ) -> None:
-        #: The Codex model id (alias resolved once at construction). The registry's
-        #: shared instance uses :data:`DEFAULT_MODEL`; the funnel constructs an instance
-        #: with its per-reviewer ``model`` so the capture reviewer honours the config.
         self.model = resolve_model(model)
-        #: The reasoning level actually emitted as ``-c model_reasoning_effort=…``
-        #: (RVW03-WS04) — ``None`` omits the override (codex's own config default)
-        #: and is what records stamped from this attribute then honestly report.
         self.reasoning = reasoning
 
     def build_command(
@@ -177,43 +69,10 @@ class CodexAdapter(BackendAdapter):
         cwd: str | Path | None = None,
         output_schema_path: str | None = None,
     ) -> list[str]:
-        """The exact ``codex exec`` argv ADR-0020 §codex specifies, per posture.
-
-        Common shell: ``codex exec --skip-git-repo-check <posture flags>
-        [-c model_reasoning_effort=<level>] -c developer_instructions=<role>
-        --model <id> "<task>"``. The generated role slice travels through Codex's
-        developer-instruction channel; the positional prompt is the task only. The
-        reasoning override (:data:`REASONING_EFFORT_KEY`, RVW03-WS04) appears only
-        when this instance pins a level — codex's native ReasoningLevel knob,
-        common to both postures.
-
-        ``read_only`` selects the posture flags:
-
-        - **write** (``read_only=False``, default): ``--dangerously-bypass-approvals-and-sandbox``.
-          Load-bearing — codex's default ``workspace-write`` sandbox blocks ``.git`` writes
-          and the network, so a Run that must ``git commit`` / ``git push`` / ``gh pr create``
-          needs the unsandboxed posture; the chmod'd Tree (ADR-0018) is the external sandbox
-          that flag documents.
-        - **reviewer** (``read_only=True``): ``--ephemeral --sandbox workspace-write
-          -c sandbox_workspace_write.network_access=true``. WS04a probed codex 0.139:
-          ``--sandbox read-only`` blocks the network a captured reviewer needs for
-          ``gh pr diff``, so the reviewer uses the least-privilege sandbox that still
-          grants the network. It deliberately omits the write bypass flag: the chmod'd
-          Tree is the load-bearing read-only guard (ADR-0020 §Decision 3), and
-          ``workspace-write`` confines any escape to ``[workdir, /tmp, $TMPDIR]`` as
-          best-effort defense-in-depth. ``--ephemeral`` skips session persistence.
-
-        ``cwd`` is accepted for the seam (ADR-0020) but **ignored**: like ``claude``,
-        codex roots in the Tree through the OS process ``cwd`` that
-        :func:`shipit.spawn.launch.launch` sets, so no path belongs in its argv (unlike
-        ``agy``, which ignores process ``cwd`` and is handed the Tree via ``--add-dir``).
-
-        ``output_schema_path`` (TRE05-WS04b) — when given AND ``read_only`` — adds
-        ``--output-schema <path>`` so codex enforces its structured output against the
-        review JSON schema natively. It is the funnel **capture** reviewer's robustness
-        win (ADR-0020 §migration-cost: *keep ``--output-schema`` on the codex reviewer*);
-        It is never added to a WRITE Run (a write Run emits no captured JSON).
-        """
+        """The ``codex exec`` argv; a schema is honoured only for a read-only Run."""
+        # A write Run needs the bypass posture: the default `workspace-write` sandbox
+        # blocks `.git` writes and the network. The reviewer keeps that sandbox but
+        # re-grants the network, since `read-only` blocks it outright.
         del cwd  # codex roots via the process cwd; no path belongs in its argv.
         prompt = task
         posture = (
@@ -248,17 +107,6 @@ class CodexAdapter(BackendAdapter):
         ]
 
     def child_env(self, parent_env: Mapping[str, str] | None = None) -> dict[str, str]:
-        """The child's environment: the parent's, with the API-billing keys REMOVED.
-
-        ADR-0020 §codex Auth (generalizing ADR-0019 §3): codex authenticates via ChatGPT
-        OAuth (tokens in ``$CODEX_HOME``), so a stale ``OPENAI_API_KEY`` / ``CODEX_API_KEY``
-        in the env could shadow that login or silently flip the Run onto API billing.
-        Scrubbing both (:data:`AUTH_ENV_VARS`) keeps the subscription first-class;
-        everything else inherits — including ``CODEX_ACCESS_TOKEN``
-        (:data:`ACCESS_TOKEN_VAR`), the subscription-token automation conduit that
-        deliberately passes through — and no secret is written to the Tree.
-        ``parent_env`` defaults to the live :data:`os.environ` and is injectable
-        for tests; the returned dict is always a fresh copy, never the caller's.
-        """
+        """The parent's environment with :data:`AUTH_ENV_VARS` removed."""
         source = os.environ if parent_env is None else parent_env
         return {key: value for key, value in source.items() if key not in AUTH_ENV_VARS}

@@ -1,8 +1,4 @@
-"""The OPT-IN, LIVE end-to-end verification harness for ``shipit spawn``.
-
-It spawns real Runs and opens real PRs, so it must never run inside
-``pixi run test`` — see docs/dev/spawn-dogfood-verification.md.
-"""
+"""The OPT-IN, LIVE verification harness for ``shipit spawn``: it opens real PRs."""
 
 from __future__ import annotations
 
@@ -69,7 +65,7 @@ class DogfoodConfig:
 def assert_dissociated_clone(
     report: Report, tree_path: str | None, *, label: str
 ) -> None:
-    """Isolation invariant 2: the Tree is a dissociated clone, not a worktree."""
+    """The Tree is a dissociated clone, not a native worktree."""
     if not _has_path(report, tree_path, label):
         return
     git = Path(tree_path) / ".git"  # type: ignore[arg-type]
@@ -89,7 +85,6 @@ def assert_dissociated_clone(
 def assert_under_central_root(
     report: Report, tree_path: str | None, central_root: str, *, label: str
 ) -> None:
-    """Isolation invariant 3: the Tree is under the central root, not in ``.claude``."""
     if not _has_path(report, tree_path, label):
         return
     path = Path(tree_path).resolve()  # type: ignore[arg-type]
@@ -110,7 +105,6 @@ def assert_under_central_root(
 def assert_distinct_from_scratch(
     report: Report, tree_path: str | None, scratch: str, *, label: str
 ) -> None:
-    """Isolation invariant 1: the Tree is a distinct dir from the scratch checkout."""
     if not _has_path(report, tree_path, label):
         return
     path = Path(tree_path).resolve()  # type: ignore[arg-type]
@@ -193,7 +187,7 @@ def _has_path(report: Report, tree_path: str | None, label: str) -> bool:
 
 
 def parse_spawned(stdout: str) -> dict | None:
-    """The ``SPAWNED`` JSON block from a spawn's stdout, or ``None`` if unparseable."""
+    """The ``SPAWNED`` JSON block from stdout, or ``None`` if unparseable."""
     lines = stdout.splitlines()
     for i, line in enumerate(lines):
         if line.strip() == "SPAWNED":
@@ -206,13 +200,10 @@ def parse_spawned(stdout: str) -> dict | None:
     return None
 
 
-# The live seams are module-level so tests can monkeypatch them.
-
-
 def _run_spawn(
     argv: list[str], *, cwd: str, env: Mapping[str, str] | None = None
 ) -> SpawnInvocation:
-    """Run ``shipit <argv>`` in ``cwd`` and capture it; ``env`` overlays the parent's."""
+    """Run ``shipit <argv>`` in ``cwd``; ``env`` overlays the parent's."""
     result = execrun.run(
         ["shipit", *argv],
         cwd=cwd,
@@ -243,7 +234,6 @@ def _pixi_runs(tree_path: str) -> tuple[bool, str]:
 
 
 def _scratch_dirty(scratch: str) -> str:
-    """The scratch checkout's porcelain status; empty means clean."""
     return "\n".join(git.status_porcelain(cwd=scratch))
 
 
@@ -273,7 +263,7 @@ def _resolve_repo_slug(repo: str, *, scratch: str) -> str:
 
 
 def verify_write_run(report: Report, cfg: DogfoodConfig) -> dict | None:
-    """Spawn a real WRITE Run, assert it landed, and return its SPAWNED payload."""
+    """Spawn a real WRITE Run and return its SPAWNED payload."""
     branch = f"{cfg.epic}/WS{cfg.ws:02d}"
     argv = [
         "spawn",
@@ -375,8 +365,7 @@ def verify_reviewer_run(
         "--backend",
         "codex",
     ]
-    # Snapshot BEFORE spawning, so the post-spawn check asserts a NEW review (a
-    # count delta), not merely "≥1 review exists".
+    # Snapshot BEFORE spawning: the check must assert a NEW review, not "≥1 exists".
     have_pr = bool(write_payload) and write_payload.get("pr") is not None
     repo_slug = _resolve_repo_slug(cfg.repo, scratch=cfg.scratch) if have_pr else ""
     reviews_before = (
@@ -447,7 +436,7 @@ def verify_reviewer_run(
 
 
 def verify_fail_closed(report: Report, cfg: DogfoodConfig) -> None:
-    """Force a Tree-create failure (a RELATIVE Trees root) and assert it fails closed."""
+    """Force a Tree-create failure (a RELATIVE Trees root) and assert fail-closed."""
     argv = [
         "spawn",
         "subagent",
@@ -474,8 +463,7 @@ def verify_fail_closed(report: Report, cfg: DogfoodConfig) -> None:
         f"stderr={result.stderr.strip()[:200]}",
     )
     native = Path(cfg.scratch) / ".claude" / "worktrees"
-    # ``iterdir`` is guarded by ``is_dir`` so a FILE or broken symlink at that path
-    # cannot raise ``NotADirectoryError`` out of the harness.
+    # ``is_dir`` guards ``iterdir`` against a file or broken symlink at that path.
     report.record(
         "fail-closed left NO native worktree fallback",
         not native.is_dir() or not any(native.iterdir()),
@@ -509,7 +497,6 @@ def verify(cfg: DogfoodConfig) -> Report:
 
 
 def _guard(report: Report, scenario: str, fn):
-    """Run one scenario; an unexpected exception becomes a recorded FAIL and ``None``."""
     try:
         return fn()
     except Exception as exc:  # noqa: BLE001 — the whole point is to never let one escape
@@ -541,7 +528,7 @@ def format_report(report: Report, *, cfg: DogfoodConfig) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Console entrypoint; refuses without an explicit ``--scratch`` and coordinates."""
+    """Console entrypoint; refuses without an explicit ``--scratch`` target."""
     parser = argparse.ArgumentParser(
         prog="shipit-spawn-dogfood",
         description=(

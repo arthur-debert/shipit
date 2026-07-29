@@ -1,7 +1,4 @@
-"""The ``shipit spawn subagent`` pipeline: spec → validate → Tree → launch → audit.
-
-See docs/adr/0019-headless-claude-run-launch-contract.md.
-"""
+"""The ``shipit spawn subagent`` pipeline: spec → validate → Tree → launch → audit."""
 
 from __future__ import annotations
 
@@ -37,8 +34,6 @@ class SpawnError(RuntimeError):
 
 @dataclass(frozen=True)
 class SubagentSpec:
-    """The typed request for one subagent Run; not validated at construction."""
-
     repo: str
     role: str
     epic: str | None = None
@@ -67,7 +62,6 @@ class SpawnResult:
     pr_is_draft: bool | None = None
 
     def to_dict(self) -> dict:
-        """The SPAWNED JSON payload — byte-stable field set and order."""
         payload: dict = {
             "tree": self.tree,
             "branch": self.branch,
@@ -84,7 +78,7 @@ class SpawnResult:
 
 @dataclass(frozen=True)
 class Boundaries:
-    """The pipeline's injectable effectful edges; a ``None`` runner means the real one."""
+    """The injectable effectful edges; a ``None`` runner means the real one."""
 
     repo_root: Callable[[], str | None] = git.repo_root
     resolve_repo: Callable[[str], identity.Repo] = identity.resolve_repo
@@ -102,7 +96,6 @@ BOUNDARIES = Boundaries()
 
 
 def _elapsed_ms(start: float) -> int:
-    """Milliseconds elapsed since ``start`` (a ``time.monotonic`` stamp)."""
     return int((time.monotonic() - start) * 1000)
 
 
@@ -111,23 +104,16 @@ def _refusal(
 ) -> SpawnError:
     """Log the durable ERROR record and RETURN the exception for the caller to raise."""
     extras = {name: value for name, value in fields.items() if value is not None}
-    # `exc_info=True` (not the instance) so the real traceback is attached; every
-    # caller passing `exc` does so from inside its own `except` block.
+    # `exc_info=True` (not the instance) so the real traceback is attached.
     logger.error("spawn subagent: %s", message, exc_info=exc is not None, extra=extras)
     return SpawnError(message)
 
 
 def spawn_subagent(spec: SubagentSpec, bounds: Boundaries | None = None) -> SpawnResult:
-    """Validate → resolve identity → create the Tree → launch → audit. The pipeline.
-
-    Raises :class:`SpawnError` at every refusal; a write-tail failure after the
-    Tree exists appends the Tree's uncommitted-change count so the work can be
-    salvaged. ``bounds`` of ``None`` means the production adapters.
-    """
+    """Raises :class:`SpawnError` at every refusal; ``bounds`` of ``None`` is production."""
     bounds = bounds if bounds is not None else BOUNDARIES
-    # A nested spawn inherits the parent's `SHIPIT_LOG_CTX_*` and a prior spawn in
-    # this process leaves its bindings behind; since `bind` drops `None` halves, a
-    # stale `epic`/`ws` would otherwise be threaded into the new child.
+    # A nested spawn inherits the parent's `SHIPIT_LOG_CTX_*`, and `bind` drops
+    # `None` halves, so a stale `epic`/`ws` would leak into the new child.
     logcontext.unbind("tree", "agent", "epic", "ws", "role", "pr", "repo")
     logger.info(
         "spawn subagent: %s run requested on backend %s",
@@ -149,8 +135,7 @@ def spawn_subagent(spec: SubagentSpec, bounds: Boundaries | None = None) -> Spaw
     )
     adapter, profile = validate(spec)
 
-    # The role binds NORMALIZED (the parsed registry Role, not the raw input);
-    # `agent` binds in the launch tails once minted.
+    # The role binds NORMALIZED; `agent` binds in the launch tails once minted.
     logcontext.bind(epic=spec.epic, ws=spec.ws, role=profile.role.value)
 
     root, repo_identity, url = resolve_spawn_identity(spec, bounds)
@@ -335,7 +320,6 @@ def plan_write_spec(
     root: str,
     bounds: Boundaries,
 ) -> TreeSpec:
-    """Stage 3 — the umbrella check + the write shape's :class:`TreeSpec`."""
     if spec.has_epic_shape:
         try:
             umbrella_base = epic_umbrella_base(spec.epic)  # origin/E/umbrella
@@ -401,7 +385,6 @@ def salvage_note(tree_path: str, bounds: Boundaries) -> str | None:
 
 
 def _read_optional_env_identity(env_prefix: Path) -> pixienv.EnvIdentity | None:
-    """Best-effort pixi identity; an unreadable record must never block a launch."""
     try:
         return pixienv.read_env_identity(env_prefix)
     except Exception:  # noqa: BLE001 - optional metadata must never block launch.
@@ -467,7 +450,6 @@ def _run_child(
     bounds: Boundaries,
     role: str,
 ) -> launch.LaunchResult:
-    """Stage 5 — launch the backend child rooted in the Tree, shared by both tails."""
     events.emit(
         logger,
         "agent.spawned",
@@ -530,7 +512,6 @@ def _launch_write(
     adapter: backends.BackendAdapter,
     bounds: Boundaries,
 ) -> SpawnResult:
-    """Stages 4–6, write tail: materialize the Tree, launch the Run, audit its PR."""
     create_start = time.monotonic()
     events.emit(
         logger,
@@ -542,16 +523,14 @@ def _launch_write(
     try:
         tree = bounds.create_tree(spec, source_repo=source_repo, github_url=github_url)
     except (ValueError, execrun.ExecError, OSError) as exc:
-        # Fail-closed: no native-worktree fallback, so a failed create can never
-        # launch a Run against the parent checkout.
+        # Fail-closed: no worktree fallback, so this never launches against the parent.
         raise _refusal(
             f"tree creation failed: {exc}",
             exc=exc,
             duration_ms=_elapsed_ms(create_start),
         ) from exc
 
-    # The Tree dir's `<id>` UUID doubles as the Run's `agent` identity, so
-    # `shipit logs --agent <id>` and the flat Tree leaf's tail agree.
+    # The Tree dir's `<id>` UUID doubles as the Run's `agent` identity.
     logcontext.bind(tree=tree.path, agent=spec.tree_id)
     create_ms = _elapsed_ms(create_start)
     logger.info(
@@ -562,8 +541,7 @@ def _launch_write(
         extra={"branch": tree.branch, "base": tree.base, "duration_ms": create_ms},
     )
     base_branch = tree.base.split("/", 1)[-1] if "/" in tree.base else tree.base
-    # A standalone-issue Run links `closes`; an epic work-stream Run links `for`
-    # (non-closing — the umbrella PR closes the epic's issues at integration).
+    # A work-stream Run links `for`, not `closes`: the umbrella PR closes the issue.
     task = launch.write_task(
         role,
         issue=issue,
@@ -609,8 +587,7 @@ def _launch_write(
             base_branch=base_branch,
         )
     except SpawnError as exc:
-        # Deliberately NOT re-routed through `_refusal`: the original refusal and
-        # `salvage_note` each already logged, so that would duplicate the record.
+        # NOT re-routed through `_refusal`: both halves already logged.
         note = salvage_note(tree.path, bounds)
         if note is None:
             raise
@@ -742,8 +719,7 @@ def _launch_existing_pr_write(
             tree_spec, source_repo=source_repo, github_url=github_url
         )
     except (ValueError, execrun.ExecError, OSError) as exc:
-        # FileExistsError ⊂ OSError: with a fresh per-Run UUID a collision is a real
-        # error, not a reuse signal.
+        # FileExistsError ⊂ OSError: with a per-Run UUID a collision is a real error.
         raise _refusal(
             f"existing-PR tree attachment failed: {exc}",
             exc=exc,
@@ -864,8 +840,7 @@ def _launch_reviewer(
             pr=pr.number,
         )
 
-    # This boundary creates no Tree; the review service clones under the naming
-    # minted here, so the reported `tree` is the path the reviewer actually runs in.
+    # The review service clones under this naming, so the reported `tree` is real.
     naming = new_tree_naming(agent_backend.by_name(adapter.name).binary)
     tree_path = str(readonly_plan(repo=repo, branch=branch, **naming).dir)
     logcontext.bind(
@@ -931,7 +906,6 @@ def _launch_reviewer(
 
 
 def _log_spawned(result: SpawnResult) -> None:
-    """Record the SPAWNED coordinates durably — the log twin of the verb's stdout."""
     logger.info(
         "spawn subagent: SPAWNED %s run on %s",
         result.role,
