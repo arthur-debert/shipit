@@ -1,14 +1,3 @@
-"""Unit tests for the ``shipit tree`` verb layer — glue + wiring only.
-
-The ``create`` handler keeps its full glue coverage (resolve repo identity at
-the gh boundary, hand a typed :class:`TreeSpec` to the planner+orchestrator,
-print READY). The ``list``/``remove``/``gc`` sections are the CLI02-WS03 thin
-WIRING smoke layer: the promoted domain logic (fleet rows, removal gating, gc
-plan+sweep) is typed-tested in ``test_tree_fleet`` / ``test_tree_removal`` /
-``test_tree_gc``; here we prove only the click binding, the render seam, the
-error shell (``error: …`` + exit 1), and the two-tier exit contract.
-"""
-
 from __future__ import annotations
 
 import io
@@ -30,8 +19,6 @@ from shipit.verbs import tree as tree_verb
 
 def test_run_create_happy_path(monkeypatch, capsys):
     monkeypatch.setattr(git, "repo_root", lambda: "/repo")
-    # Identity derives LOCALLY from the origin remote (ADR-0024): the patched
-    # remote URL is what identity.resolve_repo parses into the canonical Repo.
     monkeypatch.setattr(git, "remote_url", lambda *, cwd: "git@example:acme/widget")
 
     captured: dict = {}
@@ -47,13 +34,11 @@ def test_run_create_happy_path(monkeypatch, capsys):
     rc = tree_verb.run_create(issue=7, slug="Thing")
 
     assert rc == 0
-    # The verb resolved identity into the spec it handed the orchestrator.
     assert captured["spec"].repo == repo_from_slug("acme/widget")
     assert captured["spec"].issue == 7
     assert captured["spec"].slug == "Thing"
     assert captured["source_repo"] == "/repo"
     assert captured["github_url"] == "git@example:acme/widget"
-    # READY summary is the orchestrator's result, as a READY line + JSON.
     out = capsys.readouterr().out
     assert out.splitlines()[0] == "READY"
     payload = json.loads("\n".join(out.splitlines()[1:]))
@@ -65,15 +50,11 @@ def test_run_create_happy_path(monkeypatch, capsys):
 
 
 def _patch_identity(monkeypatch):
-    """Mock the gh boundary so run_create resolves a fixed repo identity (acme/widget)."""
     monkeypatch.setattr(git, "repo_root", lambda: "/repo")
-    # Identity derives LOCALLY from the origin remote (ADR-0024): the patched
-    # remote URL is what identity.resolve_repo parses into the canonical Repo.
     monkeypatch.setattr(git, "remote_url", lambda *, cwd: "git@example:acme/widget")
 
 
 def _capture_create(monkeypatch, tree: Tree | None = None) -> dict:
-    """Replace the orchestrator with a spy; return the dict it records the spec into."""
     captured: dict = {}
     result = tree or Tree(path="/repo/trees/x", branch="b", base="origin/main")
 
@@ -98,7 +79,6 @@ def test_run_create_epic_ws_shape_builds_spec(monkeypatch, capsys):
 
     assert rc == 0
     spec = captured["spec"]
-    # The epic shape rides through as the typed fields the planner dispatches on.
     assert spec.epic == "HAR02"
     assert spec.ws == 2
     assert spec.slug == "Tiling"
@@ -203,8 +183,6 @@ def test_run_create_branch_shape_invalid_freeform_skips_remote_probe(
 
 
 def test_run_create_issue_shape_unchanged(monkeypatch, capsys):
-    # The --issue path keeps its exact behavior now that it shares the verb with the
-    # other two shapes: same spec fields, same READY summary.
     _patch_identity(monkeypatch)
     captured = _capture_create(
         monkeypatch,
@@ -221,7 +199,6 @@ def test_run_create_issue_shape_unchanged(monkeypatch, capsys):
 
 
 def test_run_create_zero_shapes_is_exit_1(monkeypatch, capsys):
-    # No gh mocks needed: the flag-grammar gate fires before any repo resolution.
     rc = tree_verb.run_create()
 
     assert rc == 1
@@ -253,9 +230,6 @@ def test_run_create_partial_epic_missing_epic_is_exit_1(monkeypatch, capsys):
 
 
 def test_run_create_bad_epic_code_surfaces_planner_error(monkeypatch, capsys):
-    # A well-formed flag grammar but a domain-invalid epic code: the gate passes,
-    # then the planner's ValueError (raised by plan() before any clone side effect)
-    # surfaces as a clean exit-1, not a traceback.
     _patch_identity(monkeypatch)
 
     rc = tree_verb.run_create(epic="bad/code", ws=2)
@@ -288,15 +262,10 @@ def test_run_create_reports_git_error_cleanly(monkeypatch, capsys):
 
 
 def _head_pr(number: int, state: str, *, is_draft: bool = False) -> gh.HeadPr:
-    # The typed pr_for_head hit (PROC03): gc's classifier only branches on
-    # number/state/is_draft, so the base is a fixed placeholder.
     return gh.HeadPr(number=number, state=state, is_draft=is_draft, base_ref="main")
 
 
 def _record(**over) -> TreeRecord:
-    # `unpushed_shas=()` (every commit on some remote), NOT the TreeRecord default
-    # of None (list unreadable): the gc rule's never-lose-work floor reads None
-    # conservatively as has-local-work and would KEEP every record.
     base = dict(
         path="/trees/acme/widget/issues/7/work-aaaa",
         branch="issues/7/work",
@@ -308,19 +277,9 @@ def _record(**over) -> TreeRecord:
         unpushed_shas=(),
     )
     base.update(over)
-    # Likewise `newest_mtime`, the activity signal the rule reads (ADR-0072): the
-    # TreeRecord default of None (walk unreadable) is conservatively ACTIVE and would
-    # keep every Tree. It follows `mtime` unless a row states it, so `mtime=<aged>`
-    # means "nobody has touched this Tree" rather than "aged dir, unknown activity".
     base.setdefault("newest_mtime", base["mtime"])
-    # And `last_commit`, idle's other half: it is maxed into the walk and either one
-    # unreadable blanks idle entirely, so the TreeRecord default of None would likewise
-    # keep every Tree. It tracks the walk unless a row states it.
     base.setdefault("last_commit", base["newest_mtime"])
     return TreeRecord(**base)
-
-
-# --- tree list: wiring smoke (typed fleet + renderer tested in test_tree_fleet) --
 
 
 def test_run_list_renders_the_fleet_through_the_seam(monkeypatch, capsys):
@@ -343,8 +302,6 @@ def test_run_list_renders_the_fleet_through_the_seam(monkeypatch, capsys):
 
     assert rc == 0
     out = capsys.readouterr().out
-    # The scan reached the renderer: both Trees, table headers, the BASE annotation.
-    # No PR column: the `gh` read is gone with the reclaim signal it fed (ADR-0072).
     assert "BRANCH" in out and "BASE" in out and "PR" not in out
     assert "issues/7/work" in out and "HAR02/WS02" in out
     assert "origin/HAR02/umbrella (+2/-1)" in out
@@ -361,8 +318,6 @@ def test_run_list_empty_root_is_not_an_error(monkeypatch, capsys):
 
 
 def test_run_list_over_a_fixture_root_renders(tmp_path, monkeypatch, capsys):
-    # End to end: a real fixture central root + a real scan, only the gh boundary
-    # patched. `shipit tree list` must render the clone without error.
     root = tmp_path / "trees"
     clone = root / "acme" / "widget" / "issues" / "7" / "work-aaaa"
     (clone / ".git").mkdir(parents=True)
@@ -382,10 +337,6 @@ def test_run_list_over_a_fixture_root_renders(tmp_path, monkeypatch, capsys):
 
 
 def test_list_json_emits_the_typed_rows(monkeypatch, capsys):
-    # The full argv round trip for the new read-path surface: `tree list --json`
-    # serializes the typed rows' declared field set through the render seam. Since
-    # ADR-0074 the row carries a `created` stamp (recovered from the flat leaf's
-    # `<timestamp>` slot), not the retired `kind`.
     leaf = "widget-claude-20260717-081333-619cf51a-f501-44dc-992f-74df773204aa"
     monkeypatch.setattr(layout_mod, "central_root", lambda: "/trees")
     monkeypatch.setattr(
@@ -413,8 +364,6 @@ def test_list_help_advertises_json(capsys):
 
 def test_run_create_maps_create_failure_to_exit_1(monkeypatch, capsys):
     monkeypatch.setattr(git, "repo_root", lambda: "/repo")
-    # Identity derives LOCALLY from the origin remote (ADR-0024): the patched
-    # remote URL is what identity.resolve_repo parses into the canonical Repo.
     monkeypatch.setattr(git, "remote_url", lambda *, cwd: "git@example:acme/widget")
 
     def boom(spec, *, source_repo, github_url):
@@ -431,22 +380,15 @@ def test_run_create_maps_create_failure_to_exit_1(monkeypatch, capsys):
 @pytest.mark.parametrize(
     "exc",
     [
-        execrun.ExecError(
-            ["pixi", "install"], rc=1, stderr="boom"
-        ),  # provisioning failed
-        OSError("disk full"),  # a filesystem step failed
+        execrun.ExecError(["pixi", "install"], rc=1, stderr="boom"),
+        OSError("disk full"),
         FileExistsError("tree dir already exists: /trees/...; refusing to clone"),
     ],
 )
 def test_run_create_maps_provisioning_and_fs_failures_to_clean_exit_1(
     monkeypatch, capsys, exc
 ):
-    # The create contract: git/gh/provisioning/filesystem failures are a clean
-    # exit-1 message, never a traceback. ExecError (provisioning), OSError (mkdir/
-    # copy/stat), and the pre-existing-dest FileExistsError all funnel through here.
     monkeypatch.setattr(git, "repo_root", lambda: "/repo")
-    # Identity derives LOCALLY from the origin remote (ADR-0024): the patched
-    # remote URL is what identity.resolve_repo parses into the canonical Repo.
     monkeypatch.setattr(git, "remote_url", lambda *, cwd: "git@example:acme/widget")
 
     def boom(spec, *, source_repo, github_url):
@@ -461,10 +403,6 @@ def test_run_create_maps_provisioning_and_fs_failures_to_clean_exit_1(
 
 
 def test_fleet_verbs_report_misconfigured_root_through_the_shell(monkeypatch, capsys):
-    # A relative SHIPIT_TREES_ROOT makes central_root() raise the typed
-    # LayoutError; every fleet verb surfaces it through the shared error shell —
-    # `error: …` + exit 1, never a traceback (the CLI02-WS03 exit-contract move
-    # off the old per-verb `tree <verb>:` prefixes).
     monkeypatch.setenv("SHIPIT_TREES_ROOT", "relative/trees")
 
     for run in (
@@ -479,18 +417,13 @@ def test_fleet_verbs_report_misconfigured_root_through_the_shell(monkeypatch, ca
         assert "SHIPIT_TREES_ROOT" in err
 
 
-# --- tree remove: wiring smoke (gating/resolution typed in test_tree_removal) ---
-
-
 def _make_tree_dir(root, rel: str):
-    """Create ``root/<rel>`` as a fake Tree clone (a dir carrying a ``.git`` marker)."""
     path = root / rel
     (path / ".git").mkdir(parents=True)
     return path
 
 
 def _confirm_spy(answer: bool):
-    """A confirm callback that records the prompt it was asked and returns ``answer``."""
     calls: list[str] = []
 
     def confirm(message: str) -> bool:
@@ -514,14 +447,12 @@ def test_run_remove_deletes_exactly_one_tree(tmp_path, monkeypatch, capsys):
     rc = tree_verb.run_remove(str(target))
 
     assert rc == 0
-    assert not target.exists()  # the matched Tree is gone
-    assert other.exists()  # the sibling is untouched
+    assert not target.exists()
+    assert other.exists()
     assert "REMOVED" in capsys.readouterr().out
 
 
 def test_run_remove_refusals_map_through_the_error_shell(tmp_path, monkeypatch, capsys):
-    # The typed RemovalError refusals (unknown target here; the full truth table
-    # is typed-tested in test_tree_removal) surface as `error: …` + exit 1.
     monkeypatch.setattr(layout_mod, "central_root", lambda: str(tmp_path))
     monkeypatch.setattr(registry_mod, "scan", lambda r: [])
 
@@ -536,8 +467,6 @@ def test_run_remove_refusals_map_through_the_error_shell(tmp_path, monkeypatch, 
 def test_run_remove_dirty_tree_prompts_and_decline_keeps_it(
     tmp_path, monkeypatch, capsys
 ):
-    # The one terminal concern left at the verb: a CONFIRM gate outcome puts the
-    # domain's prompt to the injected confirm; declining is a typed refusal.
     root = tmp_path / "trees"
     target = _make_tree_dir(root, "acme/widget/issues/7/work-aaaa")
     monkeypatch.setattr(layout_mod, "central_root", lambda: str(root))
@@ -551,9 +480,9 @@ def test_run_remove_dirty_tree_prompts_and_decline_keeps_it(
     rc = tree_verb.run_remove(str(target), confirm=confirm, is_tty=lambda: True)
 
     assert rc == 1
-    assert target.exists()  # declined -> Tree survives
-    assert len(calls) == 1  # prompted before deleting
-    assert str(target) in calls[0]  # the domain's prompt reached the terminal
+    assert target.exists()
+    assert len(calls) == 1
+    assert str(target) in calls[0]
     err = capsys.readouterr().err
     assert err.startswith("error:") and "aborted" in err
 
@@ -572,7 +501,7 @@ def test_run_remove_dirty_tree_confirm_deletes(tmp_path, monkeypatch, capsys):
     rc = tree_verb.run_remove(str(target), confirm=confirm, is_tty=lambda: True)
 
     assert rc == 0
-    assert not target.exists()  # confirmed -> removed
+    assert not target.exists()
     assert len(calls) == 1
     assert "REMOVED" in capsys.readouterr().out
 
@@ -580,8 +509,6 @@ def test_run_remove_dirty_tree_confirm_deletes(tmp_path, monkeypatch, capsys):
 def test_run_remove_risky_non_interactive_refuses_and_does_not_hang(
     tmp_path, monkeypatch, capsys
 ):
-    # No TTY and no --yes: the REFUSE gate outcome — refused, never blocking on
-    # a prompt.
     root = tmp_path / "trees"
     target = _make_tree_dir(root, "acme/widget/issues/7/work-aaaa")
     monkeypatch.setattr(layout_mod, "central_root", lambda: str(root))
@@ -595,8 +522,8 @@ def test_run_remove_risky_non_interactive_refuses_and_does_not_hang(
     rc = tree_verb.run_remove(str(target), confirm=confirm, is_tty=lambda: False)
 
     assert rc == 1
-    assert target.exists()  # not destroyed
-    assert calls == []  # never prompted -> cannot hang
+    assert target.exists()
+    assert calls == []
     assert "--yes" in capsys.readouterr().err
 
 
@@ -616,19 +543,17 @@ def test_run_remove_yes_flag_skips_prompt(tmp_path, monkeypatch, capsys):
     )
 
     assert rc == 0
-    assert not target.exists()  # --yes removed it despite the risk
-    assert calls == []  # prompt skipped unconditionally
+    assert not target.exists()
+    assert calls == []
 
 
 def test_stdin_is_tty_false_when_stdin_none(monkeypatch):
     # The default is_tty must survive a detached process where sys.stdin is None
-    # (would AttributeError on sys.stdin.isatty) — reading as not-a-TTY, not crashing.
     monkeypatch.setattr(tree_verb.sys, "stdin", None)
     assert tree_verb._stdin_is_tty() is False
 
 
 def test_stdin_is_tty_false_when_stdin_closed(monkeypatch):
-    # A closed stream raises ValueError from isatty(); the guard returns not-a-TTY.
     class _Closed:
         closed = True
 
@@ -655,22 +580,12 @@ def test_stdin_is_tty_reflects_real_stream(monkeypatch):
     assert tree_verb._stdin_is_tty() is False
 
 
-# --- tree gc: wiring smoke (plan + sweep typed-tested in test_tree_gc) -----------
-
-
 def _gc_fleet(root, monkeypatch):
-    """A four-Tree fixture for gc: one removable, three kept — one per keep arm.
-
-    Returns ``(removable, keep_dirty, keep_unpushed, keep_active)`` paths after wiring
-    ``central_root``/``scan`` so both ``run_gc()`` and its dry-run share one fleet. The
-    removable Tree (clean + fully pushed + idle) is the only delete candidate; the
-    other three cover the rule's three keeps (ADR-0072).
-    """
     removable = _make_tree_dir(root, "acme/widget/issues/1/work-idle")
     keep_dirty = _make_tree_dir(root, "acme/widget/issues/2/work-dirty")
     keep_unpushed = _make_tree_dir(root, "acme/widget/issues/3/work-unpushed")
     keep_active = _make_tree_dir(root, "acme/widget/issues/4/work-active")
-    idle = 0.0  # newest file mtime far in the past -> always idle vs time.time()
+    idle = 0.0
     records = [
         _record(path=str(removable), branch="b1", mtime=idle),
         _record(path=str(keep_dirty), branch="b2", dirty=True, mtime=idle),
@@ -688,7 +603,6 @@ def _gc_fleet(root, monkeypatch):
 
 
 def _paths_after(out: str, marker: str) -> set[str]:
-    """The set of paths on lines whose first whitespace-delimited token is ``marker``."""
     paths = set()
     for line in out.splitlines():
         parts = line.split()
@@ -698,17 +612,16 @@ def _paths_after(out: str, marker: str) -> set[str]:
 
 
 def test_run_gc_removes_only_removable_keeps_rest(tmp_path, monkeypatch, capsys):
-    # The full wiring round trip: plan_fleet -> sweep -> the rendered summary.
     root = tmp_path / "trees"
     removable, keep_dirty, keep_unpushed, keep_active = _gc_fleet(root, monkeypatch)
 
     rc = tree_verb.run_gc()
 
     assert rc == 0
-    assert not removable.exists()  # only the removable Tree is deleted
-    assert keep_dirty.exists()  # local work protected
-    assert keep_unpushed.exists()  # unpushed commits protected
-    assert keep_active.exists()  # someone is working here
+    assert not removable.exists()
+    assert keep_dirty.exists()
+    assert keep_unpushed.exists()
+    assert keep_active.exists()
     out = capsys.readouterr().out
     assert f"REMOVED {removable}" in out
     assert "removed 1, kept 3" in out
@@ -726,8 +639,6 @@ def test_run_gc_empty_root_is_not_an_error(tmp_path, monkeypatch, capsys):
 
 
 def test_run_gc_renders_sweep_failures_on_stderr(monkeypatch, capsys):
-    # The renderer's stderr contract for a typed GcResult: the failures the sweep
-    # continued past read as FAILED lines, and the count reflects disk reality.
     result = tree_verb.gc.GcResult(
         removed=("/trees/good",),
         failed=(tree_verb.gc.GcFailure(path="/trees/bad", error="read-only file"),),
@@ -739,8 +650,6 @@ def test_run_gc_renders_sweep_failures_on_stderr(monkeypatch, capsys):
     monkeypatch.setattr(registry_mod, "scan", lambda r: [])
 
     def fake_sweep(plan, *, on_removed=None):
-        # The real sweep streams through the sink; this stand-in does the same, so
-        # the renderer under test sees the same stdout it would in production.
         on_removed("/trees/good")
         return result
 
@@ -758,8 +667,6 @@ def test_run_gc_renders_sweep_failures_on_stderr(monkeypatch, capsys):
 def test_run_gc_dry_run_lists_classifications_and_deletes_nothing(
     tmp_path, monkeypatch, capsys
 ):
-    # --dry-run prints every Tree's bucket and must not touch disk: sweeping is
-    # fatal here.
     root = tmp_path / "trees"
     removable, keep_dirty, keep_unpushed, keep_active = _gc_fleet(root, monkeypatch)
 
@@ -771,11 +678,9 @@ def test_run_gc_dry_run_lists_classifications_and_deletes_nothing(
     rc = tree_verb.run_gc(dry_run=True)
 
     assert rc == 0
-    # Nothing was deleted.
     assert removable.exists() and keep_dirty.exists()
     assert keep_unpushed.exists() and keep_active.exists()
     out = capsys.readouterr().out
-    # Each Tree is listed under its classification, and the summary says zero deleted.
     assert f"REMOVABLE {removable}" in out
     assert f"KEEP      {keep_dirty}" in out
     assert f"KEEP      {keep_unpushed}" in out
@@ -785,25 +690,20 @@ def test_run_gc_dry_run_lists_classifications_and_deletes_nothing(
 
 
 def test_run_gc_dry_run_decisions_match_the_real_sweep(tmp_path, monkeypatch, capsys):
-    # Parity: the paths --dry-run labels REMOVABLE are exactly the ones the real sweep
-    # REMOVEs. Both modes consume the ONE plan_fleet plan, so the preview cannot drift.
     root = tmp_path / "trees"
     _gc_fleet(root, monkeypatch)
 
     assert tree_verb.run_gc(dry_run=True) == 0
     dry_out = capsys.readouterr().out
 
-    assert tree_verb.run_gc() == 0  # real sweep over the same fleet (dry-run deleted 0)
+    assert tree_verb.run_gc() == 0
     real_out = capsys.readouterr().out
 
     assert _paths_after(dry_out, "REMOVABLE") == _paths_after(real_out, "REMOVED")
-    assert _paths_after(
-        dry_out, "REMOVABLE"
-    )  # and it is non-empty (proves real parity)
+    assert _paths_after(dry_out, "REMOVABLE")
 
 
 def _capture_plan_fleet(monkeypatch) -> dict:
-    """Spy on gc.plan_fleet: record its kwargs, return an empty plan."""
     seen: dict = {}
 
     def fake_plan_fleet(root, *, idle_threshold_seconds):
@@ -829,7 +729,6 @@ def test_run_gc_threshold_overrides_the_idle_boundary(monkeypatch, capsys):
 
 
 def test_run_gc_default_threshold_is_48_hours(monkeypatch, capsys):
-    # Omitting --threshold passes the 48h default through to the plan unchanged.
     monkeypatch.setattr(layout_mod, "central_root", lambda: "/trees")
     seen = _capture_plan_fleet(monkeypatch)
 
@@ -840,7 +739,6 @@ def test_run_gc_default_threshold_is_48_hours(monkeypatch, capsys):
 
 
 def test_gc_threshold_parses_at_click(monkeypatch, capsys):
-    # The shared DURATION param mints seconds at argv parse: the verb sees a float.
     monkeypatch.setattr(layout_mod, "central_root", lambda: "/trees")
     seen = _capture_plan_fleet(monkeypatch)
 
@@ -851,8 +749,6 @@ def test_gc_threshold_parses_at_click(monkeypatch, capsys):
 
 
 def test_gc_bad_threshold_is_a_usage_error(monkeypatch, capsys):
-    # The CLI02-WS03 exit-contract move: a malformed --threshold is click's job
-    # now — a usage error (exit 2) at parse, never a sweep (scan is fatal here).
     def boom(_r):
         raise AssertionError("must not scan when the threshold is invalid")
 
@@ -867,15 +763,11 @@ def test_gc_bad_threshold_is_a_usage_error(monkeypatch, capsys):
 def test_run_gc_incomplete_sweep_is_loud_and_exits_nonzero(
     tmp_path, monkeypatch, capsys
 ):
-    # When a Tree is kept because a signal could not be READ, the run judged only part
-    # of the root, so it reports FAILURE (#1012): exit 1, and a summary that LEADS with
-    # the gap rather than burying it under a healthy-looking count.
     root = tmp_path / "trees"
     judged = _make_tree_dir(root, "acme/widget/issues/1/work-idle")
     blind = _make_tree_dir(root, "acme/widget/issues/2/work-unreadable")
     records = [
         _record(path=str(judged), branch="b1", mtime=0.0),
-        # The activity walk failed: unreadable, so kept WITHOUT a verdict.
         _record(path=str(blind), branch="b2", mtime=0.0, newest_mtime=None),
     ]
     monkeypatch.setattr(layout_mod, "central_root", lambda: str(root))
@@ -883,18 +775,14 @@ def test_run_gc_incomplete_sweep_is_loud_and_exits_nonzero(
 
     rc = tree_verb.run_gc()
 
-    assert rc == 1  # a partly-judged root is not a successful sweep
-    assert not judged.exists()  # the idle Tree is reclaimed
-    assert blind.exists()  # the unreadable one is kept, unexamined
+    assert rc == 1
+    assert not judged.exists()
+    assert blind.exists()
     captured = capsys.readouterr()
     assert "judged 1 of 2; 1 kept UNEXAMINED" in captured.err
-    # The operator is told those Trees were not judged safe ...
     assert "not judged safe" in captured.err
-    # ... and is pointed at the machine the failure is actually on. The old text sent
-    # them to `gh api rate_limit` — a network budget that no longer gates anything.
     assert "gh api rate_limit" not in captured.err
     assert "local" in captured.err
-    # The summary leads with the gap; the counts follow.
     assert (
         "gc: INCOMPLETE — 1 of 2 unexamined (a signal could not be read); "
         "removed 1, kept 1" in captured.out
@@ -904,11 +792,6 @@ def test_run_gc_incomplete_sweep_is_loud_and_exits_nonzero(
 def test_run_gc_never_reports_a_tree_it_deleted_as_unexamined(
     tmp_path, monkeypatch, capsys
 ):
-    # The invariant, end-to-end through the real verb (the unit test pins the count;
-    # this pins what an operator actually READS): every Tree the sweep DELETES is judged,
-    # so `unexamined` never counts one the same run removed — the audit trail can never
-    # contradict the destruction (`INCOMPLETE - 1 of 2 skipped; removed 2, kept 0`).
-    # Two idle, clean, fully-pushed Trees: both removable, the whole root judged.
     root = tmp_path / "trees"
     plain = _make_tree_dir(root, "acme/widget/issues/1/work-idle")
     other = _make_tree_dir(root, "acme/widget/issues/2/work-idle2")
@@ -923,23 +806,16 @@ def test_run_gc_never_reports_a_tree_it_deleted_as_unexamined(
 
     captured = capsys.readouterr()
     assert not plain.exists()
-    assert not other.exists()  # both were deleted ...
-    assert "removed 2, kept 0" in captured.out  # ... and the report says exactly that
+    assert not other.exists()
+    assert "removed 2, kept 0" in captured.out
     assert "INCOMPLETE" not in captured.out
     assert "UNEXAMINED" not in captured.err
-    assert rc == 0  # the whole root was judged; nothing was skipped
+    assert rc == 0
 
 
 def test_run_gc_incomplete_view_names_a_local_cause_not_a_network_one(
     tmp_path, monkeypatch, capsys
 ):
-    # Naming a cause is the point (#1011): a bare "1 unexamined" is a mystery an
-    # operator will either ignore or go hunting over. But the cause text has to follow
-    # the SIGNALS, and ADR-0072 changed which ones can hide a Tree from the rule. It
-    # used to name the PR read (a drained `gh` budget, then one repo's failed
-    # `gh pr list`); reclaim reads no PR state at all now. What is left is the rule's
-    # own two arms, and both are LOCAL. Sending an operator to check `gh api rate_limit`
-    # for what is a filesystem problem is a confident wrong diagnosis — worse than none.
     root = tmp_path / "trees"
     blind = _make_tree_dir(root, "acme/widget/issues/1/work-unreadable")
     records = [
@@ -952,10 +828,8 @@ def test_run_gc_incomplete_view_names_a_local_cause_not_a_network_one(
 
     assert rc == 1
     err = capsys.readouterr().err
-    # It names the two signals that can actually do this ...
     assert "unpushed-commit list" in err
     assert "activity walk" in err
-    # ... and points at the right machine.
     assert "local" in err
     assert "gh api rate_limit" not in err
     assert "read once per repo" not in err
@@ -964,17 +838,12 @@ def test_run_gc_incomplete_view_names_a_local_cause_not_a_network_one(
 def test_run_gc_dry_run_warns_on_an_unexamined_tree_and_deletes_nothing(
     tmp_path, monkeypatch, capsys
 ):
-    # A --dry-run preview over a fleet holding an unreadable Tree must still surface
-    # the incomplete-view warning, yet touch nothing on disk. The preview is the mode
-    # an operator uses to ASK whether the fleet is clean, so it is the mode that most
-    # has to admit when it does not know (#1011).
     root = tmp_path / "trees"
     idle = _make_tree_dir(root, "acme/widget/issues/1/work-idle")
     blind = _make_tree_dir(root, "acme/widget/issues/2/work-unreadable")
     aged = 0.0
     records = [
         _record(path=str(idle), branch="b1", dirty=False, ahead=0, mtime=aged),
-        # The walk failed -> kept WITHOUT a verdict, and counted as such.
         _record(path=str(blind), branch="b2", mtime=aged, newest_mtime=None),
     ]
     monkeypatch.setattr(layout_mod, "central_root", lambda: str(root))
@@ -987,21 +856,17 @@ def test_run_gc_dry_run_warns_on_an_unexamined_tree_and_deletes_nothing(
 
     rc = tree_verb.run_gc(dry_run=True)
 
-    assert rc == 1  # the preview cannot answer "is the fleet clean?" either
-    assert idle.exists() and blind.exists()  # nothing deleted in dry-run
+    assert rc == 1
+    assert idle.exists() and blind.exists()
     captured = capsys.readouterr()
-    # Preview lists the partition ...
     assert f"REMOVABLE {idle}" in captured.out
     assert f"KEEP      {blind}" in captured.out
     assert "no Trees deleted" in captured.out
-    # ... and leads its counts with the gap, in the preview's own tense.
     assert "INCOMPLETE — 1 of 2 unexamined (a signal could not be read)" in captured.out
     assert "would judge 1 of 2" in captured.err
 
 
 def test_run_gc_streams_removals_before_the_summary(tmp_path, monkeypatch, capsys):
-    # The verb supplies the sweep's sink, so REMOVED lines are on stdout as each
-    # Tree dies — ahead of the summary, which only the end of the sweep can produce.
     root = tmp_path / "trees"
     removable, _keep_dirty, _keep_unpushed, _keep_active = _gc_fleet(root, monkeypatch)
 
@@ -1013,16 +878,12 @@ def test_run_gc_streams_removals_before_the_summary(tmp_path, monkeypatch, capsy
     )
     assert [line for line in lines if line.startswith("REMOVED")] == [
         f"REMOVED {removable}"
-    ]  # streamed once — the renderer no longer reprints the removed set
+    ]
 
 
 def test_run_gc_interrupted_sweep_still_printed_what_it_destroyed(
     tmp_path, monkeypatch, capsys
 ):
-    # THE regression at the verb seam (#1011): a sweep killed at minute 14 had
-    # deleted 175 Trees and printed nothing, because rendering waited for a
-    # GcResult that never came back. Whatever kills the sweep, the lines for the
-    # Trees already destroyed must be out.
     monkeypatch.setattr(layout_mod, "central_root", lambda: "/trees")
     monkeypatch.setattr(registry_mod, "scan", lambda r: [])
 
@@ -1042,9 +903,6 @@ def test_run_gc_interrupted_sweep_still_printed_what_it_destroyed(
 
 
 def test_run_gc_flushes_each_removed_line(tmp_path, monkeypatch):
-    # Buffering is the failure mode: stdout to a pipe or a file is block-buffered,
-    # so an unflushed REMOVED line dies with the process that was killed — exactly
-    # the audit trail this exists to preserve. Assert the flush, not just the text.
     class FlushCountingStdout(io.StringIO):
         def __init__(self):
             super().__init__()
@@ -1060,16 +918,11 @@ def test_run_gc_flushes_each_removed_line(tmp_path, monkeypatch):
 
     tree_verb.run_gc()
 
-    # The line was flushed while the sweep was still running: at the first flush,
-    # the summary (which only the finished sweep can print) is not written yet.
     assert stdout.flushed_text
     assert stdout.flushed_text[0] == f"REMOVED {removable}\n"
 
 
 def test_run_gc_no_warning_when_no_unknown(tmp_path, monkeypatch, capsys):
-    # A sweep where every signal is readable saw the whole root: exit 0, and no
-    # incomplete-view report anywhere. The loud path must stay rare enough to mean
-    # something.
     root = tmp_path / "trees"
     healthy = _make_tree_dir(root, "acme/widget/issues/1/work-healthy")
     records = [
@@ -1090,4 +943,4 @@ def test_run_gc_no_warning_when_no_unknown(tmp_path, monkeypatch, capsys):
     captured = capsys.readouterr()
     assert "INCOMPLETE" not in captured.out
     assert "skipped" not in captured.err and "skipped" not in captured.out
-    assert "gc: removed 1, kept 0" in captured.out  # the plain healthy form
+    assert "gc: removed 1, kept 0" in captured.out

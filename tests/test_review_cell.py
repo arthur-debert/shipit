@@ -1,15 +1,3 @@
-"""The declarative experiment Cell (ADR-0049, RVW03-WS07): parse + validation.
-
-A Cell file states one review experiment; these tests pin the fairness
-contract at LOAD — mandatory baseline/axis (control names itself and declares
-`axis = "control"`; a treatment names its control and one real axis), loud
-unknown keys (a silently-ignored knob would run a different experiment than
-the reviewed file declares), the rejected-not-wireable `reasoning` field, the
-per-dimension override rules, the sweep vocabulary — plus the pure lab
-mechanics: the full idempotency key, the informed-sweep instruction
-composition, and the machine-checkable fair-pair rule.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -32,9 +20,6 @@ from shipit.review.groundtruth import parse_fixture
 
 
 def _fair_fixture():
-    """A fixture pinning the pins the fair-pair tests name (`core-440`,
-    `app-391`) — `check_fair_pair` compares EFFECTIVE pin sets against it, so
-    `prs = []` (every pin) and an explicit full list read as one denominator."""
     return parse_fixture(
         {
             "version": 1,
@@ -59,7 +44,6 @@ def _fair_fixture():
 
 
 def _cell_data(**overrides):
-    """A minimal VALID control-cell dict; tests mutate from here."""
     data = {
         "schema": 1,
         "id": "control",
@@ -79,9 +63,6 @@ def _treatment_data(**overrides):
     data["baseline"] = "control"
     data.update(overrides)
     return data
-
-
-# --- the mandatory fairness declaration ------------------------------------------
 
 
 def test_parse_cell_accepts_a_valid_control_and_treatment():
@@ -107,8 +88,6 @@ def test_control_must_declare_axis_control():
 
 
 def test_treatment_must_declare_a_real_axis():
-    # A treatment hiding behind axis = "control" is an undeclared comparison —
-    # the exact unfairness ADR-0049 makes fail at cell review.
     with pytest.raises(CellError, match="ONE changed axis"):
         parse_cell(_treatment_data(axis="control"))
 
@@ -131,9 +110,6 @@ def test_pipeline_shape_is_explicit_and_vocabulary_checked():
         parse_cell(_cell_data(pipeline={"shape": "quadratic"}))
 
 
-# --- no silently-ignored knobs ----------------------------------------------------
-
-
 def test_unknown_top_level_key_is_loud():
     with pytest.raises(CellError, match="unknown key"):
         parse_cell(_cell_data(sweepz={"count": 3}))
@@ -145,16 +121,10 @@ def test_unknown_pipeline_key_is_loud():
 
 
 def test_invocation_reasoning_is_rejected_as_not_wireable():
-    # The backends carry a reasoning knob (#685/#691), but the lab runner does
-    # not thread a level into the replay driver yet: accepting the field would
-    # stamp arms with a level that never reached a run — the RVW02 failure.
     data = _cell_data()
     data["invocation"]["reasoning"] = "high"
     with pytest.raises(CellError, match="reasoning.*not wireable"):
         parse_cell(data)
-
-
-# --- dimensions + per-dimension Invocation overrides ------------------------------
 
 
 def test_unknown_dimension_name_is_loud():
@@ -176,23 +146,16 @@ def test_per_dimension_override_parses_and_validates_membership():
     data["invocation"]["dimensions"] = {"test-quality": {"model": "o3"}}
     cell = parse_cell(data)
     assert cell.dimension_invocations == {"test-quality": {"model": "o3"}}
-    # An override on a pass the cell never runs is a reviewed lie — loud.
     data["invocation"]["dimensions"] = {"security-robustness": {"model": "o3"}}
     with pytest.raises(CellError, match="outside this cell's pass set"):
         parse_cell(data)
 
 
 def test_omitted_dimensions_pass_set_is_the_shipped_default_not_the_registry():
-    # ADR-0051: an omitted `pipeline.dimensions` runs ONLY the shipped default
-    # four, never the experiment-only severity tiers. A per-dimension override
-    # naming a tier is therefore outside this cell's pass set — this pins the
-    # default-vs-registry distinction at the parse boundary, which would regress
-    # silently if `effective_dimensions` fell back to the whole registry.
-    data = _cell_data()  # pipeline.dimensions omitted -> shipped default four
+    data = _cell_data()
     data["invocation"]["dimensions"] = {"sev-low": {"model": "o3"}}
     with pytest.raises(CellError, match="outside this cell's pass set"):
         parse_cell(data)
-    # The same override is accepted once the cell lists the tier explicitly.
     data = _cell_data(pipeline={"shape": "fanout", "dimensions": ["sev-low"]})
     data["invocation"]["dimensions"] = {"sev-low": {"model": "o3"}}
     cell = parse_cell(data)
@@ -200,9 +163,6 @@ def test_omitted_dimensions_pass_set_is_the_shipped_default_not_the_registry():
 
 
 def test_explicit_empty_dimensions_list_is_rejected_loud():
-    # An explicit `dimensions = []` is a config mistake, not a synonym for the
-    # default set — reject it loud rather than silently running the shipped
-    # default (the Roster `dimensions` option has the same non-empty posture).
     with pytest.raises(CellError, match="empty list"):
         parse_cell(_cell_data(pipeline={"shape": "fanout", "dimensions": []}))
 
@@ -227,16 +187,12 @@ def test_per_dimension_override_requires_the_fanout_shape():
         parse_cell(data)
 
 
-# --- dedup / calibrator ------------------------------------------------------------
-
-
 def test_calibrated_dedup_requires_the_calibrator_table():
     with pytest.raises(CellError, match=r"\[pipeline.calibrator\]"):
         parse_cell(_cell_data(pipeline={"shape": "fanout", "dedup": "calibrated"}))
 
 
 def test_calibrator_table_without_calibrated_dedup_is_loud():
-    # A half-declared judge is an unlabeled arm.
     with pytest.raises(CellError, match="dedup is 'mechanical'"):
         parse_cell(
             _cell_data(
@@ -272,23 +228,17 @@ def test_calibrator_config_is_constructed_so_a_bad_field_fails_loud():
 
 
 def test_semantic_dedup_parses_for_the_fanout_shape():
-    """`dedup = "semantic"` (#750) is a declared axis like any other: it parses
-    for the fan-out shape, needs no calibrator table (it is the judge-OFF
-    path's deterministic collapse), and lands on the Cell verbatim."""
     cell = parse_cell(_cell_data(pipeline={"shape": "fanout", "dedup": "semantic"}))
     assert cell.dedup == "semantic"
     assert cell.calibrator is None
 
 
 def test_semantic_dedup_rejects_the_single_shape():
-    # A single pass has no union to dedup — same rule as "calibrated".
     with pytest.raises(CellError, match="only to the fan-out shape"):
         parse_cell(_cell_data(pipeline={"shape": "single", "dedup": "semantic"}))
 
 
 def test_calibrator_table_with_semantic_dedup_is_loud():
-    # The judge does its own dedup; a semantic cell declaring one is an
-    # unlabeled arm, exactly like the mechanical case.
     with pytest.raises(CellError, match="dedup is 'semantic'"):
         parse_cell(
             _cell_data(
@@ -306,9 +256,6 @@ def test_dedup_vocabulary_is_closed():
         parse_cell(_cell_data(pipeline={"shape": "fanout", "dedup": "psychic"}))
 
 
-# --- sweeps ------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize("bad", [0, -1, True, "2"])
 def test_sweep_count_and_replicates_must_be_positive_ints(bad):
     with pytest.raises(CellError, match="positive integer"):
@@ -323,16 +270,10 @@ def test_sweep_mode_vocabulary_is_closed():
 
 
 def test_sweep_count_and_replicates_reject_absurd_values():
-    """An unbounded count is an OOM vector — the runner allocates one point per
-    pin × replicate × sweep, so a plan above the ceiling is a mistake, refused
-    at parse before it can build a billion-tuple."""
     with pytest.raises(CellError, match="exceeds the max"):
         parse_cell(_cell_data(sweeps={"count": 1_000_000_000}))
     with pytest.raises(CellError, match="exceeds the max"):
         parse_cell(_cell_data(sweeps={"count": 1, "replicates": 2000}))
-
-
-# --- instructions path safety (arbitrary-file-read guard) --------------------------
 
 
 @pytest.mark.parametrize(
@@ -340,9 +281,6 @@ def test_sweep_count_and_replicates_reject_absurd_values():
     ["/etc/passwd", "~/.ssh/id_rsa", "../../.aws/credentials", "sub/../../x"],
 )
 def test_instructions_path_rejects_absolute_home_and_traversal(bad_path):
-    """A cell reads instructions from in-repo files ONLY: an absolute, '~', or
-    '..' path is a loud refusal at parse — it could otherwise read a local
-    secret off disk and hand its contents to the model as prompt text."""
     with pytest.raises(CellError, match="repo-relative"):
         parse_cell(_cell_data(instructions={"path": bad_path}))
 
@@ -353,24 +291,16 @@ def test_instructions_path_accepts_a_repo_relative_file():
 
 
 def test_instructions_field_errors_point_at_the_instructions_table():
-    """A present-but-empty path/label error names `[instructions]`, not the whole
-    cell, so the TOML is quick to fix."""
     with pytest.raises(CellError, match=r"\[instructions\]"):
         parse_cell(_cell_data(instructions={"path": "  "}))
 
 
 @pytest.mark.parametrize("bad", ["../evil", "sub/x", "a\\b", ".", ".."])
 def test_id_and_baseline_must_be_bare_cell_names(bad):
-    """`id`/`baseline` each name a file under the cells directory; a
-    path-separator or traversal value would escape it when the pair loads, so
-    it is refused at parse."""
     with pytest.raises(CellError, match="bare cell name"):
         parse_cell(_cell_data(id=bad))
     with pytest.raises(CellError, match="bare cell name"):
         parse_cell(_treatment_data(baseline=bad))
-
-
-# --- the file boundary ---------------------------------------------------------------
 
 
 def _write_cell(path, cell_id, extra=""):
@@ -391,8 +321,6 @@ shape = "single"
 
 
 def test_load_cell_enforces_id_equals_filename_stem(tmp_path):
-    # A copy-edited treatment that forgot to change its id must fail loud, not
-    # silently impersonate its control.
     path = tmp_path / "other-name.toml"
     _write_cell(path, "control")
     with pytest.raises(CellError, match="filename stem"):
@@ -418,9 +346,6 @@ def test_resolve_cell_path_prefers_an_existing_path(tmp_path):
     )
 
 
-# --- the idempotency key --------------------------------------------------------------
-
-
 def test_run_key_and_record_matching_use_the_full_key():
     cell = parse_cell(_cell_data())
     key = run_key(
@@ -428,10 +353,8 @@ def test_run_key_and_record_matching_use_the_full_key():
     )
     record = {"round.cell": dict(key)}
     assert record_matches_key(record, key)
-    # Non-key decoration (label/axis) does not affect matching…
     decorated = {"round.cell": {**key, "label": "other", "axis": "x"}}
     assert record_matches_key(decorated, key)
-    # …but every ADR-0049 key field does.
     for field, other in [
         ("id", "other"),
         ("fixture_version", 2),
@@ -446,9 +369,6 @@ def test_run_key_and_record_matching_use_the_full_key():
 
 
 def test_key_tuple_returns_none_for_a_corrupt_non_scalar_key_field():
-    """A well-formed key packs to a hashable tuple; a corrupt tag with a
-    non-scalar key field returns None, so a reader skips it instead of feeding
-    an unhashable value into a set."""
     cell = parse_cell(_cell_data())
     key = run_key(
         cell, pr_id="core-440", variant_hash="sha256:aa", replicate=1, sweep=1
@@ -459,18 +379,11 @@ def test_key_tuple_returns_none_for_a_corrupt_non_scalar_key_field():
 
 
 def test_instructions_variant_text_single_shape_is_the_base_text_verbatim():
-    """A single-pass cell's variant text IS its instructions — no dimension
-    passes run, and the unchanged bytes keep existing banked single-pass
-    points on their recorded keys (#713's fold re-keys FAN-OUT cells only)."""
     cell = parse_cell(_cell_data(pipeline={"shape": "single"}))
     assert instructions_variant_text(cell, "base text") == "base text"
 
 
 def test_instructions_variant_text_fanout_folds_the_dimension_set():
-    """#713 regression: two fan-out cells identical but for the `dimensions`
-    list must produce DIFFERENT variant texts (the focus texts live in code
-    and the list selects them), and the default set folds too — a fan-out
-    cell's text is never the bare instructions."""
     base = "base text"
     default = parse_cell(_cell_data())
     tiers = parse_cell(
@@ -488,8 +401,6 @@ def test_instructions_variant_text_fanout_folds_the_dimension_set():
 
 
 def test_instructions_variant_text_fanout_folds_dimension_overrides():
-    """A per-dimension Invocation override changes what the passes run, so it
-    changes the fan-out cell's variant text (#713)."""
     plain = parse_cell(
         _cell_data(pipeline={"shape": "fanout", "dimensions": ["correctness"]})
     )
@@ -505,9 +416,6 @@ def test_instructions_variant_text_fanout_folds_dimension_overrides():
     assert instructions_variant_text(plain, "x") != instructions_variant_text(
         overridden, "x"
     )
-
-
-# --- informed-sweep composition --------------------------------------------------------
 
 
 def test_compose_informed_instructions_is_identity_without_priors():
@@ -529,17 +437,12 @@ def test_compose_informed_instructions_embeds_prior_findings():
     )
     assert composed.startswith("base text")
     assert "already banked by prior sweeps" in composed
-    # Location + claim, newlines flattened; a file-scoped finding renders bare.
     assert "- src/a.py:12 (major): row padding is missed" in composed
     assert "- src/b.py (minor): leaky handle" in composed
     assert "what they MISSED" in composed
 
 
 def test_compose_informed_instructions_neutralizes_control_chars_and_caps():
-    """Prior findings are untrusted (their fields trace back to diffs): a
-    terminal-escape byte is neutralized before it reaches the prompt, and a
-    flood of priors is capped with an explicit note — a poisoned or huge banked
-    record can neither steer nor bloat the next sweep's instructions."""
     from shipit.review.cell import MAX_PRIOR_FINDINGS
 
     composed = compose_informed_instructions(
@@ -555,9 +458,6 @@ def test_compose_informed_instructions_neutralizes_control_chars_and_caps():
     assert "5 more banked finding(s) omitted" in capped
 
 
-# --- the fair-pair rule -----------------------------------------------------------------
-
-
 def test_check_fair_pair_passes_a_fair_pair():
     check_fair_pair(
         parse_cell(_treatment_data()), parse_cell(_cell_data()), _fair_fixture()
@@ -565,14 +465,11 @@ def test_check_fair_pair_passes_a_fair_pair():
 
 
 def test_check_fair_pair_treats_empty_prs_as_every_fixture_pin():
-    """`prs = []` means "every fixture pin", so a control that omits `prs` and a
-    treatment that lists all pins explicitly are ONE denominator — a fair pair,
-    not a spurious mismatch. The check compares effective sets, not raw `prs`."""
-    control = parse_cell(_cell_data(fixture={"version": 1}))  # prs omitted = all
+    control = parse_cell(_cell_data(fixture={"version": 1}))
     treatment = parse_cell(
         _treatment_data(fixture={"version": 1, "prs": ["core-440", "app-391"]})
     )
-    check_fair_pair(treatment, control, _fair_fixture())  # no raise
+    check_fair_pair(treatment, control, _fair_fixture())
 
 
 def test_check_fair_pair_rejects_wrong_baseline():
@@ -582,13 +479,6 @@ def test_check_fair_pair_rejects_wrong_baseline():
 
 
 def test_check_fair_pair_accepts_a_treatment_baseline():
-    """A COMPOSITION cell names a treatment as its baseline (one new axis
-    layered onto a treatment that earned its edge — #717's sevtiers-informed
-    vs fanout-sevtiers) and declares its own NEW axis, distinct from its
-    baseline's. The chain hides nothing: each committed link is itself
-    fair-pair-checked against ITS baseline (and the whole lineage is walked
-    to the control, see the baseline-lineage tests), so the pair is fair as
-    long as the denominators match."""
     chained = parse_cell(_treatment_data())
     check_fair_pair(
         parse_cell(
@@ -600,7 +490,7 @@ def test_check_fair_pair_accepts_a_treatment_baseline():
         ),
         chained,
         _fair_fixture(),
-    )  # no raise
+    )
 
 
 def test_check_fair_pair_rejects_differing_denominators():
@@ -619,16 +509,7 @@ def test_check_fair_pair_rejects_differing_denominators():
         )
 
 
-# --- the baseline-lineage walk ----------------------------------------------------------
-# check_fair_pair proves one EDGE; the walk proves the whole chain terminates
-# at a control, with no missing ancestor and no cycle (#719 — the gap #718's
-# composition cell opened when it dropped the baseline-is-control guard).
-
-
 def _lineage_resolver(cells):
-    """A mapping-backed resolver for the pure walker: parent by declared
-    baseline id, a loud CellError when the ancestor is not in the map (the
-    contract `load_baseline_lineage`'s file-backed resolver fulfils on disk)."""
 
     def resolve(current):
         parent = cells.get(current.baseline)
@@ -668,8 +549,6 @@ def test_check_baseline_lineage_control_is_its_own_one_cell_chain():
 
 
 def test_check_baseline_lineage_rejects_a_cycle():
-    # Two treatments naming each other: identical fixture/pins, so every EDGE
-    # passes check_fair_pair — only the walk sees no control terminates it.
     a = parse_cell(_treatment_data(id="a", baseline="b", axis="x"))
     b = parse_cell(_treatment_data(id="b", baseline="a", axis="y"))
     with pytest.raises(CellError, match="cyclic baseline chain"):
@@ -677,8 +556,6 @@ def test_check_baseline_lineage_rejects_a_cycle():
 
 
 def test_check_baseline_lineage_rejects_a_missing_ancestor():
-    # The hole is one hop DEEP (the cell's own baseline exists; ITS baseline
-    # does not) — an immediate-edge check would miss it.
     mid = parse_cell(_treatment_data(id="mid", baseline="ghost", axis="x"))
     deep = parse_cell(_treatment_data(id="deep", baseline="mid", axis="y"))
     with pytest.raises(CellError, match="'ghost'"):
@@ -688,8 +565,6 @@ def test_check_baseline_lineage_rejects_a_missing_ancestor():
 
 
 def test_check_baseline_lineage_fair_pair_checks_every_hop():
-    # The unfairness is one hop DEEP: deep↔mid agree on fixture v2, but mid
-    # pins a different version than its control — the walk fails the hop.
     control = parse_cell(_cell_data())
     mid = parse_cell(
         _treatment_data(id="mid", fixture={"version": 2, "prs": ["core-440"]})
@@ -708,8 +583,6 @@ def test_check_baseline_lineage_fair_pair_checks_every_hop():
 
 
 def test_load_baseline_lineage_names_the_missing_cell_and_the_dir(tmp_path):
-    """The file-backed walk's missing-ancestor error must name the missing
-    cell id AND the cells dir it searched (#718's agy thread on report.py)."""
     path = tmp_path / "treat.toml"
     path.write_text(
         """
@@ -733,8 +606,6 @@ shape = "single"
 
 
 def test_load_baseline_lineage_loads_a_committed_chain(tmp_path):
-    """A three-link chain on disk (composition → treatment → control) loads,
-    fair-pairs per hop, and returns the whole lineage in order."""
 
     def cell_toml(cell_id, baseline, axis):
         return f"""

@@ -26,11 +26,6 @@ import sys
 from shipit.harness.eval import store
 from shipit.identity import Owner, Repo
 
-#: The unix-only stdlib modules a windows CPython does not ship — ``fcntl``
-#: (the one that actually fired, #893) plus the usual suspects the issue names.
-#: Masked via a meta-path finder raising ``ModuleNotFoundError``, exactly what
-#: win32 raises, so a dep's guarded ``try: import fcntl`` still degrades the
-#: same way it would on windows and only an UNGUARDED import fails.
 _UNIX_ONLY = ("fcntl", "pwd", "grp", "termios", "resource")
 
 _IMPORT_UNDER_MASK = f"""
@@ -71,14 +66,6 @@ print("ok")
 
 
 def test_cli_entry_chain_imports_with_unix_only_modules_masked():
-    """The ``shipit`` entry chain must import on a win32-shaped interpreter.
-
-    Runs in a SUBPROCESS (a fresh interpreter) because the mask must be in
-    place before the first ``import shipit`` anywhere — in-process, this test
-    suite has long since imported the real ``fcntl`` carriers. A module-level
-    unix-only import sneaking back onto any verb's chain fails this test with
-    the offending traceback on stderr.
-    """
     result = subprocess.run(
         [sys.executable, "-c", _IMPORT_UNDER_MASK],
         capture_output=True,
@@ -90,10 +77,6 @@ def test_cli_entry_chain_imports_with_unix_only_modules_masked():
 
 
 def test_store_locking_seam_is_a_runnable_no_op_on_win32(tmp_path, monkeypatch):
-    # Import safety alone is not enough for the store itself: a windows process
-    # that DOES touch the eval store (never a release runner, but nothing stops
-    # a local run) must round-trip under the no-op single-writer guard rather
-    # than reach for fcntl at call time.
     monkeypatch.setattr(sys, "platform", "win32")
     repo = Repo(owner=Owner(login="acme"), name="widget")
     store.append_record({"a": 1}, repo, base_dir=tmp_path / "state")

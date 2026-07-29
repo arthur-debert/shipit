@@ -1,20 +1,3 @@
-"""Adoption runbook (docs/dev/adoption-runbook.lex) — the ADP00-WS06 acceptance,
-mechanically enforced.
-
-The runbook is prose, but its acceptance criteria are checkable facts:
-
-- both survival prompts exist and are SHORT (they are pasted verbatim into a
-  spawned coordinator's brief — a long prompt stops being a survival prompt);
-- every ``shipit …`` invocation the doc tells a coordinator to run references
-  tooling that actually exists — validated against the real click command
-  tree, so a renamed verb or dropped flag fails HERE instead of stranding a
-  spawned coordinator mid-adoption;
-- the committed ``.md`` mirror exists (the ADP01 flow links the rendered
-  projection from epic issues), so the pre-commit mirror hook keeps it fresh.
-
-Asserts external behavior only: the committed files and the public CLI tree.
-"""
-
 from __future__ import annotations
 
 import re
@@ -29,8 +12,6 @@ REPO_ROOT = Path(__file__).parent.parent
 RUNBOOK = REPO_ROOT / "docs" / "dev" / "adoption-runbook.lex"
 MIRROR = RUNBOOK.with_suffix(".md")
 
-# "Short" made precise: a survival prompt is pasted whole into a brief, so it
-# must stay skimmable. Generous ceiling — trips only on real bloat.
 MAX_PROMPT_LINES = 30
 
 
@@ -39,7 +20,6 @@ def _runbook_text() -> str:
 
 
 def _prompt_block(text: str, subject: str) -> list[str]:
-    """The verbatim lines between ``<subject>:`` and its closing ``:: prompt ::``."""
     pattern = re.compile(
         rf"^\s*{re.escape(subject)}:\n(.*?)^\s*:: prompt ::\s*$",
         re.DOTALL | re.MULTILINE,
@@ -70,38 +50,26 @@ def test_survival_prompts_exist_and_stay_short(subject: str):
 
 
 def _shipit_invocations(text: str) -> list[str]:
-    """Every backtick span that is a ``shipit …`` invocation."""
     spans = re.findall(r"`([^`\n]+)`", text)
     return [s for s in spans if s == "shipit" or s.startswith("shipit ")]
 
 
 def test_every_referenced_shipit_invocation_exists():
     invocations = _shipit_invocations(_runbook_text())
-    # The doc must actually exercise the contract it documents.
     assert invocations, "runbook references no shipit invocations at all"
 
     for invocation in invocations:
-        tokens = invocation.split()[1:]  # drop the leading "shipit"
+        tokens = invocation.split()[1:]
         cmd: click.Command = root
-        # Walk subcommand tokens until the first option. A bare word after an
-        # option is that option's value, never a subcommand; a bare word after
-        # a leaf (non-group) command is a positional argument — stop the walk
-        # once we reach one rather than mistaking it for a subcommand.
-        #
-        # Two deliberate gaps, neither exercised by this runbook and both
-        # against shipit's verb-first convention: a global flag placed BEFORE a
-        # subcommand (`shipit --debug logs`) leaves the subcommand unwalked, and
-        # bundled short flags (`-rf`) are not split into their components.
         while tokens and not tokens[0].startswith("-"):
             if not isinstance(cmd, click.Group):
-                break  # leaf reached — remaining bare words are positionals
+                break
             token = tokens.pop(0)
             assert token in cmd.commands, (
                 f"`{invocation}`: no such subcommand '{token}' — the runbook "
                 "references tooling that does not exist"
             )
             cmd = cmd.commands[token]
-        # Validate the option names (long and short) against the resolved command.
         known_opts = {
             opt
             for param in cmd.get_params(click.Context(cmd))

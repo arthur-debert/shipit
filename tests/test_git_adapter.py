@@ -1,19 +1,3 @@
-"""Unit tests for the git Tool adapter's parsed reads (PROC02-WS03).
-
-These pin the parsing/mapping the registry, hooks, and Tree planner rely on —
-the ahead/behind left-right order, upstream-absent → ``None`` / ``(0, 0)``, the
-exact-ref ``ls-remote`` equality, and the porcelain line parse — by patching
-only the Exec seam (``_git`` / ``_probe``), never a real subprocess. The one
-deliberate exception is
-``test_hooks_dir_resolves_the_shared_common_dir_in_a_real_worktree``, which
-shells out to real ``git`` end-to-end: a linked worktree's ``.git``-file →
-shared-common-dir resolution (#914) is exactly the behaviour a fake seam can't
-prove, so it drives an actual ``git worktree`` checkout. Most
-registry reads are PROBES (``check=False`` through the Exec runner, ADR-0028):
-a nonzero exit is a normal answer for a scan over the fleet, so the fakes
-return an :class:`ExecResult` with the rc under test rather than raising.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -42,7 +26,6 @@ def _fail(stderr: str = "", rc: int = 1) -> ExecResult:
 
 
 def test_ahead_behind_maps_left_right_to_behind_ahead(monkeypatch):
-    # `rev-list --left-right --count @{upstream}...HEAD` prints "<behind> <ahead>".
     monkeypatch.setattr(git, "_probe", lambda args, *, cwd: _ok("3\t5\n"))
     assert git.ahead_behind(cwd="/x") == (5, 3)
 
@@ -55,11 +38,6 @@ def test_ahead_behind_no_upstream_is_level(monkeypatch):
 
 
 def test_unpushed_shas_lists_the_local_only_commits(monkeypatch):
-    # `rev-list HEAD --not --remotes`: commits on NO remote at all — the
-    # upstream-independent "unpushed" the ephemeral gc ladder is defined over. The
-    # SHAs (not a bare count) are what lets the ladder exclude exactly the recorded
-    # provisioning commit (#232) — and they come back as Sha VALUE OBJECTS
-    # (PROC03), so the exclusion compares identities through the type.
     seen = {}
 
     def fake(args, *, cwd):
@@ -72,16 +50,11 @@ def test_unpushed_shas_lists_the_local_only_commits(monkeypatch):
 
 
 def test_unpushed_shas_empty_when_everything_is_on_a_remote(monkeypatch):
-    # Empty output = every commit reachable from HEAD is on some remote: the
-    # provably-safe reading, distinct from None (unreadable).
     monkeypatch.setattr(git, "_probe", lambda args, *, cwd: _ok(""))
     assert git.unpushed_shas(cwd="/x") == ()
 
 
 def test_unpushed_shas_unreadable_is_none_not_empty(monkeypatch):
-    # None (unknown) — NEVER () (provably pushed): the caller keeps on unknown, so
-    # a git failure must not read as "nothing to lose". Malformed output (a line
-    # that is not a SHA) is the same unreadable case.
     monkeypatch.setattr(git, "_probe", lambda args, *, cwd: _fail("unborn HEAD"))
     assert git.unpushed_shas(cwd="/x") is None
     monkeypatch.setattr(git, "_probe", lambda args, *, cwd: _ok("not-a-sha\n"))
@@ -89,11 +62,6 @@ def test_unpushed_shas_unreadable_is_none_not_empty(monkeypatch):
 
 
 def test_push_no_verify_bypasses_the_pre_push_hook(monkeypatch):
-    # #477: install's own push must carry `--no-verify` — the freshly-armed
-    # pre-push hook runs the WHOLE-TREE lint gate, which a virgin consumer's
-    # pre-existing debt fails, killing the very push that delivers the env to
-    # clear it (the tripwire armed by the run that trips it). The flag sits
-    # before the remote/branch operands, where git parses options.
     seen = {}
 
     def fake(args, *, cwd, timeout=None):
@@ -112,10 +80,6 @@ def test_push_no_verify_bypasses_the_pre_push_hook(monkeypatch):
 
 
 def test_clean_non_committed_removes_untracked_and_ignored_forcing_nested(monkeypatch):
-    # #942: repo creation strips every non-committed artifact before the atomic
-    # publish so the tree is relocatable. `-x` includes ignored paths (target/,
-    # .pixi/), `-d` recurses untracked dirs, and `-ff` forces through nested
-    # working trees so nothing regenerable survives the rename.
     seen = {}
 
     def fake(args, *, cwd, timeout=None):
@@ -126,15 +90,10 @@ def test_clean_non_committed_removes_untracked_and_ignored_forcing_nested(monkey
     monkeypatch.setattr(git, "_git", fake)
     git.clean_non_committed(cwd="/x")
     assert seen["args"] == ["clean", "-ffdx"]
-    # Unlinking a materialized .pixi env + build cache is bulk-filesystem work,
-    # not near-instant plumbing, so it carries the generous strip bound — the
-    # tight local-plumbing timeout would spuriously fail a still-progressing
-    # strip on slower disks.
     assert seen["timeout"] == git._STRIP_TIMEOUT
 
 
 def test_push_default_does_not_bypass_hooks(monkeypatch):
-    # The bypass is install's deliberate opt-in, never the adapter's default.
     seen = {}
 
     def fake(args, *, cwd, timeout=None):
@@ -147,9 +106,6 @@ def test_push_default_does_not_bypass_hooks(monkeypatch):
 
 
 def test_checkout_create_or_reset_uses_dash_big_b(monkeypatch):
-    # #845: `-B` (create-or-reset), not `-b` (create-only), so a freeform Tree
-    # whose NAME is the repo's default branch works — a fresh clone already has
-    # `main` checked out, and `checkout -b main origin/main` dies on the collision.
     seen = {}
 
     def fake(args, *, cwd, timeout=None):
@@ -164,9 +120,6 @@ def test_checkout_create_or_reset_uses_dash_big_b(monkeypatch):
 
 
 def test_switch_moves_to_an_existing_branch_without_force(monkeypatch):
-    # #777 mode 1: the MODE_PR caller-branch restore switches to a branch that
-    # already exists (the caller's own) — a plain `git switch`, never `-C`, so it
-    # only ever moves HEAD and never creates a ref.
     seen = {}
 
     def fake(args, *, cwd, timeout=None):
@@ -179,9 +132,6 @@ def test_switch_moves_to_an_existing_branch_without_force(monkeypatch):
 
 
 def test_default_branch_strips_the_remote_prefix_from_the_symref(monkeypatch):
-    # #852: the MODE_PR staging-branch base is read from `<remote>/HEAD` and the
-    # `<remote>/` prefix is stripped, so `origin/HEAD -> origin/main` resolves to
-    # the bare branch name `main`.
     seen = {}
 
     def fake(args, *, cwd, timeout=None):
@@ -194,31 +144,19 @@ def test_default_branch_strips_the_remote_prefix_from_the_symref(monkeypatch):
 
 
 def test_default_branch_honors_a_non_main_default(monkeypatch):
-    # A consumer whose default branch is `trunk` resolves to `trunk`, never a
-    # hardcoded `main` — the reset base and the PR base both follow the symref.
     monkeypatch.setattr(git, "_probe", lambda args, *, cwd: _ok("origin/trunk\n"))
     assert git.default_branch(cwd="/x") == "trunk"
 
 
 def test_default_branch_falls_back_to_main_when_the_symref_is_absent(monkeypatch):
-    # Some reference-borrow clones never set `origin/HEAD`: an absent symref is a
-    # NORMAL probe answer (nonzero rc). With no `main`/`master`/`develop`/`trunk`
-    # remote-tracking ref to confirm either, the resolver falls back to the
-    # portfolio default `main` rather than raising.
     monkeypatch.setattr(git, "_probe", lambda args, *, cwd: _fail("not a symref"))
     assert git.default_branch(cwd="/x") == "main"
 
 
 def test_default_branch_probes_common_names_when_the_symref_is_absent(monkeypatch):
-    # #852 review: an absent `<remote>/HEAD` symref must NOT blindly resolve to
-    # `main` — that would crash the MODE_PR reset onto a non-existent
-    # `origin/main` on a `master`/`trunk` remote. The fallback probes the common
-    # default-branch names against the remote-tracking refs a fetch populated and
-    # returns the one that exists.
     def fake(args, *, cwd):
         if args[0] == "symbolic-ref":
             return _fail("no symref")
-        # rev-parse --verify --quiet refs/remotes/origin/<candidate>
         return _ok("deadbeef\n") if args[-1].endswith("/master") else _fail()
 
     monkeypatch.setattr(git, "_probe", fake)
@@ -226,16 +164,9 @@ def test_default_branch_probes_common_names_when_the_symref_is_absent(monkeypatc
 
 
 def test_default_branch_probes_develop_when_the_symref_is_absent(monkeypatch):
-    # #984 copilot review: `develop` is a common default-branch name and must be
-    # in the fallback probe list — a repo whose default is `develop` (with
-    # `refs/remotes/origin/develop`) but no `<remote>/HEAD` symref must resolve
-    # to `develop`, not fall through to `main` and crash the MODE_PR reset onto a
-    # non-existent `origin/main`.
     def fake(args, *, cwd):
         if args[0] == "symbolic-ref":
             return _fail("no symref")
-        # rev-parse --verify --quiet refs/remotes/origin/<candidate>: only the
-        # `develop` remote-tracking ref exists (no main/master).
         return _ok("deadbeef\n") if args[-1].endswith("/develop") else _fail()
 
     monkeypatch.setattr(git, "_probe", fake)
@@ -243,9 +174,6 @@ def test_default_branch_probes_develop_when_the_symref_is_absent(monkeypatch):
 
 
 def test_staged_paths_scopes_the_cached_diff_and_parses_the_names(monkeypatch):
-    # #984 review: the MODE_PR commit pathspec reads a scoped
-    # `git diff --cached --name-only`, parsed to the staged names. A path the
-    # diff omits (matched nothing, or matches HEAD) simply never appears.
     seen = {}
 
     def fake(args, *, cwd, env=None):
@@ -256,22 +184,15 @@ def test_staged_paths_scopes_the_cached_diff_and_parses_the_names(monkeypatch):
     monkeypatch.setattr(git, "_git", fake)
     assert git.staged_paths(["a", "b/c", "gone"], cwd="/x") == ["a", "b/c"]
     assert seen["args"] == ["diff", "--cached", "--name-only", "--", "a", "b/c", "gone"]
-    # No index_file → the read runs against the checkout's real index (no env).
     assert seen["env"] is None
 
 
 def test_staged_paths_is_empty_on_a_clean_index(monkeypatch):
-    # No staged diff for the named pathspecs — the MODE_PR "nothing to publish"
-    # case, which skips the commit rather than crashing an empty pathspec commit.
     monkeypatch.setattr(git, "_git", lambda args, *, cwd, env=None: "")
     assert git.staged_paths(["a"], cwd="/x") == []
 
 
 def test_staged_paths_surfaces_a_git_failure_rather_than_masking_it(monkeypatch):
-    # #984 review: unlike `--quiet` (rc 1 = diff present, rc >1 = failure),
-    # `--name-only` exits 0 on any successful diff and nonzero ONLY on a genuine
-    # failure (bad pathspec magic, unreadable index) — which `_git` raises. A
-    # real git failure can never be masked as a staged path.
     def boom(args, *, cwd, env=None):
         raise ExecError(args, rc=128, stdout="", stderr="fatal", duration_ms=1)
 
@@ -281,8 +202,6 @@ def test_staged_paths_surfaces_a_git_failure_rather_than_masking_it(monkeypatch)
 
 
 def test_staged_paths_on_empty_paths_never_probes(monkeypatch):
-    # An empty pathspec is a vacuous "nothing staged" — never a bare unscoped
-    # `git diff --cached --name-only` answering for the whole index.
     def boom(*a, **k):
         raise AssertionError("must not probe on an empty pathspec")
 
@@ -291,9 +210,6 @@ def test_staged_paths_on_empty_paths_never_probes(monkeypatch):
 
 
 def test_reset_index_unstages_everything_to_head(monkeypatch):
-    # #852 review: the MODE_PR caller-restore unstages the soft-reset index when
-    # the operator started on the scratch branch — a bare `git reset` (mixed to
-    # HEAD), leaving HEAD and the working tree untouched.
     seen = {}
 
     def fake(args, *, cwd, timeout=None):
@@ -306,9 +222,6 @@ def test_reset_index_unstages_everything_to_head(monkeypatch):
 
 
 def test_reset_soft_moves_only_the_branch_pointer(monkeypatch):
-    # #852: the staging-branch rebase resets shipit/install onto origin/<default>
-    # with `--soft` so the rendered managed files stay in the working tree for
-    # the following pathspec commit.
     seen = {}
 
     def fake(args, *, cwd, timeout=None):
@@ -321,11 +234,6 @@ def test_reset_soft_moves_only_the_branch_pointer(monkeypatch):
 
 
 def test_rm_cached_purges_the_index_without_touching_the_working_tree(monkeypatch):
-    # #986 review: MODE_PR stages retired-path deletions from the INDEX with
-    # `git rm --cached --ignore-unmatch` — `--cached` never touches the working
-    # tree (a consumer file that reappeared at the path is preserved), and
-    # `--ignore-unmatch` makes an absent/untracked pathspec a no-op rather than
-    # the exit-128 crash `git add` would raise.
     seen = {}
 
     def fake(args, *, cwd, timeout=None, env=None):
@@ -343,13 +251,10 @@ def test_rm_cached_purges_the_index_without_touching_the_working_tree(monkeypatc
         "a.txt",
         "b/c.txt",
     ]
-    # No index_file → the real index (no GIT_INDEX_FILE env).
     assert seen["env"] is None
 
 
 def test_read_tree_seeds_the_scratch_index_via_git_index_file(monkeypatch):
-    # #992: the MODE_PR isolated-index seed reads origin/<base> into a SCRATCH
-    # index bound by GIT_INDEX_FILE — never the checkout's real `.git/index`.
     seen = {}
 
     def fake(args, *, cwd, timeout=None, env=None):
@@ -364,9 +269,6 @@ def test_read_tree_seeds_the_scratch_index_via_git_index_file(monkeypatch):
 
 
 def test_index_file_binds_git_index_file_across_the_staging_calls(monkeypatch):
-    # #992: `add` / `rm_cached` / `staged_paths` / `commit_all` route at the
-    # scratch index whenever `index_file` is given, so the whole reconcile is
-    # staged and published without ever mutating the caller's real index.
     envs = []
 
     def fake(args, *, cwd, timeout=None, env=None):
@@ -383,8 +285,6 @@ def test_index_file_binds_git_index_file_across_the_staging_calls(monkeypatch):
 
 
 def test_rm_cached_on_empty_paths_never_shells(monkeypatch):
-    # An empty removal set is a no-op: never a bare `git rm` (which would abort
-    # with "no pathspec given"), mirroring the empty-list guard on `add`.
     called = False
 
     def fake(args, *, cwd, timeout=None):
@@ -398,37 +298,20 @@ def test_rm_cached_on_empty_paths_never_shells(monkeypatch):
 
 
 def test_commit_all_publishes_index_deletions_a_pathspec_commit_would_drop(tmp_path):
-    # #991 (regression, end-to-end over REAL git — a fake seam cannot prove tree
-    # content): the MODE_PR reconcile stages its retired-path deletions into the
-    # INDEX (`git rm --cached`), so the publishing commit MUST read the index. A
-    # `git commit -- <pathspec>` runs git's PARTIAL-commit mode, which builds the
-    # tree from the WORKING TREE of the named paths and DISREGARDS the index —
-    # so whenever the retired file's working-tree copy is still present it
-    # RESURRECTS it, silently negating the staged deletion (the skills-store move
-    # #921 dropped all 11 `skills/*` deletions this way). The fix commits the
-    # whole INDEX (`commit_all`), which honors the staged deletion regardless of
-    # the working tree while still excluding an unrelated dirty consumer file
-    # (never staged). Drive the exact reconcile staging sequence and assert the
-    # committed TREE.
     repo = tmp_path / "repo"
     repo.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
     subprocess.run(["git", "config", "user.email", "t@t.co"], cwd=repo, check=True)
     subprocess.run(["git", "config", "user.name", "t"], cwd=repo, check=True)
-    # The base carries the retired managed file AND an unrelated consumer file.
     (repo / "skills").mkdir()
     (repo / "skills" / "foo.md").write_text("old shipit skill\n")
     (repo / "notes.txt").write_text("consumer\n")
     subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
     subprocess.run(["git", "commit", "-qm", "base"], cwd=repo, check=True)
 
-    # The reconcile staging: add the new managed file, stage the retired path's
-    # removal from the INDEX (its working-tree copy deliberately LEFT in place —
-    # the case that broke the pathspec commit), and leave an unrelated dirty edit
-    # in the working tree that is NEVER staged.
     (repo / ".shipit-skills").mkdir()
     (repo / ".shipit-skills" / "foo.md").write_text("new shipit skill\n")
-    (repo / "notes.txt").write_text("consumer — locally edited\n")  # dirty, unstaged
+    (repo / "notes.txt").write_text("consumer — locally edited\n")
     git.add([".shipit-skills/foo.md"], cwd=str(repo))
     git.rm_cached(["skills/foo.md"], cwd=str(repo))
     git.commit_all("reconcile", cwd=str(repo), no_verify=True)
@@ -440,12 +323,8 @@ def test_commit_all_publishes_index_deletions_a_pathspec_commit_would_drop(tmp_p
         capture_output=True,
         text=True,
     ).stdout.split()
-    # The staged deletion is PUBLISHED — the retired path is gone from the tree…
     assert "skills/foo.md" not in tree
-    # …the new managed file was added…
     assert ".shipit-skills/foo.md" in tree
-    # …and the unrelated consumer file is KEPT, at its BASE content: the unstaged
-    # working-tree edit was excluded (the scoping the pathspec commit used to give).
     assert "notes.txt" in tree
     committed = subprocess.run(
         ["git", "show", "HEAD:notes.txt"],
@@ -460,24 +339,11 @@ def test_commit_all_publishes_index_deletions_a_pathspec_commit_would_drop(tmp_p
 def test_mode_pr_scratch_index_commit_excludes_the_callers_branch_and_staged_state(
     tmp_path,
 ):
-    # #992 (regression, end-to-end over REAL git): the MODE_PR reconcile publishes
-    # via a whole-INDEX `commit_all`, but `reset --soft origin/<base>` moves ONLY
-    # HEAD — it leaves the checkout's REAL index pointing at the caller's branch
-    # tip (their local commits ahead of base, plus anything they had staged).
-    # Committing that real index would SQUASH the caller's branch and staged
-    # changes into the PR and destroy their staged state on restore. The fix
-    # builds the reconcile on an ISOLATED scratch index (`read_tree origin/<base>`
-    # + `add`/`rm_cached`/`commit_all` all bound to a scratch GIT_INDEX_FILE), so
-    # the committed tree is EXACTLY base + the managed delta and the caller's real
-    # index is never read or mutated. Drive the exact flow and assert BOTH the
-    # published tree and the survival of the caller's real index.
     repo = tmp_path / "repo"
     repo.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
     subprocess.run(["git", "config", "user.email", "t@t.co"], cwd=repo, check=True)
     subprocess.run(["git", "config", "user.name", "t"], cwd=repo, check=True)
-    # The base carries the retired managed file AND an unrelated consumer file.
-    # Its sha stands in for `origin/<base>` (the reconcile's parent).
     (repo / "skills").mkdir()
     (repo / "skills" / "foo.md").write_text("old shipit skill\n")
     (repo / "notes.txt").write_text("consumer\n")
@@ -491,8 +357,6 @@ def test_mode_pr_scratch_index_commit_excludes_the_callers_branch_and_staged_sta
         text=True,
     ).stdout.strip()
 
-    # The caller's checkout races AHEAD of base: a local commit (branch content
-    # that must NOT leak into the PR) plus an in-flight STAGED change (that must
     # NOT leak and must SURVIVE the flow).
     (repo / "leak.py").write_text("caller's local branch work\n")
     subprocess.run(["git", "add", "leak.py"], cwd=repo, check=True)
@@ -500,16 +364,10 @@ def test_mode_pr_scratch_index_commit_excludes_the_callers_branch_and_staged_sta
     (repo / "staged.txt").write_text("operator staged this\n")
     subprocess.run(["git", "add", "staged.txt"], cwd=repo, check=True)
 
-    # --- the MODE_PR staging flow ---
-    # switch onto the scratch branch (from the caller's tip) and soft-reset it to
-    # base: HEAD moves to base, but the REAL index still carries leak.py + the
-    # staged staged.txt.
     git.switch_create("shipit/install", cwd=str(repo))
     git.reset_soft(base_sha, cwd=str(repo))
-    # apply renders the managed write on disk.
     (repo / ".shipit-skills").mkdir()
     (repo / ".shipit-skills" / "foo.md").write_text("new shipit skill\n")
-    # Stage the reconcile into an ISOLATED scratch index, never the real one.
     index_file = str(tmp_path / "scratch-index")
     git.read_tree(base_sha, cwd=str(repo), index_file=index_file)
     git.add([".shipit-skills/foo.md"], cwd=str(repo), index_file=index_file)
@@ -523,14 +381,11 @@ def test_mode_pr_scratch_index_commit_excludes_the_callers_branch_and_staged_sta
         capture_output=True,
         text=True,
     ).stdout.split()
-    # The reconcile IS exactly base + managed delta:
-    assert ".shipit-skills/foo.md" in tree  # managed add published
-    assert "skills/foo.md" not in tree  # retired deletion honored
-    assert "notes.txt" in tree  # base consumer file kept
-    # …and NONE of the caller's branch/staged state leaked into the PR:
-    assert "leak.py" not in tree  # local commit ahead of base excluded
-    assert "staged.txt" not in tree  # operator's staged change excluded
-    # The commit's parent is base, not the caller's tip — one clean refresh.
+    assert ".shipit-skills/foo.md" in tree
+    assert "skills/foo.md" not in tree
+    assert "notes.txt" in tree
+    assert "leak.py" not in tree
+    assert "staged.txt" not in tree
     parent = subprocess.run(
         ["git", "rev-parse", "HEAD^"],
         cwd=repo,
@@ -540,8 +395,6 @@ def test_mode_pr_scratch_index_commit_excludes_the_callers_branch_and_staged_sta
     ).stdout.strip()
     assert parent == base_sha
 
-    # The caller's REAL index is untouched: their in-flight staged.txt is STILL
-    # staged (the scratch-index commit never read or rewound the real index).
     real_index = subprocess.run(
         ["git", "diff", "--cached", "--name-only"],
         cwd=repo,
@@ -555,11 +408,6 @@ def test_mode_pr_scratch_index_commit_excludes_the_callers_branch_and_staged_sta
 def test_submodule_update_init_syncs_then_recursively_inits_on_the_network_bound(
     monkeypatch,
 ):
-    # #485/#486: the Tree-provisioning seam that populates a dissociated clone's empty
-    # submodule gitlinks. It `sync --recursive` FIRST (so a reuse-refresh onto an
-    # advanced head picks up a moved submodule URL from .gitmodules — #486), THEN the
-    # recursive init CI does (`submodules: recursive`). Both carry the remote-facing
-    # timeout (submodule work hits the network), not the local-plumbing bound.
     calls = []
 
     def fake(args, *, cwd, timeout=None):
@@ -577,10 +425,6 @@ def test_submodule_update_init_syncs_then_recursively_inits_on_the_network_bound
 
 
 def test_commits_between_lists_the_range(monkeypatch):
-    # `rev-list <base>..<head>`: exactly what provisioning committed (#232) — the
-    # SHAs recorded into .git/shipit-provision.json at Tree birth. Typed at both
-    # ends (PROC03): Sha endpoints in, Sha values out — the argv still carries
-    # the plain string form.
     seen = {}
 
     def fake(args, *, cwd):
@@ -595,8 +439,6 @@ def test_commits_between_lists_the_range(monkeypatch):
 
 
 def test_commits_between_unreadable_is_none(monkeypatch):
-    # A failed or malformed rev-list -> None, so the caller records NOTHING rather
-    # than something wrong (an unrecorded provisioning commit only KEEPS the Tree).
     monkeypatch.setattr(git, "_probe", lambda args, *, cwd: _fail("bad ref"))
     assert git.commits_between(Sha("a" * 40), Sha("b" * 40), cwd="/x") is None
     monkeypatch.setattr(git, "_probe", lambda args, *, cwd: _ok("garbage\n"))
@@ -604,9 +446,6 @@ def test_commits_between_unreadable_is_none(monkeypatch):
 
 
 def test_head_commit_returns_a_sha_value_object(monkeypatch):
-    # `rev-parse HEAD` is a commit-IDENTITY read (PROC03): the adapter returns
-    # the validated Sha value object — lowercase-normalized by the type — never
-    # a raw string.
     monkeypatch.setattr(git, "_probe", lambda args, *, cwd: _ok(f"{'AB' * 20}\n"))
     head = git.head_commit(cwd="/x")
     assert head == Sha("ab" * 20)
@@ -614,8 +453,6 @@ def test_head_commit_returns_a_sha_value_object(monkeypatch):
 
 
 def test_head_commit_unresolvable_or_malformed_is_none(monkeypatch):
-    # Best-effort contract: a failed rev-parse (detached/unborn HEAD) AND output
-    # that does not validate as a full sha both degrade to None, never raise.
     monkeypatch.setattr(git, "_probe", lambda args, *, cwd: _fail("unborn HEAD"))
     assert git.head_commit(cwd="/x") is None
     monkeypatch.setattr(git, "_probe", lambda args, *, cwd: _ok("not-a-sha\n"))
@@ -623,23 +460,16 @@ def test_head_commit_unresolvable_or_malformed_is_none(monkeypatch):
 
 
 def test_hooks_dir_resolves_a_relative_answer_against_cwd(monkeypatch):
-    # A normal checkout: `rev-parse --git-path hooks` prints the path RELATIVE to
-    # the queried checkout, so the adapter joins it onto cwd to an absolute path.
     monkeypatch.setattr(git, "_probe", lambda args, *, cwd: _ok(".git/hooks\n"))
     assert git.hooks_dir(cwd="/repo") == Path("/repo/.git/hooks")
 
 
 def test_hooks_dir_keeps_an_absolute_worktree_answer_verbatim(monkeypatch):
-    # A linked worktree: git prints the ABSOLUTE shared common-dir hooks path, so
-    # os.path.join keeps it as-is rather than prefixing cwd (#914 — the whole
-    # point: a worktree's hooks live outside its own `.git` file).
     monkeypatch.setattr(git, "_probe", lambda args, *, cwd: _ok("/main/.git/hooks\n"))
     assert git.hooks_dir(cwd="/main/wt") == Path("/main/.git/hooks")
 
 
 def test_hooks_dir_none_when_not_a_repo(monkeypatch):
-    # A probe: a not-a-repo nonzero answer AND a launch-level ExecError both
-    # degrade to None so a best-effort caller no-ops rather than crashing.
     monkeypatch.setattr(git, "_probe", lambda args, *, cwd: _fail("not a git repo"))
     assert git.hooks_dir(cwd="/x") is None
 
@@ -651,10 +481,6 @@ def test_hooks_dir_none_when_not_a_repo(monkeypatch):
 
 
 def test_hooks_dir_resolves_the_shared_common_dir_in_a_real_worktree(tmp_path):
-    # End-to-end over REAL git (no seam patch): a linked worktree's `.git` is a
-    # FILE and its hooks live in the main checkout's shared common dir, so the
-    # adapter must resolve to `<main>/.git/hooks` — exactly what the hardcoded
-    # `<worktree>/.git/hooks` (a nonexistent dir) missed before #914.
     main = tmp_path / "main"
     main.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=main, check=True)
@@ -665,7 +491,7 @@ def test_hooks_dir_resolves_the_shared_common_dir_in_a_real_worktree(tmp_path):
     )
     wt = tmp_path / "wt"
     subprocess.run(["git", "worktree", "add", "-q", str(wt)], cwd=main, check=True)
-    assert (wt / ".git").is_file()  # a linked worktree points at the common dir
+    assert (wt / ".git").is_file()
 
     shared_hooks = (main / ".git" / "hooks").resolve()
     assert git.hooks_dir(cwd=str(main)).resolve() == shared_hooks
@@ -683,9 +509,6 @@ def test_upstream_ref_none_when_absent(monkeypatch):
 
 
 def test_status_porcelain_parses_to_nonempty_lines(monkeypatch):
-    # The centralized porcelain read: the adapter returns the PARSED lines (one
-    # per dirty entry, blanks dropped), so callers ask truthiness/len of it
-    # instead of re-splitting raw text at each site.
     monkeypatch.setattr(
         git, "_git", lambda args, *, cwd: " M src/a.py\n?? notes.txt\n\n"
     )
@@ -695,14 +518,11 @@ def test_status_porcelain_parses_to_nonempty_lines(monkeypatch):
 
 
 def test_epic_umbrella_exists_checks_remote_tracking_ref_first(monkeypatch):
-    # The semantic epic test: `<epic>/umbrella` present as the remote-tracking ref
-    # (the usual shape in a clone) -> True, via an EXACT `show-ref --verify` (never a
-    # pattern), and the remote ref is tried before any local head.
     seen: list = []
 
     def fake_git(args, *, cwd):
         seen.append(args)
-        return _ok()  # `show-ref --verify --quiet` exits 0 when the ref resolves
+        return _ok()
 
     monkeypatch.setattr(git, "_probe", fake_git)
     assert git.epic_umbrella_exists("TRE04", cwd="/x") is True
@@ -715,7 +535,6 @@ def test_epic_umbrella_exists_checks_remote_tracking_ref_first(monkeypatch):
 
 
 def test_epic_umbrella_exists_falls_back_to_local_head(monkeypatch):
-    # No remote-tracking ref but a local `refs/heads/<epic>/umbrella` -> still True.
     def fake_git(args, *, cwd):
         if args[-1] == "refs/heads/TRE04/umbrella":
             return _ok()
@@ -726,33 +545,17 @@ def test_epic_umbrella_exists_falls_back_to_local_head(monkeypatch):
 
 
 def test_epic_umbrella_exists_false_when_no_umbrella(monkeypatch):
-    # Neither ref resolves (an ordinary `feature/foo` -> no `feature/umbrella`): the
-    # probe reads the nonzero exit as "not an epic" rather than raising.
     monkeypatch.setattr(git, "_probe", lambda args, *, cwd: _fail())
     assert git.epic_umbrella_exists("feature", cwd="/x") is False
 
 
 def test_epic_umbrella_exists_launch_failure_raises_not_false(monkeypatch):
-    # WS03-FX01 alignment (#297): an absent ref is a normal answer (ok=False ->
-    # False, above), but a launch-level failure (missing git, timeout) must NOT
-    # read as "not an epic" — it propagates, and the fail-CLOSED WorktreeCreate
-    # hook aborts the spawn loudly instead of silently minting a mis-based
-    # epic-less holding branch.
     def boom(args, *, cwd):
         raise ExecError(["git", "show-ref"], rc=None, cause=CAUSE_MISSING_BINARY)
 
     monkeypatch.setattr(git, "_probe", boom)
     with pytest.raises(ExecError):
         git.epic_umbrella_exists("TRE04", cwd="/x")
-
-
-# --- review-diff reads: typed commit-identity plumbing (PROC03-WS03) --------
-#
-# The review-diff endpoints are commit identities, so the adapter takes/returns
-# `Sha` value objects (`commit_present` / `merge_base` / `diff_range` /
-# `diff_name_only`) — the argv still carries the plain string form, and
-# `fetch_ref` stays the one deliberately-str refspec seam. Pinned through the
-# injected runner seam (`_git` / `_probe`), never a real subprocess.
 
 
 def test_commit_present_takes_sha_and_probes_cat_file(monkeypatch):
@@ -764,15 +567,12 @@ def test_commit_present_takes_sha_and_probes_cat_file(monkeypatch):
 
     monkeypatch.setattr(git, "_probe", fake)
     assert git.commit_present(Sha("a" * 40), cwd="/x") is True
-    # The typed identity stringifies only INTO the argv.
     assert seen["args"] == ["cat-file", "-e", f"{'a' * 40}^{{commit}}"]
     monkeypatch.setattr(git, "_probe", lambda args, *, cwd: _fail())
     assert git.commit_present(Sha("a" * 40), cwd="/x") is False
 
 
 def test_merge_base_returns_a_sha_value_object(monkeypatch):
-    # The merge base IS a commit identity, so it leaves the adapter typed
-    # (PROC03) — lowercase-normalized by the Sha constructor.
     seen = {}
 
     def fake(args, *, cwd):
@@ -787,8 +587,6 @@ def test_merge_base_returns_a_sha_value_object(monkeypatch):
 
 
 def test_merge_base_none_on_no_ancestor_or_malformed_output(monkeypatch):
-    # Nonzero exit = no common ancestor (the caller fails loud); malformed
-    # output degrades to the same None — nothing rather than something wrong.
     monkeypatch.setattr(git, "_probe", lambda args, *, cwd: _fail("no ancestor"))
     assert git.merge_base(Sha("a" * 40), Sha("b" * 40), cwd="/x") is None
     monkeypatch.setattr(git, "_probe", lambda args, *, cwd: _ok("not-a-sha\n"))
@@ -809,8 +607,6 @@ def test_diff_range_takes_sha_endpoints(monkeypatch):
 
 
 def test_is_ancestor_true_on_exit_zero(monkeypatch):
-    # `git merge-base --is-ancestor A B` exits 0 when A is an ancestor of B — the
-    # incremental-round convergence gate (RVW02-WS06).
     seen = {}
 
     def fake(args, *, cwd):
@@ -823,9 +619,6 @@ def test_is_ancestor_true_on_exit_zero(monkeypatch):
 
 
 def test_is_ancestor_false_on_nonancestor_and_on_error(monkeypatch):
-    # Exit 1 = a genuine non-ancestor (rebase/force-push); any other nonzero =
-    # error (a commit not present). BOTH return False so the caller falls back to
-    # a full round — fail toward over-reviewing, never a wrongly-narrowed one.
     monkeypatch.setattr(git, "_probe", lambda args, *, cwd: _fail(rc=1))
     assert git.is_ancestor(Sha("a" * 40), Sha("b" * 40), cwd="/x") is False
     monkeypatch.setattr(git, "_probe", lambda args, *, cwd: _fail("bad object", rc=128))
@@ -847,14 +640,6 @@ def test_diff_name_only_takes_sha_endpoints_and_parses_lines(monkeypatch):
     assert seen["args"] == ["diff", "--name-only", f"{'a' * 40}..{'b' * 40}"]
 
 
-# --- remote_branch_exists: exact-ref equality (codex finding, gh.py:451) ---
-#
-# `git ls-remote` treats its final arg as a ref *pattern*, so the old
-# `bool(non-empty output)` test could false-positive. These pin the helper to
-# exact `refs/heads/<branch>` equality — the fail-closed precondition before
-# Tree creation depends on it.
-
-
 def _ls_remote_line(sha: str, refname: str) -> str:
     return f"{sha}\t{refname}\n"
 
@@ -868,20 +653,15 @@ def test_remote_branch_exists_true_when_exact_ref_present(monkeypatch):
 
     monkeypatch.setattr(git, "_git", fake_run)
     assert git.remote_branch_exists("TRE04/umbrella", cwd="/x") is True
-    # The query is for the FULLY-QUALIFIED ref, not the bare branch name.
     assert calls[0][-1] == "refs/heads/TRE04/umbrella"
 
 
 def test_remote_branch_exists_false_when_absent(monkeypatch):
-    # Empty ls-remote output (no matching head) -> absent.
     monkeypatch.setattr(git, "_git", lambda args, *, cwd=None, timeout=None: "")
     assert git.remote_branch_exists("TRE04/umbrella", cwd="/x") is False
 
 
 def test_remote_branch_exists_false_for_glob_metachar_branch(monkeypatch):
-    # A glob-ish name can never name a real git ref, so it must short-circuit to
-    # False WITHOUT ever being sent to git as a pattern (which could expand to a
-    # different head and false-positive).
     def boom(args, *, cwd=None, timeout=None):
         raise AssertionError("glob-ish branch name must not reach git ls-remote")
 
@@ -892,8 +672,6 @@ def test_remote_branch_exists_false_for_glob_metachar_branch(monkeypatch):
 
 
 def test_remote_branch_exists_false_when_only_a_different_ref_matches(monkeypatch):
-    # Non-empty output but the refname is a DIFFERENT head than the one queried:
-    # exact-equality parsing (not any-output) must reject it.
     def fake_run(args, *, cwd=None, timeout=None):
         return _ls_remote_line("b" * 40, "refs/heads/TRE04/umbrella-extra")
 
@@ -902,7 +680,6 @@ def test_remote_branch_exists_false_when_only_a_different_ref_matches(monkeypatc
 
 
 def test_remote_branch_exists_true_when_exact_ref_among_several(monkeypatch):
-    # Several lines back; True iff one refname column equals the queried ref exactly.
     def fake_run(args, *, cwd=None, timeout=None):
         return _ls_remote_line(
             "c" * 40, "refs/heads/TRE04/umbrella-extra"
@@ -912,17 +689,7 @@ def test_remote_branch_exists_true_when_exact_ref_among_several(monkeypatch):
     assert git.remote_branch_exists("TRE04/umbrella", cwd="/x") is True
 
 
-# --------------------------------------------------------------------------
-# #353 — clone_dissociated fails open on a poisoned --reference donor.
-# The real failure (git 2.54, reference with a split commit-graph chain) is
-# pinned at the seam: the first Exec raises the exact ExecError shape the live
-# diagnosis captured, and the adapter must retry ONCE without --reference.
-# --------------------------------------------------------------------------
-
-
 def _poisoned_clone_error(argv: list[str]) -> ExecError:
-    # The live #353 signature: rc=128, "unable to parse commit" + git's
-    # "Clone succeeded, but checkout failed." epilogue.
     return ExecError(
         argv,
         rc=128,
@@ -950,10 +717,6 @@ def test_clone_dissociated_retries_full_clone_on_poisoned_reference(
     with caplog.at_level(logging.WARNING, logger="shipit.git"):
         git.clone_dissociated("https://x/r.git", "/trees/leaf", reference="/ref")
 
-    # Exactly two clones: the referenced attempt (with commit-graph READING off
-    # for the clone process — the #372 fix, `-c` BEFORE the subcommand so nothing
-    # persists in the new repo), then the bare full clone — no --reference (the
-    # poison) and no --dissociate (meaningless without it).
     assert calls == [
         [
             "-c",
@@ -967,17 +730,12 @@ def test_clone_dissociated_retries_full_clone_on_poisoned_reference(
         ],
         ["clone", "https://x/r.git", "/trees/leaf"],
     ]
-    # The degradation is narrated at WARNING with the poisoned reference path,
-    # so the trail shows WHY this Tree birth was slow.
     warning = next(r for r in caplog.records if r.levelno == logging.WARNING)
     assert "/ref" in warning.getMessage()
     assert "#353" in warning.getMessage()
 
 
 def test_clone_dissociated_removes_leftover_dest_before_retry(monkeypatch, tmp_path):
-    # git leaves the cloned-but-not-checked-out dest behind on the #353 failure;
-    # the retry must not trip over those leftovers ("destination path already
-    # exists and is not an empty directory").
     dest = tmp_path / "leaf"
 
     def fake(args, *, cwd=None, timeout=None):
@@ -992,8 +750,6 @@ def test_clone_dissociated_removes_leftover_dest_before_retry(monkeypatch, tmp_p
 
 
 def test_clone_dissociated_propagates_any_other_failure_without_retry(monkeypatch):
-    # A genuinely failed clone (bad URL, auth, no space) is NOT the poisoned-
-    # reference shape: it must propagate untouched, with no second clone attempt.
     calls: list[list[str]] = []
 
     def fake(args, *, cwd=None, timeout=None):
@@ -1014,18 +770,13 @@ def test_clone_dissociated_propagates_any_other_failure_without_retry(monkeypatc
 @pytest.mark.parametrize(
     "stderr",
     [
-        # Checkout killed for a non-#353 reason (disk space, bad filename):
-        # git prints the epilogue without the parse error.
         "warning: Clone succeeded, but checkout failed.",
-        # Genuine object corruption without the checkout epilogue.
         "fatal: unable to parse commit " + "b" * 40,
     ],
 )
 def test_clone_dissociated_requires_both_markers_no_single_marker_retry(
     monkeypatch, stderr
 ):
-    # The #353 signature is BOTH fragments together; either alone has innocent
-    # causes and must propagate untouched — no dest removal, no full re-clone.
     calls: list[list[str]] = []
 
     def fake(args, *, cwd=None, timeout=None):
@@ -1039,8 +790,6 @@ def test_clone_dissociated_requires_both_markers_no_single_marker_retry(
 
 
 def test_clone_dissociated_never_retries_a_timeout(monkeypatch):
-    # Even marker-looking partial output does not qualify when the child never
-    # exited: retrying a full clone after a 10-minute hang would double the hang.
     calls: list[list[str]] = []
 
     def fake(args, *, cwd=None, timeout=None):
@@ -1059,9 +808,6 @@ def test_clone_dissociated_never_retries_a_timeout(monkeypatch):
 
 
 def test_configure_safe_reference_donor_writes_the_four_writer_knobs(monkeypatch):
-    # The suspenders half of #353: BOTH commit-graph write flags AND the auto-
-    # gc/auto-maintenance knobs (the live diagnosis proved the write flags alone
-    # are not enough — `git gc --auto` regenerated the chain regardless).
     calls: list[tuple[list[str], str | None]] = []
 
     def fake(args, *, cwd=None, timeout=None):
@@ -1080,8 +826,6 @@ def test_configure_safe_reference_donor_writes_the_four_writer_knobs(monkeypatch
 
 
 def test_changed_paths_since_probes_the_three_dot_merge_base_diff(monkeypatch):
-    # The lane planner's path-diff (TOL01-WS05): a REF-named three-dot diff —
-    # the merge-base file set GitHub's "Files changed" shows for a PR.
     seen = {}
 
     def fake(args, *, cwd):
@@ -1096,8 +840,6 @@ def test_changed_paths_since_probes_the_three_dot_merge_base_diff(monkeypatch):
 
 
 def test_changed_paths_since_answers_none_when_git_cannot(monkeypatch):
-    # A probe: unknown ref / shallow clone / not a checkout is None — the
-    # caller's fail-safe (full scope) decision, never an exception.
     monkeypatch.setattr(
         git,
         "_probe",

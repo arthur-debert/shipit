@@ -1,13 +1,3 @@
-"""The ``[stage]`` map loader (conda-direct #1079) — typed frozen copy entries at
-the config boundary (ADR-0030: construction is validation).
-
-The app-consumer half of conda-direct: a `[stage.<pkg>]` table declares
-source-in-prefix → dest-under-checkout copy pairs that
-:mod:`shipit.staging` runs off the resolved env prefix. Fixture-driven like the
-`[artifact-deps]`/`[artifacts]` loader tests — happy shapes in (TOML → typed
-values), loud malformed-config errors naming the offending key/path.
-"""
-
 import tomllib
 
 import pytest
@@ -19,14 +9,7 @@ def _load(text: str) -> tuple[config.StageEntry, ...]:
     return config.load_stage(tomllib.loads(text))
 
 
-# --------------------------------------------------------------------------
-# Happy shapes
-# --------------------------------------------------------------------------
-
-
 def test_absent_table_is_the_empty_tuple():
-    # A repo that stages nothing (a tool-only consumer, or shipit itself) has no
-    # copy list.
     assert config.load_stage({}) == ()
 
 
@@ -74,15 +57,8 @@ def test_declaration_order_is_preserved_across_packages_then_entries():
 
 
 def test_dotted_conda_package_key_is_accepted():
-    # The producer's conda vocabulary admits dots (e.g. `ruamel.yaml`); a dotted
-    # `[stage."foo.bar"]` key names one package, not a nested table.
     (entry,) = _load('[stage."foo.bar"]\n"bin/foo" = "resources/foo"\n')
     assert entry.package == "foo.bar"
-
-
-# --------------------------------------------------------------------------
-# Malformed shapes — loud at the boundary (ADR-0030)
-# --------------------------------------------------------------------------
 
 
 def test_uppercase_package_key_is_refused():
@@ -120,8 +96,6 @@ def test_absolute_source_is_refused():
         _load('[stage.lexd-lsp]\n"/etc/passwd" = "resources/x"\n')
 
 
-# The bounded staging root: every dest must be a strict descendant of `resources/`,
-# so `.`, the checkout root, `.git`/`.Git`, `.pixi` are not expressible at parse.
 @pytest.mark.parametrize(
     "dest",
     [".", "resources", ".git/HEAD", ".Git/HEAD", ".pixi/envs", "lexd-lsp", "x/y"],
@@ -142,8 +116,6 @@ def test_duplicate_destination_across_packages_is_refused():
 
 
 def test_overlapping_ancestor_descendant_destinations_are_refused():
-    # `resources/tool` and `resources/tool/plugin` overlap: the idempotent rmtree of
-    # the ancestor would silently drop the descendant. Refused loudly at load.
     with pytest.raises(config.ConfigError, match="overlapping destination"):
         _load(
             "[stage.pkg-a]\n"
@@ -154,7 +126,6 @@ def test_overlapping_ancestor_descendant_destinations_are_refused():
 
 
 def test_disjoint_destinations_under_a_shared_parent_are_allowed():
-    # Siblings that merely share a parent dir do NOT overlap — both are kept.
     entries = _load(
         "[stage.pkg-a]\n"
         '"bin/a" = "resources/a"\n'
@@ -165,8 +136,6 @@ def test_disjoint_destinations_under_a_shared_parent_are_allowed():
 
 
 def test_stage_is_a_known_top_level_table():
-    # `[stage]` must be in the closed table registry so it is not rejected as an
-    # unknown top-level table (the whole reason a new section needs registering).
     assert "stage" in config._KNOWN_TABLES
 
 

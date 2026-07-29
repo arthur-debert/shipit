@@ -1,31 +1,3 @@
-"""Tests for the funnel breadcrumb across the async detach split (OBS03).
-
-OBS02 fixed the breadcrumb's two halves and their best-effort contract; OBS03
-SPLITS them across a process boundary, so this suite exercises them on the async
-path the local reviewer actually runs:
-
-OBS03-WS01: `start_detached_review` (the PARENT) does the cheap synchronous work —
-resolve `(repo, head_sha)`, open the `in_progress` `review: <reviewer>` check run
-— then spawns a DETACHED child and returns in-flight WITHOUT running the agent.
-`run_detached_review` (the CHILD body) does the heavy resolve + generate + post
-and CLOSES the SAME `run_id` the parent handed it. The invariant: exactly ONE
-check run — the parent creates, the child closes — never two. The spawn boundary
-is injected so the parent's detach is asserted WITHOUT forking.
-
-The create is **best-effort**: per the PRD prerequisite, until the App's
-`checks:write` re-grant propagates a create can 403, and the local review must
-STILL run — a failed breadcrumb is logged (the failure FACT, never the token) and
-swallowed (the child still spawns, with no `--run-id`). The terminal close is
-best-effort too: at the CHILD boundary a PATCH failure / a `run_id is None`
-(the parent opened no run) never crashes the flow nor masks the review's real
-outcome (the original error still propagates on the failure paths), mapping
-posted → success, an empty run (no parseable review) → failure with an `empty`
-reason, a backend error → failure, a timeout → timed_out.
-
-The App-token boundary (`ghauth`) and the `gh` check-run POST/PATCH are FAKED —
-never live GitHub.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -40,8 +12,6 @@ from shipit.review import service
 from shipit.review.backends.base import BackendError
 from shipit.review.diff import ReviewView, review_view
 
-# The typed PR target (CLI01-WS02 / ADR-0030): the detach parent and child both
-# take a PrId — the repo rides on the identity, never resolved ambiently.
 TARGET = PrId(repo=repo_from_slug("owner/repo"), number=5)
 
 _DIFF = """\
@@ -64,9 +34,9 @@ def _ctx(repo: str | None = "owner/repo") -> ReviewView:
     return review_view(
         number=5,
         repo=repo,
-        head_sha="deadbeef" * 5,  # a full 40-hex sha (COR02)
+        head_sha="deadbeef" * 5,
         base_ref="main",
-        base_sha="cafe" * 10,  # a full 40-hex sha (PROC03)
+        base_sha="cafe" * 10,
         diff=_DIFF,
         is_draft=False,
         changed_files=["foo.py"],
@@ -76,10 +46,6 @@ def _ctx(repo: str | None = "owner/repo") -> ReviewView:
 
 @pytest.fixture
 def _stub_pipeline(monkeypatch):
-    """Stub the PR resolve + review generation + post so a `run_detached_review`
-    call exercises ONLY the funnel-breadcrumb wiring. Records the post call."""
-    # The detached child resolves the PR from its `--repo` arg; the stub returns a
-    # ctx for it and also stubs `gh.current_repo()` for any slug inference path.
     monkeypatch.setattr(service, "resolve_pr", lambda pr, repo=None: _ctx(repo))
     monkeypatch.setattr(
         service.gh, "current_repo", lambda: repo_from_slug("owner/repo")
@@ -101,10 +67,6 @@ def _stub_pipeline(monkeypatch):
 
 
 def _fake_checkrun_boundary(monkeypatch, *, create_id: int | None = 555) -> list[dict]:
-    """Fake the App-token mint + the `gh` REST seam for BOTH the kickoff create
-    (POST -> a run id) and the terminal transition (PATCH -> recorded). Returns the
-    list of `{method, path, body}` calls so a test can assert one create + one
-    PATCH on the same run id (never live GitHub)."""
     monkeypatch.setattr(
         service.checkrun.ghauth, "installation_token", lambda agent, repo: "ghs_tok"
     )
@@ -120,17 +82,9 @@ def _fake_checkrun_boundary(monkeypatch, *, create_id: int | None = 555) -> list
     return calls
 
 
-# --- OBS03-WS01: the detach split (parent creates, child closes) -------------
-
-
 def test_start_detached_opens_inprogress_then_spawns(monkeypatch):
-    """The PARENT: (a) opens the `in_progress` funnel run with a `started_at`,
-    (b) spawns the detached child carrying repo + pr + the created run id, and
-    (c) returns in-flight WITHOUT running the agent — no model run on the request
-    path. The spawn boundary is injected so nothing forks."""
-    calls = _fake_checkrun_boundary(monkeypatch)  # create POST -> run id 555
+    calls = _fake_checkrun_boundary(monkeypatch)
     monkeypatch.setattr(service, "_resolve_head_sha", lambda pr: "deadbeef")
-    # If the agent ran in the parent, this records it — it must NOT.
     ran: list = []
     monkeypatch.setattr(service, "generate_review", lambda *a, **k: ran.append(1))
 
@@ -139,16 +93,13 @@ def test_start_detached_opens_inprogress_then_spawns(monkeypatch):
         agent_backend.CODEX, TARGET, spawn=lambda argv, env: spawned.append(list(argv))
     )
 
-    assert rc is True  # in-flight
-    # (a) the in_progress funnel run was opened with an honest started_at.
+    assert rc is True
     posts = [c for c in calls if c["method"] == "POST"]
     assert len(posts) == 1
     assert posts[0]["path"] == "/repos/owner/repo/check-runs"
     assert posts[0]["body"]["status"] == "in_progress"
     assert posts[0]["body"]["started_at"]
-    # The parent does NOT close the run — the child does (no terminal PATCH here).
     assert not [c for c in calls if c["method"] == "PATCH"]
-    # (b) the detached child was spawned with the args it reconstructs from.
     assert len(spawned) == 1
     argv = spawned[0]
     assert "_run" in argv
@@ -156,14 +107,10 @@ def test_start_detached_opens_inprogress_then_spawns(monkeypatch):
     assert argv[argv.index("--pr") + 1] == "5"
     assert argv[argv.index("--repo") + 1] == "owner/repo"
     assert argv[argv.index("--run-id") + 1] == "555"
-    # (c) the agent never ran on the request path.
     assert ran == []
 
 
 def test_start_detached_default_spawn_is_the_exec_seam(monkeypatch):
-    """With no injected ``spawn``, the detach boundary is the exec seam's
-    :func:`shipit.execrun.spawn_detached` (issue #272, ADR-0028): the review
-    path owns no raw subprocess call — the one non-Exec lives in execrun."""
     _fake_checkrun_boundary(monkeypatch)
     monkeypatch.setattr(service, "_resolve_head_sha", lambda pr: "deadbeef")
     spawned: list = []
@@ -179,14 +126,9 @@ def test_start_detached_default_spawn_is_the_exec_seam(monkeypatch):
 
 
 def test_start_detached_exports_domain_keys_to_the_child_env(monkeypatch):
-    """The DETACH SEAM for the domain-key context (LOG01-WS03, ADR-0029): the
-    parent binds `pr`/`repo` at the seam — its own records from here carry them —
-    and the child's environment carries `pr`/`repo` PLUS the funnel `run` id as
-    `SHIPIT_LOG_CTX_*` vars (the run is exported to the child's story WITHOUT
-    binding in the parent). The child rebinds them at its logging setup."""
     from shipit import logcontext
 
-    _fake_checkrun_boundary(monkeypatch)  # create POST -> run id 555
+    _fake_checkrun_boundary(monkeypatch)
     monkeypatch.setattr(service, "_resolve_head_sha", lambda pr: "deadbeef")
 
     envs: list[dict] = []
@@ -199,15 +141,10 @@ def test_start_detached_exports_domain_keys_to_the_child_env(monkeypatch):
     assert child_env["SHIPIT_LOG_CTX_PR"] == "5"
     assert child_env["SHIPIT_LOG_CTX_REPO"] == "owner/repo"
     assert child_env["SHIPIT_LOG_CTX_RUN"] == "555"
-    # The parent bound the SEAM's keys (pr/repo) — but never the child's run id.
     assert logcontext.bound() == {"pr": 5, "repo": "owner/repo"}
 
 
 def test_start_detached_still_spawns_when_breadcrumb_create_fails(monkeypatch):
-    """The breadcrumb create is BEST-EFFORT: a 403 before the `checks:write`
-    re-grant must not fail the request — the child is still spawned (with no
-    `--run-id`, so it runs without an in_progress marker) and the request returns
-    in-flight."""
     monkeypatch.setattr(
         service.checkrun.ghauth, "installation_token", lambda agent, repo: "ghs_tok"
     )
@@ -227,16 +164,10 @@ def test_start_detached_still_spawns_when_breadcrumb_create_fails(monkeypatch):
 
     assert rc is True
     assert len(spawned) == 1
-    assert "--run-id" not in spawned[0]  # no run was opened, so none is threaded
+    assert "--run-id" not in spawned[0]
 
 
 def test_start_detached_as_app_auth_failure_fails_loud_and_does_not_spawn(monkeypatch):
-    """#347 (#343 gap 6): an App-auth failure on the SYNCHRONOUS parent path
-    (`ReviewAuthError` — no App credentials on this machine, a failed mint) is a PRECONDITION failure, not a best-effort breadcrumb
-    miss: the SAME auth the parent failed to mint is what the as_app child needs
-    to post the review and close its run, so proceeding would detach a doomed
-    child whose failure is invisible (no breadcrumb ever opened) while the
-    request reports a false in-flight. It must propagate — and nothing may spawn."""
     from shipit.review.ghauth import UNCONFIGURED, ReviewAuthError
 
     def no_auth(agent, repo):
@@ -254,13 +185,10 @@ def test_start_detached_as_app_auth_failure_fails_loud_and_does_not_spawn(monkey
             TARGET,
             spawn=lambda argv, env: spawned.append(list(argv)),
         )
-    assert spawned == []  # a doomed child was never detached
+    assert spawned == []
 
 
 def test_start_detached_no_as_app_auth_failure_stays_best_effort(monkeypatch):
-    """Without ``as_app`` the review posts as the USER — App auth is only the
-    breadcrumb's concern, so a mint failure stays best-effort: the child still
-    spawns (with no `--run-id`) and the request reports in-flight."""
     from shipit.review.ghauth import UNCONFIGURED, ReviewAuthError
 
     def no_auth(agent, repo):
@@ -281,16 +209,10 @@ def test_start_detached_no_as_app_auth_failure_stays_best_effort(monkeypatch):
 
     assert rc is True
     assert len(spawned) == 1
-    assert "--run-id" not in spawned[0]  # no run was opened, so none is threaded
+    assert "--run-id" not in spawned[0]
 
 
 def test_resolve_head_sha_raises_on_missing_headrefoid(monkeypatch):
-    """The synchronous validation path: a `gh pr view` node without `headRefOid`
-    (schema change / unexpected output) makes the typed core read
-    (`gh.pr_core` -> `core_from_node`) raise raw `KeyError` — normalized to
-    `ReviewError`, NOT silently returning an empty SHA that would report
-    in-flight with no target commit for the funnel check. There is no repo
-    resolution to fail anymore: the repo rides in on the PrId (WS02, #336)."""
     monkeypatch.setattr(
         service.gh,
         "pr_view",
@@ -302,10 +224,6 @@ def test_resolve_head_sha_raises_on_missing_headrefoid(monkeypatch):
 
 
 def test_resolve_head_sha_normalizes_adapter_value_error(monkeypatch):
-    """Unusable `gh pr view` output (unparseable / non-object JSON) raises
-    `ValueError` at the ADAPTER now (PROC03: the adapter owns the parse); the
-    synchronous boundary still normalizes it to a typed `ReviewError` instead of
-    leaking the raw error out of the request path."""
 
     def bad_view(pr, *, repo=None, json_fields=None):
         raise ValueError("`gh pr view` output for '5' is not a JSON object: [1]")
@@ -317,9 +235,6 @@ def test_resolve_head_sha_normalizes_adapter_value_error(monkeypatch):
 
 
 def test_resolve_head_sha_normalizes_malformed_head_sha(monkeypatch):
-    """A node whose `headRefOid` is not a full sha makes the typed core read raise
-    raw `ValueError` (the `Sha` mint at the one wire boundary); normalized to a
-    typed `ReviewError` rather than leaking."""
     monkeypatch.setattr(
         service.gh,
         "pr_view",
@@ -334,9 +249,6 @@ def test_resolve_head_sha_normalizes_malformed_head_sha(monkeypatch):
 
 
 def test_resolve_head_sha_returns_the_typed_head(monkeypatch):
-    """The happy path rides the TYPED adapter read end to end: the PrId hands
-    `pr_core` its repo (the wire read is PINNED to it — no ambient resolution),
-    and the return is the string form of the core's `Sha`-typed head."""
     head = "cafe" * 10
     seen: dict = {}
 
@@ -344,7 +256,7 @@ def test_resolve_head_sha_returns_the_typed_head(monkeypatch):
         seen["repo"] = repo
         return {
             "number": 5,
-            "headRefOid": head.upper(),  # the Sha mint lowercase-normalizes
+            "headRefOid": head.upper(),
             "baseRefName": "main",
             "isDraft": False,
             "mergeStateStatus": "CLEAN",
@@ -352,15 +264,11 @@ def test_resolve_head_sha_returns_the_typed_head(monkeypatch):
 
     monkeypatch.setattr(service.gh, "pr_view", fake_view)
     assert service._resolve_head_sha(TARGET) == head
-    assert seen["repo"] == "owner/repo"  # the PrId identity pinned the read
+    assert seen["repo"] == "owner/repo"
 
 
 def test_start_detached_closes_run_when_spawn_fails(monkeypatch):
-    """If the detached spawn fails AFTER the parent opened the `in_progress` run,
-    that run would hang forever with no child to close it. The parent closes it as
-    failed (terminal PATCH on the SAME run) and re-raises so the adapter still
-    normalizes the failure to `PrStateError`."""
-    calls = _fake_checkrun_boundary(monkeypatch)  # create POST -> run id 555
+    calls = _fake_checkrun_boundary(monkeypatch)
     monkeypatch.setattr(service, "_resolve_head_sha", lambda pr: "deadbeef")
 
     def boom_spawn(argv, env):
@@ -369,8 +277,6 @@ def test_start_detached_closes_run_when_spawn_fails(monkeypatch):
     with pytest.raises(OSError, match="cannot fork"):
         service.start_detached_review(agent_backend.CODEX, TARGET, spawn=boom_spawn)
 
-    # The parent opened the run (POST) and then closed it as failed (terminal
-    # PATCH on the SAME run) — no dangling in_progress.
     posts = [c for c in calls if c["method"] == "POST"]
     assert len(posts) == 1
     patches = [c for c in calls if c["method"] == "PATCH"]
@@ -378,15 +284,10 @@ def test_start_detached_closes_run_when_spawn_fails(monkeypatch):
     assert patches[0]["path"] == "/repos/owner/repo/check-runs/555"
     assert patches[0]["body"]["status"] == "completed"
     assert patches[0]["body"]["conclusion"] == "failure"
-    # The spawn failure's reason is recorded in the close (detail=str(exc)), so the
-    # check-run output carries WHY it failed — consistent with the resolve path.
     assert "cannot fork" in patches[0]["body"]["output"]["summary"]
 
 
 def test_start_detached_spawn_failure_with_no_run_just_reraises(monkeypatch):
-    """When the best-effort breadcrumb create returned no run (`run_id is None`) and
-    the spawn THEN fails, there is nothing to close — the parent must re-raise
-    without attempting a terminal PATCH (which would crash on `run_id is None`)."""
     monkeypatch.setattr(
         service.checkrun.ghauth, "installation_token", lambda agent, repo: "ghs_tok"
     )
@@ -409,22 +310,18 @@ def test_start_detached_spawn_failure_with_no_run_just_reraises(monkeypatch):
     with pytest.raises(OSError, match="cannot fork"):
         service.start_detached_review(agent_backend.CODEX, TARGET, spawn=boom_spawn)
 
-    # No run was opened, so no terminal PATCH was attempted.
     assert not [c for c in calls if c["method"] == "PATCH"]
 
 
 def test_run_detached_closes_passed_run_without_creating(monkeypatch, _stub_pipeline):
-    """The CHILD: it NEVER creates a run (the parent already did) — it CLOSES the
-    SAME `run_id` it was handed to completed/success, and the review still
-    generates + posts."""
     calls = _fake_checkrun_boundary(monkeypatch)
 
     result = service.run_detached_review(agent_backend.CODEX, TARGET, run_id=555)
 
-    assert not [c for c in calls if c["method"] == "POST"]  # child never creates
+    assert not [c for c in calls if c["method"] == "POST"]
     patches = [c for c in calls if c["method"] == "PATCH"]
     assert len(patches) == 1
-    assert patches[0]["path"] == "/repos/owner/repo/check-runs/555"  # the SAME run
+    assert patches[0]["path"] == "/repos/owner/repo/check-runs/555"
     assert patches[0]["body"]["status"] == "completed"
     assert patches[0]["body"]["conclusion"] == "success"
     assert _stub_pipeline["called"] is True
@@ -432,11 +329,8 @@ def test_run_detached_closes_passed_run_without_creating(monkeypatch, _stub_pipe
 
 
 def test_split_parent_creates_child_closes_one_run(monkeypatch, _stub_pipeline):
-    """The OBS03 invariant end to end: the run id the PARENT creates is the run id
-    the CHILD closes — exactly ONE check run, never two."""
     monkeypatch.setattr(service, "_resolve_head_sha", lambda pr: "deadbeef")
 
-    # Parent: create -> 555; capture the child argv instead of forking.
     parent_calls = _fake_checkrun_boundary(monkeypatch)
     spawned: list = []
     service.start_detached_review(
@@ -447,7 +341,6 @@ def test_split_parent_creates_child_closes_one_run(monkeypatch, _stub_pipeline):
     assert run_id == 555
     assert len([c for c in parent_calls if c["method"] == "POST"]) == 1
 
-    # Child: hand it that run id; it closes the SAME run and creates none.
     child_calls = _fake_checkrun_boundary(monkeypatch)
     service.run_detached_review(agent_backend.CODEX, TARGET, run_id=run_id)
     assert not [c for c in child_calls if c["method"] == "POST"]
@@ -456,20 +349,9 @@ def test_split_parent_creates_child_closes_one_run(monkeypatch, _stub_pipeline):
     assert patches[0]["path"] == f"/repos/owner/repo/check-runs/{run_id}"
 
 
-# --- OBS03-WS02: terminal-transition contract at the CHILD boundary ----------
-# The mapping itself lives once in `_generate_post_and_close`; these pin it at the
-# `run_detached_review` boundary the detached child actually runs through — posted
-# -> success (`test_run_detached_closes_passed_run_without_creating` above), empty
-# -> failure(empty), backend/post error -> failure, timeout marker -> timed_out —
-# and assert the child NEVER creates a run (the parent already did).
-
-
 def test_run_detached_empty_transitions_to_failure_with_empty_reason(
     monkeypatch, _stub_pipeline
 ):
-    """The CHILD boundary: an EMPTY review (a `BackendError` without the timeout
-    marker) closes the handed `run_id` to failure with an `empty` reason and
-    re-raises — no create, exactly one terminal PATCH on the same run."""
     calls = _fake_checkrun_boundary(monkeypatch)
 
     def _empty(agent, ctx, **kw):
@@ -480,7 +362,7 @@ def test_run_detached_empty_transitions_to_failure_with_empty_reason(
     with pytest.raises(BackendError):
         service.run_detached_review(agent_backend.CODEX, TARGET, run_id=555)
 
-    assert not [c for c in calls if c["method"] == "POST"]  # child never creates
+    assert not [c for c in calls if c["method"] == "POST"]
     patch = next(c for c in calls if c["method"] == "PATCH")
     assert patch["path"] == "/repos/owner/repo/check-runs/555"
     assert patch["body"]["conclusion"] in {"failure", "neutral"}
@@ -489,8 +371,6 @@ def test_run_detached_empty_transitions_to_failure_with_empty_reason(
 
 
 def test_run_detached_backend_error_transitions_to_failure(monkeypatch, _stub_pipeline):
-    """The CHILD boundary: an agent error (missing CLI / crash) closes the handed
-    `run_id` to failure and the original error still propagates."""
     from shipit.review.backends.base import BackendUnavailable
 
     calls = _fake_checkrun_boundary(monkeypatch)
@@ -503,20 +383,17 @@ def test_run_detached_backend_error_transitions_to_failure(monkeypatch, _stub_pi
     with pytest.raises(BackendUnavailable):
         service.run_detached_review(agent_backend.CODEX, TARGET, run_id=555)
 
-    assert not [c for c in calls if c["method"] == "POST"]  # child never creates
+    assert not [c for c in calls if c["method"] == "POST"]
     patches = [c for c in calls if c["method"] == "PATCH"]
     assert len(patches) == 1
     assert patches[0]["path"] == "/repos/owner/repo/check-runs/555"
     assert patches[0]["body"]["conclusion"] == "failure"
-    # Generation failed first, so the review POST never ran.
     assert _stub_pipeline.get("called") is not True
 
 
 def test_run_detached_timeout_marker_transitions_to_timed_out(
     monkeypatch, _stub_pipeline
 ):
-    """The CHILD boundary: a `BackendError` carrying the `_TIMEOUT_MARKER` closes
-    the handed `run_id` to timed_out and re-raises."""
     from shipit.review.backends.base import _TIMEOUT_MARKER
 
     calls = _fake_checkrun_boundary(monkeypatch)
@@ -532,7 +409,7 @@ def test_run_detached_timeout_marker_transitions_to_timed_out(
     with pytest.raises(BackendError):
         service.run_detached_review(agent_backend.CODEX, TARGET, run_id=555)
 
-    assert not [c for c in calls if c["method"] == "POST"]  # child never creates
+    assert not [c for c in calls if c["method"] == "POST"]
     patch = next(c for c in calls if c["method"] == "PATCH")
     assert patch["path"] == "/repos/owner/repo/check-runs/555"
     assert patch["body"]["conclusion"] == "timed_out"
@@ -541,18 +418,12 @@ def test_run_detached_timeout_marker_transitions_to_timed_out(
 def test_run_detached_structured_timeout_flag_transitions_to_timed_out(
     monkeypatch, _stub_pipeline
 ):
-    """Regression (Copilot #194): the outcome split reads the STRUCTURED
-    `BackendError.timed_out` flag, NOT a string match on the message. A timeout whose
-    `_capture` message PARAPHRASES the timeout (no `_TIMEOUT_MARKER` in the text — the
-    real nonzero-exit / marker-in-stderr path) must still close the run `timed_out`,
-    not `empty`/`neutral`. Before the fix the string match found no marker and
-    misclassified it as `empty`."""
     from shipit.review.backends.base import _TIMEOUT_MARKER
 
     calls = _fake_checkrun_boundary(monkeypatch)
 
     msg = "agy timed out before returning a complete review (try a faster model)"
-    assert _TIMEOUT_MARKER not in msg.lower()  # the message does NOT carry the marker
+    assert _TIMEOUT_MARKER not in msg.lower()
 
     def _timed(agent, ctx, **kw):
         raise BackendError(msg, raw="", timed_out=True)
@@ -562,25 +433,15 @@ def test_run_detached_structured_timeout_flag_transitions_to_timed_out(
     with pytest.raises(BackendError):
         service.run_detached_review(agent_backend.ANTIGRAVITY, TARGET, run_id=555)
 
-    assert not [c for c in calls if c["method"] == "POST"]  # child never creates
+    assert not [c for c in calls if c["method"] == "POST"]
     patch = next(c for c in calls if c["method"] == "PATCH")
     assert patch["path"] == "/repos/owner/repo/check-runs/555"
-    assert patch["body"]["conclusion"] == "timed_out"  # NOT neutral/empty
-
-
-# --- #76: salvage content-but-unparseable output as a top-level comment ------
-# A local agent (agy) routinely returns review PROSE but truncated/invalid JSON on a
-# large diff -> `BackendError`. Rather than drop it, the content is posted as a single
-# top-level COMMENT (salvage) — but the funnel outcome STAYS the degraded `empty`
-# (failure): the salvage is additive and never flips the run to success.
+    assert patch["body"]["conclusion"] == "timed_out"
 
 
 def test_run_detached_salvages_unparseable_content_as_comment(
     monkeypatch, _stub_pipeline
 ):
-    """Content-but-unparseable JSON (a `BackendError` carrying `raw`) posts the raw
-    text as a single top-level COMMENT, AND the funnel still records the degraded
-    `empty`/failure — salvage is additive, never a flip to success."""
     calls = _fake_checkrun_boundary(monkeypatch)
     raw = 'Here is my detailed review prose...\n{"summary": {truncated'
     err = BackendError("no parseable JSON\nraw output: <snip>", raw=raw)
@@ -593,14 +454,12 @@ def test_run_detached_salvages_unparseable_content_as_comment(
     with pytest.raises(BackendError):
         service.run_detached_review(agent_backend.ANTIGRAVITY, TARGET, run_id=555)
 
-    # (a) the salvage comment was posted as a COMMENT carrying the raw + a marker.
     assert _stub_pipeline["called"] is True
     assert _stub_pipeline["event"] == "COMMENT"
     body = _stub_pipeline["review"]["summary"]["overall_feedback"]
     assert raw in body
     assert "could not be parsed" in body
-    assert not _stub_pipeline["review"]["comments"]  # a single top-level comment
-    # (b) the funnel STILL records the degraded `empty`/failure (NOT success).
+    assert not _stub_pipeline["review"]["comments"]
     patch = next(c for c in calls if c["method"] == "PATCH")
     assert patch["body"]["conclusion"] in {"failure", "neutral"}
     output = patch["body"]["output"]
@@ -608,10 +467,8 @@ def test_run_detached_salvages_unparseable_content_as_comment(
 
 
 def test_run_detached_empty_stdout_does_not_salvage(monkeypatch, _stub_pipeline):
-    """A genuinely EMPTY stdout (no content on `raw`) posts NO salvage comment — the
-    degraded `empty` close is unchanged from before #76."""
     calls = _fake_checkrun_boundary(monkeypatch)
-    err = BackendError("no parseable JSON\nraw output:", raw="")  # nothing to salvage
+    err = BackendError("no parseable JSON\nraw output:", raw="")
 
     def _empty(agent, ctx, **kw):
         raise err
@@ -621,7 +478,7 @@ def test_run_detached_empty_stdout_does_not_salvage(monkeypatch, _stub_pipeline)
     with pytest.raises(BackendError):
         service.run_detached_review(agent_backend.ANTIGRAVITY, TARGET, run_id=555)
 
-    assert _stub_pipeline.get("called") is not True  # no salvage post
+    assert _stub_pipeline.get("called") is not True
     patch = next(c for c in calls if c["method"] == "PATCH")
     assert patch["body"]["conclusion"] in {"failure", "neutral"}
 
@@ -629,8 +486,6 @@ def test_run_detached_empty_stdout_does_not_salvage(monkeypatch, _stub_pipeline)
 def test_run_detached_salvages_timeout_content_but_stays_timed_out(
     monkeypatch, _stub_pipeline
 ):
-    """A TIMED-OUT agy run still emits truncated content before its marker — that is
-    salvaged too, but the funnel outcome stays `timed_out` (honest), not flipped."""
     from shipit.review.backends.base import _TIMEOUT_MARKER
 
     calls = _fake_checkrun_boundary(monkeypatch)
@@ -648,17 +503,14 @@ def test_run_detached_salvages_timeout_content_but_stays_timed_out(
     with pytest.raises(BackendError):
         service.run_detached_review(agent_backend.ANTIGRAVITY, TARGET, run_id=555)
 
-    assert _stub_pipeline["called"] is True  # content salvaged
+    assert _stub_pipeline["called"] is True
     patch = next(c for c in calls if c["method"] == "PATCH")
-    assert patch["body"]["conclusion"] == "timed_out"  # ...but outcome stays honest
+    assert patch["body"]["conclusion"] == "timed_out"
 
 
 def test_run_detached_funnel_summary_carries_snippet_not_full_raw(
     monkeypatch, _stub_pipeline
 ):
-    """#75: the funnel check-run summary (a PR surface) carries only the snippet
-    from the `BackendError` message — never the full raw, which belongs in the file
-    sink. The full raw is salvaged to a comment + logged, but not dumped here."""
     calls = _fake_checkrun_boundary(monkeypatch)
     full_raw = "SECRET-FULL-RAW-" + "Z" * 5000
     err = BackendError(
@@ -675,16 +527,11 @@ def test_run_detached_funnel_summary_carries_snippet_not_full_raw(
 
     patch = next(c for c in calls if c["method"] == "PATCH")
     summary = patch["body"]["output"]["summary"]
-    assert "SNIPPET-ONLY" in summary  # the snippet from the message is carried
-    assert full_raw not in summary  # ...but never the full raw
+    assert "SNIPPET-ONLY" in summary
+    assert full_raw not in summary
 
 
 def test_salvage_body_contains_raw_holding_backtick_fences():
-    """#76 fence safety: raw that itself contains ``` (and a longer ```` run) must be
-    fully CONTAINED by the salvage fence — a fixed ``` fence would close early and let
-    the untrusted remainder render as live GitHub markdown (an injection surface). The
-    body fences with a delimiter LONGER than the longest backtick run in the raw, so
-    nothing inside can break out."""
     import re
 
     raw = (
@@ -698,25 +545,18 @@ def test_salvage_body_contains_raw_holding_backtick_fences():
     body, truncated = service._salvage_body("agy", raw)
 
     assert truncated is False
-    assert raw in body  # the whole raw appears verbatim, fully contained
+    assert raw in body
 
-    # The opening fence is the FIRST backtick-only line (it precedes the raw content);
-    # it must be longer than the longest backtick run inside raw (4 -> >= 5).
     fence = next(ln for ln in body.splitlines() if ln and set(ln) == {"`"})
     longest_inner = max((len(m) for m in re.findall(r"`+", raw)), default=0)
     assert len(fence) >= 3
-    assert len(fence) > longest_inner  # cannot be closed early by any run in raw
-    # The exact opening delimiter appears EXACTLY twice (open + close) — the raw's own
-    # shorter runs never match it, so the fence can't be broken out of.
+    assert len(fence) > longest_inner
     assert body.count(fence) == 2
 
 
 def test_run_detached_salvage_post_failure_does_not_mask_outcome(
     monkeypatch, _stub_pipeline
 ):
-    """The salvage post is BEST-EFFORT: if posting the salvage comment fails, the
-    funnel still records the degraded `empty` and the original `BackendError` still
-    propagates (the salvage never masks the real outcome)."""
     calls = _fake_checkrun_boundary(monkeypatch)
     err = BackendError("no parseable JSON\nraw output: <snip>", raw="some prose")
 
@@ -729,33 +569,21 @@ def test_run_detached_salvage_post_failure_does_not_mask_outcome(
     monkeypatch.setattr(service, "generate_review", _unparseable)
     monkeypatch.setattr(service.post, "post_review", boom_post)
 
-    with pytest.raises(BackendError):  # original error still propagates
+    with pytest.raises(BackendError):
         service.run_detached_review(agent_backend.ANTIGRAVITY, TARGET, run_id=555)
 
     patch = next(c for c in calls if c["method"] == "PATCH")
-    assert patch["body"]["conclusion"] in {"failure", "neutral"}  # degraded recorded
-
-
-# --- OBS03-WS02: the terminal close stays BEST-EFFORT at the child boundary ---
-# The breadcrumb must NEVER crash the review nor mask its real outcome. OBS02
-# pinned this on the (now-removed) synchronous `run_and_post`; it lives on at the
-# detached-child boundary the local reviewer actually runs through — the close
-# helper `_close_funnel_breadcrumb` is shared, so these assert it at the seam the
-# child closes the run through.
+    assert patch["body"]["conclusion"] in {"failure", "neutral"}
 
 
 def test_run_detached_transition_failure_does_not_mask_success(
     monkeypatch, _stub_pipeline, caplog
 ):
-    """A PATCH failure on the terminal transition is best-effort: on the SUCCESS
-    path the review has already posted, so `run_detached_review` returns its normal
-    result and never crashes."""
     monkeypatch.setattr(
         service.checkrun.ghauth, "installation_token", lambda agent, repo: "ghs_tok"
     )
 
     def fake_rest(path, *, method=None, body=None, token=None):
-        # The child never creates (parent did); the only call is the terminal PATCH.
         raise ExecError(
             ["gh"], rc=1, stderr="PATCH 403 Resource not accessible by integration"
         )
@@ -774,8 +602,6 @@ def test_run_detached_transition_failure_does_not_mask_success(
 def test_run_detached_transition_failure_on_error_path_still_raises(
     monkeypatch, _stub_pipeline
 ):
-    """On a failure path, a PATCH failure during the terminal transition must NOT
-    mask the review's real error — the original BackendError still propagates."""
     monkeypatch.setattr(
         service.checkrun.ghauth, "installation_token", lambda agent, repo: "ghs_tok"
     )
@@ -795,9 +621,6 @@ def test_run_detached_transition_failure_on_error_path_still_raises(
 
 
 def test_run_detached_no_transition_when_no_run_id(monkeypatch, _stub_pipeline):
-    """When the parent opened no run (`run_id is None`) and the review SUCCEEDS,
-    there is nothing to transition — no PATCH is sent, no crash, and the review
-    still posts."""
     calls = _fake_checkrun_boundary(monkeypatch)
 
     result = service.run_detached_review(agent_backend.CODEX, TARGET, run_id=None)
@@ -808,8 +631,6 @@ def test_run_detached_no_transition_when_no_run_id(monkeypatch, _stub_pipeline):
 
 
 def test_run_detached_close_never_leaks_token(monkeypatch, _stub_pipeline, caplog):
-    """Even when the terminal transition fails, no installation-token value reaches
-    a record on the detached-child path."""
     secret = "ghs_leakCanary000111222333"
 
     def fake_rest(path, *, method=None, body=None, token=None):
@@ -828,18 +649,8 @@ def test_run_detached_close_never_leaks_token(monkeypatch, _stub_pipeline, caplo
     assert _stub_pipeline["called"] is True
 
 
-# --- OBS03-WS02: the detached child's records reach the OBS01 file sink -------
-# Story 5: a crashed/finished detached run leaves a durable "why" in the per-repo
-# file sink. The child entrypoint wires that sink deterministically from its
-# `--repo` arg (`configure_logging_for_slug`); here we drive that wiring with an
-# injected `base_dir` (the logsetup test seam), run the child body, and assert its
-# run records landed in `<base>/<owner>/<repo>/shipit.log`.
-
-
 @pytest.fixture
 def _restore_shipit_logger():
-    """Snapshot + restore the process-lifetime `shipit` logger so a file sink this
-    test attaches (to a tmp dir) never leaks into another test."""
     logger = logging.getLogger("shipit")
     saved = list(logger.handlers)
     saved_level, saved_prop = logger.level, logger.propagate
@@ -860,15 +671,9 @@ def _restore_shipit_logger():
 def test_detached_child_records_reach_the_file_sink(
     monkeypatch, _stub_pipeline, _restore_shipit_logger, tmp_path
 ):
-    """The story-5 regression: with the file sink wired from the child's known
-    `owner/repo` slug, the detached run's records (start, resolve, terminal close)
-    land in the per-repo log file — so a finished/crashed detached run leaves a
-    durable, readable trail even with no terminal attached."""
     from shipit import logsetup
 
     _fake_checkrun_boundary(monkeypatch)
-    # Wire the file sink the way the `_run` child does — deterministically from the
-    # repo slug — but into an injected base_dir so nothing touches a real $HOME.
     attached = logsetup.configure_logging_for_slug("owner/repo", base_dir=tmp_path)
     assert attached is True
 
@@ -879,34 +684,19 @@ def test_detached_child_records_reach_the_file_sink(
     log_file = tmp_path / "owner" / "repo" / "shipit.log"
     assert log_file.exists()
     contents = log_file.read_text()
-    # The child's own framing records reconstruct the run...
     assert "child start" in contents
     assert "child done" in contents
-    # ...including the heavy-resolve shape and the terminal transition.
     assert "resolved" in contents
     assert "completed/success" in contents
 
 
 def test_configure_logging_for_slug_is_best_effort_on_bad_slug(tmp_path):
-    """A malformed slug attaches no file sink and never raises — a logging glitch
-    must not crash the detached review."""
     from shipit import logsetup
 
     assert logsetup.configure_logging_for_slug("not-a-slug", base_dir=tmp_path) is False
 
 
-# --- OBS03-WS03: child self-resolution of the resolve region --------------------
-# The ONE remaining observable `in_progress` gap: `resolve_pr` runs OUTSIDE
-# `_generate_post_and_close`'s own terminal-close region, so a resolve failure would
-# kill the child before any close and leave the parent-opened run stuck
-# `in_progress` forever. WS03 wraps PRECISELY that region — and nothing more, so a
-# correct timeout/empty close is never overwritten with `failed`.
-
-
 def test_run_detached_resolve_failure_closes_run_failed_and_reraises(monkeypatch):
-    """A `resolve_pr` failure (fetch / auth / network) closes the handed `run_id` to
-    `failed` EXACTLY ONCE on the SAME run and RE-RAISES — no dangling `in_progress`,
-    no create."""
     calls = _fake_checkrun_boundary(monkeypatch)
 
     def boom_resolve(pr, repo=None):
@@ -917,18 +707,15 @@ def test_run_detached_resolve_failure_closes_run_failed_and_reraises(monkeypatch
     with pytest.raises(ExecError, match="could not fetch PR diff"):
         service.run_detached_review(agent_backend.CODEX, TARGET, run_id=555)
 
-    assert not [c for c in calls if c["method"] == "POST"]  # child never creates
+    assert not [c for c in calls if c["method"] == "POST"]
     patches = [c for c in calls if c["method"] == "PATCH"]
-    assert len(patches) == 1  # closed exactly once
-    assert patches[0]["path"] == "/repos/owner/repo/check-runs/555"  # the SAME run
+    assert len(patches) == 1
+    assert patches[0]["path"] == "/repos/owner/repo/check-runs/555"
     assert patches[0]["body"]["status"] == "completed"
     assert patches[0]["body"]["conclusion"] == "failure"
 
 
 def test_run_detached_resolve_failure_with_no_run_id_just_reraises(monkeypatch):
-    """When the parent opened no run (`run_id is None`) and resolve THEN fails, there
-    is nothing to close — the child re-raises without a terminal PATCH (which would
-    otherwise crash on `run_id is None`)."""
     calls = _fake_checkrun_boundary(monkeypatch)
 
     def boom_resolve(pr, repo=None):
@@ -945,10 +732,6 @@ def test_run_detached_resolve_failure_with_no_run_id_just_reraises(monkeypatch):
 def test_run_detached_resolve_guard_does_not_overwrite_timeout_close(
     monkeypatch, _stub_pipeline
 ):
-    """The guard's scope is PRECISELY the resolve region: it must NOT wrap
-    `_generate_post_and_close`, which already closes with the CORRECT conclusion.
-    With resolve SUCCEEDING, a timeout still closes `timed_out` (NOT overwritten to
-    `failed`), exactly once."""
     from shipit.review.backends.base import _TIMEOUT_MARKER
 
     calls = _fake_checkrun_boundary(monkeypatch)
@@ -965,16 +748,13 @@ def test_run_detached_resolve_guard_does_not_overwrite_timeout_close(
         service.run_detached_review(agent_backend.CODEX, TARGET, run_id=555)
 
     patches = [c for c in calls if c["method"] == "PATCH"]
-    assert len(patches) == 1  # closed exactly once...
-    assert patches[0]["body"]["conclusion"] == "timed_out"  # ...with its OWN conclusion
+    assert len(patches) == 1
+    assert patches[0]["body"]["conclusion"] == "timed_out"
 
 
 def test_run_detached_resolve_guard_does_not_overwrite_empty_close(
     monkeypatch, _stub_pipeline
 ):
-    """Same no-overwrite guarantee for the EMPTY path: with resolve SUCCEEDING, an
-    empty review closes `failure` with the `empty` reason — NOT overwritten to a
-    bare `failed` — exactly once."""
     calls = _fake_checkrun_boundary(monkeypatch)
 
     def _empty(agent, ctx, **kw):
@@ -992,18 +772,7 @@ def test_run_detached_resolve_guard_does_not_overwrite_empty_close(
     assert "empty" in (output["title"] + output["summary"]).lower()
 
 
-# --- OBS03-WS03: idempotent reconcile against an in-flight run -------------------
-# A re-request whose funnel run is already non-terminal for the CURRENT head must
-# reconcile (report in-flight) — NOT open a second breadcrumb + spawn a second child
-# that double-posts. Read-then-decide in the PARENT, against the check run only (no
-# local/daemon state). The find boundary is injected so "already in-flight" is
-# simulated without the network.
-
-
 def test_start_detached_reconciles_against_existing_inflight_run(monkeypatch):
-    """When the find boundary reports an existing in-flight run, the re-request
-    RECONCILES: it returns in-flight WITHOUT opening a breadcrumb (no POST) or
-    spawning a child — so no second review is ever posted."""
     calls = _fake_checkrun_boundary(monkeypatch)
     monkeypatch.setattr(service, "_resolve_head_sha", lambda pr: "deadbeef")
 
@@ -1015,16 +784,12 @@ def test_start_detached_reconciles_against_existing_inflight_run(monkeypatch):
         find=lambda agent, repo, head_sha: 999,
     )
 
-    assert rc is False  # in-flight, but RECONCILED — no fresh child started
-    assert spawned == []  # no duplicate child spawned
-    # No breadcrumb create and no terminal PATCH — reconciled against run 999.
+    assert rc is False
+    assert spawned == []
     assert not [c for c in calls if c["method"] in {"POST", "PATCH"}]
 
 
 def test_start_detached_no_inflight_run_creates_and_spawns(monkeypatch):
-    """The reconcile is a NO-OP when nothing is in flight: the find boundary returns
-    None, so the normal path runs — one `in_progress` create and one detached
-    child."""
     calls = _fake_checkrun_boundary(monkeypatch)
     monkeypatch.setattr(service, "_resolve_head_sha", lambda pr: "deadbeef")
 
@@ -1037,17 +802,13 @@ def test_start_detached_no_inflight_run_creates_and_spawns(monkeypatch):
     )
 
     assert rc is True
-    assert len(spawned) == 1  # the normal detached child
+    assert len(spawned) == 1
     posts = [c for c in calls if c["method"] == "POST"]
-    assert len(posts) == 1  # the in_progress create still happened
+    assert len(posts) == 1
     assert posts[0]["body"]["status"] == "in_progress"
 
 
 def test_start_detached_reconcile_lookup_failure_proceeds_to_spawn(monkeypatch, caplog):
-    """The reconcile read is BEST-EFFORT: if the in-flight lookup raises (e.g. a 403
-    before the `checks` re-grant), the request must NOT fail — it logs the fact and
-    proceeds to open + spawn a fresh run (at worst a duplicate, never a blocked
-    request)."""
     calls = _fake_checkrun_boundary(monkeypatch)
     monkeypatch.setattr(service, "_resolve_head_sha", lambda pr: "deadbeef")
 
@@ -1066,17 +827,13 @@ def test_start_detached_reconcile_lookup_failure_proceeds_to_spawn(monkeypatch, 
         )
 
     assert rc is True
-    assert len(spawned) == 1  # proceeded to spawn a fresh run
-    assert [c for c in calls if c["method"] == "POST"]  # ...and opened a fresh run
+    assert len(spawned) == 1
+    assert [c for c in calls if c["method"] == "POST"]
     text = "\n".join(r.getMessage() for r in caplog.records)
     assert "reconcile" in text.lower()
 
 
 def test_unknown_outcome_falls_back_to_failed_without_crashing(monkeypatch, caplog):
-    """Defensive (Copilot #66): `_close_funnel_breadcrumb` must not KeyError on an
-    unexpected/typo outcome — that would escape this best-effort path and mask the
-    review's real result. An unknown outcome maps to the `failed` conclusion and is
-    logged, never raised."""
     calls = _fake_checkrun_boundary(monkeypatch)
 
     with caplog.at_level(logging.WARNING, logger="shipit.review"):
@@ -1086,15 +843,12 @@ def test_unknown_outcome_falls_back_to_failed_without_crashing(monkeypatch, capl
 
     patches = [c for c in calls if c["method"] == "PATCH"]
     assert len(patches) == 1
-    assert patches[0]["body"]["conclusion"] == "failure"  # the `failed` mapping
+    assert patches[0]["body"]["conclusion"] == "failure"
     text = "\n".join(r.getMessage() for r in caplog.records)
     assert "unknown funnel outcome" in text.lower()
 
 
 def test_child_argv_carries_the_fanout_config_when_set(monkeypatch):
-    """RVW02-WS04: the detached child reconstructs the fan-out config from its
-    argv — dimensions comma-joined, the nit cap, and the calibrator's four
-    fields — each flag omitted when the value is the shipped default."""
     from shipit.review.calibrator import CalibratorConfig
 
     _fake_checkrun_boundary(monkeypatch)

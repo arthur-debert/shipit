@@ -1,12 +1,3 @@
-"""Tests for ``tree.activity.newest_mtime`` — the measured reclaim signal (ADR-0072).
-
-These drive a REAL directory tree on disk (the module's whole job is to ask the
-filesystem), and assert external behaviour: the newest file mtime, the prune set that
-makes the walk both cheap and truthful, and — the load-bearing half — that every
-unreadable answer is ``None`` rather than a number, because ``None`` is what keeps a
-Tree and a number is what deletes one.
-"""
-
 from __future__ import annotations
 
 import os
@@ -20,7 +11,6 @@ NEW = 2_000_000.0
 
 
 def _write(path, *, mtime: float, content: str = "x") -> None:
-    """Write a file with an exact mtime, creating parents."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content)
     os.utime(path, (mtime, mtime))
@@ -33,12 +23,9 @@ def test_reports_the_newest_file_mtime(tmp_path):
 
 
 def test_sees_a_file_written_under_a_subdirectory(tmp_path):
-    # The 10h-lag bug (#1018) at its source: an agent edits under `src/`, which leaves
-    # the clone ROOT's mtime untouched. The walk sees the write wherever it lands —
-    # this is the whole reason the signal exists.
     _write(tmp_path / "README.md", mtime=OLD)
     _write(tmp_path / "src" / "deep" / "nested" / "mod.py", mtime=NEW)
-    os.utime(tmp_path, (OLD, OLD))  # root dir stat is stale, as in the real bug
+    os.utime(tmp_path, (OLD, OLD))
 
     assert tmp_path.stat().st_mtime == OLD
     assert newest_mtime(tmp_path) == NEW
@@ -46,17 +33,12 @@ def test_sees_a_file_written_under_a_subdirectory(tmp_path):
 
 @pytest.mark.parametrize("pruned", sorted(PRUNE_DIRS))
 def test_activity_inside_a_pruned_dir_is_not_activity(tmp_path, pruned):
-    # The prune set is part of the DECISION, not a speed knob: an env solve, a build or
-    # a fetch writes thousands of files that say nothing about whether anyone is working
-    # in this Tree. A fresh file under any pruned dir must not refresh the signal.
     _write(tmp_path / "src" / "mod.py", mtime=OLD)
     _write(tmp_path / pruned / "junk", mtime=NEW)
     assert newest_mtime(tmp_path) == OLD
 
 
 def test_pruned_dirs_are_not_descended_into(tmp_path):
-    # Pruning is by NAME at any depth, and it stops the descent (the 100× cost gap:
-    # ~1.9ms pruned vs ~191.7ms naive, `.pixi` alone being ~97% of the file count).
     _write(tmp_path / "src" / "mod.py", mtime=OLD)
     _write(tmp_path / ".pixi" / "envs" / "default" / "lib" / "thing.so", mtime=NEW)
     _write(tmp_path / "src" / "__pycache__" / "mod.cpython-312.pyc", mtime=NEW)
@@ -64,15 +46,12 @@ def test_pruned_dirs_are_not_descended_into(tmp_path):
 
 
 def test_a_file_named_like_a_pruned_dir_still_counts(tmp_path):
-    # The prune set names DIRECTORIES. A file that happens to share the name is a file.
     _write(tmp_path / "src" / "mod.py", mtime=OLD)
     _write(tmp_path / "build", mtime=NEW)
     assert newest_mtime(tmp_path) == NEW
 
 
 def test_a_symlink_reports_its_own_stamp_not_its_targets(tmp_path):
-    # lstat, never stat: a link out of the Tree must not import foreign activity, and a
-    # BROKEN link must not raise (which would blank the whole signal to None).
     _write(tmp_path / "real.txt", mtime=OLD)
     link = tmp_path / "dangling"
     link.symlink_to(tmp_path / "does-not-exist")
@@ -81,16 +60,7 @@ def test_a_symlink_reports_its_own_stamp_not_its_targets(tmp_path):
     assert newest_mtime(tmp_path) == OLD
 
 
-# --- unreadable is NOT idle (ADR-0072) ---------------------------------------------
-#
-# Every arm below returns None, which every caller reads as KEEP. A wrongly-kept Tree
-# costs disk until the next sweep; a wrongly-deleted one costs work that no longer
-# exists.
-
-
 def test_a_tree_with_no_eligible_file_is_unreadable_not_idle(tmp_path):
-    # Nothing but pruned content: the walk completes having measured nothing. That is
-    # "I could not tell", not "idle since the epoch" — and certainly not a delete.
     _write(tmp_path / ".pixi" / "envs" / "thing", mtime=NEW)
     assert newest_mtime(tmp_path) is None
 
@@ -112,8 +82,6 @@ def test_a_file_instead_of_a_dir_is_unreadable(tmp_path):
 def test_a_stat_failure_blanks_the_signal_rather_than_reporting_a_partial_max(
     tmp_path, monkeypatch
 ):
-    # A file vanishing mid-walk (a concurrent gc, a build cleaning up) must not yield
-    # the max of whatever was read BEFORE the failure: a partial maximum is a number,
     # and a number can license a delete. The whole answer becomes None.
     _write(tmp_path / "recent.txt", mtime=NEW)
     _write(tmp_path / "old.txt", mtime=OLD)
@@ -142,19 +110,12 @@ def test_an_unreadable_directory_blanks_the_signal(tmp_path, monkeypatch):
 def test_a_really_unreadable_subdir_blanks_the_signal_rather_than_reporting_the_rest(
     tmp_path,
 ):
-    # The REAL failure mode, driven on disk rather than by replacing `os.walk`:
-    # `os.walk` SWALLOWS scandir errors by default, so an unreadable subtree is simply
-    # skipped and the walk returns a normal-looking maximum over what it COULD read.
-    # Here that maximum is OLD -> "idle since 1970" -> delete, while the recent work
-    # sits unread inside `secret/`. The signal must go None instead: the walk did not
-    # see the Tree, so it has no idea how idle it is.
     _write(tmp_path / "old.txt", mtime=OLD)
     _write(tmp_path / "secret" / "recent.txt", mtime=NEW)
     (tmp_path / "secret").chmod(0o000)
     try:
         assert newest_mtime(tmp_path) is None
     finally:
-        # Restore before tmp_path cleanup, or teardown cannot remove the dir.
         (tmp_path / "secret").chmod(0o755)
 
 
@@ -163,10 +124,6 @@ def test_a_really_unreadable_subdir_blanks_the_signal_rather_than_reporting_the_
     reason="needs POSIX non-root: os.getuid is absent on Windows; root reads unreadable dirs anyway",
 )
 def test_an_unreadable_dir_inside_a_pruned_dir_does_not_blank_the_signal(tmp_path):
-    # The prune set runs BEFORE the error can happen: `.pixi` is never descended into,
-    # so an unreadable dir inside it is never even opened. This keeps the failure arm
-    # honest — it blanks on what the walk needed and could not read, not on every
-    # unreadable byte under the Tree, most of which is env dirs it deliberately skips.
     _write(tmp_path / "src" / "mod.py", mtime=NEW)
     (tmp_path / ".pixi" / "envs").mkdir(parents=True)
     (tmp_path / ".pixi" / "envs").chmod(0o000)

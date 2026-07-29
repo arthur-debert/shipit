@@ -1,15 +1,3 @@
-"""`shipit e2e` — the effectful shell over the e2e planner (TOL01-WS03).
-
-Recorded-invocation tests through the injected artifact source and harness
-runner (prior art: the test/build verb tests over the one-exec seam,
-ADR-0028): the `<NAME>_BIN` env injection with the resolved absolute path,
-the no-declaration clean exit (PRD story 11), the legacy hard error on a
-missing/non-executable harness script, the uniform 0/1/2 exit contract
-shared with test/build (the harness verdict IS the tool's verdict), and one
-full-stack run with the real local-build source and a real bats-shaped
-consumer script.
-"""
-
 from pathlib import Path
 
 from shipit import execrun
@@ -17,9 +5,6 @@ from shipit.verbs import e2e as e2e_verb
 
 
 class _FakeSource:
-    """A scripted artifact source: name → an absolute Path to return or an
-    exception to raise. Records every resolve."""
-
     def __init__(self, outcomes):
         self.outcomes = outcomes
         self.resolved: list[str] = []
@@ -33,10 +18,6 @@ class _FakeSource:
 
 
 class _HarnessRecorder:
-    """A fake harness runner: records (argv, cwd, env), returns scripted
-    outcomes keyed by argv head (int rc, `(rc, output)`, or an exception);
-    unmapped heads pass."""
-
     def __init__(self, outcomes=None):
         self.calls: list[tuple[tuple[str, ...], Path, dict[str, str]]] = []
         self.outcomes = outcomes or {}
@@ -72,16 +53,9 @@ PADZ_TOML = (
 )
 
 
-# --------------------------------------------------------------------------
-# No declaration -> no e2e lane (PRD story 11): a report and exit 0
-# --------------------------------------------------------------------------
-
-
 def test_repo_without_any_e2e_declaration_reports_and_exits_0(
     tmp_path, monkeypatch, capsys
 ):
-    # Artifacts exist, none declares e2e — opting out is the ABSENCE of
-    # config: rc 0, nothing resolved, nothing run.
     _repo(
         tmp_path,
         monkeypatch,
@@ -101,9 +75,6 @@ def test_repo_without_any_e2e_declaration_reports_and_exits_0(
 def test_explicit_selector_on_a_repo_with_no_e2e_is_usage_rc2(
     tmp_path, monkeypatch, capsys
 ):
-    # Naming an artifact when NONE declares e2e is a usage error, NOT the
-    # clean no-op: `shipit e2e cli` must not exit 0 green (a silent CI no-op
-    # because `cli` forgot its e2e table) — it is rc 2, nothing resolved.
     _repo(
         tmp_path,
         monkeypatch,
@@ -128,11 +99,6 @@ def test_repo_without_any_config_at_all_reports_and_exits_0(
     assert "no e2e declared" in capsys.readouterr().out
 
 
-# --------------------------------------------------------------------------
-# The <NAME>_BIN injection — the recorded-env test (issue #556's core)
-# --------------------------------------------------------------------------
-
-
 def test_harness_runs_with_name_bin_set_to_the_resolved_absolute_path(
     tmp_path, monkeypatch, capsys
 ):
@@ -141,7 +107,6 @@ def test_harness_runs_with_name_bin_set_to_the_resolved_absolute_path(
     rec = _HarnessRecorder()
     rc = e2e_verb.run((), source=_FakeSource({"padz": binary}), run_harness=rec)
     assert rc == 0
-    # The default harness, from the repo root, with exactly the injection.
     assert rec.calls == [
         (("bin/check-e2e",), root, {"PADZ_BIN": str(binary)}),
     ]
@@ -161,7 +126,7 @@ def test_declared_harness_replaces_the_default_and_gets_passthrough(
         "[artifacts.lex-cli]\n"
         'build = [{ toolchain = "rust", package = "lex-cli" }]\n'
         'e2e = { harness = ["bats", "tests/e2e.bats"] }\n',
-        check_e2e=False,  # a bare-name head needs no script on disk
+        check_e2e=False,
     )
     binary = root / "target" / "release" / "lex-cli"
     rec = _HarnessRecorder()
@@ -170,18 +135,14 @@ def test_declared_harness_replaces_the_default_and_gets_passthrough(
     )
     assert rc == 0
     ((argv, cwd, env),) = rec.calls
-    assert argv == ("bats", "tests/e2e.bats", "--tap")  # verbatim, appended
+    assert argv == ("bats", "tests/e2e.bats", "--tap")
     assert cwd == root
-    assert env == {"LEX_CLI_BIN": str(binary)}  # `-` -> `_`, legacy contract
+    assert env == {"LEX_CLI_BIN": str(binary)}
 
 
 def test_gui_harness_injects_the_e2e_env_alongside_name_bin(
     tmp_path, monkeypatch, capsys
 ):
-    # A named electron harness runs the Playwright runner with the shared E2E_*
-    # launch env AND the <NAME>_BIN injection merged (the resolved binary path
-    # layered last so it always wins), and the display line shows the exact
-    # injected env in that order — the window.__e2e / E2E_* contract end to end.
     root = _repo(
         tmp_path,
         monkeypatch,
@@ -190,7 +151,7 @@ def test_gui_harness_injects_the_e2e_env_alongside_name_bin(
         "[artifacts.gal]\n"
         'build = [{ toolchain = "rust", package = "gal" }]\n'
         'e2e = { harness = "electron" }\n',
-        check_e2e=False,  # the `npm` head resolves on PATH, needs no script
+        check_e2e=False,
     )
     binary = root / "target" / "release" / "gal"
     rec = _HarnessRecorder()
@@ -213,9 +174,6 @@ def test_gui_harness_injects_the_e2e_env_alongside_name_bin(
 
 
 def test_unknown_named_harness_is_one_clean_config_error(tmp_path, monkeypatch, capsys):
-    # A named harness that names no registry entry is a declaration
-    # inconsistency: ConfigError through the cli_errors shell — `error: …` + rc
-    # 1, refused before any build or harness runs, naming the registered ones.
     _repo(
         tmp_path,
         monkeypatch,
@@ -235,9 +193,6 @@ def test_unknown_named_harness_is_one_clean_config_error(tmp_path, monkeypatch, 
 
 def test_harness_output_prints_verbatim_even_when_green(tmp_path, monkeypatch, capsys):
     root = _repo(tmp_path, monkeypatch, PADZ_TOML)
-    # Verbatim: an internal blank line and trailing whitespace survive
-    # unstripped (the build sibling's contract) — only the trailing newline is
-    # normalized, never the harness's own content.
     rec = _HarnessRecorder(outcomes={"bin/check-e2e": (0, "1..2\n\nok 1\nok 2 # ")})
     assert (
         e2e_verb.run((), source=_FakeSource({"padz": root / "padz"}), run_harness=rec)
@@ -245,11 +200,6 @@ def test_harness_output_prints_verbatim_even_when_green(tmp_path, monkeypatch, c
     )
     out = capsys.readouterr().out
     assert "1..2\n\nok 1\nok 2 # \n" in out
-
-
-# --------------------------------------------------------------------------
-# The legacy hard error: missing / non-executable harness script
-# --------------------------------------------------------------------------
 
 
 def test_missing_default_harness_script_is_a_hard_error_naming_the_path(
@@ -260,7 +210,6 @@ def test_missing_default_harness_script_is_a_hard_error_naming_the_path(
     source = _FakeSource({"padz": tmp_path / "padz"})
     rc = e2e_verb.run((), source=source, run_harness=rec)
     assert rc == 1
-    # Fail-fast: checked before any (expensive) build — nothing resolved.
     assert source.resolved == []
     assert rec.calls == []
     err = capsys.readouterr().err
@@ -277,11 +226,6 @@ def test_non_executable_harness_script_is_a_hard_error(tmp_path, monkeypatch, ca
     )
     assert rc == 1
     assert "not executable" in capsys.readouterr().err
-
-
-# --------------------------------------------------------------------------
-# The exit contract (ADR-0030), shared with test/build
-# --------------------------------------------------------------------------
 
 
 def test_harness_failure_is_the_tools_verdict_rc1(tmp_path, monkeypatch, capsys):
@@ -320,7 +264,6 @@ def test_unresolvable_artifact_hard_fails_the_job_but_not_the_others(
     )
     rc = e2e_verb.run((), source=source, run_harness=rec)
     assert rc == 1
-    # The broken job never reached its harness; the healthy one still ran.
     assert [argv[0] for argv, _, _ in rec.calls] == ["bin/check-e2e"]
     out = capsys.readouterr().out
     assert "FAIL broken" in out
@@ -334,7 +277,7 @@ def test_unknown_artifact_selector_is_usage_rc2_naming_declared(
     source = _FakeSource({})
     rc = e2e_verb.run(("dodot",), source=source, run_harness=_HarnessRecorder())
     assert rc == 2
-    assert source.resolved == []  # rejected before any build
+    assert source.resolved == []
     err = capsys.readouterr().err
     assert "unknown e2e artifact 'dodot'" in err
     assert "padz" in err
@@ -381,10 +324,6 @@ def test_missing_harness_binary_is_hard_127_never_a_skip(tmp_path, monkeypatch, 
 
 
 def test_config_inconsistency_is_one_clean_error_line(tmp_path, monkeypatch, capsys):
-    # An e2e artifact with no binary-producing target: ConfigError through
-    # the cli_errors shell — `error: …` + rc 1 (with the real source; the
-    # pure rule lives in tools/e2e and fires in the verb's UP-FRONT validation,
-    # before any build).
     _repo(
         tmp_path,
         monkeypatch,
@@ -401,10 +340,6 @@ def test_config_inconsistency_is_one_clean_error_line(tmp_path, monkeypatch, cap
 def test_config_validation_is_fail_fast_before_any_healthy_job_runs(
     tmp_path, monkeypatch, capsys
 ):
-    # A HEALTHY job (padz) is declared ahead of a BROKEN one (site targets npm,
-    # which no [toolchains] leg maps). With the default local source the verb
-    # validates every job's declaration UP FRONT, so the orphaned target is
-    # refused before padz — the job ahead of it — builds or runs anything.
     _repo(
         tmp_path,
         monkeypatch,
@@ -418,17 +353,13 @@ def test_config_validation_is_fail_fast_before_any_healthy_job_runs(
     rec = _HarnessRecorder()
     rc = e2e_verb.run((), run_harness=rec)
     assert rc == 1
-    assert rec.calls == []  # nothing ran — fail-fast, padz never reached
+    assert rec.calls == []
     err = capsys.readouterr().err
     assert err.startswith("error: ")
     assert "no [toolchains] leg" in err and "site -> npm" in err
 
 
 def test_ambiguous_producing_path_is_refused_up_front(tmp_path, monkeypatch, capsys):
-    # Two go legs and one go-targeting e2e artifact: the producing path is
-    # ambiguous (ADR-0007 — a target names a toolchain, not a path), the same
-    # combination `shipit build` refuses. The verb refuses it up front, before
-    # any build, with the default local source.
     _repo(
         tmp_path,
         monkeypatch,
@@ -447,9 +378,6 @@ def test_ambiguous_producing_path_is_refused_up_front(tmp_path, monkeypatch, cap
 
 
 def test_runs_out_is_an_output_sink_never_aliased(tmp_path, monkeypatch, capsys):
-    # A caller-supplied `runs_out` that already carries a prior (failing) run
-    # must not leak into THIS invocation's verdict or job count: the verb
-    # accumulates into a fresh list and EXTENDS the sink at the end.
     from shipit import config
     from shipit.tools import e2e as e2e_mod
 
@@ -466,15 +394,10 @@ def test_runs_out_is_an_output_sink_never_aliased(tmp_path, monkeypatch, capsys)
         run_harness=_HarnessRecorder(),
         runs_out=runs_out,
     )
-    assert rc == 0  # this run's verdict alone — the stale failure did not leak
-    assert runs_out[0] is stale  # the caller's prior entry is preserved
-    assert len(runs_out) == 2  # extended by this run's single job, not aliased
-    assert "E2E: OK (1 harness)" in capsys.readouterr().out  # count is this run's
-
-
-# --------------------------------------------------------------------------
-# The exec boundary — the stated timeout and env ride the wire (ADR-0028)
-# --------------------------------------------------------------------------
+    assert rc == 0
+    assert runs_out[0] is stale
+    assert len(runs_out) == 2
+    assert "E2E: OK (1 harness)" in capsys.readouterr().out
 
 
 def test_run_harness_states_its_timeout_check_false_and_merged_env(
@@ -490,28 +413,15 @@ def test_run_harness_states_its_timeout_check_false_and_merged_env(
 
     monkeypatch.setattr(e2e_verb.execrun, "run", fake_run)
     e2e_verb._run_harness(("bin/check-e2e",), tmp_path, {"PADZ_BIN": "/x/padz"})
-    # An e2e suite is a legitimate long-runner: the bound is the verb's own
-    # (an hour), stated on the wire, never the runner's default; the env is
-    # MERGED over the parent's (the runner's default), so the harness keeps
-    # PATH etc. and gains only the injection.
     assert captured["timeout"] == e2e_verb.E2E_TIMEOUT
     assert captured["check"] is False
     assert captured["cwd"] == str(tmp_path)
     assert captured["env"] == {"PADZ_BIN": "/x/padz"}
 
 
-# --------------------------------------------------------------------------
-# Full stack: the real local-build source + a real bats-shaped consumer
-# --------------------------------------------------------------------------
-
-
 def test_full_local_flow_builds_injects_and_runs_the_harness(
     tmp_path, monkeypatch, capsys
 ):
-    # The whole seam, no fakes: a rust-declared artifact whose build command
-    # is overridden to a no-op (the binary is pre-placed where cargo would
-    # leave it), and a check-e2e script that PASSES only if <NAME>_BIN is an
-    # executable absolute path — the legacy consumer contract end to end.
     (tmp_path / ".shipit.toml").write_text(
         "[toolchains]\n"
         '"." = { toolchain = "rust", build = ["true"] }\n'
