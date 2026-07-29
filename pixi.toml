@@ -1,15 +1,3 @@
-# shipit's own pixi workspace — Step 3 lands shipit's first pixi integration
-# (docs/legacy-prd/lint-checks.md). The substrate proven in Spike 0 stops being a spike here and
-# becomes a real dependency of shipit's own repo: the lint checks are dogfooded on shipit
-# from this step forward.
-#
-# The linters are required-check-path tools, so they are conda-forge packages
-# PINNED in pixi.lock and CI runs `--locked` (architecture.lex §2) — version
-# bumps arrive as auto-PRs, never silently. `lexd` (the one lint tool not on
-# conda-forge) rides the SAME shape since ARF02-WS06 (ADR-0066): it is published
-# to the public Artifact channel and pinned in the managed `[feature.shipit-lexd]`
-# block below, so it resolves through pixi.lock like every other linter — the
-# bespoke `provision lexd` fetcher is retired.
 
 [workspace]
 name = "shipit"
@@ -19,101 +7,28 @@ platforms = ["linux-64", "osx-arm64", "linux-aarch64"]
 
 [dependencies]
 # >>> shipit-managed launcher deps (do not edit; regenerate via `shipit install`) >>>
-# The pinned `bin/shipit` launcher's one prerequisite (#758, TOL02-WS17
-# #794): every workflow block (wf-checks and the whole wf-release family)
-# runs `pixi run --locked ./bin/shipit ...`, and the ADR-0033 launcher
-# resolves the repo's shipit pin via `uv tool run` — but hosted runners do
-# not carry uv, so without this block the very first `./bin/shipit` dies 127
-# before any verb runs. Provisioned from conda-forge under setup-pixi's
-# lockfile-keyed cache (the #582 doctrine; the spike measured the launcher's
-# uv resolve at 5s cold / 0-3s warm riding this env — no extra cache step).
-# Anchored under [dependencies] — the DEFAULT env — because that is exactly
-# the PATH a bare `pixi run --locked <task>` resolves. Pinned to the minor
-# line of Layer 0's UV_PIN (bin/setup-dev-env.sh), so dev machines and CI
-# provision the same uv; a lockstep drift test (tests/test_install.py) fails
-# when the two move apart. `uv build` (the python bundle composition) rides
-# this same entry.
 uv = "0.11.*"
 # <<< shipit-managed launcher deps <<<
 # >>> shipit-managed python release deps (do not edit; regenerate via `shipit install`) >>>
-# The python RELEASE-side publish tool (#801, closing open hole 2 of the
-# TOL02-WS17 inventory): `shipit release publish`'s pypi endpoint uploads via
-# `twine`, which hosted runner images do not carry and nothing else
-# provisions — the upload died 127 on every stock pypi consumer. Delivered on
-# the python toolchain signal (a tracked pyproject.toml), anchored under
-# [dependencies] — the DEFAULT env — because wf-publish executes shipit via
-# bare `pixi run --locked ./bin/shipit`, and twine must be on THAT run's
-# PATH. Provisioned from conda-forge under setup-pixi's lockfile-keyed cache
-# (the #582 doctrine: the release run NEVER installs at run time — publish
-# fails loudly naming this reconcile instead). Pinned to the minor line; a
-# bump is one data edit, rolled out on each consumer's next `shipit install`
-# reconcile. If this repo no longer ships python (the last pyproject.toml is
-# gone), delete this block and its `pixi.toml#shipit-python-release-deps`
-# entry in .shipit.toml's [managed] table — a reconcile only ADDS toolchain
-# blocks, it never retires one.
 twine = "6.2.*"
 # <<< shipit-managed python release deps <<<
-# (For shipit-self the entry is redundant-but-harmless, like the managed lint
-# block: the dogfood repo's declined bin/shipit execs shipit FROM SOURCE via
-# the pixi env — see [managed.decline] in .shipit.toml.)
 python = "3.13.*"
 
-# The lint toolchain ALSO rides in the DEFAULT env — for the TEST env's sake, not
-# the lint task's (#1066). The managed `lint` task now lives in
-# `[feature.lint.tasks]` (below), so the public `pixi run lint`, the hooks'
-# `pixi run -e lint lint` and CI all resolve to the ONE `lint` environment and the
-# pinned toolchain there; nothing about the lint gate needs a linter in the default
-# env any more (that placement — issue #210, option (a) — is exactly what let a
-# bare `pixi run lint` run against ambient versions, the #1066 defect). What still
-# needs them here is the `test` environment: it composes the default feature, and
-# the hermeticity invariance gate (tests/test_lint.py) drives the REAL binaries —
-# move them into the lint feature and those cases silently `skipif` away. lexd is
-# NOT here: it rides the managed `[feature.shipit-lexd]` block (from the channel),
-# wired into the lint and test envs (ARF02-WS06, ADR-0066) — the envs that actually
-# run the lex lint leg.
-#
-# The linters are required-check-path tools, so they are conda-forge packages PINNED
-# in pixi.lock and CI runs `--locked` (architecture.lex §2) — version bumps arrive as
-# auto-PRs, never silently. Since ARF02-WS06 `lexd` (the one lint tool not on
-# conda-forge) rides the same shape from the Artifact channel — see the header.
 ruff = "0.15.*"
-# PINNED DOWN to 0.10.*: 0.11.0 has an SC2218 reaching-definitions false positive
-# that reds correct code near subshells — see the managed lint-deps block below for
-# the full note. Kept in lockstep with that block (dogfood drift test).
 shellcheck = "0.10.*"
 go-shfmt = "3.*"               # conda-forge name for the `shfmt` binary
 yamllint = "1.38.*"
 prettier = "3.8.*"
 markdownlint-cli = "0.49.*"
-# GitHub Actions workflow gate — the actions Lang of `shipit lint` (TOL01-WS04):
-# workflow YAML under `.github/workflows/` routes to actionlint IN ADDITION to
-# yamllint. Kept in lockstep with the managed lint-deps block below (dogfood
-# drift test).
 actionlint = "1.7.*"
 lefthook = "2.1.*"
 
 [pypi-dependencies]
-# shipit itself, editable — `shipit lint` is the lint orchestrator, so the env
-# that runs the lint checks must carry the package under test.
 shipit = { path = ".", editable = true }
 
-# The ADR-0015 build env, declared where pixi OWNS it — set on EVERY activation
-# (`pixi run` / `pixi shell` / `shell-hook`) rather than hand-built in Python and
-# applied only to the provisioning subprocess (COR01: `sccache_env()` removed from
-# `tree/create.py`). Because pixi expands `$PIXI_PROJECT_ROOT` at activation time,
-# these resolve to PER-TREE absolute paths — each Tree is its own clone with its own
-# project root — so the per-Tree `target/` + cross-Tree sccache guarantees hold, and
-# the env now reaches the agent's OWN in-Tree `cargo` (not just provisioning), which
-# it did not before. Consumer repos that build Rust declare the same block; shipit
-# dogfoods it here (it also documents the pattern — docs/dev/pixi).
 [activation.env]
-# Per-Tree target dir: Cargo locks `target/`, so a shared one serializes the fleet.
 CARGO_TARGET_DIR = "$PIXI_PROJECT_ROOT/target"
-# sccache keys on the absolute build path; pinning the base dir to the Tree root is
-# what lets distinct Tree paths share the cross-Tree cache.
 SCCACHE_BASEDIRS = "$PIXI_PROJECT_ROOT"
-# sccache disables incremental anyway, and incremental bakes absolute paths that
-# break under any copy.
 CARGO_INCREMENTAL = "0"
 
 [tasks]
@@ -122,201 +37,41 @@ changelog = "./bin/shipit changelog"
 logs = "./bin/shipit logs"
 # <<< shipit-managed tasks <<<
 
-# pytest lives here (not a linter) so the `test` task — defined in the `test`
-# FEATURE below, alongside the Rust toolchain — has it, without pulling it into the
-# lint environment's required-check surface.
 [dependencies.pytest]
 version = ">=8"
 
-# The `test` FEATURE owns the whole test surface: the Rust toolchain the hermeticity
-# invariance gate (tests/test_lint.py, LNT01-WS02 #515) needs for its rust cases, AND
-# the `test` task itself (below). The `test` environment further down composes this
-# feature with the default feature (core linters + pytest + shipit editable). Because
-# the task lives in EXACTLY ONE feature, it exists in EXACTLY ONE environment (`test`)
-# — so bare `pixi run test` resolves UNAMBIGUOUSLY to that env, and the documented
-# developer command runs the SAME full gate CI runs (`pixi run -e test test`). That
-# closes the local/CI coverage split (#532) in the other direction: a contributor's
-# `pixi run test` can no longer go green by skipping the rust/lex cases CI executes.
-# The Rust toolchain (cargo + clippy-driver/cargo-clippy + rustfmt/cargo-fmt) is a
-# conda-forge package PINNED in pixi.lock — the invariance gate exercises the real
-# binaries, so like the required-check linters it must move only via an auto-PR bump.
-# lexd (the one lex tool not on conda-forge) reaches the test env as an ordinary
-# conda dependency: the `test` environment composes the managed `shipit-lexd`
-# feature (below, wired in `[environments]`), so lexd lands in this env's prefix
-# from the Artifact channel via pixi.lock — no inline provisioning (ARF02-WS06,
-# ADR-0066).
 [feature.test.dependencies]
 rust = "1.96.*"
-# The act harness behind `shipit wf test` (TOL01-WS04): the real-act smoke in
-# tests/test_wf.py runs a fixture workflow under act in the stock-Ubuntu
-# container. Pinned here (conda-forge, pixi.lock) so the smoke runs wherever
-# the full gate runs; docker itself is host-provided (GH runners and dev
-# machines carry it) — the smoke skips, loudly, when the daemon is absent.
 act = "0.2.*"
-# The conda producer's packager (ADR-0064/0076): the REAL conda-repackage tests
-# in tests/test_release_publish.py drive an ACTUAL `rattler-build build` — the
-# faked seam hid all the original conda-producer bugs (#1050/#1053 lesson), so
-# BOTH the noarch producer path (ADR-0076, `test_conda_noarch_real_repackage_*`)
-# AND the per-platform tool path (`test_conda_per_platform_real_repackage_*`, a
-# NON-native cross-target build catching the #1052 relink class) are exercised
-# end-to-end here, plus a file:// resolve round trip
-# (`test_conda_file_channel_roundtrip_*`, ADR-0064). RUN THESE (and
-# `tools/conda_channel_roundtrip.py`) AS THE GUARD BEFORE BUMPING THIS PIN — a
-# rattler-build minor that changes archive stripping, relink defaults, or the
-# `.conda` layout is exactly what the faked seam would have shipped blind. Pinned
-# to the same minor line the managed conda-packager block ships
-# (`0.69.*`, src/shipit/data/pixi-conda-packager-block.toml — the #1071 re-gate
-# moved rattler-build off the rust signal onto the conda endpoint) so the test
-# runs the version releases run; a real-build test `skipif`s loudly when the
-# binary is absent from an unusual host env.
 rattler-build = "0.69.*"
-# Lets the REAL conda-repackage test read the built `.conda` (a zip of
-# zstd-compressed tars) and assert its file layout — the recipe-copy class of
-# bug (#1049) is exactly a "wrong files in the package" defect, so the real
-# test verifies the payload lands under `share/<pkg>/` with no rattler-build
-# scaffolding swept in. Test-only; the producer path itself needs no zstd lib.
-# Pinned to the minor line pixi.lock already resolves (`0.25.0`), matching the
-# file's pinned-dependency pattern so a lock refresh stays deterministic.
 zstandard = "0.25.*"
 
 [feature.test.tasks]
-# The full-gate suite, THROUGH the test verb (TOL01-WS01, ADR-0039): the task is a
-# thin caller of `shipit test`, which walks `.shipit.toml [toolchains]` and
-# dispatches shipit's one python leg to its registry default (pytest) — the same
-# implementation a hook or CI job runs. It rides `./bin/shipit`, which on
-# shipit-self resolves to the editable install in this env (the code under test).
-# This task stays in the `test` FEATURE (not the managed default-[tasks] test
-# caller, which the install reconcile deliberately skips here — see the
-# PixiTaskConflict guard): the suite needs this env's Rust toolchain, and lexd
-# reaches this env as an ordinary conda dependency — the `test` environment
-# composes the managed `shipit-lexd` feature (see `[environments]` below), so
-# `pixi install` lands lexd from the Artifact channel in THIS env's own prefix.
-# Bare `pixi run test` and CI's `pixi run -e test test` are byte-identical and
-# both carry lexd on PATH. Without rust+lexd the rust/lex cases `skipif` their
-# absent binaries and the `xfail(strict)` "leak closed → reminder" signal for
-# clippy/lexd (#526) would fire local-only; this env is what makes them run
-# everywhere.
 test = "./bin/shipit test"
 
-# The `lint` FEATURE carries the MANAGED fleet-pinned dependency block below —
-# the exact block `shipit install` delivers to every consumer (ADP00,
-# docs/legacy-prd/adoption.md: the managed set owns the consumer environment). shipit
-# self-installs at Tree provisioning, so its own manifest must carry the block
-# verbatim for the reconcile to stay a NOOP; a drift test
-# (tests/test_install.py) asserts these pins agree with the hand-written
-# default-env toolchain above (the dogfood guarantee). For shipit itself the
-# block is redundant-but-harmless: the same specs already ride in the DEFAULT
-# env (for the test env's sake — see the header comment there) and the `lint`
-# environment inherits them through the default feature. This feature also carries
-# the managed `lint` TASK (#1066): `lint` lives in EXACTLY ONE place — here — and
-# `[environments]` below composes this feature into EXACTLY ONE env (`lint`, the
-# only entry naming it), so a bare `pixi run lint` resolves UNAMBIGUOUSLY to the
-# env holding the pinned toolchain. Composing this feature into a second
-# environment would break that resolution — hands off. `pixi run -e lint lint`
-# (the lefthook path) pins the env pixi would select anyway, and
-# `pixi run lint --fix` is the fixer on that same pin — one task, one environment,
-# one gate for laptop, hook and CI. Beside it live the lexd-dependent helpers
-# (regen-roles, install-hooks). Since ARF02-WS06
-# (ADR-0066) lexd is an ordinary conda dependency: the lint environment composes the
-# managed `shipit-lexd` feature (see `[environments]` below), so `pixi install` lands
-# lexd from the Artifact channel in `.pixi/envs/lint/` and it is on PATH for every
-# `-e lint` task and every `-e lint lint` the pre-commit / pre-push hooks fire — no
-# depends-on, no inline provisioning, no bespoke fetcher. The fleet-wide pin lives in
-# the managed `[feature.shipit-lexd]` block (below), integrity-checked by pixi.lock's
-# sha256 — the `provision lexd` verb and its trust-on-first-use SHAs are retired.
 [feature.lint.dependencies]
 # >>> shipit-managed lint deps (do not edit; regenerate via `shipit install`) >>>
-# The fleet-pinned lint toolchain (https://github.com/arthur-debert/shipit/blob/main/docs/legacy-prd/adoption.md:
-# the managed set owns the consumer environment).
-# Canonical versions live HERE — a bump is one data edit, rolled fleet-wide on
-# each consumer's next `shipit install` reconcile.
 ruff = "0.15.*"
-# shellcheck is PINNED DOWN to 0.10.* (not 0.11): shellcheck 0.11.0 has an SC2218
-# reaching-definitions false positive — a call to an EARLIER-defined function is
-# flagged "defined later" when a subshell (`$(...)`, a pipeline component, `<(...)`)
-# sits near the call, reddening the hermetic gate on CORRECT code across 5+ fleet
-# repos. 0.11.0 is the latest upstream (no fixed 0.11.x yet); restore 0.11+ when
-# upstream fixes it.
 shellcheck = "0.10.*"
-# conda-forge name for the `shfmt` binary
 go-shfmt = "3.*"
 yamllint = "1.38.*"
 prettier = "3.8.*"
 markdownlint-cli = "0.49.*"
-# GitHub Actions workflow gate — the actions Lang of `shipit lint` (TOL01-WS04)
 actionlint = "1.7.*"
 lefthook = "2.1.*"
 # <<< shipit-managed lint deps <<<
 
 [feature.lint.tasks]
-# The ONE lint entry point (#1066) — carried VERBATIM as the managed block so
-# shipit's self-install reconciles to a NOOP. The public `pixi run lint`, the
-# hooks' `pixi run -e lint lint`, the wf-checks matrix job's
-# `pixi run --locked lint` and the fixer `pixi run lint --fix` are now the SAME
-# task in the SAME environment: no `lint-full` twin, no `fmt` alias, nothing that
-# can run the gate against an unpinned toolchain. Since ARF02-WS06 lexd is a
-# conda dependency of this env (the composed `shipit-lexd` feature), so a plain
-# `pixi install` puts it on PATH — no inline provisioning.
 # >>> shipit-managed lint task (do not edit; regenerate via `shipit install`) >>>
 lint = "./bin/shipit lint"
 # <<< shipit-managed lint task <<<
-# One command from a fresh clone to working lint checks (the `--install-hook` equiv):
-# activates the git hooks. lexd rides pixi.lock (the composed `shipit-lexd` feature),
-# so the pre-commit / pre-push `pixi run -e lint lint` the hooks fire find it on PATH
-# after a plain `pixi install` — no provisioning step to gate on.
 install-hooks = "lefthook install"
-# Re-flow every role-prompt surface from the lex fragments (HAR01-WS03, ADR-0011):
-# mirror src/shipit/data/roles/*.lex -> .md, then compose the agent-defs, the
-# bundled coordinator deny slice, and the AGENTS.md union. Needs lexd + prettier
-# (mirroring) and shipit (the generator), all on PATH in the lint env.
 regen-roles = "bash tools/regen-roles.sh"
 
-# The managed lexd feature (ARF02-WS06, ADR-0066) — carried VERBATIM so shipit's
-# self-install (`shipit install --local` at Tree provisioning) reconciles to a
-# NOOP; a drift test (tests/test_install.py) asserts it agrees with the packaged
-# `pixi-lexd-block.toml`. This is the reserved feature the lint (and test) envs
-# compose for lexd from the Artifact channel — see `[environments]` below.
 # >>> shipit-managed lexd feature (do not edit; regenerate via `shipit install`) >>>
 [feature.shipit-lexd]
-# lexd — the lex Lang's lint-gate tool — resolved as an ordinary conda package
-# from the public Artifact channel (ADR-0066: `provision lexd` retired). The
-# channel is scoped to THIS reserved feature (a sibling of conda-forge, added to
-# whatever env `shipit-lexd` is wired into — the lint env), so lexd rides
-# pixi.lock and pixi's sha256 like every other linter, and `shipit install`
-# keeps the whole fleet on ONE lexd version — uniformity moved from a compiled
-# binary constant to this managed block (ADR-0047: not consumer config).
 channels = ["https://storage.googleapis.com/shipit-artifacts-public/lex-fmt/lex"]
-
-# The fleet-pinned lexd, PLATFORM-SCOPED via pixi `[target]` tables. This file is
-# the block HEADER; `shipit install` GENERATES one
-# `[feature.shipit-lexd.target.<plat>.dependencies]` table below per platform in
-# (this repo's declared `[workspace].platforms` ∩ the channel's CLOSED SERVED SET
-# — `SERVED_SUBDIRS`, `src/shipit/channel/buckets.py`:
-# osx-arm64/linux-64/linux-aarch64 AND win-64), pinned to `LEXD_PIN`
-# (`src/shipit/install/units.py`, the single pin edit) — NEVER a blanket
-# `[feature.shipit-lexd.dependencies]`. See `units.lexd_block`; a bump is one edit
-# to `LEXD_PIN`, rolled fleet-wide on each consumer's next reconcile.
-#
-# Why intersect with the repo's OWN declared platforms (#1072): a `[target]`
-# selector for a platform the workspace does NOT declare makes pixi warn on EVERY
-# invocation (`target selector 'win-64' does not match any of the platforms
-# supported by the workspace`) — fleet-wide noise (hit on shipit's own `main`
-# after #1068 emitted a fixed all-of-served target set). A repo emits a target
-# only for a platform it actually declares.
-#
-# Why intersect with the served set (#1068) — load-bearing AND fail-closed:
-#  - A BLANKET `[feature.shipit-lexd.dependencies]` applied lexd to EVERY platform
-#    a composing env declares, so a consumer declaring a platform OUTSIDE the
-#    served set (e.g. osx-64, Intel Mac) had no channel candidate and got an
-#    unsatisfiable lint-env solve — `shipit install` then failed closed with no
-#    commit and no reconcile (#1068). Platforms NOT in the served set carry NO
-#    lexd dep, so their lint env SOLVES and install/reconcile no longer breaks.
-#  - win-64 IS in the served set (served, merely owner-PAUSED under the Windows
-#    build pause #895, ADR-0071). A repo that DECLARES win-64 keeps a win-64
-#    target and FAILS CLOSED at solve (the channel serves no win-64 lexd while the
-#    pause holds — ADR-0071's "Windows consumers fail closed, loudly"); a repo
-#    that does NOT declare win-64 emits no win-64 target (and no dangling-selector
-#    warning). It re-resolves automatically when #895 lifts — no edit here.
+# lexd is a dependency; do not reintroduce runtime `provision lexd`.
 [feature.shipit-lexd.target.osx-arm64.dependencies]
 lexd = "==0.19.10"
 [feature.shipit-lexd.target.linux-64.dependencies]
@@ -325,56 +80,17 @@ lexd = "==0.19.10"
 lexd = "==0.19.10"
 # <<< shipit-managed lexd feature <<<
 
-# The `review` env carries NO dependency of its own any more (#969): PyJWT — the
-# App-JWT signer — is a BASE shipit dependency now, so `shipit pr review` and
-# `shipit verify-apps` work in every env and, crucially, in a consumer repo's
-# pinned shipit, which has no extras and no `review` env to be redirected into.
-# What remains here is a NAMESPACE for the LIVE, opt-in harness below: it is
-# NON-DEFAULT — never part of `test` / CI / the `lint` (required-check) surface —
-# so a harness that talks to real GitHub can never be picked up by a bare
-# `pixi run`. See docs/dev/review-app-provisioning.md.
 [feature.review.tasks]
-# The LIVE-GitHub review-funnel verification harness — opt-in (needs Doppler App
-# creds + a canary PR), refuses to run without an explicit --repo/--pr. Run e.g.:
-#   pixi run -e review verify-funnel --repo arthur-debert/shipit-canary --pr <N>
 verify-funnel = "python -m shipit.review.funnel_verify"
 
-# The `dogfood` env carries shipit editable (it drives `shipit spawn subagent` as a
-# subprocess) for the OPT-IN, LIVE end-to-end spawn-verification harness. Like
-# `review` it is NON-DEFAULT — never part of `test` / CI / the `lint` (required-check)
-# surface, and off the locked `pixi.lock` check — because it spawns real `claude`
-# Runs and opens real PRs (token spend) against a SCRATCH checkout. Its assertion +
-# wiring logic is regression-covered in the normal test checks
-# (`tests/test_spawn_dogfood.py`) with every live seam FAKED. See
-# docs/dev/spawn-dogfood-verification.md.
 [feature.dogfood.pypi-dependencies]
 shipit = { path = ".", editable = true }
 
 [feature.dogfood.tasks]
-# The LIVE spawn-dogfood verification harness (TRE03-WS05) — opt-in (spawns real
-# claude Runs, opens real PRs), refuses to run without an explicit scratch checkout +
-# target. Run it deliberately, e.g.:
-#   pixi run -e dogfood verify-spawn --scratch ~/h/scratch/shipit \
-#     --repo arthur-debert/shipit --epic TRE03 --ws 5 --issue 159
 verify-spawn = "python -m shipit.spawn.dogfood"
 
 [environments]
-# The lint env composes the managed `shipit-lexd` feature (ARF02-WS06, ADR-0066),
-# so lexd rides pixi.lock from the Artifact channel. `shipit install` treats this
-# membership as a managed invariant (ADR-0047) and MERGES `shipit-lexd` into
-# whatever `lint` env a consumer declares — appending it, preserving the
-# consumer's own base features — rather than owning the whole line behind a marker
-# fence (which a consumer-authored `lint` env would collide with, leaving lexd
-# unwired). shipit carries the composed form verbatim so its self-install NOOPs.
 lint = ["lint", "shipit-lexd"]
-# The full-gate test env: default feature (core linters + pytest + shipit editable)
-# plus the `test` feature's Rust toolchain AND its `test` task, so the hermeticity
-# invariance gate runs its rust/lex cases instead of skipping them (#532). It is the
-# ONLY env carrying the `test` task, so bare `pixi run test` auto-selects it — the
-# developer command and the CI command (`pixi run -e test test`) run the same gate.
-# It composes the managed `shipit-lexd` feature so lexd rides pixi.lock from the
-# Artifact channel into THIS env's prefix (ARF02-WS06, ADR-0066) — the lex cases run
-# everywhere, no inline provisioning.
 test = ["test", "shipit-lexd"]
 review = ["review"]
 dogfood = ["dogfood"]

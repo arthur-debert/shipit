@@ -1,168 +1,25 @@
-# shipit policy config. Owns POLICY (secrets, reviewers, the path→toolchain map,
-# pristine hashes); pixi.toml owns PROVISIONING. They describe different layers,
-# so there is no split-brain. See docs/dev/architecture.lex §6.
 
-# [secrets] — the single source of truth for repo Actions secrets. Each table key
-# is the GitHub secret NAME; the value names exactly one source:
-#
-#   NAME = { doppler = "KEY" }      # doppler secrets get KEY --plain --project github --config prd
-#   NAME = { env = "VAR" }          # value of $VAR in the environment
-#   NAME = { prompt = true }        # ask interactively
-#
-# Add `optional = true` to any entry whose absence should be a skip, not an error:
-#
-#   NAME = { doppler = "KEY", optional = true }
-#
-# `shipit gh-setup` resolves each and pushes it; a changed secret is re-set to its
-# new value. The same table feeds the cross-org workflow caller's `secrets:` block.
 [secrets]
-# RELEASE_TOKEN backs cross-repo release pushes. Sourced from the local gh CLI
-# token env var, which carries repo + workflow scope. Optional: GH_TOKEN is not
-# always exported (gh often keeps the token in the keychain), and the repo
-# secret is already set — so an absent GH_TOKEN skips the re-set rather than
-# aborting gh-setup; when present it rotates the value. More entries land as
-# shipit's release workflows arrive (Steps 4–6).
 RELEASE_TOKEN = { env = "GH_TOKEN", optional = true }
 
-# Local-agent review App credentials (PRF01-WS07). The codex/agy review backends
-# post AS their GitHub App (`adr-codex-review[bot]` / `adr-agy-review[bot]`); the
-# App private key (PEM) + app id are provisioned into Doppler `github/prd` under
-# these keys. Mapping them here makes `gh-setup` push them as repo Actions secrets
-# so a CI-side review has the same credentials the LOCAL path sources directly
-# from Doppler via `secretsrc` — CI parity, single source of truth. shipit requires
-# these local reviewers on its OWN PRs: `codex` and `agy` are in the [reviewers]
-# required set below — blocking the flip-to-Ready — so every shipit PR is reviewed
-# by both (alongside Copilot).
 CODEX_REVIEW_APP_PRIVATE_KEY = { doppler = "CODEX_REVIEW_APP_PRIVATE_KEY" }
 CODEX_REVIEW_APP_ID          = { doppler = "CODEX_REVIEW_APP_ID" }
 AGY_REVIEW_APP_PRIVATE_KEY   = { doppler = "AGY_REVIEW_APP_PRIVATE_KEY" }
 AGY_REVIEW_APP_ID            = { doppler = "AGY_REVIEW_APP_ID" }
 
-# [reviewers] — the required-reviewer SET for THIS repo's PRs (overrides the
-# shipped Copilot-only default; see src/shipit/prstate/reviewers_config.py). The
-# map KEYS are the required reviewers — all must be DONE to flip Ready. shipit
-# dogfoods its own local-review backends: `codex` and `agy` post as their App
-# bots and block the flip-to-Ready alongside Copilot. Head-strict rerun is now the
-# CODE default (ADR-0043 / RVW02-WS06): a round after the first reviews only the
-# cheap fix range, so re-reviewing every push is affordable and the commits that
-# address a review are themselves reviewed. `codex`/`agy` therefore OMIT `rerun`
-# and rely on that default (rerun = true). Copilot states `rerun = true` explicitly
-# — it opts IN despite being a full-diff app reviewer, to keep exercising the round
-# counter and the no-major+ breaker (RVW01-WS01). The SHIPPED default reviewer
-# (Copilot in DEFAULT_REVIEWERS) stays EXPLICIT review-once for a bare consumer —
-# the ADR-0043 metered-app opt-out — but this dogfood repo chooses head-strict.
-# The table-level key `round_cap` is RESERVED (not a reviewer): it sets the
-# review-round cap the engine's stopping breaker uses (default 6 when unset).
 [reviewers]
 copilot = { rerun = true }
-# The local reviewers' readiness wait window is BUMPED over the shipped 20m
-# default (RVW02-WS04): a large PR's round-1 review (the single full-scope pass
-# and, when the calibrator is opted on, a calibration run) legitimately takes
-# longer to ARRIVE — 45 minutes covers it without letting a vanished run park
-# the PR forever (the window is the arrival deadline, not the per-run agent
-# timeout).
-#
-# No `dimensions` key: these dogfood reviewers ride the ADR-0052 round-1 DEFAULT
-# — ONE unscoped full-scope pass, not the four-pass fan-out. The fan-out stays
-# fully wired and selectable — re-add `dimensions = [...]` on a reviewer to opt
-# it back in (the RVW02-WS05 baseline-study set was correctness,
-# cross-file-invariants, security-robustness, test-quality; report on #638).
-#
-# Local review models are pinned EXPLICITLY (issue #989) rather than left on the
-# backend defaults (which launch gpt-5.5 for codex and Gemini 3.1 Pro (High) for
-# agy). codex rides `gpt-5.6-sol` (a verbatim id — passes through the alias table
-# unchanged); it works and is unaffected by the below.
-#
-# agy is pinned to `pro` (→ Gemini 3.1 Pro (High)) — REVERTED from the `flash` the
-# #989 spike recommended, because that pin shipped a DEAD reviewer (issue #1006).
-# Gemini Flash goes agentic in agy's headless `--print` mode: it narrates its hunt
-# for a diff and never emits a verdict, so EVERY `agy-local` run settles `failed`.
-# Measured on this repo: `agy-local` failed on every PR of the TREE03 epic — ~10
-# review rounds across #1027/#1028/#1029 — while codex and Copilot kept passing,
-# so the roster promised three required reviewers and delivered two. The engine
-# behaved correctly throughout: it declines to let a degraded reviewer block
-# Ready, which is exactly what made the outage silent.
-#
-# The spike's ~20% speed win is forfeited DELIBERATELY: a reviewer that never
-# returns a verdict is not faster, it is absent. This pins the per-reviewer
-# `model` only; it does NOT remap agy's `pro` alias or touch any write-agent
-# default.
-#
-# This is the config revert ALONE, split out of #1008 to stop the bleeding now.
-# #1008 additionally makes the hazard MECHANICAL — declaring `flash` unusable for
-# a review run on the agy backend identity, so re-pinning it is refused loudly at
-# preflight rather than failing silently on the PR. That belongs there, not here:
-# it is a real change under review, and this line should not wait on it.
 codex = { window = 2700, model = "gpt-5.6-sol" }
 agy = { window = 2700, model = "pro" }
 
-# Table-level review-run policy, set FROM the WS05 baseline study (#638):
-#
-#   nit_cap = 3 — post-calibration nit volume was ZERO across all three baseline
-#   PRs (the single nit candidate was dropped as unverified by the calibrator),
-#   so the feared nit flood never materialised. A small positive cap is flood
-#   insurance that essentially never binds on a healthy PR (US-18: keep low-end
-#   optionality without flooding); it is deliberately NOT tuned against real nit
-#   volume, because the sample produced none.
-#
-#   calibrator — left at the shipped default: OFF (dormant). WS08 (#669)
-#   decoupled the calibrator and made the mechanically-deduped union the round-1
-#   default, after the WS05 A/B measured the LLM calibrator NET-NEGATIVE on major
-#   recall (ADR-0045 as amended). shipit dogfoods that shipped default and does
-#   NOT opt back in; the concept/config/hooks stay wired but dormant. To turn it
-#   on, add a table-level `calibrator = { backend = "claude", reasoning = "high" }`.
 nit_cap = 3
 
-# [toolchains] — the path→toolchain map (ADR-0007/0039): each build-bearing path
-# declares its toolchain, and the tree-input Tool verbs (`shipit test`,
-# `shipit build`) walk this map and dispatch each entry — a Leg — to its producing
-# command: the registry default per toolchain, or a per-path override, e.g.
-# `"crates/cli" = { toolchain = "rust", test = ["cargo", "test"] }`. shipit is a
-# single python path; the registry default runs pytest with the committed
-# pytest config (pyproject.toml).
 [toolchains]
 "." = "python"
 
-# [artifacts] — shipit's OWN release surface (#774, the 1.0.0 cutover): ONE
-# no-build artifact whose sole endpoint is the GitHub release. shipit is
-# consumed via the git pin (`[shipit] version`, ADR-0033) and `@v1` workflow
-# refs (ADR-0010) — the TAG is the payload — so the minimal HONEST declaration
-# is the zero-build shape ("the tag is the release"): preflight plans stages
-# preflight → prepare → publish with an EMPTY matrix (nothing builds, bundles,
-# or signs), and publish creates the tag's GH release carrying the coalesced
-# notes. A `wheel` composition is deliberately NOT declared: nothing consumes
-# a shipit wheel (the launcher installs from the git pin), and a phantom asset
-# would be a dishonest release surface. gh-release rides the workflow's own
-# GITHUB_TOKEN, so this declaration adds nothing to the [secrets] map.
 [artifacts.shipit]
 endpoints = ["gh-release"]
 
-# [lanes] — the declared CI test units (docs/legacy-prd/tol01-ci-tools.md story 14):
-# `{ run, required, local, trigger, runner, scope }`, keyed by lane name. The
-# lane planner (`shipit ci plan`, TOL01-WS05) maps these + the CI event + a
-# path-diff to the job matrix the wf-checks workflow block runs (`pixi run
-# <run>` per job); the commit/push checks are DERIVED as the required∩local
-# set — on these declarations exactly `lint` + the fast `test` set, pinned by
-# tests/test_tools_lanes.py, so lefthook and CI enforce one definition.
-# `trigger` defaults to "pr" — the most frequent rung of the planner's trigger
-# ladder, so both lanes run on every PR update, push, nightly and dispatch.
-#
-# `run` names the pixi task the CI job invokes — a thin caller of the shipit
-# verb (ADR-0039), so the job runs the identical implementation a laptop does.
-# The lint lane runs the managed `lint` task itself (#1066). It used to run a
-# `lint-full` twin because the managed task sat in the default [tasks] table, so
-# a lane pointed at it provisioned the DEFAULT env and never installed the pinned
-# lint toolchain. The task now lives in [feature.lint.tasks] — one task, one
-# environment — so the planner resolves this lane onto the `lint` env and the
-# CI job, the hooks and a laptop `pixi run lint` are byte-identical. The twin is
-# gone: a second name for the same gate is a second thing to drift.
-#
-# The job's own invocation is BARE (`pixi run --locked <run>`; the planner feeds
-# the resolved env to setup-pixi, it does not pass `-e`), so the one-env
-# invariant in pixi.toml is load-bearing for CI as well as for the laptop: a
-# second environment composing the lint feature would make this lane ambiguous.
-# That is a property of every lane, not of this one — the `test` task's shape is
-# identical.
 [lanes.lint]
 run = "lint"
 required = true
@@ -173,59 +30,12 @@ run = "test"
 required = true
 local = true
 
-# The PR-time changelog fragment gate (issue #1073): fail a PR to `main` when
-# CHANGELOG/ holds no unreleased fragment — a fragment-PRESENCE check that asks
-# the cut's own "are there unreleased fragments?" question (the same condition
-# that makes a release refuse an empty cut) at PR time, over the same discovery
-# machinery. `run` is the `changelog` pixi task (./bin/shipit changelog) plus the
-# `check-fragment` subcommand arg — the same invocation a laptop runs.
-# `local = false` keeps it OUT of the derived commit/push checks (the
-# required∩local set stays exactly lint + test): CI-only, so lefthook/laptop
-# never runs it. Enforcement is PR-gated via GITHUB_BASE_REF — a `trigger = "pr"`
-# lane also runs on push/nightly/dispatch, but off a PR GITHUB_BASE_REF is empty
-# and the check no-ops (exits pass), so only PRs are gated. The base-branch
-# check (main only) lives in the
-# subcommand (the planner is unaware of it); the lane rolls up into the single
-# required `check` gate and needs NO workflow YAML change — a presence check
-# reads the working tree, so no git history/fetch-depth is required.
 [lanes.changelog]
 run = "changelog check-fragment"
 required = true
 local = false
 trigger = "pr"
 
-# [project] — the CONSUMER-OWNED, un-validated namespace. shipit validates that
-# top-level tables are KNOWN (so a typo dies fast), but `[project]` (alias:
-# `[custom]`) is the well-known escape hatch whose SUBTREE shipit reads but does NOT
-# police the shape of — consumers put their own free-form policy here.
-#
-# [project.portfolio] — the AUTHORITATIVE, version-controlled list of repos shipit is
-# being rolled out across, grouped by STACK (workstream). It lives HERE, in git — never
-# in agent memory: a session reads this table instead of reconstructing a list from
-# `~/h` sibling dirs (the source of the recurring wrong list). Each entry carries the
-# `repo` (owner/name) and its `path` (hermetic-clone checkout layout). Transcribed from
-# the now-stale release/managed-repos.yaml; THIS is the source of truth. A future
-# `shipit portfolio` verb can consume it.
-#
-# Reconciled against the ADP fleet sweep (#426, epic #413): every adoption
-# target of the swept fleet is listed — including shipit itself (dogfooding is
-# a row in the sweep) and shipit-canary (the standing ADP00 test bed) — and the
-# sweep's one non-target (lex-fmt/comms: a docs repo carrying neither a
-# `pixi.toml` nor a `.shipit.toml`) is OUT. The sweep's bird's-eye table is the
-# derived human view; THIS table is the machine-readable fleet manifest
-# (ADR-0033).
-#
-# The membership test is ADOPTION, not repo genre: a repo carrying a
-# `.shipit.toml` with a `[shipit] version` pin IS a consumer and belongs here,
-# whatever it packages. lex-fmt/nvim and lex-fmt/zed-lex were excluded as
-# "editor-config / grammar-packaging repos" while both were in fact adopted and
-# pinned, so every fleet-wide reconcile silently skipped them (#1130).
-#
-# Secondary stacks are deferred (out of scope for now): the brew-tap stack
-# (arthur-debert/homebrew-tools — formulas land via release-workflow pushes, not the PR
-# loop), the gh-action stack (arthur-debert/simple-gal-action, #108), and release/
-# itself (the source-of-truth repo, which needs its own check set). Add them when those
-# workstreams pick up.
 [project.portfolio]
 phos = [
   { repo = "phos-editor/app", path = "phos/phos-app", expect_verify_fail = "the parity verify needs the phos sibling checkouts, absent in the hermetic clone" },
@@ -266,16 +76,6 @@ ignore = [
   "pnpm-lock.yaml",
 ]
 
-# [managed.decline] — managed units this repo KEEPS as its own (#600): install
-# skips delivering each listed unit key (no write, no override re-proposal in
-# every reconcile PR) and notes the standing decision in the plan and PR body.
-# Consumer-owned policy: the [shipit]/[managed] re-stamp preserves this table.
-#
-# bin/shipit: the dogfood repo's launcher is the SOURCE-DEFERRING bootstrap —
-# CI and dev flows must exec shipit FROM SOURCE via the pixi env, never the
-# pinned uv launcher the managed unit ships (#597: merging that override broke
-# every wf-checks lane and would make shipit's own CI exercise the pin instead
-# of PR source).
 [managed.decline]
 keep = ["bin/shipit"]
 

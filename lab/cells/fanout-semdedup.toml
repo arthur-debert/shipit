@@ -1,13 +1,3 @@
-# TREATMENT cell (#750; format: lab/README.md "Cells").
-# One axis vs fanout-baseline: union dedup — the deterministic near-duplicate
-# collapse (`dedup = "semantic"`: same non-empty file and concrete line, or
-# both file-scoped; claim-token overlap at the #673 same-claim seam's threshold;
-# no LLM, ADR-0048) instead of the
-# exact-claim mechanical key that let core#440 post the eval.rs:1299 major
-# twice in different words. Everything else is byte-identical to the control;
-# PR review of this pair checks exactly that. The treatment must earn any
-# default-pipeline proposal here first: it wins only if it removes the
-# near-duplicate posts WITHOUT merging away a distinct ground-truth positive.
 
 schema = 1
 id = "fanout-semdedup"

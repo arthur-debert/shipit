@@ -1,8 +1,3 @@
-# Demo TREATMENT cell (ADR-0049; format: lab/README.md "Cells").
-# One axis vs fanout-baseline: sweep mode informed instead of blind — sweep 2
-# is primed with sweep 1's posted findings (composed into the instructions at
-# the runner layer) and told to hunt for what they missed. Everything else is
-# byte-identical to the control; PR review of this pair checks exactly that.
 
 schema = 1
 id = "fanout-informed"

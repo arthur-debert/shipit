@@ -1,38 +1,11 @@
 #!/usr/bin/env bash
-# setup-dev-env.sh — Layer 0 bootstrap, installed and managed by `shipit install`.
-#
-# The managed set owns the consumer ENVIRONMENT (pixi envs, pinned linters,
-# issue #547), but everything above rides pixi — and the ADR-0033 pinned
-# `bin/shipit` launcher rides uv (`uv tool run` resolves the repo's pin). This
-# script provisions that base system: it reconciles pixi and uv TO THEIR PINS
-# (reconcile-to-pin, never install-if-missing — a drifted version is reconciled
-# exactly like an absent one) from sha256-verified GitHub release tarballs into
-# ~/.local/bin, then best-effort pre-solves the repo's pixi environments.
-#
-# Idempotent and cheap when converged: two version probes plus a locked solve
-# that no-ops. LOUD and fail-open on every miss (`setup-dev-env:` warnings on
-# stderr, exit 0): it runs from the managed SessionStart hook and must never
-# brick a session — a warned, degraded session beats no session. The one
-# hard-failing consumer of this script is docker/verify-self-provision.sh,
-# which asserts the pins landed.
-#
-# Release tarballs, never `curl | sh` vendor installers: the Claude Code cloud
-# sandbox's default "Trusted" egress allowlist carries github.com and
-# release-assets.githubusercontent.com but NOT pixi.sh / astral.sh, so the
-# pinned, checksum-verified release asset is the one fetch path that works
-# identically on a laptop, in docker, and in a cloud session.
-#
+# Reconcile pixi and uv to verified pins, then best-effort solve repo environments.
+# Fail open because this runs from a session hook.
 # Do not edit — `shipit install` overwrites this file.
 set -euo pipefail
 
-# Keep PIXI_PIN in lockstep with `pixi-version` in the wf-checks workflow
-# block (.github/workflows/wf-checks.yml, setup-pixi in both its jobs — since
-# the TOL01-WS05 cutover ci.yml is a thin caller carrying no pin of its own):
-# CI and this bootstrap must provision the same pixi. A drift test
-# (tests/test_install.py) pins the two together.
+# Must match the workflow's pixi-version.
 PIXI_PIN="0.71.0"
-# uv powers the managed `bin/shipit` launcher's pin resolve (ADR-0033) —
-# without it the pinned launcher cannot exec the repo's stamped build.
 UV_PIN="0.11.28"
 
 BIN_DIR="${HOME}/.local/bin"
@@ -41,8 +14,6 @@ warn() {
 	echo "setup-dev-env: $*" >&2
 }
 
-# The supported platform triples mirror the fleet pixi platforms (Intel macs
-# unsupported, #540): anything else warns and skips — fail-open.
 resolve_triple() {
 	case "$(uname -s)/$(uname -m)" in
 	Linux/x86_64) echo "x86_64-unknown-linux-musl" ;;
@@ -53,10 +24,7 @@ resolve_triple() {
 }
 
 sha256_of() {
-	# GNU coreutils on Linux, shasum on macOS; "" when neither exists OR the
-	# tool errors on the file (#598) — under this script's `set -euo pipefail`
-	# an unguarded pipeline would abort the whole run, and "" is what routes a
-	# hashing failure into fetch_verified's `[ -z "$got" ]` fail-open path.
+	# Return empty on unavailable or failed hashing so verification fails open.
 	if command -v sha256sum >/dev/null 2>&1; then
 		sha256sum "$1" 2>/dev/null | awk '{print $1}' || echo ""
 	elif command -v shasum >/dev/null 2>&1; then
@@ -67,22 +35,17 @@ sha256_of() {
 }
 
 probe_version() {
-	# The first X.Y.Z token of `<tool> --version`, or "" (tool absent included).
 	"$1" --version 2>/dev/null | head -n 1 | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1 || true
 }
 
 place_binary() {
-	# $1 = source file, $2 = dest basename. Atomic within BIN_DIR: staged copy
-	# + same-dir `mv -f`, so a concurrent invocation never sees a torn binary.
+	# Same-directory rename prevents concurrent readers from seeing a partial binary.
 	local staged
 	staged="${BIN_DIR}/.${2}.setup-dev-env.$$"
 	cp "$1" "$staged" && chmod +x "$staged" && mv -f "$staged" "${BIN_DIR}/${2}"
 }
 
 fetch_verified() {
-	# $1 = URL, $2 = expected sha256, $3 = dest file. The checksum is pinned in
-	# this script (verified from the published release assets), so a tampered or
-	# truncated download can never be installed.
 	local got
 	if ! command -v curl >/dev/null 2>&1; then
 		warn "curl is not available — cannot fetch $1"
@@ -123,8 +86,6 @@ provision_pixi() {
 }
 
 provision_uv() {
-	# The uv tarball nests its binaries under uv-<triple>/; install uv AND uvx
-	# (both ship in the asset, and uvx is the sibling entry point).
 	local url sum tmp
 	url="https://github.com/astral-sh/uv/releases/download/${UV_PIN}/uv-${TRIPLE}.tar.gz"
 	case "$TRIPLE" in
@@ -145,9 +106,7 @@ provision_uv() {
 }
 
 provision_tool() {
-	# Direct dispatch (no `"$fn"` indirection — shellcheck 0.10's reachability
-	# analysis cannot follow an indirect call and would flag the provisioners
-	# as unreachable, SC2317).
+	# Direct dispatch keeps shellcheck's reachability analysis sound.
 	case "$1" in
 	pixi) provision_pixi ;;
 	uv) provision_uv ;;
@@ -156,10 +115,6 @@ provision_tool() {
 }
 
 reconcile_tool() {
-	# $1 = tool, $2 = pin. Exact pin match → no-op; anything else (absent OR
-	# drifted) → fetch + install, then re-probe and warn LOUDLY when the
-	# resolved version still mismatches (a PATH shadow is hiding the pinned
-	# binary). Always returns 0 — fail-open.
 	local have
 	have="$(probe_version "$1")"
 	if [ "$have" = "$2" ]; then
@@ -181,10 +136,7 @@ reconcile_tool() {
 }
 
 manifest_defines_lint_env() {
-	# Does pixi.toml's [environments] table define a `lint` env (the managed env
-	# block)? Table-scoped awk read, same pattern as the bin/shipit launcher's
-	# pin read — a flat grep would false-positive on the managed `[tasks]`
-	# `lint = "./bin/shipit lint"` line.
+	# Restrict the lookup to [environments]; [tasks] may also define `lint`.
 	awk '
 		{ gsub(/\r/, "") }
 		/^\[/ { in_envs = ($0 == "[environments]") ? 1 : 0; next }
@@ -194,34 +146,7 @@ manifest_defines_lint_env() {
 }
 
 resolve_script_dir() {
-	# The directory holding this script, symlink-safe (#994). The old
-	# `cd -P -- "$(dirname -- "$SELF")/.."` looked equivalent but is not: -P
-	# resolves EVERY path component physically, so a symlinked intermediate
-	# `bin` (one pointing out of the checkout) applied `..` to the LINK
-	# TARGET's parent instead of the repo, and a symlinked script path
-	# (`~/bin/setup-dev-env.sh -> <repo>/bin/setup-dev-env.sh`) was never
-	# followed at all — both resolved REPO_ROOT to a directory with no
-	# pixi.toml in it. Follow the script's own link chain first, then resolve
-	# its directory LOGICALLY, so the caller's `..` is a lexical step back to
-	# the checkout this script was invoked through.
-	#
-	# The two `cd`s differ deliberately, and swapping either breaks a case:
-	#
-	# - PHYSICAL (`-P`) inside the loop, to join a RELATIVE link target: the
-	#   kernel interprets a link's relative target against the directory
-	#   PHYSICALLY holding the link, not the logical path we reached it
-	#   through. Joining onto the logical dir instead re-resolved `..` against
-	#   the wrong parent — with `~/bin -> /tools` and
-	#   `/tools/setup-dev-env.sh -> ../repo/bin/setup-dev-env.sh` it resolved
-	#   REPO_ROOT to `~/repo` (a real, WRONG checkout) instead of `/repo`.
-	#   `-P` makes the joined path fully physical, so its `..` is exact.
-	# - LOGICAL (no `-P`) for the final directory, whose last component is by
-	#   then never a link: this is what keeps the symlinked-`bin` case working,
-	#   where the caller's path IS the checkout we must resolve back to.
-	#
-	# Every resolution step warns and degrades to "use the path as-is" rather
-	# than aborting: under `set -e` a bare `readlink`/`cd` failure (readlink
-	# missing or unsupported) would hard-fail a script contracted to fail OPEN.
+	# Resolve relative links physically, but preserve the caller's logical checkout.
 	local path="$1" link dir dirpath hops=0
 	while [ -L "$path" ]; do
 		hops=$((hops + 1))
@@ -242,11 +167,7 @@ resolve_script_dir() {
 		*) path="${dir}/${link}" ;;
 		esac
 	done
-	# The final step is guarded like every step above, and for the same reason:
-	# an unguarded `cd` (a dangling target, a removed parent) let a failure ride
-	# out through the caller's outer `dirname`, which masked it into a bare "."
-	# root — silently wrong, the one outcome this script's fail-open contract
-	# must never produce. Warn and degrade to the directory as-is instead.
+	# Never let a failed `cd` collapse the repo root to ".".
 	dirpath="$(dirname -- "$path")" || dirpath="$path"
 	if ! dir="$(cd -- "$dirpath" && pwd)"; then
 		warn "could not resolve the directory holding $path — using it as-is"
@@ -258,8 +179,6 @@ resolve_script_dir() {
 
 TRIPLE="$(resolve_triple)"
 SELF="${BASH_SOURCE[0]:-$0}"
-# `dirname` on the already-absolute script dir: a lexical step to the repo
-# root, never a `..` that the filesystem could re-resolve through a symlink.
 REPO_ROOT="$(dirname -- "$(resolve_script_dir "$SELF")")"
 
 if ! mkdir -p "$BIN_DIR"; then
@@ -267,14 +186,10 @@ if ! mkdir -p "$BIN_DIR"; then
 	exit 0
 fi
 
-# ~/.local/bin must LEAD PATH for this run so the freshly placed pins win the
-# re-probe (and the pixi solve below) over any stale system copy.
 PATH="${BIN_DIR}:${PATH}"
 export PATH
 
-# When Claude Code hands us a session env file (cloud + SES01 sessions),
-# idempotently append a guarded PATH line so every LATER Bash call in the
-# session resolves the pins too — the marker comment keys the idempotence.
+# Persist the pinned PATH for later commands in this Claude session.
 if [ -n "${CLAUDE_ENV_FILE:-}" ]; then
 	if ! grep -Fqs "setup-dev-env: pinned base-system PATH" "$CLAUDE_ENV_FILE"; then
 		if ! printf '%s\n' "case \":\$PATH:\" in *\":\$HOME/.local/bin:\"*) ;; *) export PATH=\"\$HOME/.local/bin:\$PATH\" ;; esac # setup-dev-env: pinned base-system PATH" >>"$CLAUDE_ENV_FILE"; then
@@ -286,10 +201,7 @@ fi
 reconcile_tool pixi "$PIXI_PIN"
 reconcile_tool uv "$UV_PIN"
 
-# Best-effort environment pre-solve. `--locked` ONLY: provisioning must never
-# mutate pixi.lock (ADR-0033 — provisioning mutates nothing managed); a lock
-# drift fails the solve loudly here and stays the repo's own problem. Fast
-# no-op when the envs are already solved against the lockfile.
+# Provisioning may solve against pixi.lock but never mutate it.
 if [ -f "${REPO_ROOT}/pixi.toml" ]; then
 	if ! command -v pixi >/dev/null 2>&1; then
 		warn "pixi is unavailable — skipping the environment solve"

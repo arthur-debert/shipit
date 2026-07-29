@@ -1,6 +1,3 @@
-# TREATMENT cell (#666). One axis vs fanout-baseline: pipeline shape — one
-# monolithic range pass instead of the four concern-scoped dimension passes.
-# Everything else is byte-identical to the control.
 
 schema = 1
 id = "singlepass"

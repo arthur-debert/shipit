@@ -1,27 +1,5 @@
 #!/usr/bin/env bash
-#
-# verify-self-provision.sh — end-to-end proof that `bin/setup-dev-env.sh`
-# provisions the whole base system FROM ZERO (#547, docs/dev/containers.md).
-#
-# Host-side driver: builds the stock ubuntu:24.04 image (docker/
-# ubuntu.Dockerfile — no pixi/uv/node/cargo), ships a CLEAN clone of the
-# repo's HEAD into it (never the live working tree, so an uncommitted edit can
-# neither help nor hurt the verdict), runs the bootstrap inside as the
-# non-root user, and asserts:
-#
-#   1. `pixi --version` and `uv --version` resolve exactly the script's pins;
-#   2. a second run is a fast no-op (no "reconciling" line — idempotence);
-#   3. `pixi install --locked` succeeds against the shipped pixi.lock;
-#   4. `pixi run -e lint lint` goes green end-to-end (lexd resolves from the
-#      Artifact channel through pixi.lock, the same as every other linter).
-#
-# Unlike the bootstrap itself (fail-open — it runs from a session hook), this
-# harness FAILS HARD: any missed assertion exits non-zero. Opt-in only — it
-# downloads on the order of a gigabyte of toolchains — and deliberately not
-# wired into CI (docs/dev/containers.md sketches a nightly/dispatch adoption).
-# Host-arch native: works on linux/amd64 CI runners and linux/arm64 Docker
-# Desktop alike; no qemu multi-arch matrix.
-#
+# Prove the fail-open bootstrap provisions a stock Ubuntu image from zero.
 # Usage: bash docker/verify-self-provision.sh
 
 set -euo pipefail
@@ -39,20 +17,14 @@ command -v docker >/dev/null 2>&1 || fail "docker is not on PATH"
 workdir="$(mktemp -d)"
 trap 'rm -rf "$workdir"' EXIT
 
-# A clean clone of HEAD — .git included, since the lint gate reads its scope
-# from `git ls-files` (a `git archive` tree would have no index to read).
+# Keep .git because lint derives its scope from `git ls-files`.
 echo "verify-self-provision: cloning HEAD into a clean copy" >&2
 git clone --quiet --depth 1 "file://$repo_root" "$workdir/repo"
 
 echo "verify-self-provision: building $image" >&2
 docker build -t "$image" -f "$repo_root/docker/ubuntu.Dockerfile" "$repo_root/docker"
 
-# The whole in-container run is one script, passed as an ARGUMENT (stdin
-# carries the tar stream): tar the clean clone in over stdin — no bind mount,
-# so container-local files dodge the host-uid ownership mismatch a mount hits
-# on CI runners — then bootstrap and assert. The container has no pixi and no
-# uv, so everything below `setup-dev-env.sh` is what the script itself
-# provisioned.
+# stdin carries the tar stream, so the script must be passed as an argument.
 in_container="$(
     cat <<'IN_CONTAINER'
 set -euo pipefail

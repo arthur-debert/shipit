@@ -1,7 +1,3 @@
-# The portfolio-standard issue label set. `shipit gh-setup` ensures each of
-# these exists on the target repo (created-or-updated idempotently). Each table
-# key is the label name; `description` and `color` (6-hex, no leading #) are the
-# label's GitHub attributes.
 
 ["bug"]
 description = "Denotes issue is a bug, implying this corrects current behaviour."
