@@ -1,30 +1,6 @@
-"""`shipit pr classify` — the write-once Severity-override verb (ADR-0044).
+"""`shipit pr classify` — the write-once Severity-override verb.
 
-The DORMANT correction path of the severity precedence chain. The engine
-resolves each finding's Severity via machine marker → reviewer-adapter mapping
-→ the adapter's unclassified-severity policy → ``major`` fail-safe, and there
-is no classification stage anywhere. This verb exists for the one case that chain
-gets wrong — a reviewer-emitted severity judged incorrect — recording a
-write-once **Severity override** (:mod:`shipit.prstate.overrides`, the
-dev-cycle event log as the durable record) that beats every other rung. It is
-deliberately ABSENT from role prompts and operator-facing guidance (decision
-records — ADR-0044 and the RVW02 PRD — still describe it): kept warm, told to
-no one.
-
-Two modes, ADR-0030 glue + renderers around the engine's round vocabulary:
-
-- **list** (no ``--comment``): the LATEST round's findings with each one's
-  RESOLVED severity and the chain rung that decided it
-  (``override | marker | adapter | policy | default``) — the read that makes
-  a wrong severity visible before anyone overrides it.
-- **record** (``--comment <id> {critical|major|minor|nit} [--reason "…"]``):
-  validate the id IS a finding of the latest round, then write the override
-  (write-once — re-overriding errors).
-
-The PR target is the shared primitive (explicit number or the current branch's
-PR); runtime failures map through the one :func:`~.._errors.cli_errors` shell.
-Unlike `pr status`, a branch with NO PR is an error here — there is nothing to
-override.
+See docs/adr/0044-findings-arrive-classified.md.
 """
 
 from __future__ import annotations
@@ -47,21 +23,18 @@ from .._errors import cli_errors
 from .._params import json_option, pr_number_argument
 from .._render import emit
 
-#: How much of a finding's body the list view shows — one scannable line per
-#: finding; the full text lives on the PR thread itself.
 EXCERPT_CHARS = 100
 
-#: The ladder as click choices — the override vocabulary IS the Severity enum.
 SEVERITY_CHOICES = tuple(s.value for s in Severity)
 
 
 @dataclass(frozen=True)
 class FindingLine:
-    """One finding as the list view carries it: identity + resolved severity."""
+    """One finding as the list view carries it: identity plus resolved severity."""
 
     comment_id: int
-    severity: str  # the chain-resolved severity value
-    source: str  # which rung decided: override | marker | adapter | policy | default
+    severity: str
+    source: str
     path: str
     line: int | None
     author: str
@@ -84,7 +57,7 @@ class ClassifyList:
     """The list mode's typed result: the latest round's resolved severities."""
 
     pr: int
-    round: int | None  # latest round index; None when no round exists yet
+    round: int | None
     findings: tuple[FindingLine, ...]
 
     def to_dict(self) -> dict:
@@ -120,8 +93,7 @@ def _excerpt(body: str) -> str:
 
 
 def format_list(result: ClassifyList) -> str:
-    """The pure text renderer for list mode: one line per finding — resolved
-    severity + the deciding rung — then the literal override command."""
+    """One line per finding, resolved severity first."""
     if result.round is None:
         return f"PR #{result.pr}: no review round yet — no findings to list"
     if not result.findings:
@@ -146,7 +118,6 @@ def format_list(result: ClassifyList) -> str:
 
 
 def format_recorded(result: OverrideRecorded) -> str:
-    """The pure text renderer for record mode: the override written."""
     line = (
         f"severity of finding {result.comment_id} on PR #{result.pr} "
         f"overridden to {result.severity}"
@@ -182,14 +153,7 @@ def cmd(
     reason: str | None,
     as_json: bool,
 ) -> None:
-    """List the latest round's resolved severities, or override ONE finding's.
-
-    With no flags: list the latest round's findings with each one's resolved
-    severity and its source rung. With --comment <id> <severity>: record a
-    write-once Severity override into the dev-cycle event log — once per
-    finding, immutable. PR is the number; omitted, it resolves the current
-    branch's PR.
-    """
+    """List the latest round's resolved severities, or override ONE finding's."""
     raise SystemExit(run(pr, comment=comment, reason=reason, as_json=as_json))
 
 
@@ -202,20 +166,7 @@ def run(
     as_json: bool = False,
     repo: Repo | None = None,
 ) -> int:
-    """Resolve → gather → list the round's severities, or record ONE override.
-
-    ``repo`` is the identity half of the PR target: omitted (the CLI path), the
-    root context's ambient repo — resolved once per invocation (ADR-0030); a
-    direct caller (a test) injects it as a value.
-
-    Returns 0 on a rendered list or a recorded override. A branch with no PR is
-    an ERROR here (unlike `pr status` — an override needs a PR), as are: a
-    ``--reason`` without ``--comment``, a comment id that is not a finding of
-    the LATEST round (overrides key the round the loop turns on — a stale or
-    mistyped id must fail loud, not poison the log), and a re-override
-    (write-once, from the store). All map to ``error: …`` + exit 1 via the
-    shared shell.
-    """
+    """List the round's severities, or record ONE override; returns an exit code."""
     if comment is None and reason is not None:
         raise PrStateError("--reason records with an override — pass --comment too")
     target = resolve_pr(pr, *ambient_identity(repo))
@@ -224,9 +175,6 @@ def run(
             "no PR for this branch — nothing to override (pass a PR number, "
             "or run from the PR's branch)"
         )
-    # The ONE reviewer-config read of this invocation (CLI01-WS04): the Roster
-    # rides the snapshot; `build_rounds` reads the required set off it, and the
-    # gather folds the already-recorded overrides onto `ctx.overrides`.
     ctx = gather(target, load_roster())
     rounds = build_rounds(ctx)
     latest = rounds[-1] if rounds else None
