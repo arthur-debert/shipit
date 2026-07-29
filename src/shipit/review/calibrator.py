@@ -1,53 +1,4 @@
-"""calibrator — the one fixed judge between dimension passes and the posted
-review (RVW02-WS04, ADR-0045; CONTEXT.md "Calibrator").
-
-The **Calibrator** takes the UNION of a reviewer's parallel **Dimension pass**
-findings and: dedups (merging duplicates into one canonical finding),
-adversarially verifies each finding with tier-appropriate evidence (quoted
-evidence always; a concrete failure scenario for major-or-worse, a clear
-rationale for minor/nit). Its verification floor is REPRODUCTION-based
-(RVW02-WS08, F2 #665): a finding is DROPPED only when adversarial verification
-actively REFUTES it — never merely because the judge is unsure — and a
-reproducing finding is kept, never downgraded. It then normalizes **Severity**
-onto the shared ladder, and assigns every
-judged finding a **Disposition**. It NEVER originates findings — a judge that
-also finds is a monolithic reviewer again, with the anchoring bias the fan-out
-exists to remove.
-
-Two deliberate constraints (ADR-0045) live here:
-
-  * the calibrator is ONE fixed TABLE-LEVEL agent/model shared by every
-    reviewer (:class:`CalibratorConfig`, default ``claude`` at high
-    ReasoningLevel) — per-reviewer calibrators would fork the common severity
-    ruler; and
-  * its contract is enforced at the I/O BOUNDARY (:func:`parse_calibration`):
-    schema-validated output, a disposition on every judged finding, and no
-    finding absent from the input union — an out-of-range id (an originated
-    finding), a doubly-judged id, or an unjudged union finding each raises
-    :class:`CalibrationContractError` loud. The calibrator's *wisdom* is
-    deliberately NOT tested or enforced (that is what the offline A/B harness
-    measures); only its I/O contract is.
-
-Two code-enforced routings ride the same boundary, deterministic rather than
-prompt-trusted: a POST-disposition finding with NO quoted evidence is flipped
-to ``drop-unverified`` (the verification floor — quoted evidence always), and
-duplicates never post (only the canonical finding a duplicate merged into
-does). Severity follows the domain fail-safe (:func:`~shipit.finding.parse_severity`
-else ``major``): an unparseable severity forces a round rather than slipping
-past the Breaker.
-
-Launching (:func:`run_calibrator`) rides the SAME spawn seam as every other
-agent launch (:mod:`shipit.spawn.backends` adapter + :func:`shipit.spawn.launch.launch`),
-read-only in the shared Tree (live path) or the replay checkout (offline
-fan-out replay, RVW03-WS01 — where the judge's ground truth is the range's
-``git diff``, matching the passes' own diff source) so the judge can verify
-evidence against the real checkout. The ``claude`` result envelope
-(``--output-format json``) is unwrapped here: its ``session_id`` becomes the
-calibrator's run id (a backend with no envelope gets a minted id) and its
-``usage`` block becomes the run's measured token cost (RVW03-WS04 — captured at
-launch-result level; the round record's ``round.runs`` entry carries it, no
-transcript join involved).
-"""
+"""The one judge between a reviewer's passes and the posted review. See docs/adr/0045-dimension-fanout-single-calibrator.md."""
 
 from __future__ import annotations
 
@@ -82,38 +33,15 @@ from .usage import UNREPORTED, TokenUsage, from_claude_envelope, from_codex_stde
 
 logger = logging.getLogger("shipit.review")
 
-#: The role the calibrator launches under — the read-only reviewer posture
-#: (mirrors :data:`shipit.review.producer._REVIEWER_ROLE`): the judge reads the
-#: checkout and the diff to verify evidence; it never edits and never posts.
 _CALIBRATOR_ROLE = "reviewer"
 
-#: The canonical `<N>s` duration shape a calibrator ``timeout`` carries — the
-#: same shape as the Roster's per-reviewer ``timeout`` (whole seconds, ``s``
-#: suffix).
+#: The canonical `<N>s` duration shape a calibrator ``timeout`` carries.
 _TIMEOUT_SHAPE = re.compile(r"^[1-9][0-9]*s$")
 
 
 @dataclass(frozen=True)
 class CalibratorConfig:
-    """The table-level calibrator launch config — ONE value for every reviewer.
-
-    ``backend`` is a spawn-adapter token (``claude`` / ``codex`` /
-    ``antigravity``); ``model`` an optional verbatim/alias model id (``None`` →
-    the backend's own default); ``reasoning`` the chosen
-    :class:`~shipit.agent.invocation.ReasoningLevel` token, threaded to REAL
-    argv where the backend carries a knob (RVW03-WS04, #685: ``claude
-    --effort``; codex ``-c model_reasoning_effort``; agy has none) — the round
-    record's calibrator run stamps the level the adapter ACTUALLY applied, so
-    a knob-less backend records unset rather than echoing this config value;
-    ``timeout`` the launch-seam process deadline (canonical
-    ``<N>s``). The shipped default is the ADR-0045 decision: ``claude`` at
-    ``high`` reasoning.
-
-    Construction is validation (the Roster convention): a config that
-    constructs is well-formed. MEMBERSHIP (is ``backend`` a real spawn
-    backend?) is validated here too — the loader wraps the ``ValueError`` into
-    its config error, so an unknown calibrator backend fails loud at load.
-    """
+    """The table-level calibrator launch config; constructing it validates it."""
 
     backend: str = "claude"
     model: str | None = None
@@ -144,35 +72,16 @@ class CalibratorConfig:
             )
 
 
-#: The shipped default calibrator (ADR-0045): the ``claude`` backend at high
-#: ReasoningLevel, the backend's own default model, the review path's default
-#: 600s deadline.
 DEFAULT_CALIBRATOR = CalibratorConfig()
 
 
 class CalibrationContractError(RuntimeError):
-    """The calibrator's output violated its I/O contract (RVW02-WS04).
-
-    Raised by :func:`parse_calibration` when the output is not the documented
-    shape, judges a finding absent from the input union (an ORIGINATED finding
-    — the never-originates rule, enforced where checkable), judges a union
-    finding twice, omits one (no disposition on a judged finding), or carries
-    an unknown disposition. The fan-out treats it exactly like an unparseable
-    backend: the round degrades loud (ADR-0006 — non-blocking), never posts a
-    half-judged review.
-    """
+    """The calibrator's output violated its I/O contract."""
 
 
 @dataclass(frozen=True)
 class CalibratedFinding:
-    """One judged union finding: the final domain Finding + its routing.
-
-    ``id`` is the union index it judged; ``merged`` the union indices deduped
-    INTO it (its duplicates — judged through it, never separately);
-    ``duplicate_of`` is set on an entry that itself was merged away (the
-    inverse edge, derived at parse so consumers need no second lookup). A
-    merged-away entry never posts regardless of disposition.
-    """
+    """One judged union finding; an entry with ``duplicate_of`` set was merged away and never posts."""
 
     id: int
     finding: Finding
@@ -183,15 +92,11 @@ class CalibratedFinding:
 
 @dataclass(frozen=True)
 class CalibrationResult:
-    """The calibrator's validated output: the judged findings + its summary."""
-
     overall_feedback: str
     entries: tuple[CalibratedFinding, ...]
 
 
-#: Prose schema for the calibrator's output — described in-prose for every
-#: backend (``claude`` and ``agy`` have no native schema flag; keeping one
-#: presentation keeps the parse boundary single).
+#: Prose schema for the calibrator's output — described in-prose for every backend.
 _CALIBRATION_SCHEMA_PROSE = """\
 Output JSON shape (your ENTIRE stdout must be exactly one JSON object of this \
 shape — no prose, no markdown fences, nothing before or after it):
@@ -219,31 +124,7 @@ def build_calibrator_task(
     pr_number: int | None = None,
     commit_range: tuple[str, str] | None = None,
 ) -> str:
-    """Compose the calibrator task: judge ``candidates_json`` against its diff.
-
-    The judge contract (ADR-0045, its verification floor amended by
-    RVW02-WS08/F2 #665): never originate; dedup by
-    merging (``merged`` ids); adversarially verify with tier-appropriate
-    evidence (quoted evidence always; a concrete failure scenario for
-    major-or-worse, a clear rationale for minor/nit). The verification floor is
-    REPRODUCTION-based (RVW02-WS08, F2 #665): a finding is dropped
-    ``drop-unverified`` only when it is actively REFUTED (misquoted evidence,
-    code that does not behave as claimed, a failure that cannot occur), never
-    merely because the judge is unsure or cannot phrase a perfect rationale — a
-    finding that reproduces is kept, never downgraded. Route pre-existing / beyond-diff
-    findings ``out-of-scope``; normalize severity on the merge-block ruler;
-    cover EVERY candidate id exactly once (own ``id`` or another entry's
-    ``merged``). ``candidates_json`` is the union as a JSON array of
-    ``{id, dimension, file, line, severity, category, confidence, text,
-    evidence, fix}`` objects; the task embeds it whole.
-
-    The GROUND-TRUTH source is the one target-conditional part (RVW03-WS01):
-    exactly one of ``pr_number`` (the live path — the judge reads
-    ``gh pr diff``) or ``commit_range`` (the offline fan-out replay — the judge
-    reads ``git diff <base>..<head>`` and is told it is offline, matching the
-    passes' own diff source) must be given; anything else is a caller error
-    raised loud as ``ValueError``.
-    """
+    """Compose the calibrator task; exactly one of ``pr_number`` / ``commit_range`` is required."""
     if (pr_number is None) == (commit_range is None):
         raise ValueError(
             "build_calibrator_task: exactly one of pr_number (live PR) and "
@@ -263,12 +144,7 @@ def build_calibrator_task(
             "offline and touches nothing on GitHub. Read the surrounding code in "
             "this checkout wherever you need context to judge a candidate."
         )
-        # The result sink and diff-scope nouns follow the offline framing too, so
-        # the body never contradicts `situation`/`ground_truth` by naming a PR or
-        # a GitHub post (RVW03-WS01). The passes reach the same offline scoping
-        # through the shared `_scope_and_context` baseline (carrying the range
-        # diff noun) plus their range diff fetch (ADR-0050); the calibrator
-        # states it inline because its prompt does not carry that baseline.
+        # Follow the offline framing so the body never names a PR or a post.
         result_fate = "recorded in the local replay record"
         diff_noun = "this range's diff"
         summary_owner = "the review's"
@@ -352,25 +228,7 @@ and {settle}."""
 def parse_calibration(
     payload: Mapping[str, object], union: Sequence[Mapping[str, object]]
 ) -> CalibrationResult:
-    """Validate a calibrator output ``payload`` against the input ``union`` —
-    the contract's I/O boundary. PURE.
-
-    ``union`` is the candidate list the task embedded (index == candidate id);
-    ``payload`` the JSON object the calibrator emitted. Enforces the RVW02-WS04
-    contract loud (:class:`CalibrationContractError`): the documented shape, a
-    known disposition on every judged finding, and EXACT union coverage — every
-    candidate id exactly once across entry ``id``\\ s and ``merged`` lists, no
-    id outside the union (never-originates, enforced where checkable).
-
-    Fail-safe coercions (never violations, the domain conventions): an
-    unparseable severity lands on ``major`` (forces a round rather than
-    slipping the Breaker); a blank judged ``text``/``evidence``/``fix`` falls
-    back to the union candidate's own. One deterministic routing is applied
-    HERE, not trusted to the prompt: a ``post`` entry whose evidence is empty
-    after fallback is flipped to ``drop-unverified`` — quoted evidence always
-    is the verification floor. Location/category/confidence always come from
-    the union candidate (the calibrator judges; it does not relocate).
-    """
+    """Validate a calibrator ``payload`` against the ``union`` it judged, indexed by candidate id."""
     if not isinstance(payload, Mapping):
         raise CalibrationContractError(
             f"calibrator output must be a JSON object, got {type(payload).__name__}"
@@ -446,9 +304,7 @@ def parse_calibration(
         evidence = _text_or(raw.get("evidence"), candidate.get("evidence"))
         fix = _text_or(raw.get("fix"), candidate.get("fix"))
         if disposition is Disposition.POST and not evidence.strip():
-            # The verification floor, code-enforced: "quoted evidence always".
-            # An unevidenced post IS an unverified finding — routed out,
-            # retained in the record, never posted.
+            # An unevidenced post is an unverified finding.
             disposition = Disposition.DROP_UNVERIFIED
         line = candidate.get("line")
         confidence = candidate.get("confidence")
@@ -482,12 +338,7 @@ def parse_calibration(
             "judged finding needs a disposition; none may be silently dropped"
         )
 
-    # Materialize the inverse dedup edge: each merged-away candidate becomes a
-    # judged entry of its own (the canonical twin's severity/disposition, its
-    # OWN location/text from the union) so the round record retains every
-    # union finding with an honest routing — merged-away entries never post.
-    # Index the canonicals by id once (every canonical is already appended; the
-    # duplicates this loop appends are never merge targets) so the lookup is O(1).
+    # The duplicates appended below are never merge targets, so this stays complete.
     canonical_by_id = {e.id: e for e in entries}
     for merged_id, canonical_id in duplicate_of.items():
         canonical = canonical_by_id[canonical_id]
@@ -521,8 +372,7 @@ def parse_calibration(
 
 
 def _text_or(value: object, fallback: object) -> str:
-    """The judged string field, else the union candidate's own — a blank/absent
-    calibrator field never erases what the pass reported."""
+    """The judged string field, else the union candidate's own."""
     if isinstance(value, str) and value.strip():
         return value
     return fallback if isinstance(fallback, str) else ""
@@ -530,18 +380,6 @@ def _text_or(value: object, fallback: object) -> str:
 
 @dataclass(frozen=True)
 class CalibratorRun:
-    """One calibrator launch's full capture (RVW03-WS04): the validated
-    calibration plus the launch's measurements.
-
-    ``run_id`` is the claude envelope's ``session_id`` when the backend yields
-    one, else a minted uuid hex; ``task`` the exact prompt that ran (the caller
-    variant-hashes it for the round record); ``usage`` the launch's token cost
-    as the CLI reported it (claude: the envelope's ``usage`` block; codex: the
-    stderr figure; agy: explicitly unreported); ``reasoning`` the ReasoningLevel
-    the adapter ACTUALLY wired into argv (``None`` = no knob applied — the
-    record stamps this, never ``config.reasoning``).
-    """
-
     result: CalibrationResult
     run_id: str
     task: str
@@ -560,42 +398,6 @@ def run_calibrator(
     artifacts: RunArtifacts | None = None,
     correlation: Mapping[str, object] | None = None,
 ) -> CalibratorRun:
-    """Launch the calibrator over ``union`` in the checkout at ``cwd`` and
-    return its :class:`CalibratorRun`.
-
-    The launch rides the shared spawn seam (adapter argv + auth-env scrub +
-    :func:`shipit.spawn.launch.launch` under the ``config.timeout`` process
-    deadline) with the read-only reviewer posture — the judge verifies evidence
-    against the real checkout but can neither edit nor post. ``cwd`` is the
-    per-Run read-only Tree on the live path, the replay checkout on the offline
-    one; exactly one of ``pr_number`` / ``commit_range`` selects the judge's
-    ground-truth diff source (:func:`build_calibrator_task`, RVW03-WS01 — the
-    range form matches the passes' own ``git diff`` so an offline replay's judge
-    sees the same diff they did). ``config.reasoning`` reaches real argv where
-    the backend has a knob (:func:`_adapter_for`), and the returned ``reasoning``
-    is what was actually applied (RVW03-WS04).
-
-    ``artifacts`` (RVW03-WS02) is the judge run's fail-open bundle: the exact
-    task text is written before the launch, the RAW stdout/stderr + launch meta
-    (exit code, duration, timed-out flag, and — once unwrapped — the true run
-    id) after, on every path — so a calibrator failure (previously only
-    ``str(exc)``) leaves its full raw output inspectable on disk.
-
-    ``correlation`` (RVW03-WS02) is the fan-out's per-pass log-correlation extras
-    (``reviewer``/``round_id``/the stable surrogate ``run_id`` = ``calibrator``);
-    the raw-output DEBUG record carries them so ``shipit logs --run calibrator``
-    can slice the judge's trail alongside the round's progress events.
-
-    Raises :class:`~shipit.review.backends.BackendUnavailable` (CLI missing),
-    :class:`~shipit.review.backends.BackendError` (a launch-seam timeout / a
-    nonzero child / unparseable output — carrying the raw for the salvage
-    conventions), or :class:`CalibrationContractError` (parseable output that
-    violates the judge contract) — the fan-out maps each to a degraded,
-    non-blocking round (ADR-0006). Passing neither or both of ``pr_number`` /
-    ``commit_range`` is a CALLER contract violation and raises
-    :class:`ValueError` from :func:`build_calibrator_task` before any launch — a
-    programming bug at the call site, not a degraded round.
-    """
     sink = artifacts if artifacts is not None else RunArtifacts.disabled()
     identity = agent_backend.by_name(config.backend)
     if shutil.which(identity.binary) is None:
@@ -604,11 +406,7 @@ def run_calibrator(
             f"{identity.binary!r} CLI on your PATH, but it was not found. "
             "Install it (and log it in), then re-run."
         )
-    # The union candidates carry pass-plumbing the judge must not see (the
-    # RVW03-WS02 ``run_id`` correlation is the record's business, not part of
-    # the judged content — and prompt bytes are variant-hashed, so plumbing in
-    # the task would split experiment arms on non-content):
-    # serialize exactly the documented candidate shape.
+    # Prompt bytes are variant-hashed, so plumbing would split arms on non-content.
     candidates = [{k: v for k, v in c.items() if k != "run_id"} for c in union]
     task = build_calibrator_task(
         json.dumps(candidates, indent=2),
@@ -653,9 +451,6 @@ def run_calibrator(
         exit_code=result.returncode,
         timed_out=False,
     )
-    # The judge's raw output at DEBUG (issue #681 item 2) — the passes get this
-    # via parse_review_output; the calibrator's parse (`_unwrap_output`) now has
-    # the same durable raw trail in the log sink, on top of the bundle on disk.
     logger.debug(
         "calibrator (%s) raw output for pr#%s (%d chars):\n%s",
         config.backend,
@@ -667,9 +462,7 @@ def run_calibrator(
     if result.returncode != 0:
         detail = (result.stderr or "").strip() or (result.stdout or "").strip()
         if sink.dir is not None:
-            # LOCAL breadcrumb to the full raw on disk; the absolute path stays
-            # OUT of the BackendError message, which the service surfaces in the
-            # GitHub-facing funnel check summary (no user-home / state leak).
+            # The path stays out of the GitHub-facing BackendError message.
             logger.warning(
                 "the calibrator (%s) exited %d — full raw output at %s",
                 config.backend,
@@ -685,9 +478,9 @@ def run_calibrator(
     payload, run_id, envelope_usage = _unwrap_output(
         result.stdout or "", backend=config.backend
     )
-    sink.record(run_id=run_id)  # RVW03-WS02: the true run id into the bundle meta
+    sink.record(run_id=run_id)
     if envelope_usage.reported:
-        usage = envelope_usage  # the claude envelope's own usage block
+        usage = envelope_usage
     elif config.backend == "codex":
         usage = from_codex_stderr(result.stderr or "")
     else:
@@ -702,45 +495,24 @@ def run_calibrator(
 
 
 def _adapter_for(config: CalibratorConfig):
-    """The spawn :class:`~shipit.spawn.backends.base.BackendAdapter` instance
-    carrying ``config``'s model, its reasoning level where the backend has a
-    knob (RVW03-WS04), and, for agy, its timeout — a fresh per-run adapter
-    exactly like the producer builds per reviewer; the registry default is used
-    only for an unlisted-but-registered backend (whose knobs we don't know)."""
+    """A fresh spawn adapter carrying ``config``'s model and, where the backend has one, its knobs."""
     if config.backend == "claude":
         return ClaudeAdapter(model=config.model, reasoning=config.reasoning)
     if config.backend == "codex":
-        # config.model None → the adapter's own backend-defined default, never a
-        # duplicated model literal here that could drift from the backend identity.
+        # A None model defers to the adapter's own default, never a literal here.
         if config.model is None:
             return CodexAdapter(reasoning=config.reasoning)
         return CodexAdapter(model=config.model, reasoning=config.reasoning)
     if config.backend == "antigravity":
-        # agy has NO reasoning knob (probed 1.1.1): the config level is dropped
-        # here so the record stamps unset, never an echoed unapplied value.
-        # A None model defers to the adapter's own default (same non-duplication).
+        # agy has no reasoning knob, so the level is dropped, not stamped as applied.
         if config.model is None:
             return AntigravityAdapter(timeout=config.timeout)
         return AntigravityAdapter(model=config.model, timeout=config.timeout)
-    # CalibratorConfig construction already validated backend membership; an
-    # unlisted-but-registered backend falls back to its registry default.
     return resolve_adapter(config.backend)
 
 
 def _unwrap_output(stdout: str, *, backend: str) -> tuple[dict, str, TokenUsage]:
-    """Parse a calibrator's stdout into ``(payload, run_id, usage)``.
-
-    ``claude -p --output-format json`` wraps its answer in a result envelope
-    (``{"result": "<text>", "session_id": …, "usage": …}``); the payload is
-    extracted from the envelope's ``result`` text, the ``session_id`` becomes
-    the run id, and the envelope's ``usage`` block becomes the launch's
-    measured token usage (RVW03-WS04 — captured at launch-result level, no
-    transcript join). Any other shape (codex / agy, or a claude run that
-    emitted the object bare) parses directly, mints a uuid run id, and reports
-    usage :data:`~shipit.review.usage.UNREPORTED` (the caller may still read a
-    non-envelope source, e.g. codex's stderr figure). Unparseable output raises
-    :class:`~shipit.review.backends.BackendError` with the raw attached.
-    """
+    """Parse a calibrator's stdout, bare or enveloped, into ``(payload, run_id, usage)``."""
     try:
         parsed = extract_json(stdout)
     except ValueError as exc:
