@@ -1,9 +1,7 @@
 """The Work Env value: where, and with which activation, work runs.
 
-A resolved composition of existing value objects — WorkingDir, Tree provenance,
-checkout strategy, pixi activation/identity, and a routing decision. Pure and
-deterministic over supplied facts: no launch, probe, provisioning or network work.
-Resolution is boundary-specific, one constructor per boundary.
+A resolved composition of existing value objects, pure over supplied facts. One
+boundary-specific constructor per boundary; nothing here launches or probes.
 """
 
 from __future__ import annotations
@@ -53,7 +51,6 @@ class WorkEnv:
 
 
 def checkout_strategy_name(checkout: CheckoutStrategy) -> str:
-    """The stable structured-log spelling for a checkout strategy."""
     if isinstance(checkout, SessionTree):
         return "session-tree"
     if isinstance(checkout, NewWriteTree):
@@ -90,7 +87,6 @@ def _resolution_record(
     pixi_environment_lock_hash: str | None = None,
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Project supplied resolution facts into the shared flat vocabulary."""
     data: dict[str, Any] = {
         "work_env_boundary": boundary,
         "working_dir": working_dir,
@@ -220,7 +216,6 @@ def resolve_write_run_env(
     pixi_provisioned: bool,
     env_identity: EnvIdentity | None = None,
 ) -> WorkEnv:
-    """Resolve the Work Env for a NEW write Run's freshly materialized Tree."""
     return _resolve_write_env(
         repo=repo,
         tree_path=tree_path,

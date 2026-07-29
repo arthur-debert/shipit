@@ -39,7 +39,6 @@ def _data_path(name: str) -> str:
 
 
 def data_path(name: str) -> str:
-    """Return the filesystem path to a packaged ``shipit.data`` file."""
     return _data_path(name)
 
 
@@ -48,12 +47,7 @@ _RUSTFMT_CONFIG_PATH = _data_path("rustfmt.toml")
 
 @dataclass(frozen=True)
 class Tool:
-    """One linter invocation: the binary plus its check args (files appended).
-
-    ``fix`` is the formatter form applied under ``--fix``; ``None`` means the tool runs
-    its check form in both modes. ``per_manifest`` tools run once per tracked manifest
-    directory, cwd'd there, with no files appended.
-    """
+    """One linter invocation: the binary plus its check args (files appended). ``fix`` is ``None`` for a tool with no safe in-place fix; a ``per_manifest`` tool runs once per tracked manifest directory, cwd'd there, with no files appended."""
 
     binary: str
     check: tuple[str, ...]
@@ -91,12 +85,7 @@ class Tool:
 
 @dataclass(frozen=True)
 class Lang:
-    """A language leg: how files map to it, and the tools that check it.
-
-    An ordinary Lang claims files repo-wide by extension (else shebang). A Lang with
-    ``path_prefixes`` instead claims files sitting directly in those directories,
-    ADDITIVELY to the extension route, with ``extensions`` scoping that claim.
-    """
+    """A language leg. An ordinary Lang claims files repo-wide by extension (else shebang); one with ``path_prefixes`` claims files sitting directly in those directories, ADDITIVELY, with ``extensions`` scoping that claim."""
 
     name: str
     extensions: tuple[str, ...]
@@ -246,7 +235,7 @@ def lang_for(path: str, shebang: str | None = None) -> Lang | None:
 
 
 def _in_dir(path: str, prefix: str) -> bool:
-    """``path`` is an immediate child of directory ``prefix`` (trailing-slash, repo-relative), never nested deeper."""
+    """``path`` is an immediate child of directory ``prefix``, never nested deeper."""
     if not path.startswith(prefix):
         return False
     return "/" not in path[len(prefix) :]
@@ -267,7 +256,6 @@ def path_claimed_langs(path: str) -> list[Lang]:
 
 
 def _interp(shebang: str | None) -> str | None:
-    """The interpreter basename from a shebang line (``/usr/bin/env bash`` → ``bash``)."""
     if not shebang:
         return None
     tokens = shebang.split()
@@ -290,7 +278,6 @@ def manifest_roots(paths: list[str], manifests: tuple[str, ...]) -> list[str]:
 
 
 def _ext(path: str) -> str:
-    """The lowercase extension (with dot) of ``path``, or ``""`` if it has none."""
     name = _basename(path)
     return "." + name.rsplit(".", 1)[-1].lower() if "." in name else ""
 
@@ -349,12 +336,10 @@ def _ignore_matchers(patterns: list[str]) -> list[include.PatternSet]:
 
 
 def path_ignored(path: str, patterns: list[str]) -> bool:
-    """Whether ``path`` matches any consumer ``[lint].ignore`` glob."""
     return any(m.match(path) for m in _ignore_matchers(patterns))
 
 
 def drop_ignored(paths: list[str], patterns: list[str]) -> list[str]:
-    """``paths`` with every consumer-ignored entry removed, order preserved."""
     if not patterns:
         return paths
     matchers = _ignore_matchers(patterns)
@@ -376,18 +361,15 @@ PROTECTED_TESTDATA_GLOBS: tuple[str, ...] = (
 
 @functools.cache
 def _protected_matchers() -> tuple[include.PatternSet, ...]:
-    """The compiled :data:`PROTECTED_TESTDATA_GLOBS` matchers, built once."""
     return tuple(_ignore_matchers(list(PROTECTED_TESTDATA_GLOBS)))
 
 
 def drop_protected_testdata(paths: list[str]) -> list[str]:
-    """``paths`` with every built-in protected test-data path removed, order preserved."""
     matchers = _protected_matchers()
     return [p for p in paths if not any(m.match(p) for m in matchers)]
 
 
 def protected_testdata(paths: list[str]) -> list[str]:
-    """The protected subset of ``paths`` — the exact complement of :func:`drop_protected_testdata`."""
     matchers = _protected_matchers()
     return [p for p in paths if any(m.match(p) for m in matchers)]
 
@@ -412,8 +394,6 @@ def route(
 
 @dataclass(frozen=True)
 class ToolRun:
-    """The outcome of one tool invocation over its file batch."""
-
     lang: str
     binary: str
     label: str
@@ -451,11 +431,7 @@ def parse_cargo_version(output: str) -> str | None:
 
 
 def rust_pin_satisfied(version: str, spec: str) -> bool:
-    """Whether cargo ``version`` satisfies the pixi ``rust`` pin ``spec``.
-
-    Models ``*``, ``==X.Y.Z`` and dot-bounded prefix forms. Any other shape is
-    unmodelled and returns ``True``, so ambiguity keeps the gate hard.
-    """
+    """Whether cargo ``version`` satisfies the pixi ``rust`` pin ``spec``. Models ``*``, ``==X.Y.Z`` and dot-bounded prefix forms; any other shape is unmodelled and returns ``True``, so ambiguity keeps the gate hard."""
     spec = spec.strip()
     if not spec or spec == "*":
         return True
@@ -514,7 +490,6 @@ def _discover(root: Path) -> list[str]:
 
 
 def _read_editorconfig(path: Path) -> str | None:
-    """The body of the root ``.editorconfig`` at ``path``, or ``None`` if unreadable; a leading BOM is stripped."""
     try:
         return path.read_text(encoding="utf-8-sig", errors="replace")
     except OSError:
@@ -533,7 +508,6 @@ def _tracks_root_editorconfig(root: Path) -> bool:
 
 
 def _ignore_globs(root: Path) -> list[str]:
-    """The consumer ``[lint].ignore`` globs from ``root``'s ``.shipit.toml``; no config or no table yields ``[]``."""
     cfg_path = root / config.CONFIG_NAME
     if not cfg_path.is_file():
         return []
@@ -541,7 +515,6 @@ def _ignore_globs(root: Path) -> list[str]:
 
 
 def _shebang(path: Path) -> str | None:
-    """The shebang body of ``path`` (without ``#!``), or ``None``."""
     try:
         with path.open("r", encoding="utf-8", errors="replace") as fh:
             first = fh.readline()
@@ -554,7 +527,6 @@ CHECK_TIMEOUT: float = execrun.DEFAULT_TIMEOUT
 
 
 def _snapshot(root: Path, rel_paths: list[str]) -> dict[str, bytes]:
-    """The pre-image bytes of each ``rel_paths`` file under ``root`` that exists; a missing path is simply not snapshotted."""
     snapshot: dict[str, bytes] = {}
     for rel in rel_paths:
         try:
@@ -615,7 +587,6 @@ def _canonical_config(tool: Tool, root: Path) -> str | None:
 
 
 def _pinned_rust_spec(root: Path) -> str | None:
-    """The repo's pixi-pinned ``rust`` spec from ``root``'s ``pixi.toml``, or ``None`` when missing or malformed."""
     try:
         with (root / "pixi.toml").open("rb") as fh:
             data = tomllib.load(fh)
@@ -638,12 +609,7 @@ def _probe_cargo_version(
 
 
 def _run_tool(binary: str, args: list[str], cwd: Path) -> execrun.ExecResult:
-    """Run ``binary args`` in ``cwd`` through the one Exec runner.
-
-    ``check=False``: a nonzero rc is the tool's verdict; a launch failure raises
-    :class:`~shipit.execrun.ExecError`, which the orchestrator renders as 127. The
-    single choke point where the ambient-config env scrub is applied.
-    """
+    """Run ``binary args`` in ``cwd`` through the one Exec runner under :func:`_scrubbed_env`. ``check=False``: a nonzero rc is the tool's verdict, while a launch failure raises :class:`~shipit.execrun.ExecError`, which the orchestrator renders as 127."""
     return execrun.run(
         [binary, *args],
         cwd=str(cwd),
@@ -669,12 +635,7 @@ def run(
     pinned_rust_spec: Callable[[Path], str | None] | None = None,
     runs_out: list[ToolRun] | None = None,
 ) -> int:
-    """Run the checks over the tree at ``path`` (default ``.``). Returns 0/1.
-
-    ``runs_out``, when given, receives every :class:`ToolRun` outcome. A malformed
-    ``.shipit.toml`` raises :class:`~shipit.config.ConfigError`. The remaining keyword
-    arguments are the I/O seams tests substitute.
-    """
+    """Run the checks over the tree at ``path`` (default ``.``). Returns 0/1. ``runs_out``, when given, receives every :class:`ToolRun`; the remaining keyword arguments are the I/O seams tests substitute."""
     started = time.monotonic()
     root = Path(path or ".").resolve()
     if not root.is_dir():

@@ -50,7 +50,6 @@ def is_prerelease(version: str) -> bool:
 
 
 def _prerelease_key(pre: str) -> tuple[tuple[int, object], ...]:
-    """A semver §11 sort key for a prerelease suffix: numeric identifiers rank below alphanumeric and compare numerically."""
     return tuple(
         (0, int(part)) if part.isdigit() else (1, part) for part in pre.split(".")
     )
@@ -78,8 +77,6 @@ def sort_versions_desc(versions: Iterable[str]) -> list[str]:
 
 @dataclass(frozen=True)
 class Fragment:
-    """One unreleased fragment: its ``CHANGELOG/`` filename and markdown body."""
-
     name: str
     body: str
 
@@ -124,7 +121,6 @@ def classify_dir(names: Iterable[str]) -> DirListing:
 
 
 def _terminated(text: str) -> str:
-    """``text`` with a final newline iff non-empty and not already terminated."""
     if text and not text.endswith("\n"):
         return text + "\n"
     return text

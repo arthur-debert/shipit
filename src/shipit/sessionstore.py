@@ -88,8 +88,8 @@ def plant(checkout: Path | str, repo: Repo, *, home: Path | None = None) -> Plan
     """Point ``checkout``'s slug dir at ``repo``'s one session store; return what happened.
 
     The correct symlink is a no-op, an absent path is linked, a real directory is
-    :func:`adopt`ed then replaced by the link, a foreign symlink is refused. A refusal
-    is a return value; ``OSError`` escapes only for unexpected I/O.
+    :func:`adopt`ed then replaced by the link, a foreign symlink is refused. A refusal is
+    a return value; ``OSError`` escapes only for unexpected I/O.
     """
     store = store_dir(repo, home=home)
     link = link_path(checkout, home=home)
@@ -165,8 +165,7 @@ def adopt(source: Path, target: Path) -> list[str]:
 
     A recursive merge over RELATIVE paths: identical entries drop, differing ones keep
     both, a type conflict is refused untouched, symlinks adopt by link text. Nothing is
-    deleted from a source until verified in the target. The CALLER serializes.
-    """
+    deleted until verified in the target; the CALLER serializes."""
     refusals: list[str] = []
     for entry in sorted(source.iterdir()):
         refusals.extend(_adopt_entry(entry, target / entry.name))

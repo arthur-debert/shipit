@@ -96,12 +96,7 @@ class ExecResult:
 
 
 class ExecError(RuntimeError):
-    """The single transport error: an Exec failed.
-
-    ``rc`` is ``None`` when the child never produced one (timeout or launch failure);
-    ``cause`` is one of the ``CAUSE_*`` tags, the only axis a caller should branch on.
-    Every attribute and the message are pre-redacted, since callers re-log them.
-    """
+    """The single transport error: an Exec failed. ``rc`` is ``None`` when the child never produced one; ``cause`` is a ``CAUSE_*`` tag, the only axis a caller should branch on. Every attribute and the message are pre-redacted."""
 
     def __init__(
         self,
@@ -149,7 +144,7 @@ def _record_fields(
 
 
 def _prompt_summary(text: str) -> str:
-    """Stable bounded stand-in for agent prompt/developer-instruction payloads; idempotent over its own output."""
+    """Stable bounded stand-in for agent prompt payloads; idempotent over its own output."""
     if text.startswith("<redacted: prompt sha256="):
         return text
     digest = hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()[:12]
@@ -157,11 +152,7 @@ def _prompt_summary(text: str) -> str:
 
 
 def _display_argv(argv: list[str] | tuple[str, ...]) -> list[str]:
-    """An argv safe for durable logs, preserving shape but summarizing prompt payloads.
-
-    The child still receives the original argv. Never changes argv LENGTH — stream
-    sanitization zips the raw and display lists positionally.
-    """
+    """An argv safe for durable logs, with prompt payloads summarized. Never changes argv LENGTH — stream sanitization zips the raw and display lists positionally."""
     display = [str(arg) for arg in argv]
     if not display:
         return display
@@ -313,8 +304,8 @@ def run(
             # `input` and `stdin` are mutually exclusive in subprocess.run.
             stdin=subprocess.DEVNULL if input is None else None,
             capture_output=True,
-            # Explicit over `text=True`: undecodable tool output would raise
-            # UnicodeDecodeError, which neither handler below catches.
+            # Explicit over `text=True`, which would raise UnicodeDecodeError on
+            # undecodable tool output — caught by neither handler below.
             encoding="utf-8",
             errors="replace",
             check=False,
@@ -387,13 +378,7 @@ def spawn_detached(
     cwd: str | os.PathLike | None = None,
     env: Mapping[str, str] | None = None,
 ) -> None:
-    """Spawn ``argv`` as a DETACHED fire-and-forget child — the seam's one non-Exec.
-
-    There is no completion to normalize, so no result and no timeout. The child gets its
-    own session and ``/dev/null`` stdio, and is never waited on. One spawn-time record
-    and launch-error normalization still apply: no raw ``OSError`` escapes. ``env``,
-    when given, is the child's FULL environment.
-    """
+    """Spawn ``argv`` as a DETACHED fire-and-forget child — the seam's one non-Exec, so no result and no timeout. One spawn-time record and launch-error normalization still apply; ``env``, when given, is the child's FULL environment."""
     argv = [str(arg) for arg in argv]
     start = time.monotonic()
     try:
@@ -431,12 +416,7 @@ def spawn_detached(
 
 
 def _sanitize_cause(exc: BaseException) -> BaseException:
-    """Scrub raw stream payloads off ``exc`` before chaining it as ``__cause__``.
-
-    ``.args`` must be rebuilt alongside the attributes: ``BaseException.__new__``
-    snapshots the positional constructor arguments there and ``repr`` renders that
-    tuple, so attribute rewrites alone still leak.
-    """
+    """Scrub raw stream payloads off ``exc`` before chaining it as ``__cause__``; ``.args`` must be rebuilt too, since ``repr`` renders that tuple rather than the attributes."""
     if isinstance(exc, subprocess.TimeoutExpired):
         exc.output = None
         exc.stderr = None
@@ -453,7 +433,6 @@ def _sanitize_cause(exc: BaseException) -> BaseException:
 
 
 def _record_failure(error: ExecError, cwd: str | os.PathLike | None) -> None:
-    """The one record for a failed Exec: ERROR, with both stream tails."""
     fields = _record_fields(
         error.argv,
         cwd,
@@ -477,12 +456,10 @@ def _record_failure(error: ExecError, cwd: str | os.PathLike | None) -> None:
 
 
 def _elapsed_ms(start: float) -> int:
-    """Milliseconds elapsed since ``start`` (a ``time.monotonic`` stamp)."""
     return int((time.monotonic() - start) * 1000)
 
 
 def _tail(text: str) -> str:
-    """The last :data:`TAIL_CHARS` of ``text``, stripped."""
     return text[-TAIL_CHARS:].strip()
 
 

@@ -20,11 +20,8 @@ from .identity import Repo, repo_from_slug
 SCHEMA_VERSION = 1
 LIFECYCLE_INBOX = "inbox"
 
-#: Local committer identity stated in the throwaway store clone before its
-#: capture commit. A fresh clone commits on a runner that may carry no global
-#: git identity, so — exactly as the release tap push does (publish.py) — we
-#: set a local identity to keep the commit from dying on "Author identity
-#: unknown" without touching any global state.
+#: Set locally in the throwaway store clone: a runner may carry no global git
+#: identity, and the capture commit must not die on "Author identity unknown".
 OPPORTUNITY_COMMITTER = (
     "shipit opportunities",
     "shipit-opportunities@users.noreply.github.com",
@@ -37,8 +34,6 @@ class OpportunityError(RuntimeError):
 
 @dataclass(frozen=True)
 class OpportunityStoreConfig:
-    """The configured GitHub-backed Opportunity store."""
-
     repo: str
 
 
@@ -57,8 +52,6 @@ class OpportunityCapture:
 
 @dataclass(frozen=True)
 class StoredOpportunity:
-    """The result of writing one Opportunity to the store."""
-
     store_repo: str
     path: str
     commit_message: str
@@ -83,8 +76,6 @@ class StoreGitBoundary(Protocol):
 
 
 class RealStoreGitBoundary:
-    """Real Git-backed store boundary over :mod:`shipit.git`."""
-
     clone = staticmethod(git.clone)
     configure_identity = staticmethod(git.configure_identity)
     add = staticmethod(git.add)
@@ -203,8 +194,6 @@ def allocate_inbox_path(
 
 
 def store_clone_url(store_repo: str) -> str:
-    """Return the HTTPS clone URL for a configured GitHub ``owner/name`` repo."""
-
     return f"https://github.com/{store_repo}.git"
 
 
