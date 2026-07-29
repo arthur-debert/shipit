@@ -89,7 +89,9 @@ skipped and the consumer's own table stays authoritative
 shipit's own repo carries a deliberate, documented ``test`` task conflict, so
 refusing on task ambiguity would make shipit refuse to install itself, and the
 fleet-wide table-conflict count is zero — an untested refusal nobody has ever
-hit. Only the KEY conflict refuses, because only it silently drops a PIN.
+hit. Only the KEY conflict refuses, because only it silently drops a managed
+DECLARATION (a pin in the #1116 incident, but a ``[tasks]`` entry just as
+readily) out of a reconcile that reports success.
 
 Install also runs a RETIRED-COMMAND tripwire over the consumer's pixi tasks
 (#1070, ADR-0066): ``shipit provision lexd`` was deleted with no fallback, but
@@ -721,12 +723,16 @@ def format_pixi_key_conflict(conflict: PixiKeyConflict) -> str:
     DESCRIBED rather than offered as a paste-able snippet, because no single-line
     spelling of it is valid.
 
-    Worded over DECLARATIONS, never over pins (#1133 round 1). A
+    Worded over DECLARATIONS, never over pins (#1133 rounds 1-2). A
     :class:`PixiKeyConflict` can anchor under ``[tasks]`` or
     ``[feature.lint.tasks]`` just as readily as under a dependency table, so
     "also pins" / "off the fleet pin" would misdescribe a colliding ``test``
     task to the operator whose install just refused over it — on the one surface
-    that has to be accurate, since it is all they get.
+    that has to be accurate, since it is all they get. "VERSION" is pin framing
+    too, and the last of it to go: a consumer's ``logs`` task is a command, not
+    a version of anything, so what the repo keeps is its own DECLARATION.
+    ``test_a_key_conflict_message_never_assumes_the_collision_is_a_version_pin``
+    pins the whole vocabulary against a real ``[tasks]``-anchored conflict.
 
     That wording is deliberate (#1133 round 1). The remedy needs two lines — a
     ``[managed.decline]`` header then its ``keep`` assignment — and there is no
@@ -744,8 +750,9 @@ def format_pixi_key_conflict(conflict: PixiKeyConflict) -> str:
         f"this repo's pixi.toml already declares {keys} in {conflict.anchor}, "
         f"which the managed block '{conflict.unit_key}' also declares — splicing "
         f"it would duplicate the key(s) and make pixi.toml unparseable, so the "
-        f"block CANNOT be delivered and this repo would stay on its own version "
-        f"of it. Remedy — pick one: (1) delete this repo's own entry and re-run "
+        f"block CANNOT be delivered and this repo would keep its own declaration "
+        f"instead of the managed one. Remedy — pick one: (1) delete this repo's "
+        f"own entry and re-run "
         f"`shipit install` to adopt the managed one (usually right: these are "
         f"typically hand-rolled entries shipit's managed set has since taken "
         f"over); or (2) to "

@@ -4390,6 +4390,9 @@ def test_a_key_conflict_message_never_assumes_the_collision_is_a_version_pin(
     # ("also pins", "off the fleet pin", "take the managed pin"), which
     # misdescribes a colliding TASK to the operator whose install just refused —
     # the one surface that has to be accurate, since it is all they get.
+    # Round 2 adds "version" to the prohibited vocabulary: a consumer's `logs`
+    # task is a command declaration, so "stay on its own version of it" was the
+    # last of the pin framing hiding in a phrase that reads generic.
     (tmp_path / "pixi.toml").write_text(
         _CONSUMER_PIXI_WITH_NODE.replace("nodejs", "cmake")
         + '\n[tasks]\nlogs = "tail -f my.log"\n'
@@ -4404,10 +4407,20 @@ def test_a_key_conflict_message_never_assumes_the_collision_is_a_version_pin(
     # The message describes it in terms of DECLARATIONS, on every surface.
     message = irec.format_pixi_key_conflict(conflict)
     assert "logs" in message and "[tasks]" in message
-    for pin_framing in ("also pins", "fleet pin", "managed pin", "hand-pins"):
+    for pin_framing in (
+        "also pins",
+        "fleet pin",
+        "managed pin",
+        "hand-pins",
+        "version",
+    ):
         assert pin_framing not in message
+    assert "keep its own declaration" in message
     with pytest.raises(InstallError) as excinfo:
         iapply.reject_pixi_key_conflicts(plan)
+    # The refusal wraps the same formatter, so the whole operator-facing string
+    # carries the vocabulary — not just the fragment the formatter returns.
+    assert "version" not in str(excinfo.value)
     assert "off the managed pin" not in str(excinfo.value)
     assert "under-deliver its managed set" in str(excinfo.value)
 

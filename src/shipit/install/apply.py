@@ -854,7 +854,7 @@ def reject_pixi_key_conflicts(plan: Plan) -> None:
     The conflicted block's decision is already excluded from the plan, so nothing
     unparseable is ever written — what this guard refuses is EXITING 0 over it.
     Warning and continuing treated a block that could not be DELIVERED as a block
-    that did not need delivering: the repo silently kept its own version of
+    that did not need delivering: the repo silently kept its own declaration of
     whatever the block carries, in a reconcile that reported success. In the
     #1116 incident that was always a dependency pin — 16 of 20 portfolio repos,
     most over a hand-pin whose own comment named the shipit gap the managed block
@@ -1002,7 +1002,8 @@ def apply(
     reject_symlinked_dests(plan)
     # After the retired-command tripwire on purpose: a repo can carry both (the
     # fleet shape does), and a dead `provision lexd` call is broken TODAY while a
-    # key conflict is an undelivered pin — report the harder breakage first.
+    # key conflict is an undelivered declaration — report the harder breakage
+    # first.
     reject_stale_provision(plan)
     reject_pixi_key_conflicts(plan)
     activate = activate_hooks or _activate_hooks

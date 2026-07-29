@@ -524,12 +524,13 @@ def run(
             # Fail closed on an undeclined consumer key shadowing a managed pixi
             # block in EVERY applying mode (#1116): the block's decision is
             # already excluded, so what is refused is exiting 0 over a repo left
-            # on its own version of it. Placed before the no-op shortcut for the same
-            # reason as the tripwire above — the rest of the managed set is
-            # typically current, so the plan carries no work and would otherwise
-            # report success over a repo that silently under-delivered. Ordered
-            # after it for the reason apply() states: a repo can carry both, and
-            # a dead call is broken today while an undelivered pin is drift. A
+            # on its own declaration of it. Placed before the no-op shortcut for
+            # the same reason as the tripwire above — the rest of the managed set
+            # is typically current, so the plan carries no work and would
+            # otherwise report success over a repo that silently under-delivered.
+            # Ordered after it for the reason apply() states: a repo can carry
+            # both, and a dead call is broken today while an undelivered
+            # declaration is drift. A
             # DECLINED block is not a conflict, so a declared override installs.
             reject_pixi_key_conflicts(plan)
         if plan.nothing_to_do or dry_run:

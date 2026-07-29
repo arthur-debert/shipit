@@ -1,8 +1,9 @@
 - install: a consumer key shadowing a managed pixi block now **refuses** instead
   of warning and exiting 0 (#1116). A block that could not be **delivered** was
   being treated as a block that did not need delivering — the same shape as #1101
-  one layer up — so the repo silently stayed off the fleet pin while the reconcile
-  reported success. 16 of 20 portfolio repos were in exactly that state; three
+  one layer up — so the repo silently under-delivered its managed set (a pin, a
+  task: the guard is not pin-specific) while the reconcile reported success.
+  16 of 20 portfolio repos were in exactly that state, all over pins; three
   found it only by hand-inspecting a v1.6.0 bump.
 - The supported override is **declaring** it: `[managed.decline].keep` in
   `.shipit.toml` already exists for precisely this, and a declined block is no
