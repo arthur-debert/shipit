@@ -1,33 +1,7 @@
-"""Objective extractors — metrics read deterministically from a run's transcript.
+"""``harness/eval/extractors`` — objective metrics read from a run's transcript.
 
-:func:`extract` is the orchestrator the hook calls; the per-metric work lives in
-**composable pure functions** over already-parsed transcript events (the PRD's
-module #2: "per-metric extractors live *inside* this module, not as separate
-modules"). WS01 carried the one walking-skeleton metric; WS02 grows the full
-transcript-cheap set:
-
-  - **tool-call vector** — per-tool counts (:func:`tool_call_vector`), the scalar
-    :func:`tool_call_count` generalized;
-  - **turn count** — agent steps (:func:`turn_count`);
-  - **stuck-loop fingerprints** — same tool+args hash repeated, or a runaway
-    in-turn iteration count (:func:`stuck_loop`);
-  - **check-bypass / break-glass** greps — `--no-verify` family
-    (:func:`no_verify_count`) and HAR01's `SHIPIT_BREAK_GLASS` escape
-    (:func:`break_glass_count`);
-  - **error / retry** counts (:func:`error_count`, :func:`retry_count`);
-  - **token totals** if the transcript logged them (:func:`token_usage`, ``None``
-    when nothing is logged).
-
-These are PURE over the parsed events, so each is unit-testable from a fixture
-transcript (events in → metric out) and never reads the parser's internals. The
-ONE exception is :func:`exit_hygiene` — a cheap live process/fs check gated to the
-coordinator run's end (clean worktree + no stray PIDs); its git read goes through
-the :mod:`shipit.gh` boundary and its PID source is an injectable seam, so it stays
-thin and patchable. The hook wires it in only for the coordinator (it is not part
-of :func:`extract`, which stays a pure function of the transcript).
-
-The transcript is JSONL: one JSON object per line, each an event. Reading/parsing
-it is the boundary (:func:`iter_events`, tolerant of blank or malformed lines).
+Each metric is a pure function over the parsed JSONL events; :func:`extract` is
+the orchestrator. :func:`exit_hygiene` is the one live process/fs check.
 """
 
 from __future__ import annotations
@@ -41,34 +15,20 @@ from typing import Any
 from ... import execrun, git
 from .. import breakglass
 
-#: A single (tool, args) fingerprint occurring MORE than this many times WITHIN ONE
-#: TURN is the repeated-call stuck-loop signal (PRD: "same tool+args hash >2× in a turn").
+#: Repeats of one (tool, args) fingerprint within ONE turn above this are a stuck loop.
 _REPEAT_THRESHOLD = 2
 
-#: A single model turn running MORE than this many internal agentic iterations
-#: (``message.usage.iterations``) is the runaway stuck-loop signal (PRD: ">8 iterations").
+#: ``message.usage.iterations`` above this in one turn is the runaway stuck-loop signal.
 _ITERATION_THRESHOLD = 8
 
-#: Commit/push check-bypass markers grepped from tool-call inputs. ``--no-verify``
-#: skips git's pre-commit/pre-push hooks; ``--no-hooks`` is the lefthook/husky form.
 _BYPASS_MARKERS = ("--no-verify", "--no-hooks")
 
-#: HAR01's break-glass escape (`SHIPIT_BREAK_GLASS=<truthy>` in a command). The
-#: value capture is a single shell token that STOPS at whitespace, quotes, braces,
-#: and backslashes — so a grep over the JSON-serialized tool input does not swallow
-#: the surrounding JSON syntax (e.g. `{"command": "SHIPIT_BREAK_GLASS=0"}` captures
-#: ``0``, not ``0"}``). Whether a captured value arms or disarms the escape is
-#: decided by :mod:`shipit.harness.breakglass`, shared with the pretooluse hook.
+#: The break-glass assignment. The value capture stops at whitespace, quotes,
+#: braces, and backslashes so a grep over JSON-serialized input keeps no syntax.
 _BREAK_GLASS_RE = re.compile(rf"{re.escape(breakglass.ENV)}\s*=\s*([^\s\"'\\{{}}]+)")
 
 
 def extract(transcript: Path) -> dict[str, Any]:
-    """The objective metrics for a run's transcript (PURE over the on-disk events).
-
-    Reads the transcript once and hands the parsed events to each pure metric. The
-    returned dict is what the record builder folds into the eval record; the hook
-    adds the live :func:`exit_hygiene` block separately for the coordinator run.
-    """
     events = list(iter_events(transcript))
     vector = tool_call_vector(events)
     return {
@@ -85,20 +45,7 @@ def extract(transcript: Path) -> dict[str, Any]:
 
 
 def iter_events(transcript: Path) -> Iterator[dict]:
-    """Yield each transcript event (one parsed JSON object per line).
-
-    Parses lazily, one line at a time — it reads and decodes a line only when the
-    consumer pulls it, so a caller that needs a single pass (or an early exit) never
-    forces the whole file. :func:`extract`, the hook's caller, deliberately does NOT
-    stream: it materializes the events with ``list(...)`` because the per-turn metrics
-    (turn grouping, stuck-loop, token dedup) each walk the events again, so a single
-    materialized pass is cheaper than re-reading the file per metric. Transcripts are
-    transcript-cheap (the hook's "few ms" budget is about avoiding a model call, not
-    about never holding the events in memory). Tolerant by design — blank lines and
-    any line that is not a JSON object are skipped rather than raising, so a
-    partially-written or truncated transcript still yields the events it can. A
-    missing file yields nothing.
-    """
+    """Yield each transcript event; blank/malformed lines and a missing file are skipped."""
     try:
         with transcript.open(encoding="utf-8") as fh:
             for raw_line in fh:
@@ -115,18 +62,8 @@ def iter_events(transcript: Path) -> Iterator[dict]:
         return
 
 
-# --------------------------------------------------------------------------- #
-# Tool-call metrics
-# --------------------------------------------------------------------------- #
-
-
 def tool_call_vector(events: Iterable[Mapping[str, Any]]) -> dict[str, int]:
-    """Per-tool call counts — the tool-call vector keyed by tool name.
-
-    Each ``{"type": "tool_use", "name": …}`` content block on an assistant message
-    is one call; this groups the run's calls by tool so a reader can see whether an
-    agent used the tools its role expects. An unnamed tool_use is keyed ``""``.
-    """
+    """Call counts keyed by tool name; an unnamed ``tool_use`` is keyed ``""``."""
     vector: dict[str, int] = {}
     for block in _tool_use_blocks(events):
         name = str(block.get("name") or "")
@@ -135,17 +72,11 @@ def tool_call_vector(events: Iterable[Mapping[str, Any]]) -> dict[str, int]:
 
 
 def tool_call_count(events: Iterable[Mapping[str, Any]]) -> int:
-    """Total `tool_use` blocks across the run — the tool-call vector summed."""
     return sum(tool_call_vector(events).values())
 
 
 def turn_count(events: Iterable[Mapping[str, Any]]) -> int:
-    """The run's agent-turn (step) count — distinct assistant messages.
-
-    One assistant message is one step the agent took. Streamed events that share a
-    ``message.id`` (a single response delivered in parts) count once; events with
-    no id fall back to counting per assistant event.
-    """
+    """Distinct assistant messages; streamed parts sharing a ``message.id`` count once."""
     seen_ids: set[str] = set()
     count = 0
     for event in events:
@@ -161,27 +92,12 @@ def turn_count(events: Iterable[Mapping[str, Any]]) -> int:
     return count
 
 
-# --------------------------------------------------------------------------- #
-# Stuck-loop fingerprints
-# --------------------------------------------------------------------------- #
-
-
 def stuck_loop(events: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
-    """Stuck-loop fingerprints for the run (PRD module #2).
+    """``detected`` ORs two signals: repeated identical calls within one turn, and
+    runaway in-turn iterations. The counts behind each are returned alongside.
 
-    Two independent signals, OR'd into ``detected``:
-
-      - **repeated identical calls** — the max number of times any single
-        ``(tool, args-hash)`` fingerprint occurs WITHIN ONE TURN; ``> 2`` is the
-        "same tool+args hash >2× in a turn" signal (an agent re-issuing the exact
-        same call inside a single step). Counting per-turn (not across the whole
-        run) is deliberate: a call legitimately repeated once per turn — e.g.
-        ``Bash pytest`` every turn — is NORMAL and must not flag.
-      - **runaway iterations** — the max ``message.usage.iterations`` length across
-        the run's turns; ``> 8`` is a single model turn that spun internally.
-
-    Returns the booleans' inputs too (``max_repeated_calls`` / ``max_turn_iterations``)
-    so the record carries *why* a run was flagged, not just that it was.
+    Repeats are counted PER TURN — a call legitimately repeated once per turn must
+    not flag.
     """
     events = list(events)
     max_repeated = 0
@@ -201,13 +117,6 @@ def stuck_loop(events: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
 
 
 def retry_count(events: Iterable[Mapping[str, Any]]) -> int:
-    """Back-to-back identical tool calls — the run's retry count.
-
-    Counts positions in the ordered tool-call sequence where a call repeats the
-    immediately preceding ``(tool, args)`` fingerprint (the agent re-running the
-    exact same thing). A subset of, and finer-grained than, the stuck-loop repeat
-    signal — it isolates *consecutive* retries from calls merely repeated apart.
-    """
     previous: tuple[str, str] | None = None
     retries = 0
     for block in _tool_use_blocks(events):
@@ -218,19 +127,8 @@ def retry_count(events: Iterable[Mapping[str, Any]]) -> int:
     return retries
 
 
-# --------------------------------------------------------------------------- #
-# Check-bypass / break-glass greps
-# --------------------------------------------------------------------------- #
-
-
 def no_verify_count(events: Iterable[Mapping[str, Any]]) -> int:
-    """Tool calls that bypass the commit/push checks (`--no-verify` family).
-
-    Counts tool_use blocks whose serialized input contains any
-    :data:`_BYPASS_MARKERS` token — one per call regardless of how many markers it
-    carries — so a run that sidestepped the pre-commit/pre-push hooks is visible
-    from the record (PRD user story 3).
-    """
+    """Tool calls carrying any :data:`_BYPASS_MARKERS` token; one per call."""
     count = 0
     for block in _tool_use_blocks(events):
         text = _input_text(block)
@@ -240,37 +138,17 @@ def no_verify_count(events: Iterable[Mapping[str, Any]]) -> int:
 
 
 def break_glass_count(events: Iterable[Mapping[str, Any]]) -> int:
-    """HAR01 break-glass uses in the run — `SHIPIT_BREAK_GLASS=<truthy>` in a command.
-
-    Counts tool calls that ARM the escape (a truthy assignment); a disarming
-    ``=0`` / ``=false`` / … assignment does not count, matching the pretooluse
-    hook's own falsey set. Break-glass frequency is the HAR01-tightening signal
-    (CONTEXT.md "break-glass"; PRD user story 5).
-    """
+    """Tool calls that ARM the break-glass escape; a disarming assignment does not count."""
     count = 0
     for block in _tool_use_blocks(events):
         for value in _BREAK_GLASS_RE.findall(_input_text(block)):
-            # Strip any stray surrounding quotes, then defer the armed/disarmed
-            # decision to the shared break-glass semantics (same falsey set as the
-            # pretooluse hook, including the empty string).
             if breakglass.is_armed(value.strip("\"'")):
                 count += 1
                 break  # one armed use per call, not per assignment occurrence.
     return count
 
 
-# --------------------------------------------------------------------------- #
-# Errors
-# --------------------------------------------------------------------------- #
-
-
 def error_count(events: Iterable[Mapping[str, Any]]) -> int:
-    """Errored tool results in the run — ``tool_result`` blocks flagged ``is_error``.
-
-    A tool whose execution failed comes back as a ``{"type": "tool_result",
-    "is_error": true, …}`` block on the following user message; summing them is the
-    run's error count.
-    """
     count = 0
     for block in _content_blocks(events):
         if block.get("type") == "tool_result" and block.get("is_error"):
@@ -278,24 +156,10 @@ def error_count(events: Iterable[Mapping[str, Any]]) -> int:
     return count
 
 
-# --------------------------------------------------------------------------- #
-# Token totals
-# --------------------------------------------------------------------------- #
-
-
 def token_usage(events: Iterable[Mapping[str, Any]]) -> dict[str, int] | None:
-    """Summed token usage across the run's turns, or ``None`` if none was logged.
+    """Summed assistant-message ``usage``, or ``None`` when no turn logged any.
 
-    Sums ``message.usage`` over every assistant message that carries it
-    (``input_tokens`` / ``output_tokens`` and the cache-read / cache-creation
-    input variants); ``total_tokens`` is input+output. Returns ``None`` when NO
-    turn logged usage, so an absent metric reads as absent rather than a hollow
-    all-zero block (PRD: "token totals if logged … else omit/None").
-
-    Streamed parts of one response share a ``message.id`` and may each carry the
-    same usage block, so usage is consumed ONCE per id (mirroring :func:`turn_count`)
-    rather than summed per event — otherwise a single turn's tokens double-count.
-    Only assistant messages are summed, matching the documented scope.
+    Consumed once per ``message.id`` so streamed parts of one turn do not double-count.
     """
     fields = {
         "input_tokens": 0,
@@ -330,20 +194,8 @@ def token_usage(events: Iterable[Mapping[str, Any]]) -> dict[str, int] | None:
     return fields
 
 
-# --------------------------------------------------------------------------- #
-# Exit hygiene (the one live check — coordinator run only)
-# --------------------------------------------------------------------------- #
-
-
 def _no_stray_pids() -> list[int]:
-    """The default stray-PID source: none.
-
-    A reliable stray-PID check needs a registry of the PIDs a run spawned (a
-    background-shell tracker), which the harness does not yet keep — so the default
-    reports none and this function is the thin, patchable seam a future tracker
-    feeds. Injecting a lister into :func:`exit_hygiene` is how tests (and a later
-    tracker) supply candidate PIDs.
-    """
+    """The default stray-PID source: none — the injectable seam for a PID tracker."""
     return []
 
 
@@ -352,22 +204,13 @@ def exit_hygiene(
     *,
     list_stray_pids: Callable[[], Sequence[int]] = _no_stray_pids,
 ) -> dict[str, Any]:
-    """The coordinator run's exit-hygiene check: clean worktree + no stray PIDs.
-
-    The one impure extractor — a cheap process/fs check gated to the coordinator
-    run's end (PRD user story 13; the live-observed failure was a run that idled
-    with conflict markers still in the tree). The worktree read goes through the
-    :mod:`shipit.git` adapter (``git status --porcelain``); a git failure degrades
-    to ``worktree_clean=None`` rather than raising, honouring the hook's fail-open
-    contract. ``list_stray_pids`` is the injectable PID seam (see :func:`_no_stray_pids`).
-    """
+    """Clean worktree + no stray PIDs; a git failure degrades to ``worktree_clean=None``."""
     try:
         dirty = git.status_porcelain(cwd=str(repo_root))
     except execrun.ExecError:
         worktree_clean: bool | None = None
         dirty_file_count: int | None = None
     else:
-        # The adapter returns the parsed porcelain lines (one per dirty entry).
         worktree_clean = not dirty
         dirty_file_count = len(dirty)
     stray = list(list_stray_pids())
@@ -378,18 +221,7 @@ def exit_hygiene(
     }
 
 
-# --------------------------------------------------------------------------- #
-# Internal helpers (pure over parsed events)
-# --------------------------------------------------------------------------- #
-
-
 def _content_blocks(events: Iterable[Mapping[str, Any]]) -> Iterator[Mapping[str, Any]]:
-    """Yield every content block across all messages (assistant + user turns).
-
-    A message's ``content`` is a list of typed blocks (text, tool_use, tool_result,
-    …); events without a list ``message.content`` (summaries, string-content turns,
-    attachments) contribute nothing and never raise.
-    """
     for event in events:
         message = event.get("message")
         if not isinstance(message, Mapping):
@@ -405,7 +237,6 @@ def _content_blocks(events: Iterable[Mapping[str, Any]]) -> Iterator[Mapping[str
 def _tool_use_blocks(
     events: Iterable[Mapping[str, Any]],
 ) -> Iterator[Mapping[str, Any]]:
-    """Yield each ``tool_use`` block across the run's messages, in transcript order."""
     for block in _content_blocks(events):
         if block.get("type") == "tool_use":
             yield block
@@ -414,14 +245,7 @@ def _tool_use_blocks(
 def _turn_tool_use_blocks(
     events: Iterable[Mapping[str, Any]],
 ) -> Iterator[list[Mapping[str, Any]]]:
-    """Yield, per assistant TURN, the list of that turn's ``tool_use`` blocks.
-
-    A turn is one assistant message. Streamed parts that share a ``message.id`` are
-    the SAME turn and contribute once — taken from the first event bearing that id,
-    mirroring :func:`turn_count`'s dedup so the per-turn stuck-loop count agrees with
-    the turn count on what a "turn" is. An assistant event with no id is its own
-    turn; non-assistant events contribute nothing.
-    """
+    """Per assistant turn, that turn's ``tool_use`` blocks; dedup matches :func:`turn_count`."""
     seen_ids: set[str] = set()
     for event in events:
         message = event.get("message")
@@ -444,12 +268,6 @@ def _turn_tool_use_blocks(
 
 
 def _fingerprint(block: Mapping[str, Any]) -> tuple[str, str]:
-    """A ``(tool-name, canonical-args)`` fingerprint for one tool_use block.
-
-    The args are canonicalized with sorted keys so two calls with identically-valued
-    inputs collide regardless of key order; non-serializable inputs fall back to
-    ``repr`` so a fingerprint is always computable.
-    """
     name = str(block.get("name") or "")
     inp = block.get("input")
     try:
@@ -460,22 +278,18 @@ def _fingerprint(block: Mapping[str, Any]) -> tuple[str, str]:
 
 
 def _input_text(block: Mapping[str, Any]) -> str:
-    """The tool_use input serialized to text for marker greps (``""`` if none)."""
     inp = block.get("input")
     if inp is None:
         return ""
     if isinstance(inp, str):
         return inp
     try:
-        # sort_keys mirrors _fingerprint's canonicalization, so grep/text metrics
-        # are deterministic regardless of input key order.
         return json.dumps(inp, sort_keys=True, default=str)
     except (TypeError, ValueError):
         return repr(inp)
 
 
 def _turn_iteration_counts(events: Iterable[Mapping[str, Any]]) -> Iterator[int]:
-    """Yield the ``message.usage.iterations`` length for each assistant turn that logs it."""
     for event in events:
         message = event.get("message")
         if not isinstance(message, Mapping) or message.get("role") != "assistant":
@@ -489,5 +303,4 @@ def _turn_iteration_counts(events: Iterable[Mapping[str, Any]]) -> Iterator[int]
 
 
 def _int(value: Any) -> int:
-    """Coerce a usage field to ``int`` (a missing/non-numeric field counts as 0)."""
     return value if isinstance(value, int) and not isinstance(value, bool) else 0
