@@ -10,36 +10,26 @@ from dataclasses import dataclass
 
 from ..changelog import SEMVER_RE, is_prerelease, sort_versions_desc
 
-#: Resolved against the latest version tag.
 BUMP_WORDS: tuple[str, ...] = ("major", "minor", "patch")
 
 #: The reserved live-fire suffix: its bump commit travels on the TAG ONLY, so
 #: a pipeline-verification cut leaves the branch's version line clean.
 RELEASE_RC_PRE: str = "release-rc"
 
-#: The ONE place ``v`` decorates a version; the version string never carries it.
 TAG_PREFIX: str = "v"
 
-#: The bump base when the repo has no version tag yet.
 _ZERO: tuple[int, int, int] = (0, 0, 0)
 
 
 @dataclass(frozen=True)
 class VersionSpec:
-    """A PARSED version argument — exactly one of the two shapes."""
-
     semver: str | None = None
     bump: str | None = None
 
 
 @dataclass(frozen=True)
 class ResolvedVersion:
-    """The resolver's verdict: everything prepare branches on, decided pure.
-
-    ``tag_only`` is the ``-release-rc`` contract (push the tag, never advance the
-    branch ref); ``resume`` means the tag ALREADY exists, so prepare skips
-    bump/commit/push and re-emits its SHA.
-    """
+    """The resolver's verdict: everything prepare branches on, decided pure."""
 
     version: str
     tag: str
@@ -49,9 +39,6 @@ class ResolvedVersion:
 
 
 def parse_spec(raw: str) -> VersionSpec:
-    """Parse a version argument into a :class:`VersionSpec`; rejections are
-    :class:`ValueError`, which the click boundary turns into a usage error.
-    """
     if raw in BUMP_WORDS:
         return VersionSpec(bump=raw)
     if raw[:1] in ("v", "V") and SEMVER_RE.match(raw[1:]):
@@ -74,12 +61,7 @@ def parse_spec(raw: str) -> VersionSpec:
 
 
 def version_tags(tags: list[str] | tuple[str, ...]) -> list[str]:
-    """The BARE versions of the ``v<semver>`` tags, newest first.
-
-    Non-version tags are ignored. Build metadata disqualifies a tag too: semver
-    precedence ignores it, so admitting one would make ordering and resume
-    detection inconsistent with the versions a caller can supply.
-    """
+    """The BARE versions of the ``v<semver>`` tags, newest first; ``+`` disqualifies."""
     versions = [
         tail
         for tag in tags
@@ -101,12 +83,7 @@ def _triple(version: str) -> tuple[int, int, int]:
 
 
 def _bump(word: str, latest: str | None) -> str:
-    """Apply ``word`` to the latest version (``None`` -> :data:`_ZERO`). Pure.
-
-    A bump word on a PRERELEASE of the exact target triple FINALIZES it rather than
-    climbing past it — the rc led to that release, so the word that names it closes
-    it. Otherwise a prerelease could only be finalized via ``patch``.
-    """
+    """Apply ``word`` to the latest version; on a matching PRERELEASE it finalizes."""
     if latest is None:
         major, minor, patch = _ZERO
         pre = False
@@ -127,9 +104,7 @@ def _bump(word: str, latest: str | None) -> str:
 
 
 def resolve(spec: VersionSpec, tags: list[str] | tuple[str, ...]) -> ResolvedVersion:
-    """Resolve ``spec`` against the repo's existing ``tags``; a bump word resolves
-    against the latest version tag, and ``resume`` is set when its tag exists.
-    """
+    """Resolve ``spec`` against the repo's ``tags``; ``resume`` is set when its tag exists."""
     existing = version_tags(tags)
     if spec.semver is not None:
         version = spec.semver

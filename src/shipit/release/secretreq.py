@@ -12,21 +12,18 @@ from dataclasses import dataclass
 from ..agent import backend as _backend
 from ..config import Artifact, SecretSource
 
-#: Required of every RELEASE-CAPABLE repo — one declaring an endpoint.
 PREPARE_SECRETS: tuple[str, ...] = ("RELEASE_TOKEN",)
 
-#: The sign-mac stage's unconditional requirement; the notary credentials are
-#: an either-satisfies set, not a conjunction, so they are elsewhere.
+#: Unconditional; the notary credentials are an either-satisfies set instead.
 SIGN_MAC_CERT_SECRETS: tuple[str, ...] = (
     "APPLE_CERTIFICATE",
     "APPLE_CERTIFICATE_PASSWORD",
 )
 
-#: Required names whose EMPTY value is VALID presence — the ONE authority, so
-#: no consumer drifts from the signer. Still synced; only the DEMAND relaxes.
+#: Names whose EMPTY value is VALID presence — the ONE authority, so no
+#: consumer drifts from the signer. Still synced; only the DEMAND relaxes.
 EMPTY_VALID_SECRETS: frozenset[str] = frozenset({"APPLE_CERTIFICATE_PASSWORD"})
 
-#: Takes precedence when both trios are complete.
 ASC_NOTARY_SECRETS: tuple[str, ...] = (
     "ASC_API_KEY_BASE64",
     "ASC_API_KEY_ID",
@@ -54,7 +51,6 @@ class AlternativeSet:
     alternatives: tuple[SecretAlternative, ...]
 
     def names(self) -> tuple[str, ...]:
-        """Every name any alternative consumes, flat, first-seen order."""
         seen: dict[str, None] = {}
         for alt in self.alternatives:
             for name in alt.names:
@@ -84,7 +80,6 @@ class AlternativeSet:
         }
 
 
-#: EITHER complete trio satisfies it.
 NOTARY_SECRETS: AlternativeSet = AlternativeSet(
     label="notary credentials",
     alternatives=(
@@ -93,8 +88,8 @@ NOTARY_SECRETS: AlternativeSet = AlternativeSet(
     ),
 )
 
-#: Per-endpoint requirements, keyed by exactly :data:`shipit.config.ENDPOINTS`.
-#: These are GITHUB SECRET NAMES, which may differ from the source key.
+#: Keyed by exactly :data:`shipit.config.ENDPOINTS`. These are GITHUB SECRET
+#: NAMES, which may differ from the source key.
 ENDPOINT_SECRETS: dict[str, tuple[str, ...]] = {
     "gh-release": (),
     "crates": ("CARGO_REGISTRY_TOKEN",),
@@ -103,19 +98,15 @@ ENDPOINT_SECRETS: dict[str, tuple[str, ...]] = {
     "vscode-marketplace": ("VSCE_PAT",),
     "open-vsx": ("OVSX_PAT",),
     "brew": ("HOMEBREW_TAP_TOKEN",),
-    # The ambient GITHUB_TOKEN cannot dispatch cross-repo.
     "notify-downstreams": ("DOWNSTREAM_DISPATCH_TOKEN",),
     # The producer's WRITE pair for the channel bucket; readers are authless.
     "conda": ("ARTIFACT_CHANNEL_KEY_ID", "ARTIFACT_CHANNEL_SECRET_KEY"),
-    # zed only RENDERS registry coordinates for a manual PR — no push.
     "zed": (),
 }
 
-#: Nothing derives this as a requirement yet.
 TESTPYPI_SECRET: str = "TESTPYPI_TOKEN"
 
-#: Tolerated in ``[secrets]`` with no requiring entry: never orphaned, never
-#: demanded.
+#: Tolerated with no requiring entry: never orphaned, never demanded.
 TOLERATED: tuple[str, ...] = ("SCCACHE_GCS_KEY", "RELEASE_TOKEN")
 
 
@@ -145,10 +136,7 @@ def reviewer_requirements(reviewers: Sequence[str]) -> tuple[Requirement, ...]:
 def requirements(
     artifacts: Sequence[Artifact], *, reviewers: Sequence[str] = ()
 ) -> tuple[Requirement, ...]:
-    """The full derived requirement set, one entry per (name, requiring entry).
-
-    ``reviewers`` is the PROVISIONING scope; release-only consumers leave it empty.
-    """
+    """The full derived requirement set, one entry per (name, requiring entry)."""
     release_capable = any(artifact.endpoints for artifact in artifacts)
     reqs: list[Requirement] = [
         Requirement(name=name, required_by="prepare push")
@@ -179,7 +167,6 @@ def requirements(
 def required_names(
     artifacts: Sequence[Artifact], *, reviewers: Sequence[str] = ()
 ) -> tuple[str, ...]:
-    """The derived requirement NAMES, deduplicated, first-seen order."""
     seen: dict[str, None] = {}
     for req in requirements(artifacts, reviewers=reviewers):
         seen[req.name] = None
@@ -195,7 +182,6 @@ class AlternativeRequirement:
 def alternative_requirements(
     artifacts: Sequence[Artifact],
 ) -> tuple[AlternativeRequirement, ...]:
-    """One :data:`NOTARY_SECRETS` entry per signing artifact, declaration order."""
     return tuple(
         AlternativeRequirement(
             sets=NOTARY_SECRETS,
@@ -209,9 +195,7 @@ def alternative_requirements(
 def accepted_names(
     artifacts: Sequence[Artifact], *, reviewers: Sequence[str] = ()
 ) -> tuple[str, ...]:
-    """Every ACCEPTED name — required plus every live alternative's; only the required
-    ones are individually demanded.
-    """
+    """Every ACCEPTED name; only the required ones are individually demanded."""
     seen: dict[str, None] = dict.fromkeys(
         required_names(artifacts, reviewers=reviewers)
     )
@@ -224,7 +208,6 @@ def accepted_names(
 def unsatisfied_alternatives(
     artifacts: Sequence[Artifact], sources: Sequence[SecretSource]
 ) -> tuple[AlternativeRequirement, ...]:
-    """The alternative requirements no declared source completes."""
     declared = {source.name for source in sources}
     return tuple(
         alt_req
@@ -239,9 +222,7 @@ def missing_sources(
     *,
     reviewers: Sequence[str] = (),
 ) -> tuple[Requirement, ...]:
-    """The requirements no ``[secrets]`` entry sources; :data:`EMPTY_VALID_SECRETS`
-    names are never reported, so a passwordless repo provisions cleanly.
-    """
+    """The requirements no ``[secrets]`` entry sources, empty-valid names excepted."""
     declared = {source.name for source in sources}
     return tuple(
         req
@@ -262,12 +243,7 @@ def orphans(
 
 
 def secrets_block(artifacts: Sequence[Artifact]) -> str:
-    """The cross-org caller's ``secrets:`` block, from the same derivation.
-
-    Empty when nothing is required: a bare ``secrets:`` key parses as ``null`` and
-    GitHub Actions rejects it. Lists the ACCEPTED names, and takes NO ``reviewers``
-    — those credentials are provisioning, not the release contract.
-    """
+    """The cross-org caller's ``secrets:`` block; empty when nothing is required."""
     names = accepted_names(artifacts)
     if not names:
         return ""

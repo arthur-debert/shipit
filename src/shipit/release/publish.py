@@ -32,13 +32,11 @@ RESULT_SKIPPED = "skipped"
 
 HOMEBREW_TAP = "arthur-debert/homebrew-tools"
 
-#: The tap clone is fresh and hookless, so the formula commit states an identity.
 TAP_COMMITTER = ("shipit release", "shipit-release@users.noreply.github.com")
 
 TESTPYPI_URL = "https://test.pypi.org/legacy/"
 
-#: The GitHub SECRET NAME each adapter looks its token up under. gh-release
-#: declares none: ``gh`` rides its ambient auth, never a synced secret.
+#: gh-release declares none: ``gh`` rides its ambient auth.
 CRATES_SECRET = secretreq.ENDPOINT_SECRETS["crates"][0]
 PYPI_SECRET = secretreq.ENDPOINT_SECRETS["pypi"][0]
 TESTPYPI_SECRET = secretreq.TESTPYPI_SECRET
@@ -50,11 +48,9 @@ NOTIFY_SECRET = secretreq.ENDPOINT_SECRETS["notify-downstreams"][0]
 CONDA_KEY_ID_SECRET = secretreq.ENDPOINT_SECRETS["conda"][0]
 CONDA_SECRET_KEY_SECRET = secretreq.ENDPOINT_SECRETS["conda"][1]
 
-#: The one ``repository_dispatch`` type downstream repos filter the cascade on.
 NOTIFY_EVENT_TYPE = "upstream-release"
 
-#: The CLOSED release-triple -> conda-subdir map. A triple with no entry
-#: (osx-64, musl) is UNSERVED: the conda endpoint skips its archive.
+#: A triple with no entry is UNSERVED: the endpoint skips its archive.
 CONDA_SUBDIRS: dict[str, str] = {
     "aarch64-apple-darwin": "osx-arm64",
     "x86_64-unknown-linux-gnu": "linux-64",
@@ -62,7 +58,6 @@ CONDA_SUBDIRS: dict[str, str] = {
     "x86_64-pc-windows-msvc": "win-64",
 }
 
-#: The Artifact channel buckets; the per-repo channel root is ``<bucket>/<owner/name>``.
 PUBLIC_ARTIFACT_BUCKET = buckets.PUBLIC_ARTIFACT_BUCKET
 PRIVATE_ARTIFACT_BUCKET = buckets.PRIVATE_ARTIFACT_BUCKET
 
@@ -72,21 +67,18 @@ NOARCH_SUBDIR = buckets.NOARCH_SUBDIR
 CONDA_S3_ENDPOINT = buckets.CHANNEL_HOST
 CONDA_S3_REGION = "auto"
 
-#: rattler-build resolves S3 config through the AWS SDK credential chain: the
-#: ``S3_*`` names its ``--help`` suggests are IGNORED and it dies "Could not
-#: determine region from AWS SDK configuration".
+#: rattler-build resolves S3 config through the AWS SDK chain; the ``S3_*``
+#: names its ``--help`` suggests are IGNORED.
 CONDA_S3_ENDPOINT_ENV = "AWS_ENDPOINT_URL"
 CONDA_S3_REGION_ENV = "AWS_REGION"
 CONDA_S3_KEY_ID_ENV = "AWS_ACCESS_KEY_ID"
 CONDA_S3_SECRET_KEY_ENV = "AWS_SECRET_ACCESS_KEY"
 
-#: Scratch subdirs under the staged assets tree, namespaced per artifact
-#: (``<scratch>/<artifact>/…``) — never top-level, so gh-release cannot ship them.
+#: Namespaced per artifact, and never top-level: gh-release would ship them.
 CONDA_RECIPE_SCRATCH = "conda-recipe"
 CONDA_CHANNEL_SCRATCH = "conda-channel"
 
-#: The child-process env var each tool READS its token under — distinct from the
-#: secret NAME above.
+#: What each tool READS its token under, distinct from the secret NAME above.
 CARGO_TOKEN_ENV = "CARGO_REGISTRY_TOKEN"
 NPM_AUTH_ENV = "NODE_AUTH_TOKEN"
 
@@ -95,27 +87,23 @@ OVSX_PAT_ENV = "OVSX_PAT"
 
 VSIX_TARGET_STRINGS: frozenset[str] = frozenset(VSCE_TARGETS.values())
 
-#: cargo's already-published stderr signatures (lowercased match).
 CRATE_ALREADY_PUBLISHED_MARKERS: tuple[str, ...] = (
     "already uploaded",
     "already exists",
 )
 
-#: npm's publish-over-existing stderr signatures (lowercased match).
 NPM_ALREADY_PUBLISHED_MARKERS: tuple[str, ...] = (
     "previously published",
     "cannot publish over",
 )
 
-#: vsce/ovsx's already-published stderr signatures (lowercased match).
 VSIX_ALREADY_PUBLISHED_MARKERS: tuple[str, ...] = (
     "already exists",
     "already published",
     "is already published",
 )
 
-#: ``RunCmd`` raises on a nonzero rc; ``Probe`` returns it for the adapter to
-#: classify. A non-``None`` ``env`` is MERGED over the process environment.
+#: ``RunCmd`` raises on a nonzero rc, ``Probe`` returns it; ``env`` MERGES.
 RunCmd = Callable[[Sequence[str], Path, Mapping[str, str] | None], execrun.ExecResult]
 Probe = Callable[[Sequence[str], Path, Mapping[str, str] | None], execrun.ExecResult]
 
@@ -143,8 +131,6 @@ class PublishRequest:
 
 @dataclass(frozen=True)
 class Published:
-    """One completed endpoint dispatch, as short human-readable action lines."""
-
     artifact: str
     endpoint: str
     actions: tuple[str, ...]
@@ -225,7 +211,6 @@ def check_gate(
 
 
 def is_live_fire(version: str) -> bool:
-    """Whether ``version`` is a ``-release-rc`` live-fire cut. Pure."""
     match = SEMVER_RE.match(version)
     pre = match.group("pre") if match else None
     return pre is not None and (
@@ -233,7 +218,6 @@ def is_live_fire(version: str) -> bool:
     )
 
 
-#: A skip verdict's reason strings — data, so the plan renders without dispatching.
 SKIP_RC_GUARD = "rc-guard: -release-rc publishes to the GH release only"
 SKIP_STABLE_ONLY = "stable-channel only: a prerelease never moves the tap formula"
 SKIP_NOTIFY_PRERELEASE = (
@@ -251,8 +235,6 @@ RELEASE_ENDPOINT = "gh-release"
 
 @dataclass(frozen=True)
 class Dispatch:
-    """One planned (artifact, endpoint) pair: dispatch it, or skip it with a stated reason."""
-
     artifact: config.Artifact
     adapter: EndpointAdapter
     skip: str | None = None
@@ -316,8 +298,7 @@ def plan(
                 if adapter.stage != stage:
                     continue
                 skip = None
-                # Guards first: both reasons hold for a non-selected external
-                # endpoint on an rc cut, and the stronger one must be reported.
+                # Guards first: on an rc cut both hold, and the stronger wins.
                 if live_fire and adapter.external:
                     skip = SKIP_RC_GUARD
                 elif prerelease and adapter.stable_only:
@@ -342,13 +323,12 @@ def plan(
             "downstreams target lands on GitHub before they are notified (both "
             "endpoints are idempotent — a resume converges, nothing is duplicated)"
         )
-    # conda is deliberately NOT bound to gh-release: it packages the staged build
-    # output directly, so a conda-only plan is valid.
+    # conda packages the staged build output directly, so it is NOT bound to
+    # gh-release and a conda-only plan is valid.
     return tuple(dispatches)
 
 
 def required_env_keys(adapter: EndpointAdapter, *, testpypi: bool) -> tuple[str, ...]:
-    """The token env keys this run of ``adapter`` needs (testpypi swaps pypi's)."""
     if adapter.name == "pypi" and testpypi:
         return (TESTPYPI_SECRET,)
     return adapter.secrets
@@ -360,7 +340,6 @@ def missing_secrets(
     *,
     testpypi: bool,
 ) -> tuple[tuple[str, str], ...]:
-    """The ``(endpoint, env key)`` pairs absent from ``env``, over unskipped dispatches."""
     missing: list[tuple[str, str]] = []
     for dispatch in dispatches:
         if dispatch.skip is not None:
@@ -389,12 +368,10 @@ def _leg_for(
 
 
 def _leg_dir(root: Path, leg: config.ToolchainEntry) -> Path:
-    """The leg's absolute directory (``"."`` -> repo root)."""
     return root if leg.path in (".", "") else root / leg.path
 
 
 def _asset_names(assets_dir: Path) -> tuple[str, ...]:
-    """The regular non-hidden files directly under ``assets_dir``, sorted."""
     if not assets_dir.is_dir():
         return ()
     return tuple(
@@ -416,7 +393,6 @@ def release_assets(assets_dir: Path) -> tuple[str, ...]:
 
 
 def _require_token(req: PublishRequest, endpoint: str, key: str) -> str:
-    """``req.env[key]``, or the loud missing-token refusal."""
     token = req.env.get(key)
     if not token:
         raise ReleaseError(
@@ -428,12 +404,10 @@ def _require_token(req: PublishRequest, endpoint: str, key: str) -> str:
 
 
 def _tail(text: str, limit: int = 2000) -> str:
-    """The last ``limit`` characters of ``text``, stripped."""
     return text.strip()[-limit:]
 
 
 def _publish_gh_release(req: PublishRequest) -> Published:
-    """Create-or-edit the GH Release from the notes text, then upload the staged assets."""
     if not req.notes_path.is_file():
         raise ReleaseError(
             f"[artifacts.{req.artifact.name}] gh-release: no notes file at "
@@ -596,7 +570,6 @@ def _pypi_dist_name(req: PublishRequest) -> str:
 
 
 def _publish_pypi(req: PublishRequest) -> Published:
-    """Twine upload of this artifact's staged wheel+sdist, scoped to its distribution."""
     key = TESTPYPI_SECRET if req.testpypi else PYPI_SECRET
     token = _require_token(req, "pypi", key)
     dist = _pypi_dist_name(req)
@@ -688,7 +661,7 @@ def _publish_vsix_marketplace(
     secret: str,
     token_env: str,
 ) -> Published:
-    """Publish this artifact's staged ``.vsix`` files via ``argv_head``, from the npm leg dir."""
+    """Publish this artifact's staged ``.vsix`` files, from the npm leg dir."""
     token = _require_token(req, endpoint, secret)
     leg = _leg_for(req.artifact, req.entries, "npm", endpoint)
     pkg_dir = _leg_dir(req.root, leg)
@@ -717,7 +690,6 @@ def _publish_vsix_marketplace(
 
 
 def _publish_vscode_marketplace(req: PublishRequest) -> Published:
-    """``npm exec -- vsce publish --packagePath`` of this artifact's staged ``.vsix`` files."""
     return _publish_vsix_marketplace(
         req,
         "vscode-marketplace",
@@ -728,7 +700,6 @@ def _publish_vscode_marketplace(req: PublishRequest) -> Published:
 
 
 def _publish_open_vsx(req: PublishRequest) -> Published:
-    """``npm exec -- ovsx publish`` of this artifact's staged ``.vsix`` files."""
     return _publish_vsix_marketplace(
         req,
         "open-vsx",
@@ -739,7 +710,6 @@ def _publish_open_vsx(req: PublishRequest) -> Published:
 
 
 def brew_archives(artifact_name: str, names: Sequence[str]) -> dict[str, str]:
-    """``{target triple: archive name}`` for the artifact's staged mac/linux tarballs."""
     prefix = f"{artifact_name}-"
     archives: dict[str, str] = {}
     for name in sorted(names):
@@ -837,7 +807,6 @@ def _publish_brew(req: PublishRequest) -> Published:
 
 
 def _publish_notify_downstreams(req: PublishRequest) -> Published:
-    """Fire one ``repository_dispatch`` at each declared downstream repo."""
     if req.repo is None:
         raise ReleaseError(
             f"[artifacts.{req.artifact.name}] notify-downstreams: no source "
@@ -867,20 +836,17 @@ def _publish_notify_downstreams(req: PublishRequest) -> Published:
     return Published(req.artifact.name, "notify-downstreams", tuple(actions))
 
 
-#: The conda package-name vocabulary.
 _CONDA_PACKAGE_NAME_RE = re.compile(r"[a-z0-9._-]+")
 
-#: The one noarch-eligible composition whose single archive is an npm ``.tgz``
-#: rather than the ``<artifact>.tar.gz`` the others stage.
+#: The one noarch-eligible composition staging a ``.tgz``, not a ``.tar.gz``.
 NOARCH_WASM_COMPOSITION = bundle_mod.WASM_PACK.name
 
-#: A data artifact has no binary: its payload installs under
-#: ``$PREFIX/share/<package>/``, namespaced so two noarch artifacts never collide.
+#: A data artifact has no binary: its payload installs package-namespaced.
 CONDA_NOARCH_INSTALL_DIR = "share"
 
 
 def conda_subdir(triple: str) -> str | None:
-    """The conda subdir for a release target ``triple``, or ``None`` when unserved."""
+    """The conda subdir for a release ``triple``, or ``None`` when unserved."""
     return CONDA_SUBDIRS.get(triple)
 
 
@@ -933,7 +899,6 @@ def conda_package_name(artifact: config.Artifact) -> str:
 
 
 def _conda_binary_layout(subdir: str, binary: str) -> tuple[str, str, str]:
-    """``(source_filename, install_dir, install_filename)`` for a ``subdir`` package's binary."""
     if subdir == "win-64":
         return f"{binary}.exe", "Scripts", f"{binary}.exe"
     return binary, "bin", binary
@@ -948,7 +913,6 @@ def render_conda_recipe(
     install_dir: str,
     install_binary: str,
 ) -> str:
-    """The ``rattler-build`` recipe.yaml repackaging one prebuilt binary into a ``.conda``."""
     return (
         f"package:\n"
         f"  name: {package}\n"
@@ -970,7 +934,6 @@ def render_conda_recipe(
 
 
 def conda_noarch_eligible(artifact: config.Artifact) -> bool:
-    """Whether the artifact's bundle composition is ``platform_independent``."""
     bundle = artifact.bundle
     if bundle is None:
         return False
@@ -979,7 +942,6 @@ def conda_noarch_eligible(artifact: config.Artifact) -> bool:
 
 
 def conda_noarch_asset_name(artifact: config.Artifact, version: str) -> str:
-    """The known staged name of a noarch artifact's one platform-independent archive."""
     bundle = artifact.bundle
     if bundle is not None and bundle.composition == NOARCH_WASM_COMPOSITION:
         return npm_tarball_name(integrity_mod.expected_main_binary(artifact), version)
@@ -989,7 +951,6 @@ def conda_noarch_asset_name(artifact: config.Artifact, version: str) -> str:
 def conda_noarch_asset(
     artifact: config.Artifact, version: str, names: Sequence[str]
 ) -> str | None:
-    """That archive's name when staged, else ``None``."""
     want = conda_noarch_asset_name(artifact, version)
     return want if want in names else None
 
@@ -1016,7 +977,6 @@ def render_conda_noarch_recipe(
     archive_path: str,
     install_dir: str,
 ) -> str:
-    """The ``rattler-build`` recipe.yaml repackaging one archive as ``noarch: generic``."""
     return (
         f"package:\n"
         f"  name: {package}\n"
@@ -1036,7 +996,6 @@ def render_conda_noarch_recipe(
 
 
 def _conda_channel_env(key_id: str, secret_key: str) -> dict[str, str]:
-    """The rattler-build S3 child env: fixed endpoint/region plus the write HMAC pair."""
     return {
         CONDA_S3_ENDPOINT_ENV: CONDA_S3_ENDPOINT,
         CONDA_S3_REGION_ENV: CONDA_S3_REGION,
@@ -1046,7 +1005,6 @@ def _conda_channel_env(key_id: str, secret_key: str) -> dict[str, str]:
 
 
 def _conda_channel_url(req: PublishRequest) -> str:
-    """``s3://<bucket>/<repo>``, the bucket derived from the repo's visibility."""
     private = bool(req.ghio.repo_is_private(req.repo))
     bucket = PRIVATE_ARTIFACT_BUCKET if private else PUBLIC_ARTIFACT_BUCKET
     return f"s3://{bucket}/{req.repo}"
@@ -1055,7 +1013,6 @@ def _conda_channel_url(req: PublishRequest) -> str:
 def _publish_conda_noarch(
     req: PublishRequest, *, key_id: str, secret_key: str
 ) -> Published:
-    """Build the one ``noarch: generic`` ``.conda`` and publish+reindex it to ``noarch/``."""
     package = conda_noarch_package_name(req.artifact)
     asset_name = conda_noarch_asset(
         req.artifact, req.version, release_assets(req.assets_dir)
@@ -1068,8 +1025,8 @@ def _publish_conda_noarch(
             f"composition stages the one platform-independent archive the noarch "
             f"mode repackages; run `shipit release bundle` first"
         )
-    # `assets_dir` is stage-wide, so an un-namespaced channel tree would let a
-    # second conda artifact's post-build glob pick up this one's `.conda`.
+    # `assets_dir` is stage-wide: un-namespaced, a second conda artifact's
+    # post-build glob would pick up this one's `.conda`.
     recipe_dir = (
         req.assets_dir / CONDA_RECIPE_SCRATCH / req.artifact.name / NOARCH_SUBDIR
     )
@@ -1092,8 +1049,8 @@ def _publish_conda_noarch(
             "build",
             "--recipe",
             str(recipe),
-            # NO `--target-platform noarch`: rattler-build refuses it ("that should
-            # be defined in the recipe"); `build.noarch: generic` routes it.
+            # NO `--target-platform noarch`: rattler-build refuses it; the
+            # recipe's `build.noarch: generic` is what routes the package.
             "--output-dir",
             str(channel_dir),
             "--package-format",
@@ -1136,7 +1093,7 @@ def _publish_conda_noarch(
 
 
 def _publish_conda(req: PublishRequest) -> Published:
-    """Repackage the staged build-output archives into ``.conda`` packages and publish them."""
+    """Repackage the staged build-output archives into ``.conda`` packages and publish."""
     if req.repo is None:
         raise ReleaseError(
             f"[artifacts.{req.artifact.name}] conda: no source repo resolved — "
@@ -1145,8 +1102,7 @@ def _publish_conda(req: PublishRequest) -> Published:
         )
     key_id = _require_token(req, "conda", CONDA_KEY_ID_SECRET)
     secret_key = _require_token(req, "conda", CONDA_SECRET_KEY_SECRET)
-    # A data artifact has no triple, so it takes the single-package noarch path
-    # and derives its own flattened package name inside it.
+    # A data artifact has no triple, so it takes the noarch path.
     if conda_noarch_eligible(req.artifact):
         return _publish_conda_noarch(req, key_id=key_id, secret_key=secret_key)
     package = conda_package_name(req.artifact)
@@ -1162,8 +1118,8 @@ def _publish_conda(req: PublishRequest) -> Published:
             f"(osx-64 / musl) or an unbuilt matrix publishes nothing"
         )
     binary = integrity_mod.expected_main_binary(req.artifact)
-    # `assets_dir` is stage-wide, so an un-namespaced `conda-channel/<subdir>`
-    # would let a second conda artifact re-publish this one's `.conda`.
+    # `assets_dir` is stage-wide: un-namespaced, a second conda artifact would
+    # re-publish this one's `.conda`.
     recipe_root = req.assets_dir / CONDA_RECIPE_SCRATCH / req.artifact.name
     channel_dir = req.assets_dir / CONDA_CHANNEL_SCRATCH / req.artifact.name
     built: list[Path] = []
@@ -1201,8 +1157,7 @@ def _publish_conda(req: PublishRequest) -> Published:
                 "--package-format",
                 "conda",
                 "--no-build-id",
-                # `native` skips the tests on a cross-subdir repackage — the
-                # binary cannot execute on the build host.
+                # `native` skips the tests on a cross-subdir repackage.
                 "--test",
                 "native",
             ],
@@ -1235,20 +1190,17 @@ def _publish_conda(req: PublishRequest) -> Published:
     return Published(req.artifact.name, "conda", tuple(actions))
 
 
-#: The foreign, review-gated registry a zed extension publishes THROUGH, by a
-#: maintainer-merged PR. shipit never pushes here; it only renders coordinates.
+#: Publishing is a maintainer-merged PR: shipit only renders the coordinates.
 ZED_REGISTRY = "zed-industries/extensions"
 
-#: The manifest the endpoint reads the registry-keying extension id from; the
-#: zed bundle must declare it as a required payload entry.
+#: The zed bundle must declare this as a required payload entry.
 ZED_MANIFEST = "extension.toml"
 
 #: A scratch SUBDIR, never a top-level file: a gh-release re-run would ship it.
 ZED_SCRATCH = "zed"
 
-#: The Zed extension-id grammar. The id is UNTRUSTED repo content used as both a
-#: TOML table key and a scratch filename, so full-matching it is a security
-#: boundary: it must not traverse the scratch dir or break the rendered row.
+#: The id is UNTRUSTED repo content used as both a TOML table key and a scratch
+#: filename, so full-matching this grammar is a security boundary.
 _ZED_EXTENSION_ID_RE = re.compile(r"[a-z0-9][a-z0-9_-]*")
 
 
@@ -1268,8 +1220,8 @@ def zed_extension_id(text: str) -> str:
             f"(extensions/<id>) are keyed by the extension id"
         )
     if not _ZED_EXTENSION_ID_RE.fullmatch(ext_id):
-        # ascii(): a rejected id may carry newlines or terminal control
-        # sequences, which raw interpolation would inject into the error output.
+        # ascii(): a rejected id may carry control sequences raw interpolation
+        # would inject into the error output.
         raise ReleaseError(
             f"zed: {ZED_MANIFEST} id {ascii(ext_id)} is not a valid Zed "
             f"extension id (one lowercase segment of letters, digits, `-`, `_`; "
@@ -1281,7 +1233,6 @@ def zed_extension_id(text: str) -> str:
 
 
 def render_zed_registry_entry(*, ext_id: str, version: str, repo: str, tag: str) -> str:
-    """The ``zed-industries/extensions`` coordinates a maintainer applies in the publish PR."""
     return (
         f"# {ZED_REGISTRY} registry entry — apply in a PR (ADR-0068):\n"
         f"# advance submodule extensions/{ext_id} to "
@@ -1292,8 +1243,7 @@ def render_zed_registry_entry(*, ext_id: str, version: str, repo: str, tag: str)
     )
 
 
-#: The leg an endpoint-only Zed artifact (no ``bundle``) reads its manifest from
-#: — the only case with no declaration to follow.
+#: For an endpoint-only artifact — the only case with no declaration to follow.
 ZED_ENDPOINT_ONLY_LEG = "rust"
 
 
@@ -1430,8 +1380,7 @@ ZED = EndpointAdapter(
     needs_repo=True,
 )
 
-#: The CLOSED registry, in a stable order; :data:`shipit.config.ENDPOINTS` names
-#: exactly this set. Adding an endpoint is adding an entry, never a switch.
+#: The CLOSED registry; :data:`shipit.config.ENDPOINTS` names exactly this set.
 ADAPTERS: tuple[EndpointAdapter, ...] = (
     GH_RELEASE,
     CRATES,

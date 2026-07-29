@@ -16,7 +16,6 @@ from . import ReleaseError
 
 VERSION_TOKEN = "{version}"
 
-#: Matched as a substring, so cargo's quoting style never matters.
 CARGO_NO_SUCH_COMMAND = "no such command"
 
 #: The CLOSED semver-phase -> PEP 440 map, keys matched lower-cased.
@@ -32,17 +31,12 @@ _PEP440_PHASE: dict[str, str] = {
     "release-rc": "rc",
 }
 
-#: Splits one prerelease identifier into phase word + OPTIONAL number. The
-#: phase admits internal hyphens, so ``release-rc`` parses as one word.
+#: The phase admits internal hyphens, so ``release-rc`` parses as one word.
 _SEMVER_PRE_PHASE_RE = re.compile(r"^(?P<phase>[A-Za-z][A-Za-z-]*?)(?P<num>[0-9]+)?$")
 
 
 def explain_command_failure(argv: Sequence[str], stderr: str) -> str | None:
-    """A remediation message for a KNOWN adapter-command failure, else ``None``.
-
-    The probe is the ATTEMPT itself: cargo resolves custom subcommands via
-    ``$CARGO_HOME/bin`` before PATH, so a ``which`` pre-gate would wrongly abort.
-    """
+    """A remediation message for a KNOWN adapter-command failure, else ``None``."""
     if tuple(argv[:2]) == ("cargo", "set-version") and CARGO_NO_SUCH_COMMAND in stderr:
         return (
             "rust bump needs `cargo set-version` (cargo-edit), which is not "
@@ -63,12 +57,7 @@ def explain_command_failure(argv: Sequence[str], stderr: str) -> str | None:
 
 @dataclass(frozen=True)
 class BumpAdapter:
-    """How a toolchain's leg projects the version.
-
-    ``edit_path`` is a leg-relative manifest a PURE rewrite bumps instead of a
-    command; ``stage`` is the ONLY pathspec set prepare commits. A zero-command,
-    zero-edit entry is a first-class projection: the tag alone.
-    """
+    """How a toolchain's leg projects the version; ``stage`` is all prepare commits."""
 
     toolchain: str
     command_templates: tuple[tuple[str, ...], ...] = ()
@@ -101,21 +90,18 @@ NPM = BumpAdapter(
 )
 PYTHON = BumpAdapter("python", edit_path="pyproject.toml", stage=("pyproject.toml",))
 GO = BumpAdapter("go")
-#: Zero-file like go: no published manifest a downstream resolves.
 TREE_SITTER = BumpAdapter("tree-sitter")
 #: ``edit_path`` resolves against the lua leg's ``lua/<plugin>`` map path.
 LUA = BumpAdapter("lua", edit_path="init.lua", stage=("init.lua",))
 
-#: The CLOSED registry, keyed by toolchain — exactly the
-#: :mod:`shipit.tools.registry` set. No "tauri" key, ever: a Tauri app is a
-#: composition of legs, and its bundle file rides :func:`bump_bundle_config`.
+#: The CLOSED registry, exactly the :mod:`shipit.tools.registry` set. No
+#: "tauri" key, ever: its bundle file rides :func:`bump_bundle_config`.
 ADAPTERS: dict[str, BumpAdapter] = {
     a.toolchain: a for a in (RUST, GO, PYTHON, NPM, TREE_SITTER, LUA)
 }
 
 
 def adapter_for(toolchain: str) -> BumpAdapter:
-    """The registry entry for ``toolchain``; a name outside the closed set raises."""
     adapter = ADAPTERS.get(toolchain)
     if adapter is None:
         known = ", ".join(sorted(ADAPTERS))
@@ -125,21 +111,18 @@ def adapter_for(toolchain: str) -> BumpAdapter:
     return adapter
 
 
-#: Anchored to the ``[project]`` header and crossing only NON-header lines, so
-#: another table's ``version`` key is never rewritten.
+#: Anchored to ``[project]``, so another table's ``version`` is never rewritten.
 _PYPROJECT_VERSION_RE = re.compile(
     r"(?P<head>^\[project\][ \t]*\n(?:(?!^\[).*\n)*?^version[ \t]*=[ \t]*(?P<q>[\"']))"
     r"(?P<value>[^\"']*)(?P<tail>(?P=q))",
     re.MULTILINE,
 )
 
-#: Matched textually so the rewrite PRESERVES the consumer's formatting.
 _JSON_VERSION_RE = re.compile(
     r"(?P<head>\"version\"\s*:\s*\")(?P<value>[^\"]*)(?P<tail>\")"
 )
 
-#: ANCHORED to a real assignment LINE, so a leading comment or an ``M.version``
-#: inside a string or a longer identifier is never bumped.
+#: ANCHORED to a real assignment LINE, so a comment or a string is never bumped.
 _LUA_VERSION_RE = re.compile(
     r"(?P<head>^[ \t]*M\.version[ \t]*=[ \t]*(?P<q>[\"']))(?P<value>[^\"']*)(?P<tail>(?P=q))",
     re.MULTILINE,
@@ -147,7 +130,6 @@ _LUA_VERSION_RE = re.compile(
 
 
 def edit_for(adapter: BumpAdapter, text: str, version: str) -> str:
-    """Apply ``adapter``'s pure manifest rewrite to ``text``, dispatched by toolchain."""
     assert adapter.edit_path is not None
     if adapter.toolchain == "lua":
         return bump_lua_version(text, version)
@@ -155,12 +137,7 @@ def edit_for(adapter: BumpAdapter, text: str, version: str) -> str:
 
 
 def to_pep440(version: str) -> str:
-    """``version`` in PEP 440 spelling; stable versions are identical in both.
-
-    The tag names the version in SEMVER, but ``[project].version`` must be PEP 440:
-    writing ``X.Y.Z-rc.1`` verbatim breaks every source build at the tagged commit.
-    A suffix with no clean mapping, and build metadata, are LOUD refusals.
-    """
+    """``version`` in PEP 440 spelling; an unmappable suffix is a LOUD refusal."""
     match = SEMVER_RE.match(version)
     if match is None:
         raise ReleaseError(f"not a semver version to normalize to PEP 440: {version!r}")
@@ -196,7 +173,6 @@ def to_pep440(version: str) -> str:
 
 
 def bump_pyproject(text: str, version: str) -> str:
-    """``pyproject.toml`` with ``[project].version`` set, normalized to PEP 440."""
     version = to_pep440(version)
     replaced = _PYPROJECT_VERSION_RE.subn(rf"\g<head>{version}\g<tail>", text, count=1)
     if replaced[1] == 0:
@@ -209,11 +185,7 @@ def bump_pyproject(text: str, version: str) -> str:
 
 
 def bump_lua_version(text: str, version: str) -> str:
-    """A plugin's ``init.lua`` with ``M.version`` set, written VERBATIM.
-
-    The replacement is a CALLABLE, not a template: a template would have
-    :meth:`re.Pattern.subn` re-parse the dynamic version for backreferences.
-    """
+    """A plugin's ``init.lua`` with ``M.version`` set, written VERBATIM."""
     replaced = _LUA_VERSION_RE.subn(
         lambda m: f"{m.group('head')}{version}{m.group('tail')}", text, count=1
     )

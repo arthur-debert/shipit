@@ -65,11 +65,7 @@ def formula_class(name: str) -> str:
 
 
 def metadata_for(metadata: dict, artifact: config.Artifact) -> tuple[str, str, str]:
-    """(desc, homepage, license) for ``artifact``'s crate, from parsed ``cargo metadata``.
-
-    Missing description, license, or homepage is a HARD error: a formula never
-    renders with silent blanks.
-    """
+    """(desc, homepage, license) for the crate; any of the three missing is a HARD error."""
     packages = [p for p in metadata.get("packages", []) if isinstance(p, dict)]
     wanted = next(
         (t.package for t in artifact.build if t.toolchain == "rust" and t.package),
@@ -109,9 +105,7 @@ def metadata_for(metadata: dict, artifact: config.Artifact) -> tuple[str, str, s
 
 
 def _ruby_str(value: str) -> str:
-    """``value`` escaped for a Ruby DOUBLE-QUOTED literal, ``#`` included so ``#{…}``
-    interpolation cannot read a Ruby variable at install time.
-    """
+    """``value`` escaped for a Ruby literal, ``#`` included so ``#{…}`` cannot interpolate."""
     return value.replace("\\", "\\\\").replace('"', '\\"').replace("#", "\\#")
 
 
@@ -127,9 +121,7 @@ def _url_sha_lines(url: str, sha: str, *, indent: str, private: bool) -> list[st
 def _os_block(
     os_word: str, pairs: dict[str, tuple[str, str]], *, private: bool
 ) -> list[str]:
-    """One ``on_macos``/``on_linux`` block, split ``on_arm``/``on_intel`` when both are
-    present and bare when the OS ships a single target.
-    """
+    """One ``on_macos``/``on_linux`` block, split ``on_arm``/``on_intel`` when both exist."""
     arm = [pairs[t] for t in sorted(pairs) if _is_arm(t)]
     intel = [pairs[t] for t in sorted(pairs) if not _is_arm(t)]
     lines = [f"  {os_word} do"]
@@ -155,12 +147,7 @@ def render(
     targets: Mapping[str, tuple[str, str]],
     private: bool,
 ) -> str:
-    """The formula text — the ONE shared template, rendered. Pure.
-
-    ``targets`` maps each triple to its FINAL release-asset ``(url, sha256)``, so
-    these are what ``brew install`` actually fetches. A target set with neither a
-    mac nor a linux triple raises: brew has nothing to install.
-    """
+    """The formula text over each triple's FINAL release-asset ``(url, sha256)``."""
     mac = {t: v for t, v in targets.items() if "apple-darwin" in t}
     linux = {t: v for t, v in targets.items() if "linux" in t}
     if not mac and not linux:

@@ -18,11 +18,9 @@ from ..install import artifactdeps
 from ..tools import e2e as e2e_mod
 from . import ReleaseError
 
-#: Pinned: bump deliberately, in its own change.
 CARGO_DEB_VERSION = "3.7.0"
 
-#: Target triple → the vsix composition's ``--target``; vsce names platforms in
-#: its own vocabulary.
+#: vsce names platforms in its own vocabulary, not rust triples.
 VSCE_TARGETS: dict[str, str] = {
     "aarch64-apple-darwin": "darwin-arm64",
     "x86_64-apple-darwin": "darwin-x64",
@@ -32,7 +30,6 @@ VSCE_TARGETS: dict[str, str] = {
     "x86_64-pc-windows-msvc": "win32-x64",
 }
 
-#: Shipped beside the binary WHEN PRESENT.
 DOC_FILES: tuple[str, ...] = (
     "README.md",
     "CHANGELOG.md",
@@ -41,7 +38,6 @@ DOC_FILES: tuple[str, ...] = (
     "LICENSE.txt",
 )
 
-#: The runner seam a composition executes through; a failing command raises.
 RunCmd = Callable[[Sequence[str], Path], execrun.ExecResult | None]
 
 
@@ -61,8 +57,6 @@ class ComposeRequest:
 
 @dataclass(frozen=True)
 class Composed:
-    """One composed artifact: what was produced, as out-tree-relative paths."""
-
     artifact: str
     composition: str
     outputs: tuple[str, ...]
@@ -85,7 +79,6 @@ def _leg_for(
     toolchain: str,
     composition: str,
 ) -> config.ToolchainEntry:
-    """The first ``[toolchains]`` leg of ``toolchain``, or a refusal naming the need."""
     leg = next((entry for entry in entries if entry.toolchain == toolchain), None)
     if leg is None:
         raise ReleaseError(
@@ -96,7 +89,6 @@ def _leg_for(
 
 
 def _compose_archive(req: ComposeRequest) -> Composed:
-    """A ``<name>-<target>/`` subdir (binary + docs), archived beside it."""
     windows = _is_windows(req.target)
     loc = e2e_mod.binary_location(
         req.artifact, req.entries, consumer="bundle", target_triple=req.build_target
@@ -111,8 +103,7 @@ def _compose_archive(req: ComposeRequest) -> Composed:
     stem = f"{req.artifact.name}-{req.target}"
     stage = req.out_dir / stem
     if stage.exists():
-        # `zip -r` UPDATES an archive, so a reused subdir would let a prior
-        # build's files survive into this artifact.
+        # `zip -r` UPDATES an archive, so a prior build's files would survive.
         shutil.rmtree(stage)
     stage.mkdir(parents=True)
     shutil.copy2(binary, stage / binary.name)
@@ -134,7 +125,7 @@ def _compose_archive(req: ComposeRequest) -> Composed:
 def _emit_into_out(
     req: ComposeRequest, argv: Sequence[str], out_flag: str, cwd: Path
 ) -> list[str]:
-    """Run ``argv`` into a fresh scratch dir, move its output into ``out_dir``."""
+    """Run ``argv`` into a fresh scratch dir, then move its output into ``out_dir``."""
     req.out_dir.mkdir(parents=True, exist_ok=True)
     scratch = req.out_dir / f".tmp-{req.artifact.name}"
     if scratch.exists():
@@ -155,15 +146,14 @@ def _emit_into_out(
 
 
 def _compose_deb(req: ComposeRequest) -> Composed:
-    """cargo-deb over the pre-built release binary — no rebuild, no strip."""
     leg = _leg_for(req.artifact, req.entries, "rust", "deb")
     package = next(
         (t.package for t in req.artifact.build if t.toolchain == "rust" and t.package),
         None,
     )
     if shutil.which("cargo-deb") is None:
-        # cargo-deb is not on conda-forge, so no pixi env can carry it. No PATH
-        # re-check after: cargo finds a subcommand via $CARGO_HOME/bin itself.
+        # cargo-deb is not on conda-forge, so no pixi env carries it. No PATH
+        # re-check: cargo finds a subcommand via $CARGO_HOME/bin itself.
         req.run_cmd(
             [
                 "cargo",
@@ -179,7 +169,7 @@ def _compose_deb(req: ComposeRequest) -> Composed:
     if package is not None:
         argv += ["-p", package]
     if req.build_target is not None:
-        # A cross build wrote to target/<triple>/release/; a native one to
+        # A cross build wrote to target/<triple>/release/, a native one to
         # target/release/, which cargo-deb reads with no --target.
         argv += ["--target", req.build_target]
     emitted = _emit_into_out(req, argv, "--output", req.root / leg.path)
@@ -194,7 +184,6 @@ def _compose_deb(req: ComposeRequest) -> Composed:
 
 
 def _compose_wheel(req: ComposeRequest) -> Composed:
-    """``uv build``; BOTH the wheel and the sdist must appear."""
     leg = _leg_for(req.artifact, req.entries, "python", "wheel")
     produced = _emit_into_out(req, ["uv", "build"], "--out-dir", req.root / leg.path)
     wheels = sorted(name for name in produced if name.endswith(".whl"))
@@ -211,11 +200,8 @@ def _compose_wheel(req: ComposeRequest) -> Composed:
 def _payload_operands(
     artifact_name: str, spec: config.BundleSpec, root: Path, leg_rel: str
 ) -> tuple[Path, list[str]]:
-    """The proven-real leg dir and the declared payload's present entries, in order.
-
-    Both are producer-declared, so the refuse-links walk starts at the CHECKOUT
-    ROOT and runs through the leg then each entry: a link anywhere is REFUSED,
-    never followed — the escape is not in the spelling.
+    """The proven-real leg dir and the payload's present entries; a link anywhere on
+    ``root -> leg -> entry`` is REFUSED, never followed.
     """
     where = f"[artifacts.{artifact_name}] {spec.composition} composition"
     root_res = root.resolve()
@@ -281,7 +267,6 @@ def _payload_operands(
 
 
 def _compose_declared_payload(req: ComposeRequest) -> Composed:
-    """``<name>.tar.gz`` of the declared ``bundle.payload``, under its ``bundle.leg``."""
     spec = req.artifact.bundle
     if spec is None or spec.leg is None:
         raise ReleaseError(
@@ -296,20 +281,18 @@ def _compose_declared_payload(req: ComposeRequest) -> Composed:
     if archive_path.exists():
         archive_path.unlink()
     req.run_cmd(
-        # `--` ends the option list: the operands are producer-declared DATA, and
-        # without it GNU tar would run a declared `--checkpoint-action=exec=…`.
+        # `--` ends the option list: the operands are producer-declared DATA,
+        # and GNU tar would otherwise run a `--checkpoint-action=exec=…`.
         ["tar", "-czf", str(archive_path), "-C", str(leg_dir), "--", *present],
         req.root,
     )
     return Composed(req.artifact.name, spec.composition, (archive,))
 
 
-#: wasm-pack's own default output target, when the artifact declares none.
 WASM_PACK_DEFAULT_TARGET = "bundler"
 
 
 def crate_dir_for_package(metadata: dict, package: str) -> Path | None:
-    """The absolute crate dir of workspace ``package``, or ``None`` when absent."""
     for pkg in metadata.get("packages", []):
         if pkg.get("name") == package:
             manifest = pkg.get("manifest_path")
@@ -397,9 +380,7 @@ def _compose_wasm_pack(req: ComposeRequest) -> Composed:
 
 
 def _stage_mac_pair(req: ComposeRequest, source: Path, composition: str) -> Composed:
-    """Stage the unsigned ``.app``/``.dmg`` pair, re-emitting the ``.app`` as a tar
-    preserving the symlinks and exec bits cross-job upload destroys.
-    """
+    """Stage the unsigned ``.app``/``.dmg`` pair, re-emitting the ``.app`` as a tar."""
     apps = _electron_top_level_apps(source)
     dmgs = sorted(p for p in source.rglob("*.dmg") if p.is_file())
     if len(apps) != 1 or len(dmgs) != 1:
@@ -431,7 +412,6 @@ def _stage_mac_pair(req: ComposeRequest, source: Path, composition: str) -> Comp
 
 
 def _compose_mac_app(req: ComposeRequest) -> Composed:
-    """Run the declared bundler, then stage the exactly-one ``.app``/``.dmg`` pair."""
     spec = req.artifact.bundle
     assert spec is not None and spec.command is not None and spec.source is not None
     req.run_cmd(list(spec.command), req.root)
@@ -446,9 +426,7 @@ _TAURI_LINUX_FORMATS: tuple[tuple[str, str], ...] = (
 
 
 def _compose_tauri(req: ComposeRequest) -> Composed:
-    """Run the declared ``tauri build``, then collect this platform's bundles from
-    its tool-controlled subdirs; it never deletes under the declared ``source``.
-    """
+    """Run the declared ``tauri build``, then collect this platform's bundles."""
     spec = req.artifact.bundle
     assert spec is not None and spec.command is not None and spec.source is not None
     req.run_cmd(list(spec.command), req.root)
@@ -486,8 +464,7 @@ def _compose_tauri(req: ComposeRequest) -> Composed:
     return Composed(req.artifact.name, "tauri", tuple(sorted(produced)))
 
 
-#: Per platform: a triple substring, the required PRIMARY distributable suffix,
-#: and the sidecars shipped beside it WHEN PRESENT.
+#: Per platform: a triple substring, the required PRIMARY suffix, its sidecars.
 _ELECTRON_TARGETS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("apple-darwin", ".dmg", (".dmg.blockmap",)),
     ("linux", ".AppImage", (".AppImage.blockmap",)),
@@ -496,7 +473,6 @@ _ELECTRON_TARGETS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
 
 
 def _electron_target(target: str) -> tuple[str, tuple[str, ...]]:
-    """The ``(primary_suffix, sidecars)`` electron-builder emits for ``target``."""
     for needle, primary, sidecars in _ELECTRON_TARGETS:
         if needle in target:
             return primary, sidecars
@@ -507,9 +483,7 @@ def _electron_target(target: str) -> tuple[str, tuple[str, ...]]:
 
 
 def _compose_electron(req: ComposeRequest) -> Composed:
-    """Run the declared electron-builder and collect this platform's distributables;
-    the darwin ``.app`` ships UNSIGNED for the mac signer to reopen.
-    """
+    """Run the declared electron-builder; the darwin ``.app`` ships UNSIGNED."""
     spec = req.artifact.bundle
     assert spec is not None and spec.command is not None and spec.source is not None
     req.run_cmd(list(spec.command), req.root)
@@ -572,7 +546,6 @@ def _electron_top_level_apps(source: Path) -> list[Path]:
 
 
 def _stage_electron_reseal_payload(req: ComposeRequest, source: Path) -> list[str]:
-    """Stage the darwin ``.app`` plus the ``.unsigned-app.tar.gz`` the signer reopens."""
     apps = _electron_top_level_apps(source)
     if len(apps) != 1:
         raise ReleaseError(
@@ -602,7 +575,6 @@ def _stage_electron_reseal_payload(req: ComposeRequest, source: Path) -> list[st
 
 
 def vsce_target(target: str) -> str:
-    """The VS Code target for a rust triple, or a refusal naming the mapped set."""
     vt = VSCE_TARGETS.get(target)
     if vt is None:
         known = ", ".join(sorted(VSCE_TARGETS))
@@ -614,14 +586,12 @@ def vsce_target(target: str) -> str:
 
 
 def _staged_dest(leg_dir: Path, dest: str, *, windows: bool) -> Path:
-    """Where a ``bundle.stage`` entry copies to, ``.exe``-suffixed on a windows target."""
     if windows and not dest.lower().endswith(".exe"):
         dest = f"{dest}.exe"
     return leg_dir / dest
 
 
 def _dirs_staging_will_create(leg_dir: Path, parent: Path) -> list[Path]:
-    """The not-yet-existing ancestors of ``parent`` under ``leg_dir``, deepest-first."""
     to_create: list[Path] = []
     current = parent
     while current != leg_dir and leg_dir in current.parents and not current.exists():
@@ -631,10 +601,7 @@ def _dirs_staging_will_create(leg_dir: Path, parent: Path) -> list[Path]:
 
 
 def _unstage_vsix_natives(staged: list[Path], created_dirs: list[Path]) -> None:
-    """Remove every staged binary, then every dir staging created, if now empty.
-
-    Runs in a ``finally``, so a failed ``rmdir`` never masks the original failure.
-    """
+    """Remove every staged binary, then every dir staging created, if now empty."""
     for path in staged:
         path.unlink(missing_ok=True)
     # Deepest-first GLOBALLY so a nested `a/b` is emptied before its parent `a`.
@@ -653,9 +620,7 @@ def _stage_vsix_natives(
     staged: list[Path],
     created_dirs: list[Path],
 ) -> None:
-    """Copy each declared ``bundle.stage`` native binary into the extension layout,
-    appending to the caller-owned accumulators so a PARTIAL stage still cleans up.
-    """
+    """Copy each declared ``bundle.stage`` native binary into the extension layout."""
     stage = req.artifact.bundle.stage if req.artifact.bundle is not None else ()
     if not stage:
         return
@@ -718,7 +683,6 @@ def _stage_vsix_natives(
 
 
 def _compose_vsix(req: ComposeRequest) -> Composed:
-    """Package the per-target ``.vsix`` via ``vsce``, staging declared natives first."""
     leg = _leg_for(req.artifact, req.entries, "npm", "vsix")
     vt = vsce_target(req.target)
     leg_dir = req.root / leg.path
@@ -738,8 +702,8 @@ def _compose_vsix(req: ComposeRequest) -> Composed:
                 "--",
                 "vsce",
                 "package",
-                # These extensions are esbuild-BUNDLED, so vsce's `npm ls` walk
-                # adds only failure surface: a hollow .vsix, or a dead pack.
+                # These extensions are esbuild-BUNDLED, so vsce's `npm ls`
+                # walk adds only failure surface.
                 "--no-dependencies",
                 "--target",
                 vt,
@@ -761,12 +725,7 @@ def _compose_vsix(req: ComposeRequest) -> Composed:
 
 @dataclass(frozen=True)
 class Composition:
-    """One registry entry: a name, its compose function, and the platforms it applies to.
-
-    ``platforms`` holds target-triple substrings; empty means every platform.
-    ``platform_independent`` marks an output with no ``-<target>`` qualifier, which
-    must build on exactly one leg or the merged ``dist/`` collides.
-    """
+    """One registry entry: a name, its compose function, and the platforms it applies to."""
 
     name: str
     compose: Callable[[ComposeRequest], Composed]
@@ -785,7 +744,6 @@ class Composition:
 
 ARCHIVE = Composition("archive", _compose_archive, signable=True)
 DEB = Composition("deb", _compose_deb, platforms=("linux",))
-#: A python sdist+wheel carries no native binary for the integrity guard.
 WHEEL = Composition("wheel", _compose_wheel, asserts_binary=False)
 #: ``npm pack`` names its ``.tgz`` version- but not target-qualified.
 WASM_PACK = Composition(
@@ -797,7 +755,6 @@ WASM_PACK = Composition(
     # `npm pack` needs node, but the crate's package.json is generated.
     provisions_signal="node",
 )
-#: A ``.vsix`` is a zip package with no reopenable main binary to assert.
 VSIX = Composition(
     "vsix",
     _compose_vsix,
@@ -825,8 +782,7 @@ ELECTRON = Composition(
     _compose_electron,
     platforms=("apple-darwin", "linux", "windows"),
     declared_command=True,
-    # electron-builder does NOT sign at build: the darwin `.app` ships unsigned
-    # and the standalone mac sign stage reopens it.
+    # electron-builder does NOT sign at build; the sign stage reopens the app.
     signable=True,
 )
 #: The artifact's own ``bundle.payload``, as one unqualified ``<name>.tar.gz``.
@@ -837,7 +793,6 @@ TARBALL = Composition(
     platform_independent=True,
     declared_payload=True,
 )
-#: ``tarball``, kept under its own name so the ``zed`` endpoint pairs with it.
 ZED = Composition(
     "zed",
     _compose_declared_payload,
@@ -846,8 +801,7 @@ ZED = Composition(
     declared_payload=True,
 )
 
-#: The CLOSED registry, in a stable order. Adding a composition is adding an
-#: entry here — never a kind switch.
+#: The CLOSED registry: adding a composition is adding an entry, never a switch.
 COMPOSITIONS: tuple[Composition, ...] = (
     ARCHIVE,
     DEB,
@@ -885,8 +839,7 @@ def composition(name: str) -> Composition | None:
     return None
 
 
-#: (system, machine) → target triple, both lowercased; the default with no
-#: ``--target``.
+#: (system, machine) → target triple, lowercased; the default with no --target.
 _HOST_TARGETS: dict[tuple[str, str], str] = {
     ("darwin", "arm64"): "aarch64-apple-darwin",
     ("darwin", "x86_64"): "x86_64-apple-darwin",
@@ -901,5 +854,4 @@ _HOST_TARGETS: dict[tuple[str, str], str] = {
 
 
 def host_target(system: str, machine: str) -> str | None:
-    """The target triple for a ``(system, machine)`` pair, or ``None`` when unmapped."""
     return _HOST_TARGETS.get((system.lower(), machine.lower()))

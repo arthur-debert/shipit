@@ -74,8 +74,6 @@ class SigningIdentitySource:
 
 @dataclass(frozen=True)
 class NotaryCredentials:
-    """One resolved notary credential set, tagged ``"asc"`` or ``"apple-id"``."""
-
     style: str
     key_b64: str = ""
     key_id: str = ""
@@ -86,7 +84,6 @@ class NotaryCredentials:
 
 
 def resolve_signing(env: Mapping[str, str]) -> SigningIdentitySource:
-    """Resolve the signing cert from ``env``, or hard-fail; an empty password is valid."""
     cert = env.get(CERT_SECRET, "")
     if not cert:
         raise ReleaseError(
@@ -181,8 +178,7 @@ def sign_order(nested: Sequence[Path], app: Path) -> list[Path]:
 
 
 #: ``.framework`` is OPAQUE; the rest are recursed into, since a root sign
-#: covers only its main executable. The loadable roots must be listed: the
-#: notary rejects a bundle whose root carries no signature.
+#: covers only its main executable and the notary rejects an unsigned root.
 BUNDLE_SUFFIXES: tuple[str, ...] = (
     ".framework",
     ".app",
@@ -192,8 +188,7 @@ BUNDLE_SUFFIXES: tuple[str, ...] = (
     ".bundle",
 )
 
-#: These two suffixes are also the shape of data-only RESOURCE bundles, which
-#: are not signing units, so they are emitted only when they carry a Mach-O.
+#: Also the shape of data-only RESOURCE bundles, which are not signing units.
 _CODE_GATED_SUFFIXES: frozenset[str] = frozenset({".plugin", ".bundle"})
 
 
@@ -203,7 +198,6 @@ def _contains_macho(root: Path, detect: Callable[[Path], bool]) -> bool:
     )
 
 
-#: Mach-O magic numbers as the first four ON-DISK bytes.
 _THIN_MAGICS = frozenset(
     {b"\xfe\xed\xfa\xce", b"\xce\xfa\xed\xfe", b"\xfe\xed\xfa\xcf", b"\xcf\xfa\xed\xfe"}
 )
@@ -231,11 +225,7 @@ def is_macho(path: Path) -> bool:
 def nested_signable(
     app: Path, *, detect: Callable[[Path], bool] = is_macho
 ) -> list[Path]:
-    """The nested signable paths inside ``app``, deepest-first, EXCLUDING the top ``.app``.
-
-    Files inside a ``.framework`` are skipped — the root is the signing unit — but
-    files inside a helper ``.app``/``.appex``/``.xpc`` are not; symlinks are skipped.
-    """
+    """The nested signable paths inside ``app``, deepest-first, EXCLUDING the top ``.app``."""
     entries: list[tuple[int, Path]] = []
     for path in sorted(app.rglob("*")):
         if path.is_symlink():
@@ -273,14 +263,12 @@ def _plist(entries: Mapping[str, bool]) -> str:
     )
 
 
-#: ``allow-jit`` alone: without it the app notarizes but crashes at launch, and
-#: ``get-task-allow`` MUST stay off in a notarized release.
+#: Without ``allow-jit`` the app notarizes but crashes at launch.
 ELECTRON_APP_ENTITLEMENTS: Mapping[str, bool] = {
     "com.apple.security.cs.allow-jit": True,
 }
 
-#: Each helper is its OWN process. NEVER applied to a ``.appex``: a sandboxed
-#: extension is not an electron helper and must not receive JIT.
+#: Each helper is its OWN process; NEVER applied to a sandboxed ``.appex``.
 ELECTRON_HELPER_ENTITLEMENTS: Mapping[str, bool] = {
     "com.apple.security.cs.allow-jit": True,
     "com.apple.security.inherit": True,
@@ -315,7 +303,6 @@ def entitlements_for(
     return None
 
 
-#: Every electron app bundles this and nothing else does — the structural marker.
 _ELECTRON_FRAMEWORK = "Electron Framework.framework"
 
 
@@ -349,9 +336,7 @@ def _default_pass() -> str:
 
 @dataclass(frozen=True)
 class SignRequest:
-    """Everything one invocation needs; ``scratch`` holds every intermediate, and
-    credential files under it are ALSO unlinked eagerly.
-    """
+    """Everything one invocation needs; ``scratch`` holds every intermediate."""
 
     tree: Path
     out_dir: Path
@@ -386,9 +371,7 @@ class SignResult:
 
 @dataclass(frozen=True)
 class ArchiveSignResult:
-    """The archive leg's output. No ``stapled`` field: a bare binary and the zip it
-    rides in have no staple target — Gatekeeper verifies online.
-    """
+    """The archive leg's output; no ``stapled`` — a bare binary has no staple target."""
 
     archives: tuple[str, ...]
     binaries: tuple[str, ...]
@@ -462,9 +445,7 @@ def detect_shape(tree: Path) -> str:
 
 
 def _leaves_root(root: Path, base: Path, path: str) -> bool:
-    """Whether a link TARGET leaves ``root`` once resolved against ``base``; ``..``
-    resolves LEXICALLY, sound because member NAMES refuse ``..`` outright.
-    """
+    """Whether a link TARGET leaves ``root`` once resolved against ``base``."""
     if os.path.isabs(path):
         return True
     resolved = os.path.normpath(os.path.join(str(base), path))
@@ -473,9 +454,7 @@ def _leaves_root(root: Path, base: Path, path: str) -> bool:
 
 
 def _name_escapes(member: tarfile.TarInfo) -> bool:
-    """Whether ``member``'s path is absolute or carries a ``..`` COMPONENT — refused
-    outright, since ``..`` through an extracted in-tree symlink escapes at write time.
-    """
+    """Whether ``member``'s path is absolute or carries a ``..`` COMPONENT."""
     name = member.name.replace("\\", "/")
     return os.path.isabs(name) or ".." in name.split("/")
 
@@ -485,7 +464,6 @@ def _is_special(member: tarfile.TarInfo) -> bool:
 
 
 def _target_escapes(root: Path, member: tarfile.TarInfo) -> bool:
-    """Whether a link ``member``'s TARGET leaves ``root``, per structured ``linkname``."""
     base = root / Path(member.name).parent if member.issym() else root
     return _leaves_root(root, base, member.linkname)
 
@@ -504,9 +482,7 @@ def _is_confined(root: Path, member: tarfile.TarInfo, *, reject_links: bool) -> 
 def _confining_filter(
     root: Path, *, reject_links: bool
 ) -> Callable[[tarfile.TarInfo, str], tarfile.TarInfo]:
-    """An ``extractall`` filter re-asserting confinement, preserving the rwx modes and
-    symlinks tarfile's ``data`` filter would destroy; only setuid/setgid/sticky go.
-    """
+    """An ``extractall`` filter re-asserting confinement, preserving rwx and symlinks."""
 
     def _filter(member: tarfile.TarInfo, dest: str) -> tarfile.TarInfo:
         if not _is_confined(root, member, reject_links=reject_links):
@@ -527,12 +503,7 @@ def _untar_validated(
     *,
     reject_links: bool = False,
 ) -> None:
-    """Untar ``archive`` into ``work``, validating every member from the SAME handle.
-
-    Refused before anything unpacks: an escaping member NAME, a special
-    (device/FIFO) member, and — with ``reject_links`` — any link at all, else a
-    link whose TARGET leaves ``work``.
-    """
+    """Untar ``archive`` into ``work``, validating every member from the SAME handle."""
     work.mkdir(parents=True, exist_ok=True)
     root = work.resolve()
     try:
@@ -594,9 +565,7 @@ def _parse_identity(stdout: str) -> str | None:
 
 
 def _parse_keychain_list(stdout: str) -> list[str]:
-    """The keychain paths from ``security list-keychains``, order preserved. Matched
-    quote-at-line-start to quote-at-line-end, since paths print unescaped.
-    """
+    """The keychain paths from ``security list-keychains``, order preserved."""
     return [
         match.group(1)
         for match in re.finditer(
@@ -620,13 +589,7 @@ def _sign_paths(
     *,
     policy: EntitlementsPolicy = NO_ENTITLEMENTS,
 ) -> str:
-    """Codesign ``paths`` in order through a per-call temporary keychain.
-
-    The keychain is spliced into the user SEARCH LIST for the pass: ``codesign
-    --keychain`` alone does not reliably resolve an identity from a keychain
-    outside the list on current macOS. The ``finally`` restores the snapshot, tears
-    the keychain down, and unlinks the decoded ``.p12``.
-    """
+    """Codesign ``paths`` in order through a per-call temporary keychain."""
     uniq = req.uniq()
     keychain = req.scratch / f"signing-{uniq}.keychain-db"
     cert = req.scratch / f"cert-{uniq}.p12"
@@ -634,7 +597,7 @@ def _sign_paths(
     redact.register_secret(kc_pass)
     run = req.run_cmd
     # None until the splice reads it, so the finally can tell "never spliced"
-    # (a restore would WIPE the user's list) from "spliced, restore it".
+    # — where a restore would WIPE the user's list — from "restore it".
     original_keychains: list[str] | None = None
     try:
         cert.write_bytes(_decode_b64(signing.cert_p12_base64, CERT_SECRET))
@@ -704,8 +667,8 @@ def _sign_paths(
         for index, path in enumerate(paths):
             if not path.exists():
                 raise ReleaseError(f"path to sign not found: {path}")
-            # The top app is the LAST path AND a `.app`, so a single-path dmg
-            # or archive-binary pass can never evaluate as the top app.
+            # The top app is the LAST path AND a `.app`, so a dmg or
+            # archive-binary pass never evaluates as one.
             path_ent = entitlements_for(
                 path,
                 is_top_app=index == len(paths) - 1 and path.suffix == ".app",
@@ -715,7 +678,6 @@ def _sign_paths(
             run(["codesign", "--verify", "--strict", str(path)], SIGN_CMD_TIMEOUT)
         return identity
     finally:
-        # Best-effort, so a cleanup failure never masks the aborting error.
         if original_keychains is not None:
             with contextlib.suppress(execrun.ExecError):
                 run(
@@ -758,9 +720,7 @@ def _reseal(app: Path, dmg_out: Path, req: SignRequest) -> None:
 def _notarize(
     target: Path, creds: NotaryCredentials, req: SignRequest, *, staple: bool = True
 ) -> tuple[str, bool]:
-    """``notarytool`` submit, poll, optionally staple. A transient ``info`` failure is
-    one ``Unknown`` poll; a rejection or exhaustion hard-fails, a staple does not.
-    """
+    """``notarytool`` submit, poll, optionally staple; a staple failure is NON-fatal."""
     key_path: Path | None = None
     try:
         if creds.style == "asc":
@@ -857,9 +817,7 @@ def _notarize(
 
 
 def sign_bundle(req: SignRequest) -> SignResult:
-    """The full reopen, resign, reseal, notarize, staple sequence over ``req.tree``;
-    credentials and the timeout window resolve FIRST, with zero commands run.
-    """
+    """The full reopen, resign, reseal, notarize, staple sequence over ``req.tree``."""
     signing = resolve_signing(req.env)
     notary = resolve_notary(req.env)
     if req.timeout_minutes < 1:
@@ -906,11 +864,7 @@ def sign_bundle(req: SignRequest) -> SignResult:
 
 
 def sign_archives(req: SignRequest) -> ArchiveSignResult:
-    """Sign and notarize the Mach-O inside every plain tarball, then re-emit each.
-
-    All binaries sign in ONE :func:`_sign_paths` call, since the identity lives in a
-    per-call keychain; notarization lands BEFORE any tarball is re-emitted.
-    """
+    """Sign and notarize the Mach-O inside every plain tarball, then re-emit each."""
     signing = resolve_signing(req.env)
     notary = resolve_notary(req.env)
     if req.timeout_minutes < 1:
@@ -965,8 +919,7 @@ def sign_archives(req: SignRequest) -> ArchiveSignResult:
         signed_tar = req.scratch / f"signed-{index}-{archive.name}"
         signed_tar.unlink(missing_ok=True)
         members = sorted(p.name for p in work.iterdir())
-        # `--` terminates option parsing: a member name from an unpacked
-        # external bundle is an operand, never a tar flag.
+        # `--` terminates option parsing: an unpacked member name is an operand.
         req.run_cmd(
             ["tar", "-czf", str(signed_tar), "-C", str(work), "--", *members],
             SIGN_CMD_TIMEOUT,
