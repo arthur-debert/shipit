@@ -1,60 +1,6 @@
-"""``shipit hook worktreeremove`` — the ephemeral-Tree fast-path teardown (ADR-0027).
+"""``shipit hook worktreeremove`` — fast-path reclaim of a clean ephemeral Tree.
 
-Claude Code fires ``WorktreeRemove`` when a session leaves the worktree it adopted
-at ``WorktreeCreate`` — for us, when a coordinator session rooted in an ephemeral
-session Tree exits cleanly. This boundary reclaims that Tree IMMEDIATELY — removes
-the clone — instead of leaving it for the next ``tree gc`` sweep.
-
-**Best-effort only, fail-OPEN** — the same posture as ``hook sessionstart``, the
-OPPOSITE of ``hook worktreecreate``. The spike behind ADR-0027 showed this event
-does NOT fire in headless mode, so nothing may depend on it: the ``gc`` reclaim rule
-(:func:`shipit.tree.cleanup.classify`) is the load-bearing cleanup and this hook is
-only its fast path. ANY failure — bad payload, unreadable git state, a
-failed delete — logs at WARNING (the fail-open canon in :mod:`shipit.verbs.hook`:
-a swallowed failure is a degraded-but-continuing outcome) and exits 0; a teardown
-hiccup must never turn a clean session exit into an error. A by-design refusal
-(nothing ephemeral in the payload, a dirty/unpushed Tree left for the gc ladder)
-is a clean no-op and stays at DEBUG.
-
-Fast does not mean careless — the reclaim rule's never-lose-work floor holds here
-too:
-
-- Only a genuine **flat Tree leaf directly under the central root** is ever touched
-  (ADR-0074: a Tree is ONE flat, self-describing leaf directly below the root, with no
-  kind segment to key off — the flat leaf carries no ``ephemeral``/``write``/``review``
-  marker, and this event fires only for the worktree the session itself adopted at
-  ``WorktreeCreate``). The identity gate requires a **direct child** of the root whose
-  name conforms to the flat-leaf grammar (:func:`~shipit.tree.layout.parse_flat_leaf`),
-  so an arbitrary or hostile path — outside the root, a NESTED clone (a submodule or an
-  accidental repo inside a Tree), a non-conforming direct child, or not a git clone — is
-  left untouched, and the never-lose-work floor below is what keeps a Tree carrying work
-  safe regardless of which Tree the payload names.
-- A **dirty** Tree or one with **unpushed** commits (the upstream-independent
-  list — commits on NO remote, so a fresh no-upstream ``ephemeral/<id>`` branch
-  is judged by what it actually holds) is NEVER auto-removed, even on a clean
-  exit; it falls through to the gc rule, whose own floor
-  (:func:`shipit.tree.cleanup._has_local_only_work`) keeps it for the same
-  reason. An UNREADABLE list blocks removal the same way — unknown must never
-  read as "nothing to lose".
-
-This never-lose-work floor is now EXACTLY gc's own
-(:func:`shipit.tree.cleanup._has_local_only_work`): dirty or unpushed (or an unreadable
-unpushed list) keeps the Tree. The FLOOR is the only thing shared with gc, NOT the
-whole reclaim decision — the fast path still deliberately reclaims a clean ephemeral
-Tree IMMEDIATELY on a clean exit, whereas gc would keep that same Tree until its idle
-age crosses the 48h threshold. The two agree on what must never be lost, not on when a
-safe Tree is finally collected.
-
-The fast path used to apply a STRICTER floor — it carved out (#232) the SHA(s) the
-Tree's own provisioning committed at birth and additionally blocked on an
-upstream-``ahead`` count. ADR-0072's reclaim rule dropped the ephemeral ladder those
-readings served, and WS03 retired the provisioning-record reader (the former
-``shipit.tree.provision``) and the ``ps`` liveness pidfile with it, so both extra
-readings are gone here too. Dropping the carve-out only ever makes the floor MORE
-conservative (a Tree carrying an unpushed provisioning commit is now kept, not
-reclaimed), and the ``ahead`` block guarded work that — being pushed to some remote —
-the unpushed floor already treats as safe; so the fast path's floor now blocks removal
-in exactly the cases gc's floor would, never fewer.
+Best-effort and fail-open; ``tree gc`` is the load-bearing cleanup.
 """
 
 from __future__ import annotations
@@ -73,29 +19,17 @@ from ...tree.readonly import remove_tree
 
 logger = logging.getLogger("shipit.hook")
 
-#: Payload fields that may carry the removed worktree's path, tried in order. The
-#: WorktreeRemove payload is not pinned by a spike yet (it does not fire headless,
-#: so the create-spike could not capture one); the create payload carries ``cwd``,
-#: and ``path``/``worktree_path`` are the plausible explicit fields. Every
-#: candidate still has to pass the ephemeral/central-root/clean gates below, so a
-#: wrong guess degrades to a no-op, never a wrong delete.
 _PATH_FIELDS = ("path", "worktree_path", "cwd")
 
 
 @click.command(name="worktreeremove")
 def cmd() -> None:
-    """Reclaim a clean ephemeral session Tree on session exit (best-effort).
-
-    Reads the ``WorktreeRemove`` payload as JSON on stdin, removes the clone when —
-    and only when — it is an ephemeral Tree under the central root holding no
-    local-only work. Always exits 0; any failure or refusal is a silent no-op (the
-    ``gc`` rule is the load-bearing cleanup).
-    """
+    """Reclaim a clean ephemeral session Tree on session exit (best-effort)."""
     raise SystemExit(run())
 
 
 def run(stdin: TextIO | None = None) -> int:
-    """Parse stdin → gate → remove the Tree. Returns 0 always (fail-open)."""
+    """Parse stdin → gate → remove the Tree. Returns 0 always."""
     try:
         raw = (stdin if stdin is not None else sys.stdin).read()
         payload = json.loads(raw)
@@ -124,24 +58,7 @@ def run(stdin: TextIO | None = None) -> int:
 
 
 def _target_tree(payload: dict[str, object]) -> Path | None:
-    """The Tree the payload names, or ``None`` when it names no reclaimable Tree.
-
-    Tries each of :data:`_PATH_FIELDS` in order and returns the first value that
-    passes ALL the identity gates: an absolute-izable path that is a **direct child**
-    of the central root (``candidate.parent == root``) whose name conforms to the flat
-    leaf grammar (:func:`~shipit.tree.layout.parse_flat_leaf` accepts it), and is a real
-    clone (its ``.git`` is a directory). A Tree is now ONE flat leaf directly under the
-    root (ADR-0074), so the direct-child + flat-leaf pair is what makes the payload
-    contract safe on a destructive path: a NESTED clone (a submodule checkout, or an
-    accidental repo inside a Tree) and a non-conforming direct child are BOTH ignored,
-    and the root itself — never a direct child of itself and never a flat leaf — can
-    never be handed up for removal even if it carries a ``.git``. ADR-0074 retired the
-    kind segment, so there is no ``ephemeral``-vs-other test to make here — the flat leaf
-    carries no kind, this event fires only for the worktree the session adopted, and the
-    never-lose-work floor (:func:`_removal_blocker`) is what keeps a Tree carrying work
-    safe. So whatever field the harness sends — or a hostile value — either names a
-    genuine flat Tree leaf under the root or the hook does nothing.
-    """
+    """The Tree the payload names, or None when it names no reclaimable Tree: only a direct child of the central root whose name parses as a flat leaf and whose ``.git`` is a directory qualifies."""
     root = central_root().resolve()
     for field in _PATH_FIELDS:
         value = payload.get(field)
@@ -157,23 +74,7 @@ def _target_tree(payload: dict[str, object]) -> Path | None:
 
 
 def _removal_blocker(tree: Path) -> str | None:
-    """Why ``tree`` must NOT be fast-path removed — or ``None`` when it is safe.
-
-    The never-lose-work floor, applied at the fast path — now IDENTICAL to gc's own
-    (:func:`~shipit.tree.cleanup._has_local_only_work`): uncommitted changes or commits
-    that exist on no remote (read fresh through the ``git`` boundary — the hook has no
-    registry scan to lean on) block removal; the Tree then simply falls through to the
-    ``gc`` sweep, whose floor keeps it for the same reason. An unreadable unpushed list
-    blocks too: unknown never reads as "nothing to lose".
-
-    Once stricter than gc's floor — it carved out the provisioning-commit SHAs (#232)
-    and blocked on an upstream-``ahead`` count — the fast path shed both when WS03
-    retired the provisioning-record reader and the ephemeral ladder those readings
-    served (ADR-0072). What remains is exactly gc's never-lose-work floor: dropping the
-    carve-out can only KEEP a Tree gc's floor would also keep, never remove one it
-    protects. (This is only about the floor — the fast path still reclaims a clean Tree
-    on exit that gc would hold for its idle window; see the module docstring.)
-    """
+    """Why ``tree`` must not be fast-path removed, or None when it is safe; an unreadable unpushed list blocks too."""
     cwd = str(tree)
     if git.status_porcelain(cwd=cwd):
         return "uncommitted changes"
