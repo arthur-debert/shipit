@@ -1,20 +1,6 @@
 """``tree/include`` — resolve ``.treeinclude`` (gitignore syntax) to a file list.
 
-A Tree is a fresh, dissociated clone (ADR-0014): it carries every TRACKED file,
-but none of the **gitignored-but-needed** files a working session relies on — the
-``.env``, the Doppler config, downloaded models. ``.treeinclude`` is a repo-root
-allow-list, written in **``.gitignore`` syntax**, of exactly those files;
-:func:`resolve` turns it into the concrete set of paths to COPY from the source
-checkout into the new Tree (copied, never symlinked — a Tree is self-contained and
-disposable, PRD "tree/include.py").
-
-The matching is the deep, pure heart here and is unit-tested directly as a truth
-table: patterns are evaluated **relative to the repo root** (a leading ``/``
-anchors to the repo root, exactly like ``.gitignore``), support **globs**
-(``*`` ``?`` ``**`` and character classes) and **negations** (``!``), and the
-**last matching rule wins**. The only effect is :func:`apply` (the copy), kept
-thin so everything that decides *which* files move is testable without touching a
-real Tree.
+The repo-root allow-list of gitignored-but-needed files a fresh Tree must be given.
 """
 
 from __future__ import annotations
@@ -25,21 +11,12 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
-#: The repo-root allow-list file (``.gitignore`` syntax) naming the
-#: gitignored-but-needed files a fresh Tree must receive.
 TREEINCLUDE_NAME = ".treeinclude"
 
 
 @dataclass(frozen=True)
 class _Rule:
-    """One compiled ``.treeinclude`` line.
-
-    ``regex`` matches a repo-root-relative POSIX path (and, because a matched
-    directory carries its whole subtree, any path *under* a matched directory).
-    ``negated`` is the leading-``!`` re-exclude. ``floating`` (no path separator →
-    matches at any depth) and ``segments`` (the anchored pattern split on ``/``)
-    drive directory pruning so a huge unrelated subtree is never walked.
-    """
+    """One compiled line; ``floating`` means unanchored, so it matches at any depth."""
 
     regex: re.Pattern[str]
     negated: bool
@@ -52,21 +29,14 @@ class PatternSet:
 
     def __init__(self, rules: list[_Rule]) -> None:
         self._rules = rules
-        #: Any floating (unanchored) include forces a full walk — a match can sit
-        #: at any depth, so no directory can be pruned away up front.
         self._has_floating_include = any(r.floating and not r.negated for r in rules)
 
     def is_empty(self) -> bool:
-        """True when no rule could ever include a file (so :func:`resolve` is a no-op)."""
+        """True when no rule could ever include a file, so :func:`resolve` is a no-op."""
         return not any(not r.negated for r in self._rules)
 
     def match(self, relpath: str) -> bool:
-        """Whether ``relpath`` (repo-root-relative, POSIX) is included.
-
-        Standard ``.gitignore`` evaluation: walk the rules in order; each matching
-        rule sets inclusion to ``True`` (an include) or ``False`` (a ``!`` negation),
-        and the LAST match wins.
-        """
+        """Whether ``relpath`` (repo-root-relative, POSIX) is included."""
         included = False
         for rule in self._rules:
             if rule.regex.match(relpath):
@@ -74,14 +44,7 @@ class PatternSet:
         return included
 
     def can_descend(self, dir_segments: list[str]) -> bool:
-        """Whether the directory ``dir_segments`` could contain any included file.
-
-        Conservative: returns ``True`` whenever an included match is *possible*
-        below this directory, so pruning never drops a real match. A directory is
-        skipped only when EVERY include is anchored and none of them lines up with
-        this directory's path — which is what keeps ``node_modules`` / ``target``
-        out of the walk when the patterns are specific.
-        """
+        """Whether an included file could sit below — conservative, never prunes a match."""
         if self._has_floating_include:
             return True
         for rule in self._rules:
@@ -93,13 +56,7 @@ class PatternSet:
 
 
 def parse(text: str) -> PatternSet:
-    """Compile ``.treeinclude`` ``text`` (``.gitignore`` syntax) into a :class:`PatternSet`.
-
-    Blank lines and ``#`` comments are skipped; a leading ``\\#`` / ``\\!`` is a
-    literal first character; a leading ``!`` is a negation; a trailing ``/`` marks a
-    directory (its whole subtree is included); a leading ``/`` or any internal ``/``
-    anchors the pattern to the repo root, otherwise it floats (matches at any depth).
-    """
+    """Compile ``.treeinclude`` ``text`` (``.gitignore`` syntax) into a :class:`PatternSet`."""
     rules: list[_Rule] = []
     for raw in text.splitlines():
         line = raw.rstrip()
@@ -133,12 +90,7 @@ def parse(text: str) -> PatternSet:
 
 
 def resolve(root: str | os.PathLike[str]) -> list[str]:
-    """The repo-root-relative POSIX paths under ``root`` that ``.treeinclude`` selects.
-
-    Reads ``<root>/.treeinclude``; absent or empty → ``[]``. Walks the source tree,
-    pruning ``.git`` and any directory the patterns cannot reach (see
-    :meth:`PatternSet.can_descend`), and returns the matching FILES, sorted.
-    """
+    """The repo-root-relative POSIX file paths ``.treeinclude`` selects, sorted."""
     root_path = Path(root)
     spec_file = root_path / TREEINCLUDE_NAME
     if not spec_file.is_file():
@@ -169,19 +121,7 @@ def resolve(root: str | os.PathLike[str]) -> list[str]:
 def apply(
     src_root: str | os.PathLike[str], dest_root: str | os.PathLike[str]
 ) -> list[Path]:
-    """Copy every ``.treeinclude``-selected file from ``src_root`` into ``dest_root``.
-
-    Files are COPIED (parents created as needed), never symlinked, so the Tree is
-    self-contained and a plain ``rm -rf`` is a safe delete. Returns the destination
-    paths written, in resolution order.
-
-    ``.treeinclude`` exists to fill in the gitignored-but-needed files the fresh
-    checkout *lacks* (``.env``, Doppler config, models). A selected path that
-    already exists at ``dest`` therefore came from the checkout of
-    ``tree_plan.base`` — that version is authoritative and is left untouched, so a
-    stale/dirty copy under ``src_root`` can never clobber a freshly-checked-out
-    tracked file (the path is skipped, not in the returned list).
-    """
+    """Copy the selected files into ``dest_root``; one already there is left untouched."""
     src = Path(src_root)
     dest = Path(dest_root)
     written: list[Path] = []
@@ -198,19 +138,8 @@ def apply(
     return written
 
 
-# --------------------------------------------------------------------------
-# glob → regex (the .gitignore-syntax translator)
-# --------------------------------------------------------------------------
-
-
 def _glob_to_regex(pat: str) -> str:
-    """Translate a ``.gitignore`` glob into a regex body over a POSIX path.
-
-    ``*`` matches within a path segment (``[^/]*``); ``?`` a single non-``/`` char;
-    a ``**`` path segment matches zero or more segments (``a/**/b`` → ``a/b``,
-    ``a/x/b``, …); ``[...]`` is a character class (``[!...]`` negates). Everything
-    else is matched literally.
-    """
+    """Translate a ``.gitignore`` glob into a regex body over a POSIX path."""
     out: list[str] = []
     i, n = 0, len(pat)
     while i < n:
@@ -223,10 +152,10 @@ def _glob_to_regex(pat: str) -> str:
             prev_slash = i == 0 or pat[i - 1] == "/"
             next_slash = j >= n or pat[j] == "/"
             if double and prev_slash and next_slash:
-                if j < n:  # "**/..." — zero or more leading path segments
+                if j < n:
                     out.append(r"(?:[^/]+/)*")
                     j += 1  # consume the trailing "/"
-                else:  # trailing "/**" — everything below
+                else:
                     out.append(r".*")
             else:
                 out.append(r"[^/]*")
@@ -261,7 +190,7 @@ def _char_class_end(pat: str, start: int) -> int:
 def _char_class(pat: str, start: int) -> str:
     """The regex for the ``[...]`` class at ``start`` (a literal ``[`` if unterminated)."""
     end = _char_class_end(pat, start)
-    if end == start + 1:  # no closing bracket → literal "["
+    if end == start + 1:
         return re.escape("[")
     inner = pat[start + 1 : end - 1]
     if inner.startswith("!"):
@@ -269,20 +198,8 @@ def _char_class(pat: str, start: int) -> str:
     return "[" + inner + "]"
 
 
-# --------------------------------------------------------------------------
-# directory pruning (segment-wise prefix match)
-# --------------------------------------------------------------------------
-
-
 def _segments_prefix_match(pattern_segs: tuple[str, ...], dir_segs: list[str]) -> bool:
-    """Whether an anchored pattern could match some path *under* ``dir_segs``.
-
-    Walks the directory's segments against the pattern's: a ``**`` segment (matches
-    any number of segments) or running out of pattern (the pattern matched a
-    shallower directory, whose subtree is included) means yes; a concrete segment
-    mismatch means no; consuming all directory segments leaves the pattern free to
-    extend deeper, so yes.
-    """
+    """Whether an anchored pattern could match some path *under* ``dir_segs``."""
     pi = 0
     for dseg in dir_segs:
         if pi >= len(pattern_segs):
@@ -297,5 +214,4 @@ def _segments_prefix_match(pattern_segs: tuple[str, ...], dir_segs: list[str]) -
 
 
 def _segment_matches(seg: str, name: str) -> bool:
-    """Whether a single-segment glob ``seg`` matches the directory name ``name``."""
     return re.compile(f"^{_glob_to_regex(seg)}$").match(name) is not None
