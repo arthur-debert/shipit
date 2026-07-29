@@ -1,30 +1,6 @@
-"""Role-prompt generator — compose the lex fragments into per-role prompts.
+"""``harness/prompts`` — compose the lex role fragments into the per-role prompts.
 
-ADR-0011: role behavior has a SINGLE sliceable source — a shared dev-cycle
-*base* fragment plus one *overlay* per **role** (plus the coordinator's *role
-map*) — authored as focused lex under ``shipit.data.roles`` and mirrored to
-``.md``. From that source we **generate** a reduced **role prompt** per role:
-``base + that role's overlay only`` (the ``coordinator``'s also carries the role
-map — it is the one broad slice). One edit to a fragment re-flows every derived
-surface, so the dev cycle is stated once and the role prompts, the coordinator
-deny reason, and the ``AGENTS.md`` reference can never disagree.
-
-Pure core / thin boundary (the ``prstate`` shape):
-
-  - :func:`render` is the PURE core — a function from a :class:`RoleDefs`
-    (already-read fragment text) to the per-role prompts and the ``AGENTS.md``
-    *union* (base + ALL overlays — the non-binding reference). No I/O, so the
-    *reduction property* (a role prompt contains its OWN overlay and none of the
-    others') is unit-testable on plain strings.
-  - :func:`load_role_defs` / :func:`regenerate` are the BOUNDARY — they read the
-    bundled fragment ``.md`` mirrors and write the derived surfaces (the subagent
-    agent-defs, the bundled coordinator slice, the union reference).
-
-lexd does NOT support includes, so the base+overlay COMPOSITION is done here in
-Python (read each fragment, assemble), never by a lex include directive. Each
-fragment is still authored in lex and mirrored to ``.md`` (the rendered prose the
-generator reads); the leading autogen comment + the ``# Title`` H1 are stripped so
-only the body composes.
+See docs/adr/0011-role-scoped-generated-prompts.md.
 """
 
 from __future__ import annotations
@@ -39,38 +15,19 @@ from pathlib import Path
 from .role import Role
 from .roleprofile import profile_for
 
-#: The harness subsystem's logger. Regeneration mutates the working tree (the
-#: agent-defs, the bundled generated docs), so each write gets a durable record
-#: (LOG03) — the ``regenerated <path>`` print stays as the user-facing surface.
 logger = logging.getLogger("shipit.harness")
 
-#: The subagent roles — every role whose Role Profile DECLARES a generated
-#: agent-def (``generates_agent_def``), DERIVED from the registry rather than
-#: re-listed here (RPE01-WS02), so the set can never drift from the structural
-#: source. Today that is every role except the coordinator, which is the
-#: top-level session and has no agent-def (ADR-0011): its prompt rides the
-#: injected context + the PreToolUse deny reason instead. Enum order is stable,
-#: so the derived tuple keeps its historical ordering.
+#: Every role whose Role Profile declares a generated agent-def.
 SUBAGENT_ROLES: tuple[Role, ...] = tuple(
     role for role in Role if profile_for(role).generates_agent_def
 )
 
-#: The roles whose spawn/cold briefs have a bundled BRIEF TEMPLATE (RVW02): the
-#: task-specific half the coordinator fills at spawn/brief time — the general
-#: half is the role prompt composed below. Authored as `<role>-brief.lex` beside
-#: the role fragments (mirrored to `.md` by the same regen pipeline), read back
-#: via :func:`load_brief_template`, printed by `shipit spawn brief <role>`. DERIVED
-#: from each Role Profile's ``has_brief_template`` (RPE01-WS02) — the same
-#: structural source the `spawn brief` CLI choices read — so brief availability
-#: cannot drift from the registry.
+#: Every role with a bundled `<role>-brief.lex` template.
 BRIEF_ROLES: tuple[Role, ...] = tuple(
     role for role in Role if profile_for(role).has_brief_template
 )
 
-#: The MANDATORY brief slots — literal `{{slot}}` placeholders the coordinator
-#: replaces (plain textual fill; the pipeline carries no template engine and
-#: does not need one). Every brief template ships all four; the test suite pins
-#: that, so a template edit cannot silently drop a slot.
+#: The literal `{{slot}}` placeholders the coordinator fills; every template ships all four.
 MANDATORY_BRIEF_SLOTS: tuple[str, ...] = (
     "{{issue}}",
     "{{verify-commands}}",
@@ -78,44 +35,26 @@ MANDATORY_BRIEF_SLOTS: tuple[str, ...] = (
     "{{decision-boundaries}}",
 )
 
-#: Section headings the generator injects so the composed markdown is well-formed
-#: regardless of the fragments (the fragments themselves are heading-free prose +
-#: lists). Kept as constants because the deny-reason / agent-def assertions key
-#: off them (e.g. the role-map marker in the coordinator slice).
 _BASE_HEADING = "Dev cycle"
 _ROLE_HEADING = "Your role"
 _ROLEMAP_HEADING = "The roles you delegate to"
 
-#: The "do not hand edit" banner on every GENERATED surface (the agent-defs, the
-#: coordinator slice, the union) — the analogue of the lex→md mirror preamble, so
-#: a hand edit to a derived file is obviously wrong and reconciles on regenerate.
 GENERATED_COMMENT = (
     "<!-- Generated from src/shipit/data/roles/ by `pixi run regen-roles` "
     "(shipit.harness.prompts). Do not hand edit — edit the .lex fragments and "
     "regenerate. -->"
 )
 
-#: The bundled fragment package and the generated-output subdir within it.
 _ROLES_PKG = "shipit.data"
 _ROLES_REL = ("roles",)
 _GENERATED_REL = ("roles", "generated")
 _COORDINATOR_SLICE_NAME = "coordinator-prompt.md"
 _UNION_NAME = "agents-union.md"
 
-#: The read-only agent-def tool allow-list — the exact tools Claude Code grants a
-#: role whose profile posture forbids checkout mutation (no `Write`/`Edit`), so a
-#: read-only role's posture rides the tool allow-list, not just the prompt. A role
-#: gets this line IFF ``not profile.enforcement.checkout_mutation`` (RPE01-WS02):
-#: the structural tool posture DERIVES from the Role Profile, never a per-role
-#: table, so it cannot disagree with the registry's enforcement posture.
+#: The tool allow-list emitted for a role whose posture forbids checkout mutation.
 _READ_ONLY_TOOLS = "Read, Grep, Glob, Bash"
 
-#: Per-subagent-role agent-def DESCRIPTION — the "when to use" line Claude Code
-#: shows in the agent picker. This is behavioral prose (the one authored field in
-#: the frontmatter); the STRUCTURAL tool posture is derived from the Role Profile
-#: in :func:`_frontmatter`, not stored here. Every :data:`SUBAGENT_ROLES` role
-#: must have an entry — a test pins that, so a Role declaring a generated agent-def
-#: can never ship without its description (RPE01-WS02).
+#: The "when to use" line shown in the agent picker; every subagent role needs one.
 _AGENT_DESCRIPTIONS: dict[Role, str] = {
     Role.IMPLEMENTER: (
         "Implements one unit of work with tests and opens a single draft PR, "
@@ -140,13 +79,7 @@ _AGENT_DESCRIPTIONS: dict[Role, str] = {
 
 @dataclass(frozen=True)
 class RoleDefs:
-    """The role-definition source — the already-read fragment bodies.
-
-    ``base`` is the shared dev cycle; ``overlays`` maps EACH role (including the
-    coordinator) to its scoped marching orders; ``role_map`` is the one-line-per-
-    role map the coordinator carries. All are the stripped prose bodies (no
-    autogen comment, no ``# Title`` H1) so :func:`render` composes them verbatim.
-    """
+    """The already-read fragment bodies, stripped of autogen comment and ``# Title``."""
 
     base: str
     role_map: str
@@ -155,33 +88,18 @@ class RoleDefs:
 
 @dataclass(frozen=True)
 class RenderedPrompts:
-    """The generator's output: the per-role prompts + the ``AGENTS.md`` union.
-
-    ``role_prompts`` carries ALL four roles (the coordinator's is the deny
-    reason / injected context; the three subagents' are their agent-def bodies).
-    ``agents_union`` is base + every overlay + the role map — the NON-binding
-    reference the reduction-property test asserts contains all overlays.
-    """
+    """The generator's output: one prompt per role, plus the non-binding union reference."""
 
     role_prompts: dict[Role, str]
     agents_union: str
 
 
 def _section(heading: str, body: str) -> str:
-    """One ``## heading`` + body block (markdownlint-clean: blank-separated)."""
     return f"## {heading}\n\n{body.strip()}"
 
 
 def render(defs: RoleDefs) -> RenderedPrompts:
-    """Compose the fragments into the per-role prompts + the union. PURE.
-
-    Each role prompt is ``base + that role's overlay`` and nothing else — the
-    coordinator's ALSO appends the role map, the one broad slice. The union is
-    ``base + every overlay + role map``. The reduction property falls straight out
-    of this shape: a role prompt embeds only its own overlay body, so it cannot
-    carry another role's marching orders (the anti-drift guarantee), while the
-    union embeds them all.
-    """
+    """Compose the fragments: each prompt is ``base + that role's overlay`` and nothing else."""
     role_prompts: dict[Role, str] = {}
     for role in Role:
         parts = [
@@ -203,28 +121,18 @@ def render(defs: RoleDefs) -> RenderedPrompts:
     )
 
 
-# --------------------------------------------------------------------------
-# Boundary — read the bundled fragments, write the derived surfaces
-# --------------------------------------------------------------------------
-
 _PREAMBLE_RE = re.compile(r"^<!--.*?-->\s*", re.DOTALL)
 _H1_RE = re.compile(r"^#[^\n]*\n", re.MULTILINE)
 
 
 def _fragment_body(markdown: str) -> str:
-    """The prose body of a fragment ``.md`` mirror — preamble + ``# Title`` removed.
-
-    The lex→md mirror is ``<!-- autogen -->`` + ``# Title`` + body; only the body
-    composes into a prompt, so strip the leading comment and the single leading
-    H1. Idempotent and tolerant of leading blank lines.
-    """
+    """The fragment body: leading preamble comment and ``# Title`` removed."""
     text = _PREAMBLE_RE.sub("", markdown, count=1).lstrip()
     text = _H1_RE.sub("", text, count=1)
     return text.strip()
 
 
 def _read_fragment(name: str) -> str:
-    """Read one bundled fragment ``.md`` mirror and return its composed body."""
     raw = (
         resources.files(_ROLES_PKG)
         .joinpath(*_ROLES_REL, name)
@@ -234,11 +142,7 @@ def _read_fragment(name: str) -> str:
 
 
 def load_role_defs() -> RoleDefs:
-    """Read the bundled fragment mirrors into a :class:`RoleDefs`. BOUNDARY.
-
-    Reads the rendered ``.md`` prose (not the raw ``.lex``) so prompts carry no
-    lex markup. The fragment file names are fixed by the closed role registry.
-    """
+    """Read the rendered ``.md`` mirrors (never the raw ``.lex``) into a :class:`RoleDefs`."""
     return RoleDefs(
         base=_read_fragment("_base.md"),
         role_map=_read_fragment("_rolemap.md"),
@@ -247,15 +151,7 @@ def load_role_defs() -> RoleDefs:
 
 
 def load_brief_template(role: Role) -> str:
-    """Read the bundled BRIEF TEMPLATE for ``role``. BOUNDARY.
-
-    The task-specific half of a spawn/cold brief (RVW02): the coordinator prints
-    it (``shipit spawn brief <role>``), fills every ``{{slot}}``
-    (:data:`MANDATORY_BRIEF_SLOTS`), and hands the expanded skeleton to the Run.
-    Reads the fragment's rendered ``.md`` mirror like every other fragment, so
-    the template carries no lex markup. Only :data:`BRIEF_ROLES` have one —
-    any other role is a :class:`ValueError` (a closed set, like the registry).
-    """
+    """Read the bundled brief template; a role outside :data:`BRIEF_ROLES` raises."""
     if role not in BRIEF_ROLES:
         raise ValueError(
             f"no brief template for role {role.value!r} — "
@@ -265,23 +161,12 @@ def load_brief_template(role: Role) -> str:
 
 
 def _strip_generated_comment(markdown: str) -> str:
-    """Drop the leading generated banner from a derived file → the bare prompt.
-
-    The committed coordinator slice carries the :data:`GENERATED_COMMENT` so a
-    hand edit is obviously wrong; the deny reason / injected context wants only
-    the prompt prose, so the banner is stripped on read.
-    """
+    """Drop the leading generated banner from a derived file, leaving the bare prompt."""
     return _PREAMBLE_RE.sub("", markdown, count=1).strip()
 
 
 def load_coordinator_slice() -> str:
-    """Read the COMMITTED coordinator slice (the deny reason / injected context).
-
-    The single source of truth for ``policy.COORDINATOR_DENY_REASON``: the bundled
-    generated file, banner stripped. Reading the committed artifact (rather than
-    recomposing) means the deny wall is byte-identical to what was reviewed and
-    committed — the same guarantee the lex→md mirror gives.
-    """
+    """Read the COMMITTED coordinator slice, banner stripped — never a recomposition."""
     raw = (
         resources.files(_ROLES_PKG)
         .joinpath(*_GENERATED_REL, _COORDINATOR_SLICE_NAME)
@@ -291,13 +176,7 @@ def load_coordinator_slice() -> str:
 
 
 def _frontmatter(role: Role) -> str:
-    """The YAML agent-def frontmatter block for a subagent ``role``.
-
-    ``name`` and ``description`` are always emitted; the ``tools`` allow-list is
-    emitted IFF the role's Role Profile posture forbids checkout mutation — the
-    structural read-only posture DERIVES from the registry (RPE01-WS02), so the
-    generated frontmatter and the enforcement posture cannot drift apart.
-    """
+    """The agent-def frontmatter; ``tools`` is emitted only for a non-mutating posture."""
     lines = [
         "---",
         f"name: {role.value}",
@@ -310,27 +189,15 @@ def _frontmatter(role: Role) -> str:
 
 
 def _agent_def(role: Role, prompt: str) -> str:
-    """A subagent agent-def file body: frontmatter + banner + the role prompt."""
     return f"{_frontmatter(role)}\n\n{GENERATED_COMMENT}\n\n{prompt}\n"
 
 
-#: The relative path (under the repo root / a checkout) of the AGY native
-#: custom-agent reviewer def (issue #989): ``.agents/agents/reviewer/agent.md``,
-#: the location AGY 1.1.2 reads a ``--agent reviewer`` def from.
+#: Where AGY reads a ``--agent reviewer`` def from, relative to a checkout.
 AGY_REVIEWER_DEF_REL = (".agents", "agents", Role.REVIEWER.value, "agent.md")
 
 
 def _agy_frontmatter(role: Role) -> str:
-    """The AGY custom-agent frontmatter block — ONLY the documented ``name`` /
-    ``description`` fields (issue #989).
-
-    Unlike :func:`_frontmatter` (the Claude agent-def), this emits NO ``tools``
-    allow-list: AGY has no per-agent tool grant in its documented frontmatter, and
-    the reviewer's read-only guarantee rides the chmod'd Tree (ADR-0018), not an
-    agent-def field. The ``description`` reuses the same authored
-    :data:`_AGENT_DESCRIPTIONS` entry the Claude def uses, so the two surfaces
-    never disagree on what the reviewer is for.
-    """
+    """The AGY custom-agent frontmatter: only ``name`` / ``description``, never ``tools``."""
     return "\n".join(
         [
             "---",
@@ -342,52 +209,26 @@ def _agy_frontmatter(role: Role) -> str:
 
 
 def _agy_agent_def(role: Role, overlay: str) -> str:
-    """An AGY native custom-agent def body: AGY frontmatter + banner + the role's
-    FOCUSED overlay (issue #989).
-
-    The body is the role's own overlay slice (``defs.overlays[role]``) — the
-    focused reviewer marching orders — NOT the ``base + overlay`` composition the
-    Claude agent-def carries. AGY's reviewer runs a slim, read-only posture (it
-    fetches a diff and emits a structured review; the whole shared dev-cycle base
-    is irrelevant to it), and the slimmer def is the measured speed win the issue
-    lands. The schema/output contract is NOT baked in here: the funnel producer
-    still hands the concrete review task (with the inline schema) as the ``--print``
-    payload, so the def stays a stable posture and the task carries the specifics.
-    """
+    """An AGY custom-agent def: frontmatter + banner + the role's overlay ALONE, no base."""
     return f"{_agy_frontmatter(role)}\n\n{GENERATED_COMMENT}\n\n{overlay.strip()}\n"
 
 
 def _generated_doc(prompt: str) -> str:
-    """A bundled generated markdown doc: banner + the composed prompt."""
     return f"{GENERATED_COMMENT}\n\n{prompt}\n"
 
 
 def _repo_root() -> Path:
-    """The repo root in an editable checkout (src/shipit/harness/prompts.py)."""
     return Path(__file__).resolve().parents[3]
 
 
 def regenerate(repo_root: Path | None = None) -> list[Path]:
-    """Regenerate every derived surface from the fragments. BOUNDARY.
-
-    Writes, and returns the paths of: the four subagent agent-defs
-    (``.claude/agents/<role>.md``), the AGY native reviewer def
-    (``.agents/agents/reviewer/agent.md``, issue #989 — read by ``agy --agent
-    reviewer``), the bundled coordinator slice
-    (``src/shipit/data/roles/generated/coordinator-prompt.md``, read at import by
-    ``policy``), and the union reference
-    (``src/shipit/data/roles/generated/agents-union.md``). The fragment ``.md``
-    mirrors must be current first (``tools/lex-convert-doc.sh`` / the pre-commit
-    mirror step); ``tools/regen-roles.sh`` chains both.
-    """
+    """Regenerate every derived surface, from ALREADY-CURRENT ``.md`` mirrors."""
     root = repo_root if repo_root is not None else _repo_root()
     defs = load_role_defs()
     rendered = render(defs)
     written: list[Path] = []
 
     def _write_surface(dest: Path, text: str) -> None:
-        # The one write seam: every regenerated surface lands through here, so
-        # each working-tree mutation carries its own record (path as a field).
         dest.write_text(text, encoding="utf-8")
         logger.info("role surface regenerated at %s", dest, extra={"path": str(dest)})
         written.append(dest)
@@ -398,10 +239,6 @@ def regenerate(repo_root: Path | None = None) -> list[Path]:
         dest = agents_dir / f"{role.value}.md"
         _write_surface(dest, _agent_def(role, rendered.role_prompts[role]))
 
-    # The AGY native custom-agent reviewer def (#989): `agy --agent reviewer` reads
-    # `.agents/agents/reviewer/agent.md` from the checkout it runs in. Generated from
-    # the SAME reviewer overlay the Claude reviewer def uses, so the two reviewer
-    # surfaces can never disagree.
     agy_reviewer_dest = root.joinpath(*AGY_REVIEWER_DEF_REL)
     agy_reviewer_dest.parent.mkdir(parents=True, exist_ok=True)
     _write_surface(
@@ -418,7 +255,6 @@ def regenerate(repo_root: Path | None = None) -> list[Path]:
     )
     _write_surface(generated_dir / _UNION_NAME, _generated_doc(rendered.agents_union))
 
-    # The regeneration milestone: how many derived surfaces are now on disk.
     logger.info(
         "role surfaces regenerated: %d file(s)",
         len(written),
@@ -428,7 +264,6 @@ def regenerate(repo_root: Path | None = None) -> list[Path]:
 
 
 def main() -> None:
-    """``python -m shipit.harness.prompts`` — regenerate and report what changed."""
     for path in regenerate():
         print(f"regenerated {path}")
 
