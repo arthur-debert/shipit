@@ -1,73 +1,7 @@
-"""The assert-bundle pure core — the scar-#2 integrity guard (workflows.lex §3.2).
+"""The assert-bundle pure core: is the artifact the RIGHT binary, not just signed?
 
-Signing is not integrity: a src-tauri crate with multiple binaries and no
-declared main once let the bundler pick the alphabetically-first one — a dev
-tool (``gen_fixtures``) shipped as the app's main executable, and it signed
-and notarized cleanly. Signature checks verify the signature, not that the
-artifact is the right binary. This module is that guard's pure core (bundle
-tree in, verdict out — no network, no toolchain), shipped as its own verb
-(``shipit release assert-bundle``) because two workflow blocks must invoke
-it: ``wf-sign-mac``'s entry and ``wf-publish``'s unsigned path (ADR-0040 —
-the in-block wiring is TOL02-WS06's; THIS module is the check both call).
-
-Two halves:
-
-- :func:`expected_main_binary` — the expected-name fallback chain over the
-  artifact declaration (the legacy ``assert-tauri-bundle-binary.sh`` chain,
-  generalized): ``main-binary`` (mainBinaryName) → ``product-name``
-  (productName) → the first build target's package name → the artifact name.
-- :func:`check_tree` — the check itself, over a bundle tree: every main
-  binary the tree carries (a ``.app``'s ``CFBundleExecutable``, a reseal
-  payload's inner ``.app``, a plain ``.tar.gz``/``.zip`` archive's inner
-  executable, a ``.deb``'s inner executable, a ``.tgz`` npm tarball's
-  ``package.json`` name, an electron ``.dmg``/``.AppImage``'s declared product
-  name, or — when the tree bundles none of those — its loose executables) must
-  be named exactly the expected name.
-  A tree with NO discoverable main binary fails loudly: "nothing to assert"
-  is a wrong bundle, never a pass.
-
-The archive tier exists because GitHub Actions artifact upload/download
-STRIPS Unix exec bits: wf-publish's unsigned-path assert (ADR-0040) runs
-over a bundle tree that crossed a cross-job artifact, so the loose staging
-binary the archive composition emits arrives non-executable and the exec-bit
-loose scan cannot see it. The ``.tar.gz`` beside it is the real distributable
-and preserves the exec bit INSIDE its own header (tar stores mode), so the
-archive is read in place — the same transport-proof, no-extraction shape as
-the reseal payload — and its inner executable is the assertable main binary.
-
-The deb tier (issue #784 F4) exists for the same reason with a thicker shell:
-a deb composition's tree carries ONLY the ``.deb`` — opaque to every other
-tier (``_is_executable`` deliberately excludes it from the loose scan) — so
-without this tier wf-publish's assert fan hard-failed every deb leg with
-"nothing to assert". A ``.deb`` is an ar container (``debian-binary`` +
-``control.tar.*`` + ``data.tar.*``); the ``data.tar`` member is read in place
-(never extracted), and its sole executable regular member — the exec bit
-rides the inner tar's headers, transport-proof — is the assertable main
-binary.
-
-The electron tier (issue #790) is the exception to "crack the container": a
-``.dmg`` (Apple UDIF disk image) and an ``.AppImage`` (ELF runtime + squashfs)
-are OPAQUE to pure reads — no stdlib cracks them and this guard shells out to
-nothing — so the tier asserts the product name electron-builder stamped into
-the FILENAME (``<product>-<version>[-<arch>].dmg``) instead of an inner
-binary. Because that name assertion is a HEURISTIC (a filename, not a cracked
-binary), it is a FALLBACK: the ``.dmg``/``.AppImage`` tiers assert only when
-the tree carries no authoritative binary tier (``.app``/reseal-payload/
-archive/deb). This is what keeps a NON-electron ``.dmg`` — a tauri mac-app's
-own ``Product_1.0.0_arch.dmg``, which rides beside its authoritative ``.app``
-and reseal payload — from being misread as a second, unparseable "main
-binary" and failing a bundle its ``.app`` already asserts correctly. The
-electron DARWIN leg is signable like mac-app (electron-builder does not sign at
-build): it ships the unsigned ``.app`` as a ``<name>.unsigned-app.tar.gz``
-reseal payload, so this guard — running at ``wf-sign-mac``'s entry — reads the
-payload's authoritative ``CFBundleExecutable`` and the opaque ``.dmg`` name
-tier stays the fallback. Only the electron LINUX leg (an ``.AppImage`` with no
-reseal payload, not signable) leans on the container name tier as its sole
-assert.
-
-Pure over the filesystem (reads only); rendered by the verb with uniform
-exit codes (0 pass, 1 fail — verdict + expected/actual on stderr, ``--json``
-available), so the WS06 blocks call it with no extra plumbing.
+:func:`expected_main_binary` derives the name; :func:`check_tree` asserts it
+against every main binary a bundle tree carries. Pure reads.
 """
 
 from __future__ import annotations
@@ -83,74 +17,39 @@ from pathlib import Path, PurePosixPath
 
 from .. import config
 
-#: The reseal-payload suffix the mac-app composition emits
-#: (:mod:`shipit.release.bundle`) — inspected here without extraction.
+#: The mac-app composition's reseal payload; inspected without extraction.
 RESEAL_SUFFIX = ".unsigned-app.tar.gz"
 
-#: The plain-archive suffixes the archive composition emits (tarball on unix,
-#: zip on windows) — read in place for the exec-bit-preserving main-binary
-#: check. The reseal payload is also a ``.tar.gz`` but is handled separately
-#: (:func:`_payload_main_binary`), so it is excluded by :func:`_is_plain_archive`.
+#: The archive composition's outputs; the reseal payload is also a ``.tar.gz``
+#: and is excluded by :func:`_is_plain_archive`.
 PLAIN_ARCHIVE_SUFFIXES = (".tar.gz", ".zip")
 
-#: The suffix the deb composition emits (:mod:`shipit.release.bundle`) —
-#: inspected here in place, like every other archive-shaped tier.
 DEB_SUFFIX = ".deb"
 
-#: The suffix the wasm-pack composition's npm tarball carries (TOL02-WS12
-#: #788) — `npm pack`'s ``.tgz`` (NOT ``.tar.gz``, so the plain-archive tier
-#: never sees it). Its identity is the inner ``package/package.json`` ``name``
-#: (the scar-#2 check for an npm package: an empty/wrong tree fails loudly),
-#: read in place like every other archive-shaped tier.
+#: ``npm pack``'s suffix, NOT ``.tar.gz``, so the plain-archive tier skips it.
 NPM_TARBALL_SUFFIX = ".tgz"
 
-#: The ar container's global magic — a ``.deb`` IS an ar archive
-#: (``debian-binary`` + ``control.tar.*`` + ``data.tar.*``).
+#: A ``.deb`` IS an ar archive.
 _AR_MAGIC = b"!<arch>\n"
 
-#: The electron composition's darwin/linux distributable suffixes
-#: (:mod:`shipit.release.bundle`). UNLIKE every other tier — which cracks its
-#: container in place (a ``.tar``/``.zip``/``.deb``/``.app``) — a ``.dmg``
-#: (Apple UDIF disk image) and an ``.AppImage`` (ELF runtime + squashfs) are
-#: OPAQUE to pure reads, so these tiers assert the DECLARED name
-#: electron-builder stamped into the filename from ``productName`` rather than
-#: the inner executable. Because the assert is name-only (a heuristic), it is a
-#: FALLBACK — it runs only when the tree carries no authoritative binary tier
-#: (see :func:`check_tree`): a tauri mac-app's own ``.dmg`` rides beside its
-#: ``.app``/reseal payload, which assert the real binary, so the opaque ``.dmg``
-#: is not (mis)read as a second, unparseable main binary.
+#: Both are OPAQUE to pure reads, so their tier asserts the product name
+#: electron-builder stamped into the FILENAME, never an inner binary.
 DMG_SUFFIX = ".dmg"
 APPIMAGE_SUFFIX = ".AppImage"
 
-#: electron-builder's incremental-update sidecar suffix (``.dmg.blockmap``,
-#: ``.exe.blockmap``, ``.AppImage.blockmap``) — inert data beside a
-#: distributable, never a main-binary candidate.
+#: Inert data beside a distributable, never a main-binary candidate.
 BLOCKMAP_SUFFIX = ".blockmap"
 
-#: The version-boundary in an electron-builder distributable filename
-#: (``<product>-<version>[-<arch>]<suffix>``): the first ``-`` immediately
-#: followed by a digit. Everything before it is the product-name segment the
-#: electron name tiers assert. (Heuristic — a productName whose own text
-#: carries a ``-<digit>`` before the version would truncate early; the
-#: assert then fails loudly rather than silently passing a wrong name.)
+#: The version boundary in ``<product>-<version>[-<arch>]<suffix>``: the first
+#: ``-`` followed by a digit. Heuristic — a bad split fails loudly.
 _ELECTRON_VERSION_BOUNDARY = re.compile(r"-\d")
 
 
 def expected_main_binary(artifact: config.Artifact) -> str:
-    """The expected main-binary name for ``artifact`` — the fallback chain
-    (workflows.lex §3.2): mainBinaryName (``main-binary``) → productName
-    (``product-name``) → the first build target's declared package (its
-    basename — ``./cmd/padz`` → ``padz``) → the artifact name. A package with
-    no usable basename (a bare ``.``/``./``/``..``/``/``) is skipped, never
-    asserted as the expected name.
-
-    A ``wasm-pack`` bundle that declares a ``scope`` publishes a SCOPED npm
-    package: ``wasm-pack build --scope <s>`` stamps ``@<s>/<pkg>`` into
-    ``package/package.json`` ``name`` (the identity
-    :func:`_npm_tarball_main_binary` reads back), so the expected name must
-    carry the same ``@scope/`` prefix — the base name from the chain above,
-    prefixed. An unscoped wasm-pack (``scope`` is ``None``) and every other
-    composition keep the bare base name. Pure."""
+    """The expected main-binary name: ``main-binary`` -> ``product-name`` -> the first
+    build target's package basename -> the artifact name, ``@scope/``-prefixed for
+    a scoped wasm-pack bundle.
+    """
     base = _base_main_binary(artifact)
     bundle = artifact.bundle
     if bundle is not None and bundle.scope is not None:
@@ -159,10 +58,6 @@ def expected_main_binary(artifact: config.Artifact) -> str:
 
 
 def _base_main_binary(artifact: config.Artifact) -> str:
-    """The un-scoped expected main-binary name — the fallback chain
-    (mainBinaryName → productName → first package basename → artifact name),
-    before :func:`expected_main_binary` applies any npm ``@scope`` prefix.
-    Pure."""
     if artifact.main_binary is not None:
         return artifact.main_binary
     if artifact.product_name is not None:
@@ -176,10 +71,7 @@ def _base_main_binary(artifact: config.Artifact) -> str:
 
 @dataclass(frozen=True)
 class BundleVerdict:
-    """The check's typed outcome (ADR-0030): what was expected, what the
-    tree actually carries as its main binaries, and the verdict. ``problem``
-    carries the diagnosis when the tree itself is unreadable as a bundle
-    (no main binary found, a ``.app`` with no determinable executable)."""
+    """The check's typed outcome; ``problem`` diagnoses a tree unreadable as a bundle."""
 
     tree: str
     expected: str
@@ -188,7 +80,6 @@ class BundleVerdict:
     problem: str | None = None
 
     def to_dict(self) -> dict:
-        """The ``--json`` field set — exactly the declared outputs."""
         out: dict = {
             "tree": self.tree,
             "expected": self.expected,
@@ -201,9 +92,7 @@ class BundleVerdict:
 
 
 def _app_main_binary(app: Path) -> str | None:
-    """The main-binary name of a ``.app`` directory, or ``None`` when
-    undeterminable: ``Contents/Info.plist``'s ``CFBundleExecutable`` (the
-    authoritative declaration), else the SOLE file in ``Contents/MacOS``."""
+    """A ``.app``'s ``CFBundleExecutable``, else the SOLE file in ``Contents/MacOS``."""
     info = app / "Contents" / "Info.plist"
     if info.is_file():
         try:
@@ -221,10 +110,7 @@ def _app_main_binary(app: Path) -> str | None:
 
 
 def _payload_main_binary(payload: Path) -> str | None:
-    """The main-binary name of a reseal payload (``*.unsigned-app.tar.gz``),
-    read from the tar WITHOUT extraction: the inner ``.app``'s
-    ``Contents/Info.plist`` ``CFBundleExecutable``, else the sole member
-    under ``Contents/MacOS``. ``None`` when undeterminable."""
+    """A reseal payload's inner ``.app`` main binary, read WITHOUT extraction."""
     macos_members: list[str] = []
     try:
         with tarfile.open(payload, mode="r:gz") as tar:
@@ -254,26 +140,20 @@ def _payload_main_binary(payload: Path) -> str | None:
 
 
 def _is_plain_archive(path: Path) -> bool:
-    """Whether ``path`` is a plain archive-composition output (a ``.tar.gz``
-    or ``.zip``) — NOT the reseal payload (also a ``.tar.gz``, handled by
-    :func:`_payload_main_binary`). Pure."""
+    """Whether ``path`` is an archive-composition output rather than a reseal payload."""
     if path.name.endswith(RESEAL_SUFFIX):
         return False
     return path.name.endswith(PLAIN_ARCHIVE_SUFFIXES)
 
 
 def _archive_main_binary(archive: Path) -> str | None:
-    """The main-binary name of a plain archive (``.tar.gz``/``.zip``), read
-    WITHOUT extraction: the SOLE executable member (the exec bit stored in the
-    archive header survives artifact transport, unlike the loose file's; a
-    windows ``.zip`` carries no unix mode, so a ``.exe`` member counts by its
-    suffix, its stem). ``None`` when undeterminable — zero candidates, or
-    SEVERAL by ANY measure: the exec-bit and ``.exe`` tallies are counted
-    TOGETHER, so an archive mixing a unix executable and a ``.exe`` is
-    ambiguous and fails loudly rather than silently picking one. Only regular
-    files are considered (a symlink with the exec bit is never a candidate,
-    zip and tar alike); the docs the archive ships beside the binary carry no
-    exec bit and are never candidates."""
+    """A plain archive's SOLE executable member, read WITHOUT extraction.
+
+    The exec bit inside the archive header survives artifact transport where the
+    loose file's does not; a windows ``.zip`` carries no unix mode, so a ``.exe``
+    member counts by suffix. Exec-bit and ``.exe`` candidates are tallied TOGETHER,
+    so a mixed archive is ambiguous and fails loudly.
+    """
     exec_members: list[str] = []
     exe_members: list[str] = []
     try:
@@ -282,11 +162,8 @@ def _archive_main_binary(archive: Path) -> str | None:
                 for info in zf.infolist():
                     if info.is_dir():
                         continue
-                    # Match tar's isfile() filter: a Unix-created entry that
-                    # is not a regular file (symlink, device) is not a binary
-                    # candidate even with the exec bit set. Windows-created
-                    # entries carry no unix mode (mode == 0) and fall through
-                    # to the .exe suffix check below.
+                    # Match tar's isfile() filter; a windows-created entry
+                    # carries no unix mode and falls through to the .exe check.
                     mode = info.external_attr >> 16
                     if mode and (mode & 0o170000) != 0o100000:
                         continue
@@ -314,16 +191,11 @@ def _archive_main_binary(archive: Path) -> str | None:
 
 
 def _deb_data_tar(deb: Path) -> bytes | None:
-    """The raw bytes of the deb's ``data.tar.*`` member, sliced out of the ar
-    container WITHOUT extraction (we walk the container's own headers rather
-    than shelling out to ``dpkg-deb``/``ar``) — the whole file is read into
-    memory, which is bounded here because a shipit ``.deb`` wraps a single
-    pre-built CLI binary (single-digit MB), not an arbitrary payload. An ar
-    archive is the global magic followed by 60-byte member headers (name 16,
-    mtime 12, uid 6, gid 6, mode 8, size 10, magic 2) each fronting ``size``
-    data bytes padded to an even offset; a ``.deb`` carries ``debian-binary``,
-    ``control.tar.*`` and ``data.tar.*`` members. ``None`` when the file is not
-    a well-formed ar archive, the data member is missing, or it is truncated."""
+    """The deb's ``data.tar.*`` bytes, sliced out of the ar container WITHOUT extraction.
+
+    The whole file is read into memory, bounded because a shipit ``.deb`` wraps one
+    pre-built CLI binary. ``None`` for a malformed, missing, or truncated member.
+    """
     try:
         raw = deb.read_bytes()
     except OSError:
@@ -350,13 +222,7 @@ def _deb_data_tar(deb: Path) -> bytes | None:
 
 
 def _deb_main_binary(deb: Path) -> str | None:
-    """The main-binary name of a ``.deb``, read WITHOUT extraction: the SOLE
-    executable regular member of its ``data.tar`` (the exec bit rides the
-    inner tar's headers — transport-proof, exactly the plain-archive tier's
-    premise; a doc/copyright member carries no exec bit and is never a
-    candidate). ``None`` when undeterminable — an unreadable container, a
-    data.tar compression the runtime cannot open, zero candidates, or
-    several (ambiguity fails loudly, never a silent pick)."""
+    """The SOLE executable regular member of a ``.deb``'s ``data.tar``, read in place."""
     data = _deb_data_tar(deb)
     if data is None:
         return None
@@ -374,14 +240,7 @@ def _deb_main_binary(deb: Path) -> str | None:
 
 
 def _container_product_name(path: Path, suffix: str) -> str | None:
-    """The product-name segment of an electron-builder distributable filename
-    (``<product>-<version>[-<arch>]<suffix>``) — everything before the version
-    boundary (:data:`_ELECTRON_VERSION_BOUNDARY`). ``None`` when the name
-    carries no version boundary (unparseable) — which, in the fallback tier
-    that calls this (:func:`check_tree`, no authoritative binary present), the
-    guard reports as an undeterminable container rather than asserting a
-    garbled name. Pure, name-only — the ``.dmg``/``.AppImage`` container itself
-    is opaque to pure reads (see :data:`DMG_SUFFIX`)."""
+    """The product-name segment of an electron-builder filename, before the version."""
     stem = path.name[: -len(suffix)]
     match = _ELECTRON_VERSION_BOUNDARY.search(stem)
     if match is None:
@@ -391,20 +250,14 @@ def _container_product_name(path: Path, suffix: str) -> str | None:
 
 
 def _npm_tarball_main_binary(tarball: Path) -> str | None:
-    """The npm package IDENTITY of a ``.tgz`` — its inner
-    ``package/package.json`` ``name`` (``@scope/pkg`` for a scoped package),
-    read WITHOUT extraction. ``None`` when undeterminable: an unreadable
-    container, no ``package.json`` member, unparseable JSON, or a missing/
-    non-string ``name``. An npm tarball packs everything under a top-level
-    ``package/`` dir, so the manifest is ``package/package.json``."""
+    """A ``.tgz``'s inner ``package/package.json`` ``name``, read WITHOUT extraction."""
     try:
         with tarfile.open(tarball, mode="r:gz") as tar:
             for member in tar:
                 parts = PurePosixPath(member.name).parts
                 if parts[-1:] != ("package.json",) or not member.isfile():
                     continue
-                # The manifest is the top-level package/package.json; a nested
-                # bundled dependency's package.json (deeper) is not the identity.
+                # A nested bundled dependency's manifest is not the identity.
                 if len(parts) != 2 or parts[0] != "package":
                     continue
                 extracted = tar.extractfile(member)
@@ -422,18 +275,15 @@ def _npm_tarball_main_binary(tarball: Path) -> str | None:
 
 
 def _is_executable(path: Path) -> bool:
-    """Whether ``path`` is a loose main-binary candidate: an executable
-    regular file (or a ``.exe`` — windows carries no exec bit through)."""
+    """Whether ``path`` is a loose main-binary candidate: an executable regular file
+    or a ``.exe``, excluding the container suffixes their own tiers assert.
+    """
     if not path.is_file() or path.is_symlink():
         return False
     if path.suffix == ".exe":
         return True
-    # Archives and opaque distributables ride the bundle tree too (the tarball
-    # the archive composition wrote; the .tgz npm tarball; electron's
-    # .dmg/.AppImage, whose own tiers assert them, and the .blockmap sidecars
-    # beside them). An .AppImage is an executable ELF, so without excluding it
-    # the loose scan would misread it as a main binary named
-    # `<product>-<version>.AppImage`.
+    # Archives and opaque distributables ride the tree too and have their own
+    # tiers; an .AppImage is an executable ELF the loose scan would misread.
     if path.name.endswith(
         (".tar.gz", ".tgz", ".zip", ".dmg", ".deb", ".whl", ".AppImage", ".blockmap")
     ):
@@ -444,43 +294,13 @@ def _is_executable(path: Path) -> bool:
 def check_tree(tree: Path, expected: str) -> BundleVerdict:
     """Assert the bundle tree's MAIN binary is ``expected``. Pure reads.
 
-    Discovery, in precedence order (an app bundle IS the main binary when
-    one exists — the gen_fixtures scar lived inside the ``.app``):
-
-    1. every ``*.app`` directory under ``tree`` (:func:`_app_main_binary`);
-    2. every reseal payload (``*.unsigned-app.tar.gz``), read in place;
-    3. every plain archive (``*.tar.gz``/``*.zip``), read in place
-       (:func:`_archive_main_binary`) — the exec bit inside the archive
-       survives artifact transport where the loose file's does not;
-    4. every ``*.deb``, read in place (:func:`_deb_main_binary`) — its
-       ``data.tar`` member's sole executable, same transport-proof shape;
-    5. every ``*.tgz`` npm tarball, read in place
-       (:func:`_npm_tarball_main_binary`) — its ``package/package.json``
-       ``name`` is the assertable identity (a wasm/npm artifact has no
-       executable main binary; its identity is the npm package name);
-    6. only when tiers 1–5 found NO authoritative binary: every ``*.dmg`` and
-       ``*.AppImage`` (electron distributables), asserted by the product-name
-       segment of the filename (:func:`_container_product_name`) — the
-       container is opaque to pure reads, so the tier asserts the DECLARED
-       name, not the inner binary. This tier is a FALLBACK precisely BECAUSE
-       it is a filename heuristic: a tauri mac-app ships its own ``.dmg``
-       beside the ``.app``/reseal payload that authoritatively assert its
-       binary, so that non-electron ``.dmg`` (often ``Product_1.0.0_arch``,
-       which the tier cannot even split) must NOT escalate to a failure the
-       ``.app`` already cleared. An electron darwin BUNDLE tree carries the
-       ``.dmg`` beside the reseal payload (``*.unsigned-app.tar.gz``), so tier
-       2 authoritatively asserts the payload's inner ``.app`` there and this
-       fallback is skipped; the ``.dmg`` name tier is the assert that runs only
-       over a payload-less tree — the signed publish leg, where the resealed
-       ``.dmg`` crosses the artifact boundary but the fragile ``.app``/payload
-       do not;
-    7. only when the tree carries none of the above: every loose executable
-       file (``.exe`` counted by suffix, its stem compared).
-
-    The verdict is ``ok`` exactly when at least one main binary was found
-    and EVERY one is named ``expected``. An undeterminable app/payload/
-    archive, or a tree with nothing to assert, fails with the diagnosis in
-    ``problem``.
+    Discovery runs in precedence order: ``.app`` dirs, reseal payloads, plain
+    archives, ``.deb``, npm ``.tgz`` — then, ONLY when none of those was found, the
+    opaque ``.dmg``/``.AppImage`` filename heuristic, then loose executables. The
+    filename tier is a fallback precisely because it is a heuristic: a tauri
+    mac-app's own ``.dmg`` rides beside the ``.app`` that already asserts its
+    binary. The verdict is ``ok`` exactly when at least one binary was found and
+    every one is named ``expected``.
     """
     actual: list[str] = []
     problems: list[str] = []
@@ -528,11 +348,8 @@ def check_tree(tree: Path, expected: str) -> BundleVerdict:
             )
         else:
             actual.append(name)
-    # The opaque-container tiers are a name-only FALLBACK: they assert only
-    # when tiers 1–5 found no authoritative binary. A tauri mac-app's own
-    # `.dmg` rides beside its `.app`/reseal payload, so gating on those keeps
-    # that non-electron container (which the name heuristic cannot parse) from
-    # escalating to a failure the `.app` already cleared.
+    # The opaque-container tiers assert only when no authoritative binary was
+    # found; see :func:`check_tree`.
     if not (apps or payloads or archives or debs or tarballs):
         for dmg in dmgs:
             name = _container_product_name(dmg, DMG_SUFFIX)
