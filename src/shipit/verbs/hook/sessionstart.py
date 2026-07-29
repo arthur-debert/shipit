@@ -1,74 +1,6 @@
-"""``shipit hook sessionstart`` — the coordinator-activation boundary (ADR-0027).
+"""``shipit hook sessionstart`` — write activation + log context into CLAUDE_ENV_FILE.
 
-THIN by design (mirrors ``hook pretooluse``); independent, additive steps per
-session start — two writes, the advisory emits (the source-clone nudge, the
-ADR-0033 pin-staleness line, the #444 missing-``test``-task line), and the
-``session.started`` dev-cycle event (ADR-0032, :func:`_emit_session_started` —
-the hook is the one verb that witnesses a session beginning):
-
-1. **Activation** — detect the toolchain governing the session's ``cwd`` → capture
-   pixi's activation (``pixi shell-hook --json`` via
-   :func:`shipit.pixienv.shell_hook`) → render it (pure core:
-   :mod:`shipit.harness.activation`) → APPEND the export lines to the file named
-   by ``CLAUDE_ENV_FILE``, which Claude Code sources as a preamble before every
-   Bash tool call. Result: the coordinator's environment is active for every Bash
-   call with no wrapper — ``shipit``/``python`` resolve without a ``pixi run``
-   prefix.
-2. **Log-context export** (REL01 #349, ADR-0029) — when the session's ``cwd`` is
-   inside a Tree, append ``export SHIPIT_LOG_CTX_SESSION=<id>`` (and the matching
-   ``…_TREE=<path>``) to the same ``CLAUDE_ENV_FILE``. The id is resolved by the
-   shared reader (:func:`shipit.session.current.current_session_id`): a codex launch
-   already exports its ``codex-<…>`` id, while a coordinator claude session takes the
-   flat Tree leaf's trailing ``<id>`` — which IS the harness session UUID
-   (ADR-0074), the very value ``claude --resume`` wants. So every shipit command run
-   *inside* the session (each one a fresh process) rebinds it at
-   ``logsetup.configure_logging`` via :func:`shipit.logcontext.bind_from_env`, and
-   the per-repo JSONL log becomes sliceable by session for the records that matter
-   most: the ones emitted during the session. For a claude coordinator this now
-   COINCIDES with the payload ``session_id`` (the flat dir ``<id>`` is that UUID,
-   ADR-0074) — the two identifiers that ADR-0027 kept apart have merged.
-3. **Source-clone warning** (REL01 #348) — when the session's ``cwd`` is a shipit
-   *source clone* (has ``.shipit.toml``, is a git repo) rather than a Tree (any
-   dir under :func:`shipit.tree.layout.central_root`), print a one-line warning
-   on stdout. A SessionStart hook's stdout is added to the session's context, so
-   the coordinator sees it and can relay it; a WARNING log record rides along as
-   the durable trail. The direct launch stays fully supported (``claude -w
-   <name>`` without the launcher is an explicit path, per the ``agent-start``
-   header) — this is a nudge, never a block. The discriminator is the PATH, not
-   the branch: session Trees are *ephemeral-by-path, work-by-branch* (ADR-0027),
-   so their branch moves off ``ephemeral/*`` mid-session and would false-positive,
-   while every flat Tree lives under the central root by construction (ADR-0074).
-
-Session liveness is no longer recorded here: ADR-0072 replaced the pidfile-and-``ps``
-reclaim ladder with an activity-based rule (the filesystem already knows when a Tree
-was last touched), so the ``SessionStart`` pidfile lost its only consumer and retired
-with the former ``shipit.session.liveness`` module.
-
-**Fail-open is the contract** — the same posture as ``hook pretooluse``, the
-OPPOSITE of ``hook worktreecreate``. Both writes are ADDITIVE, never
-load-bearing: the managed hook commands keep running even without activation, and
-a record missing its ``session`` key is merely less sliceable, never lost. ANY
-failure in any step (no ``CLAUDE_ENV_FILE``, bad payload, no toolchain, a pixi
-error, an unwritable file, a cwd that is no ephemeral Tree) must therefore cost
-the session NOTHING: skip that write and exit 0 — and the steps fail open
-INDEPENDENTLY, so a broken activation never costs the session its log context, or
-vice versa. The source-clone warning is
-fail-open too, with one deliberate calibration exception
-(#348): a detection error skips at DEBUG, not the canon's WARNING — the check
-writes nothing durable, so there is no degraded state to flag, and a broken
-detection environment would otherwise WARN on every session start for a purely
-advisory nudge. The log-context export's *detection* half shares that
-calibration (#349: is this cwd an ephemeral Tree? — same path arithmetic, same
-"would WARN every start in a broken environment" failure mode), while its
-*write* half keeps the canon's WARNING like the other writes. Levels
-follow the fail-open canon in :mod:`shipit.verbs.hook`: a swallowed exception is
-a degraded-but-continuing outcome and logs at WARNING; a clean no-op (no
-``CLAUDE_ENV_FILE``, no toolchain, no session-host ancestor, not a clone, not an
-ephemeral Tree) is mechanics and stays at DEBUG.
-
-The env file is opened in APPEND mode: ``CLAUDE_ENV_FILE`` is a shared seam other
-SessionStart hooks may also write to, and this boundary owns only its own lines —
-never the whole file.
+Every step fails open independently; the hook always exits 0.
 """
 
 from __future__ import annotations
@@ -92,44 +24,24 @@ from ...tree import layout
 
 logger = logging.getLogger("shipit.hook")
 
-#: The env var Claude Code sets to the file it sources before each Bash call.
 ENV_FILE_VAR = "CLAUDE_ENV_FILE"
 
-#: The advisory printed (stdout → session context) when the session lands in a
-#: source clone instead of a Tree (REL01 #348). One line, actionable: the fix is
-#: a relaunch through the launcher (or the equivalent bare ``claude -w``, which
-#: fires the same WorktreeCreate isolation path).
 SOURCE_CLONE_WARNING = (
     "shipit: you launched a coordinator directly in the source clone — this "
     "session has no isolated Tree. Restart via ./agent-start claude for "
     "Claude Code or ./agent-start codex for Codex."
 )
 
-#: The tool repo the ADR-0033 staleness advisory measures a consumer's pin
-#: against — the same home the managed launcher's ``SHIPIT_GIT_URL`` points at.
 SHIPIT_REPO_SLUG = "arthur-debert/shipit"
 
-#: The branch a pin's lag is measured against.
 SHIPIT_MAIN = "main"
 
-#: The pixi task name the tooling contract requires (#444). ``pixi run test``
-#: on a manifest WITHOUT it falls through to the POSIX ``test`` shell builtin —
-#: silent exit 1, zero output on both streams, indistinguishable from a red
-#: suite — so the absence is warned at session start rather than discovered as
-#: a lying verification command mid-run.
 CONTRACT_TEST_TASK = "test"
 
 
 @click.command(name="sessionstart")
 def cmd() -> None:
-    """Write the repo's toolchain activation and log context into ``CLAUDE_ENV_FILE``.
-
-    Reads the ``SessionStart`` payload as JSON on stdin. Always exits 0; each of
-    the steps (activation, log-context export, session event, source-clone
-    warning) fails OPEN independently on any error, and a repo with no activatable
-    toolchain / a cwd that is not a source clone or not an ephemeral Tree is a
-    clean no-op for that check.
-    """
+    """Write the repo's toolchain activation and log context into ``CLAUDE_ENV_FILE``."""
     raise SystemExit(run())
 
 
@@ -140,20 +52,7 @@ def run(
     runner=execrun.run,
     commits_ahead=None,
 ) -> int:
-    """Parse stdin → the advisories (source-clone cwd, stale pin, missing
-    ``test`` task) → write activation → export the log context → emit the
-    ``session.started`` event. Returns 0 always.
-
-    ``stdout``, ``environ``, ``runner``, and ``commits_ahead`` are the injectable
-    boundaries (defaults: the real ``sys.stdout`` / ``os.environ`` /
-    :func:`shipit.execrun.run` / :func:`shipit.gh.commits_ahead`) so tests assert
-    every step without a live pixi or the network. Each check is wrapped fail-open
-    on its own, so a bad payload, a pixi failure, an unwritable env file, or a
-    detection error can never crash the session — and a failure in one check
-    never suppresses the others. The log-context export runs AFTER activation so
-    its lines land after the pixi exports in the shared env file — but it does
-    not depend on activation having succeeded (or on a toolchain existing).
-    """
+    """Parse stdin → advisories → write activation → export the log context → emit ``session.started``. Always returns 0."""
     env = environ if environ is not None else os.environ
     out = stdout if stdout is not None else sys.stdout
     try:
@@ -162,8 +61,6 @@ def run(
         logger.warning("sessionstart: could not read the payload", exc_info=True)
         return 0
     _warn_source_clone(raw, out)
-    # Resolved at CALL time (not a bound default) so a patched gh boundary is
-    # honored — the same late-binding stance as the pixienv runners.
     _warn_stale_pin(raw, out, commits_ahead or gh.commits_ahead)
     _warn_missing_test_task(raw, out)
     _write_activation(raw, env, runner)
@@ -173,17 +70,7 @@ def run(
 
 
 def _warn_source_clone(raw: str, out: TextIO) -> None:
-    """The advisory check: warn when the session landed in a source clone.
-
-    A SessionStart hook's stdout is added to the session's context, so the line
-    reaches the coordinator (and the transcript); the WARNING log record is the
-    durable trail. Fail-open in isolation — but unlike the two writes, a
-    detection error here skips at DEBUG, not WARNING (#348's explicit
-    calibration): the check writes nothing durable, so there is no degraded
-    state to flag, and a broken detection environment (e.g. a bad
-    ``SHIPIT_TREES_ROOT``) would otherwise WARN on every session start for a
-    purely advisory nudge.
-    """
+    """Warn on stdout when the session landed in a source clone rather than a Tree."""
     try:
         cwd = _payload_cwd(raw)
         if not _is_source_clone(cwd):
@@ -194,8 +81,7 @@ def _warn_source_clone(raw: str, out: TextIO) -> None:
             "no isolated Tree (restart via managed coordinator launcher)",
             cwd,
         )
-    except Exception:  # noqa: BLE001 — fail-open, DEBUG by design: advisory-only,
-        # nothing durable degrades when the detection itself breaks (see docstring).
+    except Exception:  # noqa: BLE001 — fail-open, DEBUG by design
         logger.debug(
             "sessionstart: source-clone detection failed open — no warning emitted",
             exc_info=True,
@@ -203,24 +89,7 @@ def _warn_source_clone(raw: str, out: TextIO) -> None:
 
 
 def _is_source_clone(cwd: Path) -> bool:
-    """Whether ``cwd`` is a shipit SOURCE CLONE rather than a Tree (or neither).
-
-    A source clone has ``.shipit.toml`` at its root and is a git repo (``.git``
-    dir or worktree file). What separates it from a Tree — which, being a clone
-    of the same repo, carries both markers too — is the PATH: every Tree kind
-    (ephemeral, write, review) lives under :func:`shipit.tree.layout.central_root`
-    by construction ("the path IS the signal", ADR-0018/0027). The branch is NOT
-    consulted: session Trees are *ephemeral-by-path, work-by-branch*, so their
-    branch moves off ``ephemeral/*`` mid-session and would false-positive, and a
-    git call would cost a subprocess where two stats do.
-
-    Both sides are resolved before comparing so a symlinked home or central root
-    (macOS ``/tmp`` → ``/private/tmp`` and friends) cannot split one dir into
-    "inside" and "outside" spellings. Only the session root itself is checked —
-    a launch from a SUBDIR of the clone is not detected; the payload ``cwd`` is
-    the session's root, and a fail-open advisory prefers a false negative over a
-    directory walk.
-    """
+    """Whether ``cwd`` is a shipit source clone rather than a Tree (or neither)."""
     if not (cwd / config.CONFIG_NAME).is_file():
         return False
     if not (cwd / ".git").exists():
@@ -229,17 +98,7 @@ def _is_source_clone(cwd: Path) -> bool:
 
 
 def _warn_stale_pin(raw: str, out: TextIO, commits_ahead) -> None:
-    """The ADR-0033 staleness advisory: one line when the repo's pin lags main.
-
-    Best-effort BY SPECIFICATION: staleness is surfaced, never enforced — with
-    pin-wins execution, lag is a scheduling fact, not a hazard. Silent when the
-    repo carries no valid pin (nothing to measure), silent when the pin is
-    current, and silent at DEBUG on ANY error — no network, no gh auth, an
-    unknown sha (the #348 advisory calibration: nothing durable degrades, and a
-    broken network must not WARN on every session start). ``commits_ahead`` is
-    the injected read boundary (:func:`shipit.gh.commits_ahead`), itself a
-    probe that answers ``None`` rather than raising.
-    """
+    """One advisory line when the repo's shipit pin lags main; silent on any error."""
     try:
         cwd = _payload_cwd(raw)
         pin = config.shipit_pin(cwd / config.CONFIG_NAME)
@@ -261,8 +120,7 @@ def _warn_stale_pin(raw: str, out: TextIO, commits_ahead) -> None:
             "sessionstart: shipit pin is stale",
             extra={"pin": pin, "behind": behind},
         )
-    except Exception:  # noqa: BLE001 — fail-open, DEBUG by design: advisory-only,
-        # never blocking, and a broken environment must not warn every start.
+    except Exception:  # noqa: BLE001 — fail-open, DEBUG by design
         logger.debug(
             "sessionstart: staleness advisory failed open — nothing emitted",
             exc_info=True,
@@ -270,17 +128,7 @@ def _warn_stale_pin(raw: str, out: TextIO, commits_ahead) -> None:
 
 
 def _warn_missing_test_task(raw: str, out: TextIO) -> None:
-    """The #444 advisory: warn when the manifest lacks the contract ``test`` task.
-
-    The managed task block deliberately does NOT own ``test`` (repo-specific by
-    the adoption PRD), so a consumer that never defined one hits the POSIX
-    ``test``-builtin collision the moment anything runs the tooling contract's
-    ``pixi run test`` — a silent exit 1 that reads as a red suite. The check
-    looks in the root ``[tasks]`` table and every ``[feature.*.tasks]`` table;
-    a repo with no ``pixi.toml`` at all is a clean no-op (not yet a pixi
-    consumer — install seeds the manifest, not this advisory). Fail-open at
-    DEBUG on any error (advisory calibration, like the other detections).
-    """
+    """Warn when the pixi manifest declares no ``test`` task, which makes ``pixi run test`` fall through to the POSIX ``test`` builtin — a silent exit 1."""
     try:
         cwd = _payload_cwd(raw)
         manifest = cwd / "pixi.toml"
@@ -306,8 +154,7 @@ def _warn_missing_test_task(raw: str, out: TextIO) -> None:
             "sessionstart: manifest lacks the contract test task",
             extra={"manifest": str(manifest)},
         )
-    except Exception:  # noqa: BLE001 — fail-open, DEBUG by design: an unreadable
-        # manifest is pixi's problem to report, not this advisory's.
+    except Exception:  # noqa: BLE001 — fail-open, DEBUG by design
         logger.debug(
             "sessionstart: test-task advisory failed open — nothing emitted",
             exc_info=True,
@@ -315,11 +162,7 @@ def _warn_missing_test_task(raw: str, out: TextIO) -> None:
 
 
 def _write_activation(raw: str, env, runner) -> None:
-    """The activation half: toolchain → captured env → append to CLAUDE_ENV_FILE.
-
-    Fail-open in isolation: any error logs at WARNING (the swallow is a degraded
-    outcome) and writes nothing, without touching the log-context half.
-    """
+    """Toolchain → captured env → append to CLAUDE_ENV_FILE."""
     try:
         env_file = env.get(ENV_FILE_VAR)
         if not env_file:
@@ -347,24 +190,7 @@ def _write_activation(raw: str, env, runner) -> None:
 
 
 def _write_log_context(raw: str, env) -> None:
-    """The log-context export: bind ``session``/``tree`` for every in-session command.
-
-    When the session's cwd is an ephemeral session Tree, append
-    ``export SHIPIT_LOG_CTX_SESSION=<id>`` (+ ``…_TREE=<path>``) to
-    ``CLAUDE_ENV_FILE`` — sourced before EVERY Bash call, so each shipit command
-    the session runs (a fresh process every time) rebinds the keys at
-    ``configure_logging`` (:func:`shipit.logcontext.bind_from_env`) and its JSONL
-    records carry the session they belong to (ADR-0029; REL01 #349).
-
-    Fail-open in isolation, in two independently-calibrated halves: the
-    *detection* (is this cwd an ephemeral Tree?) skips at DEBUG on any error —
-    the same #348 calibration as the source-clone check, whose path arithmetic
-    it shares — while the *write* logs at WARNING like the other writes (a
-    swallowed append is a degraded outcome: the session's records lose their
-    correlation key). The env-file gate comes FIRST, mirroring the activation
-    half: without ``CLAUDE_ENV_FILE`` there is nowhere to write and nothing to
-    detect.
-    """
+    """Append the ``session``/``tree`` exports so every in-session command binds them."""
     env_file = env.get(ENV_FILE_VAR)
     if not env_file:
         logger.debug(
@@ -374,9 +200,7 @@ def _write_log_context(raw: str, env) -> None:
     cwd = _payload_cwd(raw)
     try:
         tree = _containing_tree(cwd)
-    except Exception:  # noqa: BLE001 — fail-open, DEBUG by design: same calibration
-        # as the source-clone detection (a broken SHIPIT_TREES_ROOT would otherwise
-        # WARN on every session start).
+    except Exception:  # noqa: BLE001 — fail-open, DEBUG by design
         logger.debug(
             "sessionstart: Tree detection failed open — no log context exported",
             exc_info=True,
@@ -385,10 +209,6 @@ def _write_log_context(raw: str, env) -> None:
     if tree is None:
         logger.debug("sessionstart: cwd is not inside a Tree — no log context exported")
         return
-    # The session id: env-first (a codex launch already exports its `codex-<…>` id),
-    # else the flat Tree leaf's trailing `<id>` — the harness session UUID for a
-    # coordinator claude session (ADR-0074). Resolved through the SAME reader the
-    # `--session current` verbs use, so exporter and reader agree by construction.
     session = session_current.current_session_id(env=env, cwd=cwd)
     if session is None:
         logger.debug(
@@ -403,8 +223,7 @@ def _write_log_context(raw: str, env) -> None:
             session,
             env_file,
         )
-    except Exception:  # noqa: BLE001 — fail-open: the export is additive; records
-        # merely lose their session key, they are never lost.
+    except Exception:  # noqa: BLE001 — fail-open: the export is additive
         logger.warning(
             "sessionstart: log-context export failed open (nothing written)",
             exc_info=True,
@@ -412,28 +231,12 @@ def _write_log_context(raw: str, env) -> None:
 
 
 def _containing_tree(cwd: Path) -> Path | None:
-    """The RESOLVED flat Tree dir containing ``cwd``, or ``None`` (ADR-0074).
-
-    Delegates to :func:`shipit.session.current.containing_tree` — the ONE
-    path-is-the-signal detection, shared with the resolvers that read the id back
-    (``shipit logs --session current``, LOG04) — so the exporter and every reader
-    agree on what a Tree looks like by construction. Kept as a local seam so this
-    hook's fail-open calibration (detection errors skip at DEBUG, per #348) stays
-    wrapped around one call site.
-    """
+    """The resolved flat Tree dir containing ``cwd``, or None."""
     return session_current.containing_tree(cwd)
 
 
 def _log_context_exports(tree: Path, session: str) -> str:
-    """The export lines for a session Tree: ``session`` (its ``<id>``) + ``tree``.
-
-    ``session`` is the resolved per-launch session id (:func:`current_session_id`) —
-    the coordinator session Tree's flat leaf ``<id>`` IS the harness session UUID
-    (ADR-0074), so in-session records join the creation records on one key. The var
-    names come from :data:`shipit.logcontext.ENV_PREFIX` — the writer and the reader
-    (:func:`shipit.logcontext.bind_from_env`) can never disagree on naming — and
-    values are ``shlex``-quoted like every other line this hook sources.
-    """
+    """The shlex-quoted export lines for a session Tree: ``session`` and ``tree``."""
     return (
         f"export {logcontext.ENV_PREFIX}SESSION={shlex.quote(session)}\n"
         f"export {logcontext.ENV_PREFIX}TREE={shlex.quote(str(tree))}\n"
@@ -441,43 +244,13 @@ def _log_context_exports(tree: Path, session: str) -> str:
 
 
 def _emit_session_started(raw: str) -> None:
-    """The ``session.started`` dev-cycle event (ADR-0032 / LOG04-WS02).
-
-    The SessionStart hook is the one verb that witnesses a session beginning,
-    so the milestone emits here — for EVERY session (coordinator or spawned
-    worker; a worker's ``epic``/``ws``/``agent``/``role`` ride in from the
-    spawn seam's ``SHIPIT_LOG_CTX_*`` exports, rebound at this process's own
-    logging setup). When the session's cwd is an ephemeral session Tree, the
-    per-launch ``session``/``tree`` identity (ADR-0027: the dir leaf IS the
-    session id) is bound SCOPED to this record — the same value
-    ``_write_log_context`` exports for the session's later commands. Fail-open
-    like every other step: the detection shares the #348/#349 DEBUG
-    calibration (nothing durable degrades — one record merely goes untagged /
-    less correlated), and the session never pays for a logging problem.
-    """
+    """Emit the ``session.started`` dev-cycle event."""
     try:
         cwd = _payload_cwd(raw)
         tree = _containing_tree(cwd)
-        # The session id: env-first (codex exports its `codex-<…>` id), else the flat
-        # Tree leaf's trailing `<id>` — the harness session UUID for a coordinator
-        # claude session (ADR-0074). The env-aware reader keeps the codex `codex-`
-        # prefix intact, so the codex-thread capture below still recognizes it.
         session = session_current.current_session_id(cwd=cwd)
         sid = _payload_session_id(raw)
-        # Codex's SessionStart payload currently omits its native conversation
-        # id, but the hook process receives the supported CODEX_THREAD_ID env
-        # seam. Persist it on the same session.started record so a *fresh*
-        # ``shipit session codex`` launch can later be resumed by its shipit id.
-        # Claude continues to use the payload's session_id; absent-not-null
-        # keeps the record backend-neutral and avoids leaking other env state.
-        # Codex is discriminated by its OWN env seam (CODEX_THREAD_ID), not by the
-        # session-id prefix — ADR-0074 retires prefix reverse-engineering, and a codex
-        # launch exports this thread id into the hook process's environment.
         codex_thread = os.environ.get("CODEX_THREAD_ID")
-        # Record the BACKEND as a first-class field so resume reads it here instead of
-        # decoding the session-id prefix: the launcher owns the backend, this witness
-        # stamps it. Only stamped when a session id resolved (a non-session start
-        # records none).
         backend = (
             ("codex" if codex_thread else "claude") if session is not None else None
         )
@@ -494,29 +267,16 @@ def _emit_session_started(raw: str) -> None:
                 "session.started",
                 "session started in %s",
                 cwd,
-                # The Claude-internal id joins the record to the transcript;
-                # absent-not-null.
                 extra=native_ids or None,
             )
-    except Exception:  # noqa: BLE001 — fail-open, DEBUG by design: the emit is
-        # advisory correlation, nothing durable degrades when it breaks.
+    except Exception:  # noqa: BLE001 — fail-open, DEBUG by design
         logger.debug(
             "sessionstart: session.started emission failed open", exc_info=True
         )
 
 
 def _append(env_file: Path, text: str) -> None:
-    """Append ``text``, rolling the env file back to its prior state on failure.
-
-    The env file is sourced before EVERY subsequent Bash call, so a torn append
-    (disk full, transient I/O error) is WORSE than none: a truncated ``export``
-    line — an unterminated quote — would corrupt the whole session's preamble.
-    "Write nothing" on failure therefore means exactly that: on any write error,
-    best-effort restore the file to its pre-hook bytes (truncate back, or remove
-    it if this hook created it), then re-raise into the fail-open boundary.
-    """
-    # One stat() answers existence AND size atomically — an exists()/stat() pair
-    # would race a concurrent delete between the two calls (TOCTOU).
+    """Append ``text``, rolling the env file back to its prior bytes on failure — a torn append would corrupt the preamble sourced before every Bash call."""
     try:
         original_size: int | None = env_file.stat().st_size
     except FileNotFoundError:
@@ -531,8 +291,6 @@ def _append(env_file: Path, text: str) -> None:
             else:
                 env_file.unlink(missing_ok=True)
         except OSError:
-            # A torn append that could not be rolled back may leave a corrupt
-            # preamble — degraded-but-continuing, so WARNING per the canon.
             logger.warning(
                 "sessionstart: could not roll back partial append to %s",
                 env_file,
@@ -542,12 +300,7 @@ def _append(env_file: Path, text: str) -> None:
 
 
 def _payload_session_id(raw: str) -> str:
-    """The payload's ``session_id``, or ``""`` when missing/malformed.
-
-    The id is recorded on the ``session.started`` event for a human joining a
-    Tree back to its transcript — nothing decides on it, so a missing id degrades
-    to an empty string rather than blocking the emit.
-    """
+    """The payload's ``session_id``, or ``""`` when missing or malformed."""
     try:
         payload = json.loads(raw)
         sid = payload.get("session_id") if isinstance(payload, dict) else None
@@ -562,13 +315,7 @@ def _payload_session_id(raw: str) -> str:
 
 
 def _payload_cwd(raw: str) -> Path:
-    """The session's working dir from the payload, else the hook process's own cwd.
-
-    Claude Code's ``SessionStart`` payload carries ``cwd`` (the session's root —
-    the adopted session Tree once ADR-0027's ``--worktree`` launch lands). Hooks
-    also RUN in the project dir, so a missing/malformed payload degrades to
-    ``Path.cwd()`` rather than aborting — the manifest still resolves.
-    """
+    """The session's working dir from the payload, else the hook process's own cwd."""
     try:
         payload = json.loads(raw)
         cwd = payload.get("cwd") if isinstance(payload, dict) else None
