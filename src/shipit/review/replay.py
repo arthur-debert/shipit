@@ -1,33 +1,7 @@
-"""replay — review an arbitrary commit range offline: record written, no PR touched.
+"""Review an arbitrary commit range offline: a record is written, no PR is touched.
 
-The sanctioned offline experiment driver (RVW02-WS03 single pass; RVW03-WS01
-fan-out): ``shipit pr review replay <base>..<head>`` resolves a commit RANGE of
-the current checkout (never a PR) and runs a local review backend over it —
-either as ONE monolithic pass through the shared range producer
-(:func:`run_replay` → :func:`shipit.review.producer.run_range_review`) or, with
-``--fanout``, as the full dimension fan-out through the ONE fan-out
-orchestrator (:func:`run_fanout_replay` →
-:func:`shipit.review.fanout.run_fanout_review`, the SAME code path the live-PR
-service drives) — and writes the resulting **Review-round record**
-(:mod:`shipit.review.roundrecord`, ``round.pr = None``) to the local store —
-the review path's NO-POST mode. Both arms read the diff the same way
-(``git diff <base>..<head>`` in the checkout), so replays of the two arms over
-the same range are comparable (no ``git diff`` vs ``gh pr diff`` skew). Nothing
-on GitHub is read or written: no post, no check run, no review request. A
-historical PR's round 1 replays as ``merge-base..first-round-head`` — which is
-exactly what the three-dot spelling ``base...head`` resolves (the merge base is
-computed here).
-
-Range grammar (:func:`parse_range`): ``A..B`` reviews exactly the diff from
-commit ``A`` to commit ``B``; ``A...B`` reviews from ``merge-base(A, B)`` to
-``B`` (GitHub's "Files changed" semantics — the round-1 replay spelling). Both
-endpoints are arbitrary revisions (branch, tag, sha, ``HEAD~2``); they are
-resolved OFFLINE against the checkout — an unknown revision is a loud
-:class:`~shipit.review.diff.ReviewError` telling the operator to fetch it, never
-a silent fetch (replay is deliberately network-free).
-
-The record write is NOT fail-open here (unlike the review-path tee): the record
-IS replay's product, so a write failure fails the verb.
+Replay never reaches the network, and the record write is its product, not
+telemetry — a write failure fails the verb.
 """
 
 from __future__ import annotations
@@ -53,17 +27,10 @@ logger = logging.getLogger("shipit.review")
 
 
 def parse_range(spec: str) -> tuple[str, str, bool]:
-    """Split a range SPEC into ``(base, head, merge_base_wanted)``. PURE.
+    """Split ``A..B`` or ``A...B`` into ``(base, head, merge_base_wanted)``; pure.
 
-    ``A..B`` → ``(A, B, False)`` (review exactly ``A``→``B``); ``A...B`` →
-    ``(A, B, True)`` (review from the merge base of ``A`` and ``B`` — the
-    round-1 replay spelling). Raises :class:`~shipit.review.diff.ReviewError`
-    on anything else — no separator, an empty endpoint, or a dot-run longer
-    than the separator (e.g. ``a....b``, whose extra dot would otherwise leak
-    into an endpoint) — with the accepted grammar in the message, so a typo
-    dies at parse, before any git work. A revision can carry an internal dot
-    (a tag like ``v1.2.3``) but never a leading/trailing one, so a boundary
-    dot is always a malformed separator.
+    A revision may carry an internal dot but never a boundary one, so a boundary
+    dot is always a malformed separator and raises ``ReviewError``.
     """
     spec = spec.strip()
     if "..." in spec:
@@ -90,17 +57,7 @@ def parse_range(spec: str) -> tuple[str, str, bool]:
 
 
 def resolve_range(spec: str, *, workdir: str | None = None) -> RangeView:
-    """Resolve range ``spec`` against the checkout at ``workdir`` (default: cwd).
-
-    OFFLINE by design: endpoints resolve against what the checkout already has
-    (``git rev-parse``) — an unknown revision raises a
-    :class:`~shipit.review.diff.ReviewError` telling the operator to fetch it,
-    rather than replay silently reaching for the network. The checkout's origin
-    identity is resolved too (the round record's repo key, ADR-0024): a
-    checkout with no origin remote cannot key a record and fails loud. The
-    three-dot spelling computes the merge base here and fails loud on unrelated
-    histories, mirroring the PR path's no-silent-degrade contract.
-    """
+    """Resolve range ``spec`` against the checkout at ``workdir`` (default: cwd), offline."""
     workdir = workdir or "."
     toplevel = git.repo_root(cwd=workdir)
     if toplevel is None:
@@ -158,9 +115,7 @@ def resolve_range(spec: str, *, workdir: str | None = None) -> RangeView:
 
 
 def _resolve_endpoint(rev: str, workdir: str) -> Sha:
-    """One range endpoint → its commit :class:`~shipit.identity.Sha`, or a loud
-    :class:`ReviewError` — replay never fetches, so "unknown" means the operator
-    fetches (or fixes the spelling) and re-runs."""
+    """One range endpoint → its commit :class:`~shipit.identity.Sha`, or ``ReviewError``."""
     sha = git.resolve_commit(rev, cwd=workdir)
     if sha is None:
         raise ReviewError(
@@ -174,17 +129,7 @@ def _resolve_endpoint(rev: str, workdir: str) -> Sha:
 def _provision_replay_defs(
     view: RangeView, backend: Backend, *, calibrator_on: bool
 ) -> None:
-    """Provision the bundled role agent-defs into the replay checkout when a
-    launch in THIS replay reads a ``--agent reviewer`` def from it, mapping a
-    filesystem failure to the replay path's one clean :class:`ReviewError`.
-
-    Only the calibrator's dormant judge, ``claude --agent reviewer``
-    (``.claude/agents``), requires this. A no-op when the judge is off.
-    :func:`provision_agent_defs` writes only missing files. An :class:`OSError`
-    (read-only checkout, permissions, a non-directory ``.claude`` component)
-    is re-raised as a :class:`~shipit.review.diff.ReviewError` — the replay path's clean one-line
-    refusal — BEFORE any model bills, never a raw traceback.
-    """
+    """Provision the bundled role agent-defs when a launch in this replay reads them."""
     if not calibrator_on:
         return
     try:
@@ -213,30 +158,8 @@ def run_replay(
     launcher=None,
     base_dir: Path | None = None,
 ) -> dict:
-    """Review ``view``'s range with ``backend`` and WRITE the round record.
-
-    The no-post pipeline: generate via the shared range producer, then write the
-    **Review-round record** with ``round.pr = None`` (no PR was touched — the
-    honest replay marker). The record's ``round.usage.total_tokens`` carries the
-    launch's CLI-measured usage (RVW03-WS04; ``None`` when the backend's CLI
-    reports none — the explicit latency-only marker). Returns ``{"review": …,
-    "record_path": …}`` so the
-    verb can render what was found and where the record landed. The record
-    write PROPAGATES on failure — it is the product here, not telemetry (the
-    review-path tee is the fail-open twin). ``cell`` (RVW03-WS07) is the
-    experiment Cell tag the lab runner stamps onto the record's ``round.cell``
-    (cell id + idempotency key; ``None`` for a plain replay). ``base_dir``
-    overrides the store family root (tests) — the per-run artifact bundle
-    (below) roots under the SAME injected family root; ``launcher`` injects
-    the launch seam (tests).
-
-    OBSERVABILITY (RVW03-WS02): the replay's single range pass is a review
-    sub-agent run like any other, so it too persists a per-run artifact bundle
-    (exact prompt, raw streams, meta — unconditional, fail-open) under a minted
-    round id, and its record carries ``round.id`` / ``round.artifacts``, one
-    ``round.runs`` entry, and the run's id on every finding — the same
-    finding↔pass trail as the fan-out's, so replay evidence is as inspectable
-    as a live round's.
+    """Review ``view``'s range as one pass and write the round record; returns
+    ``{"review": …, "record_path": …}``.
     """
 
     agent = backend.funnel_agent or backend.name
@@ -272,9 +195,8 @@ def run_replay(
             artifacts=bundle,
         )
     except Exception as exc:
-        # The failure propagates (replay's record is its product) — but the
-        # bundle settles first, so the prompt + raw streams the launch seam
-        # already wrote are joined by the outcome on disk.
+        # Settle the bundle before propagating, so the prompt and raw streams
+        # already on disk are joined by the outcome.
         bundle.record(
             outcome="timed_out" if getattr(exc, "timed_out", False) else "failed",
             duration_ms=int((time.monotonic() - start) * 1000),
@@ -282,8 +204,6 @@ def run_replay(
         )
         raise
     review = captured.review
-    # RVW03-WS04: the single range pass carries its CLI-measured usage and the
-    # applied reasoning on its round.runs entry, exactly like a fan-out pass.
     run["usage"] = captured.usage.as_record()
     if captured.reasoning is not None:
         run["reasoning"] = captured.reasoning
@@ -339,55 +259,12 @@ def run_fanout_replay(
     launcher: launch.Runner | None = None,
     base_dir: Path | None = None,
 ) -> dict:
-    """Fan-out-review ``view``'s range with ``backend`` and WRITE the round record.
-
-    The FAN-OUT arm of the no-post pipeline (RVW03-WS01) — the sanctioned way to
-    run a fan-out experiment cell: the configured **Dimension passes** run
-    offline over the range through the ONE fan-out orchestrator
-    (:func:`shipit.review.fanout.run_fanout_review`, the same code path the
-    live-PR service drives, handed the range-scoped ``view`` instead of a PR
-    ctx), then the **Review-round record** is written with ``round.pr = None``
-    exactly like the single-pass :func:`run_replay` — ``round.runs`` populated
-    per pass (plus the calibrator's run when ``calibrator`` opts the dormant
-    judge on), ``round.findings`` carrying the routing's real dispositions.
-    ``dimensions`` defaults to the fan-out's default SET — the ADR-0045
-    concern four (:data:`shipit.review.dimensions.DEFAULT_DIMENSION_NAMES`):
-    calling this driver at all is the explicit fan-out opt-in (ADR-0052), so
-    an unnamed set means "the fan-out, stock decomposition", never the
-    orchestrator's single-pass default. ``nit_cap`` defaults to ``None``
-    (uncapped): an offline experiment records everything; there is no PR to
-    protect from nit churn. ``semantic_dedup`` (#750) opts the mechanical
-    union dedup into the deterministic same-round near-duplicate collapse —
-    the ``dedup = "semantic"`` Lab treatment, threaded verbatim to the
-    orchestrator (which rejects it alongside a ``calibrator``: the judge does
-    its own dedup). The role agent-defs are provisioned into the replay checkout
-    first (:func:`_provision_replay_defs`) whenever a launch reads them — the
-    judge's ``claude --agent reviewer`` when ``calibrator`` is set — so the
-    launch works in a clone that never committed them; a
-    filesystem failure provisioning them is re-raised as a
-    :class:`~shipit.review.diff.ReviewError` (the replay path's clean one-line
-    refusal) rather than a raw ``OSError``.
-
-    Returns ``{"review": …, "record_path": …}`` and PROPAGATES a record-write
-    failure, both exactly as the single-pass arm does (the record is the
-    product). ``invocation_overrides`` (RVW03-WS07) are the experiment-only
-    per-dimension Invocation overrides (``{dimension name: {"model"/"timeout":
-    …}}``) threaded to the orchestrator — a lab-cell capability, never Roster
-    configuration (ADR-0049); ``cell`` is the Cell tag stamped onto the
-    record's ``round.cell`` (cell id + idempotency key; ``None`` for a plain
-    replay). ``base_dir`` overrides the store family root (tests); ``launcher``
-    injects the launch seam (tests).
+    """Fan-out-review ``view``'s range and write the round record; returns
+    ``{"review": …, "record_path": …}``.
     """
-    # This driver IS the explicit fan-out opt-in (a `shape = "fanout"` Lab
-    # cell, or `shipit pr review replay --fanout`), so a call without a named
-    # `dimensions` list means the fan-out's DEFAULT SET — the ADR-0045 concern
-    # four — not the orchestrator's no-dimensions default, which is now the
-    # single monolithic pass (ADR-0052). Resolve it here so the orchestrator
-    # below runs the fan-out and the record folds the real pass set.
+    # Calling this driver is itself the fan-out opt-in, so an unnamed
+    # `dimensions` means the default SET, not the orchestrator's single pass.
     dimensions = tuple(dimensions) if dimensions else DEFAULT_DIMENSION_NAMES
-    # Provision the reviewer role agent-defs into the checkout before any model
-    # bills when a launch in this fan-out reads them: the calibrator's judge
-    # (`claude --agent reviewer`) when the judge is on.
     _provision_replay_defs(view, backend, calibrator_on=calibrator is not None)
     agent = backend.funnel_agent or backend.name
     start = time.monotonic()
@@ -423,10 +300,6 @@ def run_fanout_replay(
         round_id=outcome.round_id,
         artifacts_dir=outcome.artifacts_dir,
         cell=cell,
-        # The round's RESOLVED pass set + overrides fold into round.variant
-        # (#713): dimension focus texts are prompt material the instructions
-        # file does not cover. Resolution cannot fail here — the orchestrator
-        # above already ran the same names through resolve_dimensions.
         dimension_names=tuple(d.name for d in resolve_dimensions(dimensions)),
         dimension_overrides=invocation_overrides,
         base_dir=base_dir,
@@ -446,20 +319,8 @@ def run_fanout_replay(
 def _provision_bundled_tree(root: Path, rel_dir: str, source) -> list[Path]:
     """Exclusive-create every bundled file under ``source`` into ``root/rel_dir``.
 
-    The shared core of :func:`provision_agent_defs` (RVW02-WS08, extended for the
-    AGY def in #989): walk the bundled ``source`` tree and write each file into
-    the matching path under ``root/rel_dir``, MISSING-ONLY. Handles a NESTED
-    source (the AGY def is ``reviewer/agent.md``, not a flat file) by mirroring the
-    source's relative paths.
-
-    Untrusted-checkout guard (RVW03-WS01): a SYMLINK anywhere in the destination
-    directory chain — the ``rel_dir`` components OR an intermediate dir created for
-    a nested file — could redirect the writes outside the checkout, so a symlinked
-    component aborts this tree with nothing further written. Each file is created
-    with exclusive ``open(..., "xb")``, so an existing name (a regular file OR a
-    pre-planted symlink) is left untouched — never followed or truncated — which
-    also makes concurrent replays on one checkout race-safe. Returns the paths
-    written under this tree.
+    Missing-only, and a symlink anywhere in the destination chain aborts the tree:
+    the checkout replay runs over may be untrusted.
     """
     from ..install.units import walk_files
 
@@ -478,11 +339,9 @@ def _provision_bundled_tree(root: Path, rel_dir: str, source) -> list[Path]:
     written: list[Path] = []
     for rel, content in walk_files(source):
         dest = dest_dir / rel
-        # Guard each intermediate dir a nested file needs (e.g. `reviewer/`).
-        # A symlinked component ABORTS this tree fail-closed (nothing further
-        # written) — the same fail-closed posture as the base-chain guard above:
-        # once any destination component is attacker-controlled the whole tree is
-        # suspect, so we stop rather than skip-and-keep-going.
+        # Guard each intermediate dir a nested file needs. Once any destination
+        # component is attacker-controlled the whole tree is suspect, so a
+        # symlink aborts rather than skips.
         probe = dest_dir
         symlinked = False
         for part in Path(rel).parent.parts:
@@ -509,23 +368,7 @@ def _provision_bundled_tree(root: Path, rel_dir: str, source) -> list[Path]:
 
 
 def provision_agent_defs(workdir: str) -> list[Path]:
-    """Provision the bundled Claude role agent-defs (``.claude/agents``) into ``workdir``.
-
-    The RVW02-WS08 op gap (#680): a calibrator backend launches ``claude
-    --agent reviewer`` (reads ``.claude/agents/reviewer.md``) from the
-    checkout it runs in — present in shipit-self and installed consumers, ABSENT
-    in a bare experiment clone, where the launch fails. So a replay writes the
-    bundled defs (:func:`shipit.install.units.agents_root` — the same source
-    ``shipit install`` vendors) into the replay checkout first. Only MISSING files are
-    written: an existing def (committed, installed, or deliberately edited as an
-    experiment arm) is the checkout's own and is never clobbered. Returns every
-    path written (empty when everything was already present).
-
-    Untrusted-checkout guard (RVW03-WS01): replay runs over a checkout the
-    operator may not control, so the writes stay strictly inside the checkout —
-    a symlinked destination component aborts that tree, and every file is
-    exclusive-created (see :func:`_provision_bundled_tree`).
-    """
+    """Provision the bundled role agent-defs into ``workdir``; returns the paths written."""
     from ..install.units import (
         AGENTS_DEF_DIR,
         agents_root,
