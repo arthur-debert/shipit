@@ -126,7 +126,6 @@ _H1_RE = re.compile(r"^#[^\n]*\n", re.MULTILINE)
 
 
 def _fragment_body(markdown: str) -> str:
-    """The fragment body: leading preamble comment and ``# Title`` removed."""
     text = _PREAMBLE_RE.sub("", markdown, count=1).lstrip()
     text = _H1_RE.sub("", text, count=1)
     return text.strip()
@@ -161,7 +160,6 @@ def load_brief_template(role: Role) -> str:
 
 
 def _strip_generated_comment(markdown: str) -> str:
-    """Drop the leading generated banner from a derived file, leaving the bare prompt."""
     return _PREAMBLE_RE.sub("", markdown, count=1).strip()
 
 

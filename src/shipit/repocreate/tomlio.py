@@ -1,7 +1,6 @@
-"""``repocreate/tomlio`` — the one TOML renderer for creation's structured data.
+"""``repocreate/tomlio`` — the one renderer for creation's structured data.
 
-Not a general TOML library: an unmodeled shape raises rather than guessing.
-See docs/adr/0058-templates-render-text-not-structured-data.md.
+An unmodeled TOML shape raises rather than guessing.
 """
 
 from __future__ import annotations
@@ -19,11 +18,7 @@ class Inline:
 
 
 def _quote(text: str) -> str:
-    """Render ``text`` as a TOML basic string, fully escaped.
-
-    JSON escape syntax covers every case creation emits; only ``U+007F``, which
-    TOML requires escaped and JSON does not, is closed by hand.
-    """
+    """Render ``text`` as a TOML basic string; JSON escaping plus ``U+007F`` by hand."""
     return json.dumps(text, ensure_ascii=False).replace("\x7f", "\\u007f")
 
 
@@ -45,15 +40,13 @@ def _render_scalar(value: object) -> str:
 
 
 def _render_key(key: str) -> str:
-    """Render a key bare when it is a plain or dotted identifier, else quoted."""
     if all(part and _is_bare(part) for part in key.split(".")):
         return key
     return _quote(key)
 
 
 def _is_bare(part: str) -> bool:
-    # TOML bare keys are ASCII-only, and `str.isalnum()` alone accepts non-ASCII
-    # letters — so require ASCII before alnum.
+    # `str.isalnum()` alone accepts non-ASCII letters, which TOML bare keys forbid.
     return all((c.isascii() and c.isalnum()) or c in "-_" for c in part)
 
 

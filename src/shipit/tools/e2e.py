@@ -1,4 +1,4 @@
-"""``tools/e2e`` — pure planner: (artifacts, selector, passthrough) → e2e jobs.
+"""``tools/e2e`` — the pure planner: (artifacts, selector, passthrough) → e2e jobs.
 
 See docs/adr/0039-tools-as-verbs.md.
 """
@@ -27,8 +27,6 @@ class E2ePlanError(Exception):
 
 @dataclass(frozen=True)
 class Harness:
-    """One harness-registry entry; ``env`` merges in alongside the ``<NAME>_BIN`` injection."""
-
     name: str
     argv: tuple[str, ...]
     env: tuple[tuple[str, str], ...] = ()

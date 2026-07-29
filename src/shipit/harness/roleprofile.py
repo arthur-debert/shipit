@@ -15,16 +15,12 @@ from .role import Role
 
 
 class LaunchContext(StrEnum):
-    """The closed set of ways a Run can be launched."""
-
     HOST_SESSION = "host-session"
     DETACHED = "detached"
     NATIVE_SUBAGENT = "native-subagent"
 
 
 class ResultChannel(StrEnum):
-    """The closed set of channels a Run's result travels back through."""
-
     ORCHESTRATION_SESSION = "orchestration-session"
     DRAFT_PR = "draft-pr"
     EXISTING_PR_ROUNDS = "existing-pr-rounds"
@@ -113,7 +109,6 @@ class RoleProfile:
     result_channel: ResultChannel
 
 
-#: A full-trust write posture — the roles that author code.
 _WRITE_POSTURE = EnforcementPosture(
     checkout_mutation=True,
     command_execution=True,

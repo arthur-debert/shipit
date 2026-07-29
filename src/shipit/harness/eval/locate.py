@@ -1,7 +1,4 @@
-"""``harness/eval/locate`` — resolve a just-closed run's transcript and meta from the hook payload.
-
-Run KIND (coordinator vs subagent) is read off the filename; ROLE is not.
-"""
+"""``harness/eval/locate`` — a just-closed run's transcript and meta, from the hook payload."""
 
 from __future__ import annotations
 
@@ -17,8 +14,6 @@ _META_SUFFIX = ".meta.json"
 
 @dataclass(frozen=True)
 class RunFiles:
-    """One run's on-disk files; ``meta`` is ``None`` for the coordinator run."""
-
     transcript: Path
     meta: Path | None
 

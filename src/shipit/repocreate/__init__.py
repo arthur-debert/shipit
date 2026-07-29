@@ -1,7 +1,6 @@
 """``shipit.repocreate`` — the repository-creation domain behind ``shipit repo new``.
 
-:func:`create_repo` refuses with :class:`CreationError`, but an underlying tool
-failure (an ``ExecError`` from Git) propagates unchanged; both roll back.
+A refusal raises :class:`CreationError`, but a tool failure propagates unchanged.
 """
 
 from __future__ import annotations

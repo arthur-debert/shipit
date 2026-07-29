@@ -1,4 +1,4 @@
-"""``repocreate/plan`` — compose the universal seed and every profile into one effect-free plan.
+"""``repocreate/plan`` — compose the universal seed and every profile into one plan.
 
 See docs/adr/0057-creation-profiles-contribute-to-one-plan.md.
 """

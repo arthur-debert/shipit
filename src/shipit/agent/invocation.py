@@ -12,8 +12,6 @@ from typing import Any
 
 
 class Provider(Enum):
-    """The vendor of a :class:`Model` — a closed registry."""
-
     ANTHROPIC = "anthropic"
     OPENAI = "openai"
     GOOGLE = "google"
@@ -41,7 +39,6 @@ class ReasoningLevel(Enum):
 
     @classmethod
     def coerce(cls, value: object) -> ReasoningLevel | None:
-        """The :class:`ReasoningLevel` for ``value``, or ``None``; never raises on an unknown one."""
         if isinstance(value, cls):
             return value
         if not value:
@@ -97,7 +94,6 @@ class Invocation:
     permission_mode: str | None = None
 
     def as_record(self) -> dict[str, Any]:
-        """The flat, null-safe dict stamped into the eval record; the report groups by its keys."""
         return {
             "backend": self.backend,
             "model": self.model.id if self.model else None,

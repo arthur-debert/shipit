@@ -1,14 +1,9 @@
-"""``channel/buckets`` — the Artifact channel's bucket names, host, and served subdirs.
-
-See docs/adr/0065-artifact-channel-access-tiers-two-buckets.md.
-"""
+"""``channel/buckets`` — the Artifact channel's bucket names, host, and served subdirs."""
 
 from __future__ import annotations
 
-#: The public-read / authless tier bucket.
 PUBLIC_ARTIFACT_BUCKET = "shipit-artifacts-public"
 
-#: The private tier bucket, reached as an S3-compatible conda channel.
 PRIVATE_ARTIFACT_BUCKET = "shipit-artifacts-private"
 
 #: The GCS host both tiers use — a direct read for public, the S3-interop endpoint for private.

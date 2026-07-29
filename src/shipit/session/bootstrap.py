@@ -1,7 +1,4 @@
-"""``session/bootstrap`` — the Codex coordinator launch, as pure decisions.
-
-The verb composes these with the effectful seams (Tree orchestrator, exec).
-"""
+"""``session/bootstrap`` — the Codex coordinator launch, as pure decisions the verb composes."""
 
 from __future__ import annotations
 
@@ -40,7 +37,6 @@ def codex_argv(tree: str | Path, extra: Sequence[str] = ()) -> list[str]:
 def codex_resume_argv(
     tree: str | Path, thread_id: str, extra: Sequence[str] = ()
 ) -> list[str]:
-    """The Codex resume argv, re-rooted in ``tree`` and carrying the same posture."""
     return [CODEX.binary, "resume", "--cd", str(tree), BYPASS_FLAG, thread_id, *extra]
 
 

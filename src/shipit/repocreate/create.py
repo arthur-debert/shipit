@@ -1,7 +1,4 @@
-"""``repocreate/create`` — the repository-creation orchestrator behind ``shipit repo new``.
-
-See docs/adr/0059-repo-creation-publishes-by-atomic-rename.md.
-"""
+"""``repocreate/create`` — the repository-creation orchestrator; publishes by atomic rename."""
 
 from __future__ import annotations
 
@@ -41,7 +38,6 @@ class CreationResult:
 
 
 def _preflight(parent: Path, name_value: str) -> tuple[Path, Path]:
-    """Return ``(resolved parent, destination)``, refusing a bad parent or a used destination."""
     resolved = parent.resolve() if parent.is_symlink() else parent
     if not resolved.is_dir():
         raise CreationError(f"parent {parent} is not an existing directory")
@@ -116,7 +112,6 @@ def default_installer(root: Path) -> None:
 
 
 def default_provisioner(root: Path) -> None:
-    """Resolve and lock the staged Repo's pixi environment (writes ``pixi.lock``)."""
     scrubbed = pixienv.scrub_env(dict(os.environ))
     pixienv.install(root, env=scrubbed)
 

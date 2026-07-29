@@ -16,10 +16,7 @@ def parse_record(line: str) -> dict[str, Any] | None:
 
 
 def normalize_ws(value: int | str) -> int:
-    """The Work Stream index ``value`` names, as the INT the record carries.
-
-    ``1``, ``01``, and ``WS01`` all name Work Stream 1; anything else raises.
-    """
+    """The Work Stream index as the INT the record carries: ``1``, ``01``, ``WS01`` all mean 1."""
     text = str(value).strip()
     if text.upper().startswith("WS"):
         text = text[2:]

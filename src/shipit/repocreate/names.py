@@ -1,7 +1,4 @@
-"""``repocreate/names`` — the project-name value object, its grammar, and its derivations.
-
-Destination safety lives in ``create.py``'s preflight, not here.
-"""
+"""``repocreate/names`` — the project-name value object, its grammar, and its derivations."""
 
 from __future__ import annotations
 

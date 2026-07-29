@@ -1,7 +1,4 @@
-"""``harness/activation`` — map a checkout's toolchain to the coordinator's activation lines.
-
-See docs/adr/0027-coordinator-session-tree-ephemeral.md.
-"""
+"""``harness/activation`` — a checkout's toolchain to the coordinator's activation lines."""
 
 from __future__ import annotations
 

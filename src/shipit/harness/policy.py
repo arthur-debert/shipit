@@ -32,39 +32,28 @@ _EDIT_TOOLS = frozenset(
 
 
 class Permission(StrEnum):
-    """The verdict — mirrors Claude Code's `permissionDecision`."""
-
     ALLOW = "allow"
     DENY = "deny"
 
 
 @dataclass(frozen=True)
 class Decision:
-    """An edit-guard verdict: a permission + the reason carried on a deny."""
-
     permission: Permission
     reason: str = ""
 
 
 def is_edit_tool(tool_name: str) -> bool:
-    """True iff `tool_name` is a file-mutating `edit` operation — the boundary gate."""
     return tool_name.strip().lower() in _EDIT_TOOLS
 
 
 def decide(role: Role, path: str, is_code: bool, break_glass: bool) -> Decision:
-    """DENY iff a code-delegating role edits a code path with no break-glass; else ALLOW.
-
-    `path` rides along for logging; the verdict turns on the other three only.
-    """
+    """DENY iff a code-delegating role edits a code path with no break-glass; else ALLOW."""
     if delegates_code_authorship(role) and is_code and not break_glass:
         return Decision(permission=Permission.DENY, reason=COORDINATOR_DENY_REASON)
     return Decision(permission=Permission.ALLOW)
 
 
-# The native-worktree deny guard: a second, role-independent deny surface on the
-# same PreToolUse channel. The in-session `Agent(isolation:"worktree")` spawn,
-# which PreToolUse cannot see, is closed by the `WorktreeCreate` hook instead.
-
+# The in-session `Agent(isolation:"worktree")` spawn is closed by `WorktreeCreate`.
 WORKTREE_DENY_REASON = (
     "Trees are dissociated clones, not git worktrees (ADR-0014). Do not create a "
     "native git worktree — to spawn an isolated Run use `shipit spawn subagent` "
@@ -75,11 +64,9 @@ WORKTREE_DENY_REASON = (
     '`Agent(isolation:"worktree")` is already rerouted into a Tree for you.'
 )
 
-#: Substring fallback used only when a command cannot be tokenized, so it fails closed.
 _GIT_WORKTREE_ADD_FALLBACK = re.compile(r"\bgit\s+worktree\s+add\b")
 
-#: With `punctuation_chars=True` shlex emits runs of these as standalone tokens,
-#: which is how a compound command splits into independently inspected segments.
+#: With `punctuation_chars=True` shlex emits runs of these as standalone tokens.
 _SHELL_SEPARATOR_CHARS = frozenset("();<>|&")
 
 #: git global options taking a SEPARATE argument token, which consumes the next token.
@@ -91,16 +78,13 @@ def _matches_enter_worktree(tool_name: str, command: str) -> bool:
 
 
 def _segment_runs_worktree_add(tokens: list[str]) -> bool:
-    """True iff ONE simple command's tokens run `git worktree add`."""
     i = 0
     n = len(tokens)
-    # Skip leading environment assignments (`FOO=bar git …`).
     while i < n and "=" in tokens[i] and not tokens[i].startswith("-"):
         i += 1
     if i >= n or tokens[i] != "git":
         return False
     i += 1
-    # Skip leading global options, consuming the argument of `-C` / `-c`.
     while i < n and tokens[i].startswith("-"):
         opt = tokens[i]
         i += 1
@@ -136,13 +120,10 @@ def _matches_git_worktree_add(tool_name: str, command: str) -> bool:
 
 @dataclass(frozen=True)
 class WorktreeDenyRule:
-    """One deny rule: a name + a predicate over `(tool_name, command)` — `""` for non-Bash."""
-
     name: str
     matches: Callable[[str, str], bool]
 
 
-#: The deny table — checked in order; the first match wins.
 WORKTREE_DENY_RULES: tuple[WorktreeDenyRule, ...] = (
     WorktreeDenyRule("EnterWorktree", _matches_enter_worktree),
     WorktreeDenyRule("git worktree add", _matches_git_worktree_add),

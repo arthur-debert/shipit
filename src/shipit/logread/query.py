@@ -12,11 +12,7 @@ DEFAULT_TAIL = 50
 
 @dataclass(frozen=True)
 class LogQuery:
-    """One read of the durable log: selection + view.
-
-    ``tail`` counts trailing records AFTER filtering (``-1`` all, ``0`` none);
-    ``flow`` refuses ``raw``/``follow`` at construction rather than downstream.
-    """
+    """One read of the durable log; ``tail`` counts trailing records AFTER filtering."""
 
     record_filter: Filter = field(default_factory=Filter)
     tail: int = DEFAULT_TAIL

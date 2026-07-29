@@ -1,8 +1,4 @@
-"""``shipit.pixienv`` — the pixi Tool adapter: env model, reads, execution, scrub.
-
-Every piece of pixi knowledge lives here, in exactly one adapter.
-See docs/adr/0022-layer-boundary-model-vs-borrow-pixi.md.
-"""
+"""``shipit.pixienv`` — the one pixi adapter: env model, reads, execution, scrub."""
 
 from __future__ import annotations
 

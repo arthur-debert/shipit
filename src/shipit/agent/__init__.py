@@ -1,7 +1,4 @@
-"""``shipit.agent`` — the Backend / Model / Invocation axes, orthogonal but sharing one identity.
-
-See docs/adr/0025-agent-model-invocation-axes.md.
-"""
+"""``shipit.agent`` — the Backend / Model / Invocation axes, orthogonal by design."""
 
 from __future__ import annotations
 
