@@ -4091,10 +4091,16 @@ def test_a_declined_donor_block_keeps_its_key_a_conflict(tmp_path, rec):
     assert iunits.PIXI_CONDA_PACKAGER_KEY not in written
     assert iunits.PIXI_RUST_RELEASE_DEPS_KEY not in written
 
-    iapply.apply(plan, iapply.MODE_TREE)
+    # And the receiver's conflict now REFUSES (#1116): the consumer declined the
+    # donor, not the receiver, so the packager block cannot be delivered and this
+    # repo would sit off its pin — the remedy named is the receiver's own key.
+    with pytest.raises(InstallError, match="pixi key conflict") as excinfo:
+        iapply.apply(plan, iapply.MODE_TREE)
+    assert iunits.PIXI_CONDA_PACKAGER_KEY in str(excinfo.value)
 
-    # tomllib REFUSES a duplicate key, so a successful parse is the assertion:
-    # rattler-build is declared exactly once, still by the consumer's own block.
+    # The guard runs before any write, so the manifest is untouched: tomllib
+    # REFUSES a duplicate key, and rattler-build is still declared exactly once,
+    # by the consumer's own declined block.
     text = (tmp_path / "pixi.toml").read_text(encoding="utf-8")
     assert tomllib.loads(text)["dependencies"]["rattler-build"] == "0.69.*"
     assert (
@@ -4203,11 +4209,13 @@ nodejs = "22.*"
 """
 
 
-def test_node_block_is_skipped_when_the_consumer_already_pins_its_keys(tmp_path):
+def test_node_block_cannot_be_delivered_when_the_consumer_already_pins_its_keys(
+    tmp_path,
+):
     # The duplicate-key guard (#547 round 1): a consumer whose [dependencies]
     # already pins nodejs must NOT get the node block spliced in — a duplicate
     # TOML key would make pixi.toml unparseable, blocking installs and every
-    # hooked commit. The consumer's own pin stays authoritative.
+    # hooked commit. So the block's decision is excluded from the plan...
     (tmp_path / "pixi.toml").write_text(_CONSUMER_PIXI_WITH_NODE)
     plan = _plan_with_toolchains(tmp_path, frozenset({iunits.TOOLCHAIN_NODE}))
 
@@ -4222,27 +4230,105 @@ def test_node_block_is_skipped_when_the_consumer_already_pins_its_keys(tmp_path)
     keys = {d.unit.key for d in plan.decisions}
     assert iunits.PIXI_NODE_DEPS_KEY not in keys
     assert iunits.PIXI_LINT_DEPS_KEY in keys
-    # Warn-only, and worded off the one formatter (never a broken write).
+    # ...and the dry-run surface says so, worded off the one formatter — naming
+    # the key, the block, and BOTH remedies (#1116), deletion first.
     warnings = verb.format_plan_warnings(plan)
-    assert "pixi block skipped" in warnings
+    assert "pixi key conflict" in warnings
     assert "nodejs" in warnings
+    assert "delete this repo's own entry" in warnings
+    assert f'[managed.decline] keep = ["{iunits.PIXI_NODE_DEPS_KEY}"]' in warnings
 
 
-def test_skipping_a_key_conflicted_block_keeps_pixi_toml_parseable(tmp_path, rec):
-    # End to end: apply on a conflicted consumer leaves a pixi.toml pixi can
-    # still parse, the consumer's pin intact, and no [managed] entry for the
-    # skipped block (nothing was delivered, so nothing is tracked).
+def test_a_key_conflicted_block_refuses_instead_of_silently_under_delivering(
+    tmp_path, rec
+):
+    # #1116, THE defect: warning and continuing treated a block that could not be
+    # DELIVERED as one that did not need delivering — the repo silently stayed off
+    # the fleet pin while the reconcile exited 0 (16 of 20 portfolio repos). Now
+    # EVERY applying mode fails closed (MODE_TREE included: the refusal is about
+    # the consumer's manifest, not about publishing), naming the key and the block.
     (tmp_path / "AGENTS.md").write_text("# Acme\n")
     (tmp_path / "pixi.toml").write_text(_CONSUMER_PIXI_WITH_NODE)
     plan = _plan_with_toolchains(tmp_path, frozenset({iunits.TOOLCHAIN_NODE}))
-    iapply.apply(plan, iapply.MODE_TREE)
 
-    manifest = tomllib.loads((tmp_path / "pixi.toml").read_text(encoding="utf-8"))
-    assert manifest["dependencies"]["nodejs"] == "22.*"
-    assert iunits.PIXI_NODE_DEPS_OPEN not in (tmp_path / "pixi.toml").read_text()
+    with pytest.raises(InstallError, match="pixi key conflict") as excinfo:
+        iapply.apply(plan, iapply.MODE_TREE)
+    assert "nodejs" in str(excinfo.value)
+    assert iunits.PIXI_NODE_DEPS_KEY in str(excinfo.value)
+
+    # Nothing was written on the way out: the guard runs BEFORE any write, so the
+    # consumer's pixi.toml is untouched (its pin intact, no managed marker) and no
+    # `.shipit.toml` records a block this run did not deliver.
+    text = (tmp_path / "pixi.toml").read_text(encoding="utf-8")
+    assert tomllib.loads(text)["dependencies"]["nodejs"] == "22.*"
+    assert iunits.PIXI_NODE_DEPS_OPEN not in text
+    assert not (tmp_path / ".shipit.toml").exists()
+
+
+def test_declining_the_conflicted_block_is_the_supported_override(tmp_path, rec):
+    # #1116 Option 2: a consumer that genuinely wants to own the key DECLARES it
+    # in `[managed.decline].keep` — the reviewable, in-version-control escape
+    # hatch. A declined block is not a conflict at all (nothing will be spliced),
+    # so install proceeds and delivers the REST of the managed set.
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    (tmp_path / "pixi.toml").write_text(_CONSUMER_PIXI_WITH_NODE)
+    (tmp_path / ".shipit.toml").write_text(
+        f'[managed.decline]\nkeep = ["{iunits.PIXI_NODE_DEPS_KEY}"]\n'
+    )
+    plan = _plan_with_toolchains(tmp_path, frozenset({iunits.TOOLCHAIN_NODE}))
+
+    assert plan.pixi_key_conflicts == ()  # declared, so not a conflict
+    assert iunits.PIXI_NODE_DEPS_KEY in plan.declined
+    iapply.apply(plan, iapply.MODE_TREE)  # no refusal
+
+    # The consumer keeps its own pin, the block stays out, and the rest lands —
+    # a pixi.toml pixi can still parse, with no [managed] entry for the declined
+    # block (nothing was delivered, so nothing is tracked).
+    text = (tmp_path / "pixi.toml").read_text(encoding="utf-8")
+    assert tomllib.loads(text)["dependencies"]["nodejs"] == "22.*"
+    assert iunits.PIXI_NODE_DEPS_OPEN not in text
     managed = config.load_managed(config.load(tmp_path / ".shipit.toml"))
     assert iunits.PIXI_NODE_DEPS_KEY not in managed
     assert iunits.PIXI_LINT_DEPS_KEY in managed
+
+
+def test_key_conflict_refusal_survives_a_no_op_plan(tmp_path, monkeypatch):
+    # #1116, the bypass shape (the #1101 lesson): the COMMON case is a repo whose
+    # rest-of-the-managed-set is already current, so the plan carries no work at
+    # all — a guard placed after the no-op shortcut would print the warning and
+    # exit 0 over a repo left off the fleet pin, which is exactly the defect.
+    # Crafted as the empty-work-axes plan and driven through the VERB end to end.
+    conflict = irec.PixiKeyConflict(
+        unit_key=iunits.PIXI_NODE_DEPS_KEY,
+        anchor=iunits.PIXI_NODE_DEPS_ANCHOR,
+        keys=("nodejs",),
+    )
+    noop_conflict = dc_replace(
+        _plan(tmp_path),
+        decisions=(),
+        retired=(),
+        seeds=(),
+        current_pin=None,
+        target_pin=None,
+        pixi_key_conflicts=(conflict,),
+        claude_skills_link=irec.ClaudeSkillsLink(irec.LINK_NOOP),
+    )
+    assert noop_conflict.nothing_to_do  # the exact bypass shape
+    with pytest.raises(InstallError, match="pixi key conflict"):
+        iapply.reject_pixi_key_conflicts(noop_conflict)
+
+    monkeypatch.setattr(verb, "reconcile", lambda *a, **k: noop_conflict)
+    # EVERY applying mode refuses (cli_errors maps InstallError -> exit 1) — the
+    # working-tree refresh INCLUDED, unlike the lefthook publish refusal: the
+    # finding is about the state of the consumer's manifest, not about
+    # publishing, so a "successful" refresh would just relocate the discovery.
+    assert verb.run(str(tmp_path), local=True) == 1
+    assert verb.run(str(tmp_path), push=True) == 1
+    assert verb.run(str(tmp_path), pr=True) == 1
+    assert verb.run(str(tmp_path)) == 1
+    assert not (tmp_path / ".shipit.toml").exists()
+    # Dry-run previews without side effects, so it stays warn-only (exit 0).
+    assert verb.run(str(tmp_path), dry_run=True) == 0
 
 
 def test_node_block_delivers_when_the_consumer_has_no_clashing_key(tmp_path):
@@ -4551,6 +4637,25 @@ def test_shipits_own_repo_keeps_its_feature_test_task_authoritative():
     assert any(
         c.unit_key == iunits.PIXI_TEST_TASK_KEY and c.task == "test" for c in conflicts
     )
+
+
+def test_shipits_own_install_is_never_refused_by_the_key_conflict_guard():
+    # The dogfood pin on the #1116 refusal: shipit self-installs at Tree
+    # provisioning, so a key conflict in its OWN manifest would make shipit
+    # refuse to install itself. Its deliberate `test`-task conflict must stay
+    # warn-only for exactly that reason — asserted here beside the refusal it
+    # must NOT become, so widening the refusal to the task sibling fails loudly.
+    root = Path(__file__).resolve().parents[1]
+    units = iunits.load_units(
+        toolchains=frozenset({iunits.TOOLCHAIN_PYTHON}),
+        platforms=verb._declared_platforms(root),
+    )
+    retired = irec.load_retired()
+    plan = irec.reconcile(units, retired, irec.gather(root, units, retired))
+
+    assert plan.pixi_key_conflicts == ()
+    iapply.reject_pixi_key_conflicts(plan)  # no refusal, in any mode
+    assert [c.unit_key for c in plan.pixi_task_conflicts] == [iunits.PIXI_TEST_TASK_KEY]
 
 
 def test_fresh_install_lays_down_the_session_bootstrap_set_idempotently(tmp_path, rec):
@@ -5963,14 +6068,16 @@ def test_fresh_install_delivers_the_lint_environment(tmp_path, rec):
     (tmp_path / "AGENTS.md").write_text("# Acme\n")
     (tmp_path / "pixi.toml").write_text(
         '[workspace]\nname = "acme"\nchannels = ["conda-forge"]\n'
-        'platforms = ["osx-arm64"]\n\n[tasks]\ntest = "pytest"\n'
+        'platforms = ["osx-arm64"]\n\n[tasks]\ncheck = "pytest"\n'
     )
     _apply(tmp_path)
 
     manifest = tomllib.loads((tmp_path / "pixi.toml").read_text())  # valid TOML
     # The consumer's own content is preserved.
     assert manifest["workspace"]["name"] == "acme"
-    assert manifest["tasks"]["test"] == "pytest"
+    # (`check`, not `test`: a consumer task shadowing a managed block's key is
+    # the #1116 refusal's case, exercised by its own tests below.)
+    assert manifest["tasks"]["check"] == "pytest"
     # The managed task, the pinned toolchain, and the environment definition —
     # everything `pixi run lint` needs on a stock consumer. The task anchors in
     # the lint FEATURE (#1066), so it reaches exactly the env holding the pins.
@@ -6012,7 +6119,7 @@ def test_install_on_a_consumer_declaring_an_unserved_platform_delivers_scoped_le
     (tmp_path / "pixi.toml").write_text(
         '[workspace]\nname = "acme"\nchannels = ["conda-forge"]\n'
         'platforms = ["linux-64", "linux-aarch64", "osx-64", "osx-arm64"]\n\n'
-        '[tasks]\ntest = "pytest"\n'
+        '[tasks]\ncheck = "pytest"\n'
     )
     _apply(tmp_path)
 
@@ -6060,7 +6167,7 @@ def test_upgrade_replaces_blanket_lexd_block_with_scoped_targets(tmp_path, rec):
     (tmp_path / "pixi.toml").write_text(
         '[workspace]\nname = "acme"\nchannels = ["conda-forge"]\n'
         'platforms = ["linux-64", "linux-aarch64", "osx-64", "osx-arm64"]\n\n'
-        '[tasks]\ntest = "pytest"\n\n'
+        '[tasks]\ncheck = "pytest"\n\n'
         f"{_LEGACY_BLANKET_LEXD_BLOCK}"
     )
     # Sanity: the seed really carries the blanket form the migration must remove.
@@ -6106,7 +6213,7 @@ def test_scoped_lexd_manifest_is_accepted_by_real_pixi(tmp_path, rec):
     (tmp_path / "pixi.toml").write_text(
         '[workspace]\nname = "acme"\nchannels = ["conda-forge"]\n'
         'platforms = ["linux-64", "linux-aarch64", "osx-64", "osx-arm64"]\n\n'
-        '[tasks]\ntest = "pytest"\n'
+        '[tasks]\ncheck = "pytest"\n'
     )
     _apply(tmp_path)
 
@@ -6136,7 +6243,7 @@ def test_install_on_a_win64_declaring_consumer_keeps_the_win64_target(tmp_path, 
     (tmp_path / "pixi.toml").write_text(
         '[workspace]\nname = "acme"\nchannels = ["conda-forge"]\n'
         'platforms = ["linux-64", "osx-arm64", "linux-aarch64", "win-64"]\n\n'
-        '[tasks]\ntest = "pytest"\n'
+        '[tasks]\ncheck = "pytest"\n'
     )
     _apply(tmp_path)
 

@@ -33,6 +33,7 @@ from .reconcile import (
     Plan,
     consumer_inner,
     format_lefthook_conflict,
+    format_pixi_key_conflict,
     format_stale_provision,
     format_symlinked_dest,
     symlinked_dest_component,
@@ -843,6 +844,49 @@ def reject_symlinked_dests(plan: Plan) -> None:
         )
 
 
+def reject_pixi_key_conflicts(plan: Plan) -> None:
+    """Fail closed on a consumer key shadowing a managed pixi block (#1116) — the
+    single guard shared by :func:`apply` and the verb's no-op shortcut
+    (:mod:`shipit.verbs.install`), so a conflict-bearing but otherwise-empty plan
+    (the COMMON shape: the rest of the managed set is already current and only
+    this one block cannot land) cannot slip past a mode's no-op return.
+
+    The conflicted block's decision is already excluded from the plan, so nothing
+    unparseable is ever written — what this guard refuses is EXITING 0 over it.
+    Warning and continuing treated a block that could not be DELIVERED as a block
+    that did not need delivering: the repo silently stayed off the fleet pin the
+    block exists to carry, in a reconcile that reported success. 16 of 20
+    portfolio repos were in exactly that state, most of them over a hand-pin
+    whose own comment named the shipit gap the managed block had since closed.
+
+    The supported way to keep owning the key is DECLARING it —
+    ``[managed.decline].keep`` in ``.shipit.toml``, which
+    :func:`shipit.install.reconcile._plan_pixi_key_conflicts` exempts from the
+    detection outright, so a declined block never reaches this guard. That turns
+    an invisible warning into a reviewable declaration in version control.
+
+    EVERY applying mode refuses, ``MODE_TREE`` included: like
+    :func:`reject_stale_provision`, the refusal is about the state of the
+    consumer's manifest rather than about publishing, so a working-tree refresh
+    that "succeeded" while under-delivering would just relocate the discovery to
+    a fleet audit months later. The two conflict SIBLINGS stay warn-only:
+    :class:`~shipit.install.reconcile.PixiTaskConflict` is a deliberate,
+    documented shape in shipit's OWN repo (refusing would make shipit refuse to
+    install itself) and it costs a task caller, not a pin;
+    :class:`~shipit.install.reconcile.PixiTableConflict` has a fleet-wide count of
+    zero, so refusing on it would ship an untested refusal. A plain
+    :class:`InstallError` (an operator-fixable state), never a
+    :class:`SelfCertError`."""
+    if plan.pixi_key_conflicts:
+        raise InstallError(
+            "pixi key conflict — refusing to reconcile a repo that would silently "
+            "stay off the managed pin:\n"
+            + "\n".join(
+                f"  {format_pixi_key_conflict(kc)}" for kc in plan.pixi_key_conflicts
+            )
+        )
+
+
 def reject_stale_provision(plan: Plan) -> None:
     """Fail closed on a consumer pixi task still calling the retired
     ``shipit provision lexd`` (#1070, ADR-0066) — the single guard shared by
@@ -936,7 +980,8 @@ def apply(
     Raises :class:`InstallError` on a domain refusal (``local``/``push`` in
     detached HEAD, a failed self-certification, a lefthook merge conflict with
     the consumer's local config in any committing mode — #544, a managed dest
-    crossing a consumer symlink, a pixi task still calling the retired
+    crossing a consumer symlink, an undeclined consumer key shadowing a managed
+    pixi block — #1116, a pixi task still calling the retired
     ``shipit provision lexd`` — #1070) and lets a
     git/gh boundary
     failure propagate as :class:`~shipit.execrun.ExecError` — both members of
@@ -949,7 +994,11 @@ def apply(
         raise ValueError("MODE_PR needs the pr_body renderer")
     reject_lefthook_conflicts(plan, mode)
     reject_symlinked_dests(plan)
+    # After the retired-command tripwire on purpose: a repo can carry both (the
+    # fleet shape does), and a dead `provision lexd` call is broken TODAY while a
+    # key conflict is an undelivered pin — report the harder breakage first.
     reject_stale_provision(plan)
+    reject_pixi_key_conflicts(plan)
     activate = activate_hooks or _activate_hooks
     started = time.monotonic()
     root = Path(plan.root)

@@ -62,11 +62,19 @@ round 1): a pixi block unit is exact bytes anchored under a TOML table the
 consumer owns (the node deps block lands in ``[dependencies]``), so a consumer
 who already pins one of the block's keys there (their own ``nodejs``, say)
 would get a DUPLICATE TOML KEY on the ADD splice — an unparseable pixi.toml
-that blocks installs and every hooked commit. Gather detects the clash against
-the parsed consumer manifest, and the reconcile SKIPS delivering that block
-(the consumer's own pin stays authoritative; the Plan carries the conflict and
-every surface warns) — never a broken write, in any mode. Its pixi-run-level
-sibling (TOL01-WS01) guards ``[tasks]`` blocks the same way against TASK-NAME
+that blocks installs and every hooked commit. The reconcile detects the clash
+against the manifest this plan will leave behind, excludes that block's
+decision — never a broken write, in any mode — and EVERY applying mode then
+FAILS CLOSED on the record (#1116, :func:`shipit.install.apply.reject_pixi_key_conflicts`).
+Refusing is the point: the whole purpose of a managed block is fleet uniformity,
+so a block that silently opts itself out of delivery produces exactly the drift
+the mechanism exists to prevent — 16 of 20 portfolio repos sat off the fleet pin
+this way while their reconcile reported success. The escape hatch is the
+consumer DECLARING the override in ``.shipit.toml``'s ``[managed.decline].keep``
+(#600), which already exists for precisely this: a declined block is not a
+conflict (nothing will be spliced), so the intent lands in version control where
+it is reviewable instead of in a warning line nobody reads.
+Its pixi-run-level sibling (TOL01-WS01) guards ``[tasks]`` blocks against TASK-NAME
 ambiguity: a managed default-env task (``test``) also defined by a consumer
 ``[feature.*.tasks]`` table would make ``pixi run <task>`` refuse the name,
 so the block is skipped and the consumer's own task stays authoritative
@@ -77,7 +85,11 @@ is NOT in shipit's reserved namespace — the private-tier
 consumer declare by hand — would, on a first splice over a pre-existing table,
 declare that table twice and make ``pixi.toml`` unparseable, so the block is
 skipped and the consumer's own table stays authoritative
-(:class:`PixiTableConflict`).
+(:class:`PixiTableConflict`). Both siblings stay WARN-ONLY on purpose (#1116):
+shipit's own repo carries a deliberate, documented ``test`` task conflict, so
+refusing on task ambiguity would make shipit refuse to install itself, and the
+fleet-wide table-conflict count is zero — an untested refusal nobody has ever
+hit. Only the KEY conflict refuses, because only it silently drops a PIN.
 
 Install also runs a RETIRED-COMMAND tripwire over the consumer's pixi tasks
 (#1070, ADR-0066): ``shipit provision lexd`` was deleted with no fallback, but
@@ -672,9 +684,17 @@ class PixiKeyConflict:
     """One pixi block unit whose FIRST splice would duplicate consumer-owned keys.
 
     Detected only when the block's markers are absent (an ADD): once the block
-    is spliced, its own keys legitimately live in the anchor table. The remedy
-    is the consumer's call — keep their pin (the block stays undelivered) or
-    delete it and re-run install to adopt the managed one.
+    is spliced, its own keys legitimately live in the anchor table. A DECLINED
+    block is never one of these (#1116): the plan will not splice it at all, so
+    the consumer's ``[managed.decline].keep`` entry IS the supported way to own
+    the key — see :func:`_plan_pixi_key_conflicts`.
+
+    Anything else here is a REFUSAL, not a skip: every applying mode fails closed
+    on this record (:func:`shipit.install.apply.reject_pixi_key_conflicts`).
+    Continuing would leave the repo off the fleet pin the block exists to deliver,
+    with only a warning in a reconcile that ends "success" — the drift the managed
+    set exists to prevent, in the repos most likely to have hand-edited their
+    manifest.
     """
 
     unit_key: str  # the [managed] table key, e.g. "pixi.toml#shipit-node-deps"
@@ -684,15 +704,25 @@ class PixiKeyConflict:
 
 def format_pixi_key_conflict(conflict: PixiKeyConflict) -> str:
     """The one actionable message for a key conflict — used verbatim by the
-    stderr warning and the durable log line, so the two surfaces never drift."""
+    stderr warning, the durable log line and the refusal
+    (:func:`shipit.install.apply.reject_pixi_key_conflicts`), so no surface drifts.
+
+    Names the key, the block, and BOTH remedies — deletion first, because that is
+    the right answer for the overwhelming majority of them (#1116: of 16 colliding
+    portfolio repos, 13 carried a stale hand-pin whose own comment named the
+    shipit gap the managed block has since closed). The decline is the exception,
+    stated as the exact ``.shipit.toml`` lines to paste."""
     keys = " and ".join(f"'{k}'" for k in conflict.keys)
     return (
         f"this repo's pixi.toml already declares {keys} in {conflict.anchor}, "
         f"which the managed block '{conflict.unit_key}' also pins — splicing it "
         f"would duplicate the key(s) and make pixi.toml unparseable, so the "
-        f"block was NOT delivered and this repo's own pin stays authoritative. "
-        f"To adopt the managed pin instead, delete this repo's own entry and "
-        f"re-run `shipit install`."
+        f"block CANNOT be delivered and this repo would stay off the fleet pin. "
+        f"Remedy — pick one: (1) delete this repo's own entry and re-run "
+        f"`shipit install` to take the managed pin (usually right: these entries "
+        f"are hand-pins shipit's managed set has since taken over); or (2) to "
+        f"keep this repo's own entry, declare the override in .shipit.toml — "
+        f'[managed.decline] keep = ["{conflict.unit_key}"].'
     )
 
 
@@ -786,6 +816,17 @@ def _plan_pixi_key_conflicts(
     pass (#1071) does not read as a first-splice conflict and strand the
     receiving block for a whole extra reconcile — while a key whose donor block
     is DECLINED, or whose donor keeps declaring it, stays a conflict (#1081).
+
+    A unit in ``kept`` is not judged at all (#1116). ``kept`` is what this plan
+    will NOT splice: a unit the consumer DECLINED (``[managed.decline].keep``) or
+    one whose dest crosses a symlink. Since the conflict is about a FIRST SPLICE,
+    a block that will never be spliced cannot have one — and that is what makes
+    the decline the supported escape hatch now that a conflict REFUSES: declaring
+    the override in version control is exactly how a consumer keeps owning the
+    key. (A symlinked dest is out for the same mechanical reason; it has its own
+    refusal, :func:`shipit.install.apply.reject_symlinked_dests`, so nothing is
+    lost by not also reporting it here with a decline remedy that would not fix
+    it.)
     """
     if state.pixi_text is None:
         return ()
@@ -801,6 +842,8 @@ def _plan_pixi_key_conflicts(
     for unit in units:
         if unit.kind != "block" or unit.dest != PIXI_FILE or unit.anchor is None:
             continue
+        if unit.key in kept:
+            continue  # never spliced (declined / symlinked dest) — no first splice
         if unit.fmt != FMT_MARKERS:
             # An FMT_ENV_MEMBER unit shares its anchor table (`[environments]`) with
             # the consumer BY DESIGN — it merges its managed feature into the
@@ -2021,10 +2064,15 @@ class Plan:
     # commit in the consumer would be blocked before any check runs). The
     # working-tree mode warns loudly; the committing modes fail closed in apply.
     lefthook_conflicts: tuple[LefthookConflict, ...] = ()
-    # Pixi blocks this plan SKIPPED (#547 round 1): a first splice would have
-    # duplicated a consumer-owned key in the anchor table, breaking pixi.toml —
-    # so their decisions are excluded outright (never a broken write, in any
-    # mode) and every surface warns off this record.
+    # Pixi blocks this plan could NOT deliver (#547 round 1): a first splice
+    # would have duplicated a consumer-owned key in the anchor table, breaking
+    # pixi.toml — so their decisions are excluded outright (never a broken write,
+    # in any mode) and EVERY applying mode then fails closed on this record
+    # (#1116, `shipit.install.apply.reject_pixi_key_conflicts`). Undeliverable is
+    # not "did not need delivering": continuing leaves the repo off the fleet pin
+    # the block exists to deliver while the reconcile reports success. A block the
+    # consumer DECLINED never lands here — that declaration IS the way to own the
+    # key. Unlike the two conflict siblings below, which stay warn-only.
     pixi_key_conflicts: tuple[PixiKeyConflict, ...] = ()
     # Pixi blocks SKIPPED over a task-name AMBIGUITY (TOL01-WS01): the splice
     # would define a default-env task a consumer feature also defines, making
