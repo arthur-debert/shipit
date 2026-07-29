@@ -1,75 +1,6 @@
-"""producer — the captured review producer (ADR-0020 §Reviewer-path, REPLACE).
+"""Launches a review backend and captures its structured output; never posts.
 
-This is the new producer that feeds the EXISTING funnel gate. The maintainer
-ratified REPLACE outright (ADR-0020): the retired ``codex`` / ``agy`` review
-backends no longer bypass the shared spawn adapter seam. A reviewer runs in a
-per-Run read-only Tree (ADR-0018) at the PR's true head; Codex still fetches the
-scoped diff itself with ``gh pr diff``, while AGY 1.1.3+ receives shipit's
-already-authoritative ``ReviewView.diff`` / ``RangeView.diff`` bytes directly in
-the prompt so headless command permission denial cannot block delivery. shipit
-then CAPTURES the agent's structured stdout
-and the service posts it via the existing App-identity ``post`` path onto the
-existing ``review: <agent>-local`` check-run — so readiness/posting/identity/config
-are all preserved; only the producer changed.
-
-What this module owns (and ONLY this):
-
-  * map the funnel :class:`~shipit.agent.backend.Backend` identity (``CODEX`` /
-    ``ANTIGRAVITY``, ADR-0025) to its spawn ``BackendAdapter`` — keyed by the
-    registry value objects themselves, never a retyped agent-name string — ONE
-    definition of "launch codex/agy as a reviewer", shared with the spawn
-    surface (the WS04a read-only posture);
-  * provision the per-Run read-only Tree on the PR head
-    (:func:`shipit.tree.readonly.create_readonly` — a fresh flat Tree per reviewer
-    Run, ADR-0074; cross-reviewer sharing is retired);
-  * build the backend-appropriate reviewer task (Codex command-fetch via
-    :func:`shipit.review.prompt.build_reviewer_task`; AGY supplied-diff via
-    :func:`shipit.review.prompt.build_supplied_diff_reviewer_task`) and, for
-    codex, write the JSON schema temp file so codex enforces the output shape
-    natively (``--output-schema`` — the robustness win ADR-0020 keeps);
-  * launch the child rooted in the Tree (shared :func:`shipit.spawn.launch.launch`,
-    stdin ``/dev/null``, auth-env scrubbed) under the reviewer's ``--timeout`` as a
-    real process DEADLINE (#404) — a review is a bounded, non-blocking degrade
-    (ADR-0006), so a stalled backend is KILLED at the seam and settled ``timed_out``,
-    never waited on forever — then CAPTURE its stdout and parse it into a review dict
-    (:func:`shipit.review.backends.parse_review_output`), wrapped in a
-    :class:`CapturedReview` that also carries the launch's MEASURED token usage
-    (:mod:`shipit.review.usage` — parsed per-backend from the CLI's own output,
-    RVW03-WS04) and the ReasoningLevel the adapter ACTUALLY wired into argv
-    (``None`` when the backend has no knob — records stamp from this, never from
-    config).
-
-A second producer shares the same launch core (RVW02-WS03):
-:func:`run_range_review`, the OFFLINE commit-range sibling — no Tree, no ``gh``.
-Codex's prompt asks for ``git diff <base>..<head>`` in the caller's checkout;
-AGY's prompt receives the already-resolved :class:`RangeView.diff` bytes. Both
-feed the no-post replay path (:mod:`shipit.review.replay`) instead of the funnel.
-
-The RVW02-WS04 dimension fan-out (:mod:`shipit.review.fanout`) drives
-:func:`run_tree_review` too — once per configured **Dimension pass**
-(``dimension=…``) against ONE per-Run Tree it provisions up front
-(:func:`provision_review_tree`, so the N parallel passes of one reviewer Run share
-its single clone) —
-and hashes each pass's exact prompt via :func:`pass_task_text` for the
-review-round record's per-run **Variant**. For AGY that variant text includes
-the exact supplied diff bytes the launch receives. The offline fan-out replay
-(RVW03-WS01) drives :func:`run_range_review` the same way — once per pass with
-the same ``dimension=`` narrowing, :func:`range_pass_task_text` as its variant
-source.
-
-A schema-unenforced backend (agy) whose stdout is UNPARSEABLE is re-prompted ONCE
-with the specific parse failure appended before the producer gives up (#826, the
-per-backend ``retry_on_parse_failure`` opt-in) — the deterministic net even when
-the agent skipped its best-effort self-check. codex (native ``--output-schema``)
-and any TIMEOUT are never retried. Only when the single retry ALSO fails does the
-:class:`BackendError` surface, so the service's #76 salvage stays the FINAL backstop.
-
-It does NOT post, does NOT touch the check-run, and does NOT decide outcomes — the
-service layer (:mod:`shipit.review.service`) owns posting + the funnel breadcrumb,
-exactly as before. The producer raises :class:`BackendUnavailable` (missing CLI),
-:class:`BackendError` (unparseable / timed-out output — carrying the raw for the #76
-salvage), or a plain error (a nonzero child / a Tree precondition failure) which the
-service maps to the ``failed`` funnel outcome.
+See docs/adr/0020-backend-adapter-contract.md.
 """
 
 from __future__ import annotations
@@ -112,26 +43,12 @@ from .usage import UNREPORTED, TokenUsage, from_codex_stderr
 
 logger = logging.getLogger("shipit.review")
 
-#: The reviewer role the spawn adapter's read-only posture is built for. It anchors
-#: the role preamble codex / agy prepend to the task; the funnel result channel is
-#: shipit's capture-and-post, not agent self-posting, so the task says NOT to post.
 _REVIEWER_ROLE = "reviewer"
 
 
 @dataclass(frozen=True)
 class CapturedReview:
-    """One reviewer launch's full capture (RVW03-WS04): the parsed review PLUS
-    the launch's measurements.
-
-    ``review`` is the REVIEW_SCHEMA-shaped dict downstream consumes exactly as
-    before. ``usage`` is the launch's token cost as the backend's CLI actually
-    reported it (:mod:`shipit.review.usage`; explicitly :data:`~shipit.review.usage.UNREPORTED`
-    for a CLI that reports none — never a fabricated number). ``reasoning`` is
-    the ReasoningLevel the adapter ACTUALLY wired into the launched argv
-    (``adapter.reasoning``): ``None`` means no knob was applied — either unset,
-    or the backend has none — so a record stamped from it never echoes a config
-    value that did not run (#685).
-    """
+    """A parsed review plus the launch's measured usage and APPLIED reasoning level."""
 
     review: dict
     usage: TokenUsage
@@ -140,41 +57,7 @@ class CapturedReview:
 
 @dataclass(frozen=True)
 class _BackendSpec:
-    """How one funnel backend maps onto the shared spawn launch seam.
-
-    ``adapter_factory`` builds the spawn ``BackendAdapter`` carrying the model (and,
-    for agy, the timeout; and, where the CLI has a knob, the reasoning level —
-    RVW03-WS04) — the SAME adapter the spawn surface launches a reviewer
-    through, so there is one definition of the launch. The CLI binary that must be
-    on PATH (preflight) is NOT here — it is the :class:`Backend` identity's
-    ``binary`` alias (ADR-0025), read off the registry entry. ``schema_inline``
-    describes the schema in prose in the prompt for a backend with no native
-    ``--output-schema`` (agy); ``native_schema`` backends (codex) get the schema as
-    a temp file passed to ``build_command``.
-
-    ``native_timeout`` says whether the backend enforces the ``--timeout`` itself
-    (agy's ``--print-timeout``) or relies SOLELY on the launch-seam deadline (codex,
-    which has no per-run timeout flag). It steers :func:`_seam_deadline`: a
-    native-timeout backend gets seam HEADROOM over its own flag so its native
-    (salvageable-output) path wins the race and the seam is a pure backstop; a
-    backend without one is killed by the seam at exactly the configured deadline
-    (#404).
-
-    ``usage_parser`` extracts the launch's token usage from the finished
-    :class:`~shipit.spawn.launch.LaunchResult` — per-backend, because WHERE a CLI
-    reports usage is backend-private (codex: a stderr log line; agy: nowhere —
-    explicitly :data:`~shipit.review.usage.UNREPORTED`). Probed facts, documented
-    in :mod:`shipit.review.usage`.
-
-    ``retry_on_parse_failure`` opts the backend into the deterministic ONE-shot
-    re-prompt net (#826): when a launch's stdout is unparseable, re-prompt the
-    backend ONCE with the specific parse failure appended, then re-parse. On ONLY
-    for a backend with no native schema enforcement (agy) — codex's
-    ``--output-schema`` makes an off-shape response impossible, so it never needs
-    the retry. It does NOT fire on a TIMEOUT (a timeout would just burn a second
-    full deadline; re-prompting fixes a promptly-returned-but-off-shape body, not
-    a slow one) — the salvage stays the backstop there.
-    """
+    """How one funnel backend maps onto the shared spawn launch seam."""
 
     delivery_mode: str
     schema_inline: bool
@@ -186,43 +69,30 @@ class _BackendSpec:
 
 
 def _codex_adapter(model: str, timeout: str, reasoning: str | None) -> BackendAdapter:
-    # codex has no per-run timeout flag, so the deadline is NOT threaded into the
-    # adapter (only the model is) — it is enforced at the launch SEAM instead, where
-    # `run_tree_review` passes it to `launch.launch(timeout=...)` as a hard process
-    # deadline (#404). `native_timeout=False` in the spec records that the seam is
-    # codex's SOLE timeout enforcement. `reasoning` IS threaded (RVW03-WS04): codex
-    # carries the one probed reasoning knob (`-c model_reasoning_effort=<level>`).
+    # codex has no per-run timeout flag; the launch seam is its sole enforcement.
     del timeout
     return CodexAdapter(model=model, reasoning=reasoning)
 
 
 def _agy_adapter(model: str, timeout: str, reasoning: str | None) -> BackendAdapter:
-    # agy has NO reasoning knob (probed 1.1.1) — the requested level is DROPPED
-    # here, deliberately: the adapter's `reasoning` stays None, so the run record
-    # stamps "unset" instead of echoing a config value that never reached the CLI.
+    # agy has no reasoning knob, so the requested level is dropped rather than
+    # stamped on a record as applied.
     del reasoning
     return AntigravityAdapter(model=model, timeout=timeout)
 
 
 def _codex_usage(result: launch.LaunchResult) -> TokenUsage:
-    """codex reports its token total on STDERR (probed 0.139.0, RVW03-WS04)."""
+    """codex reports its token total on stderr."""
     return from_codex_stderr(result.stderr or "")
 
 
 def _agy_usage(result: launch.LaunchResult) -> TokenUsage:
-    """agy reports NO usage anywhere (probed 1.1.1) — explicitly unknown."""
+    """agy reports no usage anywhere."""
     del result
     return UNREPORTED
 
 
-#: :class:`Backend` identity → how it launches as a reviewer. ``CODEX`` ≡ the ``codex``
-#: spawn adapter (native ``--output-schema``); ``ANTIGRAVITY`` ≡ the ``antigravity``
-#: spawn adapter (no native schema → prose schema in the prompt). Keyed by the
-#: registry :class:`Backend` VALUE OBJECTS themselves — not a retyped canonical-name
-#: string — so the funnel and launch axes meet on the ONE registry identity (ADR-0025)
-#: and renaming a backend is a single registry edit (the key follows the constant's
-#: identity, which is its canonical name). This is the single place the funnel backends
-#: are mapped onto the spawn seam.
+#: :class:`Backend` identity → how it launches as a reviewer.
 _SPECS: dict[Backend, _BackendSpec] = {
     CODEX: _BackendSpec(
         delivery_mode="self-fetch",
@@ -231,8 +101,6 @@ _SPECS: dict[Backend, _BackendSpec] = {
         native_timeout=False,
         adapter_factory=_codex_adapter,
         usage_parser=_codex_usage,
-        # codex's `--output-schema` enforces the shape natively, so an off-shape
-        # response can't happen — no re-prompt net needed.
         retry_on_parse_failure=False,
     ),
     ANTIGRAVITY: _BackendSpec(
@@ -242,38 +110,18 @@ _SPECS: dict[Backend, _BackendSpec] = {
         native_timeout=True,
         adapter_factory=_agy_adapter,
         usage_parser=_agy_usage,
-        # agy has no native schema enforcement, so a promptly-returned but
-        # unparseable body is the #76 failure mode — re-prompt it ONCE with the
-        # parse failure before the salvage takes over (#826).
         retry_on_parse_failure=True,
     ),
 }
 
 
-#: Headroom (seconds) the launch-seam deadline adds OVER a backend's OWN native
-#: timeout flag (agy's ``--print-timeout``). agy's native timeout produces a
-#: truncated-but-SALVAGEABLE review (a partial JSON body + the timeout marker in
-#: stdout, #76); the seam deadline is a SIGKILL that loses that output. So a
-#: native-timeout backend's seam deadline is set past its own flag by this margin —
-#: comfortably more than agy's sub-second teardown, negligible against a 600s base —
-#: so its native path always fires first and the seam only bites if agy hangs past
-#: its OWN deadline. A backend with no native flag (codex) gets NO headroom: the seam
-#: IS its enforcement, at exactly the configured ``--timeout``.
+#: Seconds the seam deadline is set PAST a backend's own native timeout flag, so
+#: the native (salvageable-output) path wins the race and the seam only backstops.
 _SEAM_HEADROOM_SECONDS = 60.0
 
 
 def _seam_deadline(timeout: str, spec: _BackendSpec) -> float:
-    """The launch-seam process deadline (seconds) for a reviewer launch (#404).
-
-    Parses the ``<N>s`` ``timeout`` string (the canonical roster shape) into seconds
-    and, for a backend that carries its OWN native timeout flag
-    (``spec.native_timeout``), adds :data:`_SEAM_HEADROOM_SECONDS` so the native
-    (salvageable-output) path wins the race and the seam is a pure backstop. A backend
-    without a native flag (codex) is killed by the seam at exactly the configured
-    deadline. A malformed ``timeout`` raises ``ValueError`` from
-    :func:`shipit.tree.cleanup.parse_duration` — a loud failure the service maps to a
-    ``failed`` outcome, never a silent unbounded run.
-    """
+    """The launch-seam process deadline in seconds; raises ``ValueError`` if malformed."""
     base = parse_duration(timeout)
     return base + _SEAM_HEADROOM_SECONDS if spec.native_timeout else base
 
@@ -295,12 +143,7 @@ def _permission_posture(spec: _BackendSpec, *, substrate: str) -> str:
 
 
 def _cli_version(binary: str) -> str:
-    """Best-effort runtime CLI version string for artifact provenance.
-
-    Telemetry must not make a review fail. If the binary lacks ``--version`` or
-    the probe cannot run in the current test/host environment, record an explicit
-    unknown marker and keep the review path moving.
-    """
+    """Best-effort CLI version for provenance; ``unknown`` rather than failing."""
     try:
         result = execrun.run([binary, "--version"], check=False, timeout=5)
     except Exception:
@@ -318,28 +161,7 @@ def pass_task_text(
     dimension: Dimension | None = None,
     incremental_range: tuple[str, str] | None = None,
 ) -> str:
-    """The EXACT reviewer task text a :func:`run_tree_review` launch composes —
-    the fan-out's **Variant** source (RVW02-WS04).
-
-    The round record hashes each contributing run's prompt
-    (:func:`shipit.harness.eval.variant.variant_of`) so a review-prompt A/B
-    separates arms on content; this helper re-derives the same bytes
-    :func:`run_tree_review` will launch with (instructions + PR number + the
-    backend's schema presentation + the optional dimension slice) without
-    launching anything. Raises ``ValueError`` for a non-funnel backend, exactly
-    like the launch path.
-
-    ``diff`` is required for a supplied-diff backend (AGY) and forbidden to be
-    absent because the prompt hash must cover the exact bytes the launch receives.
-    Command-fetch backends (Codex) ignore it and keep the historical self-fetch
-    prompt. ``incremental_range`` (RVW02-WS06) selects the INCREMENTAL fix-range
-    task over ``(base_sha, head_sha)`` instead of the full-PR task — so the
-    incremental round's single pass hashes the same bytes it launches with.
-    ``incremental_range`` is mutually exclusive with ``dimension`` (round ≥ 2 is
-    ONE full-scope pass, not a dimension fan-out); passing both is a caller error
-    this helper rejects with ``ValueError`` — exactly like the launch path — so
-    misuse fails loudly instead of silently hashing the wrong task shape.
-    """
+    """The exact task text :func:`run_tree_review` would launch with, without launching."""
     spec = _SPECS.get(backend)
     if spec is None:
         raise ValueError(
@@ -398,17 +220,7 @@ def range_pass_task_text(
     instructions_path: str | None = None,
     dimension: Dimension | None = None,
 ) -> str:
-    """The EXACT reviewer task text a :func:`run_range_review` launch composes —
-    the offline fan-out replay's **Variant** source (RVW03-WS01).
-
-    The range sibling of :func:`pass_task_text`: re-derives the same bytes
-    :func:`run_range_review` will launch with (instructions + the resolved
-    range + the backend's schema presentation + the optional dimension slice)
-    without launching anything, so a replayed pass's ``round.runs`` variant
-    hash is honest exactly like a live pass's. ``view`` is the resolved
-    :class:`~shipit.review.diff.RangeView`. Raises ``ValueError`` for a
-    non-funnel backend, exactly like the launch path.
-    """
+    """The exact task text :func:`run_range_review` would launch with, without launching."""
     spec = _SPECS.get(backend)
     if spec is None:
         raise ValueError(
@@ -437,26 +249,7 @@ def range_pass_task_text(
 def provision_review_tree(
     ctx, backend: Backend, *, naming: Mapping[str, str] | None = None
 ) -> str:
-    """Provision the per-Run read-only Tree on ``ctx``'s PR head and return its path.
-
-    The one Tree resolution the review producers share: resolve the repo
-    identity + head branch, then :func:`shipit.tree.readonly.create_readonly` — a
-    fresh, per-Run flat Tree (ADR-0074) named after ``backend``'s binary. The
-    RVW02-WS04 fan-out calls this ONCE before launching its parallel dimension
-    passes so the N passes of ONE reviewer Run share the one clone (this is
-    within-Run sharing, NOT the retired cross-reviewer sharing);
-    :func:`run_tree_review` provisions through here too when no ``tree_path`` was
-    handed in. Raises ``RuntimeError`` when the head branch is unknown (no Tree can
-    be provisioned).
-
-    ``naming`` (#1039) hands in the flat-leaf coordinates the coordinator ALREADY
-    minted for this reviewer Run — the ``{agent, created, tree_id}`` dict from
-    :func:`shipit.tree.create.new_tree_naming` — so the Tree this provisions lands
-    at the EXACT path the spawn boundary reported in its SPAWNED ``tree`` payload.
-    ``None`` (every other caller) keeps today's behaviour: mint a fresh naming here
-    from ``backend``'s binary. A supplied naming already carries its own ``agent``,
-    so ``backend`` is not consulted for the leaf name in that case.
-    """
+    """Provision the read-only Tree on ``ctx``'s head; ``naming`` reuses already-minted leaf coordinates."""
     repo = _resolve_repo(ctx)
     branch = (ctx.head_ref or "").strip()
     if not branch:
@@ -489,53 +282,7 @@ def run_tree_review(
     run_id: str | None = None,
     artifacts: RunArtifacts | None = None,
 ) -> CapturedReview:
-    """Launch ``backend`` as a reviewer in a read-only Tree and CAPTURE its review.
-
-    Provisions the per-Run read-only Tree on ``ctx``'s PR head, launches the backend
-    through its spawn read-only posture with a backend-appropriate diff delivery
-    task (Codex command-fetches ``gh pr diff``; AGY receives ``ctx.diff`` as
-    supplied data), captures stdout, and parses it. Returns a
-    :class:`CapturedReview` — the review dict plus the launch's measured token
-    usage and the reasoning level ACTUALLY applied to argv (RVW03-WS04); it does
-    NOT post and does NOT touch the check-run (the service owns those). Raises
-    :class:`BackendUnavailable` (missing CLI), :class:`BackendError`
-    (unparseable / timed-out output, carrying the raw for salvage), or a plain
-    ``RuntimeError`` (a nonzero child / a missing PR head branch) → the service
-    maps it to ``failed``.
-
-    ``reasoning`` requests a ReasoningLevel for the launch (RVW03-WS04, #685). It
-    reaches real argv ONLY where the backend's CLI has a knob (codex
-    ``-c model_reasoning_effort=<level>``); a backend without one (agy) drops it,
-    and the returned ``CapturedReview.reasoning`` reports what was actually
-    applied — the value records must stamp, never the request.
-
-    ``dimension`` narrows the task to ONE **Dimension pass** (RVW02-WS04 — the
-    fan-out launches this once per configured dimension); ``None`` keeps the
-    full-scope task. ``tree_path`` hands in an ALREADY-provisioned Tree (the
-    fan-out provisions once via :func:`provision_review_tree` and shares it
-    across its parallel passes); ``None`` provisions here, exactly as before.
-
-    ``incremental_range`` (RVW02-WS06) selects the INCREMENTAL fix-range task over
-    ``(base_sha, head_sha)`` — Codex reads only ``git diff base..head`` plus the
-    dependency neighborhood, while AGY receives the already-rescoped ``ctx.diff``
-    for that same fix range. It is mutually exclusive with ``dimension`` (round
-    ≥ 2 is ONE full-scope pass, not a fan-out) — passing both raises
-    ``ValueError`` so a misrouted call fails loudly rather than silently running
-    the wrong task shape; the fan-out never combines them. ``None`` keeps the
-    full-PR task, exactly as before.
-
-    ``run_id`` / ``artifacts`` are the RVW03-WS02 observability seam: ``run_id``
-    is the fan-out-minted pass id, stamped (with the dimension) onto this
-    launch's log records so parallel passes are separable in the log sink;
-    ``artifacts`` is the pass's :class:`~shipit.review.artifacts.RunArtifacts`
-    bundle, which the launch core fills with the exact prompt, the raw streams,
-    and the launch meta — success and failure alike, fail-open. ``None`` for
-    either keeps the pre-WS02 behaviour (no correlation extras, no bundle).
-
-    With ``dry_run=True``: resolves the Tree COORDINATES (no clone, no model bill),
-    prints the would-run Tree-launch argv, and returns an empty capture — so a dry-run
-    is honest (it shows exactly what would run and bills nothing).
-    """
+    """Launch ``backend`` as a reviewer in a read-only Tree and capture its review; never posts."""
     agent = backend.funnel_agent or backend.name
     spec = _SPECS.get(backend)
     if spec is None:
@@ -668,34 +415,7 @@ def run_range_review(
     run_id: str | None = None,
     artifacts: RunArtifacts | None = None,
 ) -> CapturedReview:
-    """Launch ``backend`` as an OFFLINE commit-range reviewer and CAPTURE its
-    review (RVW02-WS03 replay) — a :class:`CapturedReview`, exactly like
-    :func:`run_tree_review` (usage + applied reasoning ride along, RVW03-WS04).
-
-    The range sibling of :func:`run_tree_review` — the SAME backend specs,
-    preflight, adapters, schema handling, launch seam, deadline mapping, and
-    capture (:func:`_launch_and_capture`), with two deliberate differences:
-
-      * NO Tree and NO ``gh``: the review runs in ``view.workdir`` (the checkout
-        whose range is being replayed). Codex gets a task that reads the diff via
-        ``git diff <base>..<head>``; AGY gets a supplied-diff task carrying
-        ``view.diff``. The replay boundary already resolved + validated both
-        endpoints;
-      * nothing downstream posts: the caller (:mod:`shipit.review.replay`) writes
-        the review-round record and stops — no PR is touched.
-
-    ``dimension`` narrows the task to ONE **Dimension pass** exactly as on
-    :func:`run_tree_review` (RVW03-WS01: the offline fan-out replay launches
-    this once per configured dimension); ``None`` keeps the full-scope task.
-    ``run_id`` / ``artifacts`` are the same RVW03-WS02 observability seam as on
-    :func:`run_tree_review`: the caller-minted run id lands on this launch's
-    log records, and the :class:`~shipit.review.artifacts.RunArtifacts` bundle
-    captures the exact prompt + raw streams + launch meta, fail-open.
-
-    Raises exactly the :func:`run_tree_review` error set (missing CLI →
-    :class:`BackendUnavailable`; unparseable / timed-out output →
-    :class:`BackendError`; a nonzero child → ``RuntimeError``).
-    """
+    """Launch ``backend`` over a commit range in ``view.workdir`` — no Tree, no ``gh``."""
     agent = backend.funnel_agent or backend.name
     spec = _SPECS.get(backend)
     if spec is None:
@@ -776,27 +496,7 @@ def _launch_and_capture(
     run_id: str | None = None,
     substrate: str,
 ) -> CapturedReview:
-    """Launch a reviewer child, capture its review, and — for a schema-unenforced
-    backend — apply the deterministic ONE-shot re-prompt net (#826).
-
-    The launch core :func:`run_tree_review` (PR/Tree) and :func:`run_range_review`
-    (offline range) share: it delegates a single launch+parse to :func:`_attempt`,
-    and when that raises a PARSE-failure :class:`BackendError` on a backend opted
-    into the retry (``spec.retry_on_parse_failure`` — agy, no native schema), it
-    re-prompts ONCE with the specific parse failure appended (:func:`_retry_task`)
-    and re-parses. The retry is the deterministic fix even when the agent skipped
-    its best-effort self-check; codex (native ``--output-schema``) never retries.
-
-    A TIMEOUT is NEVER retried (``exc.timed_out``): re-prompting a slow run would
-    just burn a second full deadline, and a timeout is not an off-shape body a
-    re-prompt corrects. When the retry ALSO fails (or the backend does not opt in),
-    the :class:`BackendError` propagates unchanged so the service's #76 salvage
-    stays the FINAL backstop — the retry slots strictly BEFORE it.
-
-    ``run_id`` / ``artifacts`` are threaded to :func:`_attempt`; the bundle
-    reflects the LAST attempt (a retry overwrites the first attempt's streams +
-    meta), so the artifact of record is the output the outcome is settled from.
-    """
+    """Launch a reviewer child, capturing its review with at most one re-prompt on parse failure."""
     try:
         return _attempt(
             agent,
@@ -814,10 +514,7 @@ def _launch_and_capture(
             substrate=substrate,
         )
     except BackendError as exc:
-        # The retry net (#826) fires ONLY for a schema-unenforced backend (agy) and
-        # ONLY on a parse failure, never a timeout — a second run of a slow launch
-        # would just re-burn the deadline. On any other BackendError, propagate to
-        # the service's salvage backstop unchanged.
+        # A timeout is never retried: a second run would just re-burn the deadline.
         if not spec.retry_on_parse_failure or exc.timed_out:
             raise
         logger.info(
@@ -847,15 +544,7 @@ def _launch_and_capture(
 
 
 def _retry_task(task: str, failure: BackendError) -> str:
-    """Compose the ONE agy re-prompt: the original ``task`` plus the exact failure.
-
-    Appends a terminal RETRY block quoting why the previous output could not be
-    parsed — the :class:`BackendError` message already carries the actionable hint
-    plus a head/tail snippet of the raw output — so agy fixes the concrete problem
-    rather than re-guessing the shape blind. The schema is already in ``task`` (it
-    is the agy prompt), so it is not restated; this composes the single retry and
-    nothing more — the caller (:func:`_launch_and_capture`) never loops.
-    """
+    """Compose the re-prompt: the original ``task`` plus the exact parse failure."""
     return (
         f"{task}\n\n"
         "RETRY — your PREVIOUS response could NOT be parsed as a valid review:\n"
@@ -882,28 +571,7 @@ def _attempt(
     run_id: str | None = None,
     substrate: str,
 ) -> CapturedReview:
-    """Launch ONE reviewer child in ``cwd`` under the seam deadline and parse its
-    stdout — one attempt, no retry (the retry lives in :func:`_launch_and_capture`).
-
-    The deadline mapping and the timeout→``BackendError`` normalization exist
-    exactly once here. The returned :class:`CapturedReview` carries the launch's
-    measured usage (``spec.usage_parser`` over the raw
-    :class:`~shipit.spawn.launch.LaunchResult`) and the adapter's APPLIED reasoning
-    level (RVW03-WS04).
-
-    ``run_id`` is the pass's correlation id — threaded onto the local breadcrumb
-    WARNING (the line pointing at the bundle path) so ``shipit logs --run`` /
-    ``--reviewer`` can select the very record that says where the raw output lives.
-
-    ``artifacts`` (RVW03-WS02) is the run's fail-open bundle: the EXACT prompt
-    is written BEFORE the launch (a hung/killed child still leaves it
-    inspectable), the raw streams + launch meta (argv, exit code, duration,
-    timed-out flag, delivery mode, permission posture, CLI version, resolved
-    model, prompt digest/bytes, and diff digest/bytes when a diff was supplied)
-    after — on the success, timeout, and nonzero-exit paths alike, so the full
-    raw output is always on disk even where the raised error's message
-    truncates. ``None`` disables the bundle (pre-WS02 callers).
-    """
+    """Launch one reviewer child in ``cwd`` under the seam deadline and parse its stdout."""
     sink = artifacts if artifacts is not None else RunArtifacts.disabled()
     cmd = adapter.build_command(
         task,
@@ -948,16 +616,9 @@ def _attempt(
             error=str(exc),
         )
         if not timed_out:
-            # A non-timeout transport failure (missing binary, bad cwd): leave it
-            # for the service's generic mapping to `failed` (ADR-0028 normalizes
-            # every OS-level launch error into ExecError; a nonzero CHILD is a
-            # LaunchResult, never raised, so this is always transport).
+            # A nonzero child is a LaunchResult, never raised, so this is always
+            # a transport failure — leave it for the service's `failed` mapping.
             raise
-        # The seam killed a STALLED backend at the deadline (#404). Turn it into
-        # the funnel's `timed_out` terminal outcome: BackendError(timed_out=True)
-        # so the service settles `timed_out` (degraded, non-blocking, ADR-0006),
-        # carrying the partial stdout+stderr as `raw` so the #76 salvage can still
-        # surface whatever the backend had written before it hung.
         raise BackendError(
             f"{agent} timed out before returning a review — the launch seam "
             f"killed it at {_seam_deadline(timeout, spec):.0f}s "
@@ -977,13 +638,8 @@ def _attempt(
     try:
         review = _capture(agent, result, artifacts=sink, run_id=run_id)
     except BackendError as exc:
-        # An exit-0 launch can STILL be a timeout: `_capture` re-parses the
-        # stdout and `parse_review_output` raises `BackendError(timed_out=True)`
-        # when otherwise-unparseable output carries the marker. Correct the
-        # optimistic `timed_out=False` just recorded so `meta.json` agrees with
-        # the `timed_out` outcome the fanout/service will settle, before the
-        # failure propagates — the bundle must never claim a timeout was a clean
-        # exit.
+        # An exit-0 launch can still be a timeout (the marker is in stdout), so
+        # correct the optimistic `timed_out=False` recorded just above.
         sink.record(
             timed_out=exc.timed_out,
             outcome="timed_out" if exc.timed_out else "failed",
@@ -993,8 +649,6 @@ def _attempt(
         sink.record(outcome="failed")
         raise
     sink.record(outcome="success")
-    # RVW03-WS04: wrap the captured review with the launch's measured token usage
-    # and the reasoning level the adapter actually applied to argv.
     return CapturedReview(
         review=review,
         usage=spec.usage_parser(result),  # type: ignore[operator]
@@ -1011,31 +665,16 @@ def _capture(
 ) -> dict:
     """Turn the launched reviewer's result into a review dict, or raise.
 
-    A nonzero exit is a hard failure (mirroring the retired ``proc.run(check=True)``
-    backends) — UNLESS the agy print-timeout marker is present, which is a TIMEOUT, not
-    a generic failure (so it settles ``timed_out``, not ``failed``). On exit 0 the raw
-    stdout is parsed; an unparseable / marker-bearing parse raises :class:`BackendError`
-    (carrying the raw for the #76 salvage), exactly as before.
-
-    The nonzero-exit ``RuntimeError`` still truncates its human-facing detail;
-    the FULL raw streams live in the ``artifacts`` bundle (RVW03-WS02). The
-    bundle's absolute path is logged LOCALLY (a developer running the review sees
-    it), but is kept OUT of the raised message — that message crosses into the
-    GitHub-facing funnel breadcrumb (:func:`shipit.review.service._close_funnel_breadcrumb`),
-    where a user-home / state-root path must not leak into the PR check summary.
+    Raised messages must stay free of local filesystem paths: they cross into the
+    GitHub-facing funnel breadcrumb.
     """
     stdout = result.stdout or ""
     stderr = result.stderr or ""
     if result.returncode != 0:
         haystack = f"{stdout}\n{stderr}".lower()
         if _TIMEOUT_MARKER in haystack:
-            # A TIMEOUT, not a generic failure. The marker may live in *stderr*
-            # (not the salvageable stdout), so the human-facing message here does
-            # NOT echo it — we set the STRUCTURED ``timed_out`` flag explicitly so
-            # the service settles ``timed_out`` (not ``empty``) regardless. ``raw``
-            # carries combined stdout+stderr so the #76 salvage still has the marker
-            # context to surface. The caller (`_launch_and_capture`) records the
-            # timeout into the bundle meta from this exception's ``timed_out``.
+            # The marker may live in stderr rather than the salvageable stdout, so
+            # the timeout is signalled structurally, not by echoing the message.
             raise BackendError(
                 f"{agent} timed out before returning a complete review "
                 "(try a faster model or a smaller diff)",
@@ -1069,14 +708,7 @@ def _dry_run(
     repo: Repo,
     branch: str,
 ) -> CapturedReview:
-    """Print the would-run Tree-launch argv WITHOUT cloning or billing; return empty.
-
-    Resolves the Tree's COORDINATES (the leaf dir the read-only Tree WOULD occupy) so
-    the printed ``cwd`` is real, but never clones it and never launches a model. The
-    codex schema temp file is shown as a placeholder path (no file written). The empty
-    review flows on to ``post_review(dry_run=True)``, which prints the would-post payload
-    — so the whole dry-run is honest end to end and bills nothing.
-    """
+    """Print the would-run Tree-launch argv without cloning or billing; return empty."""
     plan = readonly_plan(repo=repo, branch=branch, **new_tree_naming(agent))
     placeholder = "<review-schema-tempfile>.json" if spec.native_schema else None
     cmd = adapter.build_command(
@@ -1093,24 +725,14 @@ def _dry_run(
             "summary": {"status": "COMMENT", "overall_feedback": "(dry-run)"},
             "comments": [],
         },
-        # A dry run launches nothing, so — like usage — no reasoning was actually
-        # applied to a real launch: report the unset state, never adapter.reasoning
-        # (which would echo a requested level as "applied" and mis-stamp telemetry).
-        # The would-run level is already visible in the printed argv above.
+        # A dry run launches nothing, so nothing was actually applied.
         usage=UNREPORTED,
         reasoning=None,
     )
 
 
 def _preflight(backend: Backend, *, dry_run: bool) -> None:
-    """Verify the backend's CLI binary (the registry's ``binary`` alias) is on
-    PATH; raise :class:`BackendUnavailable` otherwise.
-
-    Skipped in ``dry_run`` (a dry-run only prints the would-run argv; it must work
-    without the CLI installed, mirroring the spawn dry-run posture). A missing CLI on a
-    REAL run fails loud — these are LOCAL backends and a missing binary must never
-    silently degrade.
-    """
+    """Verify the backend's CLI binary is on PATH; skipped under ``dry_run``."""
     if dry_run:
         return
     if shutil.which(backend.binary) is None:
@@ -1122,19 +744,7 @@ def _preflight(backend: Backend, *, dry_run: bool) -> None:
 
 
 def preflight_round(backends: Sequence[Backend]) -> None:
-    """Verify EVERY backend a round is configured to launch, ONCE, before any
-    pass starts; raise ONE :class:`BackendUnavailable` naming each missing binary.
-
-    The round-level preflight (RVW03-WS03): the fan-out calls this before
-    provisioning the Tree or launching a single pass, so a missing binary
-    surfaces as one actionable "binary X not found — install/configure it"
-    error and NO pass processes launch — never as "all N dimension passes
-    failed" with N truncated per-pass details. ``backends`` is the round's
-    configured set (the reviewer's own backend plus, when the dormant judge is
-    on, the calibrator's); duplicate binaries are checked once.
-    The per-launch checks (:func:`_preflight`, the calibrator's own) stay as
-    backstops for callers outside a fan-out round.
-    """
+    """Check every backend a round will launch up front, raising one error naming all missing binaries."""
     missing: list[Backend] = []
     seen: set[str] = set()
     for backend in backends:
@@ -1155,27 +765,11 @@ def preflight_round(backends: Sequence[Backend]) -> None:
 
 
 def _resolve_repo(ctx) -> Repo:
-    """The :class:`shipit.identity.Repo` for ``ctx`` — from ``ctx.repo``, else inferred.
-
-    The detached child always resolves ``ctx`` with an explicit ``--repo``, so
-    ``ctx.repo`` is normally set; a hand-built context falls back to ``gh repo view``.
-    Either slug routes through the ONE canonical parser
-    (:func:`shipit.identity.repo_from_slug`) so the read-only Tree's namespace is the
-    case-normalized identity — an API-cased slug can never land a divergent Tree path
-    (ADR-0024). A slug that is not ``owner/name`` fails loud rather than provisioning
-    a Tree under a malformed identity.
-    """
+    """The :class:`shipit.identity.Repo` for ``ctx`` — from ``ctx.repo``, else inferred."""
     slug = (ctx.repo or "").strip()
     try:
-        # `gh.current_repo()` already returns the typed identity (PROC03) — the
-        # fallback needs no slug round-trip; only an explicit `ctx.repo` slug is
-        # parsed, through the ONE canonical parser. Either path raises
-        # `ValueError` on a non-`owner/name` answer.
         return repo_from_slug(slug) if slug else gh.current_repo()
     except ValueError as exc:
-        # Name the actual source: an explicit `ctx.repo` slug vs the empty-slug
-        # `gh repo view` fallback — and surface `exc` so the malformed output is
-        # in the message, not only the exception chain.
         source = f"the repo slug {slug!r}" if slug else "`gh repo view`"
         raise RuntimeError(
             f"cannot review PR #{ctx.number}: {source} did not yield an "
@@ -1190,12 +784,7 @@ def _github_url(ctx) -> str:
 
 
 def _write_schema_tempfile() -> str:
-    """Write :data:`REVIEW_SCHEMA` to a temp file for codex ``--output-schema``.
-
-    Returns the path; the caller removes it in a ``finally``. The producer owns this
-    (not ``build_command``, which must stay a pure argv builder so the dry-run print is
-    honest): the path is handed to the adapter, the file is cleaned up after the launch.
-    """
+    """Write :data:`REVIEW_SCHEMA` to a temp file the caller must remove."""
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".json", prefix=".review_schema_", delete=False
     ) as fh:
