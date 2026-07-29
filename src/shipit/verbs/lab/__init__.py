@@ -1,7 +1,4 @@
-"""The ``shipit lab`` command group — the Review Lab's experiment surface.
-
-See docs/adr/0049-convergence-curve-objective-one-axis-cells.md.
-"""
+"""The ``shipit lab`` command group — the Review Lab's experiment surface."""
 
 from __future__ import annotations
 

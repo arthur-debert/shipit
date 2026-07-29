@@ -1,7 +1,4 @@
-"""The shared CLI parameter library — argv becomes value objects at parse.
-
-See docs/adr/0030-cli-boundary-parse-to-values-typed-results.md.
-"""
+"""The shared CLI parameter library — argv becomes value objects at parse."""
 
 from __future__ import annotations
 

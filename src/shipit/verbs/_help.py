@@ -8,7 +8,6 @@ import click
 
 
 def load_help_text(package: str, resource: str) -> str:
-    """Return one package-relative help text file as UTF-8 text."""
     try:
         return resources.files(package).joinpath(resource).read_text(encoding="utf-8")
     except (FileNotFoundError, IsADirectoryError, ModuleNotFoundError) as exc:
@@ -30,14 +29,12 @@ def help_command(name: str = "help", *, package: str, resource: str) -> click.Co
 
 
 def register_help_command(group: click.Group, *, package: str, resource: str) -> None:
-    """Attach a ``help`` subcommand to ``group``."""
     group.add_command(help_command(package=package, resource=resource))
 
 
 def enable_leaf_help(
     command: click.Command, *, package: str, resource: str
 ) -> click.Command:
-    """Teach one leaf command to reserve leading ``help`` for long-form help."""
     if isinstance(command, click.Group):
         raise TypeError("enable_leaf_help only accepts leaf commands")
     if not isinstance(command, HelpableCommand):

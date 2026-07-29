@@ -1,7 +1,4 @@
-"""verify-apps — probe each local-agent reviewer App for ``checks: write`` on a repo.
-
-See docs/dev/review-app-provisioning.md for the install + consent runbook.
-"""
+"""verify-apps — probe each local-agent reviewer App for ``checks: write`` on a repo."""
 
 from __future__ import annotations
 

@@ -1,7 +1,4 @@
-"""The render seam — the one place a typed result becomes terminal output.
-
-See docs/adr/0030-cli-boundary-parse-to-values-typed-results.md.
-"""
+"""The render seam — the one place a typed result becomes terminal output."""
 
 from __future__ import annotations
 

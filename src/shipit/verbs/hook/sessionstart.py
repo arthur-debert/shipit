@@ -1,7 +1,4 @@
-"""``shipit hook sessionstart`` — write activation + log context into CLAUDE_ENV_FILE.
-
-Every step fails open independently; the hook always exits 0.
-"""
+"""``shipit hook sessionstart`` — write activation + log context into CLAUDE_ENV_FILE; every step fails open independently and the hook always exits 0."""
 
 from __future__ import annotations
 

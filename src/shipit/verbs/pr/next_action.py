@@ -32,7 +32,6 @@ class NextResult:
 
 
 def format_next(result: NextResult) -> str:
-    """The pure text renderer: the action line, then the shared status block."""
     return f"action: {result.action}\n{format_status(result.status)}"
 
 

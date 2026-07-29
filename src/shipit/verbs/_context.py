@@ -1,7 +1,4 @@
-"""RootContext — the ambient identity, resolved once at the CLI root.
-
-See docs/adr/0030-cli-boundary-parse-to-values-typed-results.md.
-"""
+"""RootContext — the ambient identity, resolved once at the CLI root."""
 
 from __future__ import annotations
 

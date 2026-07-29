@@ -48,10 +48,8 @@ def run(pr: int | None = None, *, undo: bool = False, repo: Repo | None = None) 
 
 
 def format_flipped(status: TaskStatus) -> str:
-    """The pure text renderer for a performed flip."""
     return f"PR #{status.pr}: flipped draft→ready — ready for human validation"
 
 
 def format_undone(target: PrId) -> str:
-    """The pure text renderer for a performed ``--undo``."""
     return f"PR #{target.number}: reverted ready→draft"

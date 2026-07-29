@@ -1,7 +1,4 @@
-"""wf verify-canary — dispatch the canary's sign-proof chains on live GitHub and watch them.
-
-An operator verb: real runs, real minutes; never part of ``pixi run test``.
-"""
+"""wf verify-canary — dispatch the canary's sign-proof chains on live GitHub and watch them; an operator verb, never part of ``pixi run test``."""
 
 from __future__ import annotations
 

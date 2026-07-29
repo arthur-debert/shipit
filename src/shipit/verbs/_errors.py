@@ -1,7 +1,4 @@
-"""The CLI error shell — the runtime half of the two-tier exit contract.
-
-See docs/adr/0030-cli-boundary-parse-to-values-typed-results.md.
-"""
+"""The CLI error shell — the runtime half of the two-tier exit contract."""
 
 from __future__ import annotations
 

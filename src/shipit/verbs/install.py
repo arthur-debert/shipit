@@ -1,7 +1,4 @@
-"""`shipit install` — vendor + reconcile the managed set: glue + pure renderers.
-
-See docs/adr/0030-cli-boundary-parse-to-values-typed-results.md.
-"""
+"""`shipit install` — vendor + reconcile the managed set: glue + pure renderers."""
 
 from __future__ import annotations
 
@@ -429,7 +426,6 @@ def format_result(result: InstallResult) -> str:
 
 
 def format_result_warnings(result: InstallResult) -> str:
-    """The apply's stderr lines: a failed activation, overrides refreshed in place."""
     lines = []
     if result.hooks_activated is False:
         lines.append(
@@ -455,7 +451,6 @@ def _desired_text(unit: Unit) -> str:
 
 
 def _override_diff(unit: Unit, consumer_text: str) -> str:
-    """A unified diff of the consumer's edit vs shipit's intended content."""
     diff = difflib.unified_diff(
         consumer_text.splitlines(keepends=True),
         _desired_text(unit).splitlines(keepends=True),

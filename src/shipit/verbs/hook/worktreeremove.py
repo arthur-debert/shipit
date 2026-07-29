@@ -1,7 +1,4 @@
-"""``shipit hook worktreeremove`` — fast-path reclaim of a clean ephemeral Tree.
-
-Best-effort and fail-open; ``tree gc`` is the load-bearing cleanup.
-"""
+"""``shipit hook worktreeremove`` — best-effort fast-path reclaim of a clean ephemeral Tree; ``tree gc`` is the load-bearing cleanup."""
 
 from __future__ import annotations
 

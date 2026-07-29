@@ -283,7 +283,6 @@ def act_argv(
 
 
 def untestable_notice() -> str:
-    """The act-untestable surface as one printable block."""
     lines = [
         f"act cannot verify (surface statement v{UNTESTABLE_SURFACE_VERSION}) — "
         "a green run here proves nothing about:"

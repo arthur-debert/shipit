@@ -1,7 +1,4 @@
-"""e2e — run each artifact's declared harness against its built binary.
-
-See docs/adr/0039-tools-as-verbs.md.
-"""
+"""e2e — run each artifact's declared harness against its built binary."""
 
 from __future__ import annotations
 

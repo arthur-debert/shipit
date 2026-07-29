@@ -221,7 +221,6 @@ def review_axis(rounds_path: str | Path | None) -> list[ReviewRoundRow]:
 
 
 def _mean(values: list[float]) -> float | None:
-    """The arithmetic mean of ``values``, or None for an empty list."""
     return sum(values) / len(values) if values else None
 
 
@@ -271,7 +270,6 @@ def _read_jsonl(path: str | Path | None) -> list[dict]:
 
 
 def _column(field: str) -> str:
-    """The bare column name for a quoted SQL field literal."""
     return field.strip('"')
 
 
@@ -285,7 +283,6 @@ def _present_columns(con: object, path: str) -> set[str]:
 
 
 def _run_group(con: object, key_expr: str, path: str, order_by: str) -> list[GroupRow]:
-    """Execute the group query for ``key_expr`` and map its rows to GroupRow."""
     rows = con.execute(_group_query(key_expr, order_by), [path]).fetchall()  # type: ignore[attr-defined]
     return [
         GroupRow(key=str(key), runs=int(runs), avg_tool_calls=float(avg or 0.0))
@@ -294,7 +291,6 @@ def _run_group(con: object, key_expr: str, path: str, order_by: str) -> list[Gro
 
 
 def _render_section(title: str, key_header: str, rows: list[GroupRow]) -> list[str]:
-    """Render one roll-up as an aligned text table (a list of lines)."""
     lines = [title]
     if not rows:
         lines.append("  (no runs)")
