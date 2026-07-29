@@ -1,10 +1,7 @@
-"""Backend-neutral coordinator session resume resolution.
+"""``session/resume`` — backend-neutral coordinator session resume resolution.
 
-The resume command takes human-facing shipit session ids (``codex-...`` /
-``sess-...``), backend-native ids, or ``--last --repo`` and resolves them from
-shipit's durable per-repo JSONL logs. The resolver is deliberately read-only:
-it turns records into a typed target; backend-specific launch mechanics stay in
-``shipit.verbs.session``.
+Read-only: turns shipit's durable per-repo JSONL records into a typed target.
+Launch mechanics stay in the verb.
 """
 
 from __future__ import annotations
@@ -45,12 +42,8 @@ def resolve(
     last: bool = False,
     base_dir: str | Path | None = None,
 ) -> ResumeTarget:
-    """Resolve ``target`` or ``--last`` to a unique backend-specific resume target.
-
-    ``target`` may be a shipit session id (preferred) or a backend-native id.
-    When ``last`` is true, ``repo`` is required and the newest complete session
-    for that repository wins. Without ``repo`` a target lookup searches every
-    repo log under the durable log base and fails closed if multiple repos match.
+    """``target`` is a shipit session id or a backend-native one; ``last`` needs
+    ``repo``. Without ``repo`` every repo log is searched, failing closed on a tie.
     """
 
     if last:
@@ -98,14 +91,9 @@ def resolve(
 
 
 def source_checkout_for_repo(repo: Repo, *, cwd: str | None = None) -> str:
-    """Return a deterministic local checkout that can seed a fresh Tree for ``repo``.
+    """A deterministic local checkout that can seed a fresh Tree for ``repo``.
 
-    The ambient checkout wins only when its origin resolves to ``repo``. Otherwise
-    shipit's established local source root (``~/h``, shared with fleet sweep) is
-    searched to a bounded depth for a matching canonical checkout. Trees are not
-    source checkouts: choosing one makes resume depend on disposable agent/review
-    state, and recursively walking a busy Tree root is unbounded. If no stable
-    source exists, fail actionably instead of falling back to an arbitrary Tree.
+    A Tree is never a candidate: resume must not depend on disposable state.
     """
 
     ambient = git.repo_root(cwd=cwd)
@@ -126,8 +114,6 @@ def source_checkout_for_repo(repo: Repo, *, cwd: str | None = None) -> str:
 
 
 def _matching_source_checkouts(repo: Repo, source_root: Path) -> list[str]:
-    """Matching clones at the canonical root, one or two path segments deep."""
-
     preferred = (
         source_root / repo.name,
         source_root / repo.owner.login / repo.name,
@@ -191,8 +177,7 @@ def _discover_repos(*, base_dir: str | Path | None) -> list[Repo]:
     base = (
         Path(base_dir)
         if base_dir is not None
-        # resolve_log_dir is <base>/<owner>/<repo>; climb those two identity
-        # segments to the root whose immediate children are owners.
+        # resolve_log_dir is <base>/<owner>/<repo>; climb to the owners root.
         else logsetup.resolve_log_dir(identity.repo_from_slug("x/y")).parent.parent
     )
     if not base.is_dir():
@@ -216,22 +201,12 @@ def _read_jsonl(path: Path) -> Iterator[dict[str, Any]]:
 def _sessions(
     records: Iterable[dict[str, Any]], *, repo: Repo | None = None
 ) -> list[ResumeTarget]:
-    """Fold a repo's JSONL records into one resumable :class:`ResumeTarget` per session.
+    """One resumable target per session, folding fields across its records.
 
-    The BACKEND is read from the record's ``backend`` field — stamped by the
-    ``session.started`` witness (:mod:`shipit.verbs.hook.sessionstart`) — NOT
-    reverse-engineered from the session-id prefix (ADR-0074 retired the prefix
-    table). A session whose records never carry ``backend`` (a pre-flat log) or
-    never carry a native id is not resumable and is dropped. Fields accumulate across
-    a session's records (any one of them may carry the backend, native id, tree, or
-    repo), and the native id is derived from the backend once known — codex resumes by
-    its thread (falling back to its session id), every other backend by its session
-    id.
+    A session missing a ``backend`` or a native id is dropped, not guessed at.
     """
-    # Insertion order IS the recency order: pop-and-reinsert moves a re-seen session to the
-    # end, so a dict is both the field accumulator and the newest-last ordering — O(1) per
-    # record. ``--last`` then follows the session's newest record even when its earlier fields
-    # came from a rotated file before another session was seen.
+    # Insertion order IS recency order: pop-and-reinsert moves a re-seen session
+    # to the end, so one dict is both accumulator and newest-last ordering.
     fields: dict[str, dict[str, str]] = {}
     for record in records:
         session_id = record.get("session")

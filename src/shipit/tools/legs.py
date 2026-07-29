@@ -1,26 +1,7 @@
-"""The leg planner — pure: (map entries, tool, selector, passthrough) → legs.
+"""``tools/legs`` — pure: (map entries, tool, selector, passthrough) → legs.
 
-A **Leg** is one Tool applied to one path→toolchain map entry (``test rust``,
-CONTEXT.md). :func:`plan_legs` turns the typed map
-(:class:`shipit.config.ToolchainEntry`, parsed at the config boundary per
-ADR-0030) into the ordered invocations a verb executes, applying the ADR-0039
-rules in one place:
-
-- a bare invocation fans out over ALL legs, in map order — the hooks' and
-  CI's form;
-- a selector (a toolchain name, or a map path for a repo with several legs of
-  one toolchain) filters the fan-out; an unknown selector is a
-  :class:`LegPlanError` naming the known legs;
-- passthrough args forward VERBATIM, appended to the selected leg's producing
-  command — and only ever to ONE leg: passthrough with several legs selected
-  (no selector on a multi-leg repo, or a selector matching several paths) is
-  a hard :class:`LegPlanError` listing the legs, never a broadcast;
-- a single-leg repo may omit the selector (the no-selector sugar).
-
-Pure (no I/O, no Exec): fully fixture-testable, the same split the lint
-verb's ``route``/``verdict`` pair uses. The effectful shells that run the
-planned legs are :mod:`shipit.verbs.test` and :mod:`shipit.verbs.build` (the
-latter via the build-step join, :mod:`shipit.tools.build`).
+A bare invocation fans out over every leg in map order; a selector narrows it;
+passthrough reaches exactly one leg or refuses. See docs/adr/0039-tool-verbs.md.
 """
 
 from __future__ import annotations
@@ -33,22 +14,12 @@ from . import registry
 
 
 class LegPlanError(Exception):
-    """The invocation cannot be planned — a USAGE error (exit 2, ADR-0030).
-
-    Raised for an unknown leg selector, and for passthrough args that would
-    reach more than one leg. The message is the whole user-facing diagnosis
-    (it names the known/selected legs), so the verb prints it verbatim.
-    """
+    """The invocation cannot be planned; the message is the whole diagnosis."""
 
 
 @dataclass(frozen=True)
 class Leg:
-    """One planned invocation: a tool applied to one map entry.
-
-    ``argv`` is the COMPLETE producing command — the per-path override or the
-    registry default, with any passthrough args already appended — run with
-    cwd at ``path`` (relative to the repo root; ``"."`` for the root).
-    """
+    """``argv`` is the COMPLETE producing command, run with cwd at ``path``."""
 
     path: str
     toolchain: str
@@ -57,7 +28,6 @@ class Leg:
 
     @property
     def label(self) -> str:
-        """The leg's display name — ``rust (.)`` — used by every listing."""
         return f"{self.toolchain} ({self.path})"
 
 
@@ -72,16 +42,8 @@ def plan_legs(
     selector: str | None = None,
     passthrough: Sequence[str] = (),
 ) -> tuple[Leg, ...]:
-    """The ordered legs a ``tool`` invocation runs, per the ADR-0039 rules.
-
-    ``entries`` is the typed path→toolchain map in DECLARATION ORDER (the
-    fan-out order — ``.shipit.toml`` order is the contract, no re-sorting).
-    ``selector`` names a toolchain or a map path; ``passthrough`` is appended
-    verbatim to the (single) selected leg's argv. Raises
-    :class:`LegPlanError` on the selector/passthrough rule violations
-    documented in the module docstring, and :class:`ValueError` for an entry
-    whose toolchain is not registered — a caller bug: entries reach the
-    planner already validated by :func:`shipit.config.load_toolchains`.
+    """The ordered legs a ``tool`` invocation runs; ``entries`` order is fan-out
+    order, and ``selector`` names a toolchain or a map path.
     """
     legs: list[Leg] = []
     for entry in entries:
@@ -118,9 +80,6 @@ def plan_legs(
 
     if passthrough:
         if not selected:
-            # No leg to append to — an empty map reached the planner (the verb
-            # rejects that earlier, but plan_legs is a public pure function and
-            # must not IndexError on empty input).
             raise LegPlanError(
                 f"no {tool} legs declared — nothing to forward passthrough args to"
             )
