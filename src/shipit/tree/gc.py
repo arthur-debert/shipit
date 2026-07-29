@@ -1,26 +1,7 @@
-"""``tree/gc`` — garbage collection as a plan + a sweep (ADR-0030).
+"""``tree/gc`` — Tree garbage collection as a pure plan plus an effectful sweep.
 
-The gc verb's promoted domain half, split on the boundary contract:
-
-- :func:`plan` is PURE: given the scanned records and the one remaining effectful
-  input as a value (``now``), it wraps :func:`shipit.tree.cleanup.classify`'s
-  partition into a frozen :class:`GcPlan` — the exact decision BOTH gc modes act
-  on. ``--dry-run`` renders this plan; the real sweep consumes it; parity is by
-  construction.
-- :func:`plan_fleet` is the effectful GATHER (mirroring ``prstate.fetch``'s
-  snapshot idiom): scan the central root, then call the pure :func:`plan`. It
-  reads; it never mutates. Under ADR-0072 the gather has almost nothing left to
-  do — every signal the rule wants rides the scanned record, and the PR-state,
-  liveness and provisioning reads it used to make are gone with the ladder that
-  consulted them.
-- :func:`sweep` is the effectful APPLY: delete exactly the plan's removable
-  Trees and return a typed :class:`GcResult` of what actually happened. It
-  announces each removal AS it happens through the caller's ``on_removed``
-  sink, so a sweep that is interrupted mid-fleet still leaves a record of the
-  Trees it destroyed (#1011). No printing anywhere in this module — the sink
-  is the verb's renderer, called from here but written there; the durable log
-  twins (the per-failure WARNING, the sweep milestone, the incomplete-view
-  warning; ADR-0029) live here with the effect they narrate.
+:func:`plan` decides, :func:`plan_fleet` gathers, :func:`sweep` applies; ``--dry-run``
+renders the same plan the real sweep consumes, so preview and action cannot drift.
 """
 
 from __future__ import annotations
@@ -46,18 +27,8 @@ logger = logging.getLogger("shipit.tree")
 class GcPlan:
     """The frozen gc decision: the fleet's partition plus the sweep's context.
 
-    ``partition`` is :func:`~shipit.tree.cleanup.classify`'s two-bucket
-    :class:`~shipit.tree.cleanup.Cleanup`; ``total`` is how many Trees were
-    scanned and ``unexamined`` how many the rule could not JUDGE because a signal
-    was unreadable (:func:`~shipit.tree.cleanup.is_unexamined`). The counts travel
-    WITH the partition because both gc tails — the ``--dry-run`` render and the real
-    sweep — need them to surface an INCOMPLETE view of the fleet.
-
-    ``unexamined`` counts a SUBSET OF ``partition.keep``, never of ``removable``: an
-    unreadable signal keeps its Tree (ADR-0072), so the count and the deletions can
-    never describe the same Tree. That disjointness is the invariant the count's
-    predecessor lacked — it was projected off PR state, which the rule had stopped
-    reading, so a Tree could be reported "skipped" by the run that deleted it.
+    ``unexamined`` counts Trees the rule could not JUDGE because a signal was
+    unreadable. It is always a SUBSET of ``partition.keep``, never of ``removable``.
     """
 
     partition: Cleanup
@@ -66,21 +37,14 @@ class GcPlan:
 
     @property
     def judged(self) -> int:
-        """How many Trees the rule actually reached a verdict on (``total`` less the
-        unexamined)."""
+        """How many Trees the rule reached a verdict on."""
         return self.total - self.unexamined
 
     @property
     def incomplete(self) -> bool:
-        """Whether the fleet was only PARTIALLY judged.
-
-        True when any Tree was kept on an unreadable signal rather than a verdict —
-        a failed ``git rev-list``, a failed activity walk, or an unreadable HEAD commit
-        stamp (the two halves of idle, either of which blanks it; see
-        :func:`~shipit.tree.cleanup.is_unexamined`). gc says so loudly and exits
-        non-zero from both tails (#1011/#1012) rather than reporting a clean bill of
-        health for a root it could not fully read.
-        """
+        """Whether the fleet was only PARTIALLY judged — gc says so and exits
+        non-zero rather than reporting a clean bill of health for a root it could
+        not fully read."""
         return self.unexamined > 0
 
 
@@ -94,18 +58,11 @@ class GcFailure:
 
 @dataclass(frozen=True)
 class GcResult:
-    """What the sweep actually did — the typed result the verb renders.
+    """What the sweep actually did.
 
-    ``removed`` holds only the paths that CAME OFF DISK (a Tree already gone —
-    a concurrent sweep, a manual ``rm`` — is neither counted nor reported);
-    ``failed`` the per-Tree delete failures the sweep continued past; ``kept``
-    the untouched bucket; ``total``/``unexamined`` the plan's fleet-view counts,
-    carried through so the renderer can warn about an incomplete sweep off the
-    result alone.
-
-    There is no ``stale`` list: the partition it mirrored is gone (ADR-0072 —
-    :class:`~shipit.tree.cleanup.Cleanup`), so a sweep now reports what it
-    removed, what it could not, and what it kept.
+    ``removed`` holds only the paths that CAME OFF DISK; ``failed`` the per-Tree
+    delete failures the sweep continued past; ``kept`` the untouched bucket;
+    ``total``/``unexamined`` the plan's fleet-view counts.
     """
 
     removed: tuple[str, ...]
@@ -116,12 +73,12 @@ class GcResult:
 
     @property
     def judged(self) -> int:
-        """How many Trees the rule reached a verdict on (:attr:`GcPlan.judged`)."""
+        """How many Trees the rule reached a verdict on."""
         return self.total - self.unexamined
 
     @property
     def incomplete(self) -> bool:
-        """Whether the fleet was only PARTIALLY judged (:attr:`GcPlan.incomplete`)."""
+        """Whether the fleet was only PARTIALLY judged."""
         return self.unexamined > 0
 
 
@@ -131,26 +88,8 @@ def plan(
     now: float,
     idle_threshold_seconds: float = IDLE_THRESHOLD_SECONDS,
 ) -> GcPlan:
-    """Partition the fleet into the frozen :class:`GcPlan`. PURE.
-
-    Every effectful input arrives as a value (the ``classify`` contract), so the whole
-    gc decision — including the ``unexamined`` incomplete-view count — is unit-testable
-    without a fleet on disk. The one side effect is ``classify``'s per-Tree decision
-    record at DEBUG (ADR-0029).
-
-    PR state is gone from this signature, not merely from the rule. It counted the
-    fleet's unreadable signals for #1012's partly-seen report, and that projection was
-    load-bearing only while the PR read could SUPPRESS a removal — UNKNOWN kept a Tree,
-    so UNKNOWN explained a wrongly-empty sweep. Under ADR-0072 nothing consults it, so
-    an UNKNOWN Tree is now removed like any other, and counting it as "skipped" would
-    describe a Tree the very same run deleted.
-
-    #1012's PROPERTY is kept, repointed at the signals that inherited the suppressing
-    role: :func:`~shipit.tree.cleanup.is_unexamined` — an unreadable ``unpushed`` read,
-    a failed activity walk, or an unreadable HEAD commit stamp. Those keep a Tree
-    silently today, so they are exactly what can now make a blind sweep look like a
-    clean fleet.
-    """
+    """Partition the fleet into the frozen :class:`GcPlan`. Pure — every effectful
+    input arrives as a value."""
     decision = classify(
         records,
         now=now,
@@ -165,15 +104,7 @@ def plan_fleet(
 ) -> GcPlan:
     """Scan the central root and build the :class:`GcPlan` — the effectful gather.
 
-    The read-only half of gc: scan → the pure :func:`plan`. Nothing on disk is
-    mutated; the returned plan is what a ``--dry-run`` renders and what
-    :func:`sweep` applies, so the preview can NEVER drift from the action.
-
-    Everything the rule needs now rides the scanned record — the activity walk
-    included (:attr:`~shipit.tree.registry.TreeRecord.newest_mtime`) — so this gather
-    does no per-Tree work of its own, and projects no PR state: nothing downstream
-    reads one any more, neither the rule nor the incomplete-view count (ADR-0072,
-    :func:`plan`).
+    Read-only: nothing on disk is mutated.
     """
     return plan(
         registry.scan(root),
@@ -190,29 +121,12 @@ def sweep(
 ) -> GcResult:
     """Delete the plan's removable Trees; return the typed :class:`GcResult`.
 
-    The effectful apply. Deletion is best-effort per Tree: a failed delete (a
-    read-only file, a lock, a vanished dir) lands in ``failed`` — WARNING with
-    the exception attached, the degraded-but-continuing convention (ADR-0029)
-    — and the sweep CONTINUES to the next Tree rather than aborting mid-fleet.
-    A path already gone (``remove`` returns ``False``) is skipped silently:
-    ``removed`` reflects what actually came off disk, never what was merely
-    planned. ``remove`` is injectable so the sweep is unit-testable without a
-    real fleet; it defaults to the one reclaim funnel
-    (:func:`~shipit.tree.readonly.remove_tree`, which narrates each removal).
-
-    ``on_removed`` is called with each path the instant it comes off disk, and
-    is how the destroyed set reaches the operator IN TIME. Deleting a fleet
-    takes minutes, and a `GcResult` that only arrives at the end is a record
-    the process must survive to hand back: a sweep killed at minute 14 (a
-    timeout, or the Ctrl-C a silent multi-minute delete invites) had destroyed
-    175 Trees and named none of them (#1011). So the sink is the audit trail,
-    the returned :class:`GcResult` merely the summary, and the ORDER matters —
-    a path is announced before it is accumulated, never after. A sink that
-    raises is not caught here: only the per-Tree ``remove`` is best-effort.
-
-    The sweep's lifecycle milestone (the removed/kept summary) and the
-    incomplete-view warning are recorded here — the durable twins of the lines
-    the verb renders off the result.
+    Deletion is best-effort per Tree: a failed delete lands in ``failed`` and the
+    sweep continues. A path already gone (``remove`` returns ``False``) is skipped
+    silently, so ``removed`` reflects what actually came off disk. ``on_removed`` is
+    called with each path the instant it comes off disk — the audit trail that
+    survives a sweep killed mid-fleet — so a path is announced BEFORE it is
+    accumulated; a sink that raises is not caught here.
     """
     removed: list[str] = []
     failed: list[GcFailure] = []
