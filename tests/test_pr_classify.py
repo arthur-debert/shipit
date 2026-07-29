@@ -1,16 +1,3 @@
-"""The `shipit pr classify` CLI surface (ADR-0044) — through the ADR-0030 seam.
-
-The verb is the write-once Severity-OVERRIDE writer (the chain's dormant
-correction path), plus a list mode showing the latest round's chain-resolved
-severities. These prove the WIRING and the verb's own rules (list vs record
-mode, the latest-round membership check, the no-PR refusal, the exit
-contract) — the override STORE is unit-tested in test_prstate_overrides.py,
-the precedence chain in test_prstate_severity.py, and the engine's breaker in
-test_prstate_breakers.py. The boundary (`resolve_pr` / `gather` /
-`load_roster` / `record_override`) is monkeypatched so there is no network and
-no real log file.
-"""
-
 from __future__ import annotations
 
 import hashlib
@@ -29,9 +16,6 @@ from shipit.verbs.pr import classify as classify_verb
 REPO = repo_from_slug("owner/repo")
 HEAD = Sha(hashlib.sha1(b"head").hexdigest())
 
-# One marker-carrying finding (resolves `nit` off the marker) and one unmarked
-# Copilot finding (resolves `minor` off Copilot's unclassified-severity policy,
-# #743) — the list view must show both severities and their source rungs.
 BODY_1 = "<!-- shipit:finding severity=nit -->\nnitpick: capitalize the sentence"
 BODY_2 = "consider referencing the CLI02 PRD inline"
 
@@ -67,25 +51,19 @@ def _ctx(overrides=None, threads=None):
         if threads is not None
         else [_thread(101, BODY_1), _thread(202, BODY_2)],
         overrides=overrides or {},
-        # The SHIPPED default roster (copilot-only) as a value: `build_rounds`
-        # derives its required set from `ctx.roster`, and the empty Roster
-        # requires no one — no reviews would fold into rounds.
         roster=default_roster(),
     )
 
 
 @pytest.fixture
 def recorded():
-    """The record_override spy's call log."""
     return []
 
 
 @pytest.fixture
 def patched(monkeypatch, recorded):
     def resolve(pr, repo, branch):
-        assert repo is not None  # the ambient identity arrived at the boundary
-        # Pin the target's repo so assertions on the record spy are stable
-        # regardless of which checkout runs the suite.
+        assert repo is not None
         return PrId(repo=REPO, number=pr if pr is not None else 42)
 
     monkeypatch.setattr(classify_verb, "resolve_pr", resolve)
@@ -114,7 +92,6 @@ def test_list_mode_prints_resolved_severities_with_the_override_command(
     out = capsys.readouterr().out
     assert "2 finding(s), severity-resolved" in out
     assert "101" in out and "202" in out
-    # each finding shows its chain-resolved severity + the deciding rung
     assert "nit (marker)" in out
     assert "minor (policy)" in out
     assert BODY_2 in out
@@ -183,9 +160,6 @@ def test_record_refuses_a_comment_outside_the_latest_round(patched, recorded, ca
 
 
 def test_record_severity_is_a_usage_validated_choice(patched, capsys):
-    # The severity half of --comment validates at argv parse — the ladder is
-    # the ONLY vocabulary (the retired nitpick|substantive pair included):
-    # exit 2, never verb code.
     assert cli.main(["pr", "classify", "--comment", "101", "cosmetic"]) == 2
     assert cli.main(["pr", "classify", "--comment", "101", "nitpick"]) == 2
     assert cli.main(["pr", "classify", "--comment", "101", "substantive"]) == 2

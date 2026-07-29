@@ -1,14 +1,3 @@
-"""The ONE gh Tool adapter (PROC02-WS01, ADR-0028).
-
-The engine's second boundary (`shipit/prstate/ghapi.py`) merged into
-`shipit.gh`: pure-logic tests for the merged surface (no subprocess), plus the
-mechanical sweep that pins one of the merge's structural guarantees — the
-pagination-merging helper exists exactly once. The other guarantee — gh argv is
-built ONLY inside the adapter ("tool argv built outside its Tool adapter" is a
-statable defect, ADR-0028) — is the ``gh`` row of the table-driven cross-tool
-sweep in ``test_tool_argv_sweep.py``.
-"""
-
 from __future__ import annotations
 
 import ast
@@ -26,11 +15,7 @@ from shipit.prstate.errors import PrStateError
 _SRC_ROOT = pathlib.Path(shipit.__file__).parent
 
 
-# --- pagination merging (defined exactly once, in the adapter) ---------------
-
-
 def test_merge_paginated_flattens_concatenated_arrays():
-    # `gh api --paginate` emits one JSON array per page, concatenated.
     out = '[{"id": 1}, {"id": 2}]\n[{"id": 3}]\n'
     assert [o["id"] for o in gh._merge_paginated(out)] == [1, 2, 3]
 
@@ -40,8 +25,6 @@ def test_merge_paginated_single_page():
 
 
 def test_pagination_helper_exists_exactly_once():
-    """The duplicated helper was the two-boundaries disease's visible symptom:
-    after the merge, exactly one definition survives, in the adapter."""
     definitions = []
     for path in sorted(_SRC_ROOT.rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -49,9 +32,6 @@ def test_pagination_helper_exists_exactly_once():
             if isinstance(node, ast.FunctionDef) and node.name == "_merge_paginated":
                 definitions.append(path.relative_to(_SRC_ROOT.parent))
     assert definitions == [pathlib.Path("shipit/gh.py")]
-
-
-# --- workflow_ref_resolves — the @vN pin gate's boundary (#917) --------------
 
 
 def _probe_result(monkeypatch, *, rc: int, stderr: str = ""):
@@ -81,10 +61,6 @@ def test_workflow_ref_resolves_false_only_on_a_confirmed_404(monkeypatch):
 
 
 def test_workflow_ref_resolves_false_on_no_commit_422(monkeypatch):
-    # The SHA-shaped miss: `repos/{repo}/commits/{ref}` reports an unresolved
-    # SHA as HTTP 422 "No commit found for SHA", NOT a 404. It is still a
-    # CONFIRMED-missing ref — the exact shape that would otherwise slip the
-    # gate and let the dispatch hit GitHub's raw 422 anyway (#917).
     _probe_result(
         monkeypatch,
         rc=1,
@@ -94,9 +70,6 @@ def test_workflow_ref_resolves_false_on_no_commit_422(monkeypatch):
 
 
 def test_workflow_ref_resolves_true_when_404_appears_only_incidentally(monkeypatch):
-    # The tightening (copilot/agy): a bare "404" substring is NOT a missing
-    # ref — an unrelated error line (here a rate-limit remaining count) can
-    # carry the digits without meaning HTTP 404, so it degrades to UNKNOWN.
     _probe_result(
         monkeypatch, rc=1, stderr="gh: API rate limit exceeded (404 of 5000 left)"
     )
@@ -104,16 +77,10 @@ def test_workflow_ref_resolves_true_when_404_appears_only_incidentally(monkeypat
 
 
 def test_workflow_ref_resolves_true_on_unknown_probe_failure(monkeypatch, caplog):
-    # An auth/transport failure is UNKNOWN, not missing — a degraded probe must
-    # never read as an absent ref and block a cut with a phantom bootstrap, and
-    # it is logged (LOG02) so a masked misconfiguration is not swallowed.
     _probe_result(monkeypatch, rc=1, stderr="gh: authentication required")
     with caplog.at_level("WARNING", logger="shipit.gh"):
         assert gh.workflow_ref_resolves("o/r", "v1") is True
     assert any("degraded" in rec.message for rec in caplog.records)
-
-
-# --- the merged REST/GraphQL surface (transport mocked at `_run`) -------------
 
 
 def _capture_run(monkeypatch, stdout: str):
@@ -146,8 +113,6 @@ def test_rest_sends_string_fields_as_dash_f(monkeypatch):
 
 
 def test_rest_rejects_body_and_fields_together(monkeypatch):
-    """`body` and `fields` are alternative payload forms; passing both would
-    yield an ambiguous `gh api` invocation, so the adapter fails fast."""
     calls = _capture_run(monkeypatch, "{}")
     with pytest.raises(ValueError):
         gh.rest("repos/o/r", method="POST", body={"a": 1}, fields={"b": "2"})
@@ -155,8 +120,6 @@ def test_rest_rejects_body_and_fields_together(monkeypatch):
 
 
 def test_graphql_variable_encoding(monkeypatch):
-    """None omitted entirely; int/bool type-infer via -F; str forced via -f
-    (ID! variables must never be coerced to a number)."""
     calls = _capture_run(monkeypatch, json.dumps({"data": {"ok": True}}))
     assert gh.graphql("query {}", owner="o", pr=7, after=None) == {"ok": True}
     assert calls == [
@@ -165,21 +128,13 @@ def test_graphql_variable_encoding(monkeypatch):
 
 
 def test_graphql_errors_raise_the_semantic_error(monkeypatch):
-    """The Exec succeeded (rc 0) but the answer is unusable: the adapter raises
-    the engine's user-renderable `PrStateError`, never returns partial data."""
     payload = {"data": None, "errors": [{"message": "Could not resolve PR"}]}
     _capture_run(monkeypatch, json.dumps(payload))
     with pytest.raises(PrStateError):
         gh.graphql("query {}")
 
 
-# --- typed returns (PROC03, ADR-0028): core value objects off the read surface -
-
-
 def test_current_repo_returns_the_typed_repo(monkeypatch):
-    """The repo read returns the `Repo` identity value object — minted through the
-    ONE canonical slug parser, so an API-cased slug lands the case-normalized
-    identity (ADR-0024) and no caller re-splits owner/name."""
     calls = _capture_run(monkeypatch, "Acme/Widget\n")
     repo = gh.current_repo()
     assert isinstance(repo, Repo)
@@ -191,8 +146,6 @@ def test_current_repo_returns_the_typed_repo(monkeypatch):
 
 
 def test_current_repo_raises_on_unusable_output(monkeypatch):
-    """gh exited 0 but produced no usable owner/name: a data-shape `ValueError`
-    at the boundary (the transport failure is `ExecError`), never a bogus Repo."""
     _capture_run(monkeypatch, "\n")
     with pytest.raises(ValueError):
         gh.current_repo()
@@ -217,9 +170,6 @@ def test_repo_canonical_returns_the_typed_repo(monkeypatch):
 
 
 def test_repository_dispatch_posts_the_event_and_payload(monkeypatch):
-    """The notify-downstreams cascade's one write (#792): a POST to the
-    downstream's dispatches endpoint carrying event_type + client_payload,
-    authenticated by the cross-repo PAT the body is piped to `gh api`."""
     captured = {}
 
     def fake_run(args, **kwargs):
@@ -252,8 +202,6 @@ def test_repository_dispatch_posts_the_event_and_payload(monkeypatch):
 
 
 def test_pr_view_returns_the_parsed_object(monkeypatch):
-    """The adapter owns the JSON parse (PROC03): callers receive the object,
-    never a raw string to re-parse."""
     calls = _capture_run(monkeypatch, '{"number": 7, "headRefName": "feat"}\n')
     assert gh.pr_view("7", json_fields=["number", "headRefName"]) == {
         "number": 7,
@@ -272,9 +220,6 @@ def test_pr_view_raises_on_unparseable_and_non_object_output(monkeypatch):
 
 
 def test_pr_core_returns_the_typed_pr_with_sha_head(monkeypatch):
-    """The typed PR read: exactly the core field list on the wire, routed through
-    the one `core_from_node` boundary — a `PR` with a `Sha`-typed, lowercase-
-    normalized head comes back, not a dict."""
     head = "CAFE" * 10
     repo = repo_from_slug("owner/repo")
     target = PrId(repo=repo, number=7)
@@ -301,8 +246,6 @@ def test_pr_core_returns_the_typed_pr_with_sha_head(monkeypatch):
         True,
         "BLOCKED",
     )
-    # Exactly the CORE field list rides the argv — the one wire read (ADR-0024) —
-    # scoped to the explicit repo so the read never depends on the cwd checkout.
     assert calls == [
         [
             "gh",
@@ -318,9 +261,6 @@ def test_pr_core_returns_the_typed_pr_with_sha_head(monkeypatch):
 
 
 def test_pr_core_fails_loud_on_a_malformed_core(monkeypatch):
-    """The fail-loud-core discipline at the wire: a missing required key raises
-    `KeyError`, a malformed head sha raises `ValueError` — never a defaulted or
-    bogus core field flowing on."""
     target = PrId(repo=repo_from_slug("owner/repo"), number=7)
     _capture_run(monkeypatch, json.dumps({"number": 7, "isDraft": False}))
     with pytest.raises(KeyError):
@@ -333,9 +273,6 @@ def test_pr_core_fails_loud_on_a_malformed_core(monkeypatch):
 
 
 def test_pr_meta_returns_the_raw_node_for_the_view_builder(monkeypatch):
-    """`pr_meta` stays the raw-node read (no core noun spans checks+mergeability):
-    the readiness view builder consumes it, routing the core through
-    `core_from_node` — no parallel snapshot type is minted at the adapter."""
     node = {
         "number": 7,
         "headRefOid": "cafe" * 10,
@@ -347,11 +284,8 @@ def test_pr_meta_returns_the_raw_node_for_the_view_builder(monkeypatch):
     }
     calls = _capture_run(monkeypatch, json.dumps(node))
     assert gh.pr_meta(PrId(repo=repo_from_slug("owner/repo"), number=7)) == node
-    # The read is PINNED to the PrId's repo (ADR-0030) — never a cwd inference.
     assert "--repo" in calls[0] and "owner/repo" in calls[0]
 
 
 def test_the_tuple_returning_repo_slug_is_gone():
-    """PROC03 review rule: the tuple-shaped repo read is deleted (no alias, no
-    fallback) — the typed `current_repo()` is the one repo read."""
     assert not hasattr(gh, "repo_slug")

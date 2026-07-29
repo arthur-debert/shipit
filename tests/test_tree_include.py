@@ -1,11 +1,3 @@
-"""Unit tests for ``tree.include`` — the ``.treeinclude`` matching truth table.
-
-Asserts EXTERNAL behavior: given ``.treeinclude`` text (and, for ``resolve``, a
-real on-disk source tree), the module returns the right set of paths — globs,
-negations, and repo-root anchoring — never "it called git". Matching is pure, so
-the resolved list IS the contract.
-"""
-
 from __future__ import annotations
 
 import os
@@ -14,17 +6,12 @@ from pathlib import Path
 from shipit.tree import include
 from shipit.tree.include import parse
 
-# --------------------------------------------------------------------------
-# parse().match — the pure pattern semantics
-# --------------------------------------------------------------------------
-
 
 def _matches(text: str, path: str) -> bool:
     return parse(text).match(path)
 
 
 def test_literal_floating_pattern_matches_at_any_depth():
-    # A bare name (no slash) floats: it matches at the root AND nested.
     spec = parse(".env")
     assert spec.match(".env")
     assert spec.match("services/api/.env")
@@ -44,9 +31,9 @@ def test_internal_slash_anchors_to_repo_root():
 
 def test_star_glob_stays_within_a_path_segment():
     spec = parse("*.env")
-    assert spec.match(".env")  # "*" matches an empty-ish prefix too
+    assert spec.match(".env")
     assert spec.match("prod.env")
-    assert spec.match("deep/dir/prod.env")  # floats
+    assert spec.match("deep/dir/prod.env")
     assert not spec.match("prod.env.bak")
 
 
@@ -66,20 +53,16 @@ def test_character_class_and_negated_class():
 
 def test_trailing_slash_includes_a_directory_subtree_only():
     spec = parse("models/")
-    # A file UNDER the directory is included...
     assert spec.match("models/saml.bin")
-    assert spec.match("a/models/nested/deep.bin")  # floats to any depth
-    # ...but a regular FILE literally named "models" is not (dir-only).
+    assert spec.match("a/models/nested/deep.bin")
     assert not spec.match("models")
 
 
 def test_directory_pattern_without_trailing_slash_carries_its_subtree():
-    # An anchored name with no trailing slash matches the path itself OR anything
-    # under it (a matched directory carries its whole subtree).
     spec = parse("/vendor")
     assert spec.match("vendor")
     assert spec.match("vendor/lib/thing.so")
-    assert not spec.match("app/vendor/thing.so")  # anchored to root
+    assert not spec.match("app/vendor/thing.so")
 
 
 def test_double_star_matches_across_segments():
@@ -97,7 +80,6 @@ def test_leading_double_star_floats_an_anchored_path():
 
 
 def test_last_matching_rule_wins_negation_excludes():
-    # Include every ".env", then carve out the example one.
     text = "*.env\n!example.env\n"
     spec = parse(text)
     assert spec.match("prod.env")
@@ -109,7 +91,7 @@ def test_negation_then_reinclude_follows_file_order():
     spec = parse(text)
     assert spec.match("secrets/private.key")
     assert not spec.match("secrets/public/readme.txt")
-    assert spec.match("secrets/public/override.key")  # last rule re-includes
+    assert spec.match("secrets/public/override.key")
 
 
 def test_comments_blank_lines_and_escaped_specials_are_handled():
@@ -117,7 +99,6 @@ def test_comments_blank_lines_and_escaped_specials_are_handled():
     spec = parse(text)
     assert spec.match("#literal-hash")
     assert spec.match("!literal-bang")
-    # The comment / blank lines produced no rules of their own.
     assert not spec.match("a comment")
 
 
@@ -125,11 +106,6 @@ def test_empty_or_negation_only_spec_includes_nothing():
     assert parse("").is_empty()
     assert parse("# only a comment\n").is_empty()
     assert parse("!nope\n").is_empty()
-
-
-# --------------------------------------------------------------------------
-# resolve() — match against a real source tree, with directory pruning
-# --------------------------------------------------------------------------
 
 
 def _write(root: Path, rel: str, body: str = "x") -> None:
@@ -150,7 +126,7 @@ def test_resolve_selects_globs_and_directories_and_honors_negation(tmp_path: Pat
     _write(tmp_path, "models/saml.bin")
     _write(tmp_path, "models/sub/extra.bin")
     _write(tmp_path, ".doppler.yaml")
-    _write(tmp_path, "README.md")  # tracked-but-not-selected
+    _write(tmp_path, "README.md")
 
     assert include.resolve(tmp_path) == [
         ".doppler.yaml",
@@ -162,16 +138,11 @@ def test_resolve_selects_globs_and_directories_and_honors_negation(tmp_path: Pat
 
 
 def test_resolve_prunes_git_and_unmatched_directories(tmp_path: Path, monkeypatch):
-    # The patterns are all anchored under config/, so the walk must never descend
-    # into a giant unrelated tree like node_modules/.
     _write(tmp_path, ".treeinclude", "/config/**/secret.key\n")
     _write(tmp_path, "config/a/secret.key")
     _write(tmp_path, ".git/objects/pack/whatever")
-    _write(tmp_path, "node_modules/pkg/secret.key")  # NOT under config/
+    _write(tmp_path, "node_modules/pkg/secret.key")
 
-    # Trip a failure if the walk ever steps into node_modules. ``os.walk`` lists
-    # each directory via ``os.scandir`` (NOT ``os.listdir``), so the guard has to
-    # wrap ``scandir`` to actually observe a descent into a pruned directory.
     real_scandir = os.scandir
 
     def guarded_scandir(path):
@@ -203,18 +174,15 @@ def test_apply_copies_selected_files_into_dest(tmp_path: Path):
 
 
 def test_apply_never_clobbers_an_existing_dest_file(tmp_path: Path):
-    # A selected path that already exists at dest came from the fresh checkout of
-    # the base (a tracked file): that version is authoritative and must NOT be
-    # overwritten by a stale/dirty copy from the source checkout.
     src = tmp_path / "src"
     dest = tmp_path / "dest"
     _write(src, ".treeinclude", ".env\nmodels/saml.bin\n")
     _write(src, ".env", "STALE")
     _write(src, "models/saml.bin", "FRESH-FROM-SRC")
-    _write(dest, "models/saml.bin", "CHECKED-OUT")  # already present at dest
+    _write(dest, "models/saml.bin", "CHECKED-OUT")
 
     written = include.apply(src, dest)
 
     assert (dest / "models" / "saml.bin").read_text() == "CHECKED-OUT"
-    assert (dest / ".env").read_text() == "STALE"  # genuinely missing file is filled
+    assert (dest / ".env").read_text() == "STALE"
     assert {p.relative_to(dest).as_posix() for p in written} == {".env"}

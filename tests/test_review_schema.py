@@ -1,15 +1,3 @@
-"""Unit tests for `shipit.review.schema.extract_json` — the tolerant JSON parse.
-
-RVW03-WS03 replaced the greedy ``{.*}`` regex fallback with a BALANCED SCAN
-(:func:`shipit.review.schema._scan_embedded_objects`): agents wrap their JSON in
-prose, fences, and log noise, and the greedy first-brace-to-last-brace capture
-broke on any brace-bearing wrapper — a stray braced log line silently cost the
-round a whole dimension pass. These tests pin the wrapper shapes the scan must
-recover (prose braces before/after, fenced output, nested braces, braces inside
-string values) and the invariant that a recovered object is a COMPLETE parsed
-object, never a splice.
-"""
-
 from __future__ import annotations
 
 import json
@@ -18,8 +6,6 @@ import pytest
 
 from shipit.review.schema import extract_json, is_review_shaped
 
-#: A review-shaped object big enough to dwarf any wrapper fragment (the scan
-#: returns the LARGEST embedded object).
 _REVIEW = {
     "summary": {
         "status": "COMMENT",
@@ -56,10 +42,6 @@ def test_prose_around_a_fenced_object_is_tolerated():
 
 
 def test_braced_prose_before_and_after_the_object_is_recovered():
-    """THE RVW03-WS03 regression: a stray braced log line around the object
-    broke the greedy ``{.*}`` capture (first brace to last brace spans the
-    noise), failing the whole extraction — which silently dropped a dimension
-    pass from the round. The balanced scan steps past non-JSON braces."""
     text = (
         "starting review {level: info, phase: scan}\n"
         f"{_REVIEW_JSON}\n"
@@ -80,18 +62,11 @@ def test_braces_inside_string_values_do_not_end_the_object():
 
 
 def test_largest_object_wins_over_a_smaller_valid_fragment():
-    """Wrapper prose can carry a SMALL valid JSON fragment (a structured log
-    line) before the review — first-match would return the fragment; the scan
-    returns the largest embedded object, the findings object."""
     text = f'{{"level": "info"}}\n{_REVIEW_JSON}\nbye'
     assert extract_json(text) == _REVIEW
 
 
 def test_a_recovered_object_is_never_a_splice():
-    """Two adjacent objects must come back as ONE of them, complete — never a
-    span glued across both (the greedy-regex failure mode). The balanced scan
-    parses each candidate with the real JSON decoder, so a splice cannot
-    exist."""
     small = {"a": 1}
     text = f"{json.dumps(small)} {_REVIEW_JSON}"
     assert extract_json(text) == _REVIEW
@@ -113,36 +88,20 @@ def test_only_a_truncated_object_raises_value_error():
         extract_json(_REVIEW_JSON[: len(_REVIEW_JSON) // 2])
 
 
-#: A valid JSON object LARGER than the review but NOT review-shaped (no
-#: ``summary`` object, no ``comments`` list) — a stray log/tool dump in noisy
-#: reviewer stdout. Larger than ``_REVIEW_JSON`` so plain largest-wins would
-#: select it.
 _BIG_NON_REVIEW_JSON = json.dumps({"log": ["x" * 40] * 40})
 
 
 def test_the_non_review_blob_is_larger_than_the_review():
-    # Guards the premise of the `want`-selection tests below: without the shape
-    # predicate, largest-wins WOULD pick this blob over the review.
     assert len(_BIG_NON_REVIEW_JSON) > len(_REVIEW_JSON)
 
 
 def test_want_selects_the_review_over_a_larger_unrelated_blob():
-    """Noisy stdout can carry a large unrelated JSON object (a log/tool dump)
-    bigger than the review. Largest-wins alone returns it, and a dict with no
-    ``comments`` reads downstream as a CLEAN, finding-less pass. ``want``
-    (:func:`is_review_shaped`) selects the review-shaped candidate instead — the
-    generic call still returns the larger blob, proving the predicate is what
-    changes the selection (the calibrator's generic contract is untouched)."""
     text = f"{_BIG_NON_REVIEW_JSON}\n{_REVIEW_JSON}\ntrailing prose"
     assert extract_json(text, want=is_review_shaped) == _REVIEW
     assert extract_json(text) != _REVIEW
 
 
 def test_want_raises_loudly_when_no_review_shaped_object_is_present():
-    """A pass whose ONLY object is off-shape must fail LOUD (→ BackendError →
-    the #76 salvage), never return the blob as a silent clean pass. This also
-    exercises the fast-path gate: the blob parses directly, but ``want`` rejects
-    it so the parse falls through to the scan, which finds nothing wanted."""
     with pytest.raises(ValueError, match="Could not parse valid JSON"):
         extract_json(_BIG_NON_REVIEW_JSON, want=is_review_shaped)
 
@@ -150,69 +109,42 @@ def test_want_raises_loudly_when_no_review_shaped_object_is_present():
 def test_is_review_shaped_predicate():
     assert is_review_shaped(_REVIEW)
     assert not is_review_shaped({"log": []})
-    # `summary` present but not an object, or `comments` not a list → off-shape.
     assert not is_review_shaped({"summary": "ok", "comments": []})
     assert not is_review_shaped({"summary": {}, "comments": {}})
 
 
-#: A COMPLETE (balanced) JSON object nested far past the decoder's recursion
-#: limit — the pathological blob a broken/hostile agent can emit.
 _DEEP_OBJECT = '{"a":' * 60000 + "1" + "}" * 60000
 
 
 def test_deeply_nested_object_blob_raises_value_error_not_recursion_error():
-    """Deeply nested untrusted output would exhaust the JSON decoder's recursion
-    limit; the parser must degrade to a plain ``ValueError`` (→ BackendError),
-    never a ``RecursionError`` crash — and must do so FAST, without re-decoding
-    the blob from each of its interior braces."""
     with pytest.raises(ValueError, match="Could not parse valid JSON"):
         extract_json(_DEEP_OBJECT)
 
 
 def test_a_deeply_nested_object_blob_does_not_hide_a_following_review():
-    """The RecursionError branch must STEP PAST a complete over-deep OBJECT (not
-    just a brace-free array) and recover a review printed after it — the array
-    variant below is trivially stepped over by ``text.find("{")`` and so does not
-    exercise this path. Checked with and without the review-shape predicate."""
     text = f"{_DEEP_OBJECT}\n{_REVIEW_JSON}"
     assert extract_json(text) == _REVIEW
     assert extract_json(text, want=is_review_shaped) == _REVIEW
 
 
 def test_a_truncated_deeply_nested_object_blob_stops_the_scan():
-    """An UNTERMINATED over-deep object has no findable end, so the scan stops
-    rather than guess where it closes — a following object is deliberately not
-    recovered (the stream is already broken). It must still fail as a plain
-    ``ValueError``, never a ``RecursionError``."""
-    truncated = '{"a":' * 60000  # no closing braces
+    truncated = '{"a":' * 60000
     with pytest.raises(ValueError, match="Could not parse valid JSON"):
         extract_json(f"{truncated}\n{_REVIEW_JSON}")
 
 
 def test_a_deeply_nested_array_blob_does_not_hide_a_following_review():
-    """A pathological nested-array blob before the review must not crash the parse
-    or shadow the real object — the scan steps over the brace-free array region
-    and recovers the review after it."""
     blob = "[" * 5000 + "]" * 5000
     assert extract_json(f"{blob}\n{_REVIEW_JSON}") == _REVIEW
 
 
 def test_a_bare_non_object_json_value_is_not_accepted():
-    """`extract_json` is typed and documented to yield a JSON OBJECT: a fast path
-    that parses to a bare array / string / number must fall through and, with
-    nothing else to find, raise ``ValueError`` — never hand a non-mapping to a
-    caller (e.g. the calibrator's `_unwrap_output`) that would then crash on
-    ``.get``. Holds for the generic (`want=None`) call, not only the review path."""
     for bare in ("[1, 2, 3]", '"just a string"', "42"):
         with pytest.raises(ValueError, match="Could not parse valid JSON"):
             extract_json(bare)
 
 
-# --- validate_review — the schema self-check behind `shipit review validate` ---
-
-
 def _valid_review() -> dict:
-    """A deep-copied conforming review, so a test can mutate ONE field to a defect."""
     return json.loads(_REVIEW_JSON)
 
 
@@ -223,8 +155,6 @@ def test_validate_review_accepts_a_conforming_payload():
 
 
 def test_validate_review_accepts_null_line_and_empty_skipped():
-    """A file-level finding uses `line: null`, and a clean review's `skipped` is
-    an empty list — both conform (the shape the funnel posts every round)."""
     from shipit.review.schema import validate_review
 
     review = _valid_review()
@@ -250,9 +180,6 @@ def test_validate_review_reports_missing_envelope_keys():
 
 
 def test_validate_review_rejects_a_free_form_severity():
-    """The first-class check (#826): a severity outside the 4-tier enum is the
-    failure the command exists to catch — reported with the JSON path and the
-    allowed tokens."""
     from shipit.review.schema import validate_review
 
     review = _valid_review()
@@ -274,8 +201,6 @@ def test_validate_review_rejects_a_bad_status_enum():
 
 
 def test_validate_review_rejects_a_bool_line():
-    """`bool` is an int subclass; a schema `integer` line must reject `true` — the
-    same rule `finding_from_dict` applies so `line: true` never anchors to line 1."""
     from shipit.review.schema import validate_review
 
     review = _valid_review()
@@ -307,8 +232,6 @@ def test_validate_review_rejects_a_non_number_confidence():
 
 
 def test_validate_review_flags_unknown_keys():
-    """`REVIEW_SCHEMA` is additionalProperties:False — codex's strict schema rejects
-    an unknown key, so the validator flags it too (an agent matches that bar here)."""
     from shipit.review.schema import validate_review
 
     review = _valid_review()
@@ -318,8 +241,6 @@ def test_validate_review_flags_unknown_keys():
 
 
 def test_validate_review_reports_a_missing_comment_field_once():
-    """A missing required field is reported by the required-key pass and NOT also
-    as a type error, so each defect surfaces exactly once."""
     from shipit.review.schema import validate_review
 
     review = _valid_review()
@@ -342,7 +263,6 @@ def test_validate_review_validates_coverage_skipped_entries():
 
 
 def test_validate_review_reports_every_problem_at_once():
-    """Multiple defects surface together, so an agent fixes them in one pass."""
     from shipit.review.schema import validate_review
 
     review = _valid_review()

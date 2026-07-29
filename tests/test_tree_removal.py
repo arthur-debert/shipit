@@ -1,12 +1,3 @@
-"""Removal gating as a typed domain outcome (CLI02-WS03, ADR-0030).
-
-Typed tests for :mod:`shipit.tree.removal` — the promoted domain half of
-``shipit tree remove``: target resolution, the pure risk detection, and the
-gate's typed :class:`~shipit.tree.removal.Gate` outcome. No fleet on disk, no
-terminal, no callables: the whole truth table is values in, values out
-(replacing the old verb tests' injected ``confirm``/``is_tty`` spies).
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -31,9 +22,6 @@ def _record(**over) -> TreeRecord:
     return TreeRecord(**base)
 
 
-# --- resolve_target --------------------------------------------------------------
-
-
 def test_resolve_target_matches_by_full_path():
     target = _record()
     other = _record(path="/trees/acme/widget/issues/9/work-bbbb")
@@ -47,7 +35,6 @@ def test_resolve_target_matches_by_dir_name():
 
 
 def test_resolve_target_path_match_takes_precedence():
-    # A record whose FULL PATH equals the target wins over a basename collision.
     exact = _record(path="/trees/work-aaaa")
     by_name = _record(path="/trees/acme/widget/issues/7/work-aaaa")
 
@@ -61,18 +48,14 @@ def test_resolve_target_no_match_refuses():
 
 def test_resolve_target_ambiguous_refuses_and_names_both():
     a = _record(path="/trees/acme/widget/issues/7/work-aaaa")
-    b = _record(path="/trees/acme/gadget/issues/7/work-aaaa")  # same leaf, two repos
+    b = _record(path="/trees/acme/gadget/issues/7/work-aaaa")
 
     with pytest.raises(RemovalError, match="ambiguous") as excinfo:
         removal.resolve_target([a, b], "work-aaaa")
     assert a.path in str(excinfo.value) and b.path in str(excinfo.value)
 
 
-# --- removal_risk ----------------------------------------------------------------
-
-
 def test_removal_risk_clean_pushed_tree_is_safe():
-    # A clean, fully-pushed Tree holds no work that the delete would lose -> no gate.
     assert removal.removal_risk(_record(dirty=False, ahead=0)) is None
 
 
@@ -90,9 +73,6 @@ def test_removal_risk_combines_dirty_and_unpushed():
     risk = removal.removal_risk(_record(dirty=True, ahead=1))
     assert risk is not None
     assert "uncommitted" in risk and "1 unpushed commit" in risk
-
-
-# --- gate: the typed outcome -------------------------------------------------------
 
 
 def test_gate_clean_proceeds_without_prompting():
@@ -126,13 +106,8 @@ def test_gate_risky_non_interactive_refuses_without_yes():
 
 
 def test_gate_clean_non_interactive_proceeds():
-    # The safe non-interactive default cuts both ways: a clean+pushed Tree needs
-    # no terminal and no --yes.
     gate = removal.gate(_record(), assume_yes=False, interactive=False)
     assert gate.action is GateAction.PROCEED
-
-
-# --- remove: the effectful apply ---------------------------------------------------
 
 
 def test_remove_deletes_the_clone_dir(tmp_path):

@@ -1,14 +1,3 @@
-"""Smoke tests for `shipit pr next` + `pr ready` CLI wiring — glue + renderers.
-
-Proves the verbs register on the `pr` group and that `pr next`'s run shell
-resolve → gather → evaluate → dispatch → render path fires the engine's act
-boundary and renders through the seam. The acts themselves (reviewer selection,
-the request delegation, the guarded flip) are the engine's and are unit-tested
-in test_prstate_dispatch.py / test_prstate_flip.py; here the boundary
-(resolver / gather / evaluate / the promoted services) is monkeypatched — no
-network, no engine re-test.
-"""
-
 from __future__ import annotations
 
 import json
@@ -39,9 +28,6 @@ def _status(state: TaskState, pr: int = 42, next_action: str = "do x") -> TaskSt
     )
 
 
-# --- wiring ------------------------------------------------------------------
-
-
 def test_pr_help_lists_next_and_ready(capsys):
     rc = cli.main(["pr", "--help"])
     assert rc == 0
@@ -63,21 +49,13 @@ def test_ready_help(capsys):
 
 
 def test_next_malformed_pr_argument_is_usage_tier_exit_2(capsys):
-    """The shared PR-target param (ADR-0030): a bad primitive dies at parse."""
     rc = cli.main(["pr", "next", "0"])
     assert rc == 2
     assert "Usage:" in capsys.readouterr().err
 
 
-# --- pr next run shell -------------------------------------------------------
-
-
 @pytest.fixture
 def patched_next(monkeypatch):
-    """resolve → the typed PrId target (#42); gather passes the target through;
-    evaluate yields the state under test. The act boundary is the engine's real
-    `NextActs` exercised via the dispatcher; tests that need a specific act stub
-    the promoted service at the dispatch module."""
     monkeypatch.setattr(
         next_verb,
         "resolve_pr",
@@ -123,7 +101,6 @@ def test_next_no_pr_is_exit_zero_report(monkeypatch, capsys):
 
 
 def test_next_ready_flips(patched_next, monkeypatch, capsys):
-    """READY routes to the flip act; the engine's guarded flip is stubbed to flip."""
     monkeypatch.setattr(
         next_verb,
         "evaluate",
@@ -141,8 +118,6 @@ def test_next_ready_flips(patched_next, monkeypatch, capsys):
 
 
 def test_next_ready_refusal_is_uniform_error_exit_1(patched_next, monkeypatch, capsys):
-    """If the PR moved out of READY between gather and the guarded flip, the
-    engine's NotReady reaches the shared error shell: `error: …` + exit 1."""
     monkeypatch.setattr(
         next_verb,
         "evaluate",
@@ -163,10 +138,6 @@ def test_next_ready_refusal_is_uniform_error_exit_1(patched_next, monkeypatch, c
 def test_next_request_act_renders_and_dropped_edge_is_error(
     patched_next, monkeypatch, capsys
 ):
-    """REVIEWS_PENDING wiring: the engine's request act fires through the verb
-    (happy path renders the requested reviewer; a dropped edge surfaces via the
-    shell as `error: …` + exit 1). Selection/force semantics are unit-tested at
-    the dispatch module's home."""
 
     class FakeAdapter:
         def __init__(self, name):
@@ -214,15 +185,6 @@ def test_next_request_act_renders_and_dropped_edge_is_error(
 
 
 def test_next_local_auth_failure_reports_the_remedy(patched_next, monkeypatch, capsys):
-    """A local-review auth failure surfaces its own remedy and stops (#969).
-
-    There is no internal reroute any more: `pr next` used to catch this, sniff the
-    message for "PyJWT" / "pixi run -e review", and rerun itself inside a pixi env
-    that exists ONLY in shipit's own repo — so in a consumer repo the reroute
-    failed with `unknown environment 'review'`. PyJWT is a base dependency now, and
-    a genuine auth gap is reported where it happened. What must still hold: no
-    doomed child is detached, and no false "requested" line is rendered.
-    """
     from shipit.prstate.reviewers import by_name
     from shipit.review import service
     from shipit.review.ghauth import UNCONFIGURED, ReviewAuthError
@@ -259,4 +221,4 @@ def test_next_local_auth_failure_reports_the_remedy(patched_next, monkeypatch, c
     assert rc != 0
     assert "Doppler" in err
     assert "requested review(s)" not in out
-    assert spawned == []  # no doomed child was detached
+    assert spawned == []

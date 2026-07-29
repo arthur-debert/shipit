@@ -1,13 +1,3 @@
-"""Unit tests for the guarded draft→ready flip (`shipit.prstate.flip`).
-
-The guard at its domain home (CLI01-WS03 promoted it out of ``verbs/pr/``),
-exercised prstate-style with INJECTED boundaries (no network): it must refuse
-unless the engine says READY, and flip exactly once when READY. The durable
-log twins (LOG02 / ADR-0029) are pinned here too — the flip INFO milestone and
-the refusal WARNING live with the service, plus the gh-adapter milestone at
-the boundary that performs the flag flip.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -34,9 +24,6 @@ def _status(state: TaskState, pr: int = 42) -> TaskStatus:
 
 
 def test_guarded_flip_flips_when_ready():
-    # Typed in, typed out (ADR-0030): the guard takes the PrId target and both
-    # injected boundaries receive the SAME identity — repo + number travel
-    # together through re-check and flip.
     flips: list[PrId] = []
     status = guarded_flip(
         TARGET,
@@ -66,19 +53,14 @@ def test_guarded_flip_refuses_when_not_ready(state):
             flip=lambda target: flips.append(target),
             evaluate_status=lambda target: _status(state),
         )
-    assert flips == []  # never flipped
+    assert flips == []
     assert exc.value.status.state is state
 
 
 def test_not_ready_message_names_the_state_and_next_action():
-    """The refusal wording rides the exception (ADR-0030: per-verb refusal
-    wording survives as exception messages, rendered by the one error shell)."""
     exc = NotReady(_status(TaskState.VALIDATING))
     assert "PR #42 is not Ready" in str(exc)
     assert "validating" in str(exc)
-
-
-# --- the durable log twins (LOG02 / ADR-0029) ----------------------------------
 
 
 def _pr_records(caplog, level: int):
@@ -109,17 +91,13 @@ def test_refused_flip_is_a_warning_with_the_pr_key(caplog):
                 flip=lambda target: None,
                 evaluate_status=lambda target: _status(TaskState.VALIDATING),
             )
-    assert not _pr_records(caplog, logging.INFO)  # nothing flipped, no milestone
+    assert not _pr_records(caplog, logging.INFO)
     warnings = _pr_records(caplog, logging.WARNING)
     assert len(warnings) == 1
     assert warnings[0].pr == 42
 
 
 def test_gh_adapter_flip_leaves_a_durable_milestone(monkeypatch, caplog):
-    """The boundary that PERFORMS the flip records it (before #285 its only
-    record was the Exec runner's DEBUG line). The `--undo` path's dev-cycle
-    twin (`pr.unready`) rides the engine's `undo_flip` seam; this adapter
-    milestone stays the boundary-level record under both directions."""
     from shipit import gh
 
     monkeypatch.setattr(gh, "_run", lambda args, **k: "")
@@ -134,9 +112,6 @@ def test_gh_adapter_flip_leaves_a_durable_milestone(monkeypatch, caplog):
     assert milestones[0].repo == "owner/repo"
 
 
-# --- the pr.ready / pr.unready dev-cycle events (LOG04-WS02 / ADR-0032) --------
-
-
 def _event_tag(record):
     from shipit import events
 
@@ -144,8 +119,6 @@ def _event_tag(record):
 
 
 def test_performed_flip_is_the_pr_ready_event(caplog):
-    """The flip milestone IS the tagged event — the guarded flip is the one
-    place a draft→ready happens, so it fires once per ACTUAL flip."""
     with caplog.at_level(logging.INFO, logger="shipit.prstate"):
         guarded_flip(
             TARGET,
@@ -158,7 +131,6 @@ def test_performed_flip_is_the_pr_ready_event(caplog):
 
 
 def test_refused_flip_tags_no_event(caplog):
-    """A refusal flips nothing — the milestone trail records no pr.ready."""
     with caplog.at_level(logging.INFO, logger="shipit.prstate"):
         with pytest.raises(NotReady):
             guarded_flip(
@@ -170,10 +142,6 @@ def test_refused_flip_tags_no_event(caplog):
 
 
 def test_undo_flip_reverts_and_emits_pr_unready(caplog):
-    """The flip's undo: always allowed (no guard consulted), performed through
-    the injected adapter with `undo=True`, tagged `pr.unready` — and the
-    per-operation epic/ws binding runs (the undo gathers nothing, so the seam
-    is the injected `bind_identity`)."""
     from shipit.prstate.flip import undo_flip
 
     undone: list[tuple[PrId, bool]] = []
@@ -185,16 +153,13 @@ def test_undo_flip_reverts_and_emits_pr_unready(caplog):
             bind_identity=bound.append,
         )
     assert undone == [(TARGET, True)]
-    assert bound == [TARGET]  # epic/ws derived from the head branch (ADR-0032)
+    assert bound == [TARGET]
     (tagged,) = [r for r in caplog.records if _event_tag(r)]
     assert _event_tag(tagged) == "pr.unready"
     assert tagged.pr == 42 and tagged.levelno == logging.INFO
 
 
 def test_bind_pr_identity_binds_epic_ws_from_the_head_branch(monkeypatch):
-    """The no-gather binding seam (the undo path): one light headRefName read
-    through the ONE branch-identity parser — a namespaced head binds epic/ws, a
-    plain head leaves them absent (never a placeholder)."""
     from shipit import logcontext
     from shipit.prstate import fetch
 

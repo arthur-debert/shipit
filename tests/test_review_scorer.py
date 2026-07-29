@@ -1,8 +1,3 @@
-"""The deterministic scorer (ADR-0048, RVW03-WS06): banked review-round records
-vs the Ground-truth fixture — recall / false positives / unadjudicated per
-Variant, underpowered tiers marked, near-misses + unmatched emissions surfaced
-for Adjudication. Pure function of (fixture, record dicts); no LLM, no I/O."""
-
 from __future__ import annotations
 
 from shipit.finding import Severity
@@ -71,7 +66,7 @@ def fixture(labels=None):
                     "lines": [140, 160],
                     "severity": "major",
                     "verdict": "real",
-                    "confirmed": False,  # candidate: must never enter a metric
+                    "confirmed": False,
                     "claim": "cross-module contract docs describe the pre-activation world",
                     "provenance": {"kind": "fix-commit", "ref": "deadbee"},
                 },
@@ -124,7 +119,6 @@ class TestJoin:
         assert report.variants == ()
 
     def test_sha_prefix_matching_joins_abbreviated_records(self):
-        # replay records may pin at short SHAs; the fixture pins full ones.
         report = score_records(
             fixture(), [record([hit()], base=BASE[:8], head=HEAD[:8])]
         )
@@ -157,13 +151,10 @@ class TestRecall:
 
     def test_candidate_labels_never_enter_the_denominator(self):
         report = score_records(fixture(), [record([])])
-        # confirmed real majors = just core-G1; the candidate core-C1 is excluded.
         assert tier(report, 0, Severity.MAJOR).positives == 1
         assert report.candidate_labels == 1
 
     def test_routed_out_findings_never_score(self):
-        # The calibrator-dropped app-G1 failure mode (issue #665): a dropped
-        # finding did NOT reach the PR, so it must not count as recall.
         dropped = dict(hit(), disposition="drop-unverified")
         merged_dupe = dict(hit(), duplicate_of=0)
         report = score_records(fixture(), [record([dropped, merged_dupe])])
@@ -174,13 +165,10 @@ class TestRecall:
             fixture(), [record([hit()], variant="arm-a"), record([], variant="arm-b")]
         )
         by_name = {vs.variant: vs for vs in report.variants}
-        # the arm key mirrors the eval report: `content_hash [label]`.
         assert by_name["sha256:aaa [arm-a]"].recalled_label_ids == ("core-G1",)
         assert by_name["sha256:aaa [arm-b]"].recalled_label_ids == ()
 
     def test_same_label_different_hash_do_not_collapse(self):
-        # Two prompt versions carrying the SAME A/B label are DISTINCT arms —
-        # keying on the label alone would merge their denominators and recalls.
         def rec(content_hash, findings):
             return {
                 "round.schema_version": 2,
@@ -219,14 +207,6 @@ def label(
 
 
 class TestDefectFamilies:
-    """One defect, several valid anchors (#751): labels sharing an explicit
-    ``defect`` family count once for recall — modeled on the #673 v35–v37
-    residuals (graph-session, distance, native-spec, GPU-residency, same-file
-    matcher misses)."""
-
-    # The graph-session/distance/native-spec shape: one defect anchored in one
-    # file, legitimately emitted at a second file's site — aliases cannot
-    # bridge files, the family can.
     CROSS_FILE = [
         label(
             "core-G11",
@@ -265,9 +245,7 @@ class TestDefectFamilies:
         ]
         report = score_records(fixture(labels=self.CROSS_FILE), [record(both)])
         major = tier(report, 0, Severity.MAJOR)
-        # equivalent labels AND equivalent emissions count once...
         assert (major.recalled, major.positives) == (1, 1)
-        # ...while the anchor-level view still shows which sites matched.
         assert report.variants[0].recalled_label_ids == ("core-G11", "core-G26")
 
     def test_missing_the_whole_family_counts_one_miss(self):
@@ -276,8 +254,6 @@ class TestDefectFamilies:
         assert (major.recalled, major.positives) == (0, 1)
 
     def test_three_anchor_family_counts_once(self):
-        # The GPU-residency shape: one stale-contract defect surfacing in the
-        # transfer, view-transform, and gpu module docs at once.
         residency = [
             label(
                 f"core-R{i}",
@@ -311,9 +287,6 @@ class TestDefectFamilies:
         assert (nit.recalled, nit.positives) == (1, 1)
 
     def test_same_file_sibling_covers_a_matcher_miss(self):
-        # The core-G24 shape: an emission in the RIGHT file that keeps failing
-        # the banked label's lexicon is banked as a same-file sibling in the
-        # family — recalled once, never double-counted.
         siblings = [
             label(
                 "core-G24",
@@ -341,9 +314,6 @@ class TestDefectFamilies:
         assert (major.recalled, major.positives) == (1, 1)
 
     def test_not_real_family_measures_the_false_positive(self):
-        # The core-X1 shape: a banked refutation whose phrasings keep missing
-        # the lexicon gains a sibling; matching EITHER is a measured FP and the
-        # family never enters the recall denominator.
         refuted = [
             label(
                 "core-X1",
@@ -374,9 +344,6 @@ class TestDefectFamilies:
         assert tier(report, 0, Severity.MAJOR).positives == 0
 
     def test_unfamilied_labels_stay_distinct_defects(self):
-        # Identity is DECLARED, never inferred: without a shared defect id,
-        # cross-file labels — even similarly worded repeated instances, each
-        # independently fixable — keep their own denominator slots.
         instances = [
             label(
                 "core-D1",
@@ -424,7 +391,6 @@ class TestFalsePositivesAndAdjudication:
         assert vs.unadjudicated[0].kind == "unmatched"
 
     def test_near_miss_surfaces_with_its_label_id(self):
-        # right file + line, wording the lexicon does not know → alias feeder.
         near = finding(
             "phos-bench/src/bin/gpu_compare.rs",
             120,
@@ -483,8 +449,6 @@ class TestUnderpowered:
 
 class TestReportSanitization:
     def test_control_chars_in_emission_text_cannot_forge_output(self):
-        # Adjudication text is model-generated round-record data: an ANSI escape
-        # or bare newline must not reach the terminal and forge report structure.
         hostile = finding(
             "phos-editor/src/other.rs",
             10,
@@ -492,14 +456,10 @@ class TestReportSanitization:
         )
         text = render_report(score_records(fixture(), [record([hostile])]))
         assert "\x1b" not in text
-        # the embedded newline is neutralized: the whole emission stays one line.
         emission = next(ln for ln in text.splitlines() if "spoofed" in ln)
         assert "fake recall 99/99" in emission
 
     def test_fixture_derived_ids_cannot_forge_output(self):
-        # pin ids and label ids come from the fixture file (user-provided) — a
-        # control char in one must not survive into the report head, the variant
-        # header, or the near-miss banking command's copy-paste argument.
         fx = parse_fixture(
             {
                 "schema": 1,
@@ -537,9 +497,6 @@ class TestReportSanitization:
         assert "\x1b" not in text
 
     def test_option_like_label_id_stays_a_positional_argument(self):
-        # A fixture label id can be any non-empty string, including one shaped
-        # like a flag. The near-miss command must place it after a `--` so a
-        # copy-paste can't bind it to `bank alias`'s `--fixture` option.
         hostile_id = "--fixture=/tmp/other.toml"
         fx = parse_fixture(
             {

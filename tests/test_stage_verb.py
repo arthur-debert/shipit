@@ -1,12 +1,3 @@
-"""`shipit stage` — the verb glue over :mod:`shipit.staging` (conda-direct #1079).
-
-Drives ``run()`` directly (the ADR-0030 seam keeps its signature under the
-``cli_errors`` shell, so a non-click caller exercises the exit-code contract):
-the `[stage]` map is read from `.shipit.toml`, the copy runs off the env prefix,
-and the malformed/refusal paths map to the uniform exit 1. The pure renderer is
-tested straight.
-"""
-
 from shipit import staging
 from shipit.verbs import stage as stage_verb
 
@@ -38,13 +29,10 @@ def test_run_with_no_stage_map_is_a_clean_no_op(tmp_path):
 
 
 def test_run_with_no_config_is_a_clean_no_op(tmp_path):
-    # No .shipit.toml at all — an absent config is the empty map, not an error.
     assert stage_verb.run(str(tmp_path)) == 0
 
 
 def test_run_missing_source_maps_to_exit_one(tmp_path, capsys):
-    # The env exists but the package was never resolved into it — the loud
-    # StagingError is mapped to `error: …` + exit 1 by the cli_errors shell.
     (tmp_path / ".pixi" / "envs" / "default").mkdir(parents=True)
     (tmp_path / ".shipit.toml").write_text(
         '[stage.lexd-lsp]\n"bin/lexd-lsp" = "resources/lexd-lsp"\n', encoding="utf-8"
@@ -66,8 +54,6 @@ def test_run_malformed_config_maps_to_exit_one(tmp_path, capsys):
 
 
 def test_run_path_shaped_feature_maps_to_exit_one(tmp_path, capsys):
-    # A traversal-shaped `--feature` must not flow into the env prefix path; the
-    # domain refuses it and the cli_errors shell maps it to `error: …` + exit 1.
     _plant_prefix_tool(tmp_path)
     (tmp_path / ".shipit.toml").write_text(
         '[stage.lexd-lsp]\n"bin/lexd-lsp" = "resources/lexd-lsp"\n', encoding="utf-8"
@@ -77,11 +63,6 @@ def test_run_path_shaped_feature_maps_to_exit_one(tmp_path, capsys):
 
     assert rc == 1
     assert "error:" in capsys.readouterr().err
-
-
-# --------------------------------------------------------------------------
-# The pure renderer
-# --------------------------------------------------------------------------
 
 
 def test_format_staged_empty_says_nothing_to_stage():
@@ -101,5 +82,4 @@ def test_format_staged_lists_each_item_with_kind_and_exec_note():
     )
     assert "file bin/lexd-lsp -> resources/lexd-lsp (executable)" in text
     assert "dir  share/tsx/queries -> resources/queries" in text
-    # A directory never carries the (executable) note.
     assert "resources/queries (executable)" not in text

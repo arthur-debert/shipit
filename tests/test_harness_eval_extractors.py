@@ -1,11 +1,3 @@
-"""Objective extractors: a fixture transcript -> the expected metric values.
-
-Every case asserts EXTERNAL behavior — events (or a fixture JSONL transcript) in,
-the expected metric out — never the parser's internals. The four PRD fixtures
-(clean / stuck / no-verify / break-glass) live as builders here, and each extractor
-gets its own table-driven case.
-"""
-
 from __future__ import annotations
 
 import json
@@ -27,10 +19,6 @@ from shipit.harness.eval.extractors import (
     tool_call_vector,
     turn_count,
 )
-
-# --------------------------------------------------------------------------- #
-# Event builders (the fixture vocabulary)
-# --------------------------------------------------------------------------- #
 
 
 def _assistant(*blocks, usage=None, msg_id=None):
@@ -56,11 +44,6 @@ def _tool_result(*, is_error=False):
 
 def _bash(command):
     return _tool_use("Bash", command=command)
-
-
-# --------------------------------------------------------------------------- #
-# tool-call vector / count
-# --------------------------------------------------------------------------- #
 
 
 def test_tool_call_vector_counts_per_tool():
@@ -90,29 +73,18 @@ def test_tool_call_vector_ignores_events_without_list_content():
     assert tool_call_vector(events) == {"Read": 1}
 
 
-# --------------------------------------------------------------------------- #
-# turn count
-# --------------------------------------------------------------------------- #
-
-
 def test_turn_count_counts_assistant_messages():
     events = [_user("go"), _assistant(_tool_use("Read")), _user("more"), _assistant()]
     assert turn_count(events) == 2
 
 
 def test_turn_count_dedupes_parts_sharing_a_message_id():
-    # One response delivered in two parts (same id) is one turn.
     events = [
         _assistant({"type": "text", "text": "a"}, msg_id="m1"),
         _assistant(_tool_use("Bash"), msg_id="m1"),
         _assistant(_tool_use("Read"), msg_id="m2"),
     ]
     assert turn_count(events) == 2
-
-
-# --------------------------------------------------------------------------- #
-# stuck-loop fingerprints
-# --------------------------------------------------------------------------- #
 
 
 def test_stuck_loop_clean_run_is_not_flagged():
@@ -128,8 +100,6 @@ def test_stuck_loop_clean_run_is_not_flagged():
 
 
 def test_stuck_loop_flags_same_tool_args_repeated_more_than_twice():
-    # The exact same call three times WITHIN ONE TURN (>2) trips the repeated-call
-    # fingerprint — the signal is per-turn (one assistant message's content list).
     events = [_assistant(_bash("pytest -q"), _bash("pytest -q"), _bash("pytest -q"))]
     result = stuck_loop(events)
     assert result["max_repeated_calls"] == 3
@@ -137,8 +107,6 @@ def test_stuck_loop_flags_same_tool_args_repeated_more_than_twice():
 
 
 def test_stuck_loop_is_per_turn_not_across_the_run():
-    # The same call once per turn across many turns is NORMAL (e.g. `Bash pytest`
-    # every turn). The repeated-call signal resets per turn, so this is not stuck.
     events = [_assistant(_bash("pytest -q")) for _ in range(5)]
     result = stuck_loop(events)
     assert result["max_repeated_calls"] == 1
@@ -146,8 +114,6 @@ def test_stuck_loop_is_per_turn_not_across_the_run():
 
 
 def test_stuck_loop_does_not_flag_same_tool_with_different_args():
-    # One turn with the same call twice + a third different call → max repeat 2,
-    # at the >2 threshold but not over it, so not stuck.
     events = [_assistant(_bash("ls"), _bash("ls"), _bash("pwd"))]
     result = stuck_loop(events)
     assert result["max_repeated_calls"] == 2
@@ -155,7 +121,6 @@ def test_stuck_loop_does_not_flag_same_tool_with_different_args():
 
 
 def test_stuck_loop_flags_runaway_turn_iterations():
-    # A single turn whose usage.iterations ran >8 trips the runaway signal.
     events = [_assistant(_bash("x"), usage={"iterations": [{}] * 9})]
     result = stuck_loop(events)
     assert result["max_turn_iterations"] == 9
@@ -167,17 +132,12 @@ def test_stuck_loop_eight_iterations_is_not_yet_flagged():
     assert stuck_loop(events)["detected"] is False
 
 
-# --------------------------------------------------------------------------- #
-# retry count
-# --------------------------------------------------------------------------- #
-
-
 def test_retry_count_counts_back_to_back_identical_calls():
     events = [
         _assistant(_bash("pytest")),
-        _assistant(_bash("pytest")),  # retry of the previous
-        _assistant(_bash("pytest")),  # retry again
-        _assistant(_bash("ls")),  # different — resets
+        _assistant(_bash("pytest")),
+        _assistant(_bash("pytest")),
+        _assistant(_bash("ls")),
     ]
     assert retry_count(events) == 2
 
@@ -189,11 +149,6 @@ def test_retry_count_ignores_repeats_that_are_not_adjacent():
         _assistant(_bash("ls")),
     ]
     assert retry_count(events) == 0
-
-
-# --------------------------------------------------------------------------- #
-# check-bypass / break-glass greps
-# --------------------------------------------------------------------------- #
 
 
 @pytest.mark.parametrize(
@@ -220,13 +175,10 @@ def test_no_verify_count_one_per_call_even_with_multiple_markers():
     [
         ("SHIPIT_BREAK_GLASS=1 shipit install --push", 1),
         ("SHIPIT_BREAK_GLASS=true git commit", 1),
-        ("SHIPIT_BREAK_GLASS=0 git commit", 0),  # disarmed
+        ("SHIPIT_BREAK_GLASS=0 git commit", 0),
         ("SHIPIT_BREAK_GLASS=false git commit", 0),
-        ("SHIPIT_BREAK_GLASS=FALSE git commit", 0),  # case-insensitive falsey
+        ("SHIPIT_BREAK_GLASS=FALSE git commit", 0),
         ("git commit -m normal", 0),
-        # Value at the END of the command: the input serializes to
-        # `{"command": "SHIPIT_BREAK_GLASS=0"}`, so the capture must STOP at the
-        # closing quote/brace (`0`, not `0"}`) — else a disarmed use miscounts as armed.
         ("SHIPIT_BREAK_GLASS=0", 0),
         ("SHIPIT_BREAK_GLASS=1", 1),
     ],
@@ -240,11 +192,6 @@ def test_break_glass_count_one_per_call():
     assert break_glass_count([_assistant(_bash(cmd))]) == 1
 
 
-# --------------------------------------------------------------------------- #
-# errors
-# --------------------------------------------------------------------------- #
-
-
 def test_error_count_counts_errored_tool_results():
     events = [
         _assistant(_bash("bad")),
@@ -253,11 +200,6 @@ def test_error_count_counts_errored_tool_results():
         _user(_tool_result(is_error=False)),
     ]
     assert error_count(events) == 1
-
-
-# --------------------------------------------------------------------------- #
-# token totals
-# --------------------------------------------------------------------------- #
 
 
 def test_token_usage_sums_across_turns():
@@ -290,9 +232,6 @@ def test_token_usage_is_none_when_nothing_logged():
 
 
 def test_token_usage_dedupes_streamed_parts_sharing_a_message_id():
-    # Two streamed parts of ONE response share a message id and each carry the same
-    # usage block; usage is consumed once per id (not summed per event), mirroring
-    # turn_count — otherwise a single turn's tokens would double-count.
     usage = {"input_tokens": 100, "output_tokens": 20}
     events = [
         _assistant({"type": "text", "text": "a"}, usage=usage, msg_id="m1"),
@@ -308,17 +247,10 @@ def test_token_usage_dedupes_streamed_parts_sharing_a_message_id():
 
 
 def test_token_usage_ignores_non_assistant_usage():
-    # A usage block on a non-assistant message is not summed (role-guarded), so a
-    # transcript carrying only that logs no usage at all.
     events = [
         {"type": "user", "message": {"role": "user", "usage": {"input_tokens": 99}}}
     ]
     assert token_usage(events) is None
-
-
-# --------------------------------------------------------------------------- #
-# extract() over a real JSONL transcript file (the four PRD fixtures)
-# --------------------------------------------------------------------------- #
 
 
 def _write_transcript(tmp_path, events, name="agent-x.jsonl"):
@@ -344,8 +276,6 @@ def test_extract_clean_run(tmp_path):
 
 
 def test_extract_stuck_run(tmp_path):
-    # Four identical calls WITHIN ONE TURN — the per-turn repeated-call signal —
-    # which also reads as three back-to-back retries in the flat call sequence.
     events = [_assistant(*[_bash("pytest -q") for _ in range(4)])]
     metrics = extract(_write_transcript(tmp_path, events))
     assert metrics["stuck_loop"]["detected"] is True
@@ -370,8 +300,8 @@ def test_extract_tolerates_blank_and_malformed_lines(tmp_path):
     transcript = tmp_path / "agent-x.jsonl"
     lines = [
         json.dumps(_user("go")),
-        "",  # blank — tolerated
-        "{ not json",  # malformed — skipped
+        "",
+        "{ not json",
         json.dumps(_assistant(_bash("ls"), _tool_use("Read", file="a"))),
     ]
     transcript.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -385,11 +315,6 @@ def test_extract_on_missing_file_yields_empty_metrics(tmp_path):
     assert metrics["token_usage"] is None
 
 
-# --------------------------------------------------------------------------- #
-# exit-hygiene (the one live check — git via the gh boundary, PID seam injected)
-# --------------------------------------------------------------------------- #
-
-
 def test_exit_hygiene_clean_worktree(monkeypatch):
     monkeypatch.setattr(extractors.git, "status_porcelain", lambda *, cwd: [])
     result = exit_hygiene("/repo")
@@ -401,7 +326,6 @@ def test_exit_hygiene_clean_worktree(monkeypatch):
 
 
 def test_exit_hygiene_dirty_worktree(monkeypatch):
-    # The adapter returns the PARSED porcelain lines (one per dirty entry).
     porcelain = [" M src/a.py", "?? scratch.txt", "UU conflicted.py"]
     monkeypatch.setattr(extractors.git, "status_porcelain", lambda *, cwd: porcelain)
     result = exit_hygiene("/repo")

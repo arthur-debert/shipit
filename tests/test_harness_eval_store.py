@@ -1,13 +1,3 @@
-"""Local eval store: records append as JSONL, keyed by `Repo` IDENTITY, and land
-OUTSIDE the repo tree.
-
-The store is keyed by the repo's origin ``owner/name`` identity (ADR-0024) — NOT
-its filesystem path — and rooted under a platformdirs *state* dir, never inside any
-working tree, so process telemetry can never dirty product history (the HAR02
-"local, never committed" contract). The load-bearing property this file pins is the
-scatter-bug fix: two clones of one repo at different paths share ONE store file.
-"""
-
 from __future__ import annotations
 
 import json
@@ -41,8 +31,6 @@ def test_read_records_round_trips_append_order(tmp_path):
 
 
 def test_read_records_missing_store_is_empty(tmp_path):
-    # A reader with no history sees none — never an error (the incremental-round
-    # query that has no prior record then plans a full round).
     assert store.read_records(_repo(), base_dir=tmp_path / "state") == []
 
 
@@ -53,9 +41,6 @@ def test_read_records_skips_a_corrupt_line_loudly(tmp_path, caplog):
     with path.open("a", encoding="utf-8") as fh:
         fh.write("{not json\n")
     store.append_record({"a": 2}, repo, base_dir=base)
-    # One corrupt line must not blind the reader to the intact records around
-    # it — but it surfaces as a WARNING naming the file and 1-based line number
-    # (RVW03-WS03), so a corrupted round never silently reads as "nothing here".
     with caplog.at_level(logging.WARNING, logger="shipit.harness"):
         assert store.read_records(repo, base_dir=base) == [{"a": 1}, {"a": 2}]
     warning = "\n".join(r.getMessage() for r in caplog.records)
@@ -64,8 +49,6 @@ def test_read_records_skips_a_corrupt_line_loudly(tmp_path, caplog):
 
 
 def test_read_records_warns_on_a_non_object_line(tmp_path, caplog):
-    # A parseable-but-wrong-shape line (a bare JSON array/string) is malformed
-    # for this store too — skipped, and just as loudly as invalid JSON.
     base = tmp_path / "state"
     repo = _repo()
     path = store.append_record({"a": 1}, repo, base_dir=base)
@@ -88,10 +71,6 @@ def test_intact_reads_emit_no_malformed_warning(tmp_path, caplog):
     assert not caplog.records
 
 
-#: One appender process: N appends of a record whose payload is LARGER than the
-#: default 8KiB writer buffer, so an unserialized append would flush in multiple
-#: chunks and interleave with a concurrent process's chunks. Argv:
-#: <base_dir> <who> <count>.
 _APPENDER = """
 import sys
 from pathlib import Path
@@ -108,11 +87,6 @@ for i in range(count):
 
 
 def test_concurrent_appends_from_separate_processes_do_not_corrupt(tmp_path):
-    """The RVW03-WS03 stress test: parallel settles append to ONE per-repo JSONL
-    from separate processes. Each record's payload (64KiB) exceeds the writer's
-    buffer, so without the append lock two processes' flush chunks would
-    interleave and splice records into malformed lines. Every appended record
-    must read back complete and intact."""
     base = tmp_path / "state"
     writers, appends_each = 4, 8
     procs = [
@@ -125,8 +99,6 @@ def test_concurrent_appends_from_separate_processes_do_not_corrupt(tmp_path):
         assert proc.wait(timeout=120) == 0
 
     records = store.read_records(_repo(), base_dir=base)
-    # Nothing corrupt: every append reads back (a malformed line would have been
-    # skipped by the loud reader and break the count), each one intact.
     assert len(records) == writers * appends_each
     seen = set()
     for record in records:
@@ -140,7 +112,6 @@ def test_concurrent_appends_from_separate_processes_do_not_corrupt(tmp_path):
 def test_store_path_is_outside_the_repo_tree(tmp_path):
     base = tmp_path / "state"
     path = store.append_record({"x": 1}, _repo(), base_dir=base)
-    # The record must live under the injected state root, never a repo working tree.
     assert base in path.parents
 
 
@@ -152,9 +123,6 @@ def test_default_store_dir_is_under_platformdirs_state(monkeypatch, tmp_path):
 
 
 def test_kinds_are_sibling_subdirs_of_one_family_root(monkeypatch, tmp_path):
-    # ONE store family (RVW02-WS03): each record kind is a subdirectory of the
-    # same root, so the eval store's default location is unchanged and the
-    # review-rounds store sits beside it — never inside it.
     monkeypatch.setattr(
         store.platformdirs, "user_state_dir", lambda *a, **k: str(tmp_path / "ps")
     )
@@ -166,10 +134,6 @@ def test_kinds_are_sibling_subdirs_of_one_family_root(monkeypatch, tmp_path):
 
 
 def test_kinds_never_share_a_store_file(tmp_path):
-    # An eval record and a review-round record of the SAME repo land in distinct
-    # files (the kind is a directory level), while one injected family root
-    # covers both — what lets the report's review-axis join resolve both stores
-    # from a single override.
     base = tmp_path / "state"
     repo = _repo()
     eval_path = store.append_record({"kind": "eval"}, repo, base_dir=base)
@@ -192,17 +156,11 @@ def test_distinct_repos_get_distinct_store_files(tmp_path):
 
 
 def test_repo_key_is_the_nested_owner_name_identity_path():
-    # The key is a nested ``<owner>/<name>`` path (the logsetup-proven origin scheme),
-    # NOT a flat ``owner-name`` join — the ``/`` is the collision-free separator that
-    # neither a GitHub owner login nor a repo name may contain.
     key = store.repo_key(_repo(owner="arthur-debert", name="shipit"))
     assert key == "arthur-debert/shipit"
 
 
 def test_repo_key_does_not_collide_across_hyphen_ambiguous_repos(tmp_path):
-    # REGRESSION for the flat ``owner-name`` collision: owner ``a-b`` + name ``c`` and
-    # owner ``a`` + name ``b-c`` both flatten to ``a-b-c`` and would MERGE two distinct
-    # repos' records into one file. The nested-path key keeps them distinct.
     base = tmp_path / "state"
     left = _repo(owner="a-b", name="c")
     right = _repo(owner="a", name="b-c")
@@ -215,11 +173,6 @@ def test_repo_key_does_not_collide_across_hyphen_ambiguous_repos(tmp_path):
 
 
 def test_case_varying_origins_of_one_repo_share_one_store_file(tmp_path):
-    # Case-fragmentation regression: GitHub owner/repo are case-INSENSITIVE, so a
-    # clone whose origin reads `Acme/Widget` and one reading `acme/widget` are ONE
-    # repo. `resolve_repo` lowercases to the canonical identity (test_identity), so
-    # both resolve to the SAME store key/file here — the store never fragments per
-    # origin case.
     from shipit.identity import Owner, Repo, resolve_repo
 
     class _FakeGit:
@@ -242,13 +195,9 @@ def test_case_varying_origins_of_one_repo_share_one_store_file(tmp_path):
 
 
 def test_two_clone_paths_of_one_repo_share_one_store_file(tmp_path):
-    # THE scatter-bug regression: the store keys by origin identity, not by clone
-    # path — so two Trees/clones of the same repo (constructed identically, standing
-    # in for two different filesystem checkouts) resolve to ONE store file, and a
-    # repo's runs pool instead of orphaning a fresh store per clone.
     base = tmp_path / "state"
-    clone_a = _repo()  # e.g. checked out at /trees/x/widget
-    clone_b = _repo()  # e.g. checked out at /home/y/widget
+    clone_a = _repo()
+    clone_b = _repo()
     pa = store.append_record({"run": "a"}, clone_a, base_dir=base)
     pb = store.append_record({"run": "b"}, clone_b, base_dir=base)
     assert pa == pb
@@ -257,9 +206,6 @@ def test_two_clone_paths_of_one_repo_share_one_store_file(tmp_path):
 
 
 def test_ownerkind_enrichment_does_not_move_the_store_key(tmp_path):
-    # OwnerKind is excluded from Repo identity, so enriching it must NOT change the
-    # store key — the same repo's records stay in one file before and after the kind
-    # is known (ADR-0024: "same store key before and after enrichment").
     base = tmp_path / "state"
     bare = _repo(kind=None)
     enriched = _repo(kind=OwnerKind.ORGANIZATION)

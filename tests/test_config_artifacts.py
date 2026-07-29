@@ -1,13 +1,3 @@
-"""The ``[artifacts]`` map loader (TOL01-WS02) — typed frozen values at the
-config boundary (ADR-0030: construction is validation).
-
-Fixture-driven, prior art the ``[toolchains]`` loader tests: happy shapes in
-(TOML text → typed values out), loud malformed-config errors naming the
-offending key. Endpoints / bundle / sign / e2e are parsed HERE and consumed
-later (release stages, WS03) — these tests pin the parse contract those
-consumers inherit.
-"""
-
 import tomllib
 
 import pytest
@@ -19,13 +9,7 @@ def _load(text: str) -> tuple[config.Artifact, ...]:
     return config.load_artifacts(tomllib.loads(text))
 
 
-# --------------------------------------------------------------------------
-# Happy shapes
-# --------------------------------------------------------------------------
-
-
 def test_absent_table_is_the_empty_tuple():
-    # No artifact map is a legal repo: `shipit build` runs bare legs.
     assert config.load_artifacts({}) == ()
 
 
@@ -55,14 +39,11 @@ def test_full_artifact_parses_to_typed_frozen_values():
 
 
 def test_bare_toolchain_string_is_a_whole_leg_target():
-    # The shorthand: the leg's default build produces the artifact whole.
     (artifact,) = _load('[artifacts.dist]\nbuild = ["python"]\n')
     assert artifact.build == (config.BuildTarget(toolchain="python"),)
 
 
 def test_optional_fields_default_to_absent_not_null():
-    # nvim's "the tag is the release" shape (PRD further notes): zero build,
-    # zero bundle, one endpoint — every optional field at its quiet default.
     (artifact,) = _load('[artifacts.plugin]\nendpoints = ["gh-release"]\n')
     assert artifact.build == ()
     assert artifact.bundle is None
@@ -83,9 +64,6 @@ def test_optional_fields_default_to_absent_not_null():
     ],
 )
 def test_build_target_package_basename(package, expected):
-    # The single source of truth for "does this package name a binary?" — the
-    # basename, or None for no package / a bare path-navigation token. Shared by
-    # binary_location and the assert-bundle expected-name chain.
     target = config.BuildTarget(toolchain="go", package=package)
     assert target.package_basename == expected
 
@@ -101,8 +79,6 @@ def test_go_target_carries_the_version_var():
 
 
 def test_empty_e2e_table_declares_the_default_harness():
-    # Declaring `e2e` AT ALL is the opt-in (PRD story 11); an empty table
-    # means the registry-default harness (WS03 resolves it).
     (artifact,) = _load("[artifacts.app]\ne2e = {}\n")
     assert artifact.e2e == config.E2eSpec(harness=None)
 
@@ -116,17 +92,11 @@ def test_several_artifacts_parse_in_declaration_order():
 
 
 def test_one_artifact_from_several_toolchains():
-    # ADR-0007's many-to-many: rust binary + npm frontend -> one Tauri app.
     (artifact,) = _load(
         "[artifacts.app]\n"
         'build = [{ toolchain = "rust" }, { toolchain = "npm", package = "web" }]\n'
     )
     assert [t.toolchain for t in artifact.build] == ["rust", "npm"]
-
-
-# --------------------------------------------------------------------------
-# Loud malformed-config errors, naming the offending key (ADR-0030)
-# --------------------------------------------------------------------------
 
 
 def test_non_table_artifact_is_refused():
@@ -164,8 +134,6 @@ def test_downstreams_parse_with_the_notify_endpoint(tmp_path):
 
 
 def test_notify_endpoint_without_downstreams_is_refused():
-    # The endpoint fires repository_dispatch AT the list — an endpoint with no
-    # list is a no-op declaration, refused at parse (#792).
     with pytest.raises(config.ConfigError, match="needs a `downstreams` list"):
         _load(
             "[artifacts.parser]\n"
@@ -176,7 +144,6 @@ def test_notify_endpoint_without_downstreams_is_refused():
 
 
 def test_downstreams_without_the_notify_endpoint_is_refused():
-    # A downstreams list nothing fires is dead config — refused (#792).
     with pytest.raises(config.ConfigError, match="notify-downstreams.*is not"):
         _load(
             "[artifacts.parser]\n"
@@ -208,8 +175,6 @@ def test_duplicate_downstream_is_refused():
 
 
 def test_downstreams_normalized_to_canonical_lowercase_slug(tmp_path):
-    # GitHub owner/name are case-insensitive; downstreams go through the
-    # canonical slug parser so every dispatch targets one normalized form (#792).
     (artifact,) = _load(
         "[artifacts.parser]\n"
         'endpoints = ["notify-downstreams"]\n'
@@ -219,8 +184,6 @@ def test_downstreams_normalized_to_canonical_lowercase_slug(tmp_path):
 
 
 def test_case_only_duplicate_downstream_is_refused():
-    # Case-only repeats collapse to one canonical slug — a repeated dispatch is
-    # never an intent, so the collision is refused rather than dispatched twice.
     with pytest.raises(
         config.ConfigError, match="duplicate downstream `lex-fmt/vscode`"
     ):
@@ -232,8 +195,6 @@ def test_case_only_duplicate_downstream_is_refused():
 
 
 def test_tarball_with_multiple_platforms_is_refused():
-    # A platform-independent composition emits one unqualified archive; >1
-    # platform would build colliding assets in the merged dist/ — refused (#792).
     with pytest.raises(config.ConfigError, match="is platform-independent"):
         _load(
             "[artifacts.parser]\n"
@@ -244,7 +205,6 @@ def test_tarball_with_multiple_platforms_is_refused():
 
 
 def test_tarball_with_a_single_platform_is_allowed():
-    # Exactly one lane is fine — one leg, one unqualified archive, no collision.
     (artifact,) = _load(
         "[artifacts.parser]\n"
         'build = ["tree-sitter"]\n'
@@ -255,8 +215,6 @@ def test_tarball_with_a_single_platform_is_allowed():
 
 
 def test_tarball_with_no_platforms_is_allowed():
-    # No declaration defaults to a single lane, so the unqualified archive still
-    # builds on exactly one leg.
     (artifact,) = _load(
         "[artifacts.parser]\n"
         'build = ["tree-sitter"]\n'
@@ -266,10 +224,6 @@ def test_tarball_with_no_platforms_is_allowed():
 
 
 def test_wasm_pack_with_multiple_platforms_is_refused():
-    # wasm-pack's npm `.tgz` is version-qualified but NOT target-qualified — the
-    # sibling of the tarball guard (#828). >1 platform would publish colliding
-    # `<name>-<version>.tgz` bytes (no `-<target>` qualifier) in the merged
-    # dist/, so it is refused.
     with pytest.raises(config.ConfigError, match="is platform-independent"):
         _load(
             "[artifacts.wasm]\n"
@@ -280,8 +234,6 @@ def test_wasm_pack_with_multiple_platforms_is_refused():
 
 
 def test_wasm_pack_with_a_single_platform_is_allowed():
-    # The shipped contract: exactly one lane — one leg, one npm tgz (not
-    # target-qualified), no collision ("built once, published once").
     (artifact,) = _load(
         "[artifacts.wasm]\n"
         'build = ["rust"]\n'
@@ -292,8 +244,6 @@ def test_wasm_pack_with_a_single_platform_is_allowed():
 
 
 def test_wasm_pack_with_no_platforms_is_allowed():
-    # No declaration defaults to a single lane — the npm tgz still
-    # builds on exactly one leg (the default/shipped lane stays valid).
     (artifact,) = _load(
         '[artifacts.wasm]\nbuild = ["rust"]\nbundle = { composition = "wasm-pack" }\n'
     )
@@ -301,8 +251,6 @@ def test_wasm_pack_with_no_platforms_is_allowed():
 
 
 def test_multi_platform_archive_is_still_allowed():
-    # The guard is scoped to platform-independent compositions: archive emits
-    # target-qualified names, so multiple platforms never collide.
     (artifact,) = _load(
         "[artifacts.lex]\n"
         'build = ["rust"]\n'
@@ -319,7 +267,6 @@ def test_unknown_platform_names_the_closed_registry():
 
 
 def test_duplicate_platform_is_refused():
-    # A repeated platform would mean a repeated matrix entry, never an intent.
     with pytest.raises(config.ConfigError, match="duplicate platform `linux-x86_64`"):
         _load('[artifacts.x]\nplatforms = ["linux-x86_64", "linux-x86_64"]\n')
 
@@ -332,14 +279,11 @@ def test_non_list_platforms_is_refused():
 
 
 def test_unknown_build_toolchain_names_the_registry():
-    # Same closed set as [toolchains]: "tauri" is never a dispatch label.
     with pytest.raises(config.ConfigError, match="unknown toolchain `tauri`"):
         _load('[artifacts.x]\nbuild = [{ toolchain = "tauri" }]\n')
 
 
 def test_build_must_be_a_list():
-    # The offending key rides the `where` prefix (ADR-0030), like the nested
-    # `.build[i]` / `.bundle.command` messages do.
     with pytest.raises(config.ConfigError, match=r"\.build: must be a list"):
         _load('[artifacts.x]\nbuild = "rust"\n')
 
@@ -355,17 +299,11 @@ def test_unknown_build_target_key_is_refused():
 
 
 def test_empty_shorthand_toolchain_string_names_the_offending_value():
-    # `build = [""]` is caught as an empty target, not misreported as an
-    # "unknown toolchain ``" — the shorthand form validates non-empty like the
-    # table form does.
     with pytest.raises(config.ConfigError, match="must be a non-empty toolchain name"):
         _load('[artifacts.x]\nbuild = [""]\n')
 
 
 def test_whitespace_version_var_is_refused_at_parse():
-    # version-var rides go's -ldflags -X value, which the go tool re-splits on
-    # whitespace — so whitespace in it is refused at parse (ADR-0041), the same
-    # class as a whitespace `--version`.
     with pytest.raises(config.ConfigError, match="must not contain whitespace"):
         _load(
             "[artifacts.x]\n"
@@ -374,8 +312,6 @@ def test_whitespace_version_var_is_refused_at_parse():
 
 
 def test_version_var_is_go_only():
-    # ADR-0041: only go injects the version at build; everyone else's version
-    # is a manifest projection bumped at prepare.
     with pytest.raises(config.ConfigError, match="version-var applies only to the go"):
         _load(
             "[artifacts.x]\n"
@@ -389,8 +325,6 @@ def test_bundle_requires_its_composition():
 
 
 def test_bundle_composition_names_the_closed_registry():
-    # The composition registry is closed (ADR-0007's shape): the message
-    # names the known set, mirroring endpoints/toolchains.
     with pytest.raises(config.ConfigError, match="unknown composition `rpm`") as exc:
         _load('[artifacts.x]\nbundle = { composition = "rpm" }\n')
     assert (
@@ -400,8 +334,6 @@ def test_bundle_composition_names_the_closed_registry():
 
 
 def test_mac_app_requires_the_declared_bundler_command():
-    # mac-app runs the artifact's OWN bundler (the one consumer-specific part
-    # of the mac path, workflows.lex §3.1) — the declaration must carry it.
     with pytest.raises(config.ConfigError, match="declare its argv"):
         _load('[artifacts.x]\nbundle = { composition = "mac-app" }\n')
 
@@ -424,14 +356,11 @@ def test_mac_app_parses_command_and_source():
     assert artifact.bundle == config.BundleSpec(
         composition="mac-app",
         command=("npm", "run", "bundle"),
-        # Normalized to canonical form, like bundle-config.
         source="src-tauri/target/release/bundle",
     )
 
 
 def test_tauri_parses_command_and_source_like_a_declared_bundler():
-    # tauri is a declared-command composition too (its `tauri build` is the one
-    # consumer-specific part), so it carries command + source like mac-app.
     (artifact,) = _load(
         "[artifacts.app]\n"
         'build = ["rust", "npm"]\n'
@@ -454,11 +383,6 @@ def test_tauri_needs_command_and_source():
 
 @pytest.mark.parametrize("bad", ['"."', '"./"'])
 def test_declared_command_source_refuses_the_repo_root(bad):
-    # A declared bundler writes into a dedicated output subdir the composition
-    # then reads; the repo root (`.`) is a config mistake — refused loudly at
-    # parse so it can never reach the compose step (defence in depth: the tauri
-    # collector deletes nothing under `source`, but a repo-root source is still
-    # wrong for every declared-command composition).
     with pytest.raises(
         config.ConfigError, match=r"dedicated bundle output subdirectory"
     ):
@@ -470,9 +394,6 @@ def test_declared_command_source_refuses_the_repo_root(bad):
 
 
 def test_sign_with_a_tauri_bundle_parses():
-    # `sign = true` over a tauri app routes to the mac signer's mac-app leg
-    # (the darwin leg emits the same reseal payload), so it is a signable
-    # composition — accepted at parse, like mac-app.
     (artifact,) = _load(
         "[artifacts.app]\n"
         'build = ["rust", "npm"]\n'
@@ -486,9 +407,6 @@ def test_sign_with_a_tauri_bundle_parses():
 
 
 def test_electron_parses_command_and_source_like_a_declared_bundler():
-    # electron is a declared-command composition (its `electron-builder` argv
-    # is the one consumer-specific part, issue #790), so command + source are
-    # REQUIRED and parsed exactly like mac-app's.
     (artifact,) = _load(
         "[artifacts.app]\n"
         'build = ["npm"]\n'
@@ -508,10 +426,6 @@ def test_electron_requires_the_declared_bundler_command():
 
 
 def test_sign_with_electron_is_accepted_it_routes_through_the_sign_stage():
-    # electron is SIGNABLE (WS14 #790): its darwin .app ships UNSIGNED as the
-    # reseal payload the standalone mac sign stage reopens — electron-builder
-    # does not sign at build. So `sign = true` over electron is ACCEPTED and
-    # routes through the same signer leg as mac-app.
     (artifact,) = _load(
         "[artifacts.app]\n"
         'build = ["npm"]\n'
@@ -525,7 +439,6 @@ def test_sign_with_electron_is_accepted_it_routes_through_the_sign_stage():
 
 
 def test_bundle_command_must_be_an_argv_list():
-    # An argv, never a shell string (ADR-0028: no shell=True anywhere).
     with pytest.raises(
         config.ConfigError, match=r"bundle.command must be a non-empty argv"
     ):
@@ -538,8 +451,6 @@ def test_bundle_command_must_be_an_argv_list():
 
 @pytest.mark.parametrize("key,value", [("command", '["tar"]'), ("source", '"out"')])
 def test_registry_assembled_compositions_reject_declared_command(key, value):
-    # archive/deb/wheel assemble their own commands (ADR-0028's one assembly
-    # point) — a declared argv or source dir would be a second one.
     with pytest.raises(config.ConfigError, match=f"`{key}` applies only to"):
         _load(
             f'[artifacts.x]\nbundle = {{ composition = "archive", {key} = {value} }}\n'
@@ -547,8 +458,6 @@ def test_registry_assembled_compositions_reject_declared_command(key, value):
 
 
 def test_wasm_pack_parses_scope_and_wasm_target(tmp_path):
-    # wasm-pack's optional consumer-specific parts (TOL02-WS12 #788): the npm
-    # @scope and wasm-pack's --target, declared on the bundle table.
     (artifact,) = _load(
         "[artifacts.wasm]\n"
         'build = ["rust"]\n'
@@ -561,8 +470,6 @@ def test_wasm_pack_parses_scope_and_wasm_target(tmp_path):
 
 
 def test_wasm_pack_scope_and_target_default_to_absent():
-    # Both are optional — an undeclared scope/target is None (the composition
-    # applies wasm-pack's own default target, `bundler`).
     (artifact,) = _load(
         '[artifacts.wasm]\nbuild = ["rust"]\nbundle = { composition = "wasm-pack" }\n'
     )
@@ -583,23 +490,12 @@ def test_wasm_pack_options_must_be_non_empty_strings(key):
 
 @pytest.mark.parametrize("key", ["scope", "wasm-target"])
 def test_wasm_pack_options_are_rejected_on_other_compositions(key):
-    # scope/wasm-target are wasm-pack's ONLY (option_keys) — an unknown key on
-    # a composition that does not name them, so a typo dies at parse.
     with pytest.raises(config.ConfigError, match=f"unknown key `{key}`"):
         _load(
             "[artifacts.x]\n"
             'build = ["rust"]\n'
             f'bundle = {{ composition = "archive", {key} = "web" }}\n'
         )
-
-
-# --------------------------------------------------------------------------
-# tarball/zed `leg` + `payload` — the producer-declared payload (#1092)
-#
-# "Which files make up my package" is a PRODUCER-REPO fact: the declaration
-# lives here, not in shipit's source. These pin the parse contract the compose
-# inherits (shipit/release/bundle.py::_compose_declared_payload).
-# --------------------------------------------------------------------------
 
 
 def _payload_toml(payload: str, composition: str = "tarball") -> str:
@@ -614,8 +510,6 @@ def _payload_toml(payload: str, composition: str = "tarball") -> str:
 
 
 def test_payload_parses_to_ordered_typed_entries():
-    # Declaration order is preserved (it is tar member order); `required`
-    # defaults to False — a when-present entry, the common case.
     (artifact,) = _load(
         _payload_toml(
             "[\n"
@@ -631,9 +525,6 @@ def test_payload_parses_to_ordered_typed_entries():
         leg="tree-sitter",
         payload=(
             config.PayloadEntry(path="src", required=True),
-            # A BUILD-PRODUCED file at the leg root sits beside committed
-            # sources, and a NESTED path is expressible — the shape
-            # lex-fmt/tree-sitter-lex needs.
             config.PayloadEntry(path="tree-sitter-lex.wasm", required=True),
             config.PayloadEntry(path="queries", required=False),
             config.PayloadEntry(path="shared/embedded-grammars.json", required=False),
@@ -642,7 +533,6 @@ def test_payload_parses_to_ordered_typed_entries():
 
 
 def test_zed_takes_the_same_declaration():
-    # `zed` is the same declared-payload contract under its own registry name.
     (artifact,) = _load(
         "[artifacts.zed-lex]\n"
         'build = ["rust"]\n'
@@ -664,17 +554,12 @@ def test_zed_takes_the_same_declaration():
 @pytest.mark.parametrize(
     ("declared", "named"),
     [
-        # The LEGACY shape (a config predating the declaration) has neither key
-        # — the message names both, so the reader is not sent down a partial fix.
         ("", "`leg` and `payload`"),
         ('leg = "tree-sitter"', "`payload`"),
         ('payload = [{ path = "src", required = true }]', "`leg`"),
     ],
 )
 def test_declared_payload_keys_are_required_with_a_migration_pointer(declared, named):
-    # NO backwards compatibility (ADR-0077): a config predating the declaration
-    # is a LOUD failure naming what to write, never a silent fallback to the old
-    # shipit-side file list.
     with pytest.raises(config.ConfigError) as exc:
         _load(
             "[artifacts.parser]\n"
@@ -698,7 +583,6 @@ def test_payload_leg_must_be_a_non_empty_string():
 
 
 def test_payload_leg_names_a_known_toolchain():
-    # A typo'd leg dies at parse, not at the bundle stage on a release runner.
     with pytest.raises(config.ConfigError, match="unknown toolchain `treesitter`"):
         _load(
             "[artifacts.parser]\n"
@@ -709,8 +593,6 @@ def test_payload_leg_names_a_known_toolchain():
 
 
 def test_payload_with_no_required_entry_is_refused():
-    # An all-when-present payload can compose an EMPTY archive — never a quiet
-    # outcome, so the invariant is enforced at parse.
     with pytest.raises(config.ConfigError, match="no entry declares `required"):
         _load(_payload_toml('[{ path = "queries" }, { path = "grammar.js" }]'))
 
@@ -721,8 +603,6 @@ def test_payload_must_be_a_non_empty_list():
 
 
 def test_payload_entry_must_be_a_table_not_a_bare_string():
-    # No string shorthand: required-vs-when-present is the one thing an entry
-    # must state unambiguously, and a shorthand would hide it.
     with pytest.raises(config.ConfigError, match=r"payload\[1\]: must be a table"):
         _load(_payload_toml('[{ path = "src", required = true }, "queries"]'))
 
@@ -747,28 +627,17 @@ def test_payload_entry_required_must_be_a_boolean():
 
 @pytest.mark.parametrize("path", [".", "./", "./."])
 def test_payload_entry_path_may_not_name_the_leg_dir_itself(path):
-    # `.`/`./`/`./.` all normalize to `.` — an empty component tuple that names
-    # the leg dir, not a member. It slips past the escape / refuse-links guards
-    # (nothing to walk) and would otherwise only blow up at compose, so it must
-    # die at PARSE (construction-is-validation), pointing at an explicit member.
     with pytest.raises(config.ConfigError, match="names the leg directory itself"):
         _load(_payload_toml(f"[{{ path = '{path}', required = true }}]"))
 
 
 @pytest.mark.parametrize("path", ["/etc/passwd", "../outside", "..", "C:/x", "a\\b"])
 def test_payload_entry_path_may_not_escape_the_checkout(path):
-    # The same guard `bundle.source` and the vsix stage dest take: a payload
-    # path is joined to the leg dir and READ, so an escape would tar a file
-    # outside the checkout into a published artifact.
-    # TOML LITERAL strings ('...'): a basic string would eat the `\b` as an
-    # escape and never deliver a backslash to the guard.
     with pytest.raises(config.ConfigError, match="repo-relative POSIX path"):
         _load(_payload_toml(f"[{{ path = '{path}', required = true }}]"))
 
 
 def test_duplicate_payload_path_is_refused():
-    # Two entries for one path would tar the member twice and leave the two
-    # `required` values in silent conflict.
     with pytest.raises(config.ConfigError, match="already declared earlier"):
         _load(
             _payload_toml(
@@ -781,9 +650,6 @@ def test_duplicate_payload_path_is_refused():
     "second", ["src/parser.c", "src/tree_sitter/parser.h"], ids=["child", "descendant"]
 )
 def test_payload_paths_that_overlap_an_earlier_entry_are_refused(second):
-    # A directory operand ships its whole tree, so `src` + `src/parser.c` is the
-    # duplicate-member defect wearing a different spelling — tar adds that file
-    # once recursively and once by name. One member, declared once.
     with pytest.raises(config.ConfigError) as excinfo:
         _load(
             _payload_toml(
@@ -795,8 +661,6 @@ def test_payload_paths_that_overlap_an_earlier_entry_are_refused(second):
 
 
 def test_payload_overlap_is_compared_by_component_not_string_prefix():
-    # `srcfoo` merely SPELLS like it starts with `src`; it is a different member
-    # and a naive prefix compare would falsely collide the two.
     artifacts = _load(
         _payload_toml(
             '[{ path = "src", required = true }, { path = "srcfoo" }]',
@@ -806,7 +670,6 @@ def test_payload_overlap_is_compared_by_component_not_string_prefix():
 
 
 def test_payload_overlap_is_refused_in_either_declaration_order():
-    # The ancestor may be declared SECOND — same duplicate members, same refusal.
     with pytest.raises(config.ConfigError, match="overlaps `src/parser.c`"):
         _load(
             _payload_toml(
@@ -817,9 +680,6 @@ def test_payload_overlap_is_refused_in_either_declaration_order():
 
 @pytest.mark.parametrize("key", ["leg", "payload"])
 def test_leg_and_payload_are_rejected_on_other_compositions(key):
-    # archive/wheel/... assemble their own contents (binary+docs, sdist) — a
-    # payload declaration there is dead config, refused with the specific
-    # message naming the compositions that DO take it.
     value = '"rust"' if key == "leg" else '[{ path = "src", required = true }]'
     with pytest.raises(config.ConfigError, match=f"`{key}` applies only to") as exc:
         _load(
@@ -830,15 +690,7 @@ def test_leg_and_payload_are_rejected_on_other_compositions(key):
     assert "producer-declared (tarball, zed)" in str(exc.value)
 
 
-# --------------------------------------------------------------------------
-# vsix `stage` — the Artifact-channel native-binary staging map (#974)
-# --------------------------------------------------------------------------
-
-
 def test_vsix_parses_the_stage_map():
-    # The vsix composition's optional `stage`: an `[artifact-deps]` package name
-    # → its destination path in the extension layout, kept as ordered pairs so
-    # the compose copies each materialized native before `vsce package`.
     (artifact,) = _load(
         "[artifacts.ext]\n"
         'build = ["npm"]\n'
@@ -858,7 +710,6 @@ def test_vsix_parses_the_stage_map():
 
 
 def test_vsix_stage_defaults_to_empty():
-    # No `stage` is a legal vsix: the base per-platform `vsce package` alone.
     (artifact,) = _load(
         '[artifacts.ext]\nbuild = ["npm"]\nbundle = { composition = "vsix" }\n'
     )
@@ -866,7 +717,6 @@ def test_vsix_stage_defaults_to_empty():
 
 
 def test_vsix_stage_is_rejected_on_other_compositions():
-    # `stage` is vsix's ONLY (option_keys) — an unknown key elsewhere.
     with pytest.raises(config.ConfigError, match="unknown key `stage`"):
         _load(
             "[artifacts.x]\n"
@@ -885,8 +735,6 @@ def test_vsix_stage_must_be_a_non_empty_table():
 
 
 def test_vsix_stage_key_must_be_a_conda_package_name():
-    # The key doubles as the `[artifact-deps]` package name — conda's lowercase
-    # vocabulary; an uppercase key dies at parse (it could never resolve a pin).
     with pytest.raises(
         config.ConfigError, match="not a valid \\[artifact-deps\\] package name"
     ):
@@ -911,20 +759,15 @@ def test_vsix_stage_destination_must_be_a_non_empty_string():
 @pytest.mark.parametrize(
     "dest",
     [
-        "/abs/lexd",  # POSIX-absolute
-        "../escape/lexd",  # POSIX `..` climb
-        "C:\\\\temp\\\\lexd-lsp",  # Windows drive-rooted (escapes on a win runner)
-        "\\\\temp\\\\lexd-lsp",  # Windows leading-separator root
-        "..\\\\escape\\\\x",  # backslash `..` climb — PurePosixPath misses the `\`
-        "C:lexd-lsp",  # bare Windows drive-relative
+        "/abs/lexd",
+        "../escape/lexd",
+        "C:\\\\temp\\\\lexd-lsp",
+        "\\\\temp\\\\lexd-lsp",
+        "..\\\\escape\\\\x",
+        "C:lexd-lsp",
     ],
 )
 def test_vsix_stage_destination_may_not_escape_the_checkout(dest):
-    # The dest is joined to the leg dir with the RUNNER's native pathlib and
-    # WRITTEN — an absolute/`..` path (POSIX or Windows), a backslash, or a drive
-    # letter would stage outside the extension. `vsce package` runs on the
-    # win32-x64 leg too (#974), so the guard must catch the Windows vectors a
-    # POSIX-only check misses, not just the unix ones.
     with pytest.raises(config.ConfigError, match="must be a repo-relative"):
         _load(
             "[artifacts.ext]\n"
@@ -942,23 +785,16 @@ def test_main_binary_names_must_be_non_empty_strings(key, value):
 
 
 def test_e2e_harness_string_names_a_registered_harness():
-    # A STRING selects a registered harness by name (electron / tauri / bats),
-    # captured as harness_name; the name is resolved by the planner (config
-    # does not import the registry), so any non-empty string parses here.
     (artifact,) = _load('[artifacts.x]\ne2e = { harness = "electron" }\n')
     assert artifact.e2e == config.E2eSpec(harness_name="electron")
 
 
 def test_e2e_empty_harness_string_is_refused():
-    # The empty string names no harness — refused at the boundary with a
-    # message that points at both the named and the raw-argv forms.
     with pytest.raises(config.ConfigError, match=r"named harness must be a non-empty"):
         _load('[artifacts.x]\ne2e = { harness = "" }\n')
 
 
 def test_e2e_harness_that_is_neither_string_nor_list_must_be_an_argv():
-    # A number/bool/table is neither a registry name nor a raw argv — the
-    # argv-list error (the list branch's `_parse_argv`).
     with pytest.raises(
         config.ConfigError, match=r"e2e.harness must be a non-empty argv"
     ):
@@ -971,10 +807,6 @@ def test_sign_must_be_a_boolean():
 
 
 def test_sign_with_a_build_darwin_platform_and_signable_bundle_parses():
-    # `sign = true` is coherent once a build-bearing artifact has a darwin lane
-    # (signing signs a build output, on macOS) AND a bundle the signer can
-    # reopen (TOL02-WS08 #779): the linux entry rides along un-signed, the
-    # darwin one signs.
     (artifact,) = _load(
         "[artifacts.x]\n"
         'build = ["rust"]\n'
@@ -986,10 +818,6 @@ def test_sign_with_a_build_darwin_platform_and_signable_bundle_parses():
 
 
 def test_sign_without_a_bundle_is_refused():
-    # The signer reopens what the bundle stage composed (workflows.lex §3.1);
-    # a sign declaration with no bundle would emit a sign matrix entry whose
-    # leg has no bundle tree to download — a deep-CI failure the parse
-    # boundary catches instead (TOL02-WS08 #779).
     with pytest.raises(
         config.ConfigError,
         match=r"sign = true requires a bundle composition the signer can "
@@ -1004,9 +832,6 @@ def test_sign_without_a_bundle_is_refused():
 
 
 def test_sign_with_an_unsignable_composition_is_refused():
-    # The signer has legs for the mac-app/electron payload and the archive
-    # tarball only; `sign = true` over a wheel (or deb) composition routes
-    # nowhere — refused at parse, naming the signable set.
     with pytest.raises(
         config.ConfigError,
         match=r"sign = true requires a bundle composition the signer can "
@@ -1022,9 +847,6 @@ def test_sign_with_an_unsignable_composition_is_refused():
 
 
 def test_bundle_without_a_build_target_is_refused():
-    # The bundle twin of the sign rule: a bundle composes build outputs, so on a
-    # no-build artifact the stage never materializes yet the declaration reads
-    # as intent. Refused at parse rather than silently dropped.
     with pytest.raises(
         config.ConfigError, match=r"bundle requires at least one build target"
     ):
@@ -1032,16 +854,11 @@ def test_bundle_without_a_build_target_is_refused():
 
 
 def test_bundle_shape_error_precedes_the_build_requirement():
-    # A malformed bundle still gets its specific composition-shape error first —
-    # the build-requirement check is ordered after the composition parse.
     with pytest.raises(config.ConfigError, match="bundle must name its composition"):
         _load("[artifacts.x]\nbundle = {}\n")
 
 
 def test_sign_without_a_build_target_is_refused():
-    # An artifact with no build produces nothing to sign, so preflight emits no
-    # matrix entry (and no sign stage) for it while gh-setup would still demand
-    # the Apple secrets — the two consumers disagreeing. Refused at parse.
     with pytest.raises(
         config.ConfigError, match=r"sign = true requires at least one build target"
     ):
@@ -1049,9 +866,6 @@ def test_sign_without_a_build_target_is_refused():
 
 
 def test_sign_without_a_darwin_platform_is_refused():
-    # A linux-only signing declaration would silently ship UNSIGNED (no darwin
-    # lane → no sign stage) while gh-setup still demands the Apple secrets — the
-    # two consumers disagreeing. Refused at parse (story 28).
     with pytest.raises(
         config.ConfigError, match=r"sign = true requires at least one darwin platform"
     ):
@@ -1061,8 +875,6 @@ def test_sign_without_a_darwin_platform_is_refused():
 
 
 def test_sign_with_default_platforms_is_refused():
-    # An undeclared `platforms` defaults to the linux lane — non-darwin — so a
-    # build-bearing `sign = true` is refused the same way a linux-only one is.
     with pytest.raises(
         config.ConfigError, match=r"sign = true requires at least one darwin platform"
     ):
@@ -1070,8 +882,6 @@ def test_sign_with_default_platforms_is_refused():
 
 
 def test_bundle_config_parses_to_a_path():
-    # The artifact-declared bundle-config hook (TOL02-WS01, PRD story 25):
-    # the repo-relative version file release prepare bumps in lockstep.
     (artifact,) = _load(
         '[artifacts.app]\nbundle-config = "src-tauri/tauri.conf.json"\n'
     )
@@ -1090,8 +900,6 @@ def test_bundle_config_must_be_a_non_empty_path(value):
 
 
 def test_bundle_config_is_normalized_to_canonical_form():
-    # `./src-tauri/...` must be stored as `src-tauri/...` so the release stage
-    # stages and matches the same path `git status` reports (no false no-op).
     (artifact,) = _load(
         '[artifacts.app]\nbundle-config = "./src-tauri/tauri.conf.json"\n'
     )
@@ -1103,16 +911,11 @@ def test_bundle_config_is_normalized_to_canonical_form():
     ['"/etc/passwd"', '"../outside/tauri.conf.json"', '"a/../../b.json"'],
 )
 def test_bundle_config_rejects_paths_escaping_the_checkout(value):
-    # A repo config is joined to the checkout root and REWRITTEN by release
-    # prepare; an absolute or `..` path would steer that write outside the tree,
-    # so it is refused at the parse boundary (the one place values flow through).
     with pytest.raises(config.ConfigError, match=r"inside the checkout"):
         _load(f"[artifacts.app]\nbundle-config = {value}\n")
 
 
 def test_artifacts_is_a_known_top_level_table(tmp_path):
-    # The closed known-tables registry accepts [artifacts]; the boundary load
-    # would otherwise reject the whole file before the loader ever ran.
     p = tmp_path / config.CONFIG_NAME
     p.write_text('[artifacts.x]\nendpoints = ["npm"]\n', encoding="utf-8")
     (artifact,) = config.load_artifacts(config.load(p))

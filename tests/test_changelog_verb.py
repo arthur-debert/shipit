@@ -1,12 +1,3 @@
-"""Tests for the `shipit changelog` verb shell (TOL01-WS06 #554).
-
-The verb's effectful layer over real temp trees: root resolution (the git read
-injected at the seam, ADR-0028 — no subprocess runs here), CHANGELOG/ reads,
-the projection/section/notes writes, and the uniform exit/reporting contract
-(story 8: 0 ok, 1 refusal-or-failing-check via one `error: …` line or the
-check report + diff).
-"""
-
 import os
 from pathlib import Path
 
@@ -17,8 +8,6 @@ from shipit import cli, config
 from shipit.verbs import changelog as verb
 
 
-# A repo_root seam standing in for the git adapter (no test execs git): the
-# not-a-checkout answer, for trees that carry their own CHANGELOG/.
 def _no_git(**kwargs):
     return None
 
@@ -34,11 +23,6 @@ def _render_into(root: Path) -> None:
     assert verb.run_render(str(root), repo_root=_no_git) == 0
 
 
-# --------------------------------------------------------------------------
-# check — the fragment-sync verdict (the changelog-sync lane's run)
-# --------------------------------------------------------------------------
-
-
 def test_check_passes_a_synced_tree(tmp_path, capsys):
     root = _tree(tmp_path, {"unreleased-fix.md": "- fixed a thing\n"})
     _render_into(root)
@@ -51,14 +35,13 @@ def test_check_passes_a_synced_tree(tmp_path, capsys):
 def test_check_fails_fragment_added_without_render(tmp_path, capsys):
     root = _tree(tmp_path, {"unreleased-fix.md": "- fixed a thing\n"})
     _render_into(root)
-    # A later PR adds a fragment but forgets to re-render.
     (root / "CHANGELOG" / "unreleased-more.md").write_text("- more\n")
     capsys.readouterr()
     assert verb.run_check(str(root), repo_root=_no_git) == 1
     out = capsys.readouterr().out
     assert "changelog: FAILED" in out
-    assert "+- more" in out  # the diff is surfaced
-    assert "shipit changelog render" in out  # with the remediation
+    assert "+- more" in out
+    assert "shipit changelog render" in out
 
 
 def test_check_fails_changelog_edited_without_fragment(tmp_path, capsys):
@@ -75,8 +58,6 @@ def test_check_fails_changelog_edited_without_fragment(tmp_path, capsys):
 
 
 def test_check_missing_changelog_dir_is_a_refusal(tmp_path, capsys):
-    # Fragments are the DECLARED model: no CHANGELOG/ is a hard error naming
-    # the adoption step, never the legacy skip-when-missing nicety.
     assert verb.run_check(str(tmp_path), repo_root=_no_git) == 1
     err = capsys.readouterr().err
     assert err.startswith("error: no CHANGELOG/ directory")
@@ -92,8 +73,6 @@ def test_check_invalid_version_filename_is_a_refusal(tmp_path, capsys):
 
 
 def test_root_resolution_walks_up_and_falls_back_to_git(tmp_path, capsys):
-    # From a subdirectory the ancestor walk finds the CHANGELOG/ root without
-    # consulting git…
     repo = tmp_path / "repo"
     repo.mkdir()
     root = _tree(repo, {"unreleased-a.md": "- a\n"})
@@ -106,8 +85,6 @@ def test_root_resolution_walks_up_and_falls_back_to_git(tmp_path, capsys):
 
     capsys.readouterr()
     assert verb.run_check(str(sub), repo_root=_boom) == 0
-    # …and with no CHANGELOG/ anywhere the git seam supplies the root, so the
-    # refusal names the repo root, not the cwd (the one git read, injected).
     bare = tmp_path / "bare" / "inner"
     bare.mkdir(parents=True)
     calls: list[str] = []
@@ -122,17 +99,11 @@ def test_root_resolution_walks_up_and_falls_back_to_git(tmp_path, capsys):
     assert str(tmp_path / "bare") in capsys.readouterr().err
 
 
-# --------------------------------------------------------------------------
-# render — the projection write
-# --------------------------------------------------------------------------
-
-
 def test_render_writes_the_projection(tmp_path, capsys):
     root = _tree(tmp_path, {"unreleased-b.md": "- b\n", "unreleased-a.md": "- a\n"})
     assert verb.run_render(str(root), repo_root=_no_git) == 0
     text = (root / "CHANGELOG.md").read_text()
     assert text.startswith(core.RENDER_PREAMBLE)
-    # Byte-order fragment order: a before b.
     assert text.index("- a") < text.index("- b")
     assert "rendered CHANGELOG.md" in capsys.readouterr().out
 
@@ -148,8 +119,6 @@ def test_render_includes_versions_and_legacy_tail(tmp_path):
 
 
 def test_render_unwritable_target_is_a_clean_error(tmp_path, capsys):
-    # A write failure (here: CHANGELOG.md is a directory) maps to the uniform
-    # `error: …` surface / exit 1, not a raw OSError traceback (ADR-0030).
     root = _tree(tmp_path, {"unreleased-a.md": "- a\n"})
     (root / "CHANGELOG.md").mkdir()
     assert verb.run_render(str(root), repo_root=_no_git) == 1
@@ -157,18 +126,11 @@ def test_render_unwritable_target_is_a_clean_error(tmp_path, capsys):
     assert err.startswith("error: cannot write CHANGELOG.md")
 
 
-# --------------------------------------------------------------------------
-# coalesce — the cut-time face
-# --------------------------------------------------------------------------
-
-
 def _today() -> str:
     return "2026-07-08"
 
 
 def test_coalesce_mutation_oserror_is_a_clean_error(tmp_path, capsys):
-    # An OSError inside the cut's mutation block (here: the re-render target
-    # CHANGELOG.md is a directory) maps to `error: …` / exit 1, not a traceback.
     root = _tree(tmp_path, {"unreleased-a.md": "- a\n"})
     (root / "CHANGELOG.md").mkdir()
     capsys.readouterr()
@@ -178,9 +140,6 @@ def test_coalesce_mutation_oserror_is_a_clean_error(tmp_path, capsys):
 
 
 def test_coalesce_notes_out_parent_needs_execute_permission(tmp_path, capsys):
-    # Creating a file in a directory needs write AND execute (search) on the
-    # dir; a parent with write but no execute is refused BEFORE mutation, not
-    # after a later write failure once the cut has landed.
     if os.name != "posix":
         pytest.skip("directory permission bits are POSIX-only")
     if os.geteuid() == 0:
@@ -190,7 +149,7 @@ def test_coalesce_notes_out_parent_needs_execute_permission(tmp_path, capsys):
     before = (root / "CHANGELOG.md").read_text()
     nox = tmp_path / "nox"
     nox.mkdir()
-    os.chmod(nox, 0o600)  # rw-, no execute → cannot create files inside
+    os.chmod(nox, 0o600)
     capsys.readouterr()
     try:
         assert (
@@ -204,17 +163,13 @@ def test_coalesce_notes_out_parent_needs_execute_permission(tmp_path, capsys):
             == 1
         )
         assert "error" in capsys.readouterr().err.lower()
-        # Untouched: the refusal came before the cut.
         assert (root / "CHANGELOG" / "unreleased-a.md").exists()
         assert (root / "CHANGELOG.md").read_text() == before
     finally:
-        os.chmod(nox, 0o700)  # restore so pytest can clean up the tmp tree
+        os.chmod(nox, 0o700)
 
 
 def test_coalesce_failed_cut_leaves_no_stray_notes_file(tmp_path, capsys):
-    # The writability preflight must NOT pre-create --notes-out: a cut that
-    # fails after it leaves no empty notes artifact (automation keys off the
-    # file's existence). Here the re-render write fails (CHANGELOG.md is a dir).
     root = _tree(tmp_path, {"unreleased-a.md": "- a\n"})
     (root / "CHANGELOG.md").mkdir()
     notes_file = tmp_path / "notes.md"
@@ -247,21 +202,16 @@ def test_coalesce_final_rolls_consumes_and_rerenders(tmp_path, capsys):
         )
         == 0
     )
-    # The section was written, the fragments consumed…
     section = (root / "CHANGELOG" / "1.2.3.md").read_text()
     assert section == "## 1.2.3 - 2026-07-08\n\n- a\n- b\n"
     assert not (root / "CHANGELOG" / "unreleased-a.md").exists()
     assert not (root / "CHANGELOG" / "unreleased-b.md").exists()
-    # …the ONE notes text is the section body byte-for-byte (story 26)…
     assert notes_file.read_text() == "- a\n- b\n"
-    # …and the projection moved in the same step: the sync check stays green.
     capsys.readouterr()
     assert verb.run_check(str(root), repo_root=_no_git) == 0
 
 
 def test_coalesce_bad_notes_out_refuses_without_mutating(tmp_path, capsys):
-    # A --notes-out that cannot be written (here: a directory) is a refusal
-    # BEFORE the tree is touched — the cut must never land with no notes.
     root = _tree(tmp_path, {"unreleased-a.md": "- a\n"})
     _render_into(root)
     before = (root / "CHANGELOG.md").read_text()
@@ -279,14 +229,12 @@ def test_coalesce_bad_notes_out_refuses_without_mutating(tmp_path, capsys):
         == 1
     )
     assert "error" in capsys.readouterr().err.lower()
-    # Nothing mutated: fragment kept, no section written, projection untouched.
     assert (root / "CHANGELOG" / "unreleased-a.md").exists()
     assert not (root / "CHANGELOG" / "1.2.3.md").exists()
     assert (root / "CHANGELOG.md").read_text() == before
 
 
 def test_coalesce_notes_out_creates_missing_parent_dirs(tmp_path, capsys):
-    # A --notes-out under a not-yet-existing directory is created, not a failure.
     root = _tree(tmp_path, {"unreleased-a.md": "- a\n"})
     _render_into(root)
     capsys.readouterr()
@@ -305,8 +253,6 @@ def test_coalesce_notes_out_creates_missing_parent_dirs(tmp_path, capsys):
 
 
 def test_coalesce_unwritable_notes_parent_refuses_without_mutating(tmp_path, capsys):
-    # The writability preflight also catches an unusable parent (here: a file
-    # where a directory is needed) BEFORE the cut lands — no partial mutation.
     root = _tree(tmp_path, {"unreleased-a.md": "- a\n"})
     _render_into(root)
     before = (root / "CHANGELOG.md").read_text()
@@ -338,10 +284,8 @@ def test_coalesce_prerelease_extracts_and_keeps_fragments(tmp_path, capsys):
         verb.run_coalesce("1.2.3-rc.1", str(root), repo_root=_no_git, today=_today) == 0
     )
     captured = capsys.readouterr()
-    # Without --notes-out the notes ARE stdout (pipe-able); the report is stderr.
     assert captured.out == "- a\n"
     assert "prerelease 1.2.3-rc.1" in captured.err
-    # Nothing mutated: fragments kept for the final, projection untouched.
     assert (root / "CHANGELOG" / "unreleased-a.md").exists()
     assert not (root / "CHANGELOG" / "1.2.3-rc.1.md").exists()
     assert (root / "CHANGELOG.md").read_text() == before
@@ -356,8 +300,6 @@ def test_coalesce_empty_release_refused(tmp_path, capsys):
 
 
 def test_coalesce_requires_a_valid_supplied_version(tmp_path, capsys):
-    # ADR-0041 at the verb surface: a bump word or v-prefix is refused; the
-    # version is never inferred here.
     root = _tree(tmp_path, {"unreleased-a.md": "- a\n"})
     assert verb.run_coalesce("minor", str(root), repo_root=_no_git) == 1
     assert "must be valid semver" in capsys.readouterr().err
@@ -366,8 +308,6 @@ def test_coalesce_requires_a_valid_supplied_version(tmp_path, capsys):
 
 
 def test_coalesce_resume_reemits_identical_notes(tmp_path, capsys):
-    # ADR-0009: after a cut (tag exists), re-running coalesce re-emits the SAME
-    # notes text from the committed section — no fragments needed, no mutation.
     root = _tree(tmp_path, {"unreleased-a.md": "- a\n"})
     _render_into(root)
     first = tmp_path / "first.md"
@@ -396,16 +336,7 @@ def test_coalesce_refuses_new_fragments_over_a_cut_section(tmp_path, capsys):
     assert "refusing to overwrite" in capsys.readouterr().err
 
 
-# --------------------------------------------------------------------------
-# The lane and the CLI wiring — one definition, laptop and CI identical
-# --------------------------------------------------------------------------
-
-
 def test_changelog_sync_lane_runs_this_verb():
-    # The declared Lane's `run` is the exact `shipit changelog check`
-    # invocation (story 18): what WS05's planner routes in CI is what a laptop
-    # runs — one definition. The scaffold constant and a consumer's own
-    # `[lanes]` declaration parse to the same typed Lane.
     lane = config.CHANGELOG_SYNC_LANE
     assert lane.run == "changelog check"
     assert lane.trigger == "pr"
@@ -430,29 +361,17 @@ def test_cli_check_end_to_end(tmp_path, capsys, monkeypatch):
     assert "changelog: OK" in capsys.readouterr().out
 
 
-# --------------------------------------------------------------------------
-# render_current — the install reconcile's changelog seam (TOL01-WS08 #578)
-# --------------------------------------------------------------------------
-
-
 def test_render_current_is_none_without_the_fragment_model(tmp_path):
-    # No CHANGELOG/ directory: install has nothing to say — None, never the
-    # hard refusal `check` raises (a consumer without the convention must
-    # reconcile cleanly).
     assert verb.render_current(tmp_path) is None
 
 
 def test_render_current_is_none_on_unparseable_version_names(tmp_path):
-    # A mis-named section would silently vanish from a render, so the seam
-    # declines to answer rather than hand install a lossy projection.
     root = _tree(tmp_path, {"unreleased-x.md": "- x\n"})
     (root / "CHANGELOG" / "not-semver.md").write_text("bad\n", encoding="utf-8")
     assert verb.render_current(root) is None
 
 
 def test_render_current_matches_the_verb_render(tmp_path):
-    # The seam returns exactly what `shipit changelog render` would write —
-    # one renderer, so the reconcile's refresh and the check's verdict agree.
     root = _tree(tmp_path, {"unreleased-x.md": "- Added the thing\n"})
     rendered = verb.render_current(root)
     _render_into(root)
@@ -460,18 +379,11 @@ def test_render_current_matches_the_verb_render(tmp_path):
     assert core.sync_diff(rendered, rendered) is None
 
 
-# --------------------------------------------------------------------------
-# check-fragment — the PR-time fragment-PRESENCE gate (issue #1073)
-# --------------------------------------------------------------------------
-
-
 def _boom_presence() -> bool:
     raise AssertionError("CHANGELOG/ must not be read on an exempt base")
 
 
 def test_fragment_gate_passes_off_a_pr():
-    # Empty base ref = not a PR context (laptop/lefthook): the gate never blocks
-    # and never reads CHANGELOG/ — the presence thunk raises to prove it.
     verdict = verb.decide_fragment_gate(
         base_ref="", has_unreleased_fragment=_boom_presence
     )
@@ -480,8 +392,6 @@ def test_fragment_gate_passes_off_a_pr():
 
 
 def test_fragment_gate_passes_on_a_non_main_base():
-    # A WS PR targets an epic branch, not main: exempt (the umbrella PR to main
-    # carries the fragment). The presence thunk is never invoked off a main base.
     verdict = verb.decide_fragment_gate(
         base_ref="ADP02", has_unreleased_fragment=_boom_presence
     )
@@ -490,9 +400,6 @@ def test_fragment_gate_passes_on_a_non_main_base():
 
 
 def test_fragment_gate_presence_thunk_is_lazy_only_read_when_gated():
-    # The presence read is a THUNK the pure decision calls only on the gated
-    # branch (base == main), never before the base short-circuits — so an exempt
-    # run issues no filesystem read at all. Record calls.
     calls: list[str] = []
 
     def _presence() -> bool:
@@ -502,7 +409,6 @@ def test_fragment_gate_presence_thunk_is_lazy_only_read_when_gated():
     verb.decide_fragment_gate(base_ref="", has_unreleased_fragment=_presence)
     verb.decide_fragment_gate(base_ref="ADP02", has_unreleased_fragment=_presence)
     assert calls == []
-    # Gated (base == main): now it IS consulted.
     verb.decide_fragment_gate(base_ref="main", has_unreleased_fragment=_presence)
     assert calls == ["read"]
 
@@ -516,8 +422,6 @@ def test_fragment_gate_passes_when_a_fragment_is_present():
 
 
 def test_fragment_gate_fails_on_main_with_no_fragment():
-    # The exact empty-release condition, asked at PR time: base main + no
-    # unreleased fragment fails, and the message points at the cut's own refusal.
     verdict = verb.decide_fragment_gate(
         base_ref="main", has_unreleased_fragment=lambda: False
     )
@@ -527,8 +431,6 @@ def test_fragment_gate_fails_on_main_with_no_fragment():
 
 
 def test_run_check_fragment_passes_when_changelog_has_a_fragment(tmp_path, capsys):
-    # The runner's DEFAULT seam reads _read_tree over the resolved root: a
-    # CHANGELOG/ carrying an unreleased fragment passes on base main.
     root = _tree(tmp_path, {"unreleased-x.md": "- a change\n"})
     rc = verb.run_check_fragment(str(root), base_ref="main")
     assert rc == 0
@@ -536,17 +438,13 @@ def test_run_check_fragment_passes_when_changelog_has_a_fragment(tmp_path, capsy
 
 
 def test_run_check_fragment_fails_on_main_with_an_empty_changelog(tmp_path, capsys):
-    # A CHANGELOG/ with no unreleased fragment fails on base main (exit 1).
-    root = _tree(tmp_path)  # CHANGELOG/ exists but holds no fragment
+    root = _tree(tmp_path)
     rc = verb.run_check_fragment(str(root), base_ref="main")
     assert rc == 1
     assert "no CHANGELOG/unreleased-*.md fragment present" in capsys.readouterr().out
 
 
 def test_run_check_fragment_default_seam_uses_classify_dir_discovery(tmp_path, capsys):
-    # The presence answer is _read_tree's fragment set — core.classify_dir over
-    # CHANGELOG/, the SAME discovery the cut uses. A version section (1.0.0.md),
-    # not an unreleased fragment, does NOT satisfy the gate.
     root = _tree(tmp_path, {"1.0.0.md": "## 1.0.0\n"})
     rc = verb.run_check_fragment(str(root), base_ref="main")
     assert rc == 1
@@ -554,7 +452,6 @@ def test_run_check_fragment_default_seam_uses_classify_dir_discovery(tmp_path, c
 
 
 def test_run_check_fragment_passes_off_a_pr(tmp_path, capsys):
-    # Empty base (laptop / not a PR): passes even with an empty CHANGELOG/.
     root = _tree(tmp_path)
     rc = verb.run_check_fragment(str(root), base_ref="")
     assert rc == 0
@@ -562,8 +459,6 @@ def test_run_check_fragment_passes_off_a_pr(tmp_path, capsys):
 
 
 def test_run_check_fragment_reads_base_ref_from_env(tmp_path, capsys, monkeypatch):
-    # base_ref defaults to GITHUB_BASE_REF. Setting it to main over an empty
-    # CHANGELOG/ fires the gate (exit 1); no env means off-PR (exit 0).
     root = _tree(tmp_path)
     monkeypatch.setenv("GITHUB_BASE_REF", "main")
     assert verb.run_check_fragment(str(root)) == 1
@@ -573,8 +468,6 @@ def test_run_check_fragment_reads_base_ref_from_env(tmp_path, capsys, monkeypatc
 
 
 def test_run_check_fragment_read_tree_seam_is_injectable(tmp_path, capsys):
-    # The fragment-presence read is injectable at one seam (mirroring the other
-    # runners): a stub tree carrying a fragment passes on base main.
     stub = verb.ChangelogTree(
         root=tmp_path,
         has_dir=True,
@@ -591,9 +484,6 @@ def test_run_check_fragment_read_tree_seam_is_injectable(tmp_path, capsys):
 
 
 def test_run_check_fragment_does_not_read_the_tree_on_exempt_bases(tmp_path, capsys):
-    # The runner defers the tree read behind the base short-circuit: an exempt
-    # run (empty base, or a non-main base) must PASS without invoking read_tree,
-    # so an inaccessible/non-UTF-8 fragment can never fail a run needing none.
     def _boom(_root):
         raise AssertionError("read_tree must not be invoked on an exempt base")
 

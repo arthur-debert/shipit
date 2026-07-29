@@ -1,10 +1,3 @@
-"""Eval hook boundary: a terminal-hook payload -> one eval record on disk.
-
-One thin end-to-end thread per the PRD's "payload → record on disk" — plus the
-fail-open contract (eval must never break a session: any bad input is a silent
-no-op, exit 0, nothing written).
-"""
-
 from __future__ import annotations
 
 import io
@@ -20,14 +13,6 @@ from shipit.verbs.hook.eval import run
 
 @pytest.fixture
 def state_dir(monkeypatch, tmp_path):
-    """Redirect the eval store to a tmp state dir, and stub the git-identity boundary.
-
-    The store keys by `Repo` identity (origin owner/name, ADR-0024), so the hook
-    resolves a `Repo` from the payload's cwd via `identity.resolve_working_dir` —
-    which reads the origin remote. The tmp cwd is not a real checkout, so the git
-    boundary the resolver uses is stubbed to a known repo; every seeded record then
-    lands under one deterministic nested `<owner>/<name>.jsonl` store file.
-    """
     base = tmp_path / "state"
     monkeypatch.setattr(store.platformdirs, "user_state_dir", lambda *a, **k: str(base))
     monkeypatch.setattr(git, "repo_root", lambda *, cwd=None: cwd)
@@ -78,35 +63,24 @@ def test_subagent_stop_writes_a_record_with_role_and_metric(state_dir, tmp_path)
     assert rec["gen_ai.agent.name"] == "implementer"
     assert rec["eval.tool_call_count"] == 3
     assert rec["eval.tool_call_vector"] == {"Read": 1, "Bash": 1, "Edit": 1}
-    # WS03: the record now carries the implementer role-prompt content-hash.
     assert rec["eval.variant"]["content_hash"].startswith("sha256:")
     assert rec["eval.variant"]["label"] is None
-    # The typed Sha stringifies at the JSON seam: the record carries the plain
-    # lowercase full-sha string, never a repr of the value object (PROC03).
     assert rec["git.commit"] == "cafe1234" + "0" * 32
-    # A subagent run carries no exit-hygiene block (that check is coordinator-only).
     assert rec["eval.exit_hygiene.worktree_clean"] is None
 
 
 def test_subagent_with_missing_meta_gets_no_exit_hygiene(
     state_dir, tmp_path, monkeypatch
 ):
-    # A subagent run whose meta sidecar is missing parses to meta=None just like the
-    # coordinator — but it is STILL a subagent (agent-* transcript), so the
-    # coordinator-only exit-hygiene check must NOT run. The git read is patched to a
-    # clean tree so, were the check wrongly run, worktree_clean would be True; the
-    # None assertion proves the gate is on run KIND, not on `meta is None`.
     monkeypatch.setattr(git, "status_porcelain", lambda *, cwd: [])
     sub = tmp_path / "session" / "subagents"
     transcript = sub / "agent-nometa.jsonl"
-    _write_transcript(transcript, "Read")  # deliberately no agent-nometa.meta.json
+    _write_transcript(transcript, "Read")
     payload = {"transcript_path": str(transcript), "cwd": str(tmp_path)}
 
     assert run(stdin=io.StringIO(json.dumps(payload))) == 0
 
     rec = _records(state_dir)[0]
-    # Subagent role falls back to coordinator when meta is absent (pre-existing), but
-    # the exit-hygiene block must stay unstamped.
     assert rec["eval.exit_hygiene.worktree_clean"] is None
 
 
@@ -121,18 +95,12 @@ def test_stop_writes_a_coordinator_record(state_dir, tmp_path):
     assert len(records) == 1
     assert records[0]["gen_ai.agent.name"] == "coordinator"
     assert records[0]["eval.tool_call_count"] == 1
-    # The coordinator run is stamped with the coordinator role-prompt hash.
     assert records[0]["eval.variant"]["content_hash"].startswith("sha256:")
 
 
 def test_stop_stamps_the_spawned_role_from_the_launch_context(
     state_dir, tmp_path, monkeypatch
 ):
-    # #490: a headless `shipit spawn subagent --role implementer` Run is its OWN
-    # top-level session (a `<session>.jsonl`, no `.meta.json`), so the locator
-    # classifies it a coordinator. The spawn threaded the intended role into the
-    # child's env (`SHIPIT_LOG_CTX_ROLE`); the eval seam reads it and stamps the
-    # true role instead of `coordinator`.
     monkeypatch.setenv("SHIPIT_LOG_CTX_ROLE", "implementer")
     transcript = tmp_path / "57d92339.jsonl"
     _write_transcript(transcript, "Edit")
@@ -145,8 +113,6 @@ def test_stop_stamps_the_spawned_role_from_the_launch_context(
 
 
 def test_stop_without_launch_role_stays_coordinator(state_dir, tmp_path, monkeypatch):
-    # The genuine interactive coordinator carries no `SHIPIT_LOG_CTX_ROLE` — its
-    # top-level session must still stamp `coordinator`.
     monkeypatch.delenv("SHIPIT_LOG_CTX_ROLE", raising=False)
     transcript = tmp_path / "57d92339.jsonl"
     _write_transcript(transcript, "Read")
@@ -158,7 +124,6 @@ def test_stop_without_launch_role_stays_coordinator(state_dir, tmp_path, monkeyp
 
 
 def test_stop_record_carries_coordinator_exit_hygiene(state_dir, tmp_path, monkeypatch):
-    # The coordinator run runs the one live check; a clean porcelain → worktree_clean.
     monkeypatch.setattr(git, "status_porcelain", lambda *, cwd: [])
     transcript = tmp_path / "57d92339.jsonl"
     _write_transcript(transcript, "Read")
@@ -176,6 +141,5 @@ def test_stop_record_carries_coordinator_exit_hygiene(state_dir, tmp_path, monke
     "garbage", ["", "not json", "{", "[]", json.dumps({"no": "transcript"})]
 )
 def test_fails_open_writing_nothing_on_bad_input(state_dir, garbage):
-    # Malformed / empty / transcript-less input → exit 0, no record, no crash.
     assert run(stdin=io.StringIO(garbage)) == 0
     assert _records(state_dir) == []

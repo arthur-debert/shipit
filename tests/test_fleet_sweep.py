@@ -1,14 +1,3 @@
-"""The fleet verification sweep (TOL01-WS07) — unit tests for the pure
-applicability/report-assembly helpers and the orchestrator over injected
-boundaries.
-
-Per the PRD's testing decisions the WS itself is EVIDENCE-verified — the
-per-tool × per-repo report is the artifact — so these tests pin only the
-pure helpers (portfolio parse, applicability derivation, cell status, report
-shape) and the orchestrator's mechanics through fake create/exec/remove
-seams (prior art: the tool-verb recorder tests, ADR-0028).
-"""
-
 import json
 import sys
 from pathlib import Path
@@ -18,10 +7,6 @@ import pytest
 from shipit import config, execrun, fleetsweep
 from shipit.tree.create import Tree
 from shipit.verbs import fleet as fleet_verb
-
-# --------------------------------------------------------------------------
-# load_portfolio — [project.portfolio] as typed entries
-# --------------------------------------------------------------------------
 
 _PORTFOLIO = {
     "project": {
@@ -70,10 +55,10 @@ def test_load_portfolio_reads_the_custom_alias():
     "entry",
     [
         "not-a-table",
-        {"path": "x"},  # no repo
-        {"repo": "not-a-slug", "path": "x"},  # malformed slug
-        {"repo": "a/b"},  # no path
-        {"repo": "a/b", "path": "x", "expect_verify_fail": ""},  # empty reason
+        {"path": "x"},
+        {"repo": "not-a-slug", "path": "x"},
+        {"repo": "a/b"},
+        {"repo": "a/b", "path": "x", "expect_verify_fail": ""},
     ],
 )
 def test_load_portfolio_malformed_entry_names_itself(entry):
@@ -84,27 +69,18 @@ def test_load_portfolio_malformed_entry_names_itself(entry):
 
 @pytest.mark.parametrize("bad", ["/abs/checkout", "../escape", "a/../../escape"])
 def test_load_portfolio_path_must_stay_under_source_root(bad):
-    # path indexes INTO --source-root (source_root / path), so an absolute path
-    # would silently win over the join and a `..` component would escape the
-    # layout — either sweeps the wrong checkout. Rejected loud at load.
     cfg = {"project": {"portfolio": {"s": [{"repo": "a/b", "path": bad}]}}}
     with pytest.raises(config.ConfigError, match="repo-relative"):
         fleetsweep.load_portfolio(cfg)
 
 
 def test_load_portfolio_tolerates_unknown_keys():
-    # [project] is the un-policed consumer namespace: only the fields the
-    # sweep consumes are validated, extra keys pass through untouched.
     cfg = {"project": {"portfolio": {"s": [{"repo": "a/b", "path": "b", "x": 1}]}}}
     assert fleetsweep.load_portfolio(cfg)[0].repo == "a/b"
 
 
 @pytest.mark.parametrize("dup", ["a/b", "A/B"])
 def test_load_portfolio_rejects_duplicate_repo_naming_both_sites(dup):
-    # The --repo filter keys entries by canonical (lowercased) slug, so a
-    # duplicate — even a case-only one (`A/B` vs `a/b`) — would silently
-    # collapse under filtering while the full sweep runs both. Rejected loud at
-    # load, naming BOTH declaration sites so the misconfigured manifest is found.
     cfg = {
         "project": {
             "portfolio": {
@@ -121,19 +97,11 @@ def test_load_portfolio_rejects_duplicate_repo_naming_both_sites(dup):
     assert "[project.portfolio].t[0]" in msg
 
 
-# --------------------------------------------------------------------------
-# Applicability — derived from the repo's own declarations
-# --------------------------------------------------------------------------
-
-
 def _plan_map(plans):
     return {p.tool: p for p in plans}
 
 
 def test_derive_plans_only_lint_applies_everywhere():
-    # #608 (phos.photo / shipit-canary red test cells): test derives from the
-    # [toolchains] map exactly like build — a no-code repo with no map has no
-    # test lane BY DESIGN (n/a), never the verb's missing-map error.
     plans = _plan_map(
         fleetsweep.derive_plans(
             legs_declared=False, e2e_declared=False, changelog_dir=False
@@ -180,8 +148,6 @@ def test_plan_tools_reads_the_tree_declarations(tmp_path):
 
 
 def test_plan_tools_absent_declarations_are_not_applicable(tmp_path):
-    # A READABLE config with no [toolchains] map — the no-code-repo shape
-    # (#608: a firebase site, the ADP00 testbed) — proves test + build absent.
     (tmp_path / ".shipit.toml").write_text("[secrets]\n", encoding="utf-8")
     plans = _plan_map(fleetsweep.plan_tools(tmp_path))
     assert plans["lint"].applicable
@@ -192,13 +158,6 @@ def test_plan_tools_absent_declarations_are_not_applicable(tmp_path):
 
 
 def test_plan_tools_unreadable_config_runs_config_tools_changelog_follows_fs(tmp_path):
-    # A missing/malformed .shipit.toml makes the CONFIG-borne facts unprovable,
-    # so lint/test/build/e2e all run and fail with their own diagnosis — a red
-    # cell, never a silent skip. But CHANGELOG/ presence is a FILESYSTEM fact,
-    # provable regardless of the config: changelog stays not-applicable when the
-    # dir is absent even in the error fallback, and applies once it exists.
-    # "Malformed" spans bad TOML AND non-UTF-8 bytes — config.load wraps both
-    # in ConfigError (#585) — and neither may crash the sweep.
     for label, setup in (
         ("missing config", lambda: None),
         (
@@ -216,14 +175,8 @@ def test_plan_tools_unreadable_config_runs_config_tools_changelog_follows_fs(tmp
         plans = _plan_map(fleetsweep.plan_tools(tmp_path))
         assert all(plans[t].applicable for t in ("lint", "test", "build", "e2e")), label
         assert not plans["changelog"].applicable, label
-    # The convention on disk flips changelog applicable even with unreadable config.
     (tmp_path / "CHANGELOG").mkdir()
     assert all(p.applicable for p in fleetsweep.plan_tools(tmp_path))
-
-
-# --------------------------------------------------------------------------
-# cell_status — the expected-fail carve-out
-# --------------------------------------------------------------------------
 
 
 def test_cell_status_green_beats_a_declared_expectation():
@@ -240,10 +193,6 @@ def test_cell_status_declared_expectation_is_expected_fail_with_reason():
         "needs siblings",
     )
 
-
-# --------------------------------------------------------------------------
-# Report shape — red cells reproduce, absent-not-null, ADP02 seed
-# --------------------------------------------------------------------------
 
 _ENTRY = fleetsweep.PortfolioEntry(stack="s", repo="a/b", path="b")
 _XENTRY = fleetsweep.PortfolioEntry(
@@ -308,8 +257,6 @@ def test_adoption_ready_and_summaries():
     assert "adoption-ready" in green.summary()
     assert not red.adoption_ready
     assert "1 red cell(s): test" in red.summary()
-    # expected-fail is distinct from red AND from green: not adoption-ready,
-    # but not a red cell either.
     assert not xfail.adoption_ready
     assert not xfail.red
     assert "declared reason" in xfail.summary()
@@ -326,7 +273,6 @@ def test_report_verdict_and_exit_gate():
     red = fleetsweep.RepoResult(
         _ENTRY, (fleetsweep.Cell("test", fleetsweep.STATUS_FAIL),)
     )
-    # every applicable cell green or declared expected-fail → the gate holds
     assert _report([green, xfail]).verdict() == 0
     assert _report([green, red]).verdict() == 1
 
@@ -369,14 +315,7 @@ def test_format_sweep_renders_the_matrix():
     assert "1 red cell(s)" in text
 
 
-# --------------------------------------------------------------------------
-# The orchestrator — over injected create/exec/remove boundaries
-# --------------------------------------------------------------------------
-
-
 class _FakeExec:
-    """Records (argv, cwd, env); returns a scripted rc per tool subcommand."""
-
     def __init__(self, rcs=None):
         self.calls: list[tuple[tuple[str, ...], Path, dict]] = []
         self.rcs = rcs or {}
@@ -390,7 +329,6 @@ class _FakeExec:
 
 
 def _tree_factory(tmp_path, toml='[toolchains]\n"." = "python"\n'):
-    """A fake create_tree: materializes a Tree dir with a launcher + config."""
 
     def create(entry):
         root = tmp_path / "trees" / entry.repo.replace("/", "-")
@@ -422,7 +360,6 @@ def _sweep(entries, tmp_path, *, exec_fake=None, removed=None, **kwargs):
 
 def test_sweep_runs_applicable_tools_through_the_tree_launcher(tmp_path):
     report, exec_fake, removed = _sweep([_ENTRY], tmp_path)
-    # lint/test/build ran (map declared); e2e + changelog recorded n/a.
     ran = [argv[1:] for argv, _, _ in exec_fake.calls]
     assert ran == [("lint",), ("test",), ("build",)]
     row = report.repos[0]
@@ -430,10 +367,8 @@ def test_sweep_runs_applicable_tools_through_the_tree_launcher(tmp_path):
     assert by_tool["e2e"].status == fleetsweep.STATUS_NOT_APPLICABLE
     assert by_tool["changelog"].status == fleetsweep.STATUS_NOT_APPLICABLE
     assert row.adoption_ready
-    # every executed argv heads the TREE's managed launcher (ADR-0033).
     for argv, cwd, _ in exec_fake.calls:
         assert argv[0] == str(cwd / "bin" / "shipit")
-    # the Tree was torn down after its row.
     assert removed == [Path(report.repos[0].cells[0].cwd)]
 
 
@@ -443,12 +378,6 @@ def test_sweep_sets_the_sanctioned_shipit_exec_override(tmp_path):
 
 
 def test_run_tool_scrubs_leaked_pixi_env_but_keeps_path(monkeypatch, tmp_path):
-    # The swept child must be hermetic: a leaked parent PIXI_* project pointer
-    # (present when the sweep runs from shipit's own pixi env) would bind the
-    # tool to the COORDINATOR checkout, not its freshly provisioned Tree. The
-    # scrub drops it while keeping PATH and the SHIPIT_EXEC override, and the
-    # env is passed as the COMPLETE child env (replace_env=True) so no dropped
-    # pointer can creep back in via a merge over os.environ.
     monkeypatch.setenv("PIXI_PROJECT_MANIFEST", "/coordinator/pixi.toml")
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
     captured: dict = {}
@@ -472,16 +401,6 @@ def test_run_tool_scrubs_leaked_pixi_env_but_keeps_path(monkeypatch, tmp_path):
 
 
 def test_sweep_provisioned_tree_routes_through_its_own_pixi_env(tmp_path):
-    # The self-row leak regression (round-0 `arthur-debert/shipit` × test red
-    # cell): the swept tool's dispatched runners (pytest, cargo nextest, …)
-    # resolve off PATH, and the sweep's inherited PATH still FRONTS the
-    # coordinator checkout's pixi env — scrub_env drops the parent's project
-    # pointers but cannot un-edit PATH — so a bare launcher invocation let a
-    # swept shipit Tree's pytest import the CANDIDATE build's package. A
-    # provisioned Tree (.pixi/envs/default present) must therefore run
-    # through ITS OWN env: pixi run --manifest-path <tree>/pixi.toml -- …,
-    # with SHIPIT_EXEC riding through so the candidate BUILD still runs
-    # (ADR-0033: the override selects the build, never the environment).
     def provisioned(entry):
         root = tmp_path / "trees" / "prov"
         (root / "bin").mkdir(parents=True)
@@ -489,9 +408,6 @@ def test_sweep_provisioned_tree_routes_through_its_own_pixi_env(tmp_path):
         (root / ".shipit.toml").write_text(
             '[toolchains]\n"." = "python"\n', encoding="utf-8"
         )
-        # A real provisioned Tree necessarily carries the manifest the wrap
-        # points `--manifest-path` at; the fixture writes it too so the setup
-        # matches a genuine pixi Tree (has_default_env + a manifest to route).
         (root / "pixi.toml").write_text("[workspace]\n", encoding="utf-8")
         (root / ".pixi" / "envs" / "default").mkdir(parents=True)
         return Tree(path=str(root), branch="fleet-sweep-x", base="origin/main")
@@ -511,17 +427,11 @@ def test_sweep_provisioned_tree_routes_through_its_own_pixi_env(tmp_path):
         "test",
     )
     assert env["SHIPIT_EXEC"] == "/cand/shipit"
-    # The RECORDED argv is the wrapped form — the hermetic invocation a fix
-    # agent reproduces with.
     cell = {c.tool: c for c in report.repos[0].cells}["test"]
     assert cell.argv == argv
 
 
 def test_sweep_unprovisioned_tree_keeps_the_bare_launcher_argv(tmp_path):
-    # A Tree with no provisioned pixi env (a non-pixi repo) is NOT wrapped:
-    # its toolchains never resolved through pixi, and routing it through
-    # `pixi run` would fail outright — the same sentinel spawn resolves into
-    # its Work Env routing decision.
     _, exec_fake, _ = _sweep([_ENTRY], tmp_path, tools=("test",))
     ((argv, cwd, _),) = exec_fake.calls
     assert argv == (str(cwd / "bin" / "shipit"), "test")
@@ -561,16 +471,11 @@ def test_sweep_declared_expectation_renders_expected_fail(tmp_path):
     cell = {c.tool: c for c in report.repos[0].cells}["lint"]
     assert cell.status == fleetsweep.STATUS_EXPECTED_FAIL
     assert cell.reason == "declared reason"
-    # expected-fail holds no gate red…
     assert report.verdict() == 0
-    # …but the repo is not adoption-ready.
     assert not report.repos[0].adoption_ready
 
 
 def test_sweep_empty_tool_selection_refuses_loud(tmp_path):
-    # An empty selection — an empty tools tuple or only names outside
-    # SWEEP_TOOLS — would run nothing yet report 0 red cells (a false green
-    # exit gate). The domain function must refuse, not return a trivial pass.
     with pytest.raises(fleetsweep.SweepError, match="no swept tools selected"):
         _sweep([_ENTRY], tmp_path, tools=())
     with pytest.raises(fleetsweep.SweepError, match="no swept tools selected"):
@@ -595,7 +500,7 @@ def test_sweep_tree_create_failure_is_a_red_row_not_a_gap(tmp_path):
     report, exec_fake, _ = _sweep([_ENTRY], tmp_path, create_tree=broken)
     assert exec_fake.calls == []
     row = report.repos[0]
-    assert row.cells  # the row is present, never silently skipped
+    assert row.cells
     assert all(
         c.status == fleetsweep.STATUS_FAIL
         for c in row.cells
@@ -620,10 +525,6 @@ def test_sweep_missing_launcher_is_a_red_cell(tmp_path):
     assert cell.status == fleetsweep.STATUS_FAIL
     assert "launcher missing" in cell.output
 
-
-# --------------------------------------------------------------------------
-# The verb — portfolio read, selectors, report artifact
-# --------------------------------------------------------------------------
 
 _TOML = """
 [project.portfolio]
@@ -666,14 +567,11 @@ def test_run_sweep_writes_the_report_artifact(portfolio_repo, capsys):
 
 
 def test_run_sweep_json_stdout_is_a_single_json_document(portfolio_repo, capsys):
-    # Under --json, stdout is the machine surface: the "report written" courtesy
-    # note must be suppressed so stdout stays ONE valid JSON document (emit()
-    # already wrote it) — a full sweep with --json still persists the artifact.
     rc = fleet_verb.run_sweep(shipit_exec=None, as_json=True, sweep_fn=_fake_sweep)
     assert rc == 0
     out = capsys.readouterr().out
     assert "report written" not in out
-    data = json.loads(out)  # parses clean → not corrupted by a trailing line
+    data = json.loads(out)
     assert data["kind"] == "fleet-sweep-report"
 
 
@@ -698,8 +596,6 @@ def test_run_sweep_unknown_repo_selector_is_a_clean_refusal(portfolio_repo, caps
 
 
 def test_run_sweep_repo_selector_matches_case_insensitively(portfolio_repo):
-    # Selectors and portfolio slugs are normalized through the canonical parser,
-    # so a differently-cased selector still finds its repo (not "unknown").
     out = portfolio_repo / "partial.json"
     rc = fleet_verb.run_sweep(repos=("A/B",), out=out, sweep_fn=_fake_sweep)
     assert rc == 0
@@ -709,8 +605,6 @@ def test_run_sweep_repo_selector_matches_case_insensitively(portfolio_repo):
 def test_run_sweep_malformed_repo_selector_is_rejected_as_invalid(
     portfolio_repo, capsys
 ):
-    # A malformed selector is an INVALID slug, distinct from a well-formed slug
-    # that is merely absent from the portfolio.
     rc = fleet_verb.run_sweep(repos=("notaslug",), sweep_fn=_fake_sweep)
     assert rc == 1
     err = capsys.readouterr().err
@@ -721,7 +615,7 @@ def test_resolve_candidate_explicit_must_be_executable(tmp_path):
     exe = tmp_path / "shipit"
     exe.write_text("#!/bin/sh\n", encoding="utf-8")
     with pytest.raises(fleetsweep.SweepError):
-        fleetsweep.resolve_candidate(exe)  # exists but not executable
+        fleetsweep.resolve_candidate(exe)
     exe.chmod(0o755)
     assert fleetsweep.resolve_candidate(exe) == exe.resolve()
     with pytest.raises(fleetsweep.SweepError):
@@ -729,9 +623,6 @@ def test_resolve_candidate_explicit_must_be_executable(tmp_path):
 
 
 def test_resolve_candidate_implicit_resolves_bare_argv0_via_path(tmp_path, monkeypatch):
-    # The default candidate is the running build's entrypoint. Launched off PATH,
-    # sys.argv[0] is a bare name ("shipit"), not a cwd file — resolve_candidate
-    # must find it on PATH rather than refusing the executable running build.
     bindir = tmp_path / "bin"
     bindir.mkdir()
     exe = bindir / "shipit"
@@ -739,7 +630,7 @@ def test_resolve_candidate_implicit_resolves_bare_argv0_via_path(tmp_path, monke
     exe.chmod(0o755)
     monkeypatch.setattr(sys, "argv", ["shipit", "fleet", "sweep"])
     monkeypatch.setenv("PATH", str(bindir))
-    monkeypatch.chdir(tmp_path)  # cwd has no bare "shipit" file at its root
+    monkeypatch.chdir(tmp_path)
     assert fleetsweep.resolve_candidate() == exe.resolve()
 
 

@@ -1,14 +1,3 @@
-"""Unit tests for the engine's blocking wait loop (`shipit.prstate.wait`,
-RVW02-WS01 / ADR-0034) and the `reviews_in` predicate it reads.
-
-The loop is a pure composition over injected seams — a scripted status source,
-a fake clock, a recording sleep — so every behavior is proved without a
-network or real time: both `--until` conditions, the hard-deadline timeout
-path (with the final nap clamped to the deadline), state-change emission
-(one line + one ``wait.state_changed`` per CHANGE, never per tick), and the
-``wait.started`` / ``wait.fired`` / ``wait.timed_out`` flow-log records.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -59,8 +48,6 @@ def _status(
 
 
 class Clock:
-    """A fake monotonic clock + recording sleep: sleeping advances time."""
-
     def __init__(self) -> None:
         self.now = 0.0
         self.naps: list[float] = []
@@ -81,9 +68,6 @@ def _events(caplog) -> list[str]:
     ]
 
 
-# --- reviews_in: the structured predicate ------------------------------------
-
-
 def test_reviews_in_true_when_every_required_reviewer_settled():
     status = _status(
         funnel={"copilot": FunnelState.POSTED, "codex": FunnelState.FAILED}
@@ -101,9 +85,6 @@ def test_reviews_in_false_while_any_required_reviewer_holds(holding):
 
 
 def test_reviews_in_degraded_outcomes_settle():
-    # ADR-0006: failed / empty / timed-out are terminal — the review "landed"
-    # as a recorded non-delivery; the round is not held open by a broken
-    # reviewer.
     status = _status(
         funnel={
             "copilot": FunnelState.EMPTY,
@@ -115,15 +96,11 @@ def test_reviews_in_degraded_outcomes_settle():
 
 
 def test_reviews_in_missing_required_name_counts_as_holding():
-    # Absence of evidence is not a landed review: a snapshot that never
-    # evaluated a required reviewer must not read as reviews-in.
     status = _status(funnel={"copilot": FunnelState.POSTED})
     assert not reviews_in(status, ("copilot", "codex"))
 
 
 def test_reviews_in_ignores_best_effort_reviewers():
-    # Only the REQUIRED set is consulted; a best-effort reviewer still in
-    # flight never delays the round.
     status = _status(
         funnel={"copilot": FunnelState.POSTED, "gemini": FunnelState.IN_FLIGHT}
     )
@@ -131,15 +108,9 @@ def test_reviews_in_ignores_best_effort_reviewers():
 
 
 def test_reviews_in_is_not_a_state_check():
-    # A red-checks PR with its reviews landed ranks BLOCKED (#352) and an
-    # unclassified round ranks ADDRESSING (#423) — both are reviews-in; the
-    # predicate reads the funnel, never TaskState.
     for state in (TaskState.BLOCKED, TaskState.ADDRESSING):
         status = _status(state=state, funnel={"copilot": FunnelState.POSTED})
         assert reviews_in(status, ("copilot",))
-
-
-# --- satisfied: the --until vocabulary ----------------------------------------
 
 
 def test_satisfied_reviews_in_mode():
@@ -157,17 +128,12 @@ def test_satisfied_ready_mode_is_the_engine_verdict():
 
 
 def test_ready_mode_does_not_fire_on_reviews_in():
-    # reviews landed but CI still running: reviews-in fires, ready does not.
     status = _status(state=TaskState.VALIDATING, funnel={"copilot": FunnelState.POSTED})
     assert satisfied(Until.REVIEWS_IN, status, ("copilot",))
     assert not satisfied(Until.READY, status, ("copilot",))
 
 
 def test_dead_run_times_out_with_the_rerun_advice():
-    # The #621 hang guard, wait-surface half: the engine ranks a cancelled
-    # (dead) run BLOCKED with RERUN advice — NOT VALIDATING — so a
-    # `--until ready` wait on it never idles as "CI running"; it expires on
-    # the hard deadline carrying the actionable rerun line for the supervisor.
     dead = _status(
         state=TaskState.BLOCKED,
         next_action=(
@@ -182,18 +148,11 @@ def test_dead_run_times_out_with_the_rerun_advice():
     assert "gh run rerun" in result.status.next_action
 
 
-# --- actionable: the deadlock guard (#583) --------------------------------------
-
-
 def test_actionable_fires_only_for_ready_on_addressing():
-    # `addressing` is the ONE state the waiting caller must clear itself: a
-    # `--until ready` wait observing it can never fire (#583).
     addressing = _status(
         state=TaskState.ADDRESSING, funnel={"copilot": FunnelState.POSTED}
     )
     assert actionable(Until.READY, addressing)
-    # reviews-in has no deadlock: an addressing snapshot SATISFIES it (the
-    # round landed), so the wait fires normally instead of stopping early.
     assert not actionable(Until.REVIEWS_IN, addressing)
 
 
@@ -208,17 +167,11 @@ def test_actionable_fires_only_for_ready_on_addressing():
     ],
 )
 def test_actionable_is_false_for_pass_through_states(state):
-    # Every other state either progresses without the caller (reviews landing,
-    # CI finishing) or is the timeout's job (a wedged BLOCKED) — only
-    # `addressing` is guaranteed un-clearable by anyone but the waiter.
     status = _status(state=state, funnel={"copilot": FunnelState.POSTED})
     assert not actionable(Until.READY, status)
 
 
 def test_ready_wait_stops_early_on_addressing():
-    # The #583 trap: reviews re-land with findings while the caller is parked
-    # behind `--until ready`. The wait must return promptly with the DISTINCT
-    # outcome instead of polling a state only its caller can clear.
     pending = _status(funnel={"copilot": FunnelState.REQUESTED})
     addressing = _status(
         state=TaskState.ADDRESSING,
@@ -228,15 +181,12 @@ def test_ready_wait_stops_early_on_addressing():
     result, clock = _run([pending, addressing], Until.READY, timeout=1800.0, poll=60.0)
     assert result.outcome is Outcome.ACTIONABLE
     assert result.ticks == 2
-    # It stopped on the tick that observed addressing — no further naps.
     assert clock.naps == [60.0]
     assert result.status.state is TaskState.ADDRESSING
     assert result.status.next_action == "classify 1 finding(s)"
 
 
 def test_reviews_in_wait_fires_on_an_addressing_snapshot():
-    # The guard never intercepts a reviews-in wait: addressing IS reviews-in
-    # (the round landed), so the wait fires as satisfied, not actionable.
     addressing = _status(
         state=TaskState.ADDRESSING, funnel={"copilot": FunnelState.POSTED}
     )
@@ -267,9 +217,6 @@ def test_flow_log_actionable_event(caplog):
     assert record.state == "addressing"
 
 
-# --- wait_for: the loop --------------------------------------------------------
-
-
 def _run(statuses, until, timeout=600.0, poll=60.0, on_change=None):
     clock = Clock()
     feed = iter(statuses)
@@ -294,7 +241,7 @@ def test_fires_immediately_when_condition_already_holds():
     )
     assert result.outcome is Outcome.FIRED
     assert result.ticks == 1
-    assert clock.naps == []  # no sleep before the first poll
+    assert clock.naps == []
 
 
 def test_polls_at_the_fixed_interval_until_fired():
@@ -317,10 +264,7 @@ def test_timeout_returns_the_distinct_outcome_with_the_last_status():
     )
     result, clock = _run([pending] * 10, Until.REVIEWS_IN, timeout=150.0, poll=60.0)
     assert result.outcome is Outcome.TIMED_OUT
-    # The state report rides the result: the caller renders the next-action line.
     assert "copilot" in result.status.next_action
-    # The final nap is CLAMPED to the remaining deadline (60, 60, then 30) so
-    # expiry is prompt — never up to a full interval late.
     assert clock.naps == [60.0, 60.0, 30.0]
     assert result.ticks == 4
     assert result.waited_seconds == 150.0
@@ -348,14 +292,10 @@ def test_on_change_fires_per_change_not_per_tick():
         on_change=lambda s: seen.append(s.state.value),
     )
     assert result.outcome is Outcome.FIRED
-    # First observation is a change from nothing; the two unchanged re-reads
-    # emit nothing; the move emits once.
     assert seen == ["reviews_pending", "validating"]
 
 
 def test_next_action_movement_counts_as_a_change():
-    # The lifecycle state can stay put while a reviewer lands — the engine's
-    # next-action line moves, and the tailer must see it.
     first = _status(next_action="waiting on: copilot, codex")
     second = _status(next_action="waiting on: codex")
     fired = _status(funnel={"copilot": FunnelState.POSTED})
@@ -378,8 +318,6 @@ def test_flow_log_events_started_changed_fired(caplog):
     names = _events(caplog)
     assert names[0] == "wait.started"
     assert names[-1] == "wait.fired"
-    # Two observed states (pending, then landed) → exactly two change events;
-    # the unchanged middle tick leaves no record.
     assert names.count("wait.state_changed") == 2
     fired = [
         r for r in caplog.records if getattr(r, events.EXTRA_KEY, None) == "wait.fired"
@@ -405,16 +343,12 @@ def test_flow_log_timeout_event(caplog):
         for r in caplog.records
         if getattr(r, events.EXTRA_KEY, None) == "wait.timed_out"
     ]
-    # The event message carries the next-action state report, with no
-    # "still waiting on:" prefix duplicating its own "waiting on …" lead.
     message = timed_out[0].getMessage()
     assert message.endswith("— waiting on required review(s): copilot")
     assert "waiting on required review(s): waiting on" not in message
 
 
 def test_wait_event_names_are_registered():
-    # The closed vocabulary (ADR-0032) carries the waiter's four names — a
-    # typo'd emit would raise, so pin the registration.
     for name in (
         "wait.started",
         "wait.state_changed",
@@ -426,8 +360,6 @@ def test_wait_event_names_are_registered():
 
 
 def test_poll_source_errors_propagate():
-    # A real gh/auth failure must NOT be retried until the deadline: it is an
-    # error, not a state to wait through.
     def boom():
         raise RuntimeError("gh exploded")
 
@@ -446,7 +378,6 @@ def test_poll_source_errors_propagate():
 
 
 def test_shipped_default_interval_is_documented_60s():
-    # ADR-0034: the documented default the config override replaces.
     assert POLL_INTERVAL_SECONDS == 60
 
 

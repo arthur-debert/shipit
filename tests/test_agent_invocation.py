@@ -1,10 +1,3 @@
-"""agent.invocation — Model / Provider / ReasoningLevel / Invocation (ADR-0025 / COR01-WS02).
-
-Pins the orthogonality contract (a cross-provider Backend×Model pairing is expressible),
-the Model identity rule (id alone), and the observed/intended Invocation capture the eval
-record threads.
-"""
-
 from __future__ import annotations
 
 from shipit.agent import invocation as inv
@@ -17,8 +10,6 @@ from shipit.agent.invocation import (
 
 
 def test_model_identity_is_the_id_alone():
-    # Provider + reasoning capability are NOT part of identity: the same id enriched
-    # with a provider hashes/compares identically (CONTEXT.md "Model").
     bare = Model(id="gpt-5.5")
     enriched = Model(
         id="gpt-5.5",
@@ -51,9 +42,6 @@ def test_model_of_id_fills_known_providers():
 
 
 def test_cross_provider_backend_model_pairing_is_expressible():
-    # ADR-0025: Backend×Model validity is a LOOKUP, not a structural constraint — a
-    # cross-provider pairing must CONSTRUCT freely (the harness expresses it, then
-    # measures whether it worked). `supports` merely reports known-good membership.
     anthropic_model = Model(id="claude-opus", provider=Provider.ANTHROPIC)
     invocation = Invocation(
         backend="codex",
@@ -61,8 +49,8 @@ def test_cross_provider_backend_model_pairing_is_expressible():
         reasoning_level=ReasoningLevel.HIGH,
         permission_mode="bypassPermissions",
     )
-    assert invocation.model is anthropic_model  # no error, fully expressible
-    assert inv.supports("codex", anthropic_model) is False  # not a known-good pairing
+    assert invocation.model is anthropic_model
+    assert inv.supports("codex", anthropic_model) is False
     assert inv.supports("codex", inv.model_of_id("gpt-5.5")) is True
     assert inv.supports("antigravity", inv.model_of_id("Gemini 3.1 Pro (High)")) is True
     assert inv.supports("nope", inv.model_of_id("gpt-5.5")) is False
@@ -110,23 +98,18 @@ def test_observed_from_meta_reads_the_run_config():
 
 
 def test_observed_from_meta_defaults_backend_to_claude_and_tolerates_gaps():
-    # The terminal eval hooks fire for Claude Code runs, so an unspecified backend is
-    # claude; missing fields are None, never an error (the record stays valid).
     obs = inv.observed_from_meta({"model": "claude-sonnet-4"})
     assert obs.backend == "claude"
     assert obs.model.provider is Provider.ANTHROPIC
     assert obs.reasoning_level is None
     assert obs.permission_mode is None
-    # An empty / None meta still yields a valid observed invocation.
     assert inv.observed_from_meta(None).backend == "claude"
     assert inv.observed_from_meta({}).model is None
 
 
 def test_intended_from_meta_is_a_seam_none_until_stamped():
-    # No `invocation` intent block → None (only the observed side is recorded).
     assert inv.intended_from_meta({"model": "gpt-5.5"}) is None
     assert inv.intended_from_meta(None) is None
-    # When the spawn surface stamps intent, it is read tolerantly.
     intent = inv.intended_from_meta(
         {
             "invocation": {

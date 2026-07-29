@@ -1,16 +1,3 @@
-"""The requested-reviewers fetch path — the gh-CLI Bot-omission regression.
-
-`gh pr view --json reviewRequests` silently omits Bot-typed requested
-reviewers: after `gh pr edit --add-reviewer @copilot`, REST shows
-`requested_reviewers: [{login: "Copilot", type: "Bot"}]` while gh's JSON field
-returns `[]`. Sourced from that field, `CopilotAdapter.detect()` could NEVER
-read REQUESTED — `pr status` kept demanding "request for the current head"
-even with the request already pending. Requested reviewers therefore come from
-GraphQL `reviewRequests` (whose union includes Bots), riding along on the
-review-threads query. These tests pin `gather()`'s assembly of that path with
-the network mocked at the gh-adapter boundary.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -23,14 +10,10 @@ from shipit.prstate.reviewers import CopilotAdapter
 from shipit.prstate.reviewers_config import default_roster
 from shipit.prstate.roster import Roster, RosterEntry
 
-# Full, validated commit identities (COR02) for the wire fixtures.
 HEAD = "abc1234" + "0" * 33
 OLD = "dead" * 10
 NEW = "beef" * 10
 
-# The typed PR target (CLI01-WS02 / ADR-0030): the repo identity rides in on the
-# PrId — minted once at the verb boundary — so the fetch path never resolves the
-# ambient repo itself.
 REPO = repo_from_slug("owner/repo")
 TARGET = PrId(repo=REPO, number=558)
 
@@ -44,8 +27,6 @@ def _graphql_page(
         "repository": {
             "pullRequest": {
                 "reviewRequests": {"nodes": review_requests},
-                # The ReviewRequestedEvent timeline (WS03): the request-edge times
-                # the App reviewer's wait window ages against.
                 "timelineItems": {"nodes": timeline or []},
                 "reviewThreads": {
                     "pageInfo": {"hasNextPage": False, "endCursor": None},
@@ -62,8 +43,6 @@ def _wire(
     timeline: list[dict] | None = None,
     head_ref: str = "issues/558/work",
 ):
-    # The former per-gather ambient `gh repo view` shellout is DELETED (WS02):
-    # any call to it from the fetch path is a regression and fails the test.
     monkeypatch.setattr(
         fetch.gh,
         "current_repo",
@@ -75,8 +54,6 @@ def _wire(
         fetch.gh,
         "pr_meta",
         lambda pr: {
-            # The live gh-view payload: no reviewRequests key at all (pr_meta
-            # no longer asks for the field gh renders wrong for Bots).
             "number": 558,
             "headRefOid": HEAD,
             "headRefName": head_ref,
@@ -95,8 +72,6 @@ def _wire(
 
 
 def test_bot_typed_request_yields_copilot_requested(monkeypatch):
-    # The regression: a Bot-typed requested reviewer (login "Copilot") must
-    # surface in requested_logins and read as REQUESTED through the adapter.
     _wire(monkeypatch, [{"requestedReviewer": {"login": "Copilot"}}])
     ctx = fetch.gather(TARGET, default_roster())
     assert ctx.requested_logins == ["Copilot"]
@@ -104,8 +79,6 @@ def test_bot_typed_request_yields_copilot_requested(monkeypatch):
 
 
 def test_team_request_surfaces_by_slug(monkeypatch):
-    # Team nodes carry `slug`, not `login`; a null requestedReviewer (e.g. a
-    # deleted account) is skipped rather than crashing the fetch.
     _wire(
         monkeypatch,
         [
@@ -125,13 +98,6 @@ def test_no_pending_requests_reads_not_requested(monkeypatch):
 
 
 def test_gather_threads_the_prid_identity_not_an_ambient_resolution(monkeypatch):
-    """WS02 (#336): the PrId is the ONE identity source for the whole gather.
-
-    The composed view carries the target's repo, the GraphQL variables are read
-    off it (owner/name/number), and the typed `pr_meta` read receives the PrId
-    itself — while `_wire`'s fail-loud `current_repo` guard proves the former
-    per-gather ambient shellout is gone.
-    """
     _wire(monkeypatch, [])
     seen: dict = {}
 
@@ -162,10 +128,6 @@ def test_gather_threads_the_prid_identity_not_an_ambient_resolution(monkeypatch)
 
 
 def test_review_requested_edge_time_carried_for_the_app_wait_window(monkeypatch):
-    # WS03: the App reviewer's `review_requested` edge time comes from the timeline
-    # (GraphQL `reviewRequests` has none), keyed by login. The LATEST event per login
-    # wins — a re-request supersedes an earlier one — so the current edge's age is
-    # what the wait window measures.
     _wire(
         monkeypatch,
         [{"requestedReviewer": {"login": "Copilot"}}],
@@ -184,9 +146,6 @@ def test_review_requested_edge_time_carried_for_the_app_wait_window(monkeypatch)
     assert ctx.requested_at == {"Copilot": "2026-01-01T00:10:00Z"}
 
 
-# --- the light skip-decision fetch (release#852) ----------------------------
-
-
 def _reviews_page(
     review_requests: list[dict],
     reviews: list[dict],
@@ -195,10 +154,6 @@ def _reviews_page(
     is_draft: bool = False,
     head_ref: str = "issues/558/work",
 ) -> dict:
-    # The light query now selects the full PR core (number/isDraft/baseRefName/
-    # mergeStateStatus) alongside the head sha, so the core rides on the ONE call
-    # already in flight and `gather_reviews` no longer hardcodes `is_draft` —
-    # plus headRefName, feeding the ADR-0032 epic/ws derivation at the seam.
     return {
         "repository": {
             "pullRequest": {
@@ -216,10 +171,6 @@ def _reviews_page(
 
 
 def test_gather_reviews_fetches_only_the_skip_decision_inputs(monkeypatch):
-    # release#852: the bare-request skip path uses a LIGHT fetch — one GraphQL
-    # call for head sha + reviews + requested reviewers + rerun policy, and NO
-    # threads-cursor walk or reactions/issue-comment REST pagination. `rest` is
-    # wired to blow up so any stray pagination fails the test.
     monkeypatch.setattr(
         fetch.gh,
         "current_repo",
@@ -255,16 +206,12 @@ def test_gather_reviews_fetches_only_the_skip_decision_inputs(monkeypatch):
     )
     ctx = fetch.gather_reviews(TARGET, default_roster())
     assert ctx.head_sha == Sha(HEAD)
-    # The core is REAL now, not hardcoded: the light path reads `is_draft` off its
-    # own query (the killed `is_draft=False` trap) and composes the PR identity.
     assert ctx.is_draft is True
     assert ctx.pr.number == 558
     assert ctx.requested_logins == ["Copilot"]
     assert [(r.review_id, r.author, r.commit_id) for r in ctx.reviews] == [
         (11, "Copilot", Sha(HEAD))
     ]
-    # A counting review on the head → DONE (review-once any-head); the skip
-    # decision is correct off the light context.
     assert CopilotAdapter().detect(ctx) in (
         ReviewLifecycle.DONE_CLEAN,
         ReviewLifecycle.DONE_COMMENTS,
@@ -272,9 +219,6 @@ def test_gather_reviews_fetches_only_the_skip_decision_inputs(monkeypatch):
 
 
 def test_gather_reviews_threads_the_rerun_policy(monkeypatch):
-    # The rerun policy must ride on the light context so detect() is head-strict
-    # for rerun=True reviewers. With copilot rerun=True and the only review on an
-    # OLD head, copilot is stale → reads back REQUESTED (still pending), not DONE.
     monkeypatch.setattr(fetch.gh, "rest", lambda *a, **k: [])
     roster = Roster((RosterEntry(name="copilot", required=True, rerun=True),))
     monkeypatch.setattr(
@@ -298,14 +242,7 @@ def test_gather_reviews_threads_the_rerun_policy(monkeypatch):
     assert CopilotAdapter().detect(ctx) is ReviewLifecycle.REQUESTED
 
 
-# --- epic/ws binding at the fetch seam (LOG04-WS01 / ADR-0032) ---------------
-
-
 def test_gather_reviews_binds_epic_ws_from_a_namespaced_head_branch(monkeypatch):
-    # The PR verbs' per-operation binding: a slash-namespaced head (ADR-0016)
-    # derives epic + ws (int) and binds them at the SAME seam as pr/repo, so
-    # every subsequent record — the request service's review.requested event
-    # included — carries them.
     from shipit import logcontext
 
     monkeypatch.setattr(
@@ -317,12 +254,10 @@ def test_gather_reviews_binds_epic_ws_from_a_namespaced_head_branch(monkeypatch)
     bound = logcontext.bound()
     assert bound["pr"] == TARGET.number
     assert bound["epic"] == "RVW01"
-    assert bound["ws"] == 2  # the int, never the WS02 display form
+    assert bound["ws"] == 2
 
 
 def test_gather_reviews_binds_nothing_for_a_non_namespaced_head(monkeypatch):
-    # Absent keys stay absent (present-when-bound): a standalone-issue head
-    # carries no epic/ws identity, so none is bound — never a placeholder.
     from shipit import logcontext
 
     monkeypatch.setattr(
@@ -337,29 +272,20 @@ def test_gather_reviews_binds_nothing_for_a_non_namespaced_head(monkeypatch):
 
 
 def test_gather_binds_epic_ws_from_the_meta_head_branch(monkeypatch):
-    # The full gather binds the same way, off the pr_meta node's headRefName.
     from shipit import logcontext
 
     _wire(monkeypatch, [], head_ref="LOG04/umbrella")
     fetch.gather(TARGET, default_roster())
     bound = logcontext.bound()
     assert bound["epic"] == "LOG04"
-    assert "ws" not in bound  # the umbrella carries the epic only
+    assert "ws" not in bound
 
 
 def test_fetch_seam_head_branch_is_authoritative_over_stale_identity(monkeypatch):
-    # The head branch OWNS epic/ws at the fetch seam: a prior operation's
-    # identity, still bound in this process, must not leak into a later PR's
-    # records. `logcontext.bind` drops None (it can never clear a key), so the
-    # seam unbinds first — an umbrella head drops the stale ws, a non-namespaced
-    # head drops both. Regression for the stale-context leak (codex/Copilot).
     from shipit import logcontext
 
-    # A previous WS02 operation left epic/ws bound in this process.
     logcontext.bind(epic="RVW01", ws=2)
 
-    # Now the engine fetches an umbrella PR: epic is replaced, the stale ws is
-    # gone (the umbrella carries no Work Stream).
     monkeypatch.setattr(
         fetch.gh,
         "graphql",
@@ -370,8 +296,6 @@ def test_fetch_seam_head_branch_is_authoritative_over_stale_identity(monkeypatch
     assert bound["epic"] == "LOG04"
     assert "ws" not in bound
 
-    # And a standalone-issue PR fetched next clears BOTH — no placeholder, the
-    # earlier epic does not survive either.
     monkeypatch.setattr(
         fetch.gh,
         "graphql",
@@ -381,9 +305,6 @@ def test_fetch_seam_head_branch_is_authoritative_over_stale_identity(monkeypatch
     bound = logcontext.bound()
     assert "epic" not in bound
     assert "ws" not in bound
-
-
-# --- identity/decision fields die loudly at the wire boundary (#330) --------
 
 
 def _thread_node(**overrides) -> dict:
@@ -408,8 +329,6 @@ def _thread_node(**overrides) -> dict:
 
 
 def test_gather_reviews_rejects_malformed_review_database_id(monkeypatch):
-    # The GraphQL light path: a non-int (or bool) databaseId is a malformed
-    # review node and raises at the parse site, naming the wire field.
     monkeypatch.setattr(
         fetch.gh,
         "graphql",
@@ -451,8 +370,6 @@ def test_thread_id_must_be_non_empty_str():
 
 
 def test_is_resolved_must_be_exact_bool():
-    # The readiness gate: a truthy non-bool like "false" must never read as
-    # resolved — it raises instead.
     for bad in ("false", "true", 1, None):
         with pytest.raises(ValueError, match="isResolved must be a bool"):
             fetch._thread(_thread_node(isResolved=bad))
@@ -467,9 +384,6 @@ def test_comment_database_id_must_be_int():
 
 
 def test_comment_review_id_none_allowed_but_present_must_be_int():
-    # `review_id` associates the comment with its round in build_rounds();
-    # a detached comment reads as None, but a present value must be an exact
-    # int — a malformed "11" or True must never silently break the association.
     node = _thread_node()
     node["comments"]["nodes"][0]["pullRequestReview"] = None
     assert fetch._thread(node).comments[0].review_id is None
@@ -483,27 +397,10 @@ def test_comment_review_id_none_allowed_but_present_must_be_int():
 
 
 def test_commit_id_boundary_none_stays_none_and_present_is_validated():
-    """`_commit_id` distinguishes an absent oid from a present-but-malformed one.
-
-    A review that carries no commit reads as honestly-unknown ``None``. A present
-    value — including an empty string, the classic silent-falsey trap — is handed
-    to :class:`Sha`, which raises loudly rather than masquerading as unknown (the
-    fail-loud staleness boundary this WS exists to add).
-    """
     assert fetch._commit_id(None) is None
     assert fetch._commit_id(HEAD) == Sha(HEAD)
     with pytest.raises(ValueError):
         fetch._commit_id("")
-
-
-# --- review.received: the gather is the first sight of a landed review ------
-# (LOG04-WS02 / ADR-0032). The engine never posts a remote reviewer's review,
-# so the FULL gather — the snapshot every `pr status` / `pr next` decision
-# reads — is the strongest witnessing seam there is. First sight is scoped by
-# the `events.Sightings` registry, a passed value (ADR-0021 rule 4): one
-# invocation gathers up to three times threading ONE registry and must tag
-# each landed review exactly once; the record carries the review's own
-# identity flat, so a reader dedupes on data.
 
 
 def _wire_with_reviews(monkeypatch, reviews_json: list[dict]) -> None:
@@ -540,9 +437,6 @@ def test_gather_tags_each_landed_review_once_per_invocation(monkeypatch, caplog)
             {"id": 12, "user": {"login": "codex-bot"}, "state": "APPROVED"},
         ],
     )
-    # The verb's invocation-wide first-sight registry (ADR-0021 rule 4: a
-    # passed value, no module global) — `pr next` threads ONE across its
-    # gathers exactly like this.
     sightings = events.Sightings()
     with caplog.at_level(_logging.INFO, logger="shipit.prstate"):
         fetch.gather(TARGET, default_roster(), sightings=sightings)
@@ -553,16 +447,11 @@ def test_gather_tags_each_landed_review_once_per_invocation(monkeypatch, caplog)
     }
     assert all(r.pr == TARGET.number for r in tagged)
 
-    # A re-gather in the same invocation (pr next gathers again for the guarded
-    # flip, threading the SAME registry) re-reads the same reviews — NOT a new
-    # milestone, nothing re-tagged.
     caplog.clear()
     with caplog.at_level(_logging.INFO, logger="shipit.prstate"):
         fetch.gather(TARGET, default_roster(), sightings=sightings)
     assert not _received_records(caplog)
 
-    # A FRESH invocation (its own registry) legitimately re-witnesses what it
-    # re-reads — the old process-global set is gone, the scope is the value.
     caplog.clear()
     with caplog.at_level(_logging.INFO, logger="shipit.prstate"):
         fetch.gather(TARGET, default_roster())
@@ -572,8 +461,6 @@ def test_gather_tags_each_landed_review_once_per_invocation(monkeypatch, caplog)
 def test_gather_does_not_sight_a_pending_review(monkeypatch, caplog):
     import logging as _logging
 
-    # A PENDING review is an unsubmitted draft — it has not LANDED, so the
-    # trail records nothing for it.
     _wire_with_reviews(
         monkeypatch,
         [{"id": 13, "user": {"login": "human"}, "state": "PENDING"}],

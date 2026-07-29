@@ -1,23 +1,3 @@
-"""LOG02-WS03 — the prstate subsystem's lifecycle narration (glassbox spray).
-
-Convention-level tests, per the glassbox testing decision: key lifecycle events
-EXIST and CARRY the required flat fields — identified by their fields, never by
-per-message string assertions.
-
-Covered here:
-
-  * the fetch milestone: `gather()` records the snapshot's shape + duration at
-    INFO and binds the `pr`/`repo` domain keys at the fetch seam (ADR-0029), so
-    every subsequent in-process record — the gh Exec records included —
-    correlates to the PR;
-  * the light `gather_reviews()` fetch records as a DEBUG mechanic;
-  * reviewer request/settle transitions: a placed / withdrawn request edge is
-    an INFO record carrying `reviewer`/`pr`/`transition`; a local-review request
-    that dies records at ERROR with the exception attached;
-  * the one semantic gh failure the Exec record cannot carry: a GraphQL
-    response with `errors` records at ERROR with the exception attached.
-"""
-
 from __future__ import annotations
 
 import json
@@ -33,8 +13,6 @@ from shipit.prstate.errors import PrStateError
 from shipit.prstate.reviewers import CodexAdapter, CopilotAdapter, GeminiAdapter
 from shipit.prstate.roster import Roster
 
-# The typed PR targets (CLI01-WS02): every pr-family service takes a PrId; the
-# lifecycle records carry its NUMBER.
 REPO = repo_from_slug("owner/repo")
 TARGET = PrId(repo=REPO, number=558)
 TARGET_41 = PrId(repo=REPO, number=41)
@@ -61,7 +39,7 @@ def _wire_gather(monkeypatch):
         "pr_meta",
         lambda pr: {
             "number": 558,
-            "headRefOid": "deadbeef" * 5,  # a full 40-hex sha (COR02)
+            "headRefOid": "deadbeef" * 5,
             "isDraft": True,
             "mergeable": "MERGEABLE",
             "mergeStateStatus": "BLOCKED",
@@ -70,9 +48,6 @@ def _wire_gather(monkeypatch):
     )
     monkeypatch.setattr(fetch.gh, "graphql", lambda query, **v: _graphql_page())
     monkeypatch.setattr(fetch.gh, "rest", lambda *a, **k: [])
-
-
-# --- the fetch milestone ---------------------------------------------------
 
 
 def test_gather_records_an_info_milestone_with_shape_and_duration(monkeypatch, caplog):
@@ -94,10 +69,8 @@ def test_gather_records_an_info_milestone_with_shape_and_duration(monkeypatch, c
 
 
 def test_gather_binds_the_pr_and_repo_domain_keys(monkeypatch):
-    """The fetch seam binds pr/repo (ADR-0029): from the moment the engine
-    starts working on a PR, every subsequent record correlates to it."""
     _wire_gather(monkeypatch)
-    assert "pr" not in logcontext.bound()  # clean context (conftest isolation)
+    assert "pr" not in logcontext.bound()
     fetch.gather(TARGET, Roster())
     bound = logcontext.bound()
     assert bound["pr"] == 558
@@ -112,7 +85,7 @@ def test_gather_reviews_records_a_debug_mechanic_with_fields(monkeypatch, caplog
             "repository": {
                 "pullRequest": {
                     "number": 558,
-                    "headRefOid": "deadbeef" * 5,  # a full 40-hex sha (COR02)
+                    "headRefOid": "deadbeef" * 5,
                     "isDraft": True,
                     "mergeStateStatus": "BLOCKED",
                     "reviewRequests": {"nodes": []},
@@ -133,10 +106,7 @@ def test_gather_reviews_records_a_debug_mechanic_with_fields(monkeypatch, caplog
     assert rec.pr == 558
     assert rec.reviews == 0
     assert rec.requested == 0
-    assert logcontext.bound()["pr"] == 558  # the light path binds too
-
-
-# --- reviewer request/settle transitions ------------------------------------
+    assert logcontext.bound()["pr"] == 558
 
 
 def _transition_records(caplog):
@@ -166,8 +136,6 @@ def test_cancel_is_an_info_transition_record(monkeypatch, caplog):
 
 
 def test_no_mechanism_request_records_only_a_debug_mechanic(caplog):
-    """Gemini has no request edge: nothing transitioned, so no INFO transition
-    record — a DEBUG mechanic carrying reviewer/pr is the only trace."""
     with caplog.at_level(logging.DEBUG, logger="shipit.prstate"):
         assert GeminiAdapter().request(TARGET_41) is False
     assert not _transition_records(caplog)
@@ -189,21 +157,17 @@ def test_local_detach_request_is_an_info_transition_record(monkeypatch, caplog):
     transitions = _transition_records(caplog)
     assert len(transitions) == 1
     rec = transitions[0]
-    assert rec.reviewer == "codex-local"  # the funnel/display name
+    assert rec.reviewer == "codex-local"
     assert rec.pr == 41
 
 
 def test_local_reconcile_request_records_only_a_debug_mechanic(monkeypatch, caplog):
-    """An idempotent re-request that RECONCILES against an already in-flight run
-    (start_detached_review → False) detached NOTHING new: it must NOT narrate an
-    INFO request transition — only a DEBUG mechanic, so the lifecycle log never
-    claims a detach that didn't happen."""
     from shipit.review import service
 
     monkeypatch.setattr(service, "start_detached_review", lambda *a, **k: False)
     with caplog.at_level(logging.DEBUG, logger="shipit.prstate"):
-        assert CodexAdapter().request(TARGET_41) is True  # still reported in-flight
-    assert not _transition_records(caplog)  # no INFO edge for a no-op
+        assert CodexAdapter().request(TARGET_41) is True
+    assert not _transition_records(caplog)
     mechanics = [
         r
         for r in caplog.records
@@ -214,8 +178,6 @@ def test_local_reconcile_request_records_only_a_debug_mechanic(monkeypatch, capl
 
 
 def test_local_request_failure_records_error_with_exception(monkeypatch, caplog):
-    """A request act that dies is a PROPAGATING failure: ERROR, with the
-    exception attached (exc_info), before it normalizes to PrStateError."""
     from shipit.review import service
 
     def boom(*a, **k):
@@ -230,22 +192,12 @@ def test_local_request_failure_records_error_with_exception(monkeypatch, caplog)
     rec = errors[0]
     assert rec.reviewer == "codex-local"
     assert rec.pr == 41
-    # A real exception rides the record — value AND traceback, not just a truthy
-    # exc_info. exc_info=True inside the except captures the ORIGINAL failure
-    # (the RuntimeError), not the PrStateError it is later normalized to for the
-    # CLI — the original cause is what a debugger wants.
     assert rec.exc_info is not None
     assert isinstance(rec.exc_info[1], RuntimeError)
     assert rec.exc_info[2] is not None
 
 
-# --- the semantic gh failure the Exec record cannot carry --------------------
-
-
 def test_graphql_semantic_errors_record_error_with_exception(monkeypatch, caplog):
-    """The Exec succeeded (rc 0) but the GraphQL answer carries `errors`: the
-    boundary records the propagating semantic failure at ERROR with the
-    exception attached, then raises it."""
     payload = {"data": None, "errors": [{"message": "Could not resolve PR"}]}
     monkeypatch.setattr(gh, "_run", lambda args, **k: json.dumps(payload))
     with caplog.at_level(logging.ERROR, logger="shipit.gh"):
@@ -253,9 +205,6 @@ def test_graphql_semantic_errors_record_error_with_exception(monkeypatch, caplog
             gh.graphql("query {}", owner="o")
     errors = [r for r in caplog.records if r.levelno == logging.ERROR]
     assert len(errors) == 1
-    # Not just a truthy exc_info: a real PrStateError with a traceback rides the
-    # record (raise-then-log attaches the live frame, not an unraised instance
-    # whose __traceback__ is still None).
     exc_info = errors[0].exc_info
     assert exc_info is not None
     assert exc_info[0] is PrStateError

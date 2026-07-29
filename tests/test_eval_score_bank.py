@@ -1,9 +1,3 @@
-"""The ``shipit eval score`` / ``shipit eval bank`` verb boundaries (RVW03-WS06):
-score reads the fixture + the per-repo review-rounds stores (family-root
-injected, exactly like the eval report verb) and prints the deterministic
-report; bank writes an adjudicated verdict through the pure banking core and
-bumps the fixture version on disk."""
-
 from __future__ import annotations
 
 import io
@@ -93,7 +87,7 @@ class TestScoreRun:
         assert "fixture v1" in text
         assert "arm-a" in text
         assert "recall 1/1" in text
-        assert "[UNDERPOWERED]" in text  # 1 positive < ~20: never a headline
+        assert "[UNDERPOWERED]" in text
 
     def test_missing_stores_render_the_empty_report(self, tmp_path, fixture_path):
         out = io.StringIO()
@@ -106,9 +100,6 @@ class TestScoreRun:
         assert score_verb.run(bad, base_dir=tmp_path) == 1
 
     def test_cli_seam(self, tmp_path):
-        # The click layer defaults the store family root, so the CLI test stays
-        # on the loud-failure path (absent fixture) — the happy path is proven
-        # through run() with an injected root above.
         result = CliRunner().invoke(score_verb.cmd, [str(tmp_path / "absent.toml")])
         assert result.exit_code == 1
 
@@ -147,8 +138,6 @@ class TestBank:
         assert label.lines == (50, 60)
 
     def test_bank_label_with_defect_joins_the_family(self, fixture_path):
-        # The second-anchor flow (#751): a cross-file emission of a banked
-        # defect banks as a new label sharing the family, coherent or loud.
         argv = [
             "label",
             "--fixture",
@@ -174,7 +163,6 @@ class TestBank:
         assert result.exit_code == 0, result.output
         fixture = load_fixture(fixture_path)
         assert fixture.label_by_id("core-G2").defect == "core-staging-estimate"
-        # incoherent family member (verdict flips) refuses and leaves v2 alone.
         wrong = [a for a in argv]
         wrong[wrong.index("core-G2")] = "core-G3"
         wrong[wrong.index("real")] = "not-real"
@@ -205,11 +193,11 @@ class TestBank:
     @pytest.mark.parametrize(
         "args",
         [
-            ["--severity", "blocker"],  # retired ladder token
+            ["--severity", "blocker"],
             ["--provenance", "no-colon-ref"],
-            ["--lines", "50-60"],  # wrong separator
+            ["--lines", "50-60"],
             ["--pr", "unknown-pr"],
-            ["--id", "core-G1"],  # duplicate
+            ["--id", "core-G1"],
         ],
     )
     def test_bad_bank_args_exit_1_and_leave_the_file_untouched(
@@ -234,8 +222,6 @@ class TestBank:
         assert load_fixture(fixture_path).version == 1
 
     def test_banked_verdict_scores_on_the_next_run(self, tmp_path, fixture_path):
-        # The ADR-0048 loop closed end-to-end: an unmatched emission is banked
-        # not-real, and the SAME store then scores it as a false positive.
         findings = [
             {
                 "file": "phos-editor/src/eval.rs",
@@ -285,7 +271,6 @@ class TestBank:
 
 
 def test_round_record_json_shape_matches_scorer_expectations():
-    """Guard the seam: the scorer reads the EXACT keys roundrecord writes."""
     from shipit.finding import Disposition, Finding, JudgedFinding, Severity
     from shipit.review import roundrecord
 
@@ -316,7 +301,6 @@ def test_round_record_json_shape_matches_scorer_expectations():
         total_tokens=None,
         timestamp="2026-07-10T00:00:00Z",
     )
-    # JSONL round trip, as the store does it.
     record = json.loads(json.dumps(record))
     from shipit.review.groundtruth import parse_fixture
     from shipit.review.scorer import score_records

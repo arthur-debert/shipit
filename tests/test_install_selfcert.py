@@ -1,13 +1,3 @@
-"""Install self-certification (ADR-0033, ADP00-WS15 #449) — the staged
-postconditions, the fail-closed apply seam, and the debt report.
-
-Layout mirrors the install suite: the check functions test as plain functions
-against a REAL staged consumer (written by a working-tree apply) with the Exec
-boundary injected; the launcher postcondition runs the REAL delivered bash
-launcher under its ``SHIPIT_PIN_CHECK`` probe; the apply seam asserts the
-fail-closed contract (no git, no PR) on the recorded boundary.
-"""
-
 from __future__ import annotations
 
 import shutil
@@ -24,7 +14,6 @@ from shipit.install import units as iunits
 from shipit.install.errors import InstallError, SelfCertError
 from shipit.verbs import install as verb
 
-#: A syntactically valid full sha for pins the launcher must accept.
 GOOD_SHA = "a" * 40
 
 
@@ -48,9 +37,6 @@ def _plan(root) -> irec.Plan:
 
 
 class _GhRecorder:
-    """Records the git/PR boundary calls apply makes, doing nothing real
-    (the same shape as test_install.py's recorder)."""
-
     def __init__(self):
         self.calls = []
         self.pr_body = None
@@ -64,8 +50,6 @@ class _GhRecorder:
         )
 
     def default_branch(self, *, cwd, remote="origin"):
-        # The remote default the MODE_PR staging branch is reset onto (#852);
-        # a pure query, not recorded in `calls`.
         return "main"
 
     def fetch(self, *, cwd, remote="origin"):
@@ -75,42 +59,29 @@ class _GhRecorder:
         self.calls.append(("switch", branch))
 
     def reset_soft(self, ref, *, cwd):
-        # #852: reset shipit/install onto origin/<default> before the commit.
         self.calls.append(("reset", ref))
 
     def read_tree(self, ref, *, cwd, index_file):
-        # The MODE_PR isolated-index seed (#992): origin/<default> into a scratch
-        # index so the reconcile commit never publishes the caller's real index.
         self.calls.append(("read_tree", ref))
 
     def add(self, paths, *, cwd, index_file=None):
         self.calls.append(("add", tuple(paths)))
 
     def rm_cached(self, paths, *, cwd, index_file=None):
-        # The MODE_PR retired-removal staging (#986 review): retired paths are
-        # purged from the scratch index (#992), never handed to `git add`.
         self.calls.append(("rm_cached", tuple(paths)))
 
     def staged_paths(self, paths, *, cwd, index_file=None):
-        # The MODE_PR no-op guard (#991) over the scratch index (#992); a pure
-        # query, not recorded. Returns the whole queried set (everything staged)
-        # so the commit proceeds.
         return sorted(paths)
 
     def reset_index(self, *, cwd):
         self.calls.append(("reset_index", None))
 
     def commit(self, message, paths, *, cwd, no_verify=False):
-        # The MODE_LOCAL/MODE_PUSH pathspec commit — scoped to `changed_paths`.
         self.calls.append(("commit", message))
         self.commit_paths = tuple(paths)
         self.commit_no_verify = no_verify
 
     def commit_all(self, message, *, cwd, no_verify=False, index_file=None):
-        # The MODE_PR whole-INDEX reconcile commit (#991): no pathspec, so the
-        # scratch index (#992) — adds PLUS `rm --cached` deletions — is committed
-        # as-is. Recorded under the same "commit" name so ordering assertions stay
-        # uniform; a whole-index commit carries no pathspec.
         self.calls.append(("commit", message))
         self.commit_all_message = message
         self.commit_no_verify = no_verify
@@ -162,8 +133,6 @@ def rec(monkeypatch):
 
 @pytest.fixture
 def staged(tmp_path, rec):
-    """A consumer with the managed set STAGED (default working-tree apply) and
-    a valid pin stamped — the state self-certification asserts over."""
     plan = _plan(tmp_path)
     iapply.apply(plan, iapply.MODE_TREE)
     cfg = tmp_path / config.CONFIG_NAME
@@ -172,28 +141,15 @@ def staged(tmp_path, rec):
     return tmp_path
 
 
-# --------------------------------------------------------------------------
-# The scoped lint set — whole-file units only
-# --------------------------------------------------------------------------
-
-
 def test_delivered_lint_paths_are_whole_file_units_only(tmp_path, rec):
     plan = _plan(tmp_path)
     paths = selfcert.delivered_lint_paths(plan)
-    # The delivered whole files are in scope...
     assert "lefthook.yml" in paths
     assert "bin/shipit" in paths
     assert ".markdownlint.yaml" in paths
-    # ...but the block units' host files are not: install delivered a region,
-    # not the file — the consumer content around it is debt, never a blocker.
     assert "pixi.toml" not in paths
     assert "AGENTS.md" not in paths
     assert ".claude/settings.json" not in paths
-
-
-# --------------------------------------------------------------------------
-# Postcondition 1 — manifest parses + lint env solves
-# --------------------------------------------------------------------------
 
 
 def test_manifest_check_solves_the_lint_env(staged):
@@ -211,13 +167,6 @@ def test_manifest_check_solves_the_lint_env(staged):
 def test_manifest_solve_is_unlocked_so_managed_block_edits_stay_lock_coherent(
     staged,
 ):
-    # The #793 lock-coherence contract: a reconcile that edits a managed
-    # pixi.toml block (e.g. delivering the cargo-edit release block) makes the
-    # committed pixi.lock stale — every consumer `pixi run --locked` would then
-    # hard-fail. Self-cert's solve deliberately carries NO `--locked`, so pixi
-    # REGENERATES the workspace lock to match the reconciled manifest (and
-    # apply stages it into the same commit — the PIXI_LOCK tests below); a
-    # locked solve here would fail on exactly the edit install just made.
     seen = {}
 
     def runner(argv, **kw):
@@ -229,9 +178,6 @@ def test_manifest_solve_is_unlocked_so_managed_block_edits_stay_lock_coherent(
 
 
 def test_manifest_check_solves_under_a_scrubbed_env(staged, monkeypatch):
-    # A parent dev session's leaked project pointer must not reach the solve:
-    # self-cert hands pixi a scrubbed, complete child env (replace_env), so the
-    # lint-env solve targets the consumer checkout, never the parent project.
     monkeypatch.setenv("PIXI_PROJECT_MANIFEST", "/parent/pixi.toml")
     seen = {}
 
@@ -279,11 +225,6 @@ def test_manifest_check_fails_without_a_pixi_manifest(staged):
     assert not check.ok
 
 
-# --------------------------------------------------------------------------
-# Postcondition 2 — delivered files pass delivered lint configs (scoped run)
-# --------------------------------------------------------------------------
-
-
 def test_delivered_lint_runs_each_tool_through_the_lint_env(staged):
     argvs = []
 
@@ -293,8 +234,6 @@ def test_delivered_lint_runs_each_tool_through_the_lint_env(staged):
 
     check = selfcert._check_delivered_lint(staged, _plan_with_writes(staged), runner)
     assert check.ok
-    # Every tool invocation rode `pixi run --environment lint` against the
-    # consumer's own manifest — never bare PATH.
     assert argvs, "the scoped run must actually invoke tools"
     for argv in argvs:
         assert argv[:2] == ["pixi", "run"]
@@ -302,8 +241,6 @@ def test_delivered_lint_runs_each_tool_through_the_lint_env(staged):
 
 
 def _plan_with_writes(root) -> irec.Plan:
-    """A plan whose write set is the full managed catalog (fresh-install shape),
-    decided against an EMPTY pristine map so every unit is a write."""
     units = iunits.load_units()
     retired = irec.load_retired()
     state = irec.ConsumerState(
@@ -318,7 +255,6 @@ def _plan_with_writes(root) -> irec.Plan:
 
 def test_delivered_lint_failure_fails_the_check_with_the_report(staged):
     def runner(argv, **kw):
-        # Every markdownlint leg fails; the rest pass.
         if "markdownlint" in argv:
             return _exec_fail(argv, stdout="skills/x.md:1 MD000 broken")
         return _exec_ok(argv)
@@ -329,7 +265,6 @@ def test_delivered_lint_failure_fails_the_check_with_the_report(staged):
 
 
 def test_delivered_lint_is_vacuous_with_no_whole_file_writes(tmp_path, rec):
-    # A NOOP re-run shape: no writes at all -> nothing to lint, trivially ok.
     plan = irec.Plan(root=str(tmp_path), decisions=(), retired=(), seeds=())
     check = selfcert._check_delivered_lint(
         tmp_path, plan, lambda argv, **kw: _exec_fail(argv)
@@ -338,9 +273,6 @@ def test_delivered_lint_is_vacuous_with_no_whole_file_writes(tmp_path, rec):
 
 
 def test_delivered_lint_fails_closed_when_a_planned_file_is_missing(staged):
-    # A whole-file unit the plan writes but that is absent on disk is a delivery
-    # failure (install did not write a file it intended to), not "nothing to
-    # lint": self-cert must fail CLOSED and name the missing path (ADR-0033).
     plan = _plan_with_writes(staged)
     (staged / "bin" / "shipit").unlink()
     check = selfcert._check_delivered_lint(
@@ -350,21 +282,7 @@ def test_delivered_lint_fails_closed_when_a_planned_file_is_missing(staged):
     assert "bin/shipit" in check.detail
 
 
-# --------------------------------------------------------------------------
-# Postcondition 2, managed skills (#777, projection #1088) — the delivered skill
-# markdown (the single real `.agents/skills/*.md` dir; Claude reads it via the
-# `.claude/skills` symlink) is no longer exempt from the delivered markdownlint
-# gate, so self-cert's delivered-lint CATCHES a skill-content defect that would
-# otherwise ride the managed set into a consumer's markdownlint gate (modes 4+6).
-# These route the REAL markdownlint through selfcert's own `_check_delivered_lint`
-# boundary, scoped to just the skill files so only the markdown leg runs.
-# --------------------------------------------------------------------------
-
-
 def _skill_only_plan(root) -> irec.Plan:
-    """A plan whose write set is JUST the managed skill files, so a scoped
-    delivered-lint routes only markdownlint over the real skill markdown at
-    `.agents/skills/*.md` (#1088)."""
     skills = [
         u
         for u in iunits.load_units()
@@ -384,17 +302,6 @@ def _skill_only_plan(root) -> irec.Plan:
 
 
 def _unwrapping_real_runner():
-    """A self-cert Exec boundary that unwraps `pixi run ... -- <tool> <args>`
-    and runs the REAL tool. The tests provision the lint toolchain, so this
-    exercises the actual markdownlint gate over the delivered skill files — the
-    delivered `.markdownlint.yaml` (`--config`) and `.markdownlintignore`
-    (auto-discovered from cwd) — without solving a pixi env.
-
-    The caller's kwargs are forwarded verbatim, so the probe stays faithful to
-    production self-cert: it runs under the SCRUBBED env (`scrub_env` keeps PATH,
-    dropping only leaked PIXI_*/conda pointers) and the `INSTALL_TIMEOUT` bound
-    `_lint_env_run_tool` passes — a wedged markdownlint fails on the timeout
-    rather than hanging the suite unbounded."""
 
     def runner(argv, *, cwd, **kw):
         real = argv[argv.index("--") + 1 :]
@@ -405,22 +312,9 @@ def _unwrapping_real_runner():
 
 
 def test_managed_skill_files_are_in_the_delivered_lint_set(staged):
-    # The root-cause guard (no binary): every real skill `*.md` is a whole-file
-    # unit at `.agents/skills/`, so it is in scope for the delivered-lint check —
-    # the blindness was only the shipped `.markdownlintignore` exempting `skills/`,
-    # now removed. Content is single-surface (#1088); Claude reads it through the
-    # `.claude/skills` symlink.
     paths = selfcert.delivered_lint_paths(_skill_only_plan(staged))
     assert ".agents/skills/grill-me-with-docs/SKILL.md" in paths
     assert ".agents/skills/to-spec/SKILL.md" in paths
-    # The delivered ignore exempts the real `.agents/skills` content dir NOT AT
-    # ALL — the skill markdown is linted in every consumer. Nor does it exempt the
-    # retired `.shipit-skills/` path a pre-#1088 consumer still carries (#1115).
-    # This non-skip guard is the backstop for the skip-if-no-binary
-    # real markdownlint tests below. `.claude/skills` needs NO exemption and gets
-    # none: `shipit lint` discovers files via `git ls-files` (lint.py), which
-    # yields the whole-dir symlink as ONE non-`.md` entry, so the files under it
-    # are never enumerated through the link — no double-linting (#1088).
     ignore = {
         line.strip()
         for line in (staged / ".markdownlintignore").read_text().splitlines()
@@ -432,9 +326,6 @@ def test_managed_skill_files_are_in_the_delivered_lint_set(staged):
 
 @pytest.mark.skipif(shutil.which("markdownlint") is None, reason="no markdownlint")
 def test_delivered_skill_files_pass_the_delivered_config_real(staged):
-    # The two files #777 fixed (and the whole shipped skills tree) pass the
-    # delivered markdownlint config under self-cert's own scoped run: the managed
-    # set never fails its own checks (the WS09/WS10 canary class, ADR-0033).
     check = selfcert._check_delivered_lint(
         staged, _skill_only_plan(staged), _unwrapping_real_runner()
     )
@@ -443,8 +334,6 @@ def test_delivered_skill_files_pass_the_delivered_config_real(staged):
 
 @pytest.mark.skipif(shutil.which("markdownlint") is None, reason="no markdownlint")
 def test_delivered_lint_catches_a_planted_skill_defect_real(staged):
-    # Plant an MD040 bare-fence defect (mode 4's exact class) into a delivered
-    # skill file: self-cert must now CATCH it — the defect can no longer ship.
     skill = staged / ".agents" / "skills" / "grill-me-with-docs" / "SKILL.md"
     skill.write_text(skill.read_text() + "\n```\nplanted bare fence\n```\n")
     check = selfcert._check_delivered_lint(
@@ -455,30 +344,20 @@ def test_delivered_lint_catches_a_planted_skill_defect_real(staged):
     assert ".agents/skills/grill-me-with-docs/SKILL.md" in check.detail
 
 
-# --------------------------------------------------------------------------
-# Postcondition 3 — hooks live
-# --------------------------------------------------------------------------
-
-
 def test_hooks_check_requires_a_successful_activation(staged):
     plan = _plan_with_writes(staged)
     check = selfcert._check_hooks(staged, plan, hooks_activated=False)
     assert not check.ok
-    # Operator-facing recovery speaks shipit, never the internal lefthook layer.
     assert "hook activation did not succeed" in check.detail
     assert "./bin/shipit install" in check.detail
     assert "lefthook install" not in check.detail
 
 
 def test_hooks_check_requires_the_hook_files_on_disk(staged):
-    # A REAL checkout so the postcondition resolves `.git/hooks` through the git
-    # adapter (#914) rather than a fabricated bare dir the resolver reads as
-    # not-a-repo. `git init` seeds only `*.sample` hooks, so the managed
-    # pre-commit/pre-push are genuinely absent until written below.
     subprocess.run(["git", "init", "-q"], cwd=staged, check=True)
     plan = _plan_with_writes(staged)
     check = selfcert._check_hooks(staged, plan, hooks_activated=True)
-    assert not check.ok  # activation claimed success but .git/hooks is empty
+    assert not check.ok
 
     hooks = staged / ".git" / "hooks"
     (hooks / "pre-commit").write_text("#!/bin/sh\n# lefthook\n")
@@ -487,10 +366,6 @@ def test_hooks_check_requires_the_hook_files_on_disk(staged):
 
 
 def test_hooks_check_fails_when_the_hooks_dir_cannot_be_resolved(staged, monkeypatch):
-    # #914: the postcondition resolves `.git/hooks` through the git adapter; when
-    # that returns None (not a resolvable checkout) an activation that reported
-    # success has nothing to verify against, so the check fails CLOSED rather than
-    # passing a live-hooks claim it never checked.
     monkeypatch.setattr(git, "hooks_dir", lambda *, cwd: None)
     plan = _plan_with_writes(staged)
     check = selfcert._check_hooks(staged, plan, hooks_activated=True)
@@ -499,10 +374,6 @@ def test_hooks_check_fails_when_the_hooks_dir_cannot_be_resolved(staged, monkeyp
 
 
 def test_hooks_check_reads_the_shared_hooks_dir_from_a_linked_worktree(tmp_path):
-    # #914 end-to-end: run against a LINKED worktree (its `.git` is a file), the
-    # check must read the managed hooks in the main checkout's SHARED common dir —
-    # the hardcoded `<worktree>/.git/hooks` does not exist, so the old code would
-    # have failed a worktree install that genuinely HAS live hooks.
     main = tmp_path / "main"
     main.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=main, check=True)
@@ -527,11 +398,6 @@ def test_hooks_check_is_vacuous_when_the_plan_activates_nothing(tmp_path, rec):
 
 
 def test_hooks_check_is_vacuous_when_activation_was_not_attempted(tmp_path, rec):
-    # The seed-only / retire-delete-only committing install: the managed set
-    # (lefthook.yml included) is already current, so `activates_hooks` is True
-    # but there are no writes — apply skips activation and leaves the live hooks
-    # alone, so `hooks_activated` is None. The postcondition must mirror that
-    # predicate and stay vacuous, not fail the install closed.
     lefthook = next(u for u in iunits.load_units() if u.key == iunits.LEFTHOOK_FILE)
     noop = irec.Decision(
         unit=lefthook,
@@ -545,15 +411,7 @@ def test_hooks_check_is_vacuous_when_activation_was_not_attempted(tmp_path, rec)
     assert selfcert._check_hooks(tmp_path, plan, hooks_activated=None).ok
 
 
-# --------------------------------------------------------------------------
-# Postcondition 4 — the launcher resolves the freshly-stamped pin
-# (REAL bash, REAL delivered launcher, no uv, no network)
-# --------------------------------------------------------------------------
-
-
 def _launcher_plan(root, declined: tuple[str, ...] = ()) -> irec.Plan:
-    """A minimal plan for the launcher postcondition — only its ``declined``
-    record matters to the probe (#600)."""
     return irec.Plan(
         root=str(root), decisions=(), retired=(), seeds=(), declined=declined
     )
@@ -593,8 +451,6 @@ def test_launcher_check_fails_when_the_launcher_is_missing(staged):
 
 
 def test_launcher_probe_ignores_an_ambient_shipit_exec(staged, monkeypatch):
-    # A dev session's SHIPIT_EXEC override precedes the pin parse in the
-    # launcher; the probe must strip it or it would exec a build mid-install.
     monkeypatch.setenv("SHIPIT_EXEC", "/bin/echo")
     check = selfcert._check_launcher(
         staged, _launcher_plan(staged), GOOD_SHA, execrun.run
@@ -603,25 +459,14 @@ def test_launcher_probe_ignores_an_ambient_shipit_exec(staged, monkeypatch):
 
 
 def test_launcher_check_makes_no_claim_over_a_declined_launcher(staged):
-    # #600: a consumer that DECLINED bin/shipit keeps its own launcher — the
-    # dogfood repo's source-deferring bootstrap has no SHIPIT_PIN_CHECK probe,
-    # so running it would fail a postcondition over a file install does not
-    # own. The check must skip: install delivered nothing to probe.
     launcher = staged / "bin" / "shipit"
-    launcher.write_text("#!/usr/bin/env bash\nexit 99\n")  # would fail the probe
+    launcher.write_text("#!/usr/bin/env bash\nexit 99\n")
     plan = _launcher_plan(staged, declined=(iunits.SHIPIT_LAUNCHER_FILE,))
     check = selfcert._check_launcher(staged, plan, GOOD_SHA, execrun.run)
     assert check.ok, check.detail
 
 
-# --------------------------------------------------------------------------
-# certify — run ALL checks, aggregate every miss
-# --------------------------------------------------------------------------
-
-
 def _dispatching_runner(pin: str):
-    """A fake Exec boundary satisfying every check: pixi solves, tools pass,
-    the launcher probe answers the pin."""
 
     def runner(argv, **kw):
         if argv[0] == "bash":
@@ -632,9 +477,6 @@ def _dispatching_runner(pin: str):
 
 
 def _live_hooks(root: Path) -> None:
-    # A REAL checkout so the `hooks` postcondition resolves `.git/hooks` through
-    # the git adapter (#914); `git init` seeds the dir, into which the managed
-    # pre-commit/pre-push shims are written to stand in for a live activation.
     subprocess.run(["git", "init", "-q"], cwd=root, check=True)
     hooks = root / ".git" / "hooks"
     (hooks / "pre-commit").write_text("#!/bin/sh\n")
@@ -655,8 +497,6 @@ def test_certify_passes_all_four_postconditions_on_a_healthy_stage(staged):
 
 
 def test_certify_collects_every_miss_never_fail_fast(staged):
-    # Sabotage two postconditions at once: a planted bad lint outcome AND a
-    # dead activation — the report must name BOTH.
     def runner(argv, **kw):
         if argv[0] == "bash":
             return _exec_ok(argv, stdout=GOOD_SHA + "\n")
@@ -678,8 +518,6 @@ def test_certify_collects_every_miss_never_fail_fast(staged):
 
 
 def test_certify_reports_malformed_config_across_postconditions(staged):
-    # Moving lint behind its service boundary must not let ConfigError escape
-    # self-certification: every postcondition still reports its own failure.
     (staged / config.CONFIG_NAME).write_text("not = valid = toml\n")
     _live_hooks(staged)
 
@@ -709,14 +547,8 @@ def test_format_failure_names_every_missed_postcondition():
     assert "self-certification failed" in text
     assert f"FAIL {selfcert.CHECK_MANIFEST}" in text
     assert "no solve" in text
-    # Only the failures are listed — the passing launcher check stays out.
     assert f"FAIL {selfcert.CHECK_LAUNCHER}" not in text
     assert "fix belongs in shipit" in text
-
-
-# --------------------------------------------------------------------------
-# The apply seam — fail closed BEFORE any git/gh side effect
-# --------------------------------------------------------------------------
 
 
 def _fail_report() -> selfcert.CertReport:
@@ -734,12 +566,8 @@ def test_sabotaged_install_fails_closed_with_no_pr(tmp_path, rec):
             pr_body=lambda *a: "body",
             certify=lambda *a, **kw: _fail_report(),
         )
-    # Fail closed: the refusal names the miss, and NOTHING touched git/gh —
-    # no branch, no commit, no push, no PR.
     assert selfcert.CHECK_DELIVERED_LINT in str(err.value)
     assert rec.calls == []
-    # The refusal is an InstallError (the CLI error shell's known set) and
-    # carries the step the failure event names (#434).
     assert isinstance(err.value, InstallError)
     assert err.value.step == "self-certification"
 
@@ -763,7 +591,6 @@ def test_default_tree_refresh_does_not_certify(tmp_path, rec):
         iapply.MODE_TREE,
         certify=lambda *a, **kw: called.append(1) or _fail_report(),
     )
-    # The working-tree refresh publishes nothing: no certification, no git.
     assert called == []
     assert rec.calls == []
 
@@ -789,8 +616,6 @@ def test_healthy_install_certifies_then_opens_the_pr(tmp_path, rec):
         certify=ok_cert,
         debt=lambda root, **kw: 0,
     )
-    # Certification saw the pin the manifest was stamped with, and the run
-    # proceeded to the normal PR side effects.
     assert seen["pin"] == "testhash"
     assert result.pr_url is not None
     assert rec.names() == [
@@ -804,8 +629,6 @@ def test_healthy_install_certifies_then_opens_the_pr(tmp_path, rec):
         "push",
         "pr_create",
     ]
-    # The reconcile commit bypasses the repo's hooks (ADR-0033): the
-    # whole-tree gate is the repo's bar, not install's.
     assert rec.commit_no_verify is True
 
 
@@ -826,20 +649,15 @@ def test_debt_laden_consumer_still_installs_with_debt_reported(tmp_path, rec):
         ),
         debt=lambda root, **kw: 3,
     )
-    # Debt is REPORTED, never a blocker: the PR opened, the body carries it.
     assert result.lint_debt == 3
     assert ("pr_create", True) in rec.calls
     assert "whole-tree lint currently red: 3 failing check(s)" in rec.pr_body
     assert "debt-clear pending" in rec.pr_body
-    # And install's own git ops carried the hook bypass (#477): the debt never
-    # gets a chance to block via the pre-push gate this run just armed.
     assert rec.commit_no_verify is True
     assert rec.push_no_verify is True
 
 
 def test_pixi_lock_rides_the_reconcile_commit_when_present(tmp_path, rec):
-    # The committed-lockfile decision (#439): the solve materializes pixi.lock;
-    # a committing apply stages it with the managed set.
     (tmp_path / "pixi.lock").write_text("version: 6\n")
     iapply.apply(
         _plan(tmp_path),
@@ -860,11 +678,6 @@ def test_no_pixi_lock_means_no_extra_staged_path(tmp_path, rec):
         ),
     )
     assert "pixi.lock" not in rec.commit_paths
-
-
-# --------------------------------------------------------------------------
-# consumer_debt — best-effort whole-tree count, never a raise
-# --------------------------------------------------------------------------
 
 
 def test_consumer_debt_counts_failing_checks(staged, monkeypatch):
@@ -891,13 +704,7 @@ def test_consumer_debt_is_none_when_unreadable(staged, monkeypatch):
     assert selfcert.consumer_debt(staged) is None
 
 
-# --------------------------------------------------------------------------
-# The launcher's SHIPIT_PIN_CHECK probe — the shipped script's contract
-# --------------------------------------------------------------------------
-
-
 def test_pin_check_probe_needs_no_uv_and_prints_the_pin(staged, monkeypatch):
-    # An empty PATH-ish env: bash + coreutils only; uv absent by construction.
     import subprocess
 
     result = subprocess.run(
@@ -913,11 +720,6 @@ def test_pin_check_probe_needs_no_uv_and_prints_the_pin(staged, monkeypatch):
 
 
 def test_pin_check_probe_reads_a_crlf_manifest(staged):
-    # A Windows checkout / core.autocrlf=true rewrites .shipit.toml with CRLF
-    # line endings, so the `[shipit]` header arrives as `[shipit]\r`. The awk
-    # `$0 == "[shipit]"` match never fires on that, leaving an empty pin and a
-    # launcher exit 127. The launcher strips CR on the way in, so the probe
-    # resolves the real pin regardless of line endings (#501).
     import subprocess
 
     cfg = staged / config.CONFIG_NAME
@@ -937,17 +739,6 @@ def test_pin_check_probe_reads_a_crlf_manifest(staged):
 
 
 def test_pin_check_probe_never_sigpipes_under_pipefail(staged):
-    # Regression guard for #533: the pin parse must not `… | awk '…exit'`. Under
-    # `set -euo pipefail` awk's early `exit` on the matched pin closes the pipe
-    # while the upstream CR-strip is still writing; the upstream takes SIGPIPE,
-    # the pipeline returns 141 (128 + SIGPIPE(13)), and `set -e` aborts the
-    # launcher — an intermittent, timing-dependent flake. awk reading the file
-    # directly leaves no second process to SIGPIPE.
-    #
-    # A multi-megabyte trailing blob AFTER the [shipit].version match guarantees
-    # the upstream is still writing (its output far exceeds the OS pipe buffer)
-    # when awk exits on the early match — so a piped implementation SIGPIPEs
-    # deterministically, not just occasionally. The loop is belt-and-suspenders.
     import subprocess
 
     cfg = staged / config.CONFIG_NAME

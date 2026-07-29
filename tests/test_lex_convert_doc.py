@@ -1,17 +1,3 @@
-"""tools/lex-convert-doc.sh — the .lex → .md mirror converter (#363).
-
-The regression under test: `shipit install` splices a sentinel-delimited
-managed block into some mirrors (AGENTS.md) that has NO counterpart in the
-.lex source, so a wholesale regeneration used to silently delete it. The
-converter must round-trip that block byte-identical.
-
-Hermetic: `lexd` and `prettier` are stubbed onto PATH, so the tests exercise
-the script's assembly logic (preamble + body + preserved block) without the
-provisioned lint env. The sentinels are imported from
-``shipit.install.units`` — the source of truth — so a drift between the
-script's literals and the Python constants fails here, not in a consumer repo.
-"""
-
 from __future__ import annotations
 
 import os
@@ -44,12 +30,9 @@ def _stub(bindir: Path, name: str, body: str) -> None:
 
 @pytest.fixture
 def stub_path(tmp_path: Path) -> dict[str, str]:
-    """A PATH whose lexd emits a fixed body and whose prettier is a pass-through."""
     bindir = tmp_path / "stub-bin"
     bindir.mkdir()
-    # %b so the repr's \n escapes become real newlines in the stub's output.
     _stub(bindir, "lexd", f"printf '%b' {LEXD_BODY!r}")
-    # The script calls `prettier --parser markdown <file>`; cat the file arg ($3).
     _stub(bindir, "prettier", 'cat "$3"')
     return {**os.environ, "PATH": f"{bindir}:{os.environ['PATH']}"}
 
@@ -81,8 +64,6 @@ def test_regenerates_clean_mirror_without_block(tmp_path, stub_path):
 
 
 def test_preserves_managed_block_byte_identical(tmp_path, stub_path):
-    # Build the old mirror exactly the way `shipit install` does: splice the
-    # block into the previously generated markdown.
     old = splice_block(f"{PREAMBLE}\n\nstale body\n", INNER)
     src, dest = _write_doc_pair(tmp_path, old)
 
@@ -90,11 +71,7 @@ def test_preserves_managed_block_byte_identical(tmp_path, stub_path):
 
     assert result.returncode == 0, result.stderr
     regenerated = dest.read_text()
-    # Body is regenerated; the block rides along at EOF, blank-line separated —
-    # the same placement splice_block uses on a fresh insert.
     assert regenerated == splice_block(f"{PREAMBLE}\n\n{LEXD_BODY}", INNER)
-    # The install-side reconciliation reads the inner via extract_block; the
-    # round-trip must hand back the identical bytes or the [managed] hash drifts.
     assert extract_block(regenerated) == INNER
 
 
@@ -120,7 +97,6 @@ def test_corrupt_block_fails_loud_and_leaves_mirror_untouched(tmp_path, stub_pat
 
 
 def test_script_sentinels_match_units_constants():
-    """The bash literals are a transcription of units.py — pin them together."""
     script = SCRIPT.read_text()
     assert f"MANAGED_OPEN='{BLOCK_OPEN}'" in script
     assert f"MANAGED_CLOSE='{BLOCK_CLOSE}'" in script

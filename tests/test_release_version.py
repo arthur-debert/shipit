@@ -1,18 +1,6 @@
-"""The version resolver's fixture tests (TOL02-WS01, PRD Testing Decisions).
-
-Pure core, full unit coverage: spec parsing (bump words, explicit semver, the
-usage-tier rejections), bump-word resolution against the latest tag,
-prerelease suffix detection (``-rc.N``, ``-release-rc``), and resume
-detection (ADR-0041/0009).
-"""
-
 import pytest
 
 from shipit.release import version as v
-
-# --------------------------------------------------------------------------
-# parse_spec — the click boundary's parser (usage tier, ADR-0030)
-# --------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("word", ["major", "minor", "patch"])
@@ -27,7 +15,6 @@ def test_parse_spec_explicit_semver(raw):
 
 @pytest.mark.parametrize("raw", ["v1.2.3", "V1.2.3", "v1.2.3-rc.1"])
 def test_parse_spec_rejects_leading_v(raw):
-    """The tag decorates; the version string never carries the prefix (ADR-0041)."""
     with pytest.raises(ValueError, match="without the 'v' prefix"):
         v.parse_spec(raw)
 
@@ -44,11 +31,6 @@ def test_parse_spec_rejects_garbage(raw):
         v.parse_spec(raw)
 
 
-# --------------------------------------------------------------------------
-# version_tags — tag-name filtering and ordering
-# --------------------------------------------------------------------------
-
-
 def test_version_tags_filters_and_orders():
     tags = ["v1.2.3", "deploy-2024", "v1.10.0", "tip", "v1.2.4-rc.1", "1.9.9"]
     assert v.version_tags(tags) == ["1.10.0", "1.2.4-rc.1", "1.2.3"]
@@ -59,15 +41,8 @@ def test_version_tags_release_ranks_above_its_prereleases():
 
 
 def test_version_tags_ignores_build_metadata_tags():
-    """A `v<semver>+build` tag is not a shape the caller can ever supply
-    (`parse_spec` rejects `+`) and build metadata is ignored for precedence, so
-    it must not participate in resolution or resume detection."""
     assert v.version_tags(["v1.2.3+build.7", "v1.2.2"]) == ["1.2.2"]
 
-
-# --------------------------------------------------------------------------
-# resolve — bump words, prerelease flags, resume detection
-# --------------------------------------------------------------------------
 
 _TAGS = ["v1.2.3", "v1.2.2", "v0.9.0", "not-a-version"]
 
@@ -93,7 +68,6 @@ def test_resolve_bump_words_with_no_tags(word, expected):
 
 
 def test_resolve_patch_closes_a_prerelease():
-    """``patch`` on a prerelease latest resolves to the final it led to."""
     resolved = v.resolve(v.VersionSpec(bump="patch"), ["v1.2.3-rc.2", "v1.2.2"])
     assert resolved.version == "1.2.3"
 
@@ -105,11 +79,8 @@ def test_resolve_minor_from_a_prerelease_latest():
 @pytest.mark.parametrize(
     ("word", "latest", "expected"),
     [
-        # A bump word on a prerelease of its exact target triple FINALIZES it
-        # (npm semver.inc semantics) instead of climbing past a whole release.
         ("major", "2.0.0-rc.1", "2.0.0"),
         ("minor", "1.3.0-rc.1", "1.3.0"),
-        # But a prerelease that is NOT the word's target triple still climbs.
         ("major", "2.1.0-rc.1", "3.0.0"),
         ("minor", "1.3.1-rc.1", "1.4.0"),
     ],
@@ -132,23 +103,18 @@ def test_resolve_detects_rc_prerelease():
 
 
 def test_resolve_detects_release_rc_as_tag_only_prerelease():
-    """The reserved live-fire suffix: prerelease AND tag-only (release#663)."""
     resolved = v.resolve(v.VersionSpec(semver="1.3.0-release-rc"), _TAGS)
     assert resolved.prerelease
     assert resolved.tag_only
 
 
 def test_resolve_detects_resume_when_tag_exists():
-    """Tag exists → prepare skips the bump and re-emits the SHA (ADR-0009)."""
     resolved = v.resolve(v.VersionSpec(semver="1.2.3"), _TAGS)
     assert resolved.resume
 
 
 def test_resolve_resume_via_bump_word():
-    """A bump word that lands on an existing tag is a resume too."""
     resolved = v.resolve(v.VersionSpec(bump="patch"), ["v1.2.3", "v1.2.4"])
-    # latest is 1.2.4; patch -> 1.2.5, which does not exist
     assert resolved.version == "1.2.5"
     assert not resolved.resume
-    # but an explicit re-run of the existing version resumes
     assert v.resolve(v.VersionSpec(semver="1.2.4"), ["v1.2.3", "v1.2.4"]).resume

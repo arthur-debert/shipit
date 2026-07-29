@@ -1,16 +1,3 @@
-"""LOG03-WS02 (#311): hook failure-arm log levels match each hook's fail-mode.
-
-The canon lives in :mod:`shipit.verbs.hook`: a fail-CLOSED hook's failure arm is
-a propagating failure (the process exits non-zero) → ERROR with the exception
-attached; a fail-OPEN hook's swallow is a degraded-but-continuing outcome →
-WARNING with the exception attached, applied uniformly across all fail-open
-hooks.
-
-Convention-level assertions ONLY (PRD glassbox, Testing Decisions): matched by
-level + ``exc_info`` presence + field presence — never per-message string
-assertions — so wording can evolve without breaking the pin.
-"""
-
 from __future__ import annotations
 
 import io
@@ -26,32 +13,22 @@ HOOK_LOGGER = "shipit.hook"
 
 
 def _records(caplog, level):
-    """The captured ``shipit.hook`` records at exactly ``level``."""
     return [r for r in caplog.records if r.name == HOOK_LOGGER and r.levelno == level]
 
 
 class _ExplodingStdin:
-    """A stdin whose read raises — forces the hook-level failure arm."""
-
     def read(self):
         raise OSError("forced stdin failure")
 
 
-# --------------------------------------------------------------------------
-# fail-CLOSED — worktreecreate: the abort is a propagating failure → ERROR
-# --------------------------------------------------------------------------
-
-
 def test_fail_closed_failure_logs_error_with_exception(monkeypatch, caplog):
-    # A parsed payload whose Tree creation fails (not in a checkout) exercises
-    # the abort arm PAST the parse — the planning-failure shape #311 names.
     monkeypatch.setattr(worktreecreate.git, "repo_root", lambda: None)
-    payload = {"session_id": "sess-123", "name": "x"}  # no prompt_id → coordinator
+    payload = {"session_id": "sess-123", "name": "x"}
     with caplog.at_level(logging.DEBUG, logger=HOOK_LOGGER):
         rc = worktreecreate.run(
             stdin=io.StringIO(json.dumps(payload)), stdout=io.StringIO()
         )
-    assert rc == 1  # fail-closed: the spawn aborts
+    assert rc == 1
     errors = _records(caplog, logging.ERROR)
     assert errors, "a fail-closed abort must produce an ERROR record"
     assert all(r.exc_info for r in errors)
@@ -67,18 +44,11 @@ def test_fail_closed_error_record_carries_derivable_domain_keys(monkeypatch, cap
 
 
 def test_fail_closed_pre_parse_failure_still_logs_error(caplog):
-    # A payload-parse failure never reaches tree.create() — exactly the arm
-    # that used to leave only a debug line for a spawn-aborting failure.
     with caplog.at_level(logging.DEBUG, logger=HOOK_LOGGER):
         rc = worktreecreate.run(stdin=io.StringIO("{not json"), stdout=io.StringIO())
     assert rc == 1
     errors = _records(caplog, logging.ERROR)
     assert errors and all(r.exc_info for r in errors)
-
-
-# --------------------------------------------------------------------------
-# fail-OPEN — the swallow is degraded-but-continuing → WARNING, uniformly
-# --------------------------------------------------------------------------
 
 
 def _force_pretooluse_failure():
@@ -90,7 +60,7 @@ def _force_sessionstart_failure():
 
 
 def _force_worktreeremove_failure():
-    return worktreeremove.run(stdin=io.StringIO("[1, 2]"))  # payload not an object
+    return worktreeremove.run(stdin=io.StringIO("[1, 2]"))
 
 
 def _force_eval_failure():
@@ -110,37 +80,21 @@ def _force_eval_failure():
 def test_fail_open_failure_logs_warning_and_continues(force_failure, caplog):
     with caplog.at_level(logging.DEBUG, logger=HOOK_LOGGER):
         rc = force_failure()
-    assert rc == 0  # fail-open: the operation continues
+    assert rc == 0
     warnings = _records(caplog, logging.WARNING)
     assert warnings, "a swallowed fail-open failure must produce a WARNING record"
     assert any(r.exc_info for r in warnings)
-    # Uniform calibration: a swallowed failure is degraded, never a propagating
-    # failure — no ERROR record for a fail-open arm.
     assert not _records(caplog, logging.ERROR)
 
 
 def test_sessionstart_malformed_payload_warns_with_exception_on_each_arm(
     monkeypatch, tmp_path, caplog
 ):
-    # A malformed payload is swallowed INSIDE the checks, past the top-level
-    # stdin read. All 5 WARNINGs come from the shared PARSE-FALLBACK helpers
-    # (`_payload_cwd` / `_payload_session_id`), which log WARNING per the canon
-    # (a swallowed parse is a degraded-but-continuing outcome): four cwd
-    # fallbacks (the source-clone warning check, the ADR-0033 pin-staleness
-    # advisory, the #444 test-task advisory, and the session.started event step —
-    # LOG04-WS02 — each parse the payload independently; activation and log-context
-    # bail on the absent CLAUDE_ENV_FILE before parsing) plus one session-id
-    # fallback (the event step). The liveness half that once added a cwd and a
-    # session-id fallback is retired (ADR-0072). The event step's OWN swallow arm is
-    # NOT among them: its emission failure is calibrated to DEBUG by design
-    # (advisory correlation, nothing durable degrades — pinned by
-    # test_session_started_emission_failure_is_fail_open) and does not fire
-    # here, since the emit itself succeeds on the fallback cwd.
-    (tmp_path / ".git").mkdir()  # the cwd fallback must land in a clone shape
+    (tmp_path / ".git").mkdir()
     monkeypatch.chdir(tmp_path)
     with caplog.at_level(logging.DEBUG, logger=HOOK_LOGGER):
         rc = sessionstart.run(stdin=io.StringIO("{not json"), environ={})
-    assert rc == 0  # fail-open: the session start continues
+    assert rc == 0
     warnings = _records(caplog, logging.WARNING)
     assert len(warnings) == 5, (
         "exactly the five parse-fallback arms (4× cwd + 1× session-id) produce "

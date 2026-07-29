@@ -1,30 +1,3 @@
-"""The tool-provisioning drift guard (TOL02-WS17, #794).
-
-Two rc-killing unprovisioned tools were found one at a time (#784 cargo-deb,
-#793 cargo-edit) because nothing tied "shipit shells out to X" to "something
-provisions X on the runner". This module is that tie, in four directions:
-
-1. **Whitelist coverage** — every ADR-0028 argv-sweep head
-   (:data:`test_tool_argv_sweep._ADAPTER_HOMES`) has an entry in
-   :data:`PROVISIONING`, and vice versa. Since the argv sweep is where a new
-   Exec tool's assembly home must be declared, a new tool cannot join the
-   whitelist without a provisioning story landing here in the same diff.
-2. **Head discovery** — an AST sweep over the release-surface modules fails
-   on any argv-shaped literal head that is neither inventoried nor
-   explicitly declared a non-argv literal (:data:`_NON_ARGV_LITERALS`). This
-   is the tripwire for a tool that never even reached the argv sweep's
-   table: the WS13–WS16 composition tools (vsce, electron-builder, tauri,
-   tree-sitter) land HERE first (WS12's wasm-pack has landed — its row is
-   below). Do not allowlist a real tool.
-3. **Pin lockstep** — each pinned entry is cross-checked against its one
-   authority (``CARGO_DEB_VERSION``, the managed pixi block data files, the
-   wf blocks' ``pixi-version``), so the registry cannot claim a pin the code
-   no longer carries.
-4. **Doc lockstep** — every inventoried tool appears in
-   ``docs/dev/release-tool-provisioning.md`` (the human-readable half of this
-   registry), and every named fails-when-absent test exists in the suite.
-"""
-
 from __future__ import annotations
 
 import ast
@@ -43,17 +16,15 @@ _REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 _SRC_ROOT = _REPO_ROOT / "src" / "shipit"
 _INVENTORY_DOC = _REPO_ROOT / "docs" / "dev" / "release-tool-provisioning.md"
 
-# The provisioning source vocabulary — the same closed set the inventory
-# document defines (docs/dev/release-tool-provisioning.md).
-RUNNER_IMAGE = "runner-image"  # preinstalled on the hosted runner image
-SETUP_PIXI = "setup-pixi"  # the blocks' prefix-dev/setup-pixi step
-PIXI_MANAGED = "pixi-managed"  # a shipit-managed pixi.toml block
-SELF_PROVISIONED = "self-provisioned"  # installed at the Exec seam, pinned
-CONSUMER_OWNED = "consumer-owned"  # only the consumer's manifest — a HOLE
-CONSUMER_ENV = "consumer-env"  # the consumer's own env, by design (not a hole)
-REPO_LOCAL = "repo-local"  # a committed script in the repo itself
-DEV_HOST = "dev-host"  # dev/CI-harness host tool, never a release runner
-OS_PROVIDED = "os"  # the operating system's own process tooling
+RUNNER_IMAGE = "runner-image"
+SETUP_PIXI = "setup-pixi"
+PIXI_MANAGED = "pixi-managed"
+SELF_PROVISIONED = "self-provisioned"
+CONSUMER_OWNED = "consumer-owned"
+CONSUMER_ENV = "consumer-env"
+REPO_LOCAL = "repo-local"
+DEV_HOST = "dev-host"
+OS_PROVIDED = "os"
 
 SOURCES = frozenset(
     {
@@ -69,33 +40,19 @@ SOURCES = frozenset(
     }
 )
 
-#: Sources whose story is a version we control — an entry claiming one of
-#: these MUST state the pin it is provisioned at.
 PINNED_SOURCES = frozenset({SETUP_PIXI, PIXI_MANAGED, SELF_PROVISIONED})
 
 
 @dataclass(frozen=True)
 class Provisioned:
-    """One provisioning row: a concrete tool reachable through an argv head.
-
-    ``tool`` is the provisioned thing (``cargo-deb``, not ``cargo`` — several
-    distinct tools dispatch through one argv head). ``hole=True`` marks a
-    documented gap: the row exists so the gap is STATED, and ``note`` must
-    name the follow-up story (the inventory doc's "Open holes" section).
-    """
-
     tool: str
     source: str
     pin: str | None = None
-    test: str | None = None  # the fails-when-absent test, when one exists
+    test: str | None = None
     hole: bool = False
     note: str = ""
 
 
-#: The registry: ADR-0028 argv-sweep head → the provisioning rows behind it.
-#: THE drift guard table — a new `_ADAPTER_HOMES` head without an entry here
-#: fails `test_every_exec_tool_has_a_provisioning_entry`. Keep the inventory
-#: document in lockstep (test_inventory_doc_names_every_tool enforces it).
 PROVISIONING: dict[str, tuple[Provisioned, ...]] = {
     "gh": (
         Provisioned("gh", RUNNER_IMAGE, note="ambient GITHUB_TOKEN auth (ADR-0028)"),
@@ -323,39 +280,27 @@ PROVISIONING: dict[str, tuple[Provisioned, ...]] = {
     ),
 }
 
-# ---------------------------------------------------------------------------
-# Head discovery — the "new tool without a provisioning story" tripwire
-# ---------------------------------------------------------------------------
 
-#: The release-surface modules whose argv literals the discovery sweep walks:
-#: the release verbs' assembly points plus the producing/e2e registries — the
-#: places a new release-pipeline tool's argv would land (ADR-0028 whitelist).
 _RELEASE_SURFACE = (
-    "release",  # every module of the release package
+    "release",
     "tools/registry.py",
     "tools/e2e.py",
 )
 
-#: String literals the discovery sweep finds heading a list/tuple in the
-#: release surface that are NOT tool invocations (result vocabularies,
-#: platform names, template keys, manifest filenames, version prefixes, tauri
-#: bundle-format subdir names). Every entry must still be discovered (no stale
-#: rows) and must not collide with a PROVISIONING head. A REAL tool never
-#: belongs here.
 _NON_ARGV_LITERALS = frozenset(
     {
         "aarch64",
-        "appimage",  # tauri linux bundle-format subdir (_TAURI_LINUX_FORMATS)
+        "appimage",
         "apple-darwin",
         "build",
         "bundle",
         "darwin",
-        "deb",  # tauri linux bundle-format subdir (_TAURI_LINUX_FORMATS)
+        "deb",
         "description",
         "dispatch",
         "gh-release",
         "homepage/repository",
-        "init.lua",  # lua bump adapter's leg-relative edit_path (a filename, not a tool)
+        "init.lua",
         "license",
         "linux",
         "major",
@@ -369,15 +314,13 @@ _NON_ARGV_LITERALS = frozenset(
         "release",
         "rust",
         "scope",
-        "stage",  # vsix's native-staging option key (bundle.py VSIX option_keys)
+        "stage",
         "success",
         "v",
         "windows",
     }
 )
 
-#: What a binary-invocation head looks like (lowercase path-ish token, never
-#: a flag) — the same literal shape the ADR-0028 sweep guards.
 _HEAD_SHAPE = re.compile(r"^[a-z][a-z0-9._/-]*$")
 
 
@@ -386,8 +329,6 @@ def _release_surface_files() -> list[pathlib.Path]:
     for entry in _RELEASE_SURFACE:
         path = _SRC_ROOT / entry
         if path.is_dir():
-            # rglob, not glob: a future subpackage under release/ must not slip
-            # past the discovery tripwire because the sweep stayed top-level.
             files.extend(sorted(path.rglob("*.py")))
         else:
             files.append(path)
@@ -395,7 +336,6 @@ def _release_surface_files() -> list[pathlib.Path]:
 
 
 def _discovered_heads() -> dict[str, list[str]]:
-    """Every argv-shaped literal head in the release surface → its sites."""
     heads: dict[str, list[str]] = {}
     for path in _release_surface_files():
         tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -412,15 +352,7 @@ def _discovered_heads() -> dict[str, list[str]]:
     return heads
 
 
-# ---------------------------------------------------------------------------
-# The guard
-# ---------------------------------------------------------------------------
-
-
 def test_every_exec_tool_has_a_provisioning_entry():
-    # Direction 1: whitelist coverage, both ways. A new `_ADAPTER_HOMES` head
-    # (the mandatory landing point for a new Exec tool's argv home) without a
-    # provisioning story fails HERE — the #784/#793 failure class, statable.
     missing = set(_ADAPTER_HOMES) - set(PROVISIONING)
     stale = set(PROVISIONING) - set(_ADAPTER_HOMES)
     assert not missing, (
@@ -431,9 +363,6 @@ def test_every_exec_tool_has_a_provisioning_entry():
 
 
 def test_release_surface_heads_are_all_inventoried():
-    # Direction 2: the tripwire for a tool that never reached the argv
-    # sweep's table — any argv-shaped literal head in the release surface is
-    # either a PROVISIONING head or an explicitly declared non-argv literal.
     discovered = _discovered_heads()
     unknown = {
         head: sites
@@ -445,7 +374,6 @@ def test_release_surface_heads_are_all_inventoried():
         "needs a PROVISIONING entry + inventory-doc row; a non-tool literal "
         f"joins _NON_ARGV_LITERALS): {unknown}"
     )
-    # The allowlist stays honest: no dead rows, no shadowing a real entry.
     assert not (_NON_ARGV_LITERALS & set(PROVISIONING))
     stale_allowlist = _NON_ARGV_LITERALS - set(discovered)
     assert not stale_allowlist, (
@@ -466,9 +394,6 @@ def test_sources_are_valid_and_pinned_sources_carry_pins():
                     f"{head}/{row.tool}: a provisioned source contradicts hole=True"
                 )
             if row.source == CONSUMER_OWNED:
-                # The converse: CONSUMER_OWNED is DEFINED as a hole this
-                # inventory tracks (see the source vocabulary), so a
-                # consumer-owned tool cannot land without its hole=True story.
                 assert row.hole, (
                     f"{head}/{row.tool}: CONSUMER_OWNED is a hole — mark hole=True"
                 )
@@ -488,15 +413,10 @@ def _block_toml(data_file: str) -> dict:
 
 
 def test_pins_agree_with_their_one_authority():
-    # Direction 3: the registry cannot claim a pin the code/data no longer
-    # carries. Each cross-check names the pin's single home (ADR-0028: one
-    # adapter, one pin; the managed blocks: one data file).
     assert _row("cargo", "cargo-deb").pin == release_bundle.CARGO_DEB_VERSION
     rust_release = _block_toml("pixi-rust-release-deps-block.toml")
     assert _row("cargo", "cargo-edit").pin == rust_release["cargo-edit"]
     assert _row("wasm-pack", "wasm-pack").pin == rust_release["wasm-pack"]
-    # rattler-build was re-gated onto the conda ENDPOINT (#1071), so its pin's
-    # one authority is the conda-packager block, not the rust-release-deps one.
     conda_packager = _block_toml("pixi-conda-packager-block.toml")
     assert _row("rattler-build", "rattler-build").pin == conda_packager["rattler-build"]
     rust_toolchain = _block_toml("pixi-rust-release-toolchain-block.toml")
@@ -505,13 +425,7 @@ def test_pins_agree_with_their_one_authority():
         _row("wasm-pack", "rust-std-wasm32-unknown-unknown").pin
         == rust_toolchain["rust-std-wasm32-unknown-unknown"]
     )
-    # The wasm32 std is the managed rust toolchain's OWN sysroot component
-    # (#853): it rides the toolchain block and its pin moves in lockstep with
-    # the `rust` line, or wasm builds solve a std that misses the delivered
-    # sysroot version.
     assert rust_toolchain["rust-std-wasm32-unknown-unknown"] == rust_toolchain["rust"]
-    # ...and the two managed rust surfaces (release default-env toolchain,
-    # lint-feature toolchain) move in lockstep — one rust, two envs (#801).
     rust_lint = _block_toml("pixi-rust-lint-deps-block.toml")
     assert rust_toolchain["rust"] == rust_lint["rust"]
     python_release = _block_toml("pixi-python-release-deps-block.toml")
@@ -526,13 +440,6 @@ def test_pins_agree_with_their_one_authority():
 
 
 def test_remedy_map_agrees_with_the_managed_units():
-    # The #801 missing-tool translation names managed block keys in operator
-    # remediation text; each must be a real catalog unit key riding the named
-    # toolchain signal, or the remedy sends the operator to a block that the
-    # reconcile will never deliver.
-    # A managed block is delivered off a toolchain signal (TOOLCHAIN_UNITS) OR,
-    # since #1071, a declared ENDPOINT (ENDPOINT_UNITS — the conda packager); a
-    # remedy may name either, so the cross-check spans both catalogs.
     rows = {
         key: sig for key, sig, *_ in (*iunits.TOOLCHAIN_UNITS, *iunits.ENDPOINT_UNITS)
     }
@@ -542,9 +449,6 @@ def test_remedy_map_agrees_with_the_managed_units():
 
 
 def test_wf_release_family_pixi_pin_agrees_with_registry():
-    # Every wf block provisions pixi through setup-pixi; all of them (the
-    # wf-release family AND wf-checks) must pin the registry's version — the
-    # PIXI_PIN lockstep test covers wf-checks, this covers the whole family.
     expected = _row("pixi", "pixi").pin
     wf_files = sorted((_REPO_ROOT / ".github" / "workflows").glob("wf-*.yml"))
     assert wf_files, "no wf blocks found"
@@ -557,8 +461,6 @@ def test_wf_release_family_pixi_pin_agrees_with_registry():
             if line.strip().startswith("pixi-version:")
         ]
         if "setup-pixi" not in text:
-            # The composer (wf-release.yml) carries only `uses:` lines; every
-            # stage's provisioning lives in the block it composes.
             assert not pins, f"{wf.name}: pixi-version without a setup-pixi step"
             continue
         saw_pins = True
@@ -568,11 +470,6 @@ def test_wf_release_family_pixi_pin_agrees_with_registry():
 
 
 def test_inventory_doc_names_every_tool():
-    # Direction 4: the human-readable inventory and this registry move
-    # together — every head and every concrete tool is named in the doc, as a
-    # backticked token so a short name (`go`, `ps`, `tar`) cannot pass on a
-    # stray substring (e.g. head `go` inside the doc's "go/no-go" prose) and
-    # mask a genuinely missing row.
     doc = _INVENTORY_DOC.read_text(encoding="utf-8")
     for head, rows in PROVISIONING.items():
         assert f"`{head}`" in doc, f"inventory doc misses argv head {head!r}"
@@ -581,10 +478,6 @@ def test_inventory_doc_names_every_tool():
 
 
 def test_named_fails_when_absent_tests_exist():
-    # A registry row naming a test that no longer exists is the inventory
-    # lying about its coverage — the (c) column of the #794 sweep.
-    # rglob, not glob: a future test subdirectory must not make this check
-    # silently pass by hiding the file that defines a named absent-test.
     suite = "\n".join(
         p.read_text(encoding="utf-8")
         for p in sorted((_REPO_ROOT / "tests").rglob("test_*.py"))

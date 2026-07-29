@@ -1,16 +1,3 @@
-"""Unit tests for the reviewer-request service (`shipit.prstate.request`).
-
-The attach-verify helper at its domain home (CLI01-WS03 promoted it out of
-``verbs/pr/``), tested prstate-style with an INJECTED/FAKED boundary (no
-network, no real `gh`, no click): it confirms a remote request attached; it
-reports `dropped` (→ not-ok) when GitHub silently drops the edge; a bare run
-skips reviewers already DONE; `force=True` requests one regardless of state.
-Each outcome's durable log twin (LOG02 / ADR-0029) is pinned here too — the
-records live with the service now, not the verb.
-
-The engine itself (adapter detection, the state machine) is NOT re-tested here.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -32,20 +19,12 @@ from shipit.prstate.reviewers import ReviewerAdapter
 from shipit.prstate.roster import Roster, RosterEntry
 from shipit.review.calibrator import CalibratorConfig
 
-# The typed PR target (CLI01-WS02 / ADR-0030): the service threads a PrId —
-# repo + number as ONE value — never a bare int.
 REPO = repo_from_slug("owner/repo")
 TARGET = PrId(repo=REPO, number=7)
 EMPTY_ROSTER = Roster()
 
 
-# --- test doubles -------------------------------------------------------------
-
-
 class _FakeAdapter(ReviewerAdapter):
-    """A controllable adapter: declares its edge model + lifecycle, records the
-    request call, and reports placement via `request_returns`."""
-
     def __init__(
         self,
         name: str,
@@ -59,10 +38,6 @@ class _FakeAdapter(ReviewerAdapter):
         self._request_returns = request_returns
         self._lifecycle = lifecycle
         self.requested_with: list[PrId] = []
-        # The full request call surface — (pr, entry, policy) — so a test can
-        # assert the per-reviewer entry and table-level policy actually thread
-        # through (RVW02-WS04: they carry the configured dimensions/nit_cap/
-        # calibrator into the detached run).
         self.request_calls: list[tuple] = []
 
     def matches(self, login: str) -> bool:
@@ -82,9 +57,6 @@ def _boundary(
     requested_logins: list[str] | None = None,
     reviews: list[tuple[int, str]] | None = None,
 ) -> Boundary:
-    """A faked boundary: `attach_state` returns the given pending logins + review
-    tail; `gather_reviews` returns a sentinel ctx (adapters' fake `detect` ignores
-    it); `sleep` is a no-op so the poll runs instantly."""
     logins = requested_logins or []
     revs = reviews or []
     return Boundary(
@@ -94,11 +66,7 @@ def _boundary(
     )
 
 
-# --- the attach-verify service -------------------------------------------------
-
-
 def test_verifies_when_edge_attaches():
-    """A remote request whose login shows up in pending requests verifies."""
     adapter = _FakeAdapter("copilot")
     result = request_reviewers(
         TARGET,
@@ -107,7 +75,6 @@ def test_verifies_when_edge_attaches():
         force=True,
         boundary=_boundary(requested_logins=["Copilot"]),
     )
-    # The adapter received the TYPED target — repo riding on the identity.
     assert adapter.requested_with == [TARGET]
     assert result.ok
     assert result.verified == ["copilot"]
@@ -115,11 +82,6 @@ def test_verifies_when_edge_attaches():
 
 
 def test_request_threads_the_reviewer_entry_and_table_policy():
-    """The request path threads the per-reviewer entry AND the table-level policy
-    (calibrator + nit cap) into each adapter — the ONE link that carries the
-    configured dimensions/nit_cap/calibrator into a local reviewer's detached
-    run. A silent revert to `adapter.request(pr, roster.entry(name))` (dropping
-    the policy) or the wrong entry would otherwise leave the whole suite green."""
     adapter = _FakeAdapter("copilot")
     roster = Roster(
         entries=(
@@ -137,23 +99,19 @@ def test_request_threads_the_reviewer_entry_and_table_policy():
     )
     [(pr, entry, policy)] = adapter.request_calls
     assert pr == TARGET
-    assert entry == roster.entry("copilot")  # the configured entry, not a default
-    assert policy == roster.policy  # calibrator + nit cap bundled through
+    assert entry == roster.entry("copilot")
+    assert policy == roster.policy
 
 
 def test_verifies_via_fresh_review_when_bot_consumed_request():
-    """A fast bot that submits a fresh review before the poll sees the edge still
-    verifies (the review id is not in the pre-request baseline)."""
     adapter = _FakeAdapter("copilot")
-    # baseline (first attach_state call, pre-place) is empty; the poll then sees
-    # a NEW review by copilot — fresh, so verified.
     calls = {"n": 0}
 
     def attach_state(pr):
         calls["n"] += 1
         if calls["n"] == 1:
-            return [], []  # baseline: no reviews yet
-        return [], [(99, "Copilot")]  # poll: fresh review consumed the request
+            return [], []
+        return [], [(99, "Copilot")]
 
     boundary = Boundary(
         attach_state=attach_state,
@@ -168,8 +126,6 @@ def test_verifies_via_fresh_review_when_bot_consumed_request():
 
 
 def test_dropped_when_edge_never_appears():
-    """A silently-dropped attach (edge never appears, no fresh review) is a hard
-    failure: status `dropped`, result not ok."""
     adapter = _FakeAdapter("copilot")
     result = request_reviewers(
         TARGET,
@@ -183,18 +139,16 @@ def test_dropped_when_edge_never_appears():
 
 
 def test_bare_run_skips_already_done_reviewer():
-    """A bare run drops a reviewer already DONE on the head — never requested."""
     done = _FakeAdapter("copilot", lifecycle=ReviewLifecycle.DONE_CLEAN)
     result = request_reviewers(
         TARGET, [done], EMPTY_ROSTER, force=False, boundary=_boundary()
     )
-    assert done.requested_with == []  # not re-poked
+    assert done.requested_with == []
     assert result.skipped == ["copilot"]
     assert result.verified == []
 
 
 def test_bare_run_requests_pending_reviewer():
-    """A bare run DOES request a reviewer not yet done, and verifies it."""
     pending = _FakeAdapter("copilot", lifecycle=ReviewLifecycle.NOT_REQUESTED)
     result = request_reviewers(
         TARGET,
@@ -208,7 +162,6 @@ def test_bare_run_requests_pending_reviewer():
 
 
 def test_force_requests_already_done_reviewer():
-    """`force=True` (the --reviewer escape hatch) requests even a DONE reviewer."""
     done = _FakeAdapter("copilot", lifecycle=ReviewLifecycle.DONE_CLEAN)
     result = request_reviewers(
         TARGET,
@@ -217,15 +170,13 @@ def test_force_requests_already_done_reviewer():
         force=True,
         boundary=_boundary(requested_logins=["Copilot"]),
     )
-    assert done.requested_with == [TARGET]  # forced despite being done
+    assert done.requested_with == [TARGET]
     assert result.skipped == []
     assert result.verified == ["copilot"]
 
 
 def test_local_reviewer_in_flight_not_edge_verified():
-    """A local reviewer (no edge) that returns True is `in_flight`, never polled."""
     local = _FakeAdapter("codex", has_edge=False, request_returns=True)
-    # attach_state would raise if the poll ran — proving locals skip verification.
 
     def boom(pr):
         raise AssertionError("local reviewer must not be edge-verified")
@@ -244,7 +195,6 @@ def test_local_reviewer_in_flight_not_edge_verified():
 
 
 def test_no_mechanism_backend_is_no_op():
-    """A backend whose request() returns False records a no-op, never verified."""
     auto = _FakeAdapter("gemini", has_edge=False, request_returns=False)
     result = request_reviewers(
         TARGET, [auto], EMPTY_ROSTER, force=True, boundary=_boundary()
@@ -254,11 +204,6 @@ def test_no_mechanism_backend_is_no_op():
 
 
 def test_local_request_failure_propagates_and_records_no_in_flight(caplog):
-    """#347: a local adapter whose placement RAISES (`PrStateError` — e.g. the
-    detach died on an auth/env precondition) propagates out of the service: no
-    result is returned to claim the reviewer, and no `in flight` durable record
-    is left for the failed reviewer — a failed placement can never surface as a
-    placed one."""
     from shipit.prstate.errors import PrStateError
 
     class _BoomLocal(_FakeAdapter):
@@ -275,7 +220,6 @@ def test_local_request_failure_propagates_and_records_no_in_flight(caplog):
 
 
 def test_gh_failure_in_skip_read_propagates():
-    """A gh failure while reading who-is-done propagates (never a false success)."""
     adapter = _FakeAdapter("copilot")
 
     def boom(pr, roster):
@@ -290,9 +234,6 @@ def test_gh_failure_in_skip_read_propagates():
         request_reviewers(
             TARGET, [adapter], EMPTY_ROSTER, force=False, boundary=boundary
         )
-
-
-# --- the RequestResult verdict surface -----------------------------------------
 
 
 def test_result_groups_outcomes_by_status():
@@ -311,14 +252,6 @@ def test_result_groups_outcomes_by_status():
     assert result.skipped == ["coderabbit"]
     assert result.dropped == ["sourcery"]
     assert not result.ok
-
-
-# --- the durable log twins (LOG02 / ADR-0029) ----------------------------------
-#
-# Each outcome records at the SERVICE that produced it, on the engine's logger,
-# carrying flat ``pr``/``reviewer`` keys: INFO for a placed/in-flight request,
-# DEBUG for a deliberate non-act, WARNING for a dropped request. The convention
-# is pinned (levels + keys), not the prose.
 
 
 def _prstate_records(caplog, level: int):
@@ -352,7 +285,7 @@ def test_skip_and_no_op_outcomes_are_debug_mechanics(caplog):
         request_reviewers(
             TARGET, [done, auto], EMPTY_ROSTER, force=False, boundary=_boundary()
         )
-    assert not _prstate_records(caplog, logging.INFO)  # nothing transitioned
+    assert not _prstate_records(caplog, logging.INFO)
     mechanics = _prstate_records(caplog, logging.DEBUG)
     assert {r.reviewer for r in mechanics} == {"copilot", "gemini"}
     assert all(r.pr == 7 for r in mechanics)
@@ -371,24 +304,11 @@ def test_dropped_outcome_is_a_warning_record(caplog):
     assert warnings[0].pr == 7
 
 
-# --- the review.requested dev-cycle event (LOG04-WS01 / ADR-0032) ---------------
-#
-# The placed-request milestones ARE the event: one `event="review.requested"`
-# record per reviewer whose request took effect (remote edge verified, or the
-# local review detached in-flight). A dropped request and the deliberate
-# non-acts stay untagged — the milestone trail records only requests that
-# actually happened. On the raw LogRecord the tag rides under
-# `events.EXTRA_KEY` (the render seam lands it as the durable `event` field —
-# pinned end-to-end by test_events).
-
-
 def _event_tag(record) -> str | None:
     return getattr(record, events.EXTRA_KEY, None)
 
 
 def test_placed_requests_emit_the_review_requested_event(caplog):
-    """One review.requested record per reviewer requested — remote (verified)
-    and local (in-flight) alike, carrying the flat pr/reviewer keys."""
     remote = _FakeAdapter("copilot")
     local = _FakeAdapter("codex", has_edge=False)
     with caplog.at_level(logging.DEBUG, logger="shipit.prstate"):
@@ -406,8 +326,6 @@ def test_placed_requests_emit_the_review_requested_event(caplog):
 
 
 def test_non_requests_carry_no_event_tag(caplog):
-    """A dropped attach, a review-once skip, and a no-mechanism no-op never
-    tag a review.requested event — no request took effect."""
     dropped = _FakeAdapter("copilot")
     with caplog.at_level(logging.DEBUG, logger="shipit.prstate"):
         request_reviewers(

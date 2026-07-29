@@ -1,15 +1,3 @@
-"""Smoke tests for `shipit pr wait` CLI wiring — glue + renderers (ADR-0034).
-
-Proves the verb registers on the `pr` group and that its run shell — resolve →
-loop(gather → evaluate) → render — wires the engine's `wait_for` with the
-config-owned poll interval, the stderr progress line, and the exit-code
-contract (0 fired / 1 error / 2 usage / 3 timeout / 4 caller-actionable stop,
-#583). The loop's own semantics
-(conditions, clamped deadline, event emission) are the engine's and are
-unit-tested in test_prstate_wait.py; here the boundary (resolver / gather /
-evaluate / load_roster) is monkeypatched — no network, no real time.
-"""
-
 from __future__ import annotations
 
 import json
@@ -46,8 +34,6 @@ def _status(state: TaskState, pr: int = 42, next_action: str = "do x") -> TaskSt
 
 
 class Clock:
-    """A fake monotonic clock + recording sleep: sleeping advances time."""
-
     def __init__(self) -> None:
         self.now = 0.0
         self.naps: list[float] = []
@@ -62,8 +48,6 @@ class Clock:
 
 @pytest.fixture
 def patched_wait(monkeypatch):
-    """resolve → the typed PrId target (#42); gather passes the target through;
-    the roster is the copilot-required default shape. Tests script `evaluate`."""
     monkeypatch.setattr(
         wait_verb,
         "resolve_pr",
@@ -75,9 +59,6 @@ def patched_wait(monkeypatch):
         "load_roster",
         lambda: Roster((RosterEntry(name="copilot", required=True),)),
     )
-
-
-# --- wiring -------------------------------------------------------------------
 
 
 def test_pr_help_lists_wait(capsys):
@@ -92,7 +73,7 @@ def test_wait_help_documents_the_surface(capsys):
     out = capsys.readouterr().out
     assert "--until" in out
     assert "--timeout" in out
-    assert "30m" in out  # the documented default deadline
+    assert "30m" in out
     assert "--json" in out
 
 
@@ -111,9 +92,6 @@ def test_malformed_timeout_is_usage_tier(capsys):
     rc = cli.main(["pr", "wait", "--until", "ready", "--timeout", "soonish"])
     assert rc == 2
     assert "Usage:" in capsys.readouterr().err
-
-
-# --- run shell ----------------------------------------------------------------
 
 
 def test_fires_exit_zero_and_renders_the_status(patched_wait, monkeypatch, capsys):
@@ -140,8 +118,6 @@ def test_json_carries_outcome_and_status(patched_wait, monkeypatch, capsys):
 
 
 def test_no_pr_is_a_refusal_exit_1(monkeypatch, capsys):
-    # Unlike `pr status` (a normal no_pr report), a wait with no PR would poll
-    # a nonexistent target until its deadline — refuse loud instead.
     monkeypatch.setattr(wait_verb, "resolve_pr", lambda pr, repo, branch: None)
     rc = cli.main(["pr", "wait", "--until", "ready"])
     assert rc == 1
@@ -172,9 +148,6 @@ def test_timeout_is_the_distinct_exit_code_with_a_state_report(
     assert rc == wait_verb.EXIT_TIMEOUT == 3
     out = capsys.readouterr().out
     assert "timed out" in out
-    # The headline carries the engine's next-action line verbatim as the state
-    # report — no "still waiting on:" prefix duplicating next_action's own
-    # "waiting on …" lead.
     assert "— waiting on: copilot re-review" in out
     assert "waiting on: waiting on:" not in out
 
@@ -182,9 +155,6 @@ def test_timeout_is_the_distinct_exit_code_with_a_state_report(
 def test_addressing_stops_a_ready_wait_with_the_distinct_exit_code(
     patched_wait, monkeypatch, capsys
 ):
-    # The #583 deadlock guard: `--until ready` observing `addressing` — a state
-    # only the waiting caller can clear — exits promptly with the DISTINCT code
-    # 4 and the engine's next-action line, instead of polling to the deadline.
     monkeypatch.setattr(
         wait_verb,
         "evaluate",
@@ -200,7 +170,7 @@ def test_addressing_stops_a_ready_wait_with_the_distinct_exit_code(
         monotonic=clock.monotonic,
     )
     assert rc == wait_verb.EXIT_ACTIONABLE == 4
-    assert clock.naps == []  # the first observation already stops the wait
+    assert clock.naps == []
     out = capsys.readouterr().out
     assert "addressing" in out
     assert "classify 1 finding(s)" in out
@@ -240,18 +210,14 @@ def test_progress_lines_go_to_stderr_on_state_change(patched_wait, monkeypatch, 
     )
     assert rc == 0
     captured = capsys.readouterr()
-    # One stderr line per CHANGE (first observation + the move), not per tick.
     progress = [line for line in captured.err.splitlines() if "pr#42 wait:" in line]
     assert len(progress) == 2
     assert "reviews_pending" in progress[0]
     assert "ready" in progress[1]
-    # stdout stays the typed result only.
     assert "pr#42 wait:" not in captured.out
 
 
 def test_poll_interval_comes_from_the_roster_config(patched_wait, monkeypatch):
-    # ADR-0034: cadence is tool-owned config (`[reviewers].poll_interval`),
-    # never a per-call flag — the verb reads it off the ONE loaded Roster.
     monkeypatch.setattr(
         wait_verb,
         "load_roster",
@@ -299,8 +265,6 @@ def test_poll_interval_defaults_to_the_documented_60s(patched_wait, monkeypatch)
 
 
 def test_gh_failure_mid_wait_is_uniform_error_exit_1(patched_wait, monkeypatch, capsys):
-    # A real boundary failure on a poll tick must surface through the error
-    # shell, never be silently retried until the deadline.
     from shipit.execrun import ExecError
 
     def boom(ctx):
@@ -310,9 +274,5 @@ def test_gh_failure_mid_wait_is_uniform_error_exit_1(patched_wait, monkeypatch, 
     rc = cli.main(["pr", "wait", "--until", "ready"])
     assert rc == 1
     err = capsys.readouterr().err
-    # The error contract is ONE `error: …` LINE on stderr — which the wait
-    # verb deliberately shares with its progress lines (and, depending on the
-    # sink config, log records: the `wait.started` event lands there in CI),
-    # so assert on the line, not on the stream's first bytes.
     assert any(line.startswith("error: ") for line in err.splitlines())
     assert "gh pr view failed" in err

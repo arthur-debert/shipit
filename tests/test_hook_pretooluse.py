@@ -1,10 +1,3 @@
-"""Hook boundary: a `PreToolUse` payload on stdin -> the decision JSON on stdout.
-
-A thin integration test (not broad coverage): the deny path emits the Claude
-Code `hookSpecificOutput`, the allow path emits nothing, and ANY malformed input
-fails OPEN (no output, exit 0) — the dogfooding-safety contract.
-"""
-
 from __future__ import annotations
 
 import io
@@ -20,15 +13,6 @@ from shipit.verbs.hook.pretooluse import run
 
 @pytest.fixture(autouse=True)
 def _scrub_ambient_role_env(monkeypatch):
-    """No test here may depend on the ambient launch-context env (#631).
-
-    The hook's coordinator fallback reads ``SHIPIT_LOG_CTX_ROLE``/``_AGENT``
-    from the process env — and this suite RUNS inside shipit-spawned Runs that
-    export exactly those vars, so a coordinator-deny test would silently pass
-    or fail with the wrong verdict depending on who ran pytest. Every test
-    starts from a scrubbed env; the fallback-specific tests set the vars they
-    mean explicitly.
-    """
     monkeypatch.delenv("SHIPIT_LOG_CTX_ROLE", raising=False)
     monkeypatch.delenv("SHIPIT_LOG_CTX_AGENT", raising=False)
 
@@ -279,7 +263,7 @@ def test_subagent_code_edit_is_allowed_silently():
     )
     code, out = _run(payload)
     assert code == 0
-    assert out == ""  # allow == no decision; normal permission flow proceeds
+    assert out == ""
 
 
 def test_coordinator_doc_edit_is_allowed_silently():
@@ -292,8 +276,6 @@ def test_coordinator_doc_edit_is_allowed_silently():
 
 
 def test_non_edit_tool_is_allowed_silently():
-    # The hook fires for any matched tool; a non-edit one never reaches the
-    # verdict and is allowed (no output), even for the coordinator on a code path.
     payload = json.dumps(
         {"tool_name": "Read", "tool_input": {"file_path": "src/shipit/cli.py"}}
     )
@@ -303,8 +285,6 @@ def test_non_edit_tool_is_allowed_silently():
 
 
 def test_enter_worktree_is_denied():
-    # The native-worktree guard fires even though EnterWorktree is not an edit
-    # tool, and regardless of role (no agent_type ⇒ coordinator).
     payload = json.dumps({"tool_name": "EnterWorktree", "tool_input": {}})
     code, out = _run(payload)
     assert code == 0
@@ -317,7 +297,6 @@ def test_enter_worktree_is_denied():
     "command",
     [
         "git worktree add ../tree-x my-branch",
-        # A leading global option must NOT smuggle `worktree add` past the wall.
         "git -C /repo worktree add ../t b",
         "git --no-pager worktree add ../t b",
     ],
@@ -325,7 +304,7 @@ def test_enter_worktree_is_denied():
 def test_bash_git_worktree_add_is_denied(command):
     payload = json.dumps(
         {
-            "agent_type": "implementer",  # role-independent: a subagent is blocked too
+            "agent_type": "implementer",
             "tool_name": "Bash",
             "tool_input": {"command": command},
         }
@@ -356,8 +335,7 @@ def test_break_glass_permits_the_edit_and_logs_it(monkeypatch, caplog):
     with caplog.at_level(logging.WARNING, logger="shipit.hook"):
         code, out = _run(payload)
     assert code == 0
-    assert out == ""  # break-glass converts the would-be deny into a silent allow
-    # The use is recorded LOUD (an HAR02 frequency signal), with role/tool/path.
+    assert out == ""
     assert any(
         "break-glass" in r.message
         and "coordinator" in r.message
@@ -367,8 +345,6 @@ def test_break_glass_permits_the_edit_and_logs_it(monkeypatch, caplog):
 
 
 def test_break_glass_does_not_log_when_no_edit_would_be_blocked(monkeypatch, caplog):
-    # Break-glass armed, but a subagent edit was never going to be denied — so
-    # there is nothing to break through and nothing to log.
     monkeypatch.setenv(breakglass.ENV, "1")
     payload = json.dumps(
         {
@@ -398,16 +374,16 @@ def test_falsey_break_glass_still_denies(monkeypatch, falsey):
 @pytest.mark.parametrize(
     "garbage",
     [
-        "",  # empty stdin
+        "",
         "not json at all",
-        "{",  # truncated json
-        "[]",  # valid json, wrong shape
-        json.dumps({"tool_name": "Edit"}),  # missing tool_input
-        json.dumps({"tool_input": {"file_path": "src/x.py"}}),  # missing tool_name
+        "{",
+        "[]",
+        json.dumps({"tool_name": "Edit"}),
+        json.dumps({"tool_input": {"file_path": "src/x.py"}}),
         json.dumps({"tool_name": "Edit", "tool_input": "not-a-dict"}),
     ],
 )
 def test_fails_open_on_malformed_input(garbage):
     code, out = _run(garbage)
     assert code == 0
-    assert out == ""  # no block on bad input
+    assert out == ""

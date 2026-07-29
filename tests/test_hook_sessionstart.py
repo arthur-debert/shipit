@@ -1,13 +1,3 @@
-"""Hook boundary + pure core: SessionStart → toolchain activation into CLAUDE_ENV_FILE.
-
-The coordinator-activation seam (ADR-0027, SES01-WS01). Covers the three things the
-slice owns: the PURE toolchain→activation mapping (pixi → export lines rendered from
-pixi's `shell-hook --json` snapshot; non-pixi → empty), the manifest resolution from
-the session's cwd, and the boundary's FAIL-OPEN contract (exit 0 always; a repo with
-no activatable toolchain — or any error — writes nothing and never errors, because
-activation is additive, never load-bearing).
-"""
-
 from __future__ import annotations
 
 import builtins
@@ -29,9 +19,6 @@ from shipit.verbs.hook import sessionstart
 
 TREE_ROOT = "/trees/SES01/WS01"
 
-# A faithful `pixi shell-hook --json` blob (mirrors tests/test_pixienv.py's fixture):
-# the complete env-var snapshot pixi's activation produces, plus a value that NEEDS
-# quoting so the export rendering is exercised end to end.
 SHELL_HOOK_JSON = json.dumps(
     {
         "environment_variables": {
@@ -46,7 +33,6 @@ SHELL_HOOK_JSON = json.dumps(
 
 
 def _fake_runner(captured: dict):
-    """An `execrun.run`-shaped stub that records argv and returns the fixture JSON."""
 
     def runner(cmd, **kwargs):
         captured["cmd"] = cmd
@@ -63,41 +49,30 @@ def _run(payload: dict | str, env: dict, runner=None) -> int:
 
 @pytest.fixture
 def pixi_repo(tmp_path):
-    """A checkout with a pixi.toml at its root and a nested working dir."""
     (tmp_path / "pixi.toml").write_text('[project]\nname = "x"\n')
     nested = tmp_path / "src" / "pkg"
     nested.mkdir(parents=True)
     return tmp_path
 
 
-# --------------------------------------------------------------------------
-# Pure core — the toolchain→activation mapping
-# --------------------------------------------------------------------------
-
-
 def test_pixi_toolchain_maps_to_export_lines():
-    # pixi → the shell-hook snapshot rendered as pure `export` lines, in pixi's
-    # order — sourceable as a preamble (no functions, nothing interactive).
     toolchain = activation.Toolchain(kind=activation.PIXI, manifest=Path("pixi.toml"))
     script = activation.activation_script(toolchain, parse_activation(SHELL_HOOK_JSON))
     assert script.splitlines() == [
         f"export PATH={TREE_ROOT}/.pixi/envs/default/bin:/usr/bin:/bin",
         f"export CONDA_PREFIX={TREE_ROOT}/.pixi/envs/default",
         "export CONDA_DEFAULT_ENV=shipit",
-        "export PIXI_PROMPT='(shipit) '",  # embedded space+parens → quoted
+        "export PIXI_PROMPT='(shipit) '",
     ]
 
 
 def test_no_toolchain_maps_to_empty():
-    # Non-pixi → the EMPTY script: the graceful-no-op half of the mapping.
     act = parse_activation(SHELL_HOOK_JSON)
     assert activation.activation_script(None, act) == ""
     assert activation.activation_script(None, None) == ""
 
 
 def test_unknown_toolchain_kind_maps_to_empty():
-    # The kind-keyed dispatch is the extension seam: an unmapped kind degrades to
-    # the no-op script rather than guessing an activation.
     toolchain = activation.Toolchain(kind="npm", manifest=Path("package.json"))
     assert (
         activation.activation_script(toolchain, parse_activation(SHELL_HOOK_JSON)) == ""
@@ -105,8 +80,6 @@ def test_unknown_toolchain_kind_maps_to_empty():
 
 
 def test_export_lines_skip_non_identifier_keys():
-    # A key that cannot be a shell identifier cannot become an `export` line;
-    # it is dropped rather than written broken into a sourced preamble.
     act = Activation(
         environment_variables={"OK": "1", "BAD-KEY": "x", "2BAD": "y"},
         activation_scripts=(),
@@ -115,12 +88,6 @@ def test_export_lines_skip_non_identifier_keys():
 
 
 def test_activation_scripts_are_not_rendered_their_env_effects_already_are():
-    # pixi EXECUTES activation scripts while computing `shell-hook --json` and
-    # folds their env effects into environment_variables (probed live, pixi 0.71:
-    # a script's `export SCRIPT_VAR=…` appears in the JSON env map). So a
-    # non-empty activation_scripts list changes NOTHING here: the exports already
-    # match `pixi run`'s env, and the script paths themselves must never leak
-    # into the sourced preamble (re-sourcing would double-apply them).
     toolchain = activation.Toolchain(kind=activation.PIXI, manifest=Path("pixi.toml"))
     act = Activation(
         environment_variables={"SCRIPT_VAR": "set-by-script", "DECLARED": "1"},
@@ -135,7 +102,6 @@ def test_activation_scripts_are_not_rendered_their_env_effects_already_are():
 
 
 def test_export_lines_quote_hostile_values():
-    # A value with quotes/spaces/expansions survives sourcing VERBATIM.
     act = Activation(
         environment_variables={"HOSTILE": "a 'b' $(rm -rf /) $HOME"},
         activation_scripts=(),
@@ -144,14 +110,7 @@ def test_export_lines_quote_hostile_values():
     assert line == """export HOSTILE='a '"'"'b'"'"' $(rm -rf /) $HOME'"""
 
 
-# --------------------------------------------------------------------------
-# Manifest resolution — from the session's cwd
-# --------------------------------------------------------------------------
-
-
 def test_detect_toolchain_walks_up_to_the_manifest(pixi_repo):
-    # Resolved from the session cwd like pixi's own discovery: a nested cwd still
-    # finds the root pixi.toml.
     toolchain = activation.detect_toolchain(pixi_repo / "src" / "pkg")
     assert toolchain == activation.Toolchain(
         kind=activation.PIXI, manifest=(pixi_repo / "pixi.toml").resolve()
@@ -162,14 +121,7 @@ def test_detect_toolchain_none_without_a_manifest(tmp_path):
     assert activation.detect_toolchain(tmp_path) is None
 
 
-# --------------------------------------------------------------------------
-# Boundary — fail-open, no-op without a toolchain, append-only writes
-# --------------------------------------------------------------------------
-
-
 def test_pixi_repo_activation_lands_in_the_env_file(pixi_repo, tmp_path):
-    # The happy path: payload cwd → manifest → `pixi shell-hook --json` (default
-    # env: no `--environment` flag) → export lines appended to CLAUDE_ENV_FILE.
     env_file = tmp_path / "claude-env"
     captured: dict = {}
     code = _run(
@@ -179,7 +131,7 @@ def test_pixi_repo_activation_lands_in_the_env_file(pixi_repo, tmp_path):
     )
     assert code == 0
     assert captured["cmd"][:3] == ["pixi", "shell-hook", "--json"]
-    assert "--environment" not in captured["cmd"]  # default env
+    assert "--environment" not in captured["cmd"]
     assert str((pixi_repo / "pixi.toml").resolve()) in captured["cmd"]
     content = env_file.read_text()
     assert f"export CONDA_PREFIX={TREE_ROOT}/.pixi/envs/default\n" in content
@@ -187,8 +139,6 @@ def test_pixi_repo_activation_lands_in_the_env_file(pixi_repo, tmp_path):
 
 
 def test_env_file_is_appended_never_clobbered(pixi_repo, tmp_path):
-    # CLAUDE_ENV_FILE is a shared seam other SessionStart hooks write to; this
-    # boundary owns only its own lines.
     env_file = tmp_path / "claude-env"
     env_file.write_text("export OTHER_HOOK=kept\n")
     code = _run(
@@ -203,7 +153,6 @@ def test_env_file_is_appended_never_clobbered(pixi_repo, tmp_path):
 
 
 def test_non_pixi_repo_is_a_clean_noop(tmp_path):
-    # No activatable toolchain → exit 0, nothing written, pixi never invoked.
     env_file = tmp_path / "claude-env"
 
     def exploding_runner(cmd, **kwargs):  # pragma: no cover — must not be reached
@@ -219,7 +168,6 @@ def test_non_pixi_repo_is_a_clean_noop(tmp_path):
 
 
 def test_missing_env_file_var_is_a_noop(pixi_repo):
-    # Without CLAUDE_ENV_FILE there is nowhere to write — no-op, pixi never runs.
     def exploding_runner(cmd, **kwargs):  # pragma: no cover — must not be reached
         raise AssertionError("no CLAUDE_ENV_FILE — pixi must not run")
 
@@ -227,8 +175,6 @@ def test_missing_env_file_var_is_a_noop(pixi_repo):
 
 
 def test_malformed_payload_falls_back_to_process_cwd(pixi_repo, tmp_path, monkeypatch):
-    # Hooks run in the project dir, so a garbage payload degrades to Path.cwd()
-    # and activation still lands (fail-open never means fail-useless).
     monkeypatch.chdir(pixi_repo)
     env_file = tmp_path / "claude-env"
     code = _run(
@@ -241,8 +187,6 @@ def test_malformed_payload_falls_back_to_process_cwd(pixi_repo, tmp_path, monkey
 
 
 def test_pixi_failure_fails_open(pixi_repo, tmp_path):
-    # A pixi error (missing binary, solve failure, …) costs the session NOTHING:
-    # exit 0, no partial write. Activation is additive, never load-bearing.
     env_file = tmp_path / "claude-env"
 
     def failing_runner(cmd, **kwargs):
@@ -258,11 +202,6 @@ def test_pixi_failure_fails_open(pixi_repo, tmp_path):
 
 
 def _torn_open(monkeypatch, env_file: Path) -> None:
-    """Make writes to ``env_file`` tear: half the text lands, then OSError.
-
-    Simulates a mid-append failure (disk full, transient I/O error) so the
-    rollback contract is exercised: the file must end up EXACTLY as it was.
-    """
     real_open = builtins.open
 
     class TornHandle:
@@ -290,9 +229,6 @@ def _torn_open(monkeypatch, env_file: Path) -> None:
 
 
 def test_torn_write_rolls_back_to_the_prior_bytes(pixi_repo, tmp_path, monkeypatch):
-    # A write failing MID-append must not leave a truncated export line: the env
-    # file is sourced before every Bash call, so torn content is worse than none.
-    # Fail-open means the shared seam ends up byte-identical to before the hook.
     env_file = tmp_path / "claude-env"
     env_file.write_text("export OTHER_HOOK=kept\n")
     _torn_open(monkeypatch, env_file)
@@ -306,8 +242,6 @@ def test_torn_write_rolls_back_to_the_prior_bytes(pixi_repo, tmp_path, monkeypat
 
 
 def test_torn_write_removes_a_file_the_hook_created(pixi_repo, tmp_path, monkeypatch):
-    # Same tear, but the hook itself created the file: rollback removes it rather
-    # than leaving a half-written preamble behind.
     env_file = tmp_path / "claude-env"
     _torn_open(monkeypatch, env_file)
     code = _run(
@@ -322,9 +256,6 @@ def test_torn_write_removes_a_file_the_hook_created(pixi_repo, tmp_path, monkeyp
 def test_append_survives_env_file_vanishing_before_the_write(
     pixi_repo, tmp_path, monkeypatch
 ):
-    # TOCTOU shape: the env file exists when the hook starts but is deleted
-    # before the append. The single-stat existence check must not crash, and the
-    # append recreates the file with the activation lines.
     env_file = tmp_path / "claude-env"
     env_file.write_text("export DOOMED=1\n")
     real_open = builtins.open
@@ -332,7 +263,7 @@ def test_append_survives_env_file_vanishing_before_the_write(
     def deleting_open(file, *args, **kwargs):
         if str(file) == str(env_file):
             monkeypatch.setattr(builtins, "open", real_open)
-            env_file.unlink(missing_ok=True)  # vanish between stat() and open()
+            env_file.unlink(missing_ok=True)
         return real_open(file, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "open", deleting_open)
@@ -346,8 +277,6 @@ def test_append_survives_env_file_vanishing_before_the_write(
 
 
 def test_unwritable_env_file_fails_open(pixi_repo, tmp_path):
-    # Even the final write failing must not surface: the env-file path is a
-    # directory here, so open() raises — swallowed, exit 0.
     code = _run(
         {"cwd": str(pixi_repo)},
         {"CLAUDE_ENV_FILE": str(tmp_path)},
@@ -356,31 +285,17 @@ def test_unwritable_env_file_fails_open(pixi_repo, tmp_path):
     assert code == 0
 
 
-# --------------------------------------------------------------------------
-# Log-context export — session/tree keys for every in-session command
-# (REL01 #349, ADR-0029)
-# --------------------------------------------------------------------------
-
-#: A flat coordinator session Tree leaf (ADR-0074): ``<repo>-<agent>-<timestamp>-<id>``,
-#: ONE segment below the central root, no owner/kind segment. Its trailing ``<id>`` is
-#: the harness session UUID — and current_session_id recovers exactly that UUID from the
-#: leaf, so it is the value the hook exports as the session id.
 SESSION_ID = "619cf51a-f501-44dc-992f-74df773204aa"
 SESSION_LEAF = f"repo-claude-20260703-041649-{SESSION_ID}"
 
 
 def _ephemeral_tree(root: Path, leaf: str = SESSION_LEAF) -> Path:
-    """A coordinator session Tree dir under ``root`` — the flat, self-describing leaf
-    (ADR-0074), ONE segment below the central root; the path IS the signal."""
     tree = root / leaf
     tree.mkdir(parents=True)
     return tree
 
 
 def _run_log_context(cwd: Path, env_file: Path) -> int:
-    """Run the hook with the log-context check isolated from live boundaries:
-    a runner that must not be reached unless a toolchain exists (none does in
-    these bare dirs)."""
 
     def exploding_runner(cmd, **kwargs):  # pragma: no cover — must not be reached
         raise AssertionError("no toolchain — pixi must not run")
@@ -393,11 +308,6 @@ def _run_log_context(cwd: Path, env_file: Path) -> int:
 
 
 def test_ephemeral_tree_cwd_exports_session_log_context(tmp_path, monkeypatch):
-    # The seam the check exists for: a session Tree's dir leaf IS the per-launch
-    # session id (ADR-0027) — the exact value tree/create.py binds at creation —
-    # so the exported var joins in-session records to the birth records. The
-    # names come from logcontext.ENV_PREFIX so writer and reader (bind_from_env
-    # at configure_logging) agree by construction.
     root = tmp_path / "trees"
     tree = _ephemeral_tree(root)
     monkeypatch.setenv(layout.CENTRAL_ROOT_ENV, str(root))
@@ -413,9 +323,6 @@ def test_ephemeral_tree_cwd_exports_session_log_context(tmp_path, monkeypatch):
 
 
 def test_exported_session_id_round_trips_through_bind_from_env(tmp_path, monkeypatch):
-    # End to end across the seam: the values the hook writes are exactly what a
-    # child shipit process rebinds at logging setup — parse the export lines back
-    # into an environment and let the reader half do its thing.
     root = tmp_path / "trees"
     tree = _ephemeral_tree(root)
     monkeypatch.setenv(layout.CENTRAL_ROOT_ENV, str(root))
@@ -437,9 +344,6 @@ def test_exported_session_id_round_trips_through_bind_from_env(tmp_path, monkeyp
 
 
 def test_non_tree_cwd_exports_no_log_context(tmp_path, monkeypatch):
-    # A cwd outside the central root (a plain checkout, the source clone, …)
-    # carries no session identity: nothing to export, clean DEBUG no-op — and
-    # with no toolchain either, the env file is never even created.
     monkeypatch.setenv(layout.CENTRAL_ROOT_ENV, str(tmp_path / "trees"))
     cwd = tmp_path / "plain-checkout"
     cwd.mkdir()
@@ -450,12 +354,6 @@ def test_non_tree_cwd_exports_no_log_context(tmp_path, monkeypatch):
 
 
 def test_old_nested_tree_cwd_exports_no_log_context(tmp_path, monkeypatch):
-    # ADR-0074 has no kind segment, so the discriminator is no longer the leaf's
-    # kind but its trailing UUID. Old NESTED Trees coexist by attrition (their leaf
-    # carries no flat `<timestamp>-<uuid>` tail), so the flat-leaf session extractor
-    # yields nothing — a pre-flat Tree the sweep has not reclaimed never mints a bogus
-    # session key. (containing_tree truncates to the first segment below the root — here
-    # `owner` — which has no UUID tail.)
     root = tmp_path / "trees"
     tree = root / "owner" / "repo" / "issues" / "349" / "work-deadbeef"
     tree.mkdir(parents=True)
@@ -467,11 +365,6 @@ def test_old_nested_tree_cwd_exports_no_log_context(tmp_path, monkeypatch):
 
 
 def test_nested_dir_inside_a_tree_exports_the_containing_session(tmp_path, monkeypatch):
-    # A cwd DEEPER than the Tree root (a bare shell cd'd into src/, even one that
-    # itself contains a decoy `ephemeral/not-a-session` segment) is still IN the
-    # session: ADR-0074 resolution truncates to the Tree root (the FIRST segment
-    # below the central root — no depth arithmetic), so the export names the
-    # CONTAINING session (its trailing UUID) and the decoy leaf name never wins.
     root = tmp_path / "trees"
     tree = _ephemeral_tree(root)
     nested = tree / "src" / "ephemeral" / "not-a-session"
@@ -491,9 +384,6 @@ def test_nested_dir_inside_a_tree_exports_the_containing_session(tmp_path, monke
 def test_flat_position_dir_without_a_uuid_tail_exports_no_log_context(
     tmp_path, monkeypatch
 ):
-    # The discriminator is the trailing UUID, not depth: a dir sitting one segment
-    # below the root whose leaf is NOT the flat `<repo>-<agent>-<timestamp>-<id>`
-    # shape (no UUID tail) yields no session key — nothing to export.
     root = tmp_path / "trees"
     shallow = root / "not-a-session"
     shallow.mkdir(parents=True)
@@ -505,9 +395,6 @@ def test_flat_position_dir_without_a_uuid_tail_exports_no_log_context(
 
 
 def test_log_context_lands_alongside_the_activation_exports(tmp_path, monkeypatch):
-    # The issue's mechanism verbatim: the log-context lines ride the SAME env
-    # file as the pixi activation, appended after it (run order), so one sourced
-    # preamble carries both the toolchain and the correlation keys.
     root = tmp_path / "trees"
     tree = _ephemeral_tree(root)
     (tree / "pixi.toml").write_text('[project]\nname = "x"\n')
@@ -527,10 +414,6 @@ def test_log_context_lands_alongside_the_activation_exports(tmp_path, monkeypatc
 
 
 def test_log_context_detection_error_is_silent_and_debug(tmp_path, monkeypatch, caplog):
-    # A broken detection environment (a relative SHIPIT_TREES_ROOT, which
-    # central_root() rejects) costs the session NOTHING and skips at DEBUG —
-    # the same #348 calibration the source-clone check uses, since the two
-    # share the path arithmetic and the every-start failure mode.
     monkeypatch.setenv(layout.CENTRAL_ROOT_ENV, "relative/trees")
     cwd = tmp_path / "somewhere"
     cwd.mkdir()
@@ -545,14 +428,11 @@ def test_log_context_detection_error_is_silent_and_debug(tmp_path, monkeypatch, 
 
 
 def test_log_context_write_error_fails_open_at_warning(tmp_path, monkeypatch, caplog):
-    # The WRITE half keeps the canon's WARNING (a swallowed append is degraded:
-    # the session's records lose their correlation key): CLAUDE_ENV_FILE is a
-    # directory here, so the append raises — swallowed, exit 0, WARNING logged.
     root = tmp_path / "trees"
     tree = _ephemeral_tree(root)
     monkeypatch.setenv(layout.CENTRAL_ROOT_ENV, str(root))
     with caplog.at_level(logging.DEBUG, logger=HOOK_LOGGER):
-        code = _run_log_context(tree, tmp_path)  # env "file" is a dir
+        code = _run_log_context(tree, tmp_path)
     assert code == 0
     assert any(
         r.levelno == logging.WARNING and "log-context" in r.getMessage()
@@ -561,15 +441,10 @@ def test_log_context_write_error_fails_open_at_warning(tmp_path, monkeypatch, ca
     )
 
 
-# --------------------------------------------------------------------------
-# Source-clone warning — an independent, fail-open advisory check (REL01 #348)
-# --------------------------------------------------------------------------
-
 HOOK_LOGGER = "shipit.hook"
 
 
 def _clone_shape(path: Path) -> Path:
-    """Give ``path`` the two source-clone markers: .shipit.toml + a .git dir."""
     path.mkdir(parents=True, exist_ok=True)
     (path / ".git").mkdir()
     (path / ".shipit.toml").write_text("[secrets]\n")
@@ -577,8 +452,6 @@ def _clone_shape(path: Path) -> Path:
 
 
 def _run_warning_check(cwd: Path) -> tuple[int, str]:
-    """Run the hook with the warning check isolated: no env file (activation
-    no-ops before pixi)."""
     out = io.StringIO()
     code = sessionstart.run(
         stdin=io.StringIO(json.dumps({"cwd": str(cwd)})),
@@ -589,10 +462,6 @@ def _run_warning_check(cwd: Path) -> tuple[int, str]:
 
 
 def test_source_clone_cwd_warns_on_stdout(tmp_path, monkeypatch, caplog):
-    # The launch the check exists for: a coordinator started directly in the
-    # source clone (has .shipit.toml, is a git repo, NOT under the central root).
-    # The warning lands on stdout (→ session context) and a WARNING record rides
-    # along as the durable trail.
     clone = _clone_shape(tmp_path / "src-clone")
     monkeypatch.setenv(layout.CENTRAL_ROOT_ENV, str(tmp_path / "trees"))
     with caplog.at_level(logging.DEBUG, logger=HOOK_LOGGER):
@@ -607,10 +476,6 @@ def test_source_clone_cwd_warns_on_stdout(tmp_path, monkeypatch, caplog):
 
 
 def test_ephemeral_tree_cwd_is_silent(tmp_path, monkeypatch):
-    # A session Tree is a clone of the same repo — it carries BOTH markers — but
-    # it lives under the central root, so it must never warn (the no-false-
-    # positives constraint). The flat leaf shape (ADR-0074) is irrelevant here: the
-    # discriminator is the path being UNDER the root, not the leaf.
     root = tmp_path / "trees"
     tree = _clone_shape(root / SESSION_LEAF)
     monkeypatch.setenv(layout.CENTRAL_ROOT_ENV, str(root))
@@ -620,8 +485,6 @@ def test_ephemeral_tree_cwd_is_silent(tmp_path, monkeypatch):
 
 
 def test_run_tree_cwd_is_silent(tmp_path, monkeypatch):
-    # Same for any other per-Run flat Tree (a different agent/id leaf): under the
-    # root → silent.
     root = tmp_path / "trees"
     tree = _clone_shape(
         root / "repo-codex-20260101-000000-11111111-2222-4333-8444-555555555555"
@@ -633,8 +496,6 @@ def test_run_tree_cwd_is_silent(tmp_path, monkeypatch):
 
 
 def test_non_clone_cwd_is_silent(tmp_path, monkeypatch):
-    # Neither marker alone is a source clone: a shipit repo that is not a git
-    # repo (no .git), and a git repo that is not a shipit repo (no .shipit.toml).
     monkeypatch.setenv(layout.CENTRAL_ROOT_ENV, str(tmp_path / "trees"))
     no_git = tmp_path / "no-git"
     no_git.mkdir()
@@ -652,10 +513,6 @@ def test_non_clone_cwd_is_silent(tmp_path, monkeypatch):
 
 
 def test_detection_error_is_silent_and_debug(tmp_path, monkeypatch, caplog):
-    # A broken detection environment (here: a relative SHIPIT_TREES_ROOT, which
-    # central_root() rejects) costs the session NOTHING: exit 0, empty stdout,
-    # and the swallow logs at DEBUG — #348's explicit calibration exception to
-    # the WARNING canon, because the check writes nothing durable.
     clone = _clone_shape(tmp_path / "src-clone")
     monkeypatch.setenv(layout.CENTRAL_ROOT_ENV, "relative/trees")
     with caplog.at_level(logging.DEBUG, logger=HOOK_LOGGER):
@@ -668,8 +525,6 @@ def test_detection_error_is_silent_and_debug(tmp_path, monkeypatch, caplog):
 
 
 def test_warning_never_suppresses_the_writes(tmp_path, monkeypatch, pixi_repo):
-    # Independence: the warning firing must not cost the session its activation
-    # (the pixi_repo here is a source clone too — .shipit.toml + .git + pixi.toml).
     (pixi_repo / ".git").mkdir()
     (pixi_repo / ".shipit.toml").write_text("[secrets]\n")
     monkeypatch.setenv(layout.CENTRAL_ROOT_ENV, str(tmp_path / "trees"))
@@ -682,15 +537,8 @@ def test_warning_never_suppresses_the_writes(tmp_path, monkeypatch, pixi_repo):
         runner=_fake_runner({}),
     )
     assert code == 0
-    # The source-clone warning is present (the #444 test-task advisory may
-    # ride alongside it — this fixture's manifest defines no `test` task).
     assert sessionstart.SOURCE_CLONE_WARNING + "\n" in out.getvalue()
     assert "export CONDA_DEFAULT_ENV=shipit" in env_file.read_text()
-
-
-# --------------------------------------------------------------------------
-# The session.started dev-cycle event (LOG04-WS02 / ADR-0032)
-# --------------------------------------------------------------------------
 
 
 def _session_started_records(caplog):
@@ -704,9 +552,6 @@ def _session_started_records(caplog):
 
 
 def test_every_session_start_emits_session_started(tmp_path, monkeypatch, caplog):
-    # The hook is the one verb that witnesses a session beginning — a plain
-    # checkout (a spawned worker's write Tree, or any cwd) still emits; its
-    # spawn-seam identity would ride in from the environment, not from here.
     monkeypatch.setenv(layout.CENTRAL_ROOT_ENV, str(tmp_path / "trees"))
     cwd = tmp_path / "checkout"
     cwd.mkdir()
@@ -715,7 +560,6 @@ def test_every_session_start_emits_session_started(tmp_path, monkeypatch, caplog
     assert code == 0
     (started,) = _session_started_records(caplog)
     assert started.levelno == logging.INFO
-    # The payload carried no Claude session_id → the extra is ABSENT, never null.
     assert not hasattr(started, "session_id")
 
 
@@ -737,9 +581,6 @@ def test_codex_session_start_persists_native_thread_id(tmp_path, monkeypatch, ca
 
 
 def test_session_started_binds_the_ephemeral_session_scoped(tmp_path, monkeypatch):
-    # In an ephemeral session Tree the event carries the per-launch session id
-    # (the dir leaf, ADR-0027) — bound SCOPED, so it lands on this record via
-    # the pipeline without leaking into the hook's later records.
     import structlog as _structlog
 
     root = tmp_path / "trees"
@@ -759,13 +600,10 @@ def test_session_started_binds_the_ephemeral_session_scoped(tmp_path, monkeypatc
     assert code == 0
     assert seen["session.started"]["session"] == SESSION_ID
     assert seen["session.started"]["tree"] == str(tree.resolve())
-    # Scoped: unwound after the emit — nothing leaks past the hook step.
     assert "session" not in logcontext.bound()
 
 
 def test_session_started_emission_failure_is_fail_open(tmp_path, monkeypatch, caplog):
-    # The fail-open canon: a broken emission costs the session NOTHING — exit 0,
-    # a DEBUG breadcrumb only (nothing durable degrades; one record goes untagged).
     monkeypatch.setattr(
         sessionstart.events,
         "emit",
@@ -778,11 +616,6 @@ def test_session_started_emission_failure_is_fail_open(tmp_path, monkeypatch, ca
     assert code == 0
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
-
-# --------------------------------------------------------------------------
-# The ADR-0033 pin-staleness advisory (#449 item 2) — one best-effort line,
-# silent when current, silent on ANY error (faked gh boundary).
-# --------------------------------------------------------------------------
 
 GOOD_PIN = "c" * 40
 
@@ -813,7 +646,6 @@ def test_stale_pin_emits_the_advisory_line(tmp_path):
 
     out = _stale_run(_pinned_repo(tmp_path), commits_ahead)
     assert f"pin {GOOD_PIN[:12]} is 7 commits behind shipit main" in out
-    # Measured pin -> shipit main, against the tool repo.
     assert seen["args"] == (sessionstart.SHIPIT_REPO_SLUG, GOOD_PIN, "main")
 
 
@@ -823,8 +655,6 @@ def test_current_pin_is_silent(tmp_path):
 
 
 def test_offline_read_is_silent(tmp_path):
-    # The gh boundary answers None on any failure (no network/auth/sha) —
-    # the advisory stays silent, never blocking, never warning.
     out = _stale_run(_pinned_repo(tmp_path), lambda *a: None)
     assert "behind" not in out
 
@@ -857,11 +687,6 @@ def test_one_commit_behind_singular_wording(tmp_path):
     out = _stale_run(_pinned_repo(tmp_path), lambda *a: 1)
     assert "is 1 commit behind" in out
     assert "1 commits" not in out
-
-
-# --------------------------------------------------------------------------
-# The #444 missing-test-task advisory — pixi run test must never silently lie.
-# --------------------------------------------------------------------------
 
 
 def _task_run(cwd):
