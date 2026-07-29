@@ -1758,11 +1758,11 @@ lint-full = "./bin/shipit provision lexd && ./bin/shipit lint"
 
 
 def test_install_refuses_a_consumer_still_calling_the_retired_provision(tmp_path, rec):
-    """#1070: the call sites are consumer-authored lane tasks OUTSIDE every
-    managed block, so no reconcile rewrites them and the dead call survives a pin
-    bump — surfacing later as a red CI lane, at the `shipit provision` tombstone.
-    Install fails closed instead, in EVERY applying mode (MODE_TREE included),
-    naming the task, its table, and the remedy."""
+    """#1070: a call site this reconcile cannot rewrite — here a bare, markerless
+    [tasks] table plus a consumer-authored [feature.lint.tasks] lane — survives a
+    pin bump and surfaces later as a red CI lane, at the `shipit provision`
+    tombstone. Install fails closed instead, in EVERY applying mode (MODE_TREE
+    included), naming the task, its table, and the remedy."""
     (tmp_path / "pixi.toml").write_text(FLEET_PIXI)
 
     plan = _plan(tmp_path)
@@ -1803,6 +1803,103 @@ def test_stale_provision_refusal_survives_a_no_op_plan():
         ),
     )
     assert plan.nothing_to_do
+    with pytest.raises(InstallError, match="retired command in pixi.toml"):
+        iapply.reject_stale_provision(plan)
+
+
+# The shape the tripwire's premise MISSED (#1127): `provision-lexd` is not a
+# hand-written consumer task at all in 9 of the 10 remaining repos — it sits
+# INSIDE the shipit-managed [tasks] span, whose current desired content
+# (changelog + logs) no longer defines it. The very reconcile the guard refused
+# would have deleted it.
+IN_SPAN_PIXI = f"""\
+[workspace]
+name = "clapfig"
+channels = ["conda-forge"]
+platforms = ["osx-arm64"]
+
+[tasks]
+{iunits.PIXI_OPEN}
+changelog = "./bin/shipit changelog"
+logs = "./bin/shipit logs"
+provision-lexd = "./bin/shipit provision lexd"
+{iunits.PIXI_CLOSE}
+"""
+
+
+def test_stale_provision_defers_to_the_reconcile_that_deletes_the_call(tmp_path):
+    """#1127: the guard must not block its own remedy. The call lives inside the
+    managed [tasks] span, so this same plan rewrites that span WITHOUT it — the
+    finding is decided over the PROJECTED manifest, install proceeds, and the
+    written pixi.toml carries no call at all."""
+    (tmp_path / "pixi.toml").write_text(IN_SPAN_PIXI)
+
+    # The on-disk text still contains the call — the pure matcher sees it...
+    (on_disk,) = irec.stale_provision_tasks(IN_SPAN_PIXI)
+    assert on_disk.task == "provision-lexd"
+    # ...and the plan, judging what the manifest WILL hold, does not.
+    plan = _plan(tmp_path)
+    assert plan.stale_provision == ()
+    iapply.reject_stale_provision(plan)  # no refusal
+    assert "install: retired command:" not in verb.format_plan_warnings(plan)
+
+    _apply(tmp_path, iapply.MODE_TREE)
+    written = (tmp_path / "pixi.toml").read_text(encoding="utf-8")
+    assert "provision-lexd" not in written  # the task line the span carried
+    # And the projection told the truth: the written manifest passes the guard.
+    assert irec.stale_provision_tasks(written) == ()
+
+
+def test_project_pixi_text_rewrites_only_the_spans_it_is_given():
+    """The projection primitive owns exactly the marker spans handed to it — the
+    same `splice_block` call apply makes, so plan and write cannot drift, and
+    everything outside those spans (the consumer's own text) is byte-identical."""
+    tasks_unit = next(u for u in iunits.load_units() if u.key == iunits.PIXI_KEY)
+    consumer_tail = '\n[feature.lint.tasks]\nlint = "./bin/shipit lint"\n'
+
+    untouched = irec.project_pixi_text(IN_SPAN_PIXI + consumer_tail, ())
+    assert untouched == IN_SPAN_PIXI + consumer_tail
+
+    projected = irec.project_pixi_text(IN_SPAN_PIXI + consumer_tail, (tasks_unit,))
+    assert projected.endswith(consumer_tail)  # consumer text, verbatim
+    assert (
+        splice.extract_block(projected, iunits.PIXI_OPEN, iunits.PIXI_CLOSE)
+        == tasks_unit.desired_inner()
+    )
+
+
+def test_stale_provision_still_refuses_the_call_the_reconcile_cannot_reach(tmp_path):
+    """The other half of #1127 stays fail-closed: `dodot`/`standout`/`lexed` carry
+    BOTH shapes, and the [feature.lint.tasks] lane wiring is the consumer's own —
+    no managed span holds it, so the projection leaves it standing and the guard
+    refuses, naming the lane rather than the managed line it can fix itself."""
+    (tmp_path / "pixi.toml").write_text(
+        IN_SPAN_PIXI
+        + """
+[feature.lint.tasks]
+lint-full = { cmd = "./bin/shipit provision lexd && ./bin/shipit lint" }
+"""
+    )
+    plan = _plan(tmp_path)
+    # Only the lane survives the projection; the managed line is gone from it.
+    assert [sp.task for sp in plan.stale_provision] == ["lint-full"]
+    assert plan.stale_provision[0].table == "feature.lint.tasks"
+    with pytest.raises(InstallError, match="retired command in pixi.toml"):
+        _apply(tmp_path, iapply.MODE_TREE)
+
+
+def test_stale_provision_refuses_when_the_owning_block_is_declined(tmp_path):
+    """A DECLINED managed block is not rewritten (#600), so the call inside its
+    span survives exactly like a consumer-authored one — the projection must
+    reflect the plan's decisions, not merely the marker spans, or the guard would
+    wave through a repo whose lane stays dead."""
+    (tmp_path / "pixi.toml").write_text(IN_SPAN_PIXI)
+    (tmp_path / ".shipit.toml").write_text(
+        f'[managed.decline]\nkeep = ["{iunits.PIXI_KEY}"]\n'
+    )
+    plan = _plan(tmp_path)
+    assert iunits.PIXI_KEY in plan.declined
+    assert [sp.task for sp in plan.stale_provision] == ["provision-lexd"]
     with pytest.raises(InstallError, match="retired command in pixi.toml"):
         iapply.reject_stale_provision(plan)
 
@@ -3860,7 +3957,7 @@ def test_rust_conda_migration_moves_rattler_build_in_one_reconcile(tmp_path, rec
     # shipit still carries `rattler-build` INSIDE its old rust-release-deps
     # managed span. Reconciling to v1.4.2 must, in ONE pass, UPDATE that block to
     # drop rattler-build AND ADD the new conda-packager block that now owns it.
-    # Before the fix, `_pixi_key_conflicts` saw rattler-build already in
+    # Before the fix, `_plan_pixi_key_conflicts` saw rattler-build already in
     # [dependencies] and skipped the packager as a first-splice duplicate — but
     # the key sits inside ANOTHER managed block this same plan rewrites, so the
     # one reconcile stranded the repo with NO packager (removed from the rust
@@ -3934,6 +4031,78 @@ def test_rust_conda_migration_moves_rattler_build_in_one_reconcile(tmp_path, rec
     # The packager is now a tracked managed unit.
     managed = config.load_managed(config.load(tmp_path / ".shipit.toml"))
     assert iunits.PIXI_CONDA_PACKAGER_KEY in managed
+
+
+def test_a_declined_donor_block_keeps_its_key_a_conflict(tmp_path, rec):
+    # #1081: the same migration, but the consumer DECLINES the rust release-deps
+    # donor. `reconcile()` drops that block's decision entirely, so rattler-build
+    # STAYS in the old span — exempting it would let the conda-packager block
+    # splice a SECOND `rattler-build` into [dependencies] and make pixi.toml
+    # unparseable. The exemption is for keys that DEPART, and a declined block
+    # departs nothing.
+    old_rust_inner = (
+        'cargo-edit = "0.13.11.*"\nwasm-pack = "0.15.*"\nrattler-build = "0.69.*"'
+    )
+    old_pristine = config.content_hash(old_rust_inner.encode("utf-8"))
+    (tmp_path / "pixi.toml").write_text(
+        "[workspace]\n"
+        'name = "acme"\n'
+        'channels = ["conda-forge"]\n'
+        'platforms = ["linux-64"]\n'
+        "\n"
+        "[dependencies]\n"
+        f"{iunits.PIXI_RUST_RELEASE_DEPS_OPEN}\n"
+        f"{old_rust_inner}\n"
+        f"{iunits.PIXI_RUST_RELEASE_DEPS_CLOSE}\n"
+    )
+    (tmp_path / ".shipit.toml").write_text(
+        "[artifacts.cli]\n"
+        'build = ["rust"]\n'
+        'endpoints = ["gh-release", "conda"]\n'
+        "\n"
+        "[managed.decline]\n"
+        f'keep = ["{iunits.PIXI_RUST_RELEASE_DEPS_KEY}"]\n'
+        "\n"
+        "[managed]\n"
+        f'"{iunits.PIXI_RUST_RELEASE_DEPS_KEY}" = "{old_pristine}"\n'
+    )
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+
+    units = iunits.load_units(
+        toolchains=frozenset({iunits.TOOLCHAIN_RUST}),
+        endpoints=frozenset({"conda"}),
+        platforms=frozenset({"linux-64"}),
+    )
+    retired = irec.load_retired()
+    state = irec.gather(tmp_path, units, retired)
+    plan = irec.reconcile(units, retired, state)
+
+    assert iunits.PIXI_RUST_RELEASE_DEPS_KEY in plan.declined
+    assert plan.pixi_key_conflicts == (
+        irec.PixiKeyConflict(
+            unit_key=iunits.PIXI_CONDA_PACKAGER_KEY,
+            anchor="[dependencies]",
+            keys=("rattler-build",),
+        ),
+    )
+    # Both blocks are out of the write set — the declined donor by decline, the
+    # receiver by conflict — so nothing lands.
+    written = {d.unit.key for d in plan.decisions}
+    assert iunits.PIXI_CONDA_PACKAGER_KEY not in written
+    assert iunits.PIXI_RUST_RELEASE_DEPS_KEY not in written
+
+    iapply.apply(plan, iapply.MODE_TREE)
+
+    # tomllib REFUSES a duplicate key, so a successful parse is the assertion:
+    # rattler-build is declared exactly once, still by the consumer's own block.
+    text = (tmp_path / "pixi.toml").read_text(encoding="utf-8")
+    assert tomllib.loads(text)["dependencies"]["rattler-build"] == "0.69.*"
+    assert (
+        splice.extract_block(
+            text, iunits.PIXI_CONDA_PACKAGER_OPEN, iunits.PIXI_CONDA_PACKAGER_CLOSE
+        )
+        is None
+    )
 
 
 def test_declared_platforms_reads_the_workspace_table(tmp_path):
@@ -4107,7 +4276,8 @@ def test_key_conflict_guard_fails_open_on_an_unparseable_pixi_toml(tmp_path):
     (tmp_path / "pixi.toml").write_text("[[[ not toml\n")
     units = iunits.load_units(toolchains=frozenset({iunits.TOOLCHAIN_NODE}))
     state = irec.gather(Path(tmp_path), units, irec.load_retired())
-    assert state.pixi_key_conflicts == ()
+    plan = irec.reconcile(units, irec.load_retired(), state)
+    assert plan.pixi_key_conflicts == ()
 
 
 def test_key_conflict_guard_covers_the_nested_lint_feature_anchor(tmp_path):
@@ -4316,6 +4486,57 @@ def test_a_consumer_test_task_in_the_tasks_table_is_the_key_conflict_guards_case
     assert iunits.PIXI_TEST_TASK_KEY not in {d.unit.key for d in plan.decisions}
 
 
+def test_gather_reads_pixi_toml_once_and_every_guard_shares_that_snapshot(
+    tmp_path, monkeypatch
+):
+    # The one-read invariant (#1129 review): every pixi guard is pure over
+    # gather's SINGLE `_read_pixi_text`, so none can judge a different snapshot
+    # than its siblings. A stable file cannot prove that — separate reads of an
+    # unchanging file agree. So the source CHANGES: the first read carries both
+    # ADD-only conflict conditions, every later read carries neither. A second
+    # read anywhere in gather would leave the two conflict fields (and
+    # `pixi_text`, the post-plan projections' input) disagreeing about the same
+    # manifest.
+    conflicted = (
+        "[workspace]\n"
+        'channels = ["conda-forge"]\n'
+        'name = "acme"\n'
+        'platforms = ["linux-64"]\n\n'
+        # Redeclares the anchor-less managed lexd block's own table → table conflict.
+        "[feature.shipit-lexd]\n"
+        'platforms = ["linux-64"]\n\n'
+        # An env-enabled feature `test` task → task-ambiguity conflict.
+        "[feature.test.tasks]\n"
+        'test = "cargo nextest run"\n\n'
+        "[environments]\n"
+        'test = ["test"]\n'
+    )
+    clean = iunits.pixi_manifest_seed("acme")
+    (tmp_path / "pixi.toml").write_text(clean)
+
+    reads: list[Path] = []
+
+    def _changing_source(root: Path) -> str:
+        reads.append(root)
+        return conflicted if len(reads) == 1 else clean
+
+    monkeypatch.setattr(irec, "_read_pixi_text", _changing_source)
+    units = iunits.load_units(platforms=frozenset({"linux-64"}))
+    state = irec.gather(tmp_path, units, irec.load_retired())
+
+    assert len(reads) == 1
+    # The snapshot gather carries forward IS the one read — it is what the two
+    # POST-PLAN projections (`_plan_pixi_key_conflicts`, `_plan_stale_provision`)
+    # will project inside `reconcile()`.
+    assert state.pixi_text == conflicted
+    # ...and both ADD-only detections derive from that same snapshot, not from a
+    # re-read (which here would have found the clean seed and detected nothing).
+    assert [c.unit_key for c in state.pixi_task_conflicts] == [
+        iunits.PIXI_TEST_TASK_KEY
+    ]
+    assert [c.unit_key for c in state.pixi_table_conflicts] == [iunits.PIXI_LEXD_KEY]
+
+
 def test_shipits_own_repo_keeps_its_feature_test_task_authoritative():
     # The dogfood pin: shipit's own full-gate `test` task lives in
     # [feature.test.tasks] (for the rust toolchain env), so
@@ -4324,7 +4545,9 @@ def test_shipits_own_repo_keeps_its_feature_test_task_authoritative():
     root = Path(__file__).resolve().parents[1]
     units = iunits.load_units()
     consumer_hashes = {u.key: irec.consumer_hash(root, u) for u in units}
-    conflicts = irec._pixi_task_conflicts(root, units, consumer_hashes)
+    conflicts = irec._pixi_task_conflicts(
+        irec._read_pixi_text(root), units, consumer_hashes
+    )
     assert any(
         c.unit_key == iunits.PIXI_TEST_TASK_KEY and c.task == "test" for c in conflicts
     )
