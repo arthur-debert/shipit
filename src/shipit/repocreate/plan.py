@@ -1,22 +1,6 @@
-"""The central repository-creation planner (ADR-0057).
+"""``repocreate/plan`` — compose the universal seed and every profile into one effect-free plan.
 
-One planner composes the universal consumer-owned seed and every selected
-profile's :class:`~.profiles.Contribution` into ONE structured
-:class:`CreationPlan` — the ordered set of consumer-owned files creation will
-write. Shared manifests (``pixi.toml``, ``.shipit.toml``, ``.gitignore``) are
-rendered HERE, exactly once, from the merged contributions; profiles never
-splice a shared manifest independently. Conflicting claims — two contributors
-owning the same path, the same pixi dependency at differing specs, or the same
-Artifact name — are detected and raised rather than resolved by a hidden
-overlay order.
-
-The plan is a pure value: it can be inspected without any filesystem effect
-(the aligned test seam, ``docs/spec/repo-new.md`` §Design Decisions), and the
-orchestrator (:mod:`.create`) is the only thing that turns it into files. Text
-is templated (:mod:`.templates`); structured data is serialized through the one
-format-aware renderer (:mod:`.tomlio`), never templated (ADR-0058). The
-``.github`` CI caller is a fully static consumer-owned file (ADR-0060) — no
-interpolation, so shipping it verbatim honors the no-templated-YAML rule.
+See docs/adr/0057-creation-profiles-contribute-to-one-plan.md.
 """
 
 from __future__ import annotations
@@ -33,10 +17,6 @@ from .errors import CreationError
 from .names import ProjectName
 from .profiles import Contribution, OwnedFile, RustProfile
 from .templates import render_text
-
-# --------------------------------------------------------------------------
-# Universal consumer-owned seed — text and static files
-# --------------------------------------------------------------------------
 
 _README = """\
 # {{ name }}
@@ -77,10 +57,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 """
 
-#: The universal consumer-owned ``.gitignore`` seed (``docs/spec/repo-new.md``
-#: §Proposed Shape). Cross-stack caches and OS files; the managed install module
-#: keeps its own release-output block, and each profile adds its ecosystem
-#: patterns (Rust adds ``/target/``). Lockfiles are never ignored.
+#: Cross-stack caches and OS files; each profile adds its own ecosystem patterns.
 _GITIGNORE_SEED = """\
 .DS_Store
 *.swp
@@ -107,11 +84,7 @@ __pycache__/
 htmlcov/
 """
 
-#: The thin, generic, consumer-owned CI caller (ADR-0060). It delegates to
-#: shipit's published reusable checks workflow by floating major ref and owns
-#: the per-Repo triggers/permissions/concurrency; ``shipit install`` never
-#: reconciles it as a managed unit. Fully static — no interpolation — so it
-#: carries no Rust-specific commands and honors the no-templated-YAML rule.
+#: The consumer-owned CI caller; ``shipit install`` never reconciles it as a managed unit.
 _CI_CALLER = """\
 name: CI
 
@@ -147,35 +120,11 @@ jobs:
           test "$RESULT" = "success"
 """
 
-#: The generic, consumer-owned build pixi task the universal seed declares,
-#: parallel to the managed lint/test entry points (``docs/spec/repo-new.md``
-#: §Design Decisions). Repository creation does not broaden the managed task
-#: catalog; ``lint``/``test`` still arrive through their managed blocks.
+#: The consumer-owned build task; ``lint``/``test`` arrive through managed blocks instead.
 _BUILD_TASK = "./bin/shipit build"
 
-#: The generated Repo's CI policy: the standard, universal, required lint and
-#: test lanes, rendered into the consumer-owned ``.shipit.toml [lanes]`` (spec
-#: §CI: "the new Repo follows the existing pattern with required lint and test
-#: lanes only"). Each is a ``(name, run)`` pair whose ``run`` names the generic
-#: shipit verb (ADR-0039) the managed pixi task of that name wraps, so a lane's
-#: CI job, a lefthook hook, and a laptop run are ONE implementation. Both lanes
-#: are ``required`` (merge-blocking) and ``local`` (so the required∩local
-#: commit/push checks derive as lint+test too — one definition for lefthook and
-#: CI, ``shipit.tools.lanes.commit_push_checks``). There is deliberately NO
-#: ``build`` lane: build stays reachable through the ``build`` task and later
-#: artifact/release flows, never as a default PR lane (spec §CI; ADR-0060 —
-#: the caller is consumer-owned policy over the existing Lane/Tool model, not a
-#: new one). These are stack-neutral universal-seed policy, not a profile
-#: contribution: lint and test are generic Tool verbs, not Rust behavior.
-#:
-#: Both lanes run the managed task of their own name. The lint lane used to run a
-#: ``lint-full`` twin because the managed ``lint`` task anchored in the default
-#: ``[tasks]`` table, so the ``wf-checks`` lane planner (which keys a lane's
-#: provisioned pixi env off the FEATURE declaring its ``run`` task) provisioned the
-#: DEFAULT env and the runner never installed the lint tooling — the lane died 127
-#: on a stock runner (GEN01-WS07 QA, #930). #1066 moved the managed task into
-#: ``[feature.lint.tasks]``, which resolves the lane onto the ``lint`` env
-#: directly, so the twin is retired: one task name, one environment, one gate.
+#: The generated Repo's CI policy as ``(name, run)`` pairs — both required and local,
+#: and deliberately no ``build`` lane.
 _REQUIRED_LANES: tuple[tuple[str, str], ...] = (
     ("lint", "lint"),
     ("test", "test"),
@@ -184,12 +133,7 @@ _REQUIRED_LANES: tuple[tuple[str, str], ...] = (
 
 @dataclass(frozen=True)
 class CreationPlan:
-    """The composed, effect-free set of consumer-owned files to write.
-
-    ``name`` is the validated project name; ``files`` is the full ordered set
-    of :class:`~.profiles.OwnedFile` (universal seed + every profile). Purely a
-    value — inspectable without touching the filesystem.
-    """
+    """The composed, effect-free ordered set of consumer-owned files to write."""
 
     name: ProjectName
     files: tuple[OwnedFile, ...]
@@ -198,12 +142,7 @@ class CreationPlan:
 def _merge_pixi_dependencies(
     contributions: tuple[Contribution, ...],
 ) -> dict[str, str]:
-    """Union the profiles' default-env pixi dependencies, rejecting clashes.
-
-    Two profiles claiming the same dependency at DIFFERING specs is a
-    conflicting claim the planner refuses (ADR-0057); an identical repeat is
-    harmless and collapses.
-    """
+    """Union the profiles' pixi dependencies; the same dep at DIFFERING specs raises."""
     deps: dict[str, str] = {}
     for contribution in contributions:
         for dep, spec in contribution.pixi_dependencies:
@@ -216,18 +155,7 @@ def _merge_pixi_dependencies(
 
 
 def _pixi_manifest(name: ProjectName, deps: dict[str, str]) -> str:
-    """Render the consumer-owned ``pixi.toml`` once (structured, via tomlio).
-
-    The ``[workspace]`` table matches ``shipit install``'s own seed
-    (name/channels/platforms) so a re-install is a no-op; ``[dependencies]``
-    carries the merged profile deps; ``[tasks]`` carries only the universal
-    ``build`` task. The managed blocks splice in beneath: ``test`` into
-    ``[tasks]``, and ``lint`` into ``[feature.lint.tasks]`` — the ONE environment
-    carrying the pinned lint toolchain (#1066) — alongside the managed lint
-    dependency/environment blocks (``_insert_under_anchor`` creates
-    ``[feature.lint.tasks]``/``[feature.lint.dependencies]``/``[environments]``
-    at EOF as needed).
-    """
+    """Render the consumer-owned ``pixi.toml``; its ``[workspace]`` matches install's own seed."""
     header = (
         "# pixi workspace — the consumer-owned provisioning manifest for this\n"
         "# Repo. shipit's managed blocks splice in beneath these tables.\n"
@@ -247,17 +175,7 @@ def _pixi_manifest(name: ProjectName, deps: dict[str, str]) -> str:
 
 
 def _shipit_manifest(contributions: tuple[Contribution, ...]) -> str:
-    """Render the consumer-owned ``.shipit.toml`` CI-policy and Artifact tables.
-
-    ``[lanes]`` carries the universal CI policy — the standard required lint and
-    test lanes, no build lane (:data:`_REQUIRED_LANES`) — so the generated Repo
-    plugs into the existing Lane/Tool model and its thin ``wf-checks`` caller
-    fans out real merge-blocking checks. ``[artifacts]`` carries each profile's
-    Artifact as one ``[artifacts.<name>]`` table with a single Rust build target
-    (ADR-0057). ``shipit install`` later seeds the remaining policy tables
-    (``[toolchains]`` from the detected Cargo manifest, etc.) and stamps
-    ``[managed]`` alongside, preserving these consumer-owned tables.
-    """
+    """Render the consumer-owned ``.shipit.toml`` ``[lanes]`` and ``[artifacts]`` tables."""
     lanes: dict[str, object] = {
         name: {"run": run, "required": True, "local": True}
         for name, run in _REQUIRED_LANES
@@ -283,7 +201,6 @@ def _shipit_manifest(contributions: tuple[Contribution, ...]) -> str:
 
 
 def _gitignore(contributions: tuple[Contribution, ...]) -> str:
-    """The universal ``.gitignore`` seed plus each profile's ecosystem lines."""
     lines: list[str] = []
     for contribution in contributions:
         for line in contribution.gitignore_lines:
@@ -300,13 +217,7 @@ def build_plan(
     author: str,
     year: int,
 ) -> CreationPlan:
-    """Compose the universal seed and profile contributions into one plan.
-
-    ``author`` and ``year`` fill the MIT ``LICENSE`` copyright line (the
-    resolved Git author, the local creation year — ``docs/spec/repo-new.md``).
-    Raises :class:`CreationError` on any conflicting claim (a duplicated owned
-    path, a pixi-dependency clash, or a duplicated Artifact name).
-    """
+    """Compose the universal seed and profile contributions; any conflicting claim raises."""
     contributions = tuple(profile.contribute(name) for profile in profiles)
 
     universal = (
