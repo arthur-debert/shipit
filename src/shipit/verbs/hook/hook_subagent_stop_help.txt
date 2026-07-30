@@ -2,3 +2,10 @@
 
 It is the subagent counterpart to `stop`, used for role-run accounting and
 harness checks.
+
+It also reports the launch checkout's uncommitted paths as the Run hands back:
+an isolated Run must never write outside its own Tree, and a leaked write that
+happens to be format-clean leaves no other signal (ADR-0083). That report is a
+poll, not an assertion — a coordinator's checkout is legitimately dirty most of
+the time, so it cannot tell a leak from work in progress and never refuses
+anything.

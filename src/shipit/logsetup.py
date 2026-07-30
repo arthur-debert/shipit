@@ -18,6 +18,8 @@ import structlog
 
 from . import events, identity, logcontext, redact
 from .identity import Repo
+from .session import current as session_current
+from .tree import layout
 
 LOGGER_NAME = "shipit"
 
@@ -211,6 +213,28 @@ def configure_logging_for_slug(
         return False
 
 
+def rebind_own_tree(env: Mapping[str, str]) -> None:
+    """Re-key ``tree`` and ``agent`` onto the Tree this process is running in when that differs from the inherited one; ``session`` is left as inherited.
+
+    ``agent`` takes the Tree id. Never raises, and does nothing when the two
+    agree or when the process is not in a Tree. The Tree a process runs in is
+    not always the Run that issued the command — docs/adr/0083.
+    """
+    inherited = (env.get(logcontext.ENV_PREFIX + "TREE") or "").strip()
+    if not inherited:
+        return
+    try:
+        tree = session_current.containing_tree(Path.cwd())
+    except (OSError, ValueError):
+        return
+    if tree is None or str(tree) == inherited:
+        return
+    leaf = layout.parse_flat_leaf(tree.name)
+    if leaf is None:
+        return
+    logcontext.bind(tree=str(tree), agent=leaf.tree_id)
+
+
 def _clear_own_handlers(logger: logging.Logger) -> None:
     """Detach and close only the handlers this module attached, keyed on the ``shipit-`` name prefix."""
     for handler in list(logger.handlers):
@@ -235,6 +259,7 @@ def configure_logging(
     env = os.environ if env is None else env
 
     logcontext.bind_from_env(env)
+    rebind_own_tree(env)
 
     logger = logging.getLogger(LOGGER_NAME)
     logger.setLevel(logging.DEBUG)

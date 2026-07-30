@@ -12,7 +12,7 @@ from typing import TextIO
 
 import click
 
-from ... import identity, logcontext
+from ... import git, identity, logcontext
 from ...harness.eval.extractors import exit_hygiene, extract
 from ...harness.eval.locate import locate_run
 from ...harness.eval.record import build
@@ -30,7 +30,7 @@ def stop_cmd() -> None:
 
 @click.command(name="subagent-stop")
 def subagent_stop_cmd() -> None:
-    """Evaluate a subagent run at its terminal `SubagentStop` hook (fail-open, exit 0)."""
+    """Evaluate a subagent run at its terminal `SubagentStop` hook and report the launch checkout's uncommitted state (fail-open, exit 0)."""
     raise SystemExit(run())
 
 
@@ -42,6 +42,10 @@ def run(stdin: TextIO | None = None) -> int:
         run_files = locate_run(payload)
         if run_files is None:
             return 0
+        # Before the record, not after: the probe reports that something went
+        # wrong, so an unrelated eval failure must not be what silences it.
+        if not run_files.is_coordinator:
+            report_launch_checkout()
         meta = _read_meta(run_files.meta)
         wd = identity.resolve_working_dir(str(payload.get("cwd") or os.getcwd()))
         metrics = extract(run_files.transcript)
@@ -61,6 +65,38 @@ def run(stdin: TextIO | None = None) -> int:
     except Exception:  # noqa: BLE001 — fail-open is the whole point.
         logger.warning("eval hook failed open (no record written)", exc_info=True)
     return 0
+
+
+#: Dirty paths named in the hand-back report before it truncates.
+_DIRTY_SAMPLE = 10
+
+
+def report_launch_checkout() -> None:
+    """Log the process cwd's uncommitted paths — WARNING when dirty, DEBUG when clean; never raises and never refuses anything.
+
+    Reads the cwd inside its own guard, so a launch checkout deleted mid-Run
+    cannot make THIS probe raise into its caller. The managed wrapper `cd`s into
+    `$CLAUDE_PROJECT_DIR`. What a dirty result does and does not prove —
+    docs/adr/0083.
+    """
+    try:
+        cwd = os.getcwd()
+        dirty = git.status_porcelain(cwd=cwd)
+    except Exception:  # noqa: BLE001 — a detection probe never breaks hand-back.
+        logger.debug("subagent-stop: launch checkout unreadable", exc_info=True)
+        return
+    if not dirty:
+        logger.debug("subagent-stop: launch checkout %s is clean", cwd)
+        return
+    logger.warning(
+        "subagent-stop: launch checkout %s carries %d uncommitted path(s) at "
+        "hand-back: %s%s. Either the coordinator's own work in progress or a Run "
+        "that wrote outside its Tree (#1179) — check whose it is before committing.",
+        cwd,
+        len(dirty),
+        "; ".join(dirty[:_DIRTY_SAMPLE]),
+        " (truncated)" if len(dirty) > _DIRTY_SAMPLE else "",
+    )
 
 
 def _variant(meta: dict | None) -> dict | None:

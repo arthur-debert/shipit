@@ -52,6 +52,19 @@ _FLAT_LEAF = re.compile(
     r"-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
 )
 
+#: Finds leaf CANDIDATES inside a larger text; :func:`parse_flat_leaf` stays the
+#: recognizer. ``repo`` is the alphabet a repo NAME may contain, so any other
+#: character ends the segment: a leaf inside a path or behind shell punctuation
+#: (`>x`, `[x`, `,x`) is found whole and reports its own start. Keep it an
+#: allow-list — docs/adr/0083 records what an exclusion list cost here.
+_FLAT_LEAF_IN_TEXT = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9._-]*?-"
+    r"[a-z0-9]+-"
+    r"\d{8}-\d{6}-"
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}"
+    r"-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
+
 
 def is_full_uuid(value: object) -> bool:
     return isinstance(value, str) and _FULL_UUID.fullmatch(value) is not None
@@ -74,6 +87,34 @@ class FlatLeaf:
     agent: str
     created: str
     tree_id: str
+
+    @property
+    def name(self) -> str:
+        """The leaf directory name these slots compose."""
+        return f"{self.repo}-{self.agent}-{self.created}-{self.tree_id}"
+
+
+@dataclass(frozen=True)
+class FlatLeafMention:
+    """A flat Tree leaf found inside a larger text, and where it starts in it."""
+
+    leaf: FlatLeaf
+    start: int
+
+
+def find_flat_leaves(text: object) -> tuple[FlatLeafMention, ...]:
+    """Every flat Tree leaf named anywhere in ``text`` — bare, quoted, or inside a path.
+
+    Text matching: a leaf named in a comment or a string literal reads the same
+    as one named as a path.
+    """
+    if not isinstance(text, str):
+        return ()
+    return tuple(
+        FlatLeafMention(leaf=leaf, start=match.start())
+        for match in _FLAT_LEAF_IN_TEXT.finditer(text)
+        if (leaf := parse_flat_leaf(match.group(0))) is not None
+    )
 
 
 def parse_flat_leaf(name: object) -> FlatLeaf | None:

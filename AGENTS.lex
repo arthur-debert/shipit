@@ -90,8 +90,14 @@ The PR lifecycle (draft -> ready -> stop):
         `WorktreeCreate` hook auto-routes into a Tree. The coordinator never runs
         `shipit tree create` by hand to provision a Run and never points an Agent tool at
         an external checkout. A Tree is a dissociated clone rooted as the Run's cwd (no
-        bash-cwd footgun), NOT a native `git worktree` — that path is denied (ADR-0014) —
-        so concurrent agents never collide on one checkout;
+        bash-cwd footgun — verified: all 228 records of the #1179 Run carried its own
+        Tree), NOT a native `git worktree` — that path is denied (ADR-0014).
+        Isolation covers cwd ONLY: the environment is inherited wholesale, so a Run's
+        `PATH`/`PIXI_*`/`CONDA_*` point at the SPAWNING session's Tree and its paths
+        surface in tool output as if they were the Run's repo root. Concurrent agents
+        therefore CAN still collide, through an absolute path or an inline `cd` — never
+        write outside your own Tree, and trust `git rev-parse --show-toplevel` over any
+        path a tool prints (ADR-0083);
         see [./docs/legacy-prd/where-to-do-work.md]. The implementer runs the checks (`shipit lint`)
         and tests (`pixi run test`) green BEFORE opening the PR — CI runs the same as
         required checks, so local green is necessary for CI green.

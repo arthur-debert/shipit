@@ -476,3 +476,85 @@ def test_fails_open_on_malformed_input(garbage):
     code, out = _run(garbage)
     assert code == 0
     assert out == ""
+
+
+CROSS_TREE_OWN = "shipit-claude-20260730-015230-141f2c5a-1ca0-4170-b86d-b3a10f3e8c3a"
+CROSS_TREE_OTHER = "shipit-claude-20260729-233341-297e983f-54ce-4a8f-8afa-c9dea2a23c8b"
+
+
+@pytest.fixture
+def cross_tree(monkeypatch, tmp_path):
+    """A Trees root with the caller's Tree and one other, as `(own_dir, other_dir)`."""
+    root = tmp_path / "trees"
+    own, other = root / CROSS_TREE_OWN, root / CROSS_TREE_OTHER
+    for path in (own, other):
+        path.mkdir(parents=True)
+    monkeypatch.setenv("SHIPIT_TREES_ROOT", str(root))
+    return own, other
+
+
+def test_bash_write_into_another_tree_is_denied_through_the_hook(cross_tree):
+    """The decider must be REACHED from `run`, not merely exist."""
+    own, other = cross_tree
+    payload = json.dumps(
+        {
+            "agent_type": "implementer",
+            "tool_name": "Bash",
+            "cwd": str(own),
+            "tool_input": {
+                "command": f"cd {other} && python3 /tmp/s.py apply src/x.py"
+            },
+        }
+    )
+    code, out = _run(payload)
+    assert code == 0
+    decision = json.loads(out)["hookSpecificOutput"]
+    assert decision["permissionDecision"] == "deny"
+    assert CROSS_TREE_OTHER in decision["permissionDecisionReason"]
+
+
+def test_reading_another_tree_stays_allowed_through_the_hook(cross_tree):
+    own, other = cross_tree
+    payload = json.dumps(
+        {
+            "tool_name": "Bash",
+            "cwd": str(own),
+            "tool_input": {"command": f"grep -rn foo {other}/src"},
+        }
+    )
+    code, out = _run(payload)
+    assert code == 0
+    assert out == ""
+
+
+def test_the_bashguard_entry_denies_a_cross_tree_write_and_still_exits_zero(cross_tree):
+    """The advisory entry's contract: it emits `deny` on stdout, and its own exit stays 0."""
+    own, other = cross_tree
+    payload = json.dumps(
+        {
+            "tool_name": "Bash",
+            "cwd": str(own),
+            "tool_input": {"command": f"tee {other}/src/x.py"},
+        }
+    )
+    result = CliRunner().invoke(bashguard.cmd, input=payload)
+    assert result.exit_code == 0
+    assert json.loads(result.output)["hookSpecificOutput"]["permissionDecision"] == (
+        "deny"
+    )
+
+
+def test_a_coordinator_edit_in_another_tree_still_reports_the_edit_reason(cross_tree):
+    """The cross-Tree rule must not shadow the fail-closed edit guard's own verdict."""
+    own, _other = cross_tree
+    payload = json.dumps(
+        {
+            "tool_name": "Edit",
+            "cwd": str(own),
+            "tool_input": {"file_path": "src/shipit/cli.py"},
+        }
+    )
+    code, out = _run(payload)
+    assert code == 0
+    reason = json.loads(out)["hookSpecificOutput"]["permissionDecisionReason"]
+    assert reason == COORDINATOR_DENY_REASON

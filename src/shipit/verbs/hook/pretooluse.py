@@ -19,6 +19,7 @@ from ...harness.policy import (
     Decision,
     Permission,
     decide,
+    decide_cross_tree_write,
     decide_spawn_isolation,
     decide_worktree,
     is_edit_tool,
@@ -31,7 +32,7 @@ logger = logging.getLogger("shipit.hook")
 
 @click.command(name="pretooluse")
 def cmd() -> None:
-    """Decide a `PreToolUse` tool call: deny a guarded worktree or spawn operation, or a coordinator code edit; else allow."""
+    """Decide a `PreToolUse` tool call: deny a guarded worktree, cross-Tree write or spawn operation, or a coordinator code edit; else allow."""
     raise SystemExit(run())
 
 
@@ -45,7 +46,11 @@ def run(stdin: TextIO | None = None, stdout: TextIO | None = None) -> int:
         call = tool_call(payload)
         tool_name = call.tool_name
         cwd = call.cwd
-        for boundary in (decide_worktree(call), decide_spawn_isolation(call)):
+        for boundary in (
+            decide_worktree(call),
+            decide_spawn_isolation(call),
+            decide_cross_tree_write(call),
+        ):
             if boundary.permission is Permission.DENY:
                 logger.debug(
                     "pretooluse DENY: boundary tool=%s cwd=%s subagent_type=%s",

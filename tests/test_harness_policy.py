@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from shipit.harness.policy import (
+    _REDIRECTS_INTO_TAIL,
     COORDINATOR_DENY_REASON,
     SPAWN_ISOLATION_DENY_REASON,
     WORKTREE_DENY_REASON,
@@ -10,6 +13,7 @@ from shipit.harness.policy import (
     Permission,
     ToolCall,
     decide,
+    decide_cross_tree_write,
     decide_spawn_isolation,
     decide_worktree,
     is_edit_tool,
@@ -463,3 +467,246 @@ def test_spawn_isolation_allow_carries_no_reason():
         }
     )
     assert decide_spawn_isolation(call).reason == ""
+
+
+OWN_LEAF = "shipit-claude-20260730-015230-141f2c5a-1ca0-4170-b86d-b3a10f3e8c3a"
+OTHER_LEAF = "shipit-claude-20260729-233341-297e983f-54ce-4a8f-8afa-c9dea2a23c8b"
+
+
+@pytest.fixture
+def trees(monkeypatch, tmp_path):
+    """A Trees root holding the caller's own Tree and one other, as `(own_dir, other_dir)`."""
+    root = tmp_path / "trees"
+    own = root / OWN_LEAF
+    other = root / OTHER_LEAF
+    for path in (own, other):
+        path.mkdir(parents=True)
+    monkeypatch.setenv("SHIPIT_TREES_ROOT", str(root))
+    return own, other
+
+
+def _shell(command: str, cwd: str, tool: str = "Bash") -> ToolCall:
+    return ToolCall(tool, command=command, cwd=cwd)
+
+
+def test_an_inline_cd_then_a_non_git_writer_is_denied(trees):
+    own, other = trees
+    call = _shell(f"cd {other} && python3 /tmp/s.py apply src/shipit/git.py", str(own))
+    decision = decide_cross_tree_write(call)
+    assert decision.permission is Permission.DENY
+    assert OTHER_LEAF in decision.reason
+    assert OWN_LEAF in decision.reason
+
+
+def test_deny_reason_states_it_is_not_a_boundary(trees):
+    own, other = trees
+    decision = decide_cross_tree_write(_shell(f"tee {other}/x", str(own)))
+    assert "nudge, not a boundary" in decision.reason
+    assert "assembled at runtime" in decision.reason
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cd {other} && python3 /tmp/s.py apply src/x.py",
+        "sed -i s/a/b/ {other}/src/shipit/git.py",
+        "tee {other}/x.txt",
+        "cp AGENTS.md {other}/AGENTS.md",
+        "mv x {other}/x",
+        "/usr/bin/sed -i s/a/b/ {other}/x",
+        "python3.13 -c open({other}/x)",
+        "echo hi > {other}/x.txt",
+        "echo hi >> {other}/x.txt",
+        # No space after the operator: the leaf must still be found AT the leaf,
+        # or the redirect check reads a head that does not end in `>`.
+        "echo hi >{other}/x.txt",
+        "echo hi >>{other}/x.txt",
+        'echo hi >"{other}/x.txt"',
+        # A target whose first character is escaped leaves the searched prefix
+        # ending in a lone backslash; `\\s` is still `s`, so it is the same Tree.
+        "echo hi > \\{other_leaf}/x",
+        "echo hi > /tmp/a\\ b/\\{other_leaf}/x",
+        # A bare leaf, and `../<leaf>`, reach a sibling Tree without an abs path.
+        "cp x ../{other_leaf}/x",
+        "cp x {other_leaf}/x",
+        # A writer with a dotted suffix counts; accepted, not desired.
+        "sed.orig -i s/a/b/ {other}/x",
+        "python3.orig /tmp/s.py {other}/x",
+        "sed.py {other}/x",
+    ],
+)
+def test_writes_into_another_tree_are_denied(trees, command):
+    own, other = trees
+    call = _shell(command.format(other=other, other_leaf=OTHER_LEAF), str(own))
+    assert decide_cross_tree_write(call).permission is Permission.DENY
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # Reading another Tree in place is legitimate and stays allowed.
+        "ls {other}/CHANGELOG",
+        "grep -rn foo {other}/src",
+        "cat {other}/AGENTS.md",
+        # A redirect that targets something ELSE must not count as writing the
+        # path it merely reads — `2>/dev/null` is the common shape.
+        "grep -rn foo {other}/src 2>/dev/null",
+        "cat {other}/x > /tmp/y",
+        'echo "a" > b.txt && ls {other}',
+        # A `>` inside a CLOSED quote is not an operator on the mention.
+        'echo "a > b" && ls {other}',
+        # git after a cross-checkout `cd` is the host's own guard; not doubled.
+        "cd {other} && git status",
+        "git -C {other} log --oneline -1",
+        # `rm -rf <Tree>` IS how a Tree is reclaimed, and `chmod` is how a
+        # reviewer Tree is made read-only: both are legitimate cross-Tree traffic.
+        "rm -rf {other}",
+        "chmod -R a-w {other}",
+        "shipit tree remove {other}",
+        # The caller's own Tree, however addressed.
+        "cd {own} && python3 -m pytest tests/",
+        "sed -i s/a/b/ {own}/src/shipit/git.py",
+        "python3 -m pytest tests/",
+    ],
+)
+def test_commands_that_do_not_write_another_tree_are_allowed(trees, command):
+    own, other = trees
+    call = _shell(command.format(other=other, own=own), str(own))
+    assert decide_cross_tree_write(call).permission is Permission.ALLOW
+
+
+def test_accepted_false_positive_a_writer_word_used_as_data(trees):
+    """A write command's NAME as data denies; accepted, not desired."""
+    own, other = trees
+    call = _shell(f"grep -rn python3 {other}/src", str(own))
+    assert decide_cross_tree_write(call).permission is Permission.DENY
+
+
+@pytest.mark.parametrize(
+    ("root_name", "command"),
+    [
+        ("trees root", 'echo hi > "{other}/x"'),
+        ("trees root", "echo hi > '{other}/x'"),
+        ("trees root", "echo hi > {escaped}/x"),
+        ("trees", 'echo hi > "{other}/x"'),
+    ],
+)
+def test_a_redirect_target_may_contain_spaces(
+    monkeypatch, tmp_path, root_name, command
+):
+    """`SHIPIT_TREES_ROOT` may contain a space, so the target is read up to the closing quote."""
+    root = tmp_path / root_name
+    own, other = root / OWN_LEAF, root / OTHER_LEAF
+    for path in (own, other):
+        path.mkdir(parents=True)
+    monkeypatch.setenv("SHIPIT_TREES_ROOT", str(root))
+
+    call = _shell(
+        command.format(other=other, escaped=str(other).replace(" ", "\\ ")), str(own)
+    )
+    assert decide_cross_tree_write(call).permission is Permission.DENY
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # A writer outside the registry: the set is the shapes a cooperating
+        # agent types, and enumerating every interpreter is not achievable.
+        "cd {other} && ruby -e File.write",
+        "cd {other} && ./tools/rewrite.sh",
+        # The path never appears literally, so there is no leaf to find.
+        'cd "$(cat /tmp/target)" && python3 /tmp/s.py',
+        'eval "cd $T && python3 /tmp/s.py"',
+    ],
+)
+def test_known_evasions_are_not_caught(trees, command):
+    """Documented limits, not aspirations: a writer the registry omits, or a path never spelled."""
+    own, other = trees
+    call = _shell(command.format(other=other), str(own))
+    assert decide_cross_tree_write(call).permission is Permission.ALLOW
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'eval "cd {other} && python3 /tmp/s.py"',
+        "sh -c 'cd {other} && python3 /tmp/s.py'",
+        "T={other}; cd $T && python3 /tmp/s.py",
+    ],
+)
+def test_a_literal_path_inside_eval_or_sh_c_is_still_caught(trees, command):
+    """The raw command is read, not its shell words: `eval`/`sh -c` hide structure, not text."""
+    own, other = trees
+    call = _shell(command.format(other=other), str(own))
+    assert decide_cross_tree_write(call).permission is Permission.DENY
+
+
+def test_a_caller_outside_the_trees_root_is_never_refused(trees, tmp_path):
+    """ "Another Tree" has no meaning without an own Tree, so the rule stands down."""
+    _own, other = trees
+    call = _shell(f"cp x {other}/x", str(tmp_path / "ambient-checkout"))
+    assert decide_cross_tree_write(call).permission is Permission.ALLOW
+
+
+def test_a_blank_cwd_does_not_fall_back_to_the_hook_process_cwd(trees):
+    """The hook runs in the spawning session's checkout, so a blank cwd reads as unknown."""
+    _own, other = trees
+    assert (
+        decide_cross_tree_write(_shell(f"cp x {other}/x", "")).permission
+        is Permission.ALLOW
+    )
+
+
+def test_the_rule_only_fires_on_shell_tools(trees):
+    """The edit entry runs the same decider and must be untouched by it."""
+    own, other = trees
+    for tool in ("Edit", "Write", "MultiEdit", "NotebookEdit", "Agent"):
+        call = _shell(f"cp x {other}/x", str(own), tool=tool)
+        assert decide_cross_tree_write(call).permission is Permission.ALLOW, tool
+
+
+@pytest.mark.parametrize(
+    "head",
+    [
+        # Escaped pairs, the shape that made the alternatives overlap.
+        "> " + "\\a" * 60,
+        "> " + "\\a" * 60 + " ",
+        ">> " + "\\ " * 60,
+        # Raw backslash runs, which the escaped-pair inputs do not exercise.
+        "> " + "\\" * 60,
+        ">> " + "\\" * 60,
+        # Pairs closed by a terminal escape — every branch of the alternation.
+        "> " + "\\a" * 60 + "\\",
+        # The quoted branches, with and without a terminal escape.
+        '> "' + "\\a" * 60,
+        "> '" + "\\a" * 60,
+        '> "' + "\\" * 60,
+        "> '" + "\\" * 60,
+    ],
+)
+def test_the_redirect_prefix_check_stays_linear(head):
+    """A timing bound, not a verdict: only this catches a rewrite that lets the alternatives overlap again."""
+    started = time.perf_counter()
+    _REDIRECTS_INTO_TAIL.search(head)
+    assert time.perf_counter() - started < 1.0
+
+
+def test_the_rule_fires_on_the_codex_shell_tool(trees):
+    """codex names its shell tool `exec_command` and puts the command under `cmd`."""
+    own, other = trees
+    call = tool_call(
+        {
+            "tool_name": "exec_command",
+            "cwd": str(own),
+            "tool_input": {"cmd": f"tee {other}/x"},
+        }
+    )
+    assert decide_cross_tree_write(call).permission is Permission.DENY
+
+
+def test_a_misconfigured_trees_root_allows(trees, monkeypatch):
+    """A relative `SHIPIT_TREES_ROOT` raises inside the resolver; it must not refuse every shell command."""
+    _own, other = trees
+    monkeypatch.setenv("SHIPIT_TREES_ROOT", "relative/not-absolute")
+    call = _shell(f"tee {other}/x", str(other))
+    assert decide_cross_tree_write(call).permission is Permission.ALLOW

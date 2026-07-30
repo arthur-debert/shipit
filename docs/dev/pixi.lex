@@ -339,14 +339,30 @@ behaves and how we ride it.
         bypass). Relevant if per-launch activation cost on the spawn path matters;
         mark experimental before relying on it.
 
-    Leaked `PIXI_*` project pointers (#167) — CLOSED on the launch path:
+    Leaked `PIXI_*` project pointers (#167) — CLOSED on the `shipit spawn` path
+    ONLY:
         An inherited `PIXI_PROJECT_MANIFEST` makes a child's `pixi run` resolve
         the PARENT manifest and die. Provisioning always defended against this
-        (`provision_env()` scrubs leaked `PIXI_*`); as of PR #197 the launch path
-        does too, via the shared `is_leaked_env_var` predicate (`scrub_tree_env`),
-        which now also strips the `CONDA_*` activation family — the predicate's
-        home is `shipit.pixienv.scrub` (PROC02-WS02). The old asymmetry that made
-        this a live bug is gone.
+        (`provision_env()` scrubs leaked `PIXI_*`); as of PR #197 the
+        `shipit spawn subagent` launch path does too, via the shared
+        `is_leaked_env_var` predicate (`scrub_tree_env`), which now also strips
+        the `CONDA_*` activation family — the predicate's home is
+        `shipit.pixienv.scrub` (PROC02-WS02).
+
+        STILL OPEN on the in-CC `Agent(isolation:"worktree")` path, and there is
+        no seam to close it: `isolation` isolates cwd, the child's env is
+        inherited wholesale, and `WorktreeCreate` can only print a directory
+        (`verbs/hook/worktreecreate.py`) — it can never set the child's env.
+        Measured in an isolated Run on Claude Code 2.1.220: `PATH[0]`,
+        `PIXI_PROJECT_ROOT`, `PIXI_PROJECT_MANIFEST`, `CONDA_PREFIX`,
+        `CARGO_TARGET_DIR`, `SCCACHE_BASEDIRS` and `SHIPIT_LOG_CTX_*` all named
+        the SPAWNING session's Tree, so bare `python3` imported that session's
+        editable source tree. pixi mitigates its own channel (it prefers the
+        local manifest and says so: `WARN Using local manifest … rather than …
+        from environment variable PIXI_PROJECT_MANIFEST`), so `pixi run` from
+        the Tree is correct; the damage is that another checkout's absolute
+        paths surface in tool output and get mistaken for the Run's root, which
+        is how #1179's cross-Tree write happened. See ADR-0083.
 
     Cross-filesystem cache (#119):
         Provisioning warns when the pixi/rattler cache and the Tree are on

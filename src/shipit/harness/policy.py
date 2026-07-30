@@ -1,4 +1,4 @@
-"""``harness/policy`` — the pure edit-, native-worktree- and spawn-isolation deny verdicts.
+"""``harness/policy`` — the edit-, native-worktree-, cross-Tree-write and spawn-isolation deny verdicts.
 
 See docs/adr/0012-enforcement-via-native-hooks.md.
 """
@@ -10,7 +10,10 @@ import shlex
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
+from pathlib import Path
 
+from ..session import current as session_current
+from ..tree import layout
 from .prompts import load_coordinator_slice
 from .role import Role
 from .roleprofile import (
@@ -251,3 +254,104 @@ def decide_spawn_isolation(call: ToolCall) -> Decision:
     if not profile_for(role).checkout.tree_backed:
         return _ALLOW
     return Decision(permission=Permission.DENY, reason=SPAWN_ISOLATION_DENY_REASON)
+
+
+CROSS_TREE_WRITE_DENY_REASON = (
+    "This command runs a write-capable command against {foreign}, which is not "
+    "this Run's Tree ({own}). A Tree has ONE writer: two Runs writing one "
+    "checkout stomp each other, and a leaked write lands on the other Run's "
+    "branch as its own work (#1179, ADR-0014). Write only inside your own Tree "
+    "and move changes between Runs through the remote (push, then `gh pr`); "
+    "reading another Tree in place is fine, this refusal is about writing. If "
+    "you meant to write there, you are in the wrong Run — hand back instead. "
+    "One cause worth knowing: your PATH and PIXI_*/CONDA_* point at the "
+    "SPAWNING session's Tree, so tool output can print its path as if it were "
+    "your repo root; `git rev-parse --show-toplevel` is the one that tells the "
+    "truth. This check reads the command as TEXT: a path assembled at runtime, "
+    "or a writer it does not know, walks straight past it — it is a hygiene "
+    "nudge, not a boundary."
+)
+
+#: Non-git commands that can WRITE a file. `git`, `rm` and `chmod` are absent on
+#: purpose — reclaiming a Tree and making one read-only are legitimate cross-Tree
+#: traffic; docs/adr/0083 states each omission before you add one back.
+_WRITE_COMMANDS = (
+    "cp",
+    "dd",
+    "mv",
+    "patch",
+    "perl",
+    "python",
+    "python3",
+    "rsync",
+    "sed",
+    "tee",
+    "truncate",
+)
+
+#: A write command as a WORD: `/usr/bin/sed` counts, `foo-cp` and `mycp` do not.
+#: A DOTTED SUFFIX is not examined, so `python3.13`, `sed.orig` and `sed.py` all
+#: count; docs/adr/0083 tables those over-denials and why they are accepted.
+_RUNS_A_WRITE_COMMAND = re.compile(
+    r"(?<![\w.:-])(?:" + "|".join(_WRITE_COMMANDS) + r")(?![\w-])"
+)
+
+#: A `>`/`>>` whose target is the text that follows it, matched against the
+#: command's head so that `2>/dev/null …` cannot count as writing a later path.
+#: The quoted branches leave the quote OPEN, so a target may contain spaces
+#: (`SHIPIT_TREES_ROOT` may). The unquoted branch's alternatives MUST stay
+#: mutually exclusive — the class excludes the backslash that `\\.` consumes, or
+#: a run of `\x` matches both ways and the search backtracks exponentially on
+#: every Bash call. The trailing `\\?` is how a target ending in a lone escape
+#: (`> \<leaf>`, where the escape belongs to the leaf's first character) is still
+#: matched: it is reachable only at the end, so it adds no second way to match
+#: anything. Pinned by timing bounds across every branch, which is the only test
+#: that can catch a rewrite reintroducing the overlap.
+_REDIRECTS_INTO_TAIL = re.compile(
+    r""">>?\s*(?:"[^"]*|'[^']*|(?:\\.|[^\s'";|&<>\\])*\\?)$"""
+)
+
+
+def _own_tree(cwd: str) -> layout.FlatLeaf | None:
+    """The caller's own Tree, from the payload ``cwd``; ``None`` when it names no Tree.
+
+    Never raises, and never falls back to the process cwd.
+    """
+    if not cwd:
+        return None
+    try:
+        tree = session_current.containing_tree(Path(cwd))
+    except (OSError, ValueError):
+        return None
+    return None if tree is None else layout.parse_flat_leaf(tree.name)
+
+
+def _written_foreign_tree(command: str, own: layout.FlatLeaf) -> str | None:
+    """The first Tree other than ``own`` this command writes into, else ``None``."""
+    writes = _RUNS_A_WRITE_COMMAND.search(command) is not None
+    for mention in layout.find_flat_leaves(command):
+        if mention.leaf.tree_id.lower() == own.tree_id.lower():
+            continue
+        if writes or _REDIRECTS_INTO_TAIL.search(command[: mention.start]):
+            return mention.leaf.name
+    return None
+
+
+def decide_cross_tree_write(call: ToolCall) -> Decision:
+    """DENY iff a shell command names a Tree other than the caller's own AND runs a write-capable non-git command or redirects into it.
+
+    ALLOWs whenever the caller's own Tree is unknown. Text matching, with the
+    accepted false positives and the inputs that walk past it in docs/adr/0083.
+    """
+    if call.tool not in _SHELL_TOOLS or not call.command:
+        return _ALLOW
+    own = _own_tree(call.cwd)
+    if own is None:
+        return _ALLOW
+    foreign = _written_foreign_tree(call.command, own)
+    if foreign is None:
+        return _ALLOW
+    return Decision(
+        permission=Permission.DENY,
+        reason=CROSS_TREE_WRITE_DENY_REASON.format(foreign=foreign, own=own.name),
+    )
