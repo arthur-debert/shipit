@@ -12,7 +12,7 @@ from typing import TextIO
 
 import click
 
-from ... import identity, logcontext
+from ... import git, identity, logcontext
 from ...harness.eval.extractors import exit_hygiene, extract
 from ...harness.eval.locate import locate_run
 from ...harness.eval.record import build
@@ -30,7 +30,7 @@ def stop_cmd() -> None:
 
 @click.command(name="subagent-stop")
 def subagent_stop_cmd() -> None:
-    """Evaluate a subagent run at its terminal `SubagentStop` hook (fail-open, exit 0)."""
+    """Evaluate a subagent run at its terminal `SubagentStop` hook and report the launch checkout's uncommitted state (fail-open, exit 0)."""
     raise SystemExit(run())
 
 
@@ -58,9 +58,42 @@ def run(stdin: TextIO | None = None) -> int:
             run_id=run_files.run_id,
         )
         append_record(record, wd.repo)
+        if not run_files.is_coordinator:
+            report_launch_checkout(os.getcwd())
     except Exception:  # noqa: BLE001 — fail-open is the whole point.
         logger.warning("eval hook failed open (no record written)", exc_info=True)
     return 0
+
+
+#: Dirty paths named in the hand-back report before it truncates.
+_DIRTY_SAMPLE = 10
+
+
+def report_launch_checkout(cwd: str) -> None:
+    """Report the launch checkout's uncommitted paths as a subagent hands back — WARNING when dirty, DEBUG when clean.
+
+    Callers pass the process cwd: the managed wrapper `cd`s into
+    `$CLAUDE_PROJECT_DIR`, the project the session was launched from. A POLL,
+    not an assertion — it cannot tell a leaked cross-Tree write from the
+    coordinator's own work in progress, so it never refuses (docs/adr/0083).
+    """
+    try:
+        dirty = git.status_porcelain(cwd=cwd)
+    except Exception:  # noqa: BLE001 — a detection probe never breaks hand-back.
+        logger.debug("subagent-stop: %s status unreadable", cwd, exc_info=True)
+        return
+    if not dirty:
+        logger.debug("subagent-stop: launch checkout %s is clean", cwd)
+        return
+    logger.warning(
+        "subagent-stop: launch checkout %s carries %d uncommitted path(s) at "
+        "hand-back: %s%s. Either the coordinator's own work in progress or a Run "
+        "that wrote outside its Tree (#1179) — check whose it is before committing.",
+        cwd,
+        len(dirty),
+        "; ".join(dirty[:_DIRTY_SAMPLE]),
+        " (truncated)" if len(dirty) > _DIRTY_SAMPLE else "",
+    )
 
 
 def _variant(meta: dict | None) -> dict | None:

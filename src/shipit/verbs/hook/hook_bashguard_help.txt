@@ -4,14 +4,19 @@
 The two names exist so the host can wire two `PreToolUse` entries with different
 failure behaviour: the edit entry refuses the call when the guard cannot run,
 this one allows it. Its human meaning is Tree hygiene: `git worktree add` and
-`EnterWorktree` are refused (Trees are dissociated clones, not worktrees), and a
-subagent spawn for a role that requires its own Tree is refused unless it passes
+`EnterWorktree` are refused (Trees are dissociated clones, not worktrees), a
+shell command that runs a write-capable non-git command against a Tree other
+than the caller's own is refused (reads are not — ADR-0083), and a subagent
+spawn for a role that requires its own Tree is refused unless it passes
 `isolation`. Malformed input fails open so a broken hook does not strand the user.
 
 It decides whatever payload it is handed; which tool calls reach it is the host
-matcher's job, so a rule is only live for the tools that matcher names.
+matcher's job, so a rule is only live for the tools that matcher names — and the
+settings that route it come from the project the session was LAUNCHED from, not
+from an isolated Run's own Tree.
 
-The shell-command check is best-effort: it reads the command's words, so `eval`,
-variable indirection and `sh -c` hide an invocation from it. It is a hygiene
-nudge for a cooperating agent, not a security boundary, and it errs toward
+The shell-command checks are best-effort: they read the command as text, so a
+path assembled at run time, a writer they do not know, `eval`, variable
+indirection and `sh -c` can all hide an invocation from them. They are hygiene
+nudges for a cooperating agent, not security boundaries, and they err toward
 denying.

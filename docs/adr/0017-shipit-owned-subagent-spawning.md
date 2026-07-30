@@ -37,8 +37,15 @@ bypassing the WS06 deny-guard — agent isolation was never actually routed thro
 
 A feasibility spike recorded on #139 **confirmed** that Claude Code's `WorktreeCreate`
 hook is documented and stable, and that the harness adopts **any path the hook returns**
-(a dissociated clone) as the subagent's cwd — no validation, no footgun. That removed the
-last unknown and reframed #139 from "patch a hole" to "decide who owns spawning."
+(a dissociated clone) as the subagent's cwd, with no validation of that path. That removed
+the last unknown and reframed #139 from "patch a hole" to "decide who owns spawning."
+
+The spike's "no footgun" was too strong, and #1179 measured why: the hook can only return
+a **cwd**. The child's environment is inherited wholesale, so `PATH`, `PIXI_*` and
+`CONDA_*` still name the spawning session's Tree, and the hook has no seam to change that
+(`verbs/hook/worktreecreate.py` prints a path — it cannot set a child's env). A Run
+therefore starts correctly rooted while its tool output prints another checkout's absolute
+paths, which is how one Run wrote into the coordinator's checkout. See ADR-0083.
 
 The deeper pull is architectural: **push everything regular enough down to the tool/CLI
 layer, and leave the LLM only genuine-judgment work.** Determinism at the tool level buys

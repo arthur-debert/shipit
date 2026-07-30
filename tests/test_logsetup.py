@@ -477,3 +477,70 @@ def test_case_divergent_sources_land_one_log_dir(tmp_path):
     dir_from_origin = logsetup.resolve_log_dir(from_origin, base_dir=tmp_path)
     dir_from_slug = logsetup.resolve_log_dir(from_api_slug, base_dir=tmp_path)
     assert dir_from_origin == dir_from_slug == tmp_path / "acme" / "widget"
+
+
+COORDINATOR_LEAF = "shipit-claude-20260729-233341-297e983f-54ce-4a8f-8afa-c9dea2a23c8b"
+SUBAGENT_LEAF = "shipit-claude-20260730-015230-141f2c5a-1ca0-4170-b86d-b3a10f3e8c3a"
+
+
+@pytest.fixture
+def two_trees(monkeypatch, tmp_path):
+    """A Trees root with a spawning session's Tree and a spawned Run's, as `(coordinator, subagent)`."""
+    root = tmp_path / "trees"
+    coordinator, subagent = root / COORDINATOR_LEAF, root / SUBAGENT_LEAF
+    for path in (coordinator, subagent):
+        path.mkdir(parents=True)
+    monkeypatch.setenv("SHIPIT_TREES_ROOT", str(root))
+    return coordinator, subagent
+
+
+def test_a_spawned_run_is_attributed_to_its_own_tree(two_trees, monkeypatch):
+    """A native subagent inherits the spawner's `SHIPIT_LOG_CTX_TREE`, so without this its records read as the coordinator's (#1179)."""
+    coordinator, subagent = two_trees
+    monkeypatch.chdir(subagent)
+
+    logsetup.rebind_own_tree({"SHIPIT_LOG_CTX_TREE": str(coordinator)})
+
+    bound = structlog.contextvars.get_contextvars()
+    assert bound["tree"] == str(subagent)
+    assert bound["agent"] == "141f2c5a-1ca0-4170-b86d-b3a10f3e8c3a"
+
+
+def test_the_spawning_session_itself_is_left_alone(two_trees, monkeypatch):
+    coordinator, _subagent = two_trees
+    monkeypatch.chdir(coordinator)
+
+    logsetup.rebind_own_tree({"SHIPIT_LOG_CTX_TREE": str(coordinator)})
+
+    assert "agent" not in structlog.contextvars.get_contextvars()
+
+
+@pytest.mark.parametrize("env", [{}, {"SHIPIT_LOG_CTX_TREE": ""}])
+def test_nothing_is_rebound_without_an_inherited_tree(two_trees, monkeypatch, env):
+    """The mismatch IS the discriminator; with nothing to differ from there is nothing to correct."""
+    _coordinator, subagent = two_trees
+    monkeypatch.chdir(subagent)
+
+    logsetup.rebind_own_tree(env)
+
+    assert structlog.contextvars.get_contextvars() == {}
+
+
+def test_a_cwd_outside_the_trees_root_is_left_alone(two_trees, monkeypatch, tmp_path):
+    coordinator, _subagent = two_trees
+    ambient = tmp_path / "ambient"
+    ambient.mkdir()
+    monkeypatch.chdir(ambient)
+
+    logsetup.rebind_own_tree({"SHIPIT_LOG_CTX_TREE": str(coordinator)})
+
+    assert structlog.contextvars.get_contextvars() == {}
+
+
+def test_a_misconfigured_trees_root_never_raises(monkeypatch, tmp_path):
+    monkeypatch.setenv("SHIPIT_TREES_ROOT", "relative/not-absolute")
+    monkeypatch.chdir(tmp_path)
+
+    logsetup.rebind_own_tree({"SHIPIT_LOG_CTX_TREE": "/trees/whatever"})
+
+    assert structlog.contextvars.get_contextvars() == {}

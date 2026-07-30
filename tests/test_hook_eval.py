@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 
 import pytest
 
@@ -15,6 +16,7 @@ from shipit.verbs.hook.eval import run
 def state_dir(monkeypatch, tmp_path):
     base = tmp_path / "state"
     monkeypatch.setattr(store.platformdirs, "user_state_dir", lambda *a, **k: str(base))
+    monkeypatch.setattr(git, "status_porcelain", lambda *, cwd: [])
     monkeypatch.setattr(git, "repo_root", lambda *, cwd=None: cwd)
     monkeypatch.setattr(
         git,
@@ -143,3 +145,82 @@ def test_stop_record_carries_coordinator_exit_hygiene(state_dir, tmp_path, monke
 def test_fails_open_writing_nothing_on_bad_input(state_dir, garbage):
     assert run(stdin=io.StringIO(garbage)) == 0
     assert _records(state_dir) == []
+
+
+def _subagent_payload(tmp_path):
+    transcript = tmp_path / "session" / "subagents" / "agent-leak.jsonl"
+    _write_transcript(transcript, "Bash")
+    return json.dumps({"transcript_path": str(transcript), "cwd": str(tmp_path)})
+
+
+def test_subagent_hand_back_warns_when_the_launch_checkout_is_dirty(
+    state_dir, tmp_path, monkeypatch, caplog
+):
+    """The only signal a format-clean cross-Tree write leaves (#1179): report it, never refuse."""
+    monkeypatch.setattr(
+        git, "status_porcelain", lambda *, cwd: [" M src/shipit/git.py", "?? notes.md"]
+    )
+    with caplog.at_level(logging.WARNING, logger="shipit.hook"):
+        assert run(stdin=io.StringIO(_subagent_payload(tmp_path))) == 0
+
+    assert len(_records(state_dir)) == 1
+    warning = "\n".join(r.getMessage() for r in caplog.records)
+    assert "2 uncommitted path(s)" in warning
+    assert "src/shipit/git.py" in warning
+    assert "#1179" in warning
+
+
+def test_the_hand_back_report_truncates_a_long_dirty_list(
+    state_dir, tmp_path, monkeypatch, caplog
+):
+    monkeypatch.setattr(
+        git, "status_porcelain", lambda *, cwd: [f" M f{n}" for n in range(25)]
+    )
+    with caplog.at_level(logging.WARNING, logger="shipit.hook"):
+        assert run(stdin=io.StringIO(_subagent_payload(tmp_path))) == 0
+
+    warning = "\n".join(r.getMessage() for r in caplog.records)
+    assert "(truncated)" in warning
+    assert " M f24" not in warning
+
+
+def test_a_clean_launch_checkout_is_silent(state_dir, tmp_path, caplog):
+    with caplog.at_level(logging.WARNING, logger="shipit.hook"):
+        assert run(stdin=io.StringIO(_subagent_payload(tmp_path))) == 0
+
+    assert caplog.records == []
+    assert len(_records(state_dir)) == 1
+
+
+def test_an_unreadable_launch_checkout_still_writes_the_record(
+    state_dir, tmp_path, monkeypatch, caplog
+):
+    """The probe is additive: a git failure inside it must not cost the eval record."""
+
+    def _boom(*, cwd):
+        raise OSError("not a repo")
+
+    monkeypatch.setattr(git, "status_porcelain", _boom)
+    with caplog.at_level(logging.WARNING, logger="shipit.hook"):
+        assert run(stdin=io.StringIO(_subagent_payload(tmp_path))) == 0
+
+    assert len(_records(state_dir)) == 1
+    assert caplog.records == []
+
+
+def test_the_coordinators_own_stop_does_not_run_the_probe(
+    state_dir, tmp_path, monkeypatch, caplog
+):
+    """A coordinator's Stop already reports its own worktree as `exit_hygiene`; the probe is about a Run handing back."""
+    monkeypatch.setattr(
+        git, "status_porcelain", lambda *, cwd: [" M src/shipit/git.py"]
+    )
+    transcript = tmp_path / "57d92339.jsonl"
+    _write_transcript(transcript, "Read")
+    payload = json.dumps({"transcript_path": str(transcript), "cwd": str(tmp_path)})
+
+    with caplog.at_level(logging.WARNING, logger="shipit.hook"):
+        assert run(stdin=io.StringIO(payload)) == 0
+
+    assert caplog.records == []
+    assert _records(state_dir)[0]["eval.exit_hygiene.worktree_clean"] is False

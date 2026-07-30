@@ -689,3 +689,47 @@ def test_case_divergent_sources_land_one_repo_prefix():
 
     assert _plan_dir(from_origin) == _plan_dir(from_api_slug)
     assert _plan_dir(from_origin) == ROOT / LEAF
+
+
+def test_flat_leaf_name_round_trips_the_parse():
+    leaf = layout.parse_flat_leaf(LEAF)
+    assert leaf is not None
+    assert leaf.name == LEAF
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (f"cd /trees/{LEAF} && ls", [LEAF]),
+        (f"cp x {LEAF}/y", [LEAF]),
+        (f"cp x '{LEAF}/y'", [LEAF]),
+        (f"cp x ../{LEAF}/y", [LEAF]),
+        (f"cp /trees/{LEAF}/a /trees/{LEAF}/b", [LEAF, LEAF]),
+        ("cd /trees && ls", []),
+        ("", []),
+        # A stamp of the right SHAPE but not a real calendar time is not a leaf.
+        (f"cd /trees/widget-{AGENT}-20261399-081333-{TREE_ID}", []),
+        # A truncated id is not a Tree id (ADR-0074).
+        (f"cd /trees/widget-{AGENT}-{CREATED}-619cf51a", []),
+    ],
+)
+def test_find_flat_leaves(text, expected):
+    assert [m.leaf.name for m in layout.find_flat_leaves(text)] == expected
+
+
+def test_find_flat_leaves_keeps_a_hyphenated_repo_whole():
+    """The scan must not start mid-directory, or two Trees of one repo compare unequal."""
+    leaf = f"mkdocs-lex-{AGENT}-{CREATED}-{TREE_ID}"
+    found = layout.find_flat_leaves(f"cd /trees/{leaf} && ls")
+    assert [m.leaf.name for m in found] == [leaf]
+    assert found[0].leaf.repo == "mkdocs-lex"
+
+
+def test_find_flat_leaves_reports_where_each_mention_starts():
+    command = f"echo hi > /trees/{LEAF}/x"
+    (mention,) = layout.find_flat_leaves(command)
+    assert command[mention.start :].startswith(LEAF)
+
+
+def test_find_flat_leaves_ignores_a_non_string():
+    assert layout.find_flat_leaves(None) == ()
