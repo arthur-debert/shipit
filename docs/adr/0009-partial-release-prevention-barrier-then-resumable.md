@@ -40,6 +40,7 @@ A **Release** prevents partial publication in two phases:
 - `shipit release` separates a build/sign stage (the abort point) from a publish
   stage (resumable), and publish is safe to re-invoke after a transient endpoint
   failure without double-publishing.
-- The barrier composes with ADR-0008: artifacts that hit their content-key clear the
-  barrier instantly (no recompile), so the all-or-nothing build phase is cheap on a
-  re-run.
+- The barrier *could* compose with ADR-0008 if content-key reuse is ever
+  reactivated (a hit would clear the barrier without recompiling, making re-runs
+  cheap) — but that is a dormant optional optimization, not part of the operative
+  barrier design; release implementations must not require content-key resolution.

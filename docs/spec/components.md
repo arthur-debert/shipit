@@ -129,8 +129,21 @@ requires = { "lex-fmt/lex/lexd-lsp" = "app-bin/" }   # WHERE — placement
 
 `dest` lives in exactly one place: the `requires` mapping of whatever consumes the
 input — `[artifact-deps]` pins what and which version, `requires` says where. The
-same rule covers both sources (intra- and inter-repo keys), and the same mapping is
-available on an artifact for bundle-time inputs (staged app resources).
+same rule covers both sources (intra- and inter-repo keys) and both consumers:
+
+- **On a component**: inputs resolve in build-loop step 1, placed before the
+  builder runs.
+- **On an artifact** (bundle-time inputs — staged app resources): inputs resolve
+  immediately before that artifact's bundler runs, under the same resolution and
+  credential rules, at dests relative to the repo root. Bundlers package declared
+  inputs; they never fetch.
+
+```toml
+[artifacts.app]
+component = "ui"
+runtime   = "tauri"
+requires  = { "phos-editor/core/phos-corpus" = "resources/corpus/" }
+```
 
 Composition (multi-component; ordering usually *derived*):
 

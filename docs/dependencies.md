@@ -13,7 +13,8 @@ not rebuild the old model from it.
 > unchanged (derived location, one consumer-owned version, verified fetch — no
 > index, no resolution, no transitivity). The target declaration shape is
 > `[artifact-deps."<owner>/<repo>/<name>"] { version }` plus a `requires`
-> placement mapping on the consuming component — under this transport
+> placement mapping on the consuming component (build-time) or artifact
+> (bundle-time) — under this transport
 > `[artifact-deps]` **is** the one consumer-owned version place, superseding
 > the "no `version` key in `[artifact-deps]`" rule below, which was specific to
 > the conda realization (where pixi resolved the version from `[dependencies]`).
