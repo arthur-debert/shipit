@@ -54,10 +54,9 @@ _FLAT_LEAF = re.compile(
 
 #: Finds leaf CANDIDATES inside a larger text; :func:`parse_flat_leaf` stays the
 #: recognizer. ``repo`` is the alphabet a repo NAME may contain, so any other
-#: character ends the segment: a leaf inside a path is found whole rather than
-#: starting mid-directory, and one preceded by shell punctuation (`>x`, `[x`,
-#: `,x`) starts AT the leaf. An allow-list, not a list of characters to exclude,
-#: because the excluded set is unbounded and each miss silently shifts `start`.
+#: character ends the segment: a leaf inside a path or behind shell punctuation
+#: (`>x`, `[x`, `,x`) is found whole and reports its own start. Keep it an
+#: allow-list — docs/adr/0083 records what an exclusion list cost here.
 _FLAT_LEAF_IN_TEXT = re.compile(
     r"[A-Za-z0-9][A-Za-z0-9._-]*?-"
     r"[a-z0-9]+-"

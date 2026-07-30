@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from shipit.harness.policy import (
+    _REDIRECTS_INTO_TAIL,
     COORDINATOR_DENY_REASON,
     SPAWN_ISOLATION_DENY_REASON,
     WORKTREE_DENY_REASON,
@@ -656,6 +659,23 @@ def test_the_rule_only_fires_on_shell_tools(trees):
     for tool in ("Edit", "Write", "MultiEdit", "NotebookEdit", "Agent"):
         call = _shell(f"cp x {other}/x", str(own), tool=tool)
         assert decide_cross_tree_write(call).permission is Permission.ALLOW, tool
+
+
+@pytest.mark.parametrize(
+    "head",
+    [
+        "> " + "\\a" * 60,
+        "> " + "\\a" * 60 + " ",
+        '> "' + "\\a" * 60,
+        "> '" + "\\a" * 60,
+        ">> " + "\\ " * 60,
+    ],
+)
+def test_the_redirect_prefix_check_stays_linear(head):
+    """A timing bound, not a verdict: only this catches a rewrite that lets the alternatives overlap again."""
+    started = time.perf_counter()
+    _REDIRECTS_INTO_TAIL.search(head)
+    assert time.perf_counter() - started < 1.0
 
 
 def test_the_rule_fires_on_the_codex_shell_tool(trees):

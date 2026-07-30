@@ -289,27 +289,30 @@ _WRITE_COMMANDS = (
     "truncate",
 )
 
-#: A write command as a WORD: `/usr/bin/sed` counts, since a leading path is part
-#: of the invocation, while `foo-cp` and `mycp` do not. A DOTTED SUFFIX is not
-#: examined, so `python3.13` counts (an interpreter) and so do `sed.orig` and
-#: `sed.py` (not invocations) — over-denials accepted rather than discriminated,
-#: because this rule is deny-biased and advisory; docs/adr/0083 tables them.
+#: A write command as a WORD: `/usr/bin/sed` counts, `foo-cp` and `mycp` do not.
+#: A DOTTED SUFFIX is not examined, so `python3.13`, `sed.orig` and `sed.py` all
+#: count; docs/adr/0083 tables those over-denials and why they are accepted.
 _RUNS_A_WRITE_COMMAND = re.compile(
     r"(?<![\w.:-])(?:" + "|".join(_WRITE_COMMANDS) + r")(?![\w-])"
 )
 
 #: A `>`/`>>` whose target is the text that follows it, matched against the
 #: command's head so that `2>/dev/null …` cannot count as writing a later path.
-#: The quoted branches leave the quote OPEN: a redirect target may contain
-#: spaces, and `SHIPIT_TREES_ROOT` is allowed to (`> "/trees root/<leaf>/x"`).
-_REDIRECTS_INTO_TAIL = re.compile(r""">>?\s*(?:"[^"]*|'[^']*|(?:\\.|[^\s'";|&<>])*)$""")
+#: The quoted branches leave the quote OPEN, so a target may contain spaces
+#: (`SHIPIT_TREES_ROOT` may). The unquoted branch's alternatives MUST stay
+#: mutually exclusive — the class excludes the backslash that `\\.` consumes, or
+#: a run of `\x` matches both ways and the search backtracks exponentially on
+#: every Bash call. Pinned by a timing bound, which is the only test that can
+#: catch a rewrite reintroducing the overlap.
+_REDIRECTS_INTO_TAIL = re.compile(
+    r""">>?\s*(?:"[^"]*|'[^']*|(?:\\.|[^\s'";|&<>\\])*)$"""
+)
 
 
 def _own_tree(cwd: str) -> layout.FlatLeaf | None:
     """The caller's own Tree, from the payload ``cwd``; ``None`` when it names no Tree.
 
-    Never raises, and never falls back to the process cwd — the hook runs in the
-    SPAWNING session's checkout, so that fallback would name the wrong Tree.
+    Never raises, and never falls back to the process cwd.
     """
     if not cwd:
         return None
@@ -334,10 +337,8 @@ def _written_foreign_tree(command: str, own: layout.FlatLeaf) -> str | None:
 def decide_cross_tree_write(call: ToolCall) -> Decision:
     """DENY iff a shell command names a Tree other than the caller's own AND runs a write-capable non-git command or redirects into it.
 
-    ALLOWs whenever the caller's own Tree is unknown, so a call from outside the
-    Trees root — where "another Tree" has no meaning — is never refused. Text
-    matching: docs/adr/0083 lists the accepted false positives and the inputs
-    that walk past it.
+    ALLOWs whenever the caller's own Tree is unknown. Text matching, with the
+    accepted false positives and the inputs that walk past it in docs/adr/0083.
     """
     if call.tool not in _SHELL_TOOLS or not call.command:
         return _ALLOW

@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import logging
+import os
 
 import pytest
 
@@ -209,6 +210,22 @@ def test_a_failing_eval_record_still_leaves_the_hand_back_report(
     messages = "\n".join(r.getMessage() for r in caplog.records)
     assert "uncommitted path(s)" in messages
     assert _records(state_dir) == []
+
+
+def test_a_deleted_launch_checkout_still_writes_the_record(
+    state_dir, tmp_path, monkeypatch, caplog
+):
+    """A Tree can be reclaimed mid-Run, which is exactly when the record must survive."""
+
+    def _boom():
+        raise OSError("cwd no longer exists")
+
+    monkeypatch.setattr(os, "getcwd", _boom)
+    with caplog.at_level(logging.WARNING, logger="shipit.hook"):
+        assert run(stdin=io.StringIO(_subagent_payload(tmp_path))) == 0
+
+    assert len(_records(state_dir)) == 1
+    assert caplog.records == []
 
 
 def test_an_unreadable_launch_checkout_still_writes_the_record(

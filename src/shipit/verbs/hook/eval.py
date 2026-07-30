@@ -45,7 +45,7 @@ def run(stdin: TextIO | None = None) -> int:
         # Before the record, not after: the probe reports that something went
         # wrong, so an unrelated eval failure must not be what silences it.
         if not run_files.is_coordinator:
-            report_launch_checkout(os.getcwd())
+            report_launch_checkout()
         meta = _read_meta(run_files.meta)
         wd = identity.resolve_working_dir(str(payload.get("cwd") or os.getcwd()))
         metrics = extract(run_files.transcript)
@@ -71,18 +71,20 @@ def run(stdin: TextIO | None = None) -> int:
 _DIRTY_SAMPLE = 10
 
 
-def report_launch_checkout(cwd: str) -> None:
-    """Report the launch checkout's uncommitted paths as a subagent hands back — WARNING when dirty, DEBUG when clean.
+def report_launch_checkout() -> None:
+    """Log the process cwd's uncommitted paths — WARNING when dirty, DEBUG when clean; never raises and never refuses anything.
 
-    Callers pass the process cwd: the managed wrapper `cd`s into
-    `$CLAUDE_PROJECT_DIR`, the project the session was launched from. A POLL,
-    not an assertion — it cannot tell a leaked cross-Tree write from the
-    coordinator's own work in progress, so it never refuses (docs/adr/0083).
+    Reads the cwd itself rather than taking it, so no caller can evaluate
+    `os.getcwd()` outside this guard: the launch checkout can be deleted
+    mid-Run, and that is exactly when the caller's own record must survive. The
+    managed wrapper `cd`s into `$CLAUDE_PROJECT_DIR`. What a dirty result does
+    and does not prove — docs/adr/0083.
     """
     try:
+        cwd = os.getcwd()
         dirty = git.status_porcelain(cwd=cwd)
     except Exception:  # noqa: BLE001 — a detection probe never breaks hand-back.
-        logger.debug("subagent-stop: %s status unreadable", cwd, exc_info=True)
+        logger.debug("subagent-stop: launch checkout unreadable", exc_info=True)
         return
     if not dirty:
         logger.debug("subagent-stop: launch checkout %s is clean", cwd)

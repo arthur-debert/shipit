@@ -6,7 +6,7 @@ failure behaviour: the edit entry refuses the call when the guard cannot run,
 this one allows it. Its human meaning is Tree hygiene: `git worktree add` and
 `EnterWorktree` are refused (Trees are dissociated clones, not worktrees), a
 shell command that runs a write-capable non-git command against a Tree other
-than the caller's own is refused (reads are not — ADR-0083), and a subagent
+than the caller's own is refused (reads are not), and a subagent
 spawn for a role that requires its own Tree is refused unless it passes
 `isolation`. Malformed input fails open so a broken hook does not strand the user.
 
