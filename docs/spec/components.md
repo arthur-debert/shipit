@@ -119,9 +119,18 @@ Consumer:
 
 ```toml
 [artifact-deps."lex-fmt/lex/lexd-lsp"]
-version = "0.19.10"
-dest    = "app-bin/"
+version = "0.19.10"                 # WHAT and WHICH version — repo-level pin
+
+[components.app]
+kind = "npm"
+mount = "."
+requires = { "lex-fmt/lex/lexd-lsp" = "app-bin/" }   # WHERE — placement
 ```
+
+`dest` lives in exactly one place: the `requires` mapping of whatever consumes the
+input — `[artifact-deps]` pins what and which version, `requires` says where. The
+same rule covers both sources (intra- and inter-repo keys), and the same mapping is
+available on an artifact for bundle-time inputs (staged app resources).
 
 Composition (multi-component; ordering usually *derived*):
 
@@ -170,11 +179,11 @@ The orchestrator iterates components in order (derived from `requires`, plus man
 `build.after` edges), and for each one:
 
 1. **Resolve inputs**: every `requires` key is satisfied intra-repo (an artifact
-   produced earlier in this run, copied from its promised `path`) or inter-repo (an
-   `[artifact-deps]` staged fetch) — same key syntax, same resolution, two sources.
-   Inputs are placed at their declared dests (the `requires` mapping intra-repo, the
-   `dest` field inter-repo) before the builder runs. The resolver — not the
-   builders — owns the read credential for private inter-repo fetches.
+   produced earlier in this run, copied from its promised `path`) or inter-repo (a
+   staged fetch of the `[artifact-deps]`-pinned version) — same key syntax, same
+   resolution, two sources, one placement rule: the `requires` mapping's dest.
+   Inputs are in place before the builder runs. The resolver — not the builders —
+   owns the read credential for private inter-repo fetches.
 2. **Invoke the builder agnostically**: a per-kind program run at the component's
    mount, passed the target platform explicitly — the builder never infers it from
    the host. The contract is a process boundary — exit 0 is success, non-0 is
@@ -352,5 +361,5 @@ parallel build execution (enabled, not built) · the Profile/Creation-profile fo
   semantics stand independently of it.
 - Verify during implementation: all non-service harnesses are synchronous (supage is
   the only service-lifecycle case).
-- Evidence and prior art: the 2026-07-30 fleet fine-comb and the five-leg survey
+- Evidence and prior art: the 2026-07-30 fleet fine-comb and the six-group survey
   (session artifacts; survey raw findings preserved in the session transcript).

@@ -12,10 +12,13 @@ external publishing has begun it cannot be rolled back.
 
 A **Release** prevents partial publication in two phases:
 
-- **Phase 1 — build/sign barrier (all-or-nothing):** resolve-or-build (by
-  **content-key**), **bundle**, and sign the *entire declared artifact set* first.
-  If *any* artifact fails to build or sign, publish *nothing*. This is the only
-  point where a clean abort is possible, so the whole set must clear it together.
+- **Phase 1 — build/sign barrier (all-or-nothing):** build, **bundle**, and sign
+  the *entire declared artifact set* first. If *any* artifact fails to build or
+  sign, publish *nothing*. This is the only point where a clean abort is possible,
+  so the whole set must clear it together. (Amended 2026-07-30: originally
+  "resolve-or-build by content-key" — content-key reuse is dormant per ADR-0008's
+  status note and the components Spec; it may return as an optional optimization
+  of this phase, never as a requirement of the barrier.)
 - **Phase 2 — publish (ordered, idempotent-resumable):** only after the barrier,
   begin publishing in dependency order. Publishing is fail-fast but **resumable** —
   a re-run skips already-published artifacts and continues — because a mid-publish
