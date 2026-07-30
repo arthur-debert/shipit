@@ -13,6 +13,7 @@ import yaml
 from conftest import (
     LOCAL_BIN_PATH_LEG,
     PIXI_ABSENCE_GUARD,
+    managed_bashguard_hook_command,
     managed_cc_hook_command,
     managed_pretooluse_hook_command,
 )
@@ -1660,11 +1661,73 @@ def test_load_units_includes_the_eval_terminal_hooks():
         assert marker in entry["hooks"][0]["command"]
 
 
+def _matcher_alternatives(matcher: str) -> list[str]:
+    return matcher.split("|")
+
+
+def test_each_pretooluse_matcher_routes_the_tools_its_wrapper_is_right_for():
+    """A tool routed to the wrong entry gets the wrong failure mode, so matcher and decider must agree."""
+    from shipit.harness import policy
+
+    units = {u.key: u for u in iunits.load_units()}
+    edit_matcher = json.loads(units[iunits.SETTINGS_KEY].desired_inner())["matcher"]
+    bash_matcher = json.loads(units[iunits.SETTINGS_BASHGUARD_KEY].desired_inner())[
+        "matcher"
+    ]
+    edit_tools = _matcher_alternatives(edit_matcher)
+    bash_tools = _matcher_alternatives(bash_matcher)
+    assert set(edit_tools).isdisjoint(bash_tools)
+
+    for tool in edit_tools:
+        assert policy.is_edit_tool(tool), tool
+    for tool in bash_tools:
+        assert not policy.is_edit_tool(tool), tool
+
+    # Every tool behind the fail-OPEN entry must be one the decider can actually
+    # rule on, or the entry buys latency and no coverage.
+    assert (
+        policy.decide_worktree(
+            policy.ToolCall("Bash", command="git worktree add ../t b")
+        ).permission
+        is policy.Permission.DENY
+    )
+    assert (
+        policy.decide_spawn_isolation(
+            policy.tool_call(
+                {"tool_name": "Agent", "tool_input": {"subagent_type": "implementer"}}
+            )
+        ).permission
+        is policy.Permission.DENY
+    )
+
+
+def test_the_codex_pretooluse_entry_stays_matcherless_and_total():
+    """codex's managed entry carries no matcher, so `_EDIT_TOOLS` alone gates the codex edit guard."""
+    from shipit.harness import policy
+
+    unit = {u.key: u for u in iunits.load_units()}[iunits.CODEX_PRETOOLUSE_KEY]
+    assert "matcher" not in json.loads(unit.desired_inner())
+    for tool in ("apply_patch", "functions.apply_patch"):
+        assert policy.is_edit_tool(tool), tool
+    assert (
+        policy.decide_worktree(
+            policy.tool_call(
+                {
+                    "tool_name": "exec_command",
+                    "tool_input": {"cmd": "git worktree add ../t b"},
+                }
+            )
+        ).permission
+        is policy.Permission.DENY
+    )
+
+
 def test_hook_units_coexist_on_one_settings_file():
     units = {u.key: u for u in iunits.load_units()}
     text = ""
     for key in (
         iunits.SETTINGS_KEY,
+        iunits.SETTINGS_BASHGUARD_KEY,
         iunits.SETTINGS_STOP_KEY,
         iunits.SETTINGS_SUBAGENTSTOP_KEY,
         iunits.SETTINGS_SESSIONSTART_KEY,
@@ -1674,6 +1737,10 @@ def test_hook_units_coexist_on_one_settings_file():
         text = splice.splice_settings_hook(text, u.desired_inner(), u.event, u.marker)
     hooks = json.loads(text)["hooks"]
     assert iunits.SETTINGS_HOOK_MARKER in hooks["PreToolUse"][0]["hooks"][0]["command"]
+    assert (
+        iunits.SETTINGS_BASHGUARD_MARKER
+        in hooks["PreToolUse"][1]["hooks"][0]["command"]
+    )
     assert iunits.SETTINGS_STOP_MARKER in hooks["Stop"][0]["hooks"][0]["command"]
     assert (
         iunits.SETTINGS_SUBAGENTSTOP_MARKER
@@ -1689,6 +1756,7 @@ def test_hook_units_coexist_on_one_settings_file():
     )
     for key in (
         iunits.SETTINGS_KEY,
+        iunits.SETTINGS_BASHGUARD_KEY,
         iunits.SETTINGS_STOP_KEY,
         iunits.SETTINGS_SUBAGENTSTOP_KEY,
         iunits.SETTINGS_SESSIONSTART_KEY,
@@ -1731,6 +1799,7 @@ def test_managed_settings_hooks_agree_with_shipits_own_settings():
     units = {u.key: u for u in iunits.load_units()}
     for key in (
         iunits.SETTINGS_KEY,
+        iunits.SETTINGS_BASHGUARD_KEY,
         iunits.SETTINGS_STOP_KEY,
         iunits.SETTINGS_SUBAGENTSTOP_KEY,
         iunits.SETTINGS_SESSIONSTART_KEY,
@@ -1993,6 +2062,82 @@ def test_managed_pretooluse_hook_restores_pixi_run_and_fails_closed(tmp_path, re
     assert "exit 0" not in command
     assert "exit 2" in command
     assert iunits.SETTINGS_HOOK_MARKER in command
+
+
+def test_managed_bashguard_hook_keeps_pixi_run_and_fails_open(tmp_path, rec):
+    units = {u.key: u for u in iunits.load_units()}
+    unit = units[iunits.SETTINGS_BASHGUARD_KEY]
+    assert unit.event == iunits.EVENT_PRETOOLUSE
+    assert unit.marker == iunits.SETTINGS_BASHGUARD_MARKER
+    entry = json.loads(unit.desired_inner())
+    assert entry["matcher"] == "Bash|Agent"
+    command = entry["hooks"][0]["command"]
+    assert command == managed_bashguard_hook_command()
+    assert "pixi run" in command
+    assert '--manifest-path "$CLAUDE_PROJECT_DIR"/pixi.toml -- ' in command
+    assert "exit 2" not in command
+    assert "exit 0" in command
+    assert iunits.SETTINGS_BASHGUARD_MARKER in command
+
+
+def test_the_edit_entry_is_byte_identical_to_the_fail_closed_original():
+    """ADR-0038's command is verbatim: the split adds an entry, it never edits this one."""
+    unit = {u.key: u for u in iunits.load_units()}[iunits.SETTINGS_KEY]
+    entry = json.loads(unit.desired_inner())
+    assert entry["matcher"] == "Edit|Write|MultiEdit|NotebookEdit"
+    assert entry["hooks"][0]["command"] == managed_pretooluse_hook_command()
+
+
+def test_the_two_pretooluse_markers_cannot_strip_each_other():
+    """`is_shipit_hook` matches a marker as a command SUBSTRING, so neither may contain the other."""
+    edit, bash = iunits.SETTINGS_HOOK_MARKER, iunits.SETTINGS_BASHGUARD_MARKER
+    assert edit not in bash
+    assert bash not in edit
+    units = {u.key: u for u in iunits.load_units()}
+    edit_cmd = json.loads(units[iunits.SETTINGS_KEY].desired_inner())["hooks"][0][
+        "command"
+    ]
+    bash_cmd = json.loads(units[iunits.SETTINGS_BASHGUARD_KEY].desired_inner())[
+        "hooks"
+    ][0]["command"]
+    assert bash not in edit_cmd
+    assert edit not in bash_cmd
+
+
+def test_both_pretooluse_entries_coexist_across_a_respliced_settings_file():
+    units = {u.key: u for u in iunits.load_units()}
+    keys = (iunits.SETTINGS_KEY, iunits.SETTINGS_BASHGUARD_KEY)
+    text = ""
+    for _round in range(2):
+        for key in keys:
+            u = units[key]
+            text = splice.splice_settings_hook(
+                text, u.desired_inner(), u.event, u.marker
+            )
+    entries = json.loads(text)["hooks"][iunits.EVENT_PRETOOLUSE]
+    assert len(entries) == 2
+    for key in keys:
+        u = units[key]
+        assert splice.extract_settings_hook(text, u.event, u.marker) == (
+            u.desired_inner()
+        )
+
+
+def test_both_pretooluse_entries_reconcile_to_noop_on_reinstall(tmp_path, rec):
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    _apply(tmp_path)
+    keys = (iunits.SETTINGS_KEY, iunits.SETTINGS_BASHGUARD_KEY)
+
+    plan = _plan(tmp_path)
+    actions = {d.unit.key: d.action for d in plan.decisions if d.unit.key in keys}
+    assert actions == dict.fromkeys(keys, irec.NOOP)
+
+    entries = json.loads((tmp_path / iunits.SETTINGS_FILE).read_text())["hooks"][
+        iunits.EVENT_PRETOOLUSE
+    ]
+    assert len(entries) == 2
+    managed = config.load_managed(config.load(tmp_path / ".shipit.toml"))
+    assert iunits.SETTINGS_BASHGUARD_KEY in managed
 
 
 def test_load_units_includes_the_setup_dev_env_bootstrap():

@@ -253,6 +253,11 @@ AGY_AGENTS_DEF_DIR = ".agents/agents"
 SETTINGS_FILE = ".claude/settings.json"
 SETTINGS_KEY = ".claude/settings.json#shipit-pretooluse-hook"
 SETTINGS_HOOK_MARKER = "shipit hook pretooluse"
+# The second `PreToolUse` entry. Its marker must not contain — nor be contained
+# by — SETTINGS_HOOK_MARKER: `is_shipit_hook` matches a marker as a SUBSTRING of
+# the command, so either containment makes one unit strip the other's entry.
+SETTINGS_BASHGUARD_KEY = ".claude/settings.json#shipit-bashguard-hook"
+SETTINGS_BASHGUARD_MARKER = "shipit hook bashguard"
 
 # The substring EVERY shipit-managed hook command carries; the retired-hooks
 # pass uses it to avoid removing shipit's own entries.
@@ -596,6 +601,12 @@ def load_units(
             SETTINGS_HOOK_MARKER,
             EVENT_PRETOOLUSE,
             "claude-settings-pretooluse.json",
+        ),
+        (
+            SETTINGS_BASHGUARD_KEY,
+            SETTINGS_BASHGUARD_MARKER,
+            EVENT_PRETOOLUSE,
+            "claude-settings-bashguard.json",
         ),
         (
             SETTINGS_STOP_KEY,

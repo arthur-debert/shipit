@@ -4,15 +4,19 @@ import pytest
 
 from shipit.harness.policy import (
     COORDINATOR_DENY_REASON,
+    SPAWN_ISOLATION_DENY_REASON,
     WORKTREE_DENY_REASON,
     Decision,
     Permission,
+    ToolCall,
     decide,
+    decide_spawn_isolation,
     decide_worktree,
     is_edit_tool,
+    tool_call,
 )
 from shipit.harness.role import Role
-from shipit.harness.roleprofile import delegates_code_authorship
+from shipit.harness.roleprofile import PROFILES, delegates_code_authorship
 
 
 @pytest.mark.parametrize(
@@ -122,16 +126,22 @@ def test_is_edit_tool(tool, expected):
         ("Bash", "echo worktree add", Permission.ALLOW),
         ("Bash", "", Permission.ALLOW),
         ("Edit", "", Permission.ALLOW),
+        # codex names its shell tool `exec_command`, not `bash`.
+        ("exec_command", "git worktree add ../t b", Permission.DENY),
+        ("exec_command", "git status", Permission.ALLOW),
+        ("shell", "git worktree add ../t b", Permission.DENY),
+        ("unified_exec", "git worktree add ../t b", Permission.DENY),
     ],
 )
 def test_decide_worktree_matrix(tool_name, command, expected):
-    assert decide_worktree(tool_name, command).permission is expected
+    call = ToolCall(tool_name=tool_name, command=command)
+    assert decide_worktree(call).permission is expected
 
 
 def test_worktree_deny_carries_the_redirect_reason():
     for decision in (
-        decide_worktree("EnterWorktree", ""),
-        decide_worktree("Bash", "git worktree add ../t b"),
+        decide_worktree(ToolCall("EnterWorktree")),
+        decide_worktree(ToolCall("Bash", command="git worktree add ../t b")),
     ):
         assert decision == Decision(Permission.DENY, WORKTREE_DENY_REASON)
         assert "shipit tree create" in decision.reason
@@ -139,5 +149,114 @@ def test_worktree_deny_carries_the_redirect_reason():
 
 
 def test_worktree_allow_carries_no_reason():
-    assert decide_worktree("Bash", "git status").reason == ""
-    assert decide_worktree("Bash", "git worktree list").reason == ""
+    assert decide_worktree(ToolCall("Bash", command="git status")).reason == ""
+    assert decide_worktree(ToolCall("Bash", command="git worktree list")).reason == ""
+
+
+def test_tool_call_reads_the_payload_cwd():
+    call = tool_call(
+        {"tool_name": "Bash", "cwd": "/trees/t1", "tool_input": {"command": "ls"}}
+    )
+    assert call == ToolCall(tool_name="Bash", command="ls", cwd="/trees/t1")
+
+
+def test_tool_call_reads_a_codex_shell_command_under_cmd():
+    call = tool_call(
+        {
+            "tool_name": "exec_command",
+            "cwd": "/repo",
+            "tool_input": {"cmd": "git worktree add ../t b", "workdir": "/repo"},
+        }
+    )
+    assert call.command == "git worktree add ../t b"
+    assert decide_worktree(call).permission is Permission.DENY
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"tool_name": "Bash"},
+        {"tool_name": "Bash", "tool_input": "a raw string"},
+        {"tool_name": "Bash", "tool_input": None, "cwd": None},
+        {"tool_name": None},
+    ],
+)
+def test_tool_call_reads_absent_and_malformed_fields_as_absent(payload):
+    call = tool_call(payload)
+    assert call.command == ""
+    assert call.cwd == ""
+    assert call.subagent_type == ""
+    assert call.isolation is None
+
+
+@pytest.mark.parametrize(
+    ("subagent_type", "isolation", "expected"),
+    [
+        ("implementer", None, Permission.DENY),
+        ("shepherd", None, Permission.DENY),
+        ("reviewer", None, Permission.DENY),
+        ("coordinator", None, Permission.DENY),
+        ("  Implementer  ", None, Permission.DENY),
+        ("implementer", "worktree", Permission.ALLOW),
+        ("implementer", "remote", Permission.ALLOW),
+        # `explorer` runs in the ambient WorkingDir — no Tree, so nothing to isolate.
+        ("explorer", None, Permission.ALLOW),
+        # Not shipit roles: they resolve to no RoleProfile and cannot be gated.
+        ("general-purpose", None, Permission.ALLOW),
+        ("claude", None, Permission.ALLOW),
+        ("Explore", None, Permission.ALLOW),
+        ("Plan", None, Permission.ALLOW),
+        ("statusline-setup", None, Permission.ALLOW),
+        ("", None, Permission.ALLOW),
+    ],
+)
+def test_decide_spawn_isolation_matrix(subagent_type, isolation, expected):
+    tool_input: dict[str, str] = {"subagent_type": subagent_type}
+    if isolation is not None:
+        tool_input["isolation"] = isolation
+    call = tool_call({"tool_name": "Agent", "tool_input": tool_input})
+    assert decide_spawn_isolation(call).permission is expected
+
+
+def test_fork_spawn_is_never_denied():
+    """A fork inherits the parent's context, so it CANNOT be isolated."""
+    call = tool_call({"tool_name": "Agent", "tool_input": {"subagent_type": "fork"}})
+    assert decide_spawn_isolation(call).permission is Permission.ALLOW
+
+
+def test_spawn_isolation_only_governs_the_spawn_tool():
+    for tool in ("Bash", "Edit", "Task", "Read", ""):
+        call = tool_call(
+            {"tool_name": tool, "tool_input": {"subagent_type": "implementer"}}
+        )
+        assert decide_spawn_isolation(call).permission is Permission.ALLOW
+
+
+def test_spawn_isolation_is_derived_from_the_roleprofile_registry():
+    for role, profile in PROFILES.items():
+        call = tool_call(
+            {"tool_name": "Agent", "tool_input": {"subagent_type": role.value}}
+        )
+        expected = Permission.DENY if profile.checkout.tree_backed else Permission.ALLOW
+        assert decide_spawn_isolation(call).permission is expected, role
+
+
+def test_spawn_isolation_deny_names_the_parameter_to_pass():
+    call = tool_call(
+        {"tool_name": "Agent", "tool_input": {"subagent_type": "implementer"}}
+    )
+    decision = decide_spawn_isolation(call)
+    assert decision == Decision(Permission.DENY, SPAWN_ISOLATION_DENY_REASON)
+    assert 'isolation: "worktree"' in decision.reason
+    assert "explorer" in decision.reason
+
+
+def test_spawn_isolation_allow_carries_no_reason():
+    call = tool_call(
+        {
+            "tool_name": "Agent",
+            "tool_input": {"subagent_type": "implementer", "isolation": "worktree"},
+        }
+    )
+    assert decide_spawn_isolation(call).reason == ""
