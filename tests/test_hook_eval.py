@@ -228,6 +228,26 @@ def test_a_deleted_launch_checkout_still_writes_the_record(
     assert caplog.records == []
 
 
+def test_a_payload_without_cwd_and_a_deleted_checkout_still_exits_zero(
+    state_dir, tmp_path, monkeypatch, caplog
+):
+    """`run`'s own `cwd` fallback is outside the probe's guard, and `resolve_working_dir` requires a checkout: the record is unwritable here, so what is pinned is that nothing crashes."""
+
+    def _boom():
+        raise OSError("cwd no longer exists")
+
+    monkeypatch.setattr(os, "getcwd", _boom)
+    transcript = tmp_path / "session" / "subagents" / "agent-nocwd.jsonl"
+    _write_transcript(transcript, "Bash")
+    payload = json.dumps({"transcript_path": str(transcript)})
+
+    with caplog.at_level(logging.WARNING, logger="shipit.hook"):
+        assert run(stdin=io.StringIO(payload)) == 0
+
+    assert _records(state_dir) == []
+    assert any("failed open" in r.getMessage() for r in caplog.records)
+
+
 def test_an_unreadable_launch_checkout_still_writes_the_record(
     state_dir, tmp_path, monkeypatch, caplog
 ):

@@ -302,10 +302,13 @@ _RUNS_A_WRITE_COMMAND = re.compile(
 #: (`SHIPIT_TREES_ROOT` may). The unquoted branch's alternatives MUST stay
 #: mutually exclusive — the class excludes the backslash that `\\.` consumes, or
 #: a run of `\x` matches both ways and the search backtracks exponentially on
-#: every Bash call. Pinned by a timing bound, which is the only test that can
-#: catch a rewrite reintroducing the overlap.
+#: every Bash call. The trailing `\\?` is how a target ending in a lone escape
+#: (`> \<leaf>`, where the escape belongs to the leaf's first character) is still
+#: matched: it is reachable only at the end, so it adds no second way to match
+#: anything. Pinned by timing bounds across every branch, which is the only test
+#: that can catch a rewrite reintroducing the overlap.
 _REDIRECTS_INTO_TAIL = re.compile(
-    r""">>?\s*(?:"[^"]*|'[^']*|(?:\\.|[^\s'";|&<>\\])*)$"""
+    r""">>?\s*(?:"[^"]*|'[^']*|(?:\\.|[^\s'";|&<>\\])*\\?)$"""
 )
 
 

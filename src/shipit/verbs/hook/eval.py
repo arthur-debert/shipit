@@ -74,11 +74,10 @@ _DIRTY_SAMPLE = 10
 def report_launch_checkout() -> None:
     """Log the process cwd's uncommitted paths — WARNING when dirty, DEBUG when clean; never raises and never refuses anything.
 
-    Reads the cwd itself rather than taking it, so no caller can evaluate
-    `os.getcwd()` outside this guard: the launch checkout can be deleted
-    mid-Run, and that is exactly when the caller's own record must survive. The
-    managed wrapper `cd`s into `$CLAUDE_PROJECT_DIR`. What a dirty result does
-    and does not prove — docs/adr/0083.
+    Reads the cwd inside its own guard, so a launch checkout deleted mid-Run
+    cannot make THIS probe raise into its caller. The managed wrapper `cd`s into
+    `$CLAUDE_PROJECT_DIR`. What a dirty result does and does not prove —
+    docs/adr/0083.
     """
     try:
         cwd = os.getcwd()

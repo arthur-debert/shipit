@@ -522,6 +522,10 @@ def test_deny_reason_states_it_is_not_a_boundary(trees):
         "echo hi >{other}/x.txt",
         "echo hi >>{other}/x.txt",
         'echo hi >"{other}/x.txt"',
+        # A target whose first character is escaped leaves the searched prefix
+        # ending in a lone backslash; `\\s` is still `s`, so it is the same Tree.
+        "echo hi > \\{other_leaf}/x",
+        "echo hi > /tmp/a\\ b/\\{other_leaf}/x",
         # A bare leaf, and `../<leaf>`, reach a sibling Tree without an abs path.
         "cp x ../{other_leaf}/x",
         "cp x {other_leaf}/x",
@@ -664,11 +668,20 @@ def test_the_rule_only_fires_on_shell_tools(trees):
 @pytest.mark.parametrize(
     "head",
     [
+        # Escaped pairs, the shape that made the alternatives overlap.
         "> " + "\\a" * 60,
         "> " + "\\a" * 60 + " ",
+        ">> " + "\\ " * 60,
+        # Raw backslash runs, which the escaped-pair inputs do not exercise.
+        "> " + "\\" * 60,
+        ">> " + "\\" * 60,
+        # Pairs closed by a terminal escape — every branch of the alternation.
+        "> " + "\\a" * 60 + "\\",
+        # The quoted branches, with and without a terminal escape.
         '> "' + "\\a" * 60,
         "> '" + "\\a" * 60,
-        ">> " + "\\ " * 60,
+        '> "' + "\\" * 60,
+        "> '" + "\\" * 60,
     ],
 )
 def test_the_redirect_prefix_check_stays_linear(head):
