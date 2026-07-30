@@ -1,6 +1,6 @@
 # Spec — Cross-repo artifacts: collapse to conda-direct
 
-**Status:** draft for review · **Supersedes:** the accreted parts of ADR-0064/0067/0070/0071 (see §7) · **Reframes:** ARF02 (#999, #1059, #1078, #1079, #1087)
+**Status:** executed; transport realization superseded by [ADR-0085](../adr/0085-artifact-transport-gh-release-assets.md) (GH Release assets — invariants unchanged) · **Supersedes:** the accreted parts of ADR-0064/0067/0070/0071 (see §7) · **Reframes:** ARF02 (#999, #1059, #1078, #1079, #1087)
 
 ## 1. Problem
 

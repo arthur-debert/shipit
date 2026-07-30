@@ -27,11 +27,18 @@ not the exception. (Suburbia Spec: `docs/spec/suburbia.md`.)
   never states an image tag: its image reference is derived from the Shipit pin
   it already has, plus its selected layers. Toolchain bumps ship as shipit
   releases, delivered by the same pin-bump reconcile as everything else.
-- **The Mac exception** is the sole carve-out: locally launching the GUI apps,
-  and CI signing/notarization legs, run natively on macOS. The exception is
-  licensed to use cruder pinning (pixi may survive solely to serve it) because
-  its blast radius is a few repos' inner dev loop. It must not accumulate
-  general machinery.
+- **The Mac exception** is the sole carve-out: work that physically requires
+  macOS runs natively on it — the Darwin build/bundle release legs (Apple SDK,
+  Xcode, `.app`/`.dmg` packaging), CI signing/notarization, and locally
+  launching the GUI apps. The exception is licensed to use cruder pinning
+  (pixi may survive solely to serve it) because its blast radius is a few
+  repos' GUI legs and inner dev loop. It must not accumulate general
+  machinery, and no leg joins it without a physical macOS requirement.
+- **Revision pins stay total.** A Version pin (ADR-0080) uses the published
+  image. A Revision pin falls back to the latest released image; when the
+  revision changes the image definition itself, the dev loop builds the image
+  locally from the revision's own Dockerfiles — the definition travels with
+  the pin, so image derivation never has a hole.
 
 ## Considered options
 
@@ -49,6 +56,6 @@ not the exception. (Suburbia Spec: `docs/spec/suburbia.md`.)
 - pixi demotes from substrate to, at most, the Mac exception's pinning tool;
   the hermetic-on-host machinery retires as convergence lands.
 - conda-direct's dependency-model invariants are unaffected; its *transport*
-  changes separately (ADR-0084).
+  changes separately (ADR-0085).
 - Profiles (Suburbia Phase 3) are written against this target substrate so the
   fleet is stamped once.

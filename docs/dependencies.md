@@ -4,7 +4,17 @@
 comment, or agent handoff disagrees with it, **that thing is wrong and out of date** — do
 not rebuild the old model from it.
 
-**A cross-repo dependency is a plain conda package. That is the whole idea.**
+**A cross-repo dependency is a plain versioned package. That is the whole idea.**
+
+> **Transport update (2026-07-30,
+> [ADR-0085](adr/0085-artifact-transport-gh-release-assets.md)):** the *target*
+> transport is the producer's GH Release assets under standardized naming; the
+> invariants are unchanged (derived location, one consumer-owned version,
+> verified fetch — no index, no resolution, no transitivity). Until a repo's
+> Suburbia convergence sweep migrates it, the conda realization below remains
+> operative for that repo, and the dead list still binds current work — the
+> staged, sha-verified ADR-0085 fetch is **not** the ad-hoc
+> download-from-a-release step that list kills.
 
 ## In — this is all there is
 

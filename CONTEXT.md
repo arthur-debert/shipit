@@ -345,21 +345,21 @@ The isolated environment in which a Repo's tasks execute: a container by default
 _Avoid_: assuming host-installed toolchains; treating the host machine as the execution environment.
 
 **Mac exception**:
-The scoped carve-out from the Substrate for execution that must run natively on macOS: locally launching a GUI app, and CI signing/notarization legs. Deliberately licensed to use cruder pinning than the Substrate because its blast radius is a few repos' inner dev loop.
-_Avoid_: "exception lane" (Lane is a CI verification term); accumulating general machinery here.
+The scoped carve-out from the Substrate for work that physically requires macOS: Darwin build/bundle release legs, CI signing/notarization, and locally launching a GUI app. Deliberately licensed to use cruder pinning than the Substrate because its blast radius is a few repos' GUI legs and inner dev loop.
+_Avoid_: "exception lane" (Lane is a CI verification term); admitting a leg without a physical macOS requirement; accumulating general machinery here.
 
 ### Standardization
 
 **Component**:
-A reusable unit of repo composition: a toolchain, a dir layout at a declared mount point, and the task implementations it brings. A repo is a composition of Components under one Task contract.
+A reusable unit of repo composition: a toolchain, a dir layout at a declared mount point, and the Tool implementations it brings. A repo is a composition of Components under one Tool contract per Tool.
 _Avoid_: treating the repo as the unit of tooling; inventing a per-repo variant where a Component fits.
 
-**Task contract**:
-The fleet-wide contract for one standard verb (lint, test, build, release): shared setup, invocation, and machine-readable result shape, with per-Component implementations. Human-facing output formats are presentation overrides, never a second machine contract.
-_Avoid_: verb names as loose convention; per-repo result formats.
+**Tool contract**:
+The fleet-wide contract for one Tool (the shipit verbs: lint, test, build, release): shared setup, invocation, and machine-readable result shape, with per-Component implementations. The verb itself remains the Tool (ADR-0039); a _task_ is a repo-level entry point that invokes a Tool, never a name for the verb. Human-facing output formats are presentation overrides, never a second machine contract.
+_Avoid_: "task contract"; verb names as loose convention; per-repo result formats.
 
 **Master task**:
-The repo-level task that composes Component tasks into the repo outcome. Single-component repos pass through to their one Component.
+The repo-level entry point that composes Component implementations of a Tool into the repo outcome. Single-component repos pass through to their one Component.
 
 **Profile**:
 The prescribed shape of a repo of its kind: a composition of Components, Menu selections, and registered contributions. Adoption state is a computable diff from Profile, not a judgment call.
@@ -438,6 +438,10 @@ The breadth of a lane run: thin for a path-diff-minimal run, full for all releva
 **Release**:
 A repo-level versioned event that publishes the repo's Artifact set to its Distribution endpoints. Client artifacts are released rather than deployed.
 _Avoid_: "deploy".
+
+**Cascade** (retired):
+The old cross-repo auto-bump flow removed by ADR-0077. Appears only in historical or superseded docs; pin bumps are a generic dependency bot's job now.
+_Avoid_: building or referencing it as live machinery.
 
 **Dependency mode**:
 How a downstream consumes an upstream: source-pinned rebuilds from a ref or version, while artifact-pinned fetches a released Artifact by version.

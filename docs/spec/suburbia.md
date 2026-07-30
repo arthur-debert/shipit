@@ -1,6 +1,6 @@
 # Spec — Project Suburbia: fleet standardization
 
-**Status:** draft for grill · **Named for** the little boxes of American sprawl: the
+**Status:** grilled 2026-07-30 (decisions folded in below) · **Named for** the little boxes of American sprawl: the
 Portfolio's repos should look near-identical wherever identical is possible.
 
 This Spec is the program-level definition for finishing shipit's fleet adoption. It exists
@@ -76,7 +76,7 @@ them the norm.
    before a release reaches the fleet.
 5. **The substrate decision made and recorded.** The execution substrate becomes an
    isolated environment (container by default) with code mounted from the host; macOS is
-   a scoped exception lane. Decided on paper with one spike; profiles are written against
+   the scoped Mac exception. Decided on paper with one spike; profiles are written against
    the target so the fleet is stamped once.
 6. **Doctrine pages that kill recurring bad information** — short standalone
    "this file wins" docs on the topics agents repeatedly get wrong.
@@ -140,15 +140,15 @@ largely by transcription from settled decisions:
   env var names, stored/fetched via doppler, same names locally and in CI), *GH repo
   rulesets* (standardized — ruleset drift creates havoc in the PR/review/branch flow).
 
-**Phase 2 — Substrate (decided; spike pending).** Crystallized in ADR-0083 and
-ADR-0084: code lives on the host filesystem (owner and agents read/write it there);
+**Phase 2 — Substrate (decided; spike pending).** Crystallized in ADR-0084 and
+ADR-0085: code lives on the host filesystem (owner and agents read/write it there);
 execution happens inside a container Substrate whose layered images own the toolchain —
 one fleet baseline layer (rust, python/uv, node, linters) plus sanctioned heavy layers
 selected from the menu. shipit owns the Dockerfiles; images publish via shipit's own
 release, and a repo's image reference is derived from its Shipit pin — one pin axis,
-never typed. The Mac exception is the sole carve-out (locally launching the GUI apps;
-CI signing/notarization legs), licensed to be crude — pixi may survive solely to serve
-it. The Artifact channel's transport moves to GH Release assets with conda-direct's
+never typed. The Mac exception is the sole carve-out (Darwin build/bundle release
+legs; CI signing/notarization; locally launching the GUI apps), licensed to be crude —
+pixi may survive solely to serve it. The Artifact channel's transport moves to GH Release assets with conda-direct's
 invariants preserved verbatim, under a standing guard: no index, no resolution, no
 transitivity. Remaining Phase 2 work is the spike proving dev-loop ergonomics (a rust
 repo's edit-on-host, lint/test/build-in-container loop end-to-end). The decision must
@@ -174,7 +174,7 @@ nothing fleet-wide waits on it.
 The profile's substance is defined by a dedicated **component-model spec** — the next
 planning artifact after this one. Its shape, settled here: a repo is a composition of
 **Components** (a toolchain + a dir layout at a mount point + the task implementations
-it brings) under one fixed **Task contract** (the verbs lint/test/build/release with a
+it brings) under one fixed **Tool contract** (the Tools lint/test/build/release with a
 shared setup/execution/result shape; every `test` implementation deposits JUnit XML at
 the standard path — human-facing formats like TAP are presentation overrides, never a
 second machine contract). A repo **master task** composes component tasks into the repo
@@ -213,7 +213,7 @@ model); then lex-fmt through its profile (vscode → lexed → zed-lex); simple-
 the binary-optional e2e redesign (#985); phos-editor/app last (first Tauri
 sign/notarize fire — the program's biggest unknown, deliberately fed by everything
 learned before it). comms enters the Portfolio and converts from git submodule to a
-released tarball consumed via `shipit stage` (ADR-0084). GUI unknowns are solved once
+released tarball consumed via `shipit stage` (ADR-0085). GUI unknowns are solved once
 into the profile, never per-repo.
 
 **Phase 5 — Canary per profile, generated.** As each profile stabilizes, the canary
@@ -267,7 +267,7 @@ accordingly); prescribe first, then burn down diffs — never census the entropy
   top-down prescription there relocates whack-a-mole into the profile spec.
 - **Immutable external surfaces.** crates.io versions, published extension versions, and
   similar cannot be deleted; convergence there must be forward-only.
-- **The mac lane creeping.** The exception lane is licensed to be crude precisely because
+- **The Mac exception creeping.** The exception is licensed to be crude precisely because
   it is small; if it starts accumulating general machinery, the substrate decision is
   being silently reversed.
 
@@ -326,9 +326,9 @@ non-profile variation · any backwards-compatibility machinery in consumer repos
 - This Spec supersedes the ADP02-era adoption matrices as a statement of intent; issue
   #1100 remains the live migration tracker until Phase 4's sweeps absorb it.
 - Grill outcomes (2026-07-30): the substrate and transport crystallized in
-  [ADR-0083](../adr/0083-container-substrate-image-owned-toolchains.md) (container
+  [ADR-0084](../adr/0084-container-substrate-image-owned-toolchains.md) (container
   Substrate, image-owned toolchains, layered images, one derived pin, Mac exception)
-  and [ADR-0084](../adr/0084-artifact-transport-gh-release-assets.md) (GH Release
+  and [ADR-0085](../adr/0085-artifact-transport-gh-release-assets.md) (GH Release
   asset transport, the no-index/no-resolution/no-transitivity guard, comms as first
   user). The component model gets its own spec before its ADRs — define what to build,
   then the dos and don'ts. The doctrine page set (Phase 1) remains to be minted.

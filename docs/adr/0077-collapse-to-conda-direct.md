@@ -1,7 +1,7 @@
 # Collapse cross-repo artifacts to conda-direct
 
 > **Status:** transport realization superseded by
-> [ADR-0084](0084-artifact-transport-gh-release-assets.md) (GH Release assets);
+> [ADR-0085](0085-artifact-transport-gh-release-assets.md) (GH Release assets);
 > the invariants and the pin-governance handoff below stand.
 
 ADR-0064 built the Artifact channel — a downstream repo consumes another repo's
