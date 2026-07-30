@@ -396,8 +396,8 @@ def test_tool_call_reads_absent_and_malformed_fields_as_absent(payload):
         ("coordinator", None, Permission.DENY),
         ("  Implementer  ", None, Permission.DENY),
         ("implementer", "worktree", Permission.ALLOW),
-        # Any non-blank value is isolated: which modes are valid is the harness's
-        # call, not shipit's.
+        # Any non-blank STRING is isolated: which modes are valid is the harness's
+        # call, not shipit's. (Non-strings are covered separately, and deny.)
         ("implementer", "remote", Permission.ALLOW),
         # ...but a blank one is not a value at all.
         ("implementer", "", Permission.DENY),

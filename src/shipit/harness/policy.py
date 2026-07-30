@@ -83,9 +83,10 @@ class ToolCall:
     command: str = ""
     cwd: str = ""
     subagent_type: str = ""
-    #: ``None`` when the spawn omitted `isolation` or passed it blank — the
-    #: absence the spawn rule fires on. Any non-blank value counts as isolated:
-    #: the harness, not shipit, decides which isolation modes are valid.
+    #: ``None`` is the absence the spawn rule fires on, and covers three payload
+    #: shapes: `isolation` omitted, present but blank, and present but not a
+    #: string. Only a non-blank STRING counts as isolated — which isolation modes
+    #: are valid is the harness's business, so the value itself is not checked.
     isolation: str | None = None
 
     @property

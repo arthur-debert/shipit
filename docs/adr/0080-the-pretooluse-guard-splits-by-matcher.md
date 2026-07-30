@@ -56,12 +56,15 @@ availability.
    dissociated clones, not git worktrees. See the limits below — the shell-command
    half of this is a nudge, not a boundary.
 2. **Mandatory isolation (ADR-0047)**: an `Agent` spawn whose `subagent_type`
-   resolves to a Role whose profile is `tree_backed` is refused when
-   `isolation` is absent from `tool_input` (or present but blank — a blank
-   value is not a value). Any non-blank value counts as isolated: which
-   isolation modes exist is the harness's business, not shipit's. The rule
-   reads the `roleprofile` registry, so `explorer` (`AmbientWorkingDir` — no
-   Tree, ever) passes by construction and needs no exception.
+   resolves to a Role whose profile is `tree_backed` is refused unless
+   `tool_input` carries a **non-blank string** `isolation`. Absent, blank, and
+   non-string all read as absent and are refused: a blank value is not a value,
+   and coercing a non-string would turn truthy junk (`{"a": 1}`, `[1]`, `1`)
+   into "isolated" — failing open on the one rule this adds. The string itself
+   is never inspected, because which isolation modes exist is the harness's
+   business, not shipit's; only its type is. The rule reads the `roleprofile`
+   registry, so `explorer` (`AmbientWorkingDir` — no Tree, ever) passes by
+   construction and needs no exception.
 
 ### A rule is only as live as the matcher that routes it
 
