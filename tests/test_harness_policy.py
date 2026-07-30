@@ -119,9 +119,9 @@ def test_is_edit_tool(tool, expected):
         ("Bash", "git worktree prune", Permission.ALLOW),
         ("Bash", "gh pr create --draft", Permission.ALLOW),
         ("Bash", "gh pr ready 123", Permission.ALLOW),
+        # A QUOTED mention lexes to one word and can never match.
         ("Bash", 'rg "git worktree add"', Permission.ALLOW),
         ("Bash", "printf 'git worktree add'", Permission.ALLOW),
-        ("Bash", "echo git worktree add", Permission.ALLOW),
         ("Read", "git worktree add ../t b", Permission.ALLOW),
         ("Bash", "echo worktree add", Permission.ALLOW),
         ("Bash", "", Permission.ALLOW),
@@ -131,23 +131,62 @@ def test_is_edit_tool(tool, expected):
         ("exec_command", "git status", Permission.ALLOW),
         ("shell", "git worktree add ../t b", Permission.DENY),
         ("unified_exec", "git worktree add ../t b", Permission.DENY),
-        # An unquoted newline separates commands, so a leading command must not
-        # hide what follows it.
+        # An unquoted newline cannot hide what follows it.
         ("Bash", "git status\ngit worktree add ../t b", Permission.DENY),
         ("Bash", "echo hi\r\ngit worktree add ../t b", Permission.DENY),
         ("Bash", "ls\n\ngit worktree add ../t b", Permission.DENY),
         ("Bash", "git worktree add ../t b\nls", Permission.DENY),
-        # A newline INSIDE quotes is data, not a separator.
+        ("Bash", "git status \\\ngit worktree add ../t b", Permission.DENY),
+        # ...and a newline INSIDE quotes is still data, not a separator.
         ("Bash", 'echo "hi\ngit worktree add ../t b"', Permission.ALLOW),
         ("Bash", "printf 'x\ngit worktree add ../t b'", Permission.ALLOW),
-        # A backslash continuation is ONE command — `git status git worktree
-        # add …` — which adds no worktree.
-        ("Bash", "git status \\\ngit worktree add ../t b", Permission.ALLOW),
+        # No wrapper or keyword ahead of `git` defeats the rule: matching is
+        # position-independent, so this set never has to be enumerated.
+        ("Bash", "git \\\n worktree add ../t b", Permission.DENY),
+        ("Bash", "git \\\nworktree add ../t b", Permission.DENY),
+        ("Bash", "git\nworktree add ../t b", Permission.DENY),
+        ("Bash", "if true; then git worktree add x; fi", Permission.DENY),
+        ("Bash", "sudo git worktree add ../t b", Permission.DENY),
+        ("Bash", "env  git worktree add ../t b", Permission.DENY),
+        ("Bash", "time git worktree add ../t b", Permission.DENY),
+        ("Bash", "nice -n 10 git worktree add ../t b", Permission.DENY),
+        ("Bash", "while :; do git worktree add x; done", Permission.DENY),
+        ("Bash", "ls | xargs -I{} git worktree add {} b", Permission.DENY),
+        # The accepted cost of position-independence: an unquoted mention now
+        # denies. Over-denying costs one redirect message; under-denying
+        # silently violates ADR-0014.
+        ("Bash", "echo git worktree add", Permission.DENY),
+        # KNOWN-EVADABLE BY DESIGN, not bugs. The words are hidden from the
+        # lexer, and this rule is a hygiene nudge for a cooperating agent, not a
+        # security boundary. Chasing these would need a shell interpreter.
+        ("Bash", "eval 'git worktree add ../t b'", Permission.ALLOW),
+        ("Bash", "G=git; $G worktree add ../t b", Permission.ALLOW),
+        ("Bash", "sh -c 'git worktree add ../t b'", Permission.ALLOW),
+        ("Bash", 'bash -c "git worktree add ../t b"', Permission.ALLOW),
     ],
 )
 def test_decide_worktree_matrix(tool_name, command, expected):
     call = ToolCall(tool_name=tool_name, command=command)
     assert decide_worktree(call).permission is expected
+
+
+def test_a_quoted_mention_never_matches_however_it_is_wrapped():
+    """Quoting is the whole discrimination: a mention is ONE word, an invocation is adjacent words."""
+    for command in (
+        'echo "git worktree add ../t b"',
+        "echo 'git worktree add ../t b'",
+        'rg -n "git worktree add" docs/',
+        'grep -r "git worktree add" .',
+    ):
+        assert decide_worktree(ToolCall("Bash", command=command)).permission is (
+            Permission.ALLOW
+        ), command
+
+
+def test_an_unlexable_command_falls_back_to_the_conservative_regex():
+    """An unbalanced quote cannot be lexed, so the check errs toward denying."""
+    call = ToolCall("Bash", command='echo "unterminated; git worktree add ../t b')
+    assert decide_worktree(call).permission is Permission.DENY
 
 
 def test_worktree_deny_carries_the_redirect_reason():

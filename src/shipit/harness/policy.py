@@ -136,12 +136,11 @@ WORKTREE_DENY_REASON = (
 
 _GIT_WORKTREE_ADD_FALLBACK = re.compile(r"\bgit\s+worktree\s+add\b")
 
-#: Characters shlex emits as standalone tokens, which therefore end a command
-#: segment. An unquoted newline separates commands exactly as `;` does, so it is
-#: here: without it a leading command swallows the rest of a multiline payload
-#: into one segment and only that command is ever inspected.
+#: Shell punctuation shlex emits as its own token. Newlines are included so an
+#: unquoted one cannot hide inside a word, and every one of these is stripped
+#: from a word's edges — an escaped newline glues itself to the next word
+#: (`git \<newline>worktree` lexes as `['git', '\nworktree']`).
 _SHELL_PUNCTUATION = "();<>|&\n\r"
-_SHELL_SEPARATOR_CHARS = frozenset(_SHELL_PUNCTUATION)
 
 #: git global options taking a SEPARATE argument token, which consumes the next token.
 _GIT_OPTS_WITH_ARG = frozenset({"-C", "-c"})
@@ -151,43 +150,52 @@ def _matches_enter_worktree(call: ToolCall) -> bool:
     return call.tool in _WORKTREE_TOOLS
 
 
-def _segment_runs_worktree_add(tokens: list[str]) -> bool:
-    i = 0
-    n = len(tokens)
-    while i < n and "=" in tokens[i] and not tokens[i].startswith("-"):
-        i += 1
-    if i >= n or tokens[i] != "git":
-        return False
-    i += 1
-    while i < n and tokens[i].startswith("-"):
-        opt = tokens[i]
-        i += 1
-        if opt in _GIT_OPTS_WITH_ARG and i < n:
-            i += 1
-    return i + 1 < n and tokens[i] == "worktree" and tokens[i + 1] == "add"
-
-
-def _runs_git_worktree_add(command: str) -> bool:
-    """True iff a Bash `command` actually EXECUTES `git worktree add`, not merely names it."""
+def _shell_words(command: str) -> list[str] | None:
+    """A command's words, punctuation-stripped and empties dropped; ``None`` if it does not lex."""
     try:
         lexer = shlex.shlex(command, posix=True, punctuation_chars=_SHELL_PUNCTUATION)
         lexer.whitespace_split = True
-        # Newlines must reach the token stream as punctuation, so drop them from
-        # the whitespace shlex silently discards. shlex still owns quoting, so a
-        # newline INSIDE quotes stays part of its token and separates nothing.
+        # Newlines must reach the token stream as punctuation rather than being
+        # silently discarded as whitespace. shlex still owns quoting, so a
+        # newline INSIDE quotes stays part of its word.
         lexer.whitespace = lexer.whitespace.replace("\n", "").replace("\r", "")
-        tokens = list(lexer)
+        return [word for tok in lexer if (word := tok.strip(_SHELL_PUNCTUATION))]
     except ValueError:
+        return None
+
+
+def _git_args_reach_worktree_add(words: list[str], i: int) -> bool:
+    """True iff `git`'s arguments from `i` begin `worktree add`, past any git global options."""
+    n = len(words)
+    while i < n and words[i].startswith("-"):
+        option = words[i]
+        i += 1
+        if option in _GIT_OPTS_WITH_ARG and i < n:
+            i += 1
+    return i + 1 < n and words[i] == "worktree" and words[i + 1] == "add"
+
+
+def _runs_git_worktree_add(command: str) -> bool:
+    """True iff any word of `command` is a `git` whose arguments begin `worktree add`.
+
+    Quoting supplies the discrimination: a mention (`echo "git worktree add"`)
+    lexes to ONE word and can never match, while an invocation is adjacent
+    words wherever it sits in the command. Position is therefore irrelevant, so
+    no wrapper or keyword ahead of `git` — `sudo`, `env`, `time`, `then` — can
+    defeat it, and that set never has to be enumerated.
+
+    Best-effort by construction, and evadable: `eval`, variable indirection and
+    `sh -c` all hide the words. It is a hygiene nudge for a cooperating agent,
+    not a security boundary, so it errs toward denying (an unquoted
+    `echo git worktree add` is refused).
+    """
+    words = _shell_words(command)
+    if words is None:
         return _GIT_WORKTREE_ADD_FALLBACK.search(command) is not None
-    segment: list[str] = []
-    for tok in tokens:
-        if tok and all(ch in _SHELL_SEPARATOR_CHARS for ch in tok):
-            if _segment_runs_worktree_add(segment):
-                return True
-            segment = []
-        else:
-            segment.append(tok)
-    return _segment_runs_worktree_add(segment)
+    return any(
+        word == "git" and _git_args_reach_worktree_add(words, i + 1)
+        for i, word in enumerate(words)
+    )
 
 
 def _matches_git_worktree_add(call: ToolCall) -> bool:

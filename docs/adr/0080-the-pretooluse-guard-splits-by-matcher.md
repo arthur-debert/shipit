@@ -53,7 +53,8 @@ availability.
 ## What the second entry enforces
 
 1. **ADR-0014**: `git worktree add` and `EnterWorktree` are refused. Trees are
-   dissociated clones, not git worktrees.
+   dissociated clones, not git worktrees. See the limits below — the shell-command
+   half of this is a nudge, not a boundary.
 2. **Mandatory isolation (ADR-0047)**: an `Agent` spawn whose `subagent_type`
    resolves to a Role whose profile is `tree_backed` is refused when
    `isolation` is absent from `tool_input` (or present but blank — a blank
@@ -79,6 +80,34 @@ Claude Code emits a `PreToolUse` event for it at all is not established here.**
 Listing it costs nothing if no event ever arrives, but this ADR does not claim
 observed enforcement for that tool — only for `Bash` and `Agent`, both of which
 were verified end-to-end against the checked-in wrapper commands.
+
+### The `git worktree add` rule is a hygiene NUDGE, not a security boundary
+
+Matching a shell command is matching text, and a shell can hide text from any
+matcher that is not itself a shell. `eval "git worktree add …"`, variable
+indirection (`G=git; $G worktree add …`) and `sh -c '…'` all evade this rule by
+construction, and no amount of case-patching closes that class — only executing
+the command would. **This ADR does not claim the rule catches every route to a
+native worktree.** It claims it catches the shapes a *cooperating* agent
+actually types, which is what ADR-0014 hygiene needs: an agent that would have
+reached for `git worktree add` gets redirected to `shipit tree create`.
+
+That framing sets the error bias. Because the cost of a false positive is one
+clear redirect message and the cost of a false negative is a silent ADR-0014
+violation, the rule errs toward denying: an unquoted `echo git worktree add`
+is refused.
+
+The rule's first shape asked whether a command *segment* STARTED with `git`,
+which made every wrapper and keyword a bypass — `sudo`, `env`, `time`,
+`if true; then …`, an escaped newline, `xargs -I{}` — an unbounded set that
+review found six members of in minutes. The fix was subtraction, not more cases:
+**quoting already supplies the discrimination the segment logic was reaching
+for.** A quoted mention lexes to ONE word and can never match; a real
+invocation is adjacent words. So position stopped mattering — the rule scans
+every word for a `git` whose arguments begin `worktree add` — and segment
+accumulation, the env-assignment prefix skip, and the escaped-vs-unescaped
+newline distinction all deleted themselves. The whole wrapper class closed
+without naming a single wrapper.
 
 ### Enforcement reaches the session CC was launched in, not every Tree
 
@@ -145,6 +174,12 @@ tracked in #1186.**
   matcher and enforced on the Claude path for the first time — verified
   end-to-end for `Bash` and `Agent`, routed but not observed for
   `EnterWorktree`, and only in the project Claude Code was launched from.
+- The shell-command rule is best-effort: it closes the whole wrapper/keyword
+  class, and stays evadable through `eval`, variable indirection and `sh -c`.
+  Treat it as a nudge that keeps a cooperating agent honest, and never as
+  something a hostile caller cannot get past.
+- An unquoted mention of `git worktree add` in a shell command now denies. The
+  error bias is deliberate: a false positive costs one redirect message.
 - The edit guard's contract is untouched: same matcher, same command, same
   `exit 2`, same sha.
 - Every Bash, Agent and EnterWorktree call now pays one guard invocation

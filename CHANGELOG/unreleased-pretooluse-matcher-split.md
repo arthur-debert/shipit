@@ -13,14 +13,27 @@
   tool names the rules fire on are now declared as data and a wiring-level test
   asserts the managed matchers cover all of them — a pure-verdict test cannot catch
   an unrouted rule, since it bypasses the matcher entirely.
-- harness: `git worktree add` on a later line of a multiline command is no longer
-  missed. `shlex` discards newlines as whitespace, so `git status\ngit worktree add
-  ../t b` tokenized into a single segment whose first command was `git status`, and
-  only that command was inspected — the check passed and the worktree was created.
-  An unquoted newline is now a command separator like `;` is. A newline *inside*
-  quotes stays data and still matches nothing, and a backslash continuation still
-  reads as the one command it is. Pre-existing, but only reachable once the matcher
-  above started routing `Bash`.
+- harness: the `git worktree add` check no longer depends on where in the command
+  the invocation sits. It asked whether a command *segment* began with `git`, so
+  anything ahead of `git` defeated it: a newline (`git status\ngit worktree add x`),
+  an escaped newline, a shell keyword (`if true; then git worktree add x; fi`), or a
+  wrapper (`sudo`, `env`, `time`, `nice`, `xargs -I{}`). Six such bypasses were
+  found in minutes, and the set is not enumerable. All of them predate this
+  release; the matcher fix above is what made the rule live enough for them to
+  matter.
+  The fix was a subtraction. **Quoting already supplies the discrimination the
+  segment logic was reaching for** — a quoted mention lexes to ONE word and can
+  never match, while a real invocation is adjacent words — so the rule now scans
+  every word for a `git` whose arguments begin `worktree add`, and segment
+  tracking, the env-assignment prefix skip and the escaped-newline special case
+  all deleted themselves. The whole wrapper class closed without naming a single
+  wrapper.
+  It remains **best-effort, and evadable by construction**: `eval`, variable
+  indirection and `sh -c` hide the words from any matcher that is not itself a
+  shell. It is a hygiene nudge that redirects a cooperating agent to `shipit tree
+  create`, not a security boundary. It errs toward denying, so an unquoted
+  `echo git worktree add` is now refused — a false positive costs one clear
+  message, a false negative silently violates ADR-0014.
 - harness: a subagent spawn for a role that requires its own Tree is refused
   unless it passes `isolation`. Omitting the parameter runs the subagent with the
   **caller's** checkout as its cwd, which is the wholesale-sharing failure two
