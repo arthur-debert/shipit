@@ -173,12 +173,12 @@ nothing fleet-wide waits on it.
 
 The profile's substance is defined by a dedicated **component-model spec** — the next
 planning artifact after this one. Its shape, settled here: a repo is a composition of
-**Components** (a toolchain + a dir layout at a mount point + the task implementations
+**Components** (a toolchain + a dir layout at a mount point + the Tool implementations
 it brings) under one fixed **Tool contract** (the Tools lint/test/build/release with a
 shared setup/execution/result shape; every `test` implementation deposits JUnit XML at
 the standard path — human-facing formats like TAP are presentation overrides, never a
-second machine contract). A repo **master task** composes component tasks into the repo
-outcome; single-component repos are passthrough. The fleet fine-comb (2026-07-30, all
+second machine contract). A repo **master task** composes Component implementations of a
+Tool into the repo outcome; single-component repos are passthrough. The fleet fine-comb (2026-07-30, all
 22 repos read on origin/main) confirmed the premise: six component kinds plus a
 docs-site component (mkdocs — currently mid-migration, itself a convergence target) and
 one static-site case cover the entire fleet; the task layer is already uniform one-line

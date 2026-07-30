@@ -18,10 +18,15 @@ publishing spine's standardized naming. The invariants carry over verbatim:
   **artifact name** (a producer releases many Artifacts, ADR-0007), version,
   and the sha of each fetched file. For platform-dependent artifacts the
   consumer's needed platform/arch selects the variant.
-- The asset URL is **derived, never typed**: repo + the spine's standardized
-  asset naming (`<name>-<version>-<platform>-<arch>`, universal artifacts
-  unsuffixed) determines the file deterministically. The naming convention is
-  the derivation — there is no listing step.
+- The asset location is **derived, never typed**: repo + the spine's
+  standardized asset naming (`<name>-<version>-<platform>-<arch>`, universal
+  artifacts unsuffixed) determines the file deterministically. Public repos
+  fetch the deterministic download URL directly. Private repos need one
+  bounded API step — GitHub's authenticated asset endpoint requires the asset
+  id, so the fetch resolves the *one known release* (by the derived tag) and
+  matches its assets by the *exact derived filename*. That is retrieval
+  mechanics for an already-determined file, not discovery: nothing enumerates
+  versions, searches names, or resolves anything.
 - `shipit stage` fetches, verifies the sha, and unpacks/stages — a wrong
   name, version, or hash fails loudly, locally, before anything ships.
 - **Access follows the producer repo's visibility.** Assets of a private repo
