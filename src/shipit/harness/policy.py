@@ -136,14 +136,13 @@ WORKTREE_DENY_REASON = (
 
 _GIT_WORKTREE_ADD_FALLBACK = re.compile(r"\bgit\s+worktree\s+add\b")
 
-#: Shell punctuation shlex emits as its own token. Newlines are included so an
-#: unquoted one cannot hide inside a word, and every one of these is stripped
-#: from a word's edges — an escaped newline glues itself to the next word
-#: (`git \<newline>worktree` lexes as `['git', '\nworktree']`).
+#: Shell punctuation shlex emits as its own token, so a separator cannot hide
+#: inside a word (`git worktree add;` must still yield an `add` word).
 _SHELL_PUNCTUATION = "();<>|&\n\r"
 
-#: git global options taking a SEPARATE argument token, which consumes the next token.
-_GIT_OPTS_WITH_ARG = frozenset({"-C", "-c"})
+#: A backslash-newline is spliced out before anything else, which is the shell's
+#: own first lexical step.
+_LINE_CONTINUATION = re.compile(r"\\\r?\n")
 
 
 def _matches_enter_worktree(call: ToolCall) -> bool:
@@ -151,38 +150,32 @@ def _matches_enter_worktree(call: ToolCall) -> bool:
 
 
 def _shell_words(command: str) -> list[str] | None:
-    """A command's words, punctuation-stripped and empties dropped; ``None`` if it does not lex."""
+    """A command's words, exactly as shlex lexes them; ``None`` if it does not lex."""
     try:
-        lexer = shlex.shlex(command, posix=True, punctuation_chars=_SHELL_PUNCTUATION)
+        lexer = shlex.shlex(
+            _LINE_CONTINUATION.sub("", command),
+            posix=True,
+            punctuation_chars=_SHELL_PUNCTUATION,
+        )
         lexer.whitespace_split = True
         # Newlines must reach the token stream as punctuation rather than being
         # silently discarded as whitespace. shlex still owns quoting, so a
         # newline INSIDE quotes stays part of its word.
         lexer.whitespace = lexer.whitespace.replace("\n", "").replace("\r", "")
-        return [word for tok in lexer if (word := tok.strip(_SHELL_PUNCTUATION))]
+        return list(lexer)
     except ValueError:
         return None
 
 
-def _git_args_reach_worktree_add(words: list[str], i: int) -> bool:
-    """True iff `git`'s arguments from `i` begin `worktree add`, past any git global options."""
-    n = len(words)
-    while i < n and words[i].startswith("-"):
-        option = words[i]
-        i += 1
-        if option in _GIT_OPTS_WITH_ARG and i < n:
-            i += 1
-    return i + 1 < n and words[i] == "worktree" and words[i + 1] == "add"
-
-
 def _runs_git_worktree_add(command: str) -> bool:
-    """True iff any word of `command` is a `git` whose arguments begin `worktree add`.
+    """True iff `command` has adjacent `worktree` `add` words with a `git` word before them.
 
     Quoting supplies the discrimination: a mention (`echo "git worktree add"`)
     lexes to ONE word and can never match, while an invocation is adjacent
-    words wherever it sits in the command. Position is therefore irrelevant, so
-    no wrapper or keyword ahead of `git` — `sudo`, `env`, `time`, `then` — can
-    defeat it, and that set never has to be enumerated.
+    words wherever it sits. Nothing is counted or skipped — no wrapper, keyword
+    or option ahead of the pair can misalign it, and none of those sets ever has
+    to be enumerated. The `git` word is required so `grep worktree add file`
+    does not match.
 
     Best-effort by construction, and evadable: `eval`, variable indirection and
     `sh -c` all hide the words. It is a hygiene nudge for a cooperating agent,
@@ -193,7 +186,10 @@ def _runs_git_worktree_add(command: str) -> bool:
     if words is None:
         return _GIT_WORKTREE_ADD_FALLBACK.search(command) is not None
     return any(
-        word == "git" and _git_args_reach_worktree_add(words, i + 1)
+        word == "worktree"
+        and i + 1 < len(words)
+        and words[i + 1] == "add"
+        and "git" in words[:i]
         for i, word in enumerate(words)
     )
 

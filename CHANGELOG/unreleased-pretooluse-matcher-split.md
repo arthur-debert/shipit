@@ -21,19 +21,28 @@
   found in minutes, and the set is not enumerable. All of them predate this
   release; the matcher fix above is what made the rule live enough for them to
   matter.
-  The fix was a subtraction. **Quoting already supplies the discrimination the
-  segment logic was reaching for** — a quoted mention lexes to ONE word and can
-  never match, while a real invocation is adjacent words — so the rule now scans
-  every word for a `git` whose arguments begin `worktree add`, and segment
-  tracking, the env-assignment prefix skip and the escaped-newline special case
-  all deleted themselves. The whole wrapper class closed without naming a single
-  wrapper.
+  A second bypass of the same family: the check also walked `git`'s options to
+  find the subcommand, and since `-C` consumes the following token,
+  `git -C ";" worktree add ../t b` misaligned the walk. Under posix lexing a
+  quoted `";"` and an unquoted `;` produce identical token streams, so that
+  misalignment was not fixable by inspecting tokens — the information needed to
+  tell them apart is gone before the walk starts.
+  Both fixes were deletions. **Quoting already supplies the discrimination the
+  structural logic was reaching for** — a quoted mention lexes to ONE word and
+  can never match, while a real invocation is adjacent words. The check now
+  matches adjacent `worktree` `add` words with a `git` word somewhere before
+  them, counting and skipping nothing, so there is no alignment left to break.
+  Line continuations are spliced out of the raw string first, which is the
+  shell's own first lexical step. Segment tracking, the env-assignment prefix
+  skip, the option walk and the escaped-newline special case all deleted
+  themselves; the `git` word is kept so `grep worktree add file` does not match.
   It remains **best-effort, and evadable by construction**: `eval`, variable
   indirection and `sh -c` hide the words from any matcher that is not itself a
   shell. It is a hygiene nudge that redirects a cooperating agent to `shipit tree
   create`, not a security boundary. It errs toward denying, so an unquoted
-  `echo git worktree add` is now refused — a false positive costs one clear
-  message, a false negative silently violates ADR-0014.
+  `echo git worktree add` and `git config -l ; worktree add` are now refused — a
+  false positive costs one clear message, a false negative silently violates
+  ADR-0014.
 - harness: a subagent spawn for a role that requires its own Tree is refused
   unless it passes `isolation`. Omitting the parameter runs the subagent with the
   **caller's** checkout as its cwd, which is the wholesale-sharing failure two

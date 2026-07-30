@@ -95,19 +95,36 @@ reached for `git worktree add` gets redirected to `shipit tree create`.
 That framing sets the error bias. Because the cost of a false positive is one
 clear redirect message and the cost of a false negative is a silent ADR-0014
 violation, the rule errs toward denying: an unquoted `echo git worktree add`
-is refused.
+and `git config -l ; worktree add` are both refused.
 
-The rule's first shape asked whether a command *segment* STARTED with `git`,
-which made every wrapper and keyword a bypass — `sudo`, `env`, `time`,
-`if true; then …`, an escaped newline, `xargs -I{}` — an unbounded set that
-review found six members of in minutes. The fix was subtraction, not more cases:
-**quoting already supplies the discrimination the segment logic was reaching
-for.** A quoted mention lexes to ONE word and can never match; a real
-invocation is adjacent words. So position stopped mattering — the rule scans
-every word for a `git` whose arguments begin `worktree add` — and segment
-accumulation, the env-assignment prefix skip, and the escaped-vs-unescaped
-newline distinction all deleted themselves. The whole wrapper class closed
-without naming a single wrapper.
+**Every correctness round on this rule was a deletion, and that is the pattern
+to keep.** Each shape failed because it tried to reason about a command's
+*structure* from a token list, which is not enough information to do it with:
+
+1. *Segment-relative:* asked whether a command segment STARTED with `git`, so
+   anything ahead of `git` was a bypass — `sudo`, `env`, `time`,
+   `if true; then …`, a newline, `xargs -I{}`. An unbounded set; review found
+   six members in minutes. Deleted the segment machinery: **quoting already
+   supplies the discrimination** the segment logic was reaching for, since a
+   quoted mention lexes to ONE word and an invocation is adjacent words. Position
+   stopped mattering.
+2. *Option-counting:* still walked `git`'s options to find the subcommand,
+   remembering that `-C`/`-c` consume a following token. Under posix lexing a
+   quoted `";"` and an unquoted `;` produce **identical** token streams, so
+   `git -C ";" worktree add …` misaligned the walk and slipped through — and no
+   token mutation could fix it, because the information needed to tell the two
+   apart is gone before the walk begins. Deleted the walk: match adjacent
+   `worktree` `add` words with a `git` word somewhere before them, and there is
+   no alignment left to break.
+
+What remains counts nothing and skips nothing. Line continuations are spliced
+out of the raw string first — the shell's own first lexical step, and
+unambiguous — and tokens are then used exactly as lexed. The `git` word is
+required so `grep worktree add file` does not match.
+
+This is where the hardening stops. The rule's stated scope is a cooperating
+agent, so a further adversarial input is out of scope by definition rather than
+a defect to patch.
 
 ### Enforcement reaches the session CC was launched in, not every Tree
 

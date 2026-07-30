@@ -140,8 +140,8 @@ def test_is_edit_tool(tool, expected):
         # ...and a newline INSIDE quotes is still data, not a separator.
         ("Bash", 'echo "hi\ngit worktree add ../t b"', Permission.ALLOW),
         ("Bash", "printf 'x\ngit worktree add ../t b'", Permission.ALLOW),
-        # No wrapper or keyword ahead of `git` defeats the rule: matching is
-        # position-independent, so this set never has to be enumerated.
+        # No wrapper or keyword ahead of `git` defeats the rule: nothing is
+        # counted or skipped, so this set never has to be enumerated.
         ("Bash", "git \\\n worktree add ../t b", Permission.DENY),
         ("Bash", "git \\\nworktree add ../t b", Permission.DENY),
         ("Bash", "git\nworktree add ../t b", Permission.DENY),
@@ -152,10 +152,23 @@ def test_is_edit_tool(tool, expected):
         ("Bash", "nice -n 10 git worktree add ../t b", Permission.DENY),
         ("Bash", "while :; do git worktree add x; done", Permission.DENY),
         ("Bash", "ls | xargs -I{} git worktree add {} b", Permission.DENY),
-        # The accepted cost of position-independence: an unquoted mention now
-        # denies. Over-denying costs one redirect message; under-denying
-        # silently violates ADR-0014.
+        # An option ARGUMENT can no longer misalign the pair. A quoted `";"` and
+        # an unquoted `;` lex identically under posix rules, so counting `-C`'s
+        # argument was unfixable — the rule counts nothing instead.
+        ("Bash", 'git -C ";" worktree add ../t b', Permission.DENY),
+        ("Bash", 'git -C "" worktree add ../t b', Permission.DENY),
+        ("Bash", "git -C /tmp worktree add x", Permission.DENY),
+        ("Bash", 'git -c "a;b" worktree add x', Permission.DENY),
+        # A non-matching `worktree` word must not end the scan.
+        ("Bash", "git worktree list && git worktree add x", Permission.DENY),
+        ("Bash", "git worktree prune; git worktree add x", Permission.DENY),
+        # The `git` word is required, so a grep for the phrase is not a match.
+        ("Bash", "grep worktree add file", Permission.ALLOW),
+        ("Bash", "grep -r worktree add/", Permission.ALLOW),
+        # The accepted cost of counting nothing: these deny. Over-denying costs
+        # one redirect message; under-denying silently violates ADR-0014.
         ("Bash", "echo git worktree add", Permission.DENY),
+        ("Bash", "git config -l ; worktree add", Permission.DENY),
         # KNOWN-EVADABLE BY DESIGN, not bugs. The words are hidden from the
         # lexer, and this rule is a hygiene nudge for a cooperating agent, not a
         # security boundary. Chasing these would need a shell interpreter.
@@ -177,6 +190,7 @@ def test_a_quoted_mention_never_matches_however_it_is_wrapped():
         "echo 'git worktree add ../t b'",
         'rg -n "git worktree add" docs/',
         'grep -r "git worktree add" .',
+        'echo "git status\ngit worktree add x"',
     ):
         assert decide_worktree(ToolCall("Bash", command=command)).permission is (
             Permission.ALLOW
