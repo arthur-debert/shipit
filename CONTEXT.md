@@ -4,6 +4,8 @@
 
 shipit standardizes agent-driven development across a personal portfolio of repositories: planning, isolated workspaces, role-scoped agents, checks, review state, and release flow. This glossary keeps only the domain language a shipit contributor needs to speak clearly; implementation detail belongs in code, ADRs, and focused docs.
 
+This file is the single truth holder for that language, across docs, code, and agent interaction: every entry is one short description; Specs and ADRs deep-dive and link back here, never redefine. Terms enter only when shared language is actually needed — adding glossary entries is not a ritual start of new work, and decisions (ADRs) and feature definitions (Specs) are never bolted in.
+
 ## Language
 
 ### Core Identities
@@ -352,7 +354,15 @@ _Avoid_: "exception lane" (Lane is a CI verification term); admitting a leg with
 
 **Component**:
 A reusable unit of repo composition: a toolchain, a dir layout at a declared mount point, and the Tool implementations it brings. A repo is a composition of Components under one Tool contract per Tool.
-_Avoid_: treating the repo as the unit of tooling; inventing a per-repo variant where a Component fits.
+_Avoid_: treating the repo as the unit of tooling; inventing a per-repo variant where a Component fits; "component" for shipit's own internal units (those are subsystems — build, changelog, distribution).
+
+**Subsystem**:
+A standalone unit of shipit's own architecture — build, changelog, distribution, the orchestrator — coupled to its peers by process contracts and shared data types, never code. Release orchestrates subsystems; it does not do their work.
+_Avoid_: "component" for these (Component is consumer-repo vocabulary).
+
+**Runtime**:
+Where an executing Artifact runs: native-cli, browser, electron, tauri, an editor host, service, or static-web. Runtime is an Artifact attribute — never a Component property — and it selects the e2e harness. Distribution is orthogonal: the same runtime can ship through many endpoints.
+_Avoid_: "registry" as a runtime (publishing is a Distribution endpoint); coupling distribution to runtime.
 
 **Tool contract**:
 The fleet-wide contract for one Tool (the shipit verbs: lint, test, build, release): shared setup, invocation, and machine-readable result shape, with per-Component implementations. The verb itself remains the Tool (ADR-0039); a _task_ is a repo-level entry point that invokes a Tool, never a name for the verb. Human-facing output formats are presentation overrides, never a second machine contract.
@@ -387,30 +397,31 @@ A shipit-owned creation-time recipe selected through `repo new --stack`, combini
 _Avoid_: "Toolchain" for the source-layout recipe; persisting "stack" as a Repo type or dispatch label.
 
 **Toolchain**:
-The build, test, and provisioning ecosystem for a path in a repo, such as Rust, npm, MkDocs, Go, or WASM. Shipit dispatches work by toolchain.
-_Avoid_: "kind", "stack", or "project type" as a dispatch label.
+The build, test, and provisioning ecosystem a Component's kind binds, such as Rust, npm, MkDocs, or Go. The kind names a Component's shape; the toolchain is the ecosystem it brings.
+_Avoid_: Toolchain as the unit of composition (that is the Component); "stack" or "project type" as a dispatch label.
 
 **Path→toolchain map**:
-The `.shipit.toml` declaration mapping build-bearing paths to their toolchains. Shipit walks this map for provisioning, build, test, and lint.
+The current `.shipit.toml` realization mapping build-bearing paths to toolchains. It promotes to `[components]` declarations (the components Spec); new declarations go there.
+_Avoid_: extending this map with new concepts.
 
 **Tool**:
-A uniform shipit verb, such as `shipit lint`, `shipit test`, or `shipit build`, that walks the path→toolchain map and dispatches each leg.
+A uniform shipit verb — `shipit lint`, `shipit test`, `shipit build` — dispatched across a Repo's Components.
 _Avoid_: "task" for the verb.
 
 **e2e**:
-The artifact-consuming Tool: it runs a declared harness against a built Artifact instead of testing the source tree directly. A repo with no e2e declaration has no e2e lane.
-_Avoid_: using e2e as the name for every environment-heavy integration test.
+The artifact-consuming Tool: it runs a harness against a built Artifact instead of testing the source tree directly. The harness follows from the Artifact's runtime; its lifecycle is synchronous or service (started once per suite).
+_Avoid_: using e2e as the name for every environment-heavy integration test; designing a harness per repo.
 
 **Leg**:
-One Tool applied to one path→toolchain entry, such as `test rust` or `build npm`. A leg is the unit for selection and passthrough arguments.
+One Tool applied to one Component, such as `test rust` or `build npm` — the unit for selection and passthrough arguments. In release orchestration, a release leg is one platform's arch-bound build and bundle in the matrix.
 _Avoid_: "target".
 
 **Artifact**:
-A named, distributable build product. An Artifact may come from one toolchain, several toolchains, and an optional Bundle step.
+A named, distributable build product: bound to one Component, optionally composed by a Bundle step, declaring a runtime when it executes (libraries have none and are verified by unit tests alone).
 _Avoid_: "build output".
 
 **Bundle**:
-The optional composition step that turns toolchain outputs into one Artifact, such as a Tauri or Electron bundle. It is also the corresponding release-pipeline stage.
+The optional composition step that turns Component outputs into one Artifact, such as a Tauri or Electron bundle. It is also the corresponding release-pipeline stage. Bundlers package declared inputs; they do not build.
 _Avoid_: "package" for this stage.
 
 **Distribution endpoint**:
@@ -423,10 +434,6 @@ The boundary that knows how to publish to one Distribution endpoint. Adding an e
 **Artifact channel**:
 The durable, per-producer store of published Artifacts that downstream repos consume in artifact-pinned mode. Its defining invariants, not its transport, are the concept: the location is derived from the producer Repo (never typed by hand), the version is stated in exactly one consumer-owned place, and integrity is verified at fetch time so a wrong name or version fails locally. Permanent and release-scoped, unlike an ephemeral CI job artifact that only chains one workflow run's jobs.
 _Avoid_: defining it by its current realization (conda channels; the target realization is the producer's GH Release assets under standardized naming); "cache" or "sccache bucket"; "CI artifact".
-
-**Content-key**:
-The identity shipit uses for build-once reuse of an Artifact, derived from the inputs that determine that Artifact. It is more than a cache bucket.
-_Avoid_: "cache key".
 
 **Lane**:
 A declared CI verification unit with its run target, artifact consumption, required/local status, trigger, runner, and scope. A lane may map to a GitHub check, but the lane is the declaration.

@@ -1,5 +1,10 @@
 # Content-addressed artifact identity
 
+> **Status:** dormant — the content-key is absent from the current pipeline's code,
+> and the components Spec (`docs/spec/components.md`) declares caching/build-once
+> reuse out of scope. Reintroducing it is a deliberate future decision. ADR-0009's
+> barrier semantics stand independently of this ADR.
+
 The largest lever on the fleet's CI cost (agents waiting the majority of their time
 on CI) is to **build once and reuse** — across lanes within a run, across workflows,
 and across git revisions when the inputs that determine a binary are unchanged (a
