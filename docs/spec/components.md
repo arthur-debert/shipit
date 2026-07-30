@@ -13,7 +13,7 @@ The fleet fine-comb (2026-07-30, all 22 Portfolio repos on origin/main) establis
 the fleet is not 22 bespoke setups: six-ish component kinds plus a docs-site and a
 static-site case cover everything; the task layer is already uniform one-line dispatch
 into shipit; the e2e surface is four harness shapes; the true one-off list fits on one
-hand. A five-ecosystem prior-art survey (Bazel/Buck2, Gradle, Nx/Turborepo/moonrepo/
+hand. A six-group prior-art survey (Bazel/Buck2, Gradle, Nx/Turborepo/moonrepo/
 Pants, Buildpacks/devcontainers, task-runners/Nix flakes, Cargo/npm/Maven) supplied the
 patterns worth stealing and the failure modes to avoid — chiefly: a small **fixed verb
 vocabulary with a typed result shape** buys generic tooling (Nix flakes); a central
@@ -24,8 +24,8 @@ CNB); and a closed, ordered lifecycle with implicit chaining is the documented d
 
 What exists today and is kept: the `.shipit.toml` path→toolchain map (promoted, not
 replaced), the Tool verbs and their drivers, `[artifacts]` bundle declarations,
-Distribution endpoints with endpoint adapters (ADR-0009), managed pixi task
-indirections.
+Distribution endpoints with endpoint adapters (ADR-0007; the build/sign/publish
+barrier is ADR-0009), managed pixi task indirections.
 
 ## Problem
 
@@ -76,7 +76,7 @@ central diagnosis.
   `static-site`. Adding a kind is a sanctioned change inside shipit, small and
   reviewed — the answer to odd toolchains is a kind, not a hook.
 - **Artifact** — a built deliverable, bound to a component, bundled by a packaging
-  kind (archive/tarball, vsix, electron, tauri-bundle, zed-ext, wasm-pkg, service
+  kind (archive/tarball, vsix, electron, tauri-bundle, zed-ext, wasm-pack, service
   image). An artifact that executes declares a **runtime**:
   `native-cli | browser | electron | tauri | nvim-host | vscode-host | zed-host |
   service | static-web | data`. Libraries/registry packages have **no runtime** — they
@@ -101,12 +101,19 @@ mount = "crates"
 component = "core"
 runtime   = "native-cli"
 platforms = ["linux-x86_64", "darwin-arm64"]
+path      = "target/release/lexd"          # promised output; platform-keyed
 
 [artifacts.lex-wasm]
 component = "core"
 runtime   = "browser"
-universal = true
+universal = true                            # XOR with platforms; satisfies any consumer
+path      = "crates/lex-wasm/pkg"
 ```
+
+An artifact's `path` is its **promised output** — where its bytes land after the
+owning component builds (platform-keyed when platform-dependent). These declared
+paths are what the orchestrator verifies. `universal` and `platforms` are mutually
+exclusive; a universal artifact satisfies every consumer platform.
 
 Consumer:
 
@@ -126,16 +133,28 @@ mount = "crates"
 [components.ui]
 kind = "npm"
 mount = "."
-requires = ["phos-editor/core/phos-wasm"]   # intra-repo key ⇒ ordering edge derived
+# requires maps a key to the dest where the input is placed before this
+# component builds; an intra-repo key also derives the ordering edge.
+requires = { "phos-editor/core/phos-wasm" = "public/wasm/" }
 # build.after = ["wasm"]                    # manual edge only when no artifact mediates
 ```
 
 **Version binds identity; sha verifies transport.** The consumer pins only the version;
 at fetch time the GH asset digest is the integrity checksum for that version's bytes.
 In-place asset replacement is prohibited except bug fixes, where the new bytes are what
-every consumer wants (gentleman's agreement; single-owner trust domain — a compromised
-account defeats any per-artifact scheme anyway). No lock sidecar exists. This amends
-ADR-0085's "consumer declares the sha of each fetched file" clause.
+every consumer wants. This is a deliberate owner decision with the threat model stated:
+a single-owner portfolio where producer and consumer are one trust domain — a
+compromised account publishes infected *new* releases that consumers auto-update into,
+so per-artifact tamper-evidence buys nothing here; it would be too loose for
+multi-party or enterprise infrastructure. Consequence accepted: same-version bytes may
+legitimately change, so byte-reproducibility over time is not guaranteed — the build's
+pure-function property is about build *logic*, not about refetches being
+byte-identical forever. No lock sidecar exists. This amends ADR-0085's "consumer
+declares the sha of each fetched file" clause, and supersedes ADR-0077's prohibition
+of a `version` key in `[artifact-deps]` — that prohibition was an artifact of the
+conda realization, where the version had to live in `[dependencies]` for pixi to
+resolve; under the GH-asset transport, `[artifact-deps]` *is* the one consumer-owned
+place (`docs/dependencies.md` carries the same update).
 
 ### The build subsystem: arch-bound, contract-coupled
 
@@ -151,9 +170,11 @@ The orchestrator iterates components in order (derived from `requires`, plus man
 `build.after` edges), and for each one:
 
 1. **Resolve inputs**: every `requires` key is satisfied intra-repo (an artifact
-   produced earlier in this run) or inter-repo (an `[artifact-deps]` staged fetch) —
-   same key syntax, same resolution, two sources. Inputs are placed at their declared
-   dests before the builder runs.
+   produced earlier in this run, copied from its promised `path`) or inter-repo (an
+   `[artifact-deps]` staged fetch) — same key syntax, same resolution, two sources.
+   Inputs are placed at their declared dests (the `requires` mapping intra-repo, the
+   `dest` field inter-repo) before the builder runs. The resolver — not the
+   builders — owns the read credential for private inter-repo fetches.
 2. **Invoke the builder agnostically**: a per-kind program run at the component's
    mount, passed the target platform explicitly — the builder never infers it from
    the host. The contract is a process boundary — exit 0 is success, non-0 is
@@ -174,21 +195,24 @@ every kind has a builder, `build --all` is total by construction.
 ### Release: orchestration of standalone subsystems
 
 The arch-bound build is what makes the case for a separate release system. Release
-does not *do* the work — it orchestrates three subsystems that do, each standalone
+does not *do* the work — it orchestrates four subsystems that do, each standalone
 under the same rule as the builders (shared data types, never code):
 
 - **Build** (above): invoked once per leg with that leg's target, the matrix
   derived by release from the artifacts' declared `platforms`.
 - **Changelog**: fragment compilation and version accounting — the existing
   `CHANGELOG/` machinery, formalized as its own subsystem.
+- **Signing**: the separate post-build stage (ADR-0040's seam): bundlers emit
+  signable outputs and never self-sign; Darwin signing/notarization legs ride the
+  Mac exception (ADR-0084).
 - **Distribution**: the endpoint adapters publishing the aggregated outputs, with
-  completeness — every declared platform present — checked at the publish barrier
-  (ADR-0009).
+  completeness — every declared platform present, built *and signed* — checked at
+  the publish barrier (ADR-0009).
 
 This maps directly onto the existing per-stage dispatch (ADR-0054): prepare =
-changelog, build legs = arch-bound builds, publish = distribution. The interface
-between release and build is the same builder contract — there is no second
-protocol, and release logic never leaks into builders nor vice versa.
+changelog, build legs = arch-bound builds, sign = signing, publish = distribution.
+The interface between release and build is the same builder contract — there is no
+second protocol, and release logic never leaks into builders nor vice versa.
 
 **Terminology guard**: "Component" is reserved for consumer-repo units. shipit's
 own internal units — build, changelog, distribution, the orchestrator — are
@@ -208,10 +232,17 @@ presentation overrides). The e2e harness is a function of the artifact's runtime
 | tauri | tauri-driver | synchronous |
 | *-host | plugin smoke (per host) | synchronous |
 | service | suite harness + backing service (e.g. Firestore emulator) | **service** (start once per suite) |
+| static-web | none — build-output verification only | — |
+| data | none — staged fetch + unpack verification | — |
 
-Runners (GPU, macOS-arm64) are orthogonal menu options. The `lifecycle` attribute
-makes supage's emulator a modeled shape, not a one-off. (To verify while
-implementing: all non-service harnesses are genuinely synchronous.)
+**Verification is total across artifact classes**: execution runtimes get the
+harness above; `static-web` and `data` are verified by the orchestrator's
+output-verification and the staging path respectively; libraries/registry packages
+are verified by unit tests plus the endpoint adapter's publish-time validation
+(dry-run/install-smoke where the endpoint supports it). Runners (GPU, macOS-arm64)
+are orthogonal menu options. The `lifecycle` attribute makes supage's emulator a
+modeled shape, not a one-off. (To verify while implementing: all non-service
+harnesses are genuinely synchronous.)
 
 ### Menu and extension mechanism
 
@@ -229,8 +260,9 @@ Intra-repo: every artifact names an existing component; ordering edges acyclic; 
 inside the repo; declared mounts have manifests (and probes flag undeclared ones —
 detection as advisory cross-check only). Fleet-level (shipit owns the Portfolio):
 every consumed key resolves to a declared producer artifact at an existing version;
-consumer platform needs ⊆ producer `platforms`; orphaned artifacts and dangling
-consumers reported. The declarations are the agreement; the fetch verifies bytes.
+consumer platform needs ⊆ producer `platforms`, with `universal` satisfying every
+consumer platform (`universal` and `platforms` mutually exclusive — declaring both
+is invalid); orphaned artifacts and dangling consumers reported. The declarations are the agreement; the fetch verifies bytes.
 
 ## User / Agent Stories
 
@@ -267,11 +299,14 @@ consumers reported. The declarations are the agreement; the fetch verifies bytes
 
 - **Substrate**: builders run inside the container (ADR-0084); Darwin bundle legs ride
   the Mac exception; the builder contract is substrate-agnostic by construction.
-- **Secrets**: endpoint adapters own their credentials via `[secrets]`/doppler; the
-  build loop itself needs none (public fetch authless, private via the portfolio
-  credential).
-- **Observability**: orchestrator steps (resolve/invoke/verify) emit dev-cycle events;
-  a failed output-verification names the component and the missing path.
+- **Secrets**: split by direction. *Read*: the orchestrator's input resolver owns the
+  portfolio read credential for private inter-repo fetches (via `[secrets]`/doppler,
+  locally and in CI); public fetches are authless. *Write*: endpoint adapters own
+  their publish credentials. Builders never receive credentials of either kind.
+- **Observability**: orchestrator steps (resolve/invoke/verify) are logged as normal
+  structured file-log records with lifecycle narration — not dev-cycle events, whose
+  registered vocabulary stays reserved for session/PR/epic milestones (ADR-0032). A
+  failed output-verification names the component and the missing path.
 - **Migration**: existing `[toolchains]` maps promote mechanically to `[components]`;
   the tree-sitter build-script config and electron self-provisioning sunset during
   each repo's convergence sweep. ADR-0085's sha clause is amended by this Spec.
@@ -308,7 +343,13 @@ parallel build execution (enabled, not built) · the Profile/Creation-profile fo
   ADR bar (builder process contract / no code coupling; version-binds—sha-verifies
   and the mutation doctrine; runtime-on-artifact) should be minted as ADRs with the
   implementing epic, linking back here.
-- Amends ADR-0085's consumer-sha clause (see Declarations).
+- Amends ADR-0085's consumer-sha clause and supersedes ADR-0077's `[artifact-deps]`
+  version-key prohibition (see Declarations); `docs/dependencies.md` carries the
+  matching update.
+- ADR-0008's content-key (build-once reuse) is dormant: absent from the current
+  pipeline's code, and caching is out of scope here. Reintroducing it is a
+  deliberate future decision, not an implied obligation — ADR-0009's barrier
+  semantics stand independently of it.
 - Verify during implementation: all non-service harnesses are synchronous (supage is
   the only service-lifecycle case).
 - Evidence and prior art: the 2026-07-30 fleet fine-comb and the five-leg survey

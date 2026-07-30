@@ -401,7 +401,7 @@ The build, test, and provisioning ecosystem a Component's kind binds, such as Ru
 _Avoid_: Toolchain as the unit of composition (that is the Component); "stack" or "project type" as a dispatch label.
 
 **Path→toolchain map**:
-The current `.shipit.toml` realization mapping build-bearing paths to toolchains. It promotes to `[components]` declarations (the components Spec); new declaration needs go there.
+The current `.shipit.toml` realization mapping build-bearing paths to toolchains. It promotes to `[components]` declarations (the components Spec); new declarations go there.
 _Avoid_: extending this map with new concepts.
 
 **Tool**:
