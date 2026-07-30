@@ -37,8 +37,8 @@ The version-controlled fleet manifest in `.shipit.toml` that lists the repos shi
 _Avoid_: reconstructing the fleet from local sibling directories or memory.
 
 **Shipit pin**:
-The shipit commit a consumer repo locks to, recorded in that repo's `.shipit.toml`. The pin ties the installed tool and managed files to one shipit revision.
-_Avoid_: package version, branch name, or "shipit version" for this noun.
+The one Shipit identity a consumer Repo locks to in `.shipit.toml`: normally a semantic release Version, or exceptionally a full git Revision for unreleased testing. The pin ties the installed tool and managed files to one build.
+_Avoid_: storing both Version and Revision, or using a branch as a pin.
 
 **PR**:
 A GitHub pull request identified by Repo plus number, with cheap core state such as head SHA, base branch, draft status, and merge state. Richer readiness or review views compose a PR instead of replacing it.
