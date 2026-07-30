@@ -11,3 +11,9 @@ remain a manual per-Repo testing escape hatch.
 This supersedes ADR-0033’s Sha-only pin representation now that Shipit has
 release machinery. The invariant survives: the selected build writes its own pin
 together with the managed files it produced.
+
+For transition, readers accept the existing full Sha stored in `version` as a
+legacy Revision pin and status labels it explicitly. A released update rewrites
+that legacy shape atomically to its semantic Version alongside the managed-file
+update. A manifest with both `version` and `revision`, or with any other
+malformed pin, fails loudly.

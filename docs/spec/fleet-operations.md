@@ -27,8 +27,9 @@ edges.
 
 ## Goals
 
-- Provide `shipit fleet verify`, `update`, `status`, `run`, and
-  `tree-cache refresh`.
+- Provide `shipit fleet verify`, `shipit fleet update`,
+  `shipit fleet status`, `shipit fleet run`, and
+  `shipit fleet tree-cache refresh`.
 - Replace `sweep` with `verify` and user-facing `reconcile` language with
   `update` in one change across code, scripts, docs, and reports.
 - Select Repos with either `--only` or `--exclude`; reject both together.
@@ -75,8 +76,9 @@ other results.
 - `shipit fleet verify` retains the current sweep check-matrix behavior.
 - `shipit fleet update [--version X.Y.Z]` updates to the latest stable Shipit
   release by default or an exact released version (including an explicitly
-  requested prerelease). It opens or refreshes consumer update PRs, arms
-  auto-merge, and waits up to 25 minutes for terminal outcomes.
+  requested prerelease). It opens or refreshes consumer update PRs, converts
+  them from draft to Ready without requesting consumer review, arms auto-merge,
+  and waits up to 25 minutes for terminal outcomes.
 - `shipit fleet status` reads each live remote default branch and reports Repo,
   Shipit Version or Revision, the pin-change commit/date, and required
   reviewers. Composable facets add GitHub state (`--gh`), declared internal
@@ -88,8 +90,16 @@ other results.
 
 Released installs store one semantic `version = "x.y.z"`. Exceptional manual
 testing stores a mutually exclusive full `revision`; fleet update writes only
-Versions. `shipit update` is a user-facing alias of the idempotent
-`shipit install`, not another implementation.
+Versions. During migration, a full SHA in the legacy `version` field is
+dual-read as a legacy Revision pin and reported as such; the next released
+fleet update atomically replaces it with a semantic Version. Dual-key and other
+malformed states fail loudly.
+
+`shipit update` is a user-facing verb alias of the idempotent `shipit install`,
+not a release resolver or another implementation. It updates only when the
+target build has already been selected externally, as fleet orchestration does
+or a manual `SHIPIT_EXEC` override can do. Invoking it through a Repo's ordinary
+pin-wins launcher runs that Repo's currently pinned build.
 
 The Shipit-owned Repo donor cache is concurrency-safe and performance-only.
 Missing donors initialize automatically; existing donors refresh only through
@@ -97,11 +107,13 @@ Missing donors initialize automatically; existing donors refresh only through
 default branch, so stale cache objects cannot produce stale state.
 
 Fleet update resolves the release once, opens all selected update PRs serially,
-then polls them together. These PRs do not request consumer review: the released
-Shipit code was reviewed at its producer, while consumer lint and tests prove
-compatibility. Passing required checks and mergeability auto-merge. Failed
-checks or conflicts leave the PR open and visible for follow-up. At timeout,
-auto-merge remains armed and the result is `pending`.
+converts each generated draft PR to Ready without requesting consumer review,
+arms auto-merge, then polls them together. This transition is part of the narrow
+released-update exception: the released Shipit code was reviewed at its
+producer, while consumer lint and tests prove compatibility. Passing required
+checks and mergeability auto-merge. Failed checks or conflicts leave the PR open
+and visible for follow-up. At timeout, auto-merge remains armed and the result
+is `pending`.
 
 ## User / Agent Stories
 
@@ -145,8 +157,12 @@ consumers.
 - Exercise donor initialization and explicit refresh concurrently and after
   interruption; prove live remotes remain authoritative.
 - Run update against disposable consumer Repos for current, merged, failed,
-  blocked, and timed-out outcomes; verify Version and managed files move
-  together and every PR result has a full URL.
+  blocked, and timed-out outcomes; verify generated drafts become Ready before
+  auto-merge is armed, Version and managed files move together, and every PR
+  result has a full URL.
+- Cover the pin migration: dual-read a legacy SHA in `version` as a legacy
+  Revision, rewrite it to a released Version with its managed files, and reject
+  dual-key or malformed states.
 - Run overlapping real fleet operations and confirm isolated Trees, a healthy
   shared cache, and untouched human checkouts.
 
