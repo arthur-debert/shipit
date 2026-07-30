@@ -64,12 +64,14 @@
   by construction. It covers shipit's five roles only: `general-purpose`,
   `claude`, `Explore`, `Plan` and `fork` resolve to no role profile and are always
   allowed, `fork` necessarily so, since it inherits the parent's context and
-  cannot be isolated. A blank `isolation` reads as absent and is refused — passing
-  the parameter as `""` is not passing it — while any non-blank value counts as
-  isolated, because which isolation modes exist is the harness's business.
-  Enforcement reaches the project Claude Code was launched in: a subagent's own
-  process reads that project's settings, not its Tree's, so the entries are live
-  for a Run only once installed there.
+  cannot be isolated. Only a non-blank **string** counts as isolated: a blank one
+  is refused (passing `""` is not passing it), and so is a non-string, because
+  coercing truthy junk like `{"a": 1}` or `[1]` to text would read as "isolated"
+  and fail open on exactly the rule this adds. Which isolation *modes* are valid
+  stays the harness's business, so any non-blank string is accepted, `"remote"`
+  included. Enforcement reaches the project Claude Code was launched in: a
+  subagent's own process reads that project's settings, not its Tree's, so the
+  entries are live for a Run only once installed there.
 - harness: the worktree deny rules now fire on codex too. They matched only a
   tool named `bash`, and codex names its shell tool `exec_command` and puts the
   command under `tool_input.cmd` rather than `tool_input.command` (both observed

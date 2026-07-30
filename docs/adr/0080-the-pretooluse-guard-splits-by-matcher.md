@@ -94,8 +94,31 @@ reached for `git worktree add` gets redirected to `shipit tree create`.
 
 That framing sets the error bias. Because the cost of a false positive is one
 clear redirect message and the cost of a false negative is a silent ADR-0014
-violation, the rule errs toward denying: an unquoted `echo git worktree add`
-and `git config -l ; worktree add` are both refused.
+violation, the rule errs toward denying.
+
+**The accepted false positives, by input.** These are refused and invoke no
+worktree, so a reader finds them recorded rather than rediscovering them as
+defects. The reasoning, reproductions and fix options live in **#1189**; this
+list is the statement of what is accepted, not a re-argument of it:
+
+| input | why it is refused |
+| --- | --- |
+| `echo git worktree add` | the words are unquoted, so they are indistinguishable from an invocation |
+| `git config -l ; worktree add` | nothing is counted or skipped, so the `git` word and the pair need not belong to one command |
+| `git "worktree\n" add x` | CR/LF at a quoted word's edge is stripped |
+| `"git\n" worktree add x` | same |
+| `git worktree "\n" add x` | a quoted CR/LF-only word strips to empty and drops out |
+
+The last three qualify the "quoting supplies the discrimination" claim above:
+**quoted content stays data EXCEPT for CR/LF at a word's edges.** The edge strip
+exists to reproduce the shell's line-continuation word-join, but `shlex` reports
+no provenance — a quoted `"\n"` and a syntactic continuation are the same
+character in the same position by the time the words exist — so it cannot tell
+them apart. Fixing that correctly needs a provenance-keeping tokenizer, which is
+a design change rather than a normalization tweak; #1189 owns the decision,
+including whether "document and close" is the right answer given the rule is not
+a boundary. A quoted word whose CR/LF is *interior* keeps it, so a quoted mention
+still stays one word and never matches.
 
 **Every correctness round on this rule was a deletion, and that is the pattern
 to keep.** Each shape failed because it tried to reason about a command's
@@ -106,8 +129,8 @@ to keep.** Each shape failed because it tried to reason about a command's
    `if true; then …`, a newline, `xargs -I{}`. An unbounded set; review found
    six members in minutes. Deleted the segment machinery: **quoting already
    supplies the discrimination** the segment logic was reaching for, since a
-   quoted mention lexes to ONE word and an invocation is adjacent words. Position
-   stopped mattering.
+   quoted mention lexes to ONE word and an invocation is adjacent words (with the
+   CR/LF-at-word-edge exception recorded above). Position stopped mattering.
 2. *Option-counting:* still walked `git`'s options to find the subcommand,
    remembering that `-C`/`-c` consume a following token. Under posix lexing a
    quoted `";"` and an unquoted `;` produce **identical** token streams, so
@@ -139,13 +162,20 @@ and create a worktree (the space before the backslash already ended the word),
 so it denies; `git\<newline>worktree add X` joins into `gitworktree`, which is
 not a command, so it does not. Both are pinned by a test citing that
 verification, because one review round proposed flipping the first. The `git`
-word is required so `grep worktree add file` does not match.
+word is required so `grep worktree add file` does not match. The cost of that
+reconciliation is the three quoted-CR/LF false positives tabled above, accepted
+rather than fixed.
 
 This is where the hardening stops. The rule's stated scope is a cooperating
 agent, so a further adversarial input is out of scope by definition rather than
-a defect to patch. Four rounds each **removed** logic; a fifth correctness
-finding here is a signal to reconsider the design with the maintainer, not to
-patch again.
+a defect to patch. Each round **removed** logic instead of adding a case, and
+the fifth round's findings — quoted CR/LF being stripped, and a quoted empty
+argument being dropped — were answered by documenting the limitation rather than
+by changing behaviour: both are the same root cause, and a correct fix needs a
+provenance-keeping tokenizer. **#1189 owns that root cause**, with the five-round
+history and the unevaluated options; agy's trigger for spending the effort is a
+second consumer of `_shell_words` appearing, not aesthetics. The next correctness
+finding here belongs in that issue, not in another patch.
 
 ### Enforcement reaches the session CC was launched in, not every Tree
 

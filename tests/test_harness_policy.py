@@ -204,6 +204,36 @@ def test_a_quoted_mention_never_matches_however_it_is_wrapped():
         ), command
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        'git "worktree\n" add x',
+        '"git\n" worktree add x',
+        'git worktree "\n" add x',
+    ],
+)
+def test_quoted_crlf_at_a_word_edge_is_an_accepted_false_positive(command):
+    """ACCEPTED, not desired: none of these invokes `git worktree add`, yet all deny.
+
+    The word-edge CR/LF strip cannot tell a quoted newline from a syntactic line
+    continuation, because shlex reports no provenance. A correct fix needs a
+    provenance-keeping tokenizer, which is a design change rather than a
+    normalization tweak — tracked in #1189, and consistent meanwhile with the
+    deny bias in docs/adr/0080.
+    """
+    assert decide_worktree(ToolCall("Bash", command=command)).permission is (
+        Permission.DENY
+    )
+
+
+def test_a_quoted_word_keeps_an_interior_newline_so_a_mention_stays_one_word():
+    """The limit above is edge-only: interior CR/LF survives, so quoting still discriminates."""
+    for command in ('echo "git\nworktree add"', 'echo "hi\ngit worktree add x"'):
+        assert decide_worktree(ToolCall("Bash", command=command)).permission is (
+            Permission.ALLOW
+        ), command
+
+
 def test_a_line_continuation_follows_the_shell_word_join_exactly():
     """Whether a continuation invokes git depends on the space BEFORE the backslash.
 
@@ -260,6 +290,43 @@ def test_worktree_deny_carries_the_redirect_reason():
 def test_worktree_allow_carries_no_reason():
     assert decide_worktree(ToolCall("Bash", command="git status")).reason == ""
     assert decide_worktree(ToolCall("Bash", command="git worktree list")).reason == ""
+
+
+@pytest.mark.parametrize(
+    "junk",
+    [
+        {"a": 1},
+        {"mode": "worktree"},
+        [1],
+        ["worktree"],
+        1,
+        0.5,
+        True,
+        object(),
+    ],
+)
+def test_a_non_string_isolation_reads_as_absent_and_denies(junk):
+    """Coercing truthy junk to a string would read as "isolated" — the one direction that must not fail open."""
+    call = tool_call(
+        {
+            "tool_name": "Agent",
+            "tool_input": {"subagent_type": "implementer", "isolation": junk},
+        }
+    )
+    assert call.isolation is None
+    assert decide_spawn_isolation(call).permission is Permission.DENY
+
+
+@pytest.mark.parametrize("falsey", [{}, [], 0, False, None])
+def test_a_falsey_non_string_isolation_also_denies(falsey):
+    call = tool_call(
+        {
+            "tool_name": "Agent",
+            "tool_input": {"subagent_type": "implementer", "isolation": falsey},
+        }
+    )
+    assert call.isolation is None
+    assert decide_spawn_isolation(call).permission is Permission.DENY
 
 
 @pytest.mark.parametrize("blank", ["", "   ", "\t\n"])

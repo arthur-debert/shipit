@@ -102,7 +102,11 @@ def tool_call(payload: Mapping[str, object]) -> ToolCall:
         (str(fields[key]) for key in _COMMAND_KEYS if fields.get(key)),
         "",
     )
-    isolation = str(fields.get("isolation") or "").strip()
+    # A non-`str` isolation reads as ABSENT, never as a value: coercing one would
+    # turn any truthy junk (`{"a": 1}`, `[1]`, `1`) into a non-blank string and
+    # so into "isolated", which is the one direction that must not fail open.
+    raw_isolation = fields.get("isolation")
+    isolation = raw_isolation.strip() if isinstance(raw_isolation, str) else ""
     return ToolCall(
         tool_name=str(payload.get("tool_name") or ""),
         command=command,
@@ -140,11 +144,11 @@ _GIT_WORKTREE_ADD_FALLBACK = re.compile(r"\bgit\s+worktree\s+add\b")
 #: inside a word (`git worktree add;` must still yield an `add` word).
 _SHELL_PUNCTUATION = "();<>|&"
 
-#: The one place shlex and the shell disagree: shlex keeps an escaped newline as
-#: a literal character, the shell splices it out. Stripping it from a word's
-#: EDGES matches the shell, and leaving an INTERIOR one alone matches it too —
-#: `git \<newline>worktree` runs `git worktree`, but `git\<newline>worktree`
-#: (no space) runs `gitworktree`, which is not git at all.
+#: Stripped from a word's EDGES to reconcile shlex with the shell: shlex keeps an
+#: escaped newline as a literal character where the shell splices it out. An
+#: INTERIOR one is left alone, which matches the shell too — `git \<newline>worktree`
+#: runs `git worktree`, but `git\<newline>worktree` (no space) runs `gitworktree`,
+#: which is not git at all.
 _CONTINUATION_CHARS = "\n\r"
 
 
@@ -153,7 +157,16 @@ def _matches_enter_worktree(call: ToolCall) -> bool:
 
 
 def _shell_words(command: str) -> list[str] | None:
-    """A command's words as the shell would split them; ``None`` if it does not lex."""
+    """A command's words, shell-like: shlex POSIX splitting with CR/LF stripped from word EDGES; ``None`` if it does not lex.
+
+    The edge strip reproduces the shell's line-continuation word-join, but it is
+    NOT what the shell does to a quoted value: shlex reports no provenance, so a
+    quoted `"\\n"` is indistinguishable from a syntactic continuation and is
+    stripped too, and a word that strips to empty is dropped rather than kept as
+    an empty argument. Words whose CR/LF is INTERIOR keep it, so a quoted mention
+    stays one word. docs/adr/0080 states the accepted false positives; #1189 owns
+    the limitation.
+    """
     try:
         lexer = shlex.shlex(command, posix=True, punctuation_chars=_SHELL_PUNCTUATION)
         lexer.whitespace_split = True
