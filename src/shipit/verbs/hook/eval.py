@@ -42,6 +42,10 @@ def run(stdin: TextIO | None = None) -> int:
         run_files = locate_run(payload)
         if run_files is None:
             return 0
+        # Before the record, not after: the probe reports that something went
+        # wrong, so an unrelated eval failure must not be what silences it.
+        if not run_files.is_coordinator:
+            report_launch_checkout(os.getcwd())
         meta = _read_meta(run_files.meta)
         wd = identity.resolve_working_dir(str(payload.get("cwd") or os.getcwd()))
         metrics = extract(run_files.transcript)
@@ -58,8 +62,6 @@ def run(stdin: TextIO | None = None) -> int:
             run_id=run_files.run_id,
         )
         append_record(record, wd.repo)
-        if not run_files.is_coordinator:
-            report_launch_checkout(os.getcwd())
     except Exception:  # noqa: BLE001 — fail-open is the whole point.
         logger.warning("eval hook failed open (no record written)", exc_info=True)
     return 0

@@ -289,16 +289,20 @@ _WRITE_COMMANDS = (
     "truncate",
 )
 
-#: A write command as a WORD: `/usr/bin/sed` counts (a leading path is part of
-#: the invocation), `foo-cp`, `mycp` and `sed.orig` do not. The trailing
-#: lookahead admits `python3.13` — an interpreter name, unlike a `.orig` suffix.
+#: A write command as a WORD: `/usr/bin/sed` counts, since a leading path is part
+#: of the invocation, while `foo-cp` and `mycp` do not. A DOTTED SUFFIX is not
+#: examined, so `python3.13` counts (an interpreter) and so do `sed.orig` and
+#: `sed.py` (not invocations) — over-denials accepted rather than discriminated,
+#: because this rule is deny-biased and advisory; docs/adr/0083 tables them.
 _RUNS_A_WRITE_COMMAND = re.compile(
     r"(?<![\w.:-])(?:" + "|".join(_WRITE_COMMANDS) + r")(?![\w-])"
 )
 
 #: A `>`/`>>` whose target is the text that follows it, matched against the
 #: command's head so that `2>/dev/null …` cannot count as writing a later path.
-_REDIRECTS_INTO_TAIL = re.compile(r">>?\s*['\"]?[^\s'\";|&<>]*$")
+#: The quoted branches leave the quote OPEN: a redirect target may contain
+#: spaces, and `SHIPIT_TREES_ROOT` is allowed to (`> "/trees root/<leaf>/x"`).
+_REDIRECTS_INTO_TAIL = re.compile(r""">>?\s*(?:"[^"]*|'[^']*|(?:\\.|[^\s'";|&<>])*)$""")
 
 
 def _own_tree(cwd: str) -> layout.FlatLeaf | None:

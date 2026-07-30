@@ -79,6 +79,15 @@ never a coincidence, and matching the leaf catches `/abs/path/<leaf>`,
 `../<leaf>` and a bare `<leaf>` without normalizing anything. `layout.find_flat_leaves`
 scans; `layout.parse_flat_leaf` stays the recognizer.
 
+The scan's repo segment is an **allow-list** — the alphabet a repo name may
+contain — rather than a list of characters to exclude. The first draft excluded
+shell punctuation and missed `<>[]{},`, which did not lose the mention (the repo
+segment simply absorbed the stray character) but shifted the reported `start` by
+one and corrupted the leaf name. That silently disabled the redirect check, so
+`echo x >LEAF/f` was allowed while `echo x > LEAF/f` was refused — a false
+negative turning on a single space. The excluded set is unbounded; the included
+one is not.
+
 **What the write registry deliberately omits.** `git` — the host refuses a
 cross-checkout `cd` before git natively, and `git -C <other Tree>` is legitimate
 traffic. `rm` — `rm -rf <Tree>` *is* how a Tree is reclaimed (ADR-0014), so
@@ -98,6 +107,15 @@ rather than rediscovering them as defects:
 | `sed -n 1,5p <other Tree>/f` | `sed` counts unconditionally; requiring `-i` would mean walking options, which ADR-0080 deleted for good reason |
 | `echo "cp a b" && ls <other Tree>` | a quoted mention is still text |
 | `python3 -c pass && ls <other Tree>` | a writer and a foreign Tree in one command need not be related |
+| `sed.orig`, `sed.py`, `python3.orig` + a foreign Tree | a DOTTED SUFFIX is not examined, so a backup or a filename that begins with a writer's name counts as one |
+
+That last row is a deliberate choice, not an oversight. The same lookahead is
+what lets `python3.13` count, and telling a version suffix from a `.orig` suffix
+means more subtlety in a regex on the exact path where added cleverness has
+repeatedly produced new defects (#1189 records five rounds of it). On a
+deny-biased advisory rule an over-denial costs one message, so the contract is
+corrected to say what the regex does instead of the regex being bent to match a
+nicer contract.
 
 ### The known-evadable inputs, by input
 
@@ -151,10 +169,20 @@ action from the coordinator's.
 
 `logsetup.rebind_own_tree` re-keys `tree` — and `agent`, to the Tree id, matching
 what `shipit spawn subagent` already binds — onto the Tree the process is
-actually running in whenever that differs from the inherited export. The
-mismatch is itself the discriminator; the inherited `session` is kept, because it
-genuinely is shared. `shipit logs --flow --agent-ids` and `--agent <id>` now
-separate a native subagent's records from its spawner's.
+running in whenever that differs from the inherited export. The inherited
+`session` is kept, because it genuinely is shared.
+
+**What that is, stated exactly, because the obvious stronger claim is false.**
+It attributes a record to the Tree the process **ran in**, which equals the
+acting Run only while that Run stays in its own Tree. Cross-Tree reads and an
+inline `cd` are deliberately allowed, so both departures are reachable: a Run
+that runs `cd <inherited Tree> && shipit …` still records as its spawner, and one
+that does the same into a third Tree records as that third Tree. So this
+**narrows** the ambiguity to the common case — a Run working where it was put —
+rather than removing it. Removing it needs a per-Run identity captured at
+launch, which the host does not provide (see the limit below); **#1191 owns
+that**, and until it lands `shipit logs --flow --agent-ids` should be read as
+"which Tree" and not as "which agent".
 
 **The limit, filed as #1191:** a Run that never invokes a shipit CLI command
 still leaves no record, because shipit only sees what runs through it — the

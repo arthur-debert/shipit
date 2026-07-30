@@ -214,12 +214,17 @@ def configure_logging_for_slug(
 
 
 def rebind_own_tree(env: Mapping[str, str]) -> None:
-    """Re-key ``tree``/``agent`` onto the Tree this process is actually running in when it is NOT the Tree the parent exported.
+    """Re-key ``tree``/``agent`` onto the Tree this process is RUNNING IN when it is NOT the Tree the parent exported.
 
-    ``agent`` takes the Tree id, as `shipit spawn subagent` binds it; the
-    inherited ``session`` is kept, being genuinely shared. Never raises, and
-    does nothing when the two agree or when there is no Tree. A native subagent
-    inherits its spawner's export, which is what this separates — docs/adr/0083.
+    The Tree running the process, NOT the Run that issued the command: they are
+    the same only while a Run stays in its own Tree. A Run that `cd`s into the
+    inherited Tree keeps the spawner's identity, and one that `cd`s into a third
+    Tree takes that Tree's — cross-Tree reads and `cd` are allowed, so both
+    happen. Attributing the acting Run needs a per-Run identity the host does
+    not export; #1191 owns that. ``agent`` takes the Tree id, as
+    `shipit spawn subagent` binds it; the inherited ``session`` is kept, being
+    genuinely shared. Never raises, and does nothing when the two agree or when
+    there is no Tree.
     """
     inherited = (env.get(logcontext.ENV_PREFIX + "TREE") or "").strip()
     if not inherited:

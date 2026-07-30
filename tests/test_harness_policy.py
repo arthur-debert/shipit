@@ -486,8 +486,7 @@ def _shell(command: str, cwd: str, tool: str = "Bash") -> ToolCall:
     return ToolCall(tool, command=command, cwd=cwd)
 
 
-def test_the_incident_shape_is_denied(trees):
-    """An inline `cd` into the spawning session's Tree then a non-git writer — #1179's transcript line 42."""
+def test_an_inline_cd_then_a_non_git_writer_is_denied(trees):
     own, other = trees
     call = _shell(f"cd {other} && python3 /tmp/s.py apply src/shipit/git.py", str(own))
     decision = decide_cross_tree_write(call)
@@ -515,10 +514,18 @@ def test_deny_reason_states_it_is_not_a_boundary(trees):
         "python3.13 -c open({other}/x)",
         "echo hi > {other}/x.txt",
         "echo hi >> {other}/x.txt",
+        # No space after the operator: the leaf must still be found AT the leaf,
+        # or the redirect check reads a head that does not end in `>`.
         "echo hi >{other}/x.txt",
-        # A bare leaf name is a Tree reference too: the leaf carries a full UUID,
-        # so it cannot be a coincidence, and `../<leaf>` reaches a sibling Tree.
+        "echo hi >>{other}/x.txt",
+        'echo hi >"{other}/x.txt"',
+        # A bare leaf, and `../<leaf>`, reach a sibling Tree without an abs path.
         "cp x ../{other_leaf}/x",
+        "cp x {other_leaf}/x",
+        # A writer with a dotted suffix counts; accepted, not desired.
+        "sed.orig -i s/a/b/ {other}/x",
+        "python3.orig /tmp/s.py {other}/x",
+        "sed.py {other}/x",
     ],
 )
 def test_writes_into_another_tree_are_denied(trees, command):
@@ -538,8 +545,10 @@ def test_writes_into_another_tree_are_denied(trees, command):
         # path it merely reads — `2>/dev/null` is the common shape.
         "grep -rn foo {other}/src 2>/dev/null",
         "cat {other}/x > /tmp/y",
-        # git after a cross-checkout `cd` is Claude Code's own `command_redirect`
-        # guard (verified on 2.1.220); shipit does not double it.
+        'echo "a" > b.txt && ls {other}',
+        # A `>` inside a CLOSED quote is not an operator on the mention.
+        'echo "a > b" && ls {other}',
+        # git after a cross-checkout `cd` is the host's own guard; not doubled.
         "cd {other} && git status",
         "git -C {other} log --oneline -1",
         # `rm -rf <Tree>` IS how a Tree is reclaimed, and `chmod` is how a
@@ -560,9 +569,34 @@ def test_commands_that_do_not_write_another_tree_are_allowed(trees, command):
 
 
 def test_accepted_false_positive_a_writer_word_used_as_data(trees):
-    """A write command's NAME as data denies: text cannot tell a search pattern from an invocation (ADR-0083)."""
+    """A write command's NAME as data denies; accepted, not desired."""
     own, other = trees
     call = _shell(f"grep -rn python3 {other}/src", str(own))
+    assert decide_cross_tree_write(call).permission is Permission.DENY
+
+
+@pytest.mark.parametrize(
+    ("root_name", "command"),
+    [
+        ("trees root", 'echo hi > "{other}/x"'),
+        ("trees root", "echo hi > '{other}/x'"),
+        ("trees root", "echo hi > {escaped}/x"),
+        ("trees", 'echo hi > "{other}/x"'),
+    ],
+)
+def test_a_redirect_target_may_contain_spaces(
+    monkeypatch, tmp_path, root_name, command
+):
+    """`SHIPIT_TREES_ROOT` may contain a space, so the target is read up to the closing quote."""
+    root = tmp_path / root_name
+    own, other = root / OWN_LEAF, root / OTHER_LEAF
+    for path in (own, other):
+        path.mkdir(parents=True)
+    monkeypatch.setenv("SHIPIT_TREES_ROOT", str(root))
+
+    call = _shell(
+        command.format(other=other, escaped=str(other).replace(" ", "\\ ")), str(own)
+    )
     assert decide_cross_tree_write(call).permission is Permission.DENY
 
 
@@ -579,7 +613,7 @@ def test_accepted_false_positive_a_writer_word_used_as_data(trees):
     ],
 )
 def test_known_evasions_are_not_caught(trees, command):
-    """Pinned as documented limits, not aspirations (ADR-0083): a writer the registry omits, or a path the command never spells."""
+    """Documented limits, not aspirations: a writer the registry omits, or a path never spelled."""
     own, other = trees
     call = _shell(command.format(other=other), str(own))
     assert decide_cross_tree_write(call).permission is Permission.ALLOW
@@ -594,21 +628,21 @@ def test_known_evasions_are_not_caught(trees, command):
     ],
 )
 def test_a_literal_path_inside_eval_or_sh_c_is_still_caught(trees, command):
-    """Reading the RAW command rather than its shell words is why: `eval`/`sh -c` hide structure, not text (contrast ADR-0080's word-level rule)."""
+    """The raw command is read, not its shell words: `eval`/`sh -c` hide structure, not text."""
     own, other = trees
     call = _shell(command.format(other=other), str(own))
     assert decide_cross_tree_write(call).permission is Permission.DENY
 
 
 def test_a_caller_outside_the_trees_root_is_never_refused(trees, tmp_path):
-    """ "Another Tree" has no meaning without an own Tree, so the rule stands down rather than guessing."""
+    """ "Another Tree" has no meaning without an own Tree, so the rule stands down."""
     _own, other = trees
     call = _shell(f"cp x {other}/x", str(tmp_path / "ambient-checkout"))
     assert decide_cross_tree_write(call).permission is Permission.ALLOW
 
 
 def test_a_blank_cwd_does_not_fall_back_to_the_hook_process_cwd(trees):
-    """The hook runs in the SPAWNING session's checkout, so a blank payload cwd must read as unknown."""
+    """The hook runs in the spawning session's checkout, so a blank cwd reads as unknown."""
     _own, other = trees
     assert (
         decide_cross_tree_write(_shell(f"cp x {other}/x", "")).permission
@@ -617,7 +651,7 @@ def test_a_blank_cwd_does_not_fall_back_to_the_hook_process_cwd(trees):
 
 
 def test_the_rule_only_fires_on_shell_tools(trees):
-    """The edit entry runs the same decider and must be untouched by it (ADR-0038, ADR-0080)."""
+    """The edit entry runs the same decider and must be untouched by it."""
     own, other = trees
     for tool in ("Edit", "Write", "MultiEdit", "NotebookEdit", "Agent"):
         call = _shell(f"cp x {other}/x", str(own), tool=tool)

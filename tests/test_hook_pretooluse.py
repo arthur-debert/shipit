@@ -494,7 +494,7 @@ def cross_tree(monkeypatch, tmp_path):
 
 
 def test_bash_write_into_another_tree_is_denied_through_the_hook(cross_tree):
-    """The decider must be REACHED from `run`, not merely exist — #1179's write was a `Bash` call."""
+    """The decider must be REACHED from `run`, not merely exist."""
     own, other = cross_tree
     payload = json.dumps(
         {
@@ -528,7 +528,7 @@ def test_reading_another_tree_stays_allowed_through_the_hook(cross_tree):
 
 
 def test_the_bashguard_entry_denies_a_cross_tree_write_and_still_exits_zero(cross_tree):
-    """The advisory entry's contract: it emits `deny` on stdout, and its own exit stays 0 (ADR-0080)."""
+    """The advisory entry's contract: it emits `deny` on stdout, and its own exit stays 0."""
     own, other = cross_tree
     payload = json.dumps(
         {
@@ -545,7 +545,7 @@ def test_the_bashguard_entry_denies_a_cross_tree_write_and_still_exits_zero(cros
 
 
 def test_a_coordinator_edit_in_another_tree_still_reports_the_edit_reason(cross_tree):
-    """The cross-Tree rule must not shadow the fail-CLOSED edit guard's own verdict (ADR-0038)."""
+    """The cross-Tree rule must not shadow the fail-closed edit guard's own verdict."""
     own, _other = cross_tree
     payload = json.dumps(
         {

@@ -23,15 +23,20 @@
   branch as the coordinator's own work. The report is a poll, not an assertion —
   a coordinator's checkout is legitimately dirty most of the time — so it names
   the paths and never refuses anything.
-- logs: a native subagent's records are attributed to its own Tree. It inherits
+- logs: a record is now attributed to the Tree its process ran in, rather than to
+  whatever Tree the parent exported. A native subagent inherits
   `SHIPIT_LOG_CTX_SESSION`/`_TREE` from the session that spawned it, so in the
   incident window all 987 exec records carried the coordinator's identity —
   including 18 whose `cwd` was the subagent's Tree — and `shipit logs --flow`
-  could not tell a Run's action from its spawner's. When the Tree a process is
-  running in differs from the exported one, `tree` and `agent` are re-keyed onto
-  the actual Tree (`agent` takes the Tree id, matching what `shipit spawn
-  subagent` already binds), so `--agent-ids` and `--agent <id>` separate them.
-  The inherited `session` is kept, because that one really is shared.
+  could not tell a Run's action from its spawner's. When the two differ, `tree`
+  and `agent` are re-keyed onto the actual Tree (`agent` takes the Tree id,
+  matching what `shipit spawn subagent` already binds), so `--agent-ids` and
+  `--agent <id>` separate them; the inherited `session` is kept, because that one
+  really is shared. **This narrows the ambiguity rather than removing it:** the
+  Tree a process runs in is the acting Run only while that Run stays in its own
+  Tree, and a cross-Tree `cd` — which is allowed — still misattributes. Read
+  `--agent-ids` as "which Tree", not "which agent", until #1191 lands a per-Run
+  identity.
 - docs: three claims that outran their evidence now say what was measured.
   `AGENTS.lex` §1.2 kept "no bash-cwd footgun" (verified — all 228 records of the
   incident Run carried its own Tree) but dropped "concurrent agents never collide

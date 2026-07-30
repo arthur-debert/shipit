@@ -709,7 +709,7 @@ def test_flat_leaf_name_round_trips_the_parse():
         ("", []),
         # A stamp of the right SHAPE but not a real calendar time is not a leaf.
         (f"cd /trees/widget-{AGENT}-20261399-081333-{TREE_ID}", []),
-        # A truncated id is not a Tree id (ADR-0074).
+        # A truncated id is not a Tree id.
         (f"cd /trees/widget-{AGENT}-{CREATED}-619cf51a", []),
     ],
 )
@@ -728,6 +728,15 @@ def test_find_flat_leaves_keeps_a_hyphenated_repo_whole():
 def test_find_flat_leaves_reports_where_each_mention_starts():
     command = f"echo hi > /trees/{LEAF}/x"
     (mention,) = layout.find_flat_leaves(command)
+    assert command[mention.start :].startswith(LEAF)
+
+
+@pytest.mark.parametrize("prefix", ["<", ">", "[", "]", "{", "}", ",", "*", "!", "$"])
+def test_punctuation_touching_a_leaf_is_not_absorbed_into_the_repo_name(prefix):
+    """It parses either way, so the failure is a shifted `start` and a corrupted name, not a miss."""
+    command = f"echo x {prefix}{LEAF}/f"
+    (mention,) = layout.find_flat_leaves(command)
+    assert mention.leaf.name == LEAF
     assert command[mention.start :].startswith(LEAF)
 
 

@@ -494,8 +494,9 @@ def two_trees(monkeypatch, tmp_path):
     return coordinator, subagent
 
 
-def test_a_spawned_run_is_attributed_to_its_own_tree(two_trees, monkeypatch):
-    """A native subagent inherits the spawner's `SHIPIT_LOG_CTX_TREE`, so without this its records read as the coordinator's (#1179)."""
+def test_a_process_running_in_another_tree_is_attributed_to_that_tree(
+    two_trees, monkeypatch
+):
     coordinator, subagent = two_trees
     monkeypatch.chdir(subagent)
 
@@ -513,6 +514,38 @@ def test_the_spawning_session_itself_is_left_alone(two_trees, monkeypatch):
     logsetup.rebind_own_tree({"SHIPIT_LOG_CTX_TREE": str(coordinator)})
 
     assert "agent" not in structlog.contextvars.get_contextvars()
+
+
+def test_a_run_that_cds_into_the_inherited_tree_keeps_the_spawners_identity(
+    two_trees, monkeypatch
+):
+    """The Tree, not the actor: a Run working in the inherited Tree reads as its spawner."""
+    coordinator, _subagent = two_trees
+    monkeypatch.chdir(coordinator)
+
+    logsetup.rebind_own_tree({"SHIPIT_LOG_CTX_TREE": str(coordinator)})
+
+    assert structlog.contextvars.get_contextvars() == {}
+
+
+def test_a_run_that_cds_into_a_third_tree_takes_that_trees_identity(
+    two_trees, monkeypatch, tmp_path
+):
+    """Also the Tree, not the actor: the record names where the command ran."""
+    coordinator, _subagent = two_trees
+    third = (
+        tmp_path
+        / "trees"
+        / "shipit-claude-20260728-101010-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    )
+    third.mkdir(parents=True)
+    monkeypatch.chdir(third)
+
+    logsetup.rebind_own_tree({"SHIPIT_LOG_CTX_TREE": str(coordinator)})
+
+    bound = structlog.contextvars.get_contextvars()
+    assert bound["tree"] == str(third)
+    assert bound["agent"] == "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 
 
 @pytest.mark.parametrize("env", [{}, {"SHIPIT_LOG_CTX_TREE": ""}])

@@ -156,7 +156,7 @@ def _subagent_payload(tmp_path):
 def test_subagent_hand_back_warns_when_the_launch_checkout_is_dirty(
     state_dir, tmp_path, monkeypatch, caplog
 ):
-    """The only signal a format-clean cross-Tree write leaves (#1179): report it, never refuse."""
+    """The only signal a format-clean cross-Tree write leaves: report it, never refuse."""
     monkeypatch.setattr(
         git, "status_porcelain", lambda *, cwd: [" M src/shipit/git.py", "?? notes.md"]
     )
@@ -192,6 +192,25 @@ def test_a_clean_launch_checkout_is_silent(state_dir, tmp_path, caplog):
     assert len(_records(state_dir)) == 1
 
 
+def test_a_failing_eval_record_still_leaves_the_hand_back_report(
+    state_dir, tmp_path, monkeypatch, caplog
+):
+    """The probe reports that something went wrong, so an unrelated eval failure must not silence it."""
+    monkeypatch.setattr(
+        git, "status_porcelain", lambda *, cwd: [" M src/shipit/git.py"]
+    )
+    monkeypatch.setattr(
+        "shipit.verbs.hook.eval.append_record",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("store unwritable")),
+    )
+    with caplog.at_level(logging.WARNING, logger="shipit.hook"):
+        assert run(stdin=io.StringIO(_subagent_payload(tmp_path))) == 0
+
+    messages = "\n".join(r.getMessage() for r in caplog.records)
+    assert "uncommitted path(s)" in messages
+    assert _records(state_dir) == []
+
+
 def test_an_unreadable_launch_checkout_still_writes_the_record(
     state_dir, tmp_path, monkeypatch, caplog
 ):
@@ -211,7 +230,7 @@ def test_an_unreadable_launch_checkout_still_writes_the_record(
 def test_the_coordinators_own_stop_does_not_run_the_probe(
     state_dir, tmp_path, monkeypatch, caplog
 ):
-    """A coordinator's Stop already reports its own worktree as `exit_hygiene`; the probe is about a Run handing back."""
+    """A coordinator's Stop already reports its own worktree as `exit_hygiene`."""
     monkeypatch.setattr(
         git, "status_porcelain", lambda *, cwd: [" M src/shipit/git.py"]
     )
