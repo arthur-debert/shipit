@@ -1,5 +1,9 @@
 # Collapse cross-repo artifacts to conda-direct
 
+> **Status:** transport realization superseded by
+> [ADR-0085](0085-artifact-transport-gh-release-assets.md) (GH Release assets);
+> the invariants and the pin-governance handoff below stand.
+
 ADR-0064 built the Artifact channel — a downstream repo consumes another repo's
 released build artifacts as version-pinned conda dependencies. In practice,
 getting one artifact produced and consumed has cost three sessions and ~8M
