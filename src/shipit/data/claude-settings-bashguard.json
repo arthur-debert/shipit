@@ -5,5 +5,5 @@
       "type": "command"
     }
   ],
-  "matcher": "Bash|Agent"
+  "matcher": "Bash|Agent|EnterWorktree"
 }

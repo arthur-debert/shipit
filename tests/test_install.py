@@ -1699,6 +1699,48 @@ def test_each_pretooluse_matcher_routes_the_tools_its_wrapper_is_right_for():
         ).permission
         is policy.Permission.DENY
     )
+    assert (
+        policy.decide_worktree(policy.ToolCall("EnterWorktree")).permission
+        is policy.Permission.DENY
+    )
+
+
+def test_every_guarded_claude_tool_is_reached_by_a_managed_matcher():
+    """A rule whose tool no matcher names is dead code — the wiring bug #1182 exists to close.
+
+    The pure-verdict tests cannot catch it: they call the decider directly,
+    bypassing the matcher that decides whether it ever runs.
+    """
+    from shipit.harness import policy
+
+    units = {u.key: u for u in iunits.load_units()}
+    routed: set[str] = set()
+    for key in (iunits.SETTINGS_KEY, iunits.SETTINGS_BASHGUARD_KEY):
+        matcher = json.loads(units[key].desired_inner())["matcher"]
+        routed |= {alt.strip().lower() for alt in _matcher_alternatives(matcher)}
+
+    unreachable = policy.CLAUDE_GUARDED_TOOLS - routed
+    assert not unreachable, (
+        f"deny rules exist for {sorted(unreachable)} but no managed PreToolUse "
+        f"matcher routes them, so those rules can never run (routed: {sorted(routed)})"
+    )
+
+
+def test_the_guarded_tool_set_is_exactly_what_the_deciders_fire_on():
+    """Keeps `CLAUDE_GUARDED_TOOLS` — what the reachability test asserts against — from drifting from the rules."""
+    from shipit.harness import policy
+
+    denied_by = {
+        "bash": policy.ToolCall("Bash", command="git worktree add ../t b"),
+        "enterworktree": policy.ToolCall("EnterWorktree"),
+        "agent": policy.tool_call(
+            {"tool_name": "Agent", "tool_input": {"subagent_type": "implementer"}}
+        ),
+    }
+    assert set(denied_by) == policy.CLAUDE_GUARDED_TOOLS
+    for tool, call in denied_by.items():
+        verdicts = (policy.decide_worktree(call), policy.decide_spawn_isolation(call))
+        assert any(v.permission is policy.Permission.DENY for v in verdicts), tool
 
 
 def test_the_codex_pretooluse_entry_stays_matcherless_and_total():
@@ -2070,7 +2112,7 @@ def test_managed_bashguard_hook_keeps_pixi_run_and_fails_open(tmp_path, rec):
     assert unit.event == iunits.EVENT_PRETOOLUSE
     assert unit.marker == iunits.SETTINGS_BASHGUARD_MARKER
     entry = json.loads(unit.desired_inner())
-    assert entry["matcher"] == "Bash|Agent"
+    assert entry["matcher"] == "Bash|Agent|EnterWorktree"
     command = entry["hooks"][0]["command"]
     assert command == managed_bashguard_hook_command()
     assert "pixi run" in command

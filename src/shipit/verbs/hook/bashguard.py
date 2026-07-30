@@ -12,5 +12,5 @@ from .pretooluse import run
 
 @click.command(name="bashguard")
 def cmd() -> None:
-    """Decide a `Bash`/`Agent` tool call: deny native-worktree creation or an un-isolated Tree-backed spawn, else allow."""
+    """Decide a `Bash`/`Agent`/`EnterWorktree` tool call: deny native-worktree use or an un-isolated Tree-backed spawn, else allow."""
     raise SystemExit(run())

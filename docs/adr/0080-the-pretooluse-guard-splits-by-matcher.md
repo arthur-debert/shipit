@@ -9,11 +9,11 @@
 > and instantiates ADR-0014 and ADR-0047 by making their rules reachable.
 
 The managed matcher was `Edit|Write|MultiEdit|NotebookEdit`, so on the Claude
-path `Bash` and `Agent` calls never reached the guard at all. Two rules written
-to enforce ADR-0014 — `git worktree add` and `EnterWorktree` — were therefore
-dead code, and the mandatory-isolation rule ADR-0047's registry makes possible
-had nowhere to run. Widening the matcher raises the question ADR-0038 answered
-for edits: what happens when the guard cannot run?
+path no `Bash`, `Agent` or `EnterWorktree` call ever reached the guard. Two rules
+written to enforce ADR-0014 — `git worktree add` and `EnterWorktree` — were
+therefore dead code, and the mandatory-isolation rule ADR-0047's registry makes
+possible had nowhere to run. Widening the matcher raises the question ADR-0038
+answered for edits: what happens when the guard cannot run?
 
 ## Decision
 
@@ -23,7 +23,7 @@ matcher does the discrimination:
 | matcher | command | on `rc != 0` |
 | --- | --- | --- |
 | `Edit\|Write\|MultiEdit\|NotebookEdit` | `shipit hook pretooluse` | `exit 2` — refuse (ADR-0038, verbatim) |
-| `Bash\|Agent` | `shipit hook bashguard` | `exit 0` — allow, with a message on stderr |
+| `Bash\|Agent\|EnterWorktree` | `shipit hook bashguard` | `exit 0` — allow, with a message on stderr |
 
 Both run the same total decider; `bashguard` exists as a second name only
 because the install marker (`SETTINGS_HOOK_MARKER`) is matched as a **substring
@@ -56,9 +56,38 @@ availability.
    dissociated clones, not git worktrees.
 2. **Mandatory isolation (ADR-0047)**: an `Agent` spawn whose `subagent_type`
    resolves to a Role whose profile is `tree_backed` is refused when
-   `isolation` is absent from `tool_input`. The rule reads the `roleprofile`
-   registry, so `explorer` (`AmbientWorkingDir` — no Tree, ever) passes by
-   construction and needs no exception.
+   `isolation` is absent from `tool_input` (or present but blank — a blank
+   value is not a value). Any non-blank value counts as isolated: which
+   isolation modes exist is the harness's business, not shipit's. The rule
+   reads the `roleprofile` registry, so `explorer` (`AmbientWorkingDir` — no
+   Tree, ever) passes by construction and needs no exception.
+
+### A rule is only as live as the matcher that routes it
+
+**The matcher is part of the rule.** A deny rule whose tool name no managed
+matcher lists is dead code no matter how correct its logic, and a pure-verdict
+unit test cannot detect that — it calls the decider directly, bypassing the
+matcher that decides whether the decider ever runs. This ADR's first draft
+shipped exactly that bug: it widened the matcher to `Bash|Agent` and claimed
+`EnterWorktree` was now enforced, while `EnterWorktree` matched neither pattern
+and stayed unreachable. So the tool names the rules fire on are declared as data
+(`policy.CLAUDE_GUARDED_TOOLS`) and a wiring-level test asserts the managed
+matchers cover that whole set.
+
+`EnterWorktree` is routed by the matcher and denied by the decider; **whether
+Claude Code emits a `PreToolUse` event for it at all is not established here.**
+Listing it costs nothing if no event ever arrives, but this ADR does not claim
+observed enforcement for that tool — only for `Bash` and `Agent`, both of which
+were verified end-to-end against the checked-in wrapper commands.
+
+### Enforcement reaches the session CC was launched in, not every Tree
+
+A subagent launched with `isolation` gets its own Tree as cwd, but its Claude
+Code process resolves `.claude/settings.json` from the **project it was launched
+from** — the coordinator's checkout — not from its Tree. So these entries are
+live for a Run only once they are installed in that project. Observed while
+verifying this change: a `git worktree add` issued from an isolated subagent
+whose Tree carried the new entry was not denied.
 
 The isolation rule covers shipit's five roles only. `subagent_type` is
 frequently *not* a shipit role — `general-purpose`, `claude`, `Explore`,
@@ -101,24 +130,25 @@ So the tool-name registry gains a `_SHELL_TOOLS` set — the same shape
 `_EDIT_TOOLS` already uses to carry codex's `apply_patch` alongside Claude
 Code's `Edit` — and the payload projection reads either command key.
 
-The codex entry keeps **no matcher and `exit 2`**, unchanged. Splitting it the
-same way would mean introducing a matcher on the entry that guards codex edits,
-and codex only honours a project `hooks.json` whose `trusted_hash` was granted
-interactively in its TUI — which cannot be minted non-interactively, so codex
-matcher behaviour could not be verified here. A wrong matcher on that entry
-would silently disable the codex coordinator edit guard: the #529 failure again.
-Leaving it matcherless keeps it a total decider, which is strictly safer, and it
-already gains the real fix above. The codex path therefore still carries the
-fail-closed-on-shell exposure this ADR rejects for Claude Code; splitting it
-once codex matcher semantics can be verified is the follow-up.
+The codex entry keeps **no matcher and `exit 2`**, unchanged: matcherless keeps
+it a total decider, which is strictly safer, and it already gains the fix above.
+Splitting it would mean putting a matcher on the entry that guards codex *edits*,
+and a wrong one there would silently disable the codex coordinator edit guard —
+the #529 failure again. The codex path therefore still carries the
+fail-closed-on-shell exposure this ADR rejects for Claude Code. **That remainder,
+and the trust-hash blocker that prevented verifying codex matcher behaviour, are
+tracked in #1186.**
 
 ## Consequences
 
-- ADR-0014's two deny rules and ADR-0047's isolation requirement are reachable
-  and enforced on the Claude path for the first time.
+- ADR-0014's two deny rules and ADR-0047's isolation requirement are routed by a
+  matcher and enforced on the Claude path for the first time — verified
+  end-to-end for `Bash` and `Agent`, routed but not observed for
+  `EnterWorktree`, and only in the project Claude Code was launched from.
 - The edit guard's contract is untouched: same matcher, same command, same
   `exit 2`, same sha.
-- Every Bash and Agent call now pays one guard invocation (~0.3s warm).
+- Every Bash, Agent and EnterWorktree call now pays one guard invocation
+  (~0.3s warm).
 - `payload["cwd"]` is read and threaded into the deny path, so a rule that needs
   to compare the caller's checkout against a path has the field available.
 - Two managed units now share one event on one file, distinguished by `key` and

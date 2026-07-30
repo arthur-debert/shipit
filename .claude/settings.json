@@ -29,7 +29,7 @@
         ]
       },
       {
-        "matcher": "Bash|Agent",
+        "matcher": "Bash|Agent|EnterWorktree",
         "hooks": [
           {
             "type": "command",

@@ -35,19 +35,26 @@ _EDIT_TOOLS = frozenset(
     }
 )
 
-#: Tool names that EXECUTE a shell command — Claude Code's `Bash` plus codex's
-#: builtin shell tools — matched case-insensitively.
-_SHELL_TOOLS = frozenset(
-    {
-        "bash",
-        "exec_command",
-        "shell",
-        "unified_exec",
-    }
-)
+#: Claude Code's shell tool. Split from codex's because the managed
+#: `PreToolUse` matcher that must route them is per-harness.
+_CLAUDE_SHELL_TOOLS = frozenset({"bash"})
+
+#: codex's builtin shell tools (codex-cli 0.146.0).
+_CODEX_SHELL_TOOLS = frozenset({"exec_command", "shell", "unified_exec"})
+
+#: Tool names that EXECUTE a shell command, matched case-insensitively.
+_SHELL_TOOLS = _CLAUDE_SHELL_TOOLS | _CODEX_SHELL_TOOLS
 
 #: Tool names that SPAWN a subagent, matched case-insensitively.
 _SPAWN_TOOLS = frozenset({"agent"})
+
+#: Tool names that ENTER a native git worktree, matched case-insensitively.
+_WORKTREE_TOOLS = frozenset({"enterworktree"})
+
+#: Every Claude Code tool a deny rule can fire on. A managed `PreToolUse` matcher
+#: must cover this whole set, or the rule behind the uncovered name is
+#: unreachable — the defect #1182 exists to close.
+CLAUDE_GUARDED_TOOLS = _CLAUDE_SHELL_TOOLS | _SPAWN_TOOLS | _WORKTREE_TOOLS
 
 #: The `tool_input` keys a shell tool puts its command under: `command` (Claude
 #: Code), `cmd` (codex).
@@ -76,7 +83,9 @@ class ToolCall:
     command: str = ""
     cwd: str = ""
     subagent_type: str = ""
-    #: ``None`` when the spawn omitted `isolation` — the absence the spawn rule fires on.
+    #: ``None`` when the spawn omitted `isolation` or passed it blank — the
+    #: absence the spawn rule fires on. Any non-blank value counts as isolated:
+    #: the harness, not shipit, decides which isolation modes are valid.
     isolation: str | None = None
 
     @property
@@ -93,13 +102,13 @@ def tool_call(payload: Mapping[str, object]) -> ToolCall:
         (str(fields[key]) for key in _COMMAND_KEYS if fields.get(key)),
         "",
     )
-    isolation = fields.get("isolation")
+    isolation = str(fields.get("isolation") or "").strip()
     return ToolCall(
         tool_name=str(payload.get("tool_name") or ""),
         command=command,
         cwd=str(payload.get("cwd") or ""),
         subagent_type=str(fields.get("subagent_type") or ""),
-        isolation=None if isolation is None else str(isolation),
+        isolation=isolation or None,
     )
 
 
@@ -127,15 +136,19 @@ WORKTREE_DENY_REASON = (
 
 _GIT_WORKTREE_ADD_FALLBACK = re.compile(r"\bgit\s+worktree\s+add\b")
 
-#: With `punctuation_chars=True` shlex emits runs of these as standalone tokens.
-_SHELL_SEPARATOR_CHARS = frozenset("();<>|&")
+#: Characters shlex emits as standalone tokens, which therefore end a command
+#: segment. An unquoted newline separates commands exactly as `;` does, so it is
+#: here: without it a leading command swallows the rest of a multiline payload
+#: into one segment and only that command is ever inspected.
+_SHELL_PUNCTUATION = "();<>|&\n\r"
+_SHELL_SEPARATOR_CHARS = frozenset(_SHELL_PUNCTUATION)
 
 #: git global options taking a SEPARATE argument token, which consumes the next token.
 _GIT_OPTS_WITH_ARG = frozenset({"-C", "-c"})
 
 
 def _matches_enter_worktree(call: ToolCall) -> bool:
-    return call.tool == "enterworktree"
+    return call.tool in _WORKTREE_TOOLS
 
 
 def _segment_runs_worktree_add(tokens: list[str]) -> bool:
@@ -157,8 +170,12 @@ def _segment_runs_worktree_add(tokens: list[str]) -> bool:
 def _runs_git_worktree_add(command: str) -> bool:
     """True iff a Bash `command` actually EXECUTES `git worktree add`, not merely names it."""
     try:
-        lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=_SHELL_PUNCTUATION)
         lexer.whitespace_split = True
+        # Newlines must reach the token stream as punctuation, so drop them from
+        # the whitespace shlex silently discards. shlex still owns quoting, so a
+        # newline INSIDE quotes stays part of its token and separates nothing.
+        lexer.whitespace = lexer.whitespace.replace("\n", "").replace("\r", "")
         tokens = list(lexer)
     except ValueError:
         return _GIT_WORKTREE_ADD_FALLBACK.search(command) is not None

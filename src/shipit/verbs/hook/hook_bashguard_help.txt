@@ -7,3 +7,6 @@ this one allows it. Its human meaning is Tree hygiene: `git worktree add` and
 `EnterWorktree` are refused (Trees are dissociated clones, not worktrees), and a
 subagent spawn for a role that requires its own Tree is refused unless it passes
 `isolation`. Malformed input fails open so a broken hook does not strand the user.
+
+It decides whatever payload it is handed; which tool calls reach it is the host
+matcher's job, so a rule is only live for the tools that matcher names.

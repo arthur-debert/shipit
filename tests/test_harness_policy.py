@@ -131,6 +131,18 @@ def test_is_edit_tool(tool, expected):
         ("exec_command", "git status", Permission.ALLOW),
         ("shell", "git worktree add ../t b", Permission.DENY),
         ("unified_exec", "git worktree add ../t b", Permission.DENY),
+        # An unquoted newline separates commands, so a leading command must not
+        # hide what follows it.
+        ("Bash", "git status\ngit worktree add ../t b", Permission.DENY),
+        ("Bash", "echo hi\r\ngit worktree add ../t b", Permission.DENY),
+        ("Bash", "ls\n\ngit worktree add ../t b", Permission.DENY),
+        ("Bash", "git worktree add ../t b\nls", Permission.DENY),
+        # A newline INSIDE quotes is data, not a separator.
+        ("Bash", 'echo "hi\ngit worktree add ../t b"', Permission.ALLOW),
+        ("Bash", "printf 'x\ngit worktree add ../t b'", Permission.ALLOW),
+        # A backslash continuation is ONE command — `git status git worktree
+        # add …` — which adds no worktree.
+        ("Bash", "git status \\\ngit worktree add ../t b", Permission.ALLOW),
     ],
 )
 def test_decide_worktree_matrix(tool_name, command, expected):
@@ -151,6 +163,27 @@ def test_worktree_deny_carries_the_redirect_reason():
 def test_worktree_allow_carries_no_reason():
     assert decide_worktree(ToolCall("Bash", command="git status")).reason == ""
     assert decide_worktree(ToolCall("Bash", command="git worktree list")).reason == ""
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\t\n"])
+def test_tool_call_reads_a_blank_isolation_as_absent(blank):
+    call = tool_call(
+        {
+            "tool_name": "Agent",
+            "tool_input": {"subagent_type": "implementer", "isolation": blank},
+        }
+    )
+    assert call.isolation is None
+
+
+def test_tool_call_keeps_a_non_blank_isolation_verbatim():
+    call = tool_call(
+        {
+            "tool_name": "Agent",
+            "tool_input": {"subagent_type": "implementer", "isolation": " worktree "},
+        }
+    )
+    assert call.isolation == "worktree"
 
 
 def test_tool_call_reads_the_payload_cwd():
@@ -199,7 +232,13 @@ def test_tool_call_reads_absent_and_malformed_fields_as_absent(payload):
         ("coordinator", None, Permission.DENY),
         ("  Implementer  ", None, Permission.DENY),
         ("implementer", "worktree", Permission.ALLOW),
+        # Any non-blank value is isolated: which modes are valid is the harness's
+        # call, not shipit's.
         ("implementer", "remote", Permission.ALLOW),
+        # ...but a blank one is not a value at all.
+        ("implementer", "", Permission.DENY),
+        ("implementer", "   ", Permission.DENY),
+        ("implementer", "\t\n", Permission.DENY),
         # `explorer` runs in the ambient WorkingDir — no Tree, so nothing to isolate.
         ("explorer", None, Permission.ALLOW),
         # Not shipit roles: they resolve to no RoleProfile and cannot be gated.

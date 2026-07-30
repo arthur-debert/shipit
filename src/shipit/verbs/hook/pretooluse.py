@@ -31,18 +31,20 @@ logger = logging.getLogger("shipit.hook")
 
 @click.command(name="pretooluse")
 def cmd() -> None:
-    """Decide a `PreToolUse` tool call: deny a coordinator code edit, else allow."""
+    """Decide a `PreToolUse` tool call: deny a guarded worktree or spawn operation, or a coordinator code edit; else allow."""
     raise SystemExit(run())
 
 
 def run(stdin: TextIO | None = None, stdout: TextIO | None = None) -> int:
     """Returns 0 always — fail-open: an undecidable call is never denied."""
     out = stdout if stdout is not None else sys.stdout
+    cwd = ""
     try:
         raw = (stdin if stdin is not None else sys.stdin).read()
         payload = json.loads(raw)
         call = tool_call(payload)
         tool_name = call.tool_name
+        cwd = call.cwd
         for boundary in (decide_worktree(call), decide_spawn_isolation(call)):
             if boundary.permission is Permission.DENY:
                 logger.debug(
@@ -78,7 +80,9 @@ def run(stdin: TextIO | None = None, stdout: TextIO | None = None) -> int:
 
     if decision.permission is Permission.DENY:
         logger.debug(
-            "pretooluse DENY: role=coordinator op=edit reason=%r", decision.reason
+            "pretooluse DENY: role=coordinator op=edit cwd=%s reason=%r",
+            cwd,
+            decision.reason,
         )
         _emit_deny(decision.reason, out)
     return 0
