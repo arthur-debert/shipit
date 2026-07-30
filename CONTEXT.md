@@ -338,6 +338,48 @@ The user-facing summary of a Role's checkout family: session, write, read-only, 
 The resolved execution context shipit uses for work: a WorkingDir, optional Tree provenance, Checkout strategy, optional pixi Activation and EnvIdentity, and an execution-routing decision. Work Env describes where and with which activation work runs; Exec, pixi, Tool adapters, Tree provisioning, CI, and fleet code remain the executors and owners of their existing mechanisms.
 _Avoid_: "workspace", "working tree", "sandbox".
 
+### Substrate
+
+**Substrate**:
+The isolated environment in which a Repo's tasks execute: a container by default, with the code mounted from the host. The host edits; the Substrate runs. CI legs and local dev loops use the same Substrate model.
+_Avoid_: assuming host-installed toolchains; treating the host machine as the execution environment.
+
+**Mac exception**:
+The scoped carve-out from the Substrate for execution that must run natively on macOS: locally launching a GUI app, and CI signing/notarization legs. Deliberately licensed to use cruder pinning than the Substrate because its blast radius is a few repos' inner dev loop.
+_Avoid_: "exception lane" (Lane is a CI verification term); accumulating general machinery here.
+
+### Standardization
+
+**Component**:
+A reusable unit of repo composition: a toolchain, a dir layout at a declared mount point, and the task implementations it brings. A repo is a composition of Components under one Task contract.
+_Avoid_: treating the repo as the unit of tooling; inventing a per-repo variant where a Component fits.
+
+**Task contract**:
+The fleet-wide contract for one standard verb (lint, test, build, release): shared setup, invocation, and machine-readable result shape, with per-Component implementations. Human-facing output formats are presentation overrides, never a second machine contract.
+_Avoid_: verb names as loose convention; per-repo result formats.
+
+**Master task**:
+The repo-level task that composes Component tasks into the repo outcome. Single-component repos pass through to their one Component.
+
+**Profile**:
+The prescribed shape of a repo of its kind: a composition of Components, Menu selections, and registered contributions. Adoption state is a computable diff from Profile, not a judgment call.
+_Avoid_: conflating with Creation profile (the repo-birth machinery; folding the two is a documented follow-up, not an assumption).
+
+**Owned surface**:
+The operations shipit owns fleet-wide — provision, lint, build, release, CI plumbing. Strictly enforced and identical across repos; no local variation.
+_Avoid_: advisory or best-effort enforcement language.
+
+**Extension point**:
+A shipit-defined interface at a declared seam where a project contributes an implementation, from a shell script to a registered plugin — always invoked inside shipit's contract, never a bypass. A contribution that grows past a threshold graduates into a Menu item or is removed.
+_Avoid_: "workaround", "escape hatch" as free-form bypasses; anything neither Owned surface nor a registered contribution is a violation.
+
+**Menu**:
+The registry of sanctioned options a repo selects from: CI runners, image layers, e2e harnesses. Selecting from the Menu is not variation; going off-menu is.
+
+**Canary instance**:
+A generated consumer repo materializing one Profile — created from its creation profile, running the full shipit-managed surface in CI. It exists to fail a bad shipit release before the fleet sees it; an instance that cannot fail does not count.
+_Avoid_: hand-maintained canaries; modeling fleet entropy instead of Profiles.
+
 ### Build & Release
 
 **Creation profile**:
@@ -379,8 +421,8 @@ _Avoid_: "channel".
 The boundary that knows how to publish to one Distribution endpoint. Adding an endpoint means adding an adapter, not changing release orchestration.
 
 **Artifact channel**:
-The portfolio's durable, versioned store of published Artifacts that downstream repos consume in artifact-pinned mode. It is realized as per-repo conda channels hosted in dedicated object-storage buckets, with a public-authless tier for open artifacts and a private-authenticated tier for closed ones, so a downstream declares an Artifact as an ordinary versioned dependency and a pin bump re-resolves against it. Permanent and release-scoped, unlike an ephemeral CI job artifact that only chains one workflow run's jobs.
-_Avoid_: "forge" (conda-forge is the upstream community channel, not this); "cache" or "sccache bucket" (a different store with a different lifecycle); "CI artifact" (those are ephemeral).
+The durable, per-producer store of published Artifacts that downstream repos consume in artifact-pinned mode. Its defining invariants, not its transport, are the concept: the location is derived from the producer Repo (never typed by hand), the version is stated in exactly one consumer-owned place, and integrity is verified at fetch time so a wrong name or version fails locally. Permanent and release-scoped, unlike an ephemeral CI job artifact that only chains one workflow run's jobs.
+_Avoid_: defining it by its current realization (conda channels; the target realization is the producer's GH Release assets under standardized naming); "cache" or "sccache bucket"; "CI artifact".
 
 **Content-key**:
 The identity shipit uses for build-once reuse of an Artifact, derived from the inputs that determine that Artifact. It is more than a cache bucket.
@@ -396,10 +438,6 @@ The breadth of a lane run: thin for a path-diff-minimal run, full for all releva
 **Release**:
 A repo-level versioned event that publishes the repo's Artifact set to its Distribution endpoints. Client artifacts are released rather than deployed.
 _Avoid_: "deploy".
-
-**Cascade**:
-The cross-repo update flow fired by an upstream's release that keeps its downstreams current, its effect set by each downstream's Dependency mode. An artifact-pinned downstream is found by deriving the target set from which repos declare an artifact-pin on the upstream, and gets a version-bump PR pinning the newer released version from the Artifact channel; a source-pinned downstream is a producer-declared target and gets a rebuild. One push, two effects.
-_Avoid_: "trigger chain", "webhook chain"; treating the artifact-pinned target set as producer-declared rather than derived.
 
 **Dependency mode**:
 How a downstream consumes an upstream: source-pinned rebuilds from a ref or version, while artifact-pinned fetches a released Artifact by version.
