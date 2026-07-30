@@ -5,9 +5,15 @@ import json
 import logging
 
 import pytest
+from click.testing import CliRunner
 
 from shipit.harness import breakglass
-from shipit.harness.policy import COORDINATOR_DENY_REASON, WORKTREE_DENY_REASON
+from shipit.harness.policy import (
+    COORDINATOR_DENY_REASON,
+    SPAWN_ISOLATION_DENY_REASON,
+    WORKTREE_DENY_REASON,
+)
+from shipit.verbs.hook import bashguard, hook, pretooluse
 from shipit.verbs.hook.pretooluse import run
 
 
@@ -325,6 +331,89 @@ def test_ordinary_git_bash_is_allowed_silently(command):
     code, out = _run(payload)
     assert code == 0
     assert out == ""
+
+
+def test_codex_shell_git_worktree_add_is_denied():
+    payload = json.dumps(
+        {
+            "tool_name": "exec_command",
+            "cwd": "/repo",
+            "tool_input": {"cmd": "git worktree add ../t b", "workdir": "/repo"},
+        }
+    )
+    code, out = _run(payload)
+    assert code == 0
+    decision = json.loads(out)["hookSpecificOutput"]
+    assert decision["permissionDecisionReason"] == WORKTREE_DENY_REASON
+
+
+def test_un_isolated_tree_backed_spawn_is_denied():
+    payload = json.dumps(
+        {
+            "tool_name": "Agent",
+            "cwd": "/trees/coordinator",
+            "tool_input": {
+                "description": "d",
+                "prompt": "p",
+                "subagent_type": "implementer",
+            },
+        }
+    )
+    code, out = _run(payload)
+    assert code == 0
+    decision = json.loads(out)["hookSpecificOutput"]
+    assert decision["permissionDecision"] == "deny"
+    assert decision["permissionDecisionReason"] == SPAWN_ISOLATION_DENY_REASON
+
+
+@pytest.mark.parametrize(
+    "tool_input",
+    [
+        {"subagent_type": "implementer", "isolation": "worktree"},
+        {"subagent_type": "explorer"},
+        {"subagent_type": "fork"},
+        {"subagent_type": "general-purpose"},
+        {"subagent_type": "claude"},
+        {"subagent_type": "Explore"},
+        {"subagent_type": "Plan"},
+        {},
+    ],
+)
+def test_allowable_spawns_are_allowed_silently(tool_input):
+    payload = json.dumps({"tool_name": "Agent", "tool_input": tool_input})
+    code, out = _run(payload)
+    assert code == 0
+    assert out == ""
+
+
+def test_the_deny_log_line_carries_the_callers_cwd(caplog):
+    payload = json.dumps(
+        {
+            "tool_name": "Agent",
+            "cwd": "/trees/coordinator",
+            "tool_input": {"subagent_type": "implementer"},
+        }
+    )
+    with caplog.at_level(logging.DEBUG, logger="shipit.hook"):
+        _run(payload)
+    assert "/trees/coordinator" in caplog.text
+
+
+def test_bashguard_is_the_same_decider_under_a_second_name():
+    """The two verbs differ only in name, so the host can wire two failure modes."""
+    assert bashguard.run is pretooluse.run
+    assert hook.commands["bashguard"] is bashguard.cmd
+    assert hook.commands["pretooluse"] is pretooluse.cmd
+
+
+def test_bashguard_denies_an_un_isolated_spawn_through_the_cli():
+    payload = json.dumps(
+        {"tool_name": "Agent", "tool_input": {"subagent_type": "implementer"}}
+    )
+    result = CliRunner().invoke(bashguard.cmd, [], input=payload)
+    assert result.exit_code == 0
+    decision = json.loads(result.stdout)["hookSpecificOutput"]
+    assert decision["permissionDecisionReason"] == SPAWN_ISOLATION_DENY_REASON
 
 
 def test_break_glass_permits_the_edit_and_logs_it(monkeypatch, caplog):

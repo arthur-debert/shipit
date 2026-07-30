@@ -82,6 +82,25 @@ def managed_pretooluse_hook_command() -> str:
     )
 
 
+def managed_bashguard_hook_command() -> str:
+    return (
+        f'{LOCAL_BIN_PATH_LEG}cd "$CLAUDE_PROJECT_DIR" && pixi run --manifest-path '
+        '"$CLAUDE_PROJECT_DIR"/pixi.toml -- ./bin/shipit hook bashguard; '
+        "rc=$?; "
+        'if [ "$rc" -ne 0 ]; then echo "shipit: PreToolUse Bash/Agent guard could '
+        "not run (rc=$rc) — ALLOWING the call. This guard is advisory: it enforces "
+        "Tree hygiene (no native git worktree, no un-isolated spawn of a Tree-backed "
+        "role), and refusing every shell command would leave the session unable to "
+        "run the commands that repair it. The edit guard is a separate entry and "
+        "still refuses. Likely causes: CLAUDE_PROJECT_DIR is unset or not a shipit "
+        "checkout (the cd failed), pixi is not installed, or the pinned shipit "
+        "environment could not be resolved. Install pixi (https://pixi.sh) if it is "
+        "missing, then run this command from the project to see the underlying "
+        'error: pixi run --manifest-path \\"\\$CLAUDE_PROJECT_DIR\\"/pixi.toml -- '
+        './bin/shipit hook bashguard" >&2; exit 0; fi'
+    )
+
+
 @pytest.fixture
 def context():
     return load_context

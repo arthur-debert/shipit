@@ -122,6 +122,19 @@ def test_delegates_code_authorship_is_the_capability_shaped_edit_guard():
         assert not roleprofile.delegates_code_authorship(role)
 
 
+def test_tree_backed_is_the_mandatory_isolation_input():
+    """The spawn guard reads `tree_backed`, so `explorer` must be the ONE role that passes by construction."""
+    exempt = {r for r in Role if not profile_for(r).checkout.tree_backed}
+    assert exempt == {Role.EXPLORER}
+
+
+@pytest.mark.parametrize("bogus", ["fork", "general-purpose", "claude", "Explore"])
+def test_harness_native_subagent_types_are_not_registry_roles(bogus):
+    """The spawn guard cannot gate what resolves to no profile, so these must stay unparseable."""
+    with pytest.raises(RoleValidationError):
+        parse_role(bogus)
+
+
 def test_explorer_posture_is_read_scoped():
     posture = profile_for(Role.EXPLORER).enforcement
     assert posture.command_execution

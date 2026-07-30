@@ -116,6 +116,7 @@ agent-start = "sha256:70a2f96788eecbd689412d428a3615193edcd1deaccc730e6976332c61
 ".claude/agents/shepherd.md" = "sha256:3b2ed72a14da511ed264f81596039c86e99d1103cf9e03faf4482bd89c52f5f9"
 ".agents/agents/reviewer/agent.md" = "sha256:38d3d1265d8cf912652570932d0e59f867c71ad80b7c7e0a9fbbb55316c6cca5"
 ".claude/settings.json#shipit-pretooluse-hook" = "sha256:329d1ef1631ac5217473702961c4213a36f6de10873e2a2500731ff003f58c9a"
+".claude/settings.json#shipit-bashguard-hook" = "sha256:cb0064fc652b3b262a7099ec5351237954233c89298cb24d2199fb3834c23951"
 ".claude/settings.json#shipit-stop-hook" = "sha256:f01a445a58731cca9cfa67032780749aed3ece69afa0cec813c1a522cf25ce8f"
 ".claude/settings.json#shipit-subagentstop-hook" = "sha256:48cf4d9e66102fe17d1f5cdd93b0fccef89547e32eb737ad519d809f5cf2b644"
 ".claude/settings.json#shipit-sessionstart-hook" = "sha256:310768c7cdb63d1e9419405272cbcc0553a417f03d3657e544c5a246bd663167"

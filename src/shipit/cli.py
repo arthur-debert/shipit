@@ -266,6 +266,7 @@ _HELP_RESOURCES = {
     ("review", "validate"): ("shipit.verbs", "review_validate_help.txt"),
     ("hook",): ("shipit.verbs.hook", "hook_help.txt"),
     ("hook", "pretooluse"): ("shipit.verbs.hook", "hook_pretooluse_help.txt"),
+    ("hook", "bashguard"): ("shipit.verbs.hook", "hook_bashguard_help.txt"),
     ("hook", "stop"): ("shipit.verbs.hook", "hook_stop_help.txt"),
     ("hook", "subagent-stop"): ("shipit.verbs.hook", "hook_subagent_stop_help.txt"),
     ("hook", "sessionstart"): ("shipit.verbs.hook", "hook_sessionstart_help.txt"),

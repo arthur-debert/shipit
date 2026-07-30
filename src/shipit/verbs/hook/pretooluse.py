@@ -19,8 +19,10 @@ from ...harness.policy import (
     Decision,
     Permission,
     decide,
+    decide_spawn_isolation,
     decide_worktree,
     is_edit_tool,
+    tool_call,
 )
 from ...harness.role import resolve_role
 
@@ -29,24 +31,30 @@ logger = logging.getLogger("shipit.hook")
 
 @click.command(name="pretooluse")
 def cmd() -> None:
-    """Decide a `PreToolUse` tool call: deny a coordinator code edit, else allow."""
+    """Decide a `PreToolUse` tool call: deny a guarded worktree or spawn operation, or a coordinator code edit; else allow."""
     raise SystemExit(run())
 
 
 def run(stdin: TextIO | None = None, stdout: TextIO | None = None) -> int:
     """Returns 0 always — fail-open: an undecidable call is never denied."""
     out = stdout if stdout is not None else sys.stdout
+    cwd = ""
     try:
         raw = (stdin if stdin is not None else sys.stdin).read()
         payload = json.loads(raw)
-        tool_name = str(payload.get("tool_name", ""))
-        worktree = decide_worktree(
-            tool_name, _extract_command(payload.get("tool_input"))
-        )
-        if worktree.permission is Permission.DENY:
-            logger.debug("pretooluse DENY: native worktree blocked tool=%s", tool_name)
-            _emit_deny(worktree.reason, out)
-            return 0
+        call = tool_call(payload)
+        tool_name = call.tool_name
+        cwd = call.cwd
+        for boundary in (decide_worktree(call), decide_spawn_isolation(call)):
+            if boundary.permission is Permission.DENY:
+                logger.debug(
+                    "pretooluse DENY: boundary tool=%s cwd=%s subagent_type=%s",
+                    tool_name,
+                    call.cwd,
+                    call.subagent_type,
+                )
+                _emit_deny(boundary.reason, out)
+                return 0
         if not is_edit_tool(tool_name):
             return 0
         role = resolve_role(payload, fallback_role=_spawned_role_from_env(os.environ))
@@ -72,7 +80,9 @@ def run(stdin: TextIO | None = None, stdout: TextIO | None = None) -> int:
 
     if decision.permission is Permission.DENY:
         logger.debug(
-            "pretooluse DENY: role=coordinator op=edit reason=%r", decision.reason
+            "pretooluse DENY: role=coordinator op=edit cwd=%s reason=%r",
+            cwd,
+            decision.reason,
         )
         _emit_deny(decision.reason, out)
     return 0
@@ -116,13 +126,6 @@ def _extract_paths(tool_input: object) -> tuple[str, ...]:
             if paths:
                 return paths
     return ()
-
-
-def _extract_command(tool_input: object) -> str:
-    """The shell command on a Bash `tool_input` payload, or `""` if absent."""
-    if not isinstance(tool_input, dict):
-        return ""
-    return str(tool_input.get("command") or "")
 
 
 def _break_glass_armed() -> bool:

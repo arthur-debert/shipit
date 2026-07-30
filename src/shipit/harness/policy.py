@@ -1,4 +1,4 @@
-"""``harness/policy`` — the pure edit-enforcement and native-worktree deny verdicts.
+"""``harness/policy`` — the pure edit-, native-worktree- and spawn-isolation deny verdicts.
 
 See docs/adr/0012-enforcement-via-native-hooks.md.
 """
@@ -7,13 +7,18 @@ from __future__ import annotations
 
 import re
 import shlex
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 
 from .prompts import load_coordinator_slice
 from .role import Role
-from .roleprofile import delegates_code_authorship
+from .roleprofile import (
+    RoleValidationError,
+    delegates_code_authorship,
+    parse_role,
+    profile_for,
+)
 
 #: The generated coordinator role-prompt slice, loaded once at import so `decide` stays pure.
 COORDINATOR_DENY_REASON = load_coordinator_slice()
@@ -30,6 +35,31 @@ _EDIT_TOOLS = frozenset(
     }
 )
 
+#: Claude Code's shell tool. Split from codex's because the managed
+#: `PreToolUse` matcher that must route them is per-harness.
+_CLAUDE_SHELL_TOOLS = frozenset({"bash"})
+
+#: codex's builtin shell tools (codex-cli 0.146.0).
+_CODEX_SHELL_TOOLS = frozenset({"exec_command", "shell", "unified_exec"})
+
+#: Tool names that EXECUTE a shell command, matched case-insensitively.
+_SHELL_TOOLS = _CLAUDE_SHELL_TOOLS | _CODEX_SHELL_TOOLS
+
+#: Tool names that SPAWN a subagent, matched case-insensitively.
+_SPAWN_TOOLS = frozenset({"agent"})
+
+#: Tool names that ENTER a native git worktree, matched case-insensitively.
+_WORKTREE_TOOLS = frozenset({"enterworktree"})
+
+#: Every Claude Code tool a deny rule can fire on. A managed `PreToolUse` matcher
+#: must cover this whole set, or the rule behind the uncovered name is
+#: unreachable — the defect #1182 exists to close.
+CLAUDE_GUARDED_TOOLS = _CLAUDE_SHELL_TOOLS | _SPAWN_TOOLS | _WORKTREE_TOOLS
+
+#: The `tool_input` keys a shell tool puts its command under: `command` (Claude
+#: Code), `cmd` (codex).
+_COMMAND_KEYS = ("command", "cmd")
+
 
 class Permission(StrEnum):
     ALLOW = "allow"
@@ -40,6 +70,51 @@ class Permission(StrEnum):
 class Decision:
     permission: Permission
     reason: str = ""
+
+
+_ALLOW = Decision(permission=Permission.ALLOW)
+
+
+@dataclass(frozen=True)
+class ToolCall:
+    """A `PreToolUse` payload projected onto the fields the deny rules read."""
+
+    tool_name: str
+    command: str = ""
+    cwd: str = ""
+    subagent_type: str = ""
+    #: ``None`` is the absence the spawn rule fires on, and covers three payload
+    #: shapes: `isolation` omitted, present but blank, and present but not a
+    #: string. Only a non-blank STRING counts as isolated — which isolation modes
+    #: are valid is the harness's business, so the value itself is not checked.
+    isolation: str | None = None
+
+    @property
+    def tool(self) -> str:
+        """The tool name normalized for registry membership."""
+        return self.tool_name.strip().lower()
+
+
+def tool_call(payload: Mapping[str, object]) -> ToolCall:
+    """Project a raw hook payload; a missing or malformed field reads as absent."""
+    tool_input = payload.get("tool_input")
+    fields = tool_input if isinstance(tool_input, Mapping) else {}
+    command = next(
+        (str(fields[key]) for key in _COMMAND_KEYS if fields.get(key)),
+        "",
+    )
+    # A non-`str` isolation reads as ABSENT, never as a value: coercing one would
+    # turn any truthy junk (`{"a": 1}`, `[1]`, `1`) into a non-blank string and
+    # so into "isolated", which is the one direction that must not fail open.
+    raw_isolation = fields.get("isolation")
+    isolation = raw_isolation.strip() if isinstance(raw_isolation, str) else ""
+    return ToolCall(
+        tool_name=str(payload.get("tool_name") or ""),
+        command=command,
+        cwd=str(payload.get("cwd") or ""),
+        subagent_type=str(fields.get("subagent_type") or ""),
+        isolation=isolation or None,
+    )
 
 
 def is_edit_tool(tool_name: str) -> bool:
@@ -66,62 +141,78 @@ WORKTREE_DENY_REASON = (
 
 _GIT_WORKTREE_ADD_FALLBACK = re.compile(r"\bgit\s+worktree\s+add\b")
 
-#: With `punctuation_chars=True` shlex emits runs of these as standalone tokens.
-_SHELL_SEPARATOR_CHARS = frozenset("();<>|&")
+#: Shell punctuation shlex emits as its own token, so a separator cannot hide
+#: inside a word (`git worktree add;` must still yield an `add` word).
+_SHELL_PUNCTUATION = "();<>|&"
 
-#: git global options taking a SEPARATE argument token, which consumes the next token.
-_GIT_OPTS_WITH_ARG = frozenset({"-C", "-c"})
+#: Stripped from a word's EDGES to reconcile shlex with the shell: shlex keeps an
+#: escaped newline as a literal character where the shell splices it out. An
+#: INTERIOR one is left alone, which matches the shell too — `git \<newline>worktree`
+#: runs `git worktree`, but `git\<newline>worktree` (no space) runs `gitworktree`,
+#: which is not git at all.
+_CONTINUATION_CHARS = "\n\r"
 
 
-def _matches_enter_worktree(tool_name: str, command: str) -> bool:
-    return tool_name.strip().lower() == "enterworktree"
+def _matches_enter_worktree(call: ToolCall) -> bool:
+    return call.tool in _WORKTREE_TOOLS
 
 
-def _segment_runs_worktree_add(tokens: list[str]) -> bool:
-    i = 0
-    n = len(tokens)
-    while i < n and "=" in tokens[i] and not tokens[i].startswith("-"):
-        i += 1
-    if i >= n or tokens[i] != "git":
-        return False
-    i += 1
-    while i < n and tokens[i].startswith("-"):
-        opt = tokens[i]
-        i += 1
-        if opt in _GIT_OPTS_WITH_ARG and i < n:
-            i += 1
-    return i + 1 < n and tokens[i] == "worktree" and tokens[i + 1] == "add"
+def _shell_words(command: str) -> list[str] | None:
+    """A command's words, shell-like: shlex POSIX splitting with CR/LF stripped from word EDGES; ``None`` if it does not lex.
+
+    The edge strip reproduces the shell's line-continuation word-join, but it is
+    NOT what the shell does to a quoted value: shlex reports no provenance, so a
+    quoted `"\\n"` is indistinguishable from a syntactic continuation and is
+    stripped too, and a word that strips to empty is dropped rather than kept as
+    an empty argument. Words whose CR/LF is INTERIOR keep it, so a quoted mention
+    stays one word. docs/adr/0080 states the accepted false positives; #1189 owns
+    the limitation.
+    """
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=_SHELL_PUNCTUATION)
+        lexer.whitespace_split = True
+        return [word for tok in lexer if (word := tok.strip(_CONTINUATION_CHARS))]
+    except ValueError:
+        return None
 
 
 def _runs_git_worktree_add(command: str) -> bool:
-    """True iff a Bash `command` actually EXECUTES `git worktree add`, not merely names it."""
-    try:
-        lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
-        lexer.whitespace_split = True
-        tokens = list(lexer)
-    except ValueError:
+    """True iff `command` has adjacent `worktree` `add` words with a `git` word before them.
+
+    Quoting supplies the discrimination: a mention (`echo "git worktree add"`)
+    lexes to ONE word and can never match, while an invocation is adjacent
+    words wherever it sits. Nothing is counted or skipped — no wrapper, keyword
+    or option ahead of the pair can misalign it, and none of those sets ever has
+    to be enumerated. The `git` word is required so `grep worktree add file`
+    does not match.
+
+    Best-effort by construction, and evadable: `eval`, variable indirection and
+    `sh -c` all hide the words. It is a hygiene nudge for a cooperating agent,
+    not a security boundary, so it errs toward denying (an unquoted
+    `echo git worktree add` is refused).
+    """
+    words = _shell_words(command)
+    if words is None:
         return _GIT_WORKTREE_ADD_FALLBACK.search(command) is not None
-    segment: list[str] = []
-    for tok in tokens:
-        if tok and all(ch in _SHELL_SEPARATOR_CHARS for ch in tok):
-            if _segment_runs_worktree_add(segment):
-                return True
-            segment = []
-        else:
-            segment.append(tok)
-    return _segment_runs_worktree_add(segment)
+    return any(
+        word == "worktree"
+        and i + 1 < len(words)
+        and words[i + 1] == "add"
+        and "git" in words[:i]
+        for i, word in enumerate(words)
+    )
 
 
-def _matches_git_worktree_add(tool_name: str, command: str) -> bool:
-    if tool_name.strip().lower() != "bash":
+def _matches_git_worktree_add(call: ToolCall) -> bool:
+    if call.tool not in _SHELL_TOOLS:
         return False
-    return _runs_git_worktree_add(command)
+    return _runs_git_worktree_add(call.command)
 
 
 @dataclass(frozen=True)
 class WorktreeDenyRule:
     name: str
-    matches: Callable[[str, str], bool]
+    matches: Callable[[ToolCall], bool]
 
 
 WORKTREE_DENY_RULES: tuple[WorktreeDenyRule, ...] = (
@@ -130,9 +221,33 @@ WORKTREE_DENY_RULES: tuple[WorktreeDenyRule, ...] = (
 )
 
 
-def decide_worktree(tool_name: str, command: str = "") -> Decision:
+def decide_worktree(call: ToolCall) -> Decision:
     """DENY iff the call matches :data:`WORKTREE_DENY_RULES`; role- and break-glass-independent."""
     for rule in WORKTREE_DENY_RULES:
-        if rule.matches(tool_name, command):
+        if rule.matches(call):
             return Decision(permission=Permission.DENY, reason=WORKTREE_DENY_REASON)
-    return Decision(permission=Permission.ALLOW)
+    return _ALLOW
+
+
+SPAWN_ISOLATION_DENY_REASON = (
+    "This role runs in its own Tree, so its spawn must be isolated: re-issue it "
+    'with isolation: "worktree" (ADR-0014, ADR-0047). Without that parameter the '
+    "subagent inherits THIS session's checkout as its cwd, and two write Runs on "
+    "one checkout stomp each other. `shipit spawn subagent` provisions the Tree "
+    "itself and needs no parameter — only the in-session Agent spawn does. The "
+    "`explorer` role runs in the ambient WorkingDir with no Tree, and is never "
+    "refused."
+)
+
+
+def decide_spawn_isolation(call: ToolCall) -> Decision:
+    """DENY iff a spawn of a Tree-backed shipit Role omits `isolation`; any other `subagent_type` ALLOWs."""
+    if call.tool not in _SPAWN_TOOLS or call.isolation is not None:
+        return _ALLOW
+    try:
+        role = parse_role(call.subagent_type)
+    except RoleValidationError:
+        return _ALLOW
+    if not profile_for(role).checkout.tree_backed:
+        return _ALLOW
+    return Decision(permission=Permission.DENY, reason=SPAWN_ISOLATION_DENY_REASON)

@@ -7,6 +7,11 @@
 > logic (`shipit.harness.policy`, unchanged) nor the other four managed hooks
 > (`sessionstart`/`stop`/`subagent-stop`/`worktreecreate`, unchanged, still
 > legitimately fail-open per #491).
+>
+> **Amended by ADR-0080** (#1182), narrowly: this ADR's contract now governs the
+> `Edit|Write|MultiEdit|NotebookEdit` entry, whose command is unchanged. A second
+> managed `PreToolUse` entry matching `Bash|Agent` is advisory on failure and
+> exits 0; see ADR-0080 for why the severities are not symmetric.
 
 ## The regression
 

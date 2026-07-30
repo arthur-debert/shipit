@@ -20,15 +20,17 @@ def hook() -> None:
     """Root of the ``hook`` subcommand group; events are attached below."""
 
 
-from . import eval as _eval  # noqa: E402
 from . import (  # noqa: E402
+    bashguard,
     pretooluse,
     sessionstart,
     worktreecreate,
     worktreeremove,
 )
+from . import eval as _eval  # noqa: E402
 
 hook.add_command(pretooluse.cmd)
+hook.add_command(bashguard.cmd)
 hook.add_command(_eval.stop_cmd)
 hook.add_command(_eval.subagent_stop_cmd)
 hook.add_command(sessionstart.cmd)
