@@ -116,15 +116,36 @@ to keep.** Each shape failed because it tried to reason about a command's
    apart is gone before the walk begins. Deleted the walk: match adjacent
    `worktree` `add` words with a `git` word somewhere before them, and there is
    no alignment left to break.
+3. *Token mutation:* stripping ALL shell punctuation from word edges (added to
+   join an escaped newline to the following word) was what made `";"` vanish
+   above. Deleted: only the continuation characters are stripped now, so a `;`
+   word survives intact and cannot disappear.
+4. *Custom newline lexing:* `\n\r` were put into `punctuation_chars` and taken
+   out of `lexer.whitespace`, which broke shlex's native handling and forced a
+   regex that spliced `\`+newline out of the raw string first. That splice let a
+   comment swallow the following line: `# \<newline>git worktree add …` lexed to
+   nothing and was allowed, while bash ends a comment at the newline regardless
+   of the backslash and runs the next line — verified by an actual worktree
+   appearing. Deleted both: the adjacency rule never needed newlines to be
+   separators, because it does not care about command boundaries.
 
-What remains counts nothing and skips nothing. Line continuations are spliced
-out of the raw string first — the shell's own first lexical step, and
-unambiguous — and tokens are then used exactly as lexed. The `git` word is
-required so `grep worktree add file` does not match.
+What remains is shlex's own POSIX lexing — `posix=True`, `whitespace_split`,
+and `punctuation_chars` so a trailing `;` cannot hide inside the `add` word —
+with exactly one reconciliation on top: continuation characters are stripped
+from a word's **edges**. shlex keeps an escaped newline as a literal character
+where the shell splices it out, and edge-stripping reproduces the shell in both
+directions. `git \<newline>worktree add X` really does run `git worktree add X`
+and create a worktree (the space before the backslash already ended the word),
+so it denies; `git\<newline>worktree add X` joins into `gitworktree`, which is
+not a command, so it does not. Both are pinned by a test citing that
+verification, because one review round proposed flipping the first. The `git`
+word is required so `grep worktree add file` does not match.
 
 This is where the hardening stops. The rule's stated scope is a cooperating
 agent, so a further adversarial input is out of scope by definition rather than
-a defect to patch.
+a defect to patch. Four rounds each **removed** logic; a fifth correctness
+finding here is a signal to reconsider the design with the maintainer, not to
+patch again.
 
 ### Enforcement reaches the session CC was launched in, not every Tree
 

@@ -145,6 +145,13 @@ def test_is_edit_tool(tool, expected):
         ("Bash", "git \\\n worktree add ../t b", Permission.DENY),
         ("Bash", "git \\\nworktree add ../t b", Permission.DENY),
         ("Bash", "git\nworktree add ../t b", Permission.DENY),
+        # A comment ends at the newline no matter what precedes it, so the next
+        # line is a live command.
+        ("Bash", "# \\\ngit worktree add ../t b", Permission.DENY),
+        ("Bash", "# c \\\n git worktree add x", Permission.DENY),
+        # ...but a continuation with NO space before the backslash concatenates:
+        # this runs `gitworktree`, which is not git, so nothing is created.
+        ("Bash", "git\\\nworktree add ../t b", Permission.ALLOW),
         ("Bash", "if true; then git worktree add x; fi", Permission.DENY),
         ("Bash", "sudo git worktree add ../t b", Permission.DENY),
         ("Bash", "env  git worktree add ../t b", Permission.DENY),
@@ -195,6 +202,43 @@ def test_a_quoted_mention_never_matches_however_it_is_wrapped():
         assert decide_worktree(ToolCall("Bash", command=command)).permission is (
             Permission.ALLOW
         ), command
+
+
+def test_a_line_continuation_follows_the_shell_word_join_exactly():
+    """Whether a continuation invokes git depends on the space BEFORE the backslash.
+
+    Verified against bash, by whether a worktree actually appears:
+    `git \\<newline>worktree add X` runs `git worktree add X` and CREATES one —
+    the space before the backslash already ended the word. Without that space,
+    `git\\<newline>worktree` joins into `gitworktree`, which is not a command.
+    """
+    creates_a_worktree = "git \\\nworktree add ../t b"
+    joins_into_one_word = "git\\\nworktree add ../t b"
+    assert (
+        decide_worktree(ToolCall("Bash", command=creates_a_worktree)).permission
+        is Permission.DENY
+    )
+    assert (
+        decide_worktree(ToolCall("Bash", command=joins_into_one_word)).permission
+        is Permission.ALLOW
+    )
+
+
+def test_a_comment_ends_at_its_newline_even_after_a_backslash():
+    """Splicing continuations before lexing let a comment swallow the next line."""
+    for command in (
+        "# \\\ngit worktree add ../t b",
+        "# c \\\n git worktree add x",
+        "echo hi # \\\ngit worktree add x",
+    ):
+        assert decide_worktree(ToolCall("Bash", command=command)).permission is (
+            Permission.DENY
+        ), command
+
+
+def test_a_trailing_comment_is_still_dropped():
+    call = ToolCall("Bash", command="ls  # git worktree add ../t b")
+    assert decide_worktree(call).permission is Permission.ALLOW
 
 
 def test_an_unlexable_command_falls_back_to_the_conservative_regex():

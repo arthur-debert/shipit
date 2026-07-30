@@ -138,11 +138,14 @@ _GIT_WORKTREE_ADD_FALLBACK = re.compile(r"\bgit\s+worktree\s+add\b")
 
 #: Shell punctuation shlex emits as its own token, so a separator cannot hide
 #: inside a word (`git worktree add;` must still yield an `add` word).
-_SHELL_PUNCTUATION = "();<>|&\n\r"
+_SHELL_PUNCTUATION = "();<>|&"
 
-#: A backslash-newline is spliced out before anything else, which is the shell's
-#: own first lexical step.
-_LINE_CONTINUATION = re.compile(r"\\\r?\n")
+#: The one place shlex and the shell disagree: shlex keeps an escaped newline as
+#: a literal character, the shell splices it out. Stripping it from a word's
+#: EDGES matches the shell, and leaving an INTERIOR one alone matches it too —
+#: `git \<newline>worktree` runs `git worktree`, but `git\<newline>worktree`
+#: (no space) runs `gitworktree`, which is not git at all.
+_CONTINUATION_CHARS = "\n\r"
 
 
 def _matches_enter_worktree(call: ToolCall) -> bool:
@@ -150,19 +153,11 @@ def _matches_enter_worktree(call: ToolCall) -> bool:
 
 
 def _shell_words(command: str) -> list[str] | None:
-    """A command's words, exactly as shlex lexes them; ``None`` if it does not lex."""
+    """A command's words as the shell would split them; ``None`` if it does not lex."""
     try:
-        lexer = shlex.shlex(
-            _LINE_CONTINUATION.sub("", command),
-            posix=True,
-            punctuation_chars=_SHELL_PUNCTUATION,
-        )
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=_SHELL_PUNCTUATION)
         lexer.whitespace_split = True
-        # Newlines must reach the token stream as punctuation rather than being
-        # silently discarded as whitespace. shlex still owns quoting, so a
-        # newline INSIDE quotes stays part of its word.
-        lexer.whitespace = lexer.whitespace.replace("\n", "").replace("\r", "")
-        return list(lexer)
+        return [word for tok in lexer if (word := tok.strip(_CONTINUATION_CHARS))]
     except ValueError:
         return None
 

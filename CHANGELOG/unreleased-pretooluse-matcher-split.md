@@ -27,15 +27,27 @@
   quoted `";"` and an unquoted `;` produce identical token streams, so that
   misalignment was not fixable by inspecting tokens — the information needed to
   tell them apart is gone before the walk starts.
-  Both fixes were deletions. **Quoting already supplies the discrimination the
-  structural logic was reaching for** — a quoted mention lexes to ONE word and
-  can never match, while a real invocation is adjacent words. The check now
-  matches adjacent `worktree` `add` words with a `git` word somewhere before
-  them, counting and skipping nothing, so there is no alignment left to break.
-  Line continuations are spliced out of the raw string first, which is the
-  shell's own first lexical step. Segment tracking, the env-assignment prefix
-  skip, the option walk and the escaped-newline special case all deleted
-  themselves; the `git` word is kept so `grep worktree add file` does not match.
+  A third, from the same family: custom newline lexing (newlines forced into
+  `punctuation_chars` and out of shlex's whitespace) broke shlex's native POSIX
+  handling and needed a regex to splice `\`+newline out of the command first —
+  which let a comment swallow the line after it, so `# \<newline>git worktree add
+  x` was allowed even though bash ends a comment at the newline and runs the next
+  line.
+  All of it was fixed by deleting, never by adding cases. **Quoting already
+  supplies the discrimination the structural logic was reaching for** — a quoted
+  mention lexes to ONE word and can never match, while a real invocation is
+  adjacent words. The check now matches adjacent `worktree` `add` words with a
+  `git` word somewhere before them, counting and skipping nothing, over shlex's
+  own POSIX lexing with no pre-processing of the command string. Segment tracking,
+  the env-assignment prefix skip, the option walk, the punctuation stripping and
+  the custom newline lexing are all gone; the `git` word is kept so
+  `grep worktree add file` does not match.
+  One reconciliation remains, because shlex and the shell genuinely differ:
+  continuation characters are stripped from a word's edges. `git \<newline>worktree
+  add X` runs `git worktree add X` and creates a worktree — the space before the
+  backslash already ended the word — so it is refused, while
+  `git\<newline>worktree add X` joins into `gitworktree`, which is not a command,
+  so it is not. Both are pinned by a test citing the bash verification.
   It remains **best-effort, and evadable by construction**: `eval`, variable
   indirection and `sh -c` hide the words from any matcher that is not itself a
   shell. It is a hygiene nudge that redirects a cooperating agent to `shipit tree
