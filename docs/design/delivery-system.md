@@ -17,9 +17,10 @@ iterates toward it.
 
 1. **Deliverability spikes** — every load-bearing third-party claim is verified
    hands-on or from primary sources before the design depends on it (§ Spikes).
-2. **The paper-fit test** — all 22 Portfolio repos must map onto this tree with zero
-   special cases (checked against the 2026-07-30 fleet fine-comb). A repo that cannot
-   be expressed here falsifies the design, not the repo.
+2. **The paper-fit test** — every fleet repo (the 22 Portfolio members plus comms,
+   joining — 23 rows) must map onto this tree with zero special cases (checked
+   against the 2026-07-30 fleet fine-comb). A repo that cannot be expressed here
+   falsifies the design, not the repo.
 
 A subsystem section is **done** when it has: purpose, owned responsibilities, its
 contract, its data types, its adopted tools, and an empty open-questions list.
@@ -56,9 +57,12 @@ Execution happens in a container; code is mounted from the host (the host edits,
 Substrate runs). Images are layered — one fleet baseline (rust, python/uv, node,
 linters) plus sanctioned heavy layers from the Menu — owned by shipit, published by
 shipit's own release, referenced by derivation from the Shipit pin (one pin axis).
-The **Mac exception** covers only work physically requiring macOS; its CI-signing half
-is expected to shrink to nothing if the rcodesign spike passes, leaving only local GUI
-launch. Toolchain identity comes from the image, never from per-repo env machinery.
+The **Mac exception** covers only work physically requiring macOS: local GUI launch,
+physically macOS-bound build legs (the `xcode` kind — lexed's appex), and Darwin
+signing/notarization legs — with the signing half expected to move into the container
+if the rcodesign spike passes. The build legs and local launch remain regardless: the
+exception shrinks, it does not vanish. Toolchain identity comes from the image, never
+from per-repo env machinery.
 
 ## Consumer surface
 
@@ -110,9 +114,16 @@ spec; amendment to follow]**: one artifact fans out to **N packagings** — form
 applied to the built thing (`.app` → dmg + zip; linux binary → deb + rpm + tar;
 exe → zip + msix). A packaging declares its format and rides the same `requires`
 mapping for bundle-time inputs. Packagers package declared inputs; they never build
-and never fetch. Distribution consumes packagings, not artifacts. Adopted leaf tools:
-**nfpm** (verified: apk/archlinux/deb/ipk/**msix**/rpm/srpm; msix signs via its PFX
-block), **@electron/packager** + dmg/zip leaf tools (the packager that genuinely takes
+and never fetch. A packaging declares its **platform selector** (a subset of the
+artifact's platforms — dmg is darwin-only, deb linux-only; defaults to all) and,
+where one format yields multiple outputs, a **variant name with packaging-time
+metadata** (the two vsix outputs). Every artifact also has an implicit **identity
+packaging** — its output passed through as-is — so directly-deployed outputs (a
+static site dir) have a packaging for their adapter to consume without ceremony.
+Distribution consumes packagings, not artifacts. Adopted leaf tools:
+**nfpm** (verified: apk/archlinux/deb/ipk/**msix**/rpm/srpm; msix signing is
+delegated through nfpm's PFX mechanism under the Signing subsystem's ownership —
+see Signing), **@electron/packager** + dmg/zip leaf tools (the packager that genuinely takes
 a prebuilt app dir in — electron-forge rejected on verification: its `package` always
 runs the full build, forge#3053, and `make --skip-package` only reuses forge's own
 output), **`tauri bundle`** (verified bundle-only flow: `build --no-bundle` then
@@ -123,16 +134,22 @@ spans repos; the owning repo is its home.
 
 ## Signing [design, pending-spike]
 
-A standalone post-packaging stage (ADR-0040 seam): packagers emit signable outputs and
-never self-sign. Target implementation: **rcodesign** — sign, notarize, staple from
-Linux (verified: real projects run it from Linux containers; notarize+staple via App
-Store Connect API key supported). Its verified constraints fix the pipeline ordering:
-it cannot sign *inside* a DMG or mutate flat `.pkg` contents, so the order is —
-sign the `.app` bottom-up (helpers/frameworks before the outer bundle, never
-`--deep`), *then* assemble the DMG from the signed app, then notarize + staple the
-DMG. Until the hands-on spike passes on a real fleet `.app`/`.dmg`, Darwin signing
-legs remain on the Mac exception; a pass confines the Mac exception to local GUI
-launch.
+A standalone subsystem that owns signing **policy and credentials** — that is
+ADR-0040's seam: ownership, not a strict ordering slot. Execution points are
+format-defined and woven into the packaging sequence: for macOS, sign the packaged
+`.app` bottom-up (helpers/frameworks before the outer bundle, never `--deep`), *then*
+assemble the DMG from the signed app, then notarize + staple the DMG (rcodesign's
+verified constraints — it cannot sign inside a DMG or mutate flat `.pkg` contents —
+force exactly this order). For MSIX, the signature is applied through nfpm's native
+PFX mechanism as a **delegated step**: the certificate is injected by the signing
+subsystem at invocation and never lives in packager config. The invariant packagers
+must honor is therefore: they never *own* signing decisions or credentials — even
+when a format's tooling is the mechanical signer. Target implementation:
+**rcodesign** — sign, notarize, staple from Linux (verified: real projects run it
+from Linux containers; App Store Connect API key supported). Until the hands-on
+spike passes on a real fleet `.app`/`.dmg`, Darwin signing legs remain on the Mac
+exception; a pass moves the CI signing/notarization legs into the container (the
+Mac exception keeps local GUI launch and the xcode build legs).
 
 ## Changelog [settled]
 
@@ -203,7 +220,9 @@ The nouns (glossary-anchored, one line each — CONTEXT.md wins on meaning):
 **Repo** · **Component** (kind, mount, requires) · **Tool** / **Tool contract** ·
 **Builder** (per-kind program) · **Target** (platform | universal) · **Artifact**
 (key, component, platforms/universal, path, runtime) · **Packaging** (artifact,
-format, requires) · **Release** (version, tag, changelog, artifact set) ·
+format, platform selector, optional variant + metadata, requires; every artifact has
+an implicit identity packaging) · **Release** (version, tag, changelog, artifact
+set) ·
 **Distribution endpoint** / **Endpoint adapter** · **Artifact-dep** (key, version) ·
 **Menu** / **Profile** / **Canary instance**.
 
@@ -274,9 +293,12 @@ workspace flattening from the filed pre-work applied; conda retired). Any repo t
 did not fit would falsify the design; none does.
 
 Registry-publishing note (adapter detail, not a model exception): npm tarballs and
-python sdist/wheel are ordinary packagings the npm/pypi adapters publish; cargo
-fuses package+upload inside `cargo publish`, so the crates.io adapter runs it
-post-barrier as one step — adapters own how they publish.
+python sdist/wheel are ordinary packagings the npm/pypi adapters publish. For
+crates.io, the crate packaging runs **pre-barrier** as `cargo package` (producing
+and verifying the `.crate` so the all-or-nothing barrier covers it); the adapter's
+post-barrier `cargo publish` re-derives that same packaging at upload — a tool
+constraint of cargo's fused package+upload, safe because the source state is
+identical and the barrier already verified packagability.
 
 | Repo | Components | Artifacts (runtime) | Packagings | Endpoints | Menu / notes |
 | --- | --- | --- | --- | --- | --- |
@@ -295,13 +317,13 @@ post-barrier as one step — adapters own how they publish.
 | lexed | npm @ root · xcode @ quicklook/ | app (electron) · LexQuickLook.appex (darwin, intra-repo input) | dmg/zip/deb; appex placed into Contents/PlugIns via the packaging's `requires` | GH | playwright+xvfb; deps: lexd-lsp, comms, grammar; keeps one Darwin build leg (appex) regardless of signing outcome |
 | mkdocs-lex | python @ mkdocs_lex/ | package (—) | sdist/wheel | pypi, GH | — |
 | lex | rust @ crates/ | lexd, lexd-lsp (native-cli) · lex-wasm (browser, universal) | archives, wasm-pack | GH | fleet keystone producer; sandbox-tests = consumer-owned extra lane |
-| nvim | lua @ lua/lex | plugin (nvim-host) | none | GH (notes-only) | degenerate release: tag+changelog, empty artifact set — expressible |
+| nvim | lua @ lua/lex | plugin (nvim-host) | none needed | GH spine only (notes-only; zero distribution adapters) | degenerate release: tag+changelog, empty artifact set — the spine is produced by release itself, not an adapter |
 | tree-sitter-lex | grammar @ root · npm @ root | grammar wasm (browser, universal) · npm pkg (—) | wasm-pack, npm tarball | GH, npm | grammar kind's first instance |
 | vscode | npm @ root | extension (vscode-host) | vsix ×2 — Marketplace and Open VSX variants (same build, different packaging-time metadata) | GH · VS Marketplace (vsce) · Open VSX (ovsx) | vsix-smoke; deps: lexd-lsp, comms, grammar; the same-format/different-metadata case of packaging 1→N |
 | zed-lex | rust @ root | extension (zed-host, universal wasm) | zed-ext | GH · zed registry (human-gated adapter) | — |
 | phos-core | rust @ crates/ | binaries (native-cli) · wasm pkgs (browser, universal) · corpus, fixtures (data, universal) | archives, wasm-pack, tarballs | GH (private) | GPU lane (registry, until durable runner) |
 | phos-app | npm @ root · rust @ crates/ (tauri shell) | app (tauri) | tauri→dmg/deb/msi | GH (private) | tauri-driver, GPU lane (registry); deps: phos-core wasm, corpus, fixtures |
-| phos.photo | static-site @ site/ | site (static-web, universal) | none | firebase | no toolchain — correct |
+| phos.photo | static-site @ site/ | site (static-web, universal) | identity (site dir as-is) | firebase | no toolchain — correct |
 | comms | docs-site (+ data content) | tarball (data, universal) | tarball | GH | ADR-0085 first user; submodule retired |
 
 **Verdict: fits.** Zero unexpressible repos. The model's degenerate cases are each

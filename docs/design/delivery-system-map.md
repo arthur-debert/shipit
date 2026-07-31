@@ -23,8 +23,10 @@ tool line where a lower-level tool is adopted. The detail doc wins on any questi
      argument, exit-code contract.
    - **Output verification** — promised paths must exist; a builder that lies fails
      the leg on the spot.
-3. **Packaging** — each artifact fans out to its N formats (includes signing where
-   the format needs it); packagers package, never build.
+3. **Packaging** — each artifact fans out to its N formats (each with a platform
+   selector; identity packaging for direct-deploy outputs); packagers package,
+   never build. Signing steps are woven in at format-defined points, owned by the
+   Signing subsystem.
    - **linux + windows formats** (deb/rpm/apk/msix/…)
      - tool: nfpm
    - **electron** — `.app`/exe from the prebuilt app dir, then dmg/zip.
@@ -32,8 +34,10 @@ tool line where a lower-level tool is adopted. The detail doc wins on any questi
    - **tauri**
      - tool: `tauri bundle` (bundle-only flow)
    - **archives** (tarball/zip) — built in.
-   - **Signing** — bottom-up over the bundle, then dmg assembly, then
-     notarize + staple; never inside the packagers.
+   - **Signing** — the Signing subsystem owns policy and credentials; format-defined
+     execution (bottom-up over the bundle, then dmg assembly, then notarize +
+     staple; msix delegated through nfpm with an injected cert). Packagers never
+     own signing decisions or credentials.
      - tool: rcodesign (from Linux; pending the hands-on spike)
 4. **Barrier** — all-or-nothing: every leg built, packaged, and signed, or nothing
    publishes. The only clean abort point.
@@ -50,7 +54,9 @@ tool line where a lower-level tool is adopted. The detail doc wins on any questi
 ## Standing systems (not stages — the flow runs on top of these)
 
 - **Substrate** — everything above executes in a container; code mounts from the
-  host; layered shipit-owned images; the Mac exception is the only native carve-out.
+  host; layered shipit-owned images; the Mac exception (local GUI launch, xcode
+  build legs, and — until the signing spike passes — Darwin signing legs) is the
+  only native carve-out.
 - **Consumer surface** — the managed 4-verb Task veneer (+ consumer-owned local
   include) delegating to `shipit <verb>`; same entry points locally and in CI.
   - tool: Taskfile (go-task)
