@@ -285,18 +285,19 @@ Hands-on, must pass before the dependent design point is final:
    assembled but not re-run after a resource-staging fix, so full deb content
    parity stands undemonstrated). Consequences applied: electron packaging +
    rcodesign rows settled, ADR-0084 Mac exception amended (CI-signing half
-   removed; lexed keeps its appex Darwin *build* leg). Residual caveat: the
-   QuickLook *visual* render remains unverified — signing and appex
-   registration/invocation are machine-checked, but the rendered preview still
-   needs a human at an unlocked screen; this does not touch the signing result.
-   Full recipe + caveats: `docs/dev/delivery-spike-electron-signing.md`.
+   removed; lexed keeps its appex Darwin *build* leg). Residual caveat: signing
+   and the appex's registration + document-type association are machine-checked,
+   but appex *invocation* and the rendered preview remain unverified pending a
+   human at an unlocked screen; this does not touch the signing result. Full
+   recipe + caveats: `docs/dev/delivery-spike-electron-signing.md`.
 2. **Container dev-loop ergonomics — PASSED** (shipit#1198, PR #1200, merged
    2026-07-31; the Suburbia Phase 2 spike). rustloc edit-on-host /
    execute-in-container: lint/test/build parity exact (0-diff findings, 266/266
    tests, matching artifact sets); measured ergonomics prescribe named volumes
    for cargo target + registry and `GH_TOKEN` env passthrough for `gh`. Feeds
-   the image build/publish mechanics design (the remaining Substrate open
-   item). Numbers: `docs/dev/substrate-devloop-spike.md`.
+   both remaining Substrate open items: image build/publish mechanics and the
+   runner-owned cache-volume contract. Numbers:
+   `docs/dev/substrate-devloop-spike.md`.
 3. **`src-tauri` → `crates/` renameability** (still planned with Phase 3 layout).
 
 Doc-level verifications: complete (2026-07-30 claims scout —
