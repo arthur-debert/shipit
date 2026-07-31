@@ -1,0 +1,17 @@
+# Spike #1197 step 6: deb layout for the linux @electron/packager output.
+name: lexed
+arch: arm64
+platform: linux
+version: ${LEXED_VERSION}
+section: editors
+priority: optional
+maintainer: Arthur Debert <arthur@debert.xyz>
+description: LexEd editor for Lex
+homepage: https://lex.ing
+license: MIT
+contents:
+  - src: /work/out/pack-linux/lexed-linux-arm64
+    dst: /opt/lexed
+  - src: /opt/lexed/lexed
+    dst: /usr/bin/lexed
+    type: symlink
