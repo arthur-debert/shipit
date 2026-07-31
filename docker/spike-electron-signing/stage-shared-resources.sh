@@ -13,8 +13,14 @@ cd "$LEXED"
 mkdir -p "$RES/bin"
 install -m 0755 bin/lexed "$RES/bin/lexed"
 cp -R welcome "$RES/welcome"
-mkdir -p "$RES/dictionaries/licenses"
-cp dictionaries/*.trie.gz "$RES/dictionaries/" 2>/dev/null || true
-cp -R dictionaries/licenses/. "$RES/dictionaries/licenses/" 2>/dev/null || true
+# Dictionaries ship when the checkout carries them; when present, staging is
+# required (no silent skip — deb/app parity is asserted downstream).
+if compgen -G "dictionaries/*.trie.gz" >/dev/null; then
+    mkdir -p "$RES/dictionaries/licenses"
+    cp dictionaries/*.trie.gz "$RES/dictionaries/"
+    cp -R dictionaries/licenses/. "$RES/dictionaries/licenses/"
+else
+    echo "(no dictionaries/*.trie.gz in the checkout — dictionary staging skipped)"
+fi
 mkdir -p "$RES/assets"
 cp comms/assets/logo-full.png "$RES/assets/logo-full.png"

@@ -14,6 +14,11 @@ SECRETS="${4:?secrets dir or -}"
 SCRIPT="${5:?script name}"
 IMAGE=shipit-spike-electron-signing
 
+if [[ "$SCRIPT" != "$(basename "$SCRIPT")" || ! -f "$HERE/$SCRIPT" ]]; then
+    echo "unknown step script: '$SCRIPT' (expected the name of a script in $HERE)" >&2
+    exit 1
+fi
+
 docker build -q -t "$IMAGE" "$HERE" >/dev/null
 
 MOUNTS=(

@@ -18,7 +18,7 @@ Findings report: `docs/dev/delivery-spike-electron-signing.md`.
 | 5a. dmg assemble (xorrisofs → libdmg-hfsplus) + sign | Linux container | `40-dmg.sh` |
 | 5b. notarize (ASC API) + staple | Linux container | `50-notarize.sh` |
 | 6. nfpm deb + zip | Linux container | `60-linux-artifacts.sh` |
-| 7. Gatekeeper + QuickLook verification | host (real mac) | `70-verify-mac.sh <out> <sample.lex\|->` (`-` = explicit PARTIAL mode: registration asserted, render skipped) |
+| 7. Gatekeeper + QuickLook verification | host (real mac) | `70-verify-mac.sh <out> <sample.lex\|->` (sample = registration + appex-invocation gate; `-` = registration only; the rendered content is confirmed visually by a human either way) |
 
 Container steps run via:
 
