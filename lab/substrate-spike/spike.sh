@@ -17,7 +17,7 @@
 # SPIKE_RUSTLOC_URL, SPIKE_NO_CACHE=1 (build-image with --no-cache).
 set -euo pipefail
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+repo_root="$(cd -- "$(dirname "${BASH_SOURCE[0]}")/../.." >/dev/null && pwd)"
 image="${SPIKE_IMAGE:-shipit-rust-baseline:spike}"
 rustloc_url="${SPIKE_RUSTLOC_URL:-https://github.com/arthur-debert/rustloc.git}"
 rustloc_rev="${SPIKE_RUSTLOC_REV:-84467c96604919dd8ae7518f722c30ef3de4b62f}"
@@ -57,7 +57,7 @@ timed() {
 ensure_rustloc() {
     if [ -n "${SPIKE_RUSTLOC_DIR:-}" ]; then
         # Absolute path: docker -v rejects relative host paths.
-        rustloc_dir="$(cd "$SPIKE_RUSTLOC_DIR" 2>/dev/null && pwd)" \
+        rustloc_dir="$(cd -- "$SPIKE_RUSTLOC_DIR" >/dev/null 2>&1 && pwd)" \
             || die "SPIKE_RUSTLOC_DIR=$SPIKE_RUSTLOC_DIR is not a directory"
         [ -d "$rustloc_dir/.git" ] || die "SPIKE_RUSTLOC_DIR=$rustloc_dir is not a git checkout"
     else
@@ -385,7 +385,8 @@ main() {
     results="${2:-${TMPDIR:-/tmp}/spike-1198-results}"
     mkdir -p "$results"
     # Absolute path: docker -v rejects relative host paths.
-    results="$(cd "$results" && pwd)"
+    results="$(cd -- "$results" >/dev/null 2>&1 && pwd)" \
+        || die "cannot resolve results dir: $results"
     case "$cmd" in
         build-image)
             build_image
