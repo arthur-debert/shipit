@@ -385,8 +385,10 @@ main() {
     results="${2:-${TMPDIR:-/tmp}/spike-1198-results}"
     mkdir -p "$results"
     # Absolute path: docker -v rejects relative host paths.
-    results="$(cd -- "$results" >/dev/null 2>&1 && pwd)" \
+    local abs_results
+    abs_results="$(cd -- "$results" >/dev/null 2>&1 && pwd)" \
         || die "cannot resolve results dir: $results"
+    results="$abs_results"
     case "$cmd" in
         build-image)
             build_image
