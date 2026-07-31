@@ -56,7 +56,9 @@ timed() {
 # escape hatch and is used as-is, whatever it has checked out.
 ensure_rustloc() {
     if [ -n "${SPIKE_RUSTLOC_DIR:-}" ]; then
-        rustloc_dir="$SPIKE_RUSTLOC_DIR"
+        # Absolute path: docker -v rejects relative host paths.
+        rustloc_dir="$(cd "$SPIKE_RUSTLOC_DIR" 2>/dev/null && pwd)" \
+            || die "SPIKE_RUSTLOC_DIR=$SPIKE_RUSTLOC_DIR is not a directory"
         [ -d "$rustloc_dir/.git" ] || die "SPIKE_RUSTLOC_DIR=$rustloc_dir is not a git checkout"
     else
         rustloc_dir="$results/rustloc"
@@ -382,6 +384,8 @@ main() {
     local cmd="${1:-}"
     results="${2:-${TMPDIR:-/tmp}/spike-1198-results}"
     mkdir -p "$results"
+    # Absolute path: docker -v rejects relative host paths.
+    results="$(cd "$results" && pwd)"
     case "$cmd" in
         build-image)
             build_image
