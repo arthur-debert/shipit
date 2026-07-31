@@ -10,12 +10,12 @@ LEXED="${1:?lexed checkout dir}"
 OUT="${2:?output dir}"
 DD="$OUT/derived-data"
 
+mkdir -p "$OUT"
 xcodebuild -project "$LEXED/quicklook/LexQuickLook.xcodeproj" \
     -scheme LexQuickLook -configuration Release \
     -derivedDataPath "$DD" \
     build CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO
 
-mkdir -p "$OUT"
 rm -rf "$OUT/LexQuickLook.appex"
 cp -R "$DD/Build/Products/Release/LexQuickLook.appex" "$OUT/"
 echo "appex at $OUT/LexQuickLook.appex"

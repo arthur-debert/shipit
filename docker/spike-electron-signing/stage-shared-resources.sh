@@ -16,9 +16,12 @@ cp -R welcome "$RES/welcome"
 # Dictionaries ship when the checkout carries them; when present, staging is
 # required (no silent skip — deb/app parity is asserted downstream).
 if compgen -G "dictionaries/*.trie.gz" >/dev/null; then
-    mkdir -p "$RES/dictionaries/licenses"
+    mkdir -p "$RES/dictionaries"
     cp dictionaries/*.trie.gz "$RES/dictionaries/"
-    cp -R dictionaries/licenses/. "$RES/dictionaries/licenses/"
+    if [[ -d dictionaries/licenses ]]; then
+        mkdir -p "$RES/dictionaries/licenses"
+        cp -R dictionaries/licenses/. "$RES/dictionaries/licenses/"
+    fi
 else
     echo "(no dictionaries/*.trie.gz in the checkout — dictionary staging skipped)"
 fi
