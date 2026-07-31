@@ -1,14 +1,12 @@
-# Fleet baseline image, rust layer — the container Substrate's dev-loop image
-# (ADR-0084: the image owns the toolchain; apt + native toolchains, no pixi).
+# Fleet baseline image, rust layer — the container Substrate's dev-loop image.
 # Carries the rust toolchain, the linters the fleet's rust verbs need, gh, and
 # shipit itself; code mounts from the host at /work and the shipit verbs
 # execute in here. Version pins mirror the fleet's managed pixi pins so a
 # container run and a host run resolve the same tool versions.
 #
 # Build context: a scratch dir holding wheels/shipit-*.whl — assembled by
-# lab/substrate-spike/build-image.sh. linux-arm64 download pins (spike scope);
-# a published fleet image adds the other platforms.
-FROM ubuntu:24.04
+# `lab/substrate-spike/spike.sh build-image`. linux-arm64 download pins only.
+FROM ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
 
 ARG RUST_VERSION=1.96.1
 ARG NEXTEST_VERSION=0.9.140
@@ -83,7 +81,8 @@ RUN uv tool install --python "${PYTHON_VERSION}" /tmp/wheels/shipit-*.whl \
 	&& rm -rf /tmp/wheels
 
 # The mounted checkout is host-owned; git must still resolve it as a repo.
-RUN git config --system --add safe.directory '*'
+# Scoped to the fixed mount point, not '*'.
+RUN git config --system --add safe.directory /work
 
 ENV PATH="/opt/cargo/bin:/opt/node/bin:${PATH}"
 WORKDIR /work

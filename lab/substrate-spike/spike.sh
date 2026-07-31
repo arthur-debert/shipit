@@ -1,23 +1,26 @@
 #!/usr/bin/env bash
-# Substrate dev-loop spike (#1198): edit on host, execute in container.
+# Substrate dev-loop spike: edit on host, execute in container.
 # The runnable measurements behind docs/dev/substrate-devloop-spike.md.
 #
 # Usage: bash lab/substrate-spike/spike.sh <build-image|parity|ergonomics|all> [results-dir]
 #
 #   build-image  build the shipit wheel and the fleet rust-baseline image
 #   parity       run shipit lint/test/build on the SAME rustloc commit on the
-#                host (today's pixi path) and in the container, then diff
+#                host (today's pixi path) and in the container, then diff;
+#                exits nonzero on any rc/output/artifact difference
 #   ergonomics   cold-start, build-cache (target on mount vs volume), file-watch
 #                round-trip, and gh credential passthrough measurements
 #
-# Env overrides: SPIKE_IMAGE (image tag), SPIKE_RUSTLOC_DIR (reuse an existing
-# checkout instead of cloning fresh), SPIKE_RUSTLOC_URL, SPIKE_NO_CACHE=1
-# (build-image with --no-cache).
+# Env overrides: SPIKE_IMAGE (image tag), SPIKE_RUSTLOC_REV (rustloc revision
+# to measure; defaults to the commit the recorded report measured),
+# SPIKE_RUSTLOC_DIR (reuse an existing checkout as-is instead of cloning),
+# SPIKE_RUSTLOC_URL, SPIKE_NO_CACHE=1 (build-image with --no-cache).
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 image="${SPIKE_IMAGE:-shipit-rust-baseline:spike}"
 rustloc_url="${SPIKE_RUSTLOC_URL:-https://github.com/arthur-debert/rustloc.git}"
+rustloc_rev="${SPIKE_RUSTLOC_REV:-84467c96604919dd8ae7518f722c30ef3de4b62f}"
 rustloc_dir=""
 results=""
 
@@ -48,6 +51,9 @@ timed() {
     timed_ms=$((t1 - t0))
 }
 
+# Pins the harness-owned clone to $rustloc_rev (detached, verified clean) so
+# reruns measure the same test subject; SPIKE_RUSTLOC_DIR is the explicit
+# escape hatch and is used as-is, whatever it has checked out.
 ensure_rustloc() {
     if [ -n "${SPIKE_RUSTLOC_DIR:-}" ]; then
         rustloc_dir="$SPIKE_RUSTLOC_DIR"
@@ -58,6 +64,11 @@ ensure_rustloc() {
             note "cloning rustloc fresh into $rustloc_dir"
             git clone --quiet "$rustloc_url" "$rustloc_dir"
         fi
+        [ -z "$(git -C "$rustloc_dir" status --porcelain)" ] \
+            || die "harness clone $rustloc_dir is dirty; remove it and rerun"
+        git -C "$rustloc_dir" rev-parse --quiet --verify "$rustloc_rev^{commit}" >/dev/null \
+            || git -C "$rustloc_dir" fetch --quiet origin "$rustloc_rev"
+        git -C "$rustloc_dir" checkout --quiet --detach "$rustloc_rev"
     fi
     git -C "$rustloc_dir" rev-parse HEAD >"$results/rustloc-commit.txt"
 }
@@ -107,7 +118,7 @@ normalize() {
         -e '/^shipit: SHIPIT_EXEC/d' \
         -e '/Pixi task/d' \
         -e '/^ *WARN /d' \
-        -e '/^\s*(Compiling|Checking|Finished|Downloading|Downloaded|Updating|Locking|Blocking|Installed)/d' \
+        -e '/^[[:space:]]*(Compiling|Checking|Finished|Downloading|Downloaded|Updating|Locking|Blocking|Installed)/d' \
         -e 's/in [0-9]+(\.[0-9]+)?s//g' \
         -e 's/\[[ 0-9.]+s\]/[]/g' \
         -e 's|/[^ ]*/shipit/data/|<data>/|g' \
@@ -137,11 +148,14 @@ build_image() {
     echo "image-build ms=$timed_ms no_cache=${SPIKE_NO_CACHE:-0}" | tee -a "$results/timings.txt"
 }
 
+# Artifact NAMES go to $out (compared host-vs-container); the binary format
+# goes to $out.filetype (recorded only — Mach-O vs ELF is the expected
+# platform difference, not a parity break).
 artifact_listing() {
     local out="$1"
     if [ -d "$rustloc_dir/target/release" ]; then
         (cd "$rustloc_dir/target/release" && find . -maxdepth 1 -type f ! -name '*.d' | sort) >"$out"
-        file "$rustloc_dir/target/release/rustloc" >>"$out" 2>&1 || true
+        file "$rustloc_dir/target/release/rustloc" >"$out.filetype" 2>&1 || true
     else
         echo "(no target/release)" >"$out"
     fi
@@ -182,6 +196,33 @@ parity() {
     grep -E 'tests run|TEST:' "$results/cont-test.log" >"$results/cont-test.norm" || true
     diff -u <(normalize "$results/host-test.norm") <(normalize "$results/cont-test.norm") \
         >"$results/test.diff" || true
+    diff -u "$results/host-artifacts.txt" "$results/cont-artifacts.txt" \
+        >"$results/artifacts.diff" || true
+
+    # The verdict: any nonzero verb, empty test-summary extraction, or
+    # host/container difference fails parity (and stops `all`).
+    local failures=()
+    if [ "$host_lint_rc" -ne 0 ] || [ "$cont_lint_rc" -ne 0 ]; then
+        failures+=("lint rc: host=$host_lint_rc cont=$cont_lint_rc")
+    fi
+    if [ "$host_test_rc" -ne 0 ] || [ "$cont_test_rc" -ne 0 ]; then
+        failures+=("test rc: host=$host_test_rc cont=$cont_test_rc")
+    fi
+    if [ "$host_build_rc" -ne 0 ] || [ "$cont_build_rc" -ne 0 ]; then
+        failures+=("build rc: host=$host_build_rc cont=$cont_build_rc")
+    fi
+    if [ ! -s "$results/host-test.norm" ] || [ ! -s "$results/cont-test.norm" ]; then
+        failures+=("test summary extraction came up empty (host-test.norm / cont-test.norm)")
+    fi
+    if [ -s "$results/lint.diff" ]; then
+        failures+=("lint output differs (lint.diff)")
+    fi
+    if [ -s "$results/test.diff" ]; then
+        failures+=("test results differ (test.diff)")
+    fi
+    if [ -s "$results/artifacts.diff" ]; then
+        failures+=("artifact names differ (artifacts.diff)")
+    fi
 
     {
         echo "rustloc commit: $(cat "$results/rustloc-commit.txt")"
@@ -191,8 +232,14 @@ parity() {
         echo "build  $host_build_rc $cont_build_rc $host_build_ms $cont_build_ms"
         echo "lint diff lines (normalized): $(grep -c '^[+-][^+-]' "$results/lint.diff" || true)"
         echo "test diff lines (normalized): $(grep -c '^[+-][^+-]' "$results/test.diff" || true)"
-        echo "artifact listings: host-artifacts.txt / cont-artifacts.txt"
+        echo "artifact name diff lines: $(grep -c '^[+-][^+-]' "$results/artifacts.diff" || true)"
+        if [ "${#failures[@]}" -gt 0 ]; then
+            printf 'parity: FAIL: %s\n' "${failures[@]+"${failures[@]}"}"
+        else
+            echo "parity: PASS"
+        fi
     } | tee "$results/parity-summary.txt"
+    [ "${#failures[@]}" -eq 0 ] || die "parity failed (logs and diffs in $results)"
 }
 
 # One cold/warm/incremental `shipit build` trio; $1 label, rest: extra docker
@@ -226,14 +273,22 @@ build_trio() {
     echo "build-cache $label cold_ms=$cold warm_ms=$warm incr_ms=$incr" | tee -a "$results/timings.txt"
 }
 
-file_watch() {
+file_watch_cleanup() {
     docker rm -f spike-watch >/dev/null 2>&1 || true
+    rm -f "$rustloc_dir"/.spike-ping-* "$rustloc_dir"/.spike-pong-* \
+        "$rustloc_dir/.spike-stop" 2>/dev/null || true
+}
+
+file_watch() {
+    file_watch_cleanup
+    trap file_watch_cleanup EXIT
     docker run -d --name spike-watch -v "$rustloc_dir:/work" "$image" bash -c \
         'i=0; while [ ! -f /work/.spike-stop ]; do
             if [ -f "/work/.spike-ping-$i" ]; then : >"/work/.spike-pong-$i"; i=$((i + 1)); fi
             sleep 0.01
         done' >/dev/null
-    python3 - "$rustloc_dir" <<'PYEOF' | tee -a "$results/timings.txt"
+    local watch_rc=0
+    python3 - "$rustloc_dir" <<'PYEOF' | tee -a "$results/timings.txt" || watch_rc=$?
 import os
 import statistics
 import sys
@@ -246,25 +301,33 @@ for i in range(10):
     ping, pong = f"{d}/.spike-ping-{i}", f"{d}/.spike-pong-{i}"
     t0 = time.monotonic()
     open(ping, "w").close()
+    deadline = t0 + 30
     while not os.path.exists(pong):
+        if time.monotonic() > deadline:
+            print(f"file-watch: no pong for ping {i} within 30s", file=sys.stderr)
+            sys.exit(1)
         time.sleep(0.001)
     rtts.append((time.monotonic() - t0) * 1000)
 open(f"{d}/.spike-stop", "w").close()
-time.sleep(0.5)
-for f in os.listdir(d):
-    if f.startswith((".spike-ping", ".spike-pong", ".spike-stop")):
-        os.unlink(os.path.join(d, f))
 print(f"file-watch rtt_ms median={statistics.median(rtts):.0f} "
       f"min={min(rtts):.0f} max={max(rtts):.0f} all={[round(r) for r in rtts]}")
 PYEOF
-    docker rm -f spike-watch >/dev/null 2>&1 || true
+    if [ "$watch_rc" -ne 0 ]; then
+        note "watcher container state:" \
+            "$(docker inspect -f '{{.State.Status}}' spike-watch 2>/dev/null || echo removed)"
+        docker logs spike-watch >&2 || true
+        die "file-watch probe failed or timed out"
+    fi
+    file_watch_cleanup
+    trap - EXIT
 }
 
 gh_passthrough() {
     local token rc
     token="$(gh auth token 2>/dev/null)" || die "host gh has no token (gh auth login first)"
     rc=0
-    docker run --rm -e GH_TOKEN="$token" "$image" \
+    # The token rides the environment (-e GH_TOKEN with no value), never argv.
+    GH_TOKEN="$token" docker run --rm -e GH_TOKEN "$image" \
         bash -c 'gh auth status && gh api user --jq .login' \
         >"$results/gh-token-env.log" 2>&1 || rc=$?
     echo "gh-passthrough token-env rc=$rc" | tee -a "$results/timings.txt"

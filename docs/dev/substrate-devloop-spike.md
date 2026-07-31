@@ -6,7 +6,8 @@
 > Phase 2 probe (ADR-0084). Run 2026-07-31 on the owner's darwin-arm64 host
 > (Apple M3, 8 cores, 16 GB) against Docker Desktop 4.82.0's linux-aarch64
 > VM (8 CPUs, 7.75 GB, VirtioFS mounts).
-> Test repo: `arthur-debert/rustloc` at `84467c9`, cloned fresh.
+> Test repo: `arthur-debert/rustloc` at `84467c9`, cloned fresh (the harness
+> pins that commit by default; `SPIKE_RUSTLOC_REV` overrides).
 > Everything here is reproducible from `lab/substrate-spike/spike.sh`
 > (`build-image` / `parity` / `ergonomics`); the image definition is
 > `docker/rust-baseline.Dockerfile`. All numbers are wall-clock measurements
@@ -52,10 +53,12 @@ host and container:
   aarch64 in-container vs Mach-O arm64 on the host — that platform
   difference is the substrate's point, not a break.
 - No verb hard-blocked in-container. The image bakes
-  `git config --system --add safe.directory '*'` for the host-owned mount
+  `git config --system --add safe.directory /work` for the host-owned mount
   (lint scopes via `git ls-files`); on Docker Desktop the mount appears
   root-owned in-container so the setting was not load-bearing in this run —
-  it covers uid-mismatched setups (Linux hosts, non-root containers).
+  it covers uid-mismatched setups (Linux hosts, non-root containers). (The
+  measured run baked the broader `'*'`; scoping to the fixed mount point is
+  behavior-identical for `/work`.)
 - The parity legs also carry timings (host→container on a bare mount:
   lint 24.5 s→73.2 s, test 26.0 s→84.9 s) — performance is the ergonomics
   section's subject, with cache mitigations.
@@ -140,7 +143,7 @@ time; nothing needs to be baked or written.
   1.7.12, yamllint 1.38.0, prettier 3.8.5, markdownlint-cli 0.49.0, ruff
   0.15.20, nextest 0.9.140); shipit installed as a `uv tool` from a wheel of
   the working Tree — exactly the ADR-0084 Revision-pin shape (the definition
-  travels with the pin, the dev loop builds locally); `safe.directory '*'`
+  travels with the pin, the dev loop builds locally); `safe.directory /work`
   baked in for the host-owned mount.
 - **The run shape needs two named volumes per repo** (target dir, cargo
   registry) or an equivalent derived cache location — the mitigation that
@@ -152,7 +155,11 @@ time; nothing needs to be baked or written.
   before declaring it structural.
 - **Scope honesty:** linux-arm64 only; single small rust repo; Docker
   Desktop/VirtioFS specifically — colima/OrbStack may move the VirtioFS
-  numbers; the Mac exception legs (ADR-0084) were out of scope.
+  numbers; the Mac exception legs (ADR-0084) were out of scope. Supply-chain
+  hardening is spike-grade: the base image is digest-pinned and every direct
+  tool version is pinned, but downloads are not checksum-verified and
+  npm/python transitive dependencies resolve at build time — locked-artifact
+  installs belong to the image build/publish design, an open item below.
 
 ## Fail criteria verdict
 
