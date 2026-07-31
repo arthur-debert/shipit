@@ -42,7 +42,7 @@ Delivery System
 │   └── Build orchestrator         resolve → invoke → verify, sequential
 ├── Artifacts                      named build products, promised output paths
 ├── Packaging                      artifact → N packagings (formats); bundlers
-├── Signing                        post-packaging; rcodesign target
+├── Signing                        owns policy+credentials; format-woven execution
 ├── Changelog                      fragments compiled at release
 ├── Release orchestration          version + matrix + barrier + GH Release core
 ├── Distribution                   endpoint adapters; push + reconcile sweep
@@ -117,9 +117,10 @@ mapping for bundle-time inputs. Packagers package declared inputs; they never bu
 and never fetch. A packaging declares its **platform selector** (a subset of the
 artifact's platforms — dmg is darwin-only, deb linux-only; defaults to all) and,
 where one format yields multiple outputs, a **variant name with packaging-time
-metadata** (the two vsix outputs). Every artifact also has an implicit **identity
-packaging** — its output passed through as-is — so directly-deployed outputs (a
-static site dir) have a packaging for their adapter to consume without ceremony.
+metadata** (the two vsix outputs). An artifact's raw output is additionally
+addressable as its **identity packaging** — the output passed through as-is —
+materialized only when an adapter consumes it directly (a static site dir deployed
+to its host); an artifact nothing consumes raw has no identity packaging.
 Distribution consumes packagings, not artifacts. Adopted leaf tools:
 **nfpm** (verified: apk/archlinux/deb/ipk/**msix**/rpm/srpm; msix signing is
 delegated through nfpm's PFX mechanism under the Signing subsystem's ownership —
@@ -133,6 +134,9 @@ cross-repo final app is an ordinary Artifact whose `requires`/artifact-deps clos
 spans repos; the owning repo is its home.
 
 ## Signing [design, pending-spike]
+
+Restates the components spec's "separate post-build stage" wording; rides the same
+components-spec amendment as the packaging refactor.
 
 A standalone subsystem that owns signing **policy and credentials** — that is
 ADR-0040's seam: ownership, not a strict ordering slot. Execution points are
@@ -228,10 +232,13 @@ set) ·
 
 The contracts (all process boundaries; shared data types, never code):
 **builder contract** (target in, exit code + promised outputs out) · **packager
-contract** (built input + format in, signable output out) · **signer contract**
-(signable in, signed/stapled out) · **adapter contract** (packaging in, published
-endpoint state out, idempotent) · **verb contract** (per Tool: setup, invocation,
-machine-readable result).
+contract** (declared inputs — which may include previously signed outputs — plus
+format in, output out; never owns signing decisions or credentials) · **signer
+contract** (signable in → signed/notarized/stapled out; may execute by delegation,
+injecting credentials into a format tool it supervises) — packager and signer steps
+interleave at format-defined points within one packaging sequence · **adapter
+contract** (packaging in, published endpoint state out, idempotent) · **verb
+contract** (per Tool: setup, invocation, machine-readable result).
 
 ## Adopted tools
 
@@ -309,7 +316,7 @@ identical and the barrier already verified packagability.
 | padz | rust @ crates/ | cli (native-cli) | archive | GH, crates.io, brew | bats e2e |
 | rustloc | rust @ crates/ | cli (native-cli) | archive | GH, crates.io | — |
 | standout | rust @ crates/ · docs-site | lib crates (—) | crate | crates.io, GH | — |
-| simple-gal | rust @ crates/ · static-site @ static/ | cli (native-cli) · site (static-web) | archive | GH · site host | windows leg deferred by doctrine |
+| simple-gal | rust @ crates/ · static-site @ static/ | cli (native-cli) · site (static-web) | archive · identity (site dir) | GH · site host | windows leg deferred by doctrine |
 | supage | go @ root | service image (service) | service image | deploy target | Firestore harness (service lifecycle) |
 | shipit | python @ src/ | package (—) | sdist/wheel | GH (+pypi) | the producer itself |
 | shipit-canary | (generated per profile) | per profile | per profile | per profile | Canary instance, not hand-modeled |
@@ -317,7 +324,7 @@ identical and the barrier already verified packagability.
 | lexed | npm @ root · xcode @ quicklook/ | app (electron) · LexQuickLook.appex (darwin, intra-repo input) | dmg/zip/deb; appex placed into Contents/PlugIns via the packaging's `requires` | GH | playwright+xvfb; deps: lexd-lsp, comms, grammar; keeps one Darwin build leg (appex) regardless of signing outcome |
 | mkdocs-lex | python @ mkdocs_lex/ | package (—) | sdist/wheel | pypi, GH | — |
 | lex | rust @ crates/ | lexd, lexd-lsp (native-cli) · lex-wasm (browser, universal) | archives, wasm-pack | GH | fleet keystone producer; sandbox-tests = consumer-owned extra lane |
-| nvim | lua @ lua/lex | plugin (nvim-host) | none needed | GH spine only (notes-only; zero distribution adapters) | degenerate release: tag+changelog, empty artifact set — the spine is produced by release itself, not an adapter |
+| nvim | lua @ lua/lex | none — the repo itself is the plugin, consumed from git by plugin managers | none | GH spine only (notes-only; zero distribution adapters) | degenerate release: tag+changelog, empty artifact set — the spine is produced by release itself, not an adapter |
 | tree-sitter-lex | grammar @ root · npm @ root | grammar wasm (browser, universal) · npm pkg (—) | wasm-pack, npm tarball | GH, npm | grammar kind's first instance |
 | vscode | npm @ root | extension (vscode-host) | vsix ×2 — Marketplace and Open VSX variants (same build, different packaging-time metadata) | GH · VS Marketplace (vsce) · Open VSX (ovsx) | vsix-smoke; deps: lexd-lsp, comms, grammar; the same-format/different-metadata case of packaging 1→N |
 | zed-lex | rust @ root | extension (zed-host, universal wasm) | zed-ext | GH · zed registry (human-gated adapter) | — |
