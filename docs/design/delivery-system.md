@@ -57,12 +57,17 @@ Execution happens in a container; code is mounted from the host (the host edits,
 Substrate runs). Images are layered — one fleet baseline (rust, python/uv, node,
 linters) plus sanctioned heavy layers from the Menu — owned by shipit, published by
 shipit's own release, referenced by derivation from the Shipit pin (one pin axis).
-The **Mac exception** covers only work physically requiring macOS: local GUI launch,
-physically macOS-bound build legs (the `xcode` kind — lexed's appex), and Darwin
-signing/notarization legs — with the signing half expected to move into the container
-if the rcodesign spike passes. The build legs and local launch remain regardless: the
-exception shrinks, it does not vanish. Toolchain identity comes from the image, never
-from per-repo env machinery.
+The **Mac exception** covers only work physically requiring macOS: local GUI launch
+and the physically macOS-bound build legs (the `xcode` kind — lexed's appex). The
+signing/notarization half left the exception when the rcodesign spike passed
+(spike 1, PR #1199; ADR-0084 amended 2026-07-31): Darwin signing legs run in the
+container. Toolchain identity comes from the image, never from per-repo env
+machinery. The dev-loop ergonomics are validated (spike 2, PR #1200): verb parity
+host-vs-container is exact, and the workable inner loop keeps the cargo target dir
+and registry on named volumes (never on the bind mount — the pathological config)
+with `gh` riding `GH_TOKEN` env passthrough. Image build/publish mechanics are the
+remaining named open item, fed by that spike's findings
+(`docs/dev/substrate-devloop-spike.md`).
 
 ## Consumer surface
 
@@ -133,7 +138,7 @@ above Artifact: a
 cross-repo final app is an ordinary Artifact whose `requires`/artifact-deps closure
 spans repos; the owning repo is its home.
 
-## Signing [design, pending-spike]
+## Signing [design — spike passed; components-spec amendment to follow]
 
 Retires the components spec's "separate post-build stage" wording; rides the same
 components-spec amendment as the packaging refactor.
@@ -149,11 +154,12 @@ PFX mechanism as a **delegated step**: the certificate is injected by the signin
 subsystem at invocation and never lives in packager config. The invariant packagers
 must honor is therefore: they never *own* signing decisions or credentials — even
 when a format's tooling is the mechanical signer. Target implementation:
-**rcodesign** — sign, notarize, staple from Linux (verified: real projects run it
-from Linux containers; App Store Connect API key supported). Until the hands-on
-spike passes on a real fleet `.app`/`.dmg`, Darwin signing legs remain on the Mac
-exception; a pass moves the CI signing/notarization legs into the container (the
-Mac exception keeps local GUI launch and the xcode build legs).
+**rcodesign** — sign, notarize, staple from Linux (verified hands-on: spike 1,
+PR #1199, ran scoped bottom-up signing, dmg signing, notarization — Accepted —
+and staple from a Linux container against lexed's `.app` with its nested appex,
+using the App Store Connect API key). The CI signing/notarization legs run in
+the container; the Mac exception keeps local GUI launch and the xcode build
+legs (ADR-0084 amended 2026-07-31).
 
 ## Changelog [settled]
 
@@ -246,9 +252,9 @@ contract** (per Tool: setup, invocation, machine-readable result).
 | --- | --- | --- |
 | Task veneer | Taskfile (go-task) | verified (schema stable; v4 is opt-in-flags, no break planned) |
 | linux/windows packaging | nfpm | verified (incl. msix, PFX-signed) |
-| electron packaging | @electron/packager + dmg/zip leaf tools | **pending-spike (hands-on)** |
+| electron packaging | @electron/packager + leaf dmg (xorrisofs + libdmg-hfsplus) / zip | verified (hands-on spike 1, PR #1199) |
 | tauri packaging | `tauri bundle` | verified (bundle-only flow documented) |
-| macOS signing/notarization | rcodesign | **pending-spike (hands-on)** |
+| macOS signing/notarization | rcodesign | verified (hands-on spike 1, PR #1199 — sign/notarize/staple from a Linux container) |
 | fetch/verify | `gh release download` (+ `gh attestation verify`) | verified (attestation incl. private repos on personal plans) |
 | everything else | built in shipit | settled |
 
@@ -265,20 +271,27 @@ is ever rewritten in Rust). Survey reports: session scratchpad
 
 Hands-on, must pass before the dependent design point is final:
 
-1. **Electron packaging + signing pipeline from Linux** — test article: **lexed
-   including its QuickLook `.appex`**, the fleet's hardest signing case (nested
-   bundle, sandbox entitlements): appex built on a Darwin leg (xcode kind) → npm
-   builder output → `@electron/packager` → appex placed into `Contents/PlugIns/`
-   via the packaging's `requires` → rcodesign scoped, bottom-up signing (appex with
-   its own entitlements, then helpers/frameworks, then the outer `.app`) → dmg
-   assembly → notarize + staple via App Store Connect API key (doppler) → nfpm
-   deb and zip of the same build. Pass ⇒ the electron packaging row is settled; the
-   Mac exception's CI-signing half shrinks away (ADR-0084 amendment; lexed keeps
-   its appex Darwin *build* leg either way). Fail ⇒ Darwin signing legs stay on
-   macOS runners and the electron packager choice is revisited.
-2. **Container dev-loop ergonomics** (Suburbia Phase 2 spike, already planned) — one
-   rust repo, edit-on-host / execute-in-container, lint/test/build parity.
-3. **`src-tauri` → `crates/` renameability** (already planned with Phase 3 layout).
+1. **Electron packaging + signing pipeline from Linux — PASSED** (shipit#1197,
+   PR #1199, merged 2026-07-31). Test article: **lexed including its QuickLook
+   `.appex`**, the fleet's hardest signing case (nested bundle, sandbox
+   entitlements): appex built unsigned on a Darwin leg (xcode kind), then —
+   entirely in a Linux container — `@electron/packager` → appex placed into
+   `Contents/PlugIns/` → rcodesign scoped, bottom-up signing (appex with its own
+   entitlements first, never `--deep`) → dmg assembly (xorrisofs +
+   libdmg-hfsplus) → dmg sign → notarize (Accepted) + staple via the App Store
+   Connect API key → nfpm deb and zip of the same build. Consequences applied:
+   electron packaging + rcodesign rows settled, ADR-0084 Mac exception amended
+   (CI-signing half removed; lexed keeps its appex Darwin *build* leg). Full
+   recipe + caveats (QuickLook *visual* render is human-verified, not
+   machine-verified): `docs/dev/delivery-spike-electron-signing.md`.
+2. **Container dev-loop ergonomics — PASSED** (shipit#1198, PR #1200, merged
+   2026-07-31; the Suburbia Phase 2 spike). rustloc edit-on-host /
+   execute-in-container: lint/test/build parity exact (0-diff findings, 266/266
+   tests, matching artifact sets); measured ergonomics prescribe named volumes
+   for cargo target + registry and `GH_TOKEN` env passthrough for `gh`. Feeds
+   the image build/publish mechanics design (the remaining Substrate open
+   item). Numbers: `docs/dev/substrate-devloop-spike.md`.
+3. **`src-tauri` → `crates/` renameability** (still planned with Phase 3 layout).
 
 Doc-level verifications: complete (2026-07-30 claims scout —
 `adopt-claims-verification.md`): nfpm msix TRUE; private-repo attestation SUPPORTED
@@ -288,8 +301,10 @@ Doc-level verifications: complete (2026-07-30 claims scout —
 
 ## Open questions
 
-- None at the tree level. Per-subsystem: empty except items marked pending-spike /
-  pending-verification above, which resolve to design changes only if a spike fails.
+- None at the tree level. Spikes 1 and 2 passed with no design change required.
+  Per-subsystem, two named items remain: the Substrate's image build/publish
+  mechanics (fed by spike 2's findings) and spike 3 (`src-tauri` → `crates/`
+  renameability, rides Phase 3).
 
 ## Paper-fit appendix
 

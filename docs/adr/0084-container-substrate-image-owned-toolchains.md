@@ -28,12 +28,18 @@ not the exception. (Suburbia Spec: `docs/spec/suburbia.md`.)
   it already has, plus its selected layers. Toolchain bumps ship as shipit
   releases, delivered by the same pin-bump reconcile as everything else.
 - **The Mac exception** is the sole carve-out: work that physically requires
-  macOS runs natively on it — the Darwin build/bundle release legs (Apple SDK,
-  Xcode, `.app`/`.dmg` packaging), CI signing/notarization, and locally
-  launching the GUI apps. The exception is licensed to use cruder pinning
-  (pixi may survive solely to serve it) because its blast radius is a few
-  repos' GUI legs and inner dev loop. It must not accumulate general
-  machinery, and no leg joins it without a physical macOS requirement.
+  macOS runs natively on it — the physically macOS-bound build legs (the
+  `xcode` kind: Apple SDK / `xcodebuild` targets, e.g. lexed's QuickLook
+  appex) and locally launching the GUI apps. The exception is licensed to use
+  cruder pinning (pixi may survive solely to serve it) because its blast
+  radius is a few repos' GUI legs and inner dev loop. It must not accumulate
+  general machinery, and no leg joins it without a physical macOS requirement.
+  (Amended 2026-07-31: CI signing/notarization and `.app`/`.dmg` packaging
+  left the exception — the deliverability spike (shipit#1197, PR #1199) ran
+  the full electron pipeline from a Linux container against lexed including
+  its nested appex: `@electron/packager` assembly, `rcodesign` scoped
+  bottom-up signing, dmg assembly + signing, notarization (Accepted) and
+  staple. Only the appex `xcodebuild` leg needed Darwin.)
 - **Revision pins stay total.** A Version pin (ADR-0080) uses the published
   image. A Revision pin falls back to the latest released image; when the
   revision changes the image definition itself, the dev loop builds the image
