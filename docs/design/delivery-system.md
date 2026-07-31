@@ -135,7 +135,7 @@ spans repos; the owning repo is its home.
 
 ## Signing [design, pending-spike]
 
-Restates the components spec's "separate post-build stage" wording; rides the same
+Retires the components spec's "separate post-build stage" wording; rides the same
 components-spec amendment as the packaging refactor.
 
 A standalone subsystem that owns signing **policy and credentials** — that is
@@ -224,9 +224,9 @@ The nouns (glossary-anchored, one line each — CONTEXT.md wins on meaning):
 **Repo** · **Component** (kind, mount, requires) · **Tool** / **Tool contract** ·
 **Builder** (per-kind program) · **Target** (platform | universal) · **Artifact**
 (key, component, platforms/universal, path, runtime) · **Packaging** (artifact,
-format, platform selector, optional variant + metadata, requires; every artifact has
-an implicit identity packaging) · **Release** (version, tag, changelog, artifact
-set) ·
+format, platform selector, optional variant + metadata, requires; an identity
+packaging exists only where an adapter consumes the artifact's raw output) ·
+**Release** (version, tag, changelog, artifact set) ·
 **Distribution endpoint** / **Endpoint adapter** · **Artifact-dep** (key, version) ·
 **Menu** / **Profile** / **Canary instance**.
 
