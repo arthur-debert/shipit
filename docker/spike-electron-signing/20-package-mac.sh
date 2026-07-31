@@ -19,20 +19,23 @@ echo "==> npm ci"
 npm ci --no-audit --no-fund
 
 echo "==> fetch-deps equivalent (deps.json assets, straight from GitHub releases)"
-mkdir -p /work/fetch resources
-if [[ ! -f /work/fetch/lexd-lsp-darwin ]]; then
-    curl -fsSL -o /work/fetch/lexd-lsp-darwin.tar.gz \
+# The fetch cache lives under /work/out (a mounted volume) so downloads
+# survive across container runs.
+FETCH=/work/out/fetch
+mkdir -p "$FETCH" resources
+if [[ ! -f "$FETCH/lexd-lsp-darwin" ]]; then
+    curl -fsSL -o "$FETCH/lexd-lsp-darwin.tar.gz" \
         "https://github.com/lex-fmt/lex/releases/download/${LEXD_LSP_VERSION}/lexd-lsp-aarch64-apple-darwin.tar.gz"
-    tar -xzf /work/fetch/lexd-lsp-darwin.tar.gz -C /work/fetch
-    mv /work/fetch/lexd-lsp-aarch64-apple-darwin/lexd-lsp /work/fetch/lexd-lsp-darwin
+    tar -xzf "$FETCH/lexd-lsp-darwin.tar.gz" -C "$FETCH"
+    mv "$FETCH/lexd-lsp-aarch64-apple-darwin/lexd-lsp" "$FETCH/lexd-lsp-darwin"
 fi
 if [[ ! -f resources/tree-sitter-lex.wasm ]]; then
-    curl -fsSL -o /work/fetch/tree-sitter.tar.gz \
+    curl -fsSL -o "$FETCH/tree-sitter.tar.gz" \
         "https://github.com/lex-fmt/tree-sitter-lex/releases/download/${TREE_SITTER_VERSION}/tree-sitter.tar.gz"
-    mkdir -p /work/fetch/tree-sitter
-    tar -xzf /work/fetch/tree-sitter.tar.gz -C /work/fetch/tree-sitter
-    cp /work/fetch/tree-sitter/tree-sitter-lex.wasm resources/
-    mkdir -p resources/queries && cp -R /work/fetch/tree-sitter/queries/. resources/queries/
+    mkdir -p "$FETCH/tree-sitter"
+    tar -xzf "$FETCH/tree-sitter.tar.gz" -C "$FETCH/tree-sitter"
+    cp "$FETCH/tree-sitter/tree-sitter-lex.wasm" resources/
+    mkdir -p resources/queries && cp -R "$FETCH/tree-sitter/queries/." resources/queries/
 fi
 
 echo "==> icons (icon-gen, pure JS)"
@@ -51,14 +54,9 @@ node .spike-packager.mjs darwin "$LEXED" "$OUT/pack-darwin"
 APP="$OUT/pack-darwin/LexEd-darwin-arm64/LexEd.app"
 RES="$APP/Contents/Resources"
 
-echo "==> input placement: extraResources"
-install -m 0755 /work/fetch/lexd-lsp-darwin "$RES/lexd-lsp"
-mkdir -p "$RES/bin" && install -m 0755 bin/lexed "$RES/bin/lexed"
-cp -R welcome "$RES/welcome"
-mkdir -p "$RES/dictionaries/licenses"
-cp dictionaries/*.trie.gz "$RES/dictionaries/" 2>/dev/null || true
-cp -R dictionaries/licenses/. "$RES/dictionaries/licenses/" 2>/dev/null || true
-mkdir -p "$RES/assets" && cp comms/assets/logo-full.png "$RES/assets/logo-full.png"
+echo "==> input placement: extraResources (shared staging keeps deb parity)"
+install -m 0755 "$FETCH/lexd-lsp-darwin" "$RES/lexd-lsp"
+bash /work/scripts/stage-shared-resources.sh "$LEXED" "$RES"
 
 echo "==> input placement: QuickLook appex -> Contents/PlugIns/"
 mkdir -p "$APP/Contents/PlugIns"

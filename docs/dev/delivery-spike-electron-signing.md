@@ -7,8 +7,12 @@ entitlements) — be packaged, signed, dmg-assembled, notarized, and stapled
 **from a Linux container**, leaving macOS only the appex *build* leg and the
 final real-mac *verification*?
 
-**Overall: PASS.** Every pipeline step ran end-to-end with real artifacts and
-the real Apple notary service. Two assembly-detail corrections were needed
+**Overall: PASS on the question under test.** Packaging, signing, dmg
+assembly, notarization, and stapling all ran end-to-end from Linux with real
+artifacts and the real Apple notary service, and every programmatic mac-side
+check accepts the result. Step 7 is PARTIAL: the visual QuickLook render was
+not demonstrated (locked-screen run; see the transcript) — registration and
+all signing checks pass. Two assembly-detail corrections were needed
 (recorded below); neither disturbs the design's tool adoption.
 
 Runnable scripts: `docker/spike-electron-signing/` (see its README for the
@@ -16,9 +20,11 @@ step map). Test article: fresh clone of `lex-fmt/lexed` (electron 41,
 `quicklook/LexQuickLook.xcodeproj`). Host: darwin-arm64 + Docker running
 linux/aarch64 containers — CI would use x86_64 or arm64 Linux runners;
 rcodesign, nfpm, and xorriso are arch-agnostic, and `@electron/packager`
-cross-packages any target arch from any host. Signing used local credentials
-(coordinator-provided); no credential value appears in the scripts or in any
-artifact.
+cross-packages any target arch from any host. Tool identities: rcodesign
+0.29.0, nfpm 2.47.0, `@electron/packager` 20.0.4, libdmg-hfsplus at
+`fanquake/libdmg-hfsplus@1cc791e` (pinned in the Dockerfile). Signing used
+local credentials (coordinator-provided); no credential value appears in the
+scripts or in any artifact.
 
 ## Per-step results
 
@@ -30,8 +36,15 @@ artifact.
 | 4 | `rcodesign` scoped bottom-up signing (p12, never `--deep`) | Linux container | PASS — `codesign --verify --deep --strict` clean on host | ~9s for a 321MB app |
 | 5a | dmg assembly (xorrisofs → libdmg-hfsplus `dmg`) + `rcodesign` dmg sign | Linux container | PASS (after dropping `-hfsplus`, see gotcha 1) | ~15s |
 | 5b | notarize (`rcodesign notary-submit`, App Store Connect API) + staple | Linux container | PASS — "Accepted / Ready for distribution", ticket stapled into the dmg | 71s total (47s notary poll) for a 127MB dmg |
-| 6 | nfpm deb + symlink-preserving zip of the same build | Linux container | PASS — `lexed_0.11.3_arm64.deb` + `LexEd-mac-arm64.zip` | ~47s |
-| 7 | Gatekeeper install assess + staple validate + launch + QuickLook function | host (real mac) | PASS with one manual residual (see transcript) | — |
+| 6 | nfpm deb + symlink-preserving zip of the same build | Linux container | PASS (assembly) — `lexed_0.11.3_arm64.deb` + `LexEd-mac-arm64.zip`; see the deb-parity note below | ~47s |
+| 7 | Gatekeeper install assess + staple validate + launch + QuickLook function | host (real mac) | PARTIAL — all programmatic checks pass (Gatekeeper, staple, launch, pluginkit registration); the visual QuickLook render was not exercised (see transcript) | — |
+
+Deb-parity note (step 6): the deb built during the run staged only `lexd-lsp`
+and `welcome`, missing the other extraResources the mac package carries
+(`bin/lexed`, dictionaries, logo) — found in review. The scripts now share one
+staging path for both platforms and assert the deb's contents; the deb itself
+was not rebuilt (the step's question — nfpm/zip assembly from the container —
+stands, and the Linux artifact is not this spike's article under test).
 
 ## The signing invocations that worked
 

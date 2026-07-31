@@ -2,8 +2,8 @@
 # Spike #1197 step 5a (container): assemble a UDIF dmg from the SIGNED app,
 # entirely on Linux, then sign the dmg. Sign-then-assemble is mandatory:
 # rcodesign cannot sign inside a dmg (verified constraint).
-# Pipeline (bitcoin-core's): xorrisofs (ISO9660+HFS+ hybrid, Rock Ridge
-# symlinks preserved) -> libdmg-hfsplus `dmg` (wraps into UDIF/UDZO with a
+# Pipeline (bitcoin-core's): xorrisofs (plain ISO9660 + Rock Ridge, symlinks
+# preserved, no HFS+) -> libdmg-hfsplus `dmg` (wraps into UDIF/UDZO with a
 # koly trailer rcodesign can sign and the notary service accepts).
 set -euo pipefail
 
@@ -20,11 +20,8 @@ cp -a "$APP" "$STAGE/"
 ln -s /Applications "$STAGE/Applications"
 
 echo "==> xorrisofs (ISO9660 + Rock Ridge; NO -hfsplus)"
-# -hfsplus was tried and REJECTED: libisofs' HFS+ writer stamps a
-# com.apple.FinderInfo xattr on every file, and `codesign --verify --strict`
-# rejects that as "detritus" on every Mach-O in the bundle. Plain ISO9660 +
-# Rock Ridge (current bitcoin-core practice) carries symlinks and no xattrs;
-# macOS mounts it read-only via cd9660.
+# Do not add -hfsplus: libisofs' HFS+ writer stamps FinderInfo xattrs that
+# `codesign --verify --strict` rejects (details in the findings report).
 xorrisofs -D -l -V "$VOLNAME" -no-pad -r -dir-mode 0755 \
     -sysid APPLE -apm-block-size 2048 \
     -o "$OUT/uncompressed.dmg" "$STAGE"
