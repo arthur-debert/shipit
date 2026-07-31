@@ -35,7 +35,16 @@ qlmanage -m plugins 2>/dev/null | grep -i lex || true
 pluginkit -m -v 2>/dev/null | grep -i "com.lex.lexed.quicklook" || true
 
 if [[ -n "$SAMPLE" ]]; then
-    echo "==> qlmanage -p (render preview)"
-    qlmanage -p "$SAMPLE" 2>&1 | tail -3
+    echo "==> qlmanage -p (render preview; appex process spawning is the proof)"
+    qlmanage -p "$SAMPLE" >/tmp/qlmanage-spike.log 2>&1 &
+    QL_PID=$!
+    sleep 6
+    if pgrep -fl "LexQuickLook" | head -2; then
+        echo "APPEX PROCESS SPAWNED — QuickLook extension functioning"
+    else
+        echo "APPEX PROCESS NOT FOUND — QuickLook render did not use the appex"
+    fi
+    kill "$QL_PID" 2>/dev/null || true
+    grep -iE 'error|cancel' /tmp/qlmanage-spike.log | head -3 || true
 fi
 echo "verification done"

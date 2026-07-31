@@ -15,7 +15,7 @@ LINRES="$OUT/pack-linux/lexed-linux-arm64/resources"
 curl -fsSL -o /tmp/lexd-lsp-linux.tar.gz \
     "https://github.com/lex-fmt/lex/releases/download/v0.17.0/lexd-lsp-aarch64-unknown-linux-gnu.tar.gz"
 tar -xzf /tmp/lexd-lsp-linux.tar.gz -C /tmp
-install -m 0755 /tmp/lexd-lsp "$LINRES/lexd-lsp"
+install -m 0755 /tmp/lexd-lsp-aarch64-unknown-linux-gnu/lexd-lsp "$LINRES/lexd-lsp"
 cp -R welcome "$LINRES/welcome"
 
 echo "==> nfpm deb"
@@ -28,4 +28,4 @@ rm -f "$OUT/LexEd-mac-arm64.zip"
 zip -qry "$OUT/LexEd-mac-arm64.zip" LexEd.app
 
 ls -lh "$OUT"/*.deb "$OUT"/*.zip
-dpkg-deb -c "$OUT"/lexed_*.deb | head -5
+dpkg-deb -c "$OUT"/lexed_*.deb | sed -n '1,5p'

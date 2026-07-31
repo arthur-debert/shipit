@@ -35,7 +35,7 @@ done < <(find "$APP/Contents/Frameworks" -maxdepth 1 -name '*Helper*.app' | sort
 "${SIGN[@]}" \
     --entitlements-xml-file "$APP_ENTITLEMENTS" \
     "${HELPER_ARGS[@]}" \
-    --exclude 'Contents/PlugIns/LexQuickLook.appex/**' \
+    --exclude 'Contents/PlugIns/LexQuickLook.appex' \
     "$APP"
 
 echo "==> verify"

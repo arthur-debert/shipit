@@ -24,14 +24,15 @@ if [[ ! -f /work/fetch/lexd-lsp-darwin ]]; then
     curl -fsSL -o /work/fetch/lexd-lsp-darwin.tar.gz \
         "https://github.com/lex-fmt/lex/releases/download/${LEXD_LSP_VERSION}/lexd-lsp-aarch64-apple-darwin.tar.gz"
     tar -xzf /work/fetch/lexd-lsp-darwin.tar.gz -C /work/fetch
-    mv /work/fetch/lexd-lsp /work/fetch/lexd-lsp-darwin
+    mv /work/fetch/lexd-lsp-aarch64-apple-darwin/lexd-lsp /work/fetch/lexd-lsp-darwin
 fi
 if [[ ! -f resources/tree-sitter-lex.wasm ]]; then
     curl -fsSL -o /work/fetch/tree-sitter.tar.gz \
         "https://github.com/lex-fmt/tree-sitter-lex/releases/download/${TREE_SITTER_VERSION}/tree-sitter.tar.gz"
-    tar -xzf /work/fetch/tree-sitter.tar.gz -C /work/fetch/
-    cp /work/fetch/tree-sitter-lex.wasm resources/
-    mkdir -p resources/queries && cp -R /work/fetch/queries/. resources/queries/
+    mkdir -p /work/fetch/tree-sitter
+    tar -xzf /work/fetch/tree-sitter.tar.gz -C /work/fetch/tree-sitter
+    cp /work/fetch/tree-sitter/tree-sitter-lex.wasm resources/
+    mkdir -p resources/queries && cp -R /work/fetch/tree-sitter/queries/. resources/queries/
 fi
 
 echo "==> icons (icon-gen, pure JS)"
