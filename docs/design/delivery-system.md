@@ -65,9 +65,11 @@ container. Toolchain identity comes from the image, never from per-repo env
 machinery. The dev-loop ergonomics are validated (spike 2, PR #1200): verb parity
 host-vs-container is exact, and the workable inner loop keeps the cargo target dir
 and registry on named volumes (never on the bind mount — the pathological config)
-with `gh` riding `GH_TOKEN` env passthrough. Image build/publish mechanics are the
-remaining named open item, fed by that spike's findings
-(`docs/dev/substrate-devloop-spike.md`).
+with `gh` riding `GH_TOKEN` env passthrough. Two named open items remain, both fed
+by that spike's findings (`docs/dev/substrate-devloop-spike.md`): image
+build/publish mechanics, and the substrate runner's ownership of the cache
+volumes — the runner, not the developer, creates and keys them, and their
+sharing and cleanup lifecycle is that design's to define.
 
 ## Consumer surface
 
@@ -279,11 +281,15 @@ Hands-on, must pass before the dependent design point is final:
    `Contents/PlugIns/` → rcodesign scoped, bottom-up signing (appex with its own
    entitlements first, never `--deep`) → dmg assembly (xorrisofs +
    libdmg-hfsplus) → dmg sign → notarize (Accepted) + staple via the App Store
-   Connect API key → nfpm deb and zip of the same build. Consequences applied:
-   electron packaging + rcodesign rows settled, ADR-0084 Mac exception amended
-   (CI-signing half removed; lexed keeps its appex Darwin *build* leg). Full
-   recipe + caveats (QuickLook *visual* render is human-verified, not
-   machine-verified): `docs/dev/delivery-spike-electron-signing.md`.
+   Connect API key → zip plus nfpm deb assembly of the same build (the deb was
+   assembled but not re-run after a resource-staging fix, so full deb content
+   parity stands undemonstrated). Consequences applied: electron packaging +
+   rcodesign rows settled, ADR-0084 Mac exception amended (CI-signing half
+   removed; lexed keeps its appex Darwin *build* leg). Residual caveat: the
+   QuickLook *visual* render remains unverified — signing and appex
+   registration/invocation are machine-checked, but the rendered preview still
+   needs a human at an unlocked screen; this does not touch the signing result.
+   Full recipe + caveats: `docs/dev/delivery-spike-electron-signing.md`.
 2. **Container dev-loop ergonomics — PASSED** (shipit#1198, PR #1200, merged
    2026-07-31; the Suburbia Phase 2 spike). rustloc edit-on-host /
    execute-in-container: lint/test/build parity exact (0-diff findings, 266/266
@@ -302,9 +308,10 @@ Doc-level verifications: complete (2026-07-30 claims scout —
 ## Open questions
 
 - None at the tree level. Spikes 1 and 2 passed with no design change required.
-  Per-subsystem, two named items remain: the Substrate's image build/publish
-  mechanics (fed by spike 2's findings) and spike 3 (`src-tauri` → `crates/`
-  renameability, rides Phase 3).
+  Per-subsystem, three named items remain: the Substrate's image build/publish
+  mechanics and its runner-owned cache-volume contract (creation, keying,
+  sharing, cleanup — both fed by spike 2's findings), and spike 3
+  (`src-tauri` → `crates/` renameability, rides Phase 3).
 
 ## Paper-fit appendix
 
