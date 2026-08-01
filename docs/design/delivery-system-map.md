@@ -38,7 +38,7 @@ tool line where a lower-level tool is adopted. The detail doc wins on any questi
      execution (bottom-up over the bundle, then dmg assembly, then notarize +
      staple; msix delegated through nfpm with an injected cert). Packagers never
      own signing decisions or credentials.
-     - tool: rcodesign (from Linux; pending the hands-on spike)
+     - tool: rcodesign (from Linux; verified hands-on — spike 1, PR #1199)
 4. **Barrier** — all-or-nothing: every leg built, packaged, and signed, or nothing
    publishes. The only clean abort point.
 5. **Release** — the spine event: GH Release matching the tag, compiled changelog,
@@ -54,9 +54,9 @@ tool line where a lower-level tool is adopted. The detail doc wins on any questi
 ## Standing systems (not stages — the flow runs on top of these)
 
 - **Substrate** — everything above executes in a container; code mounts from the
-  host; layered shipit-owned images; the Mac exception (local GUI launch, xcode
-  build legs, and — until the signing spike passes — Darwin signing legs) is the
-  only native carve-out.
+  host; layered shipit-owned images; the Mac exception (local GUI launch and the
+  xcode build legs — Darwin signing left it when the signing spike passed,
+  ADR-0084 amended 2026-07-31) is the only native carve-out.
 - **Consumer surface** — the managed 4-verb Task veneer (+ consumer-owned local
   include) delegating to `shipit <verb>`; same entry points locally and in CI.
   - tool: Taskfile (go-task)
