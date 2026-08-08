@@ -2,8 +2,8 @@
 
 The unit tests drive a FAKE `standout` executable placed on `PATH`, so the seam,
 the import, and the Artifact derivation all run for real. One end-to-end test
-drives the released wizard itself and skips when it is absent; obtain it with
-`cargo install standout --version 7.10.0 --locked`.
+drives the released wizard itself; it runs only when `SHIPIT_STANDOUT_WIZARD`
+names the certified version on `PATH`.
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ import pytest
 
 from shipit import execrun, git
 from shipit.repocreate import CreationError, build_plan, create_repo, validate_name
+from shipit.repocreate import create as create_mod
 from shipit.repocreate import standout as standout_mod
 from shipit.repocreate.profiles import (
     ArtifactDecl,
@@ -212,6 +213,31 @@ def test_produce_reports_a_failing_wizard(tmp_path, monkeypatch):
     install_wizard(tmp_path, monkeypatch, "exit 1")
     with pytest.raises(CreationError, match="exited 1"):
         produce(tmp_path)
+
+
+def test_produce_carries_the_generated_file_modes_not_the_caller_access(
+    tmp_path, monkeypatch
+):
+    files = standout_tree()
+    files["scripts/release.sh"] = "#!/bin/sh\n"
+    source = write_tree(tmp_path / "wizard-source", files)
+    (source / "scripts/release.sh").chmod(0o755)
+    install_wizard(tmp_path, monkeypatch, f"cp -R '{source}' './hello'")
+
+    modes = {file.path: file.executable for file in produce(tmp_path).owned_files}
+    assert modes["scripts/release.sh"] is True
+    assert modes["Cargo.toml"] is False
+
+
+def test_produce_resolves_a_relative_path_entry_before_entering_the_scratch_dir(
+    tmp_path, monkeypatch
+):
+    source = write_tree(tmp_path / "wizard-source", standout_tree())
+    bindir = install_wizard(tmp_path, monkeypatch, f"cp -R '{source}' './hello'")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PATH", os.pathsep.join([bindir.name, "/usr/bin", "/bin"]))
+
+    assert produce(tmp_path).artifact.package == "hello"
 
 
 def test_produce_refuses_without_the_executable_on_path(tmp_path, monkeypatch):
@@ -525,6 +551,46 @@ def test_create_removes_the_producer_scratch_directory_when_it_refuses(
     assert list(tmp_path.iterdir()) == []
 
 
+@contextlib.contextmanager
+def rmtree_always_fails(monkeypatch):
+    """Every removal fails; whatever it refused to remove is cleaned on the way out."""
+    real_rmtree = shutil.rmtree
+    refused: list[str] = []
+
+    def failing_rmtree(path, ignore_errors=False):
+        refused.append(path)
+        raise OSError(39, "Directory not empty")
+
+    monkeypatch.setattr(create_mod.shutil, "rmtree", failing_rmtree)
+    try:
+        yield
+    finally:
+        for path in refused:
+            real_rmtree(path, ignore_errors=True)
+
+
+def test_create_fails_when_the_producer_scratch_directory_survives(
+    tmp_path, git_identity, monkeypatch
+):
+    with rmtree_always_fails(monkeypatch):
+        with pytest.raises(CreationError, match="scaffold scratch directory"):
+            _create(tmp_path, producer=lambda name, scratch: minimal_scaffold(name))
+    assert not (tmp_path / "hello").exists()
+
+
+def test_create_reports_a_surviving_scratch_directory_alongside_the_producer_failure(
+    tmp_path, git_identity, monkeypatch
+):
+    def refusing(name, scratch):
+        raise CreationError("the wizard was cancelled")
+
+    with rmtree_always_fails(monkeypatch):
+        with pytest.raises(CreationError, match="cancelled") as exc:
+            _create(tmp_path, producer=refusing)
+    notes = getattr(exc.value, "__notes__", [])
+    assert any("scaffold scratch directory" in note for note in notes)
+
+
 def test_create_with_the_wizard_leaves_nothing_when_a_check_fails(
     tmp_path, monkeypatch, git_identity
 ):
@@ -621,6 +687,10 @@ def test_run_interactive_normalizes_a_missing_binary(tmp_path):
 
 # --- end-to-end against the released wizard ---------------------------------
 
+#: The one wizard release the prompt sequence below is verified against. The binary
+#: carries no `--version`, so the runner asserts the version through this variable.
+CERTIFIED_VERSION = "7.10.0"
+
 #: Answers for standout v7.10.0's prompt sequence, verified against the binary:
 #: project name, executable name, command, description, input count, input name,
 #: type, cardinality, sources, result shape, record fields, then the confirmation.
@@ -630,17 +700,15 @@ REAL_WIZARD_ANSWERS = (
 
 
 @pytest.mark.skipif(
-    shutil.which("standout") is None,
-    reason="needs the released wizard: cargo install standout --version 7.10.0 --locked",
+    os.environ.get("SHIPIT_STANDOUT_WIZARD") != CERTIFIED_VERSION,
+    reason=(
+        f"needs standout {CERTIFIED_VERSION} on PATH: install it with `cargo install "
+        f"standout --version {CERTIFIED_VERSION} --locked`, then set "
+        f"SHIPIT_STANDOUT_WIZARD={CERTIFIED_VERSION}"
+    ),
 )
 def test_released_standout_wizard_scaffold_imports_and_certifies(tmp_path):
-    """Certify the wizard CONTRACT against the real binary: run it, import it, check it.
-
-    It stops short of the staged Checks: a v7.10.0-generated project pins the
-    unpublished `standout-test = "7.10.0"`, so Cargo cannot resolve it yet. That
-    is an upstream gap, and shipit's answer to it — refuse to publish — is
-    covered by the failing-Check tests above.
-    """
+    """Certify the wizard CONTRACT against the real binary: run it, import it, plan it."""
     scratch = tmp_path / "scratch"
     scratch.mkdir()
     with piped_stdin(REAL_WIZARD_ANSWERS):

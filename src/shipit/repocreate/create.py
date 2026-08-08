@@ -26,6 +26,10 @@ CHECKS: tuple[str, ...] = ("lint", "test", "build")
 #: Staged Checks are provisioning-shaped, so they share pixi's own budget.
 _LONG_TIMEOUT: float = pixienv.INSTALL_TIMEOUT
 
+#: How :func:`_cleanup` names each temporary directory it removes.
+_STAGING_SIBLING = "staging sibling"
+_SCAFFOLD_SCRATCH = "scaffold scratch directory"
+
 Effect = Callable[[Path], None]
 
 #: A scaffold producer: build the Rust application tree inside a private scratch dir.
@@ -217,9 +221,9 @@ def create_repo(
         _relocate_hook_shims(staging, dest)
         _publish(staging, dest)
     except BaseException as primary:
-        cleanup_report = _cleanup(staging)
+        cleanup_report = _cleanup(staging, _STAGING_SIBLING)
         if cleanup_report is not None:
-            primary.add_note(cleanup_report)
+            primary.add_note(f"additionally, {cleanup_report}")
         raise
     return CreationResult(
         destination=dest,
@@ -229,18 +233,22 @@ def create_repo(
 
 
 def _scaffold(producer: Producer, name: ProjectName) -> RustScaffold:
-    """Run ``producer`` in a private scratch directory, always removed; its product is data."""
+    """Run ``producer`` in a private scratch directory, always removed; its product is data.
+
+    A scratch directory that survives removal fails the creation.
+    """
     scratch = Path(tempfile.mkdtemp(prefix="shipit-repo-new-scaffold-"))
     try:
-        return producer(name, scratch)
-    finally:
-        try:
-            shutil.rmtree(scratch)
-        except OSError:
-            logger.exception(
-                "failed to remove the scaffold scratch directory",
-                extra={"scratch": str(scratch)},
-            )
+        scaffold = producer(name, scratch)
+    except BaseException as primary:
+        cleanup_report = _cleanup(scratch, _SCAFFOLD_SCRATCH)
+        if cleanup_report is not None:
+            primary.add_note(f"additionally, {cleanup_report}")
+        raise
+    cleanup_report = _cleanup(scratch, _SCAFFOLD_SCRATCH)
+    if cleanup_report is not None:
+        raise CreationError(cleanup_report)
+    return scaffold
 
 
 def _relocate_hook_shims(staging: Path, dest: Path) -> None:
@@ -271,16 +279,14 @@ def _publish(staging: Path, dest: Path) -> None:
     logger.info("published new Repo", extra={"destination": str(dest)})
 
 
-def _cleanup(staging: Path) -> str | None:
-    """Remove the temporary sibling; ``None`` when gone, else a report of why it could not be."""
+def _cleanup(directory: Path, what: str) -> str | None:
+    """Remove a temporary directory; ``None`` when gone, else a report of why it could not be."""
     try:
-        shutil.rmtree(staging, ignore_errors=False)
+        shutil.rmtree(directory, ignore_errors=False)
         return None
     except OSError as exc:
         logger.exception(
-            "failed to remove staging directory after a creation failure",
-            extra={"staging": str(staging)},
+            "failed to remove a temporary directory after a creation failure",
+            extra={"directory": str(directory), "what": what},
         )
-        return (
-            f"additionally, the staging sibling {staging} could not be removed: {exc}"
-        )
+        return f"the {what} {directory} could not be removed: {exc}"

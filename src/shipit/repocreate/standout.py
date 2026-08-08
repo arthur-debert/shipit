@@ -42,7 +42,8 @@ def _invoke(scratch: Path) -> None:
             f"--standout-wizard needs the `{EXECUTABLE}` executable, which is not "
             f"on PATH; {_INSTALL_HINT}"
         )
-    rc = execrun.run_interactive([binary, SUBCOMMAND], cwd=scratch)
+    # Absolute: a relative PATH hit would otherwise re-resolve against `cwd=scratch`.
+    rc = execrun.run_interactive([os.path.abspath(binary), SUBCOMMAND], cwd=scratch)
     if rc != 0:
         raise CreationError(
             f"`{EXECUTABLE} {SUBCOMMAND}` exited {rc}; no Repo was created"
@@ -96,9 +97,8 @@ def _import(root: Path) -> tuple[OwnedFile, ...]:
             _check_importable(path, label)
             if path.is_dir():
                 continue
-            owned.append(
-                OwnedFile(label, _read_text(path, label), os.access(path, os.X_OK))
-            )
+            executable = bool(path.stat().st_mode & 0o111)
+            owned.append(OwnedFile(label, _read_text(path, label), executable))
     if not owned:
         raise CreationError(
             f"`{EXECUTABLE} {SUBCOMMAND}` generated an empty project directory; "
