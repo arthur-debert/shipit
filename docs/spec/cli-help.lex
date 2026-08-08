@@ -468,6 +468,19 @@ Shipit CLI Human Help Draft
                 describe a multi-toolchain Repo; at least one selection is
                 mandatory, and v1 supports a single profile, `rust`.
 
+                `--standout-wizard` selects an alternate scaffold producer inside
+                the `rust` profile: the released `standout new-project` wizard
+                generates the application workspace instead of the minimal
+                hello-world one. It is accepted only with `--stack rust` alone,
+                and requires `standout` on PATH — shipit never installs it. The
+                wizard runs interactively before anything is staged, its
+                `Project name:` answer must equal `<name>`, and its generated
+                tree is imported verbatim in place of the hello-world Cargo
+                files. The Artifact is derived from the generated executable
+                package, which the wizard's separate executable-name answer may
+                spell differently from `<name>`. Everything else — the managed
+                baseline, the Checks, the atomic publication — is unchanged.
+
                 Creation scaffolds the consumer-owned project (a two-crate
                 Cargo workspace for Rust), applies the managed baseline,
                 resolves the pixi lockfile, and runs the lint, test, and build

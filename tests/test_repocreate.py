@@ -836,11 +836,12 @@ def _run_new_with_seams(monkeypatch, tmp_path, capsys, *, verifier):
 
     order: list[str] = []
 
-    def wired(name, parent, stacks):
+    def wired(name, parent, stacks, **kwargs):
         return create_repo(
             name,
             parent,
             stacks,
+            **kwargs,
             installer=_Recorder(order, "install", writes="MANAGED.md"),
             provisioner=_Recorder(order, "provision", writes="pixi.lock"),
             verifier=verifier,
@@ -1079,7 +1080,7 @@ def test_run_new_renders_destination_and_commit(monkeypatch, capsys, tmp_path):
     monkeypatch.setattr(
         repo_verb,
         "create_repo",
-        lambda name, parent, stacks: CreationResult(
+        lambda name, parent, stacks, **kwargs: CreationResult(
             destination=tmp_path / name,
             initial_commit="abcdef1234567890",
             stacks=stacks,

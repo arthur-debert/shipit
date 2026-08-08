@@ -3,7 +3,7 @@ shipit-managed development baseline.
 
 Usage:
 
-    shipit repo new --stack rust <name> [parent]
+    shipit repo new --stack rust [--standout-wizard] <name> [parent]
 
 The destination is always `<parent>/<name>`; `parent` defaults to the current
 directory and must already exist as a writable, traversable directory. The
@@ -31,6 +31,23 @@ What a Rust Repo receives:
   * working `pixi run lint`, `pixi run test`, and `pixi run build` tasks;
   * a minimal README, an MIT LICENSE attributed to your resolved Git author,
     and a thin generic CI caller.
+
+`--standout-wizard` swaps the Rust application scaffold for one the released
+`standout new-project` wizard generates. It requires `--stack rust` and nothing
+else, and it needs `standout` already on your PATH — shipit never installs it
+(`cargo install standout --locked`). The wizard runs interactively before
+anything is staged: it asks its own questions on your terminal, and its
+`Project name:` answer must be `<name>`, because the wizard has no name
+injection and shipit will not create two identities. What it generates replaces
+the six hello-world Cargo files above — never overlaid on them — and is imported
+verbatim: the `<name>lib` library, the richer CLI source tree with its handlers,
+templates, styles, and crate README, resolver 2, and edition 2021 all stay as
+Standout wrote them. Everything else is unchanged: shipit still owns the
+repository files, the Artifact is derived from the generated executable package
+(which the wizard's separate `Executable name` answer may spell differently from
+`<name>`), and the same staging, certification, and atomic publication apply.
+Cancelling the wizard, answering a mismatched project name, or generating
+something shipit cannot import leaves the destination untouched.
 
 Creation stages the whole Repo in a temporary sibling under the parent, installs
 the managed baseline, resolves the lockfile, runs the three public Checks, and

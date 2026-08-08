@@ -372,6 +372,54 @@ def run(
     return result
 
 
+def run_interactive(
+    argv: list[str] | tuple[str, ...],
+    *,
+    cwd: str | os.PathLike | None = None,
+) -> int:
+    """Execute one Exec with the caller's stdin, stdout, and stderr INHERITED, returning its rc.
+
+    The seam's one INTERACTIVE Exec: the child talks to the user's terminal, so
+    nothing is captured, there is no :class:`ExecResult` to hand back and no
+    stream to redact — only the rc. It runs in the caller's environment and
+    without a timeout, because the user is the clock; ``SIGINT`` reaches the
+    child through the shared terminal. Launch errors still normalize to
+    :class:`ExecError`.
+    """
+    argv = [str(arg) for arg in argv]
+    start = time.monotonic()
+    try:
+        proc = subprocess.run(  # noqa: S603 — argv is a constructed list, never shell-interpolated
+            argv,
+            cwd=cwd,
+            check=False,
+        )
+    except OSError as exc:
+        is_missing_binary = isinstance(exc, FileNotFoundError) and (
+            cwd is None or str(exc.filename) != os.fspath(cwd)
+        )
+        error = ExecError(
+            argv,
+            rc=None,
+            stderr=str(exc),
+            duration_ms=_elapsed_ms(start),
+            cause=CAUSE_MISSING_BINARY if is_missing_binary else CAUSE_OS,
+        )
+        _record_failure(error, cwd)
+        raise error from _sanitize_cause(exc)
+    duration_ms = _elapsed_ms(start)
+    fields = _record_fields(argv, cwd, rc=proc.returncode, duration_ms=duration_ms)
+    logger.debug(
+        "exec-interactive %s (cwd=%s) -> rc=%d in %dms",
+        fields["argv"],
+        fields["cwd"],
+        proc.returncode,
+        duration_ms,
+        extra=fields,
+    )
+    return proc.returncode
+
+
 def spawn_detached(
     argv: list[str] | tuple[str, ...],
     *,
