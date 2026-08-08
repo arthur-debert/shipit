@@ -220,12 +220,17 @@ def test_produce_carries_the_generated_file_modes_not_the_caller_access(
 ):
     files = standout_tree()
     files["scripts/release.sh"] = "#!/bin/sh\n"
+    files["scripts/group-only.sh"] = "#!/bin/sh\n"
     source = write_tree(tmp_path / "wizard-source", files)
     (source / "scripts/release.sh").chmod(0o755)
+    # 0o455 carries an execute bit the OWNER lacks, so `os.access(X_OK)` reads False
+    # here while the mode does not: the one portable split between the two predicates.
+    (source / "scripts/group-only.sh").chmod(0o455)
     install_wizard(tmp_path, monkeypatch, f"cp -R '{source}' './hello'")
 
     modes = {file.path: file.executable for file in produce(tmp_path).owned_files}
     assert modes["scripts/release.sh"] is True
+    assert modes["scripts/group-only.sh"] is True
     assert modes["Cargo.toml"] is False
 
 
