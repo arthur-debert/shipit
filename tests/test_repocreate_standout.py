@@ -29,6 +29,11 @@ from shipit.repocreate.profiles import (
     require_rust_only,
 )
 
+#: The one wizard release this file's fixtures and prompt sequence are verified
+#: against. The binary carries no `--version`, so the end-to-end runner asserts the
+#: version through `SHIPIT_STANDOUT_WIZARD` rather than interrogating the executable.
+CERTIFIED_VERSION = "7.10.1"
+
 _ROOT_MANIFEST = """\
 [workspace]
 resolver = "2"
@@ -45,11 +50,11 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-standout = "7.10.0"
+standout = "{version}"
 {lib} = {{ package = "{lib}", path = "../{lib}" }}
 
 [dev-dependencies]
-standout-test = "7.10.0"
+standout-test = "{version}"
 """
 
 _LIB_MANIFEST = """\
@@ -64,10 +69,15 @@ thiserror = "2"
 
 
 def standout_tree(project: str = "hello", exe: str | None = None) -> dict[str, str]:
-    """The released wizard's generated file set, verified against standout v7.10.0."""
+    """The released wizard's generated file set, verified against `CERTIFIED_VERSION`."""
     exe = exe or project
     lib = f"{project}lib"
-    fields = {"project": project, "exe": exe, "lib": lib}
+    fields = {
+        "project": project,
+        "exe": exe,
+        "lib": lib,
+        "version": CERTIFIED_VERSION,
+    }
     return {
         "Cargo.toml": _ROOT_MANIFEST.format(**fields),
         f"crates/{exe}/Cargo.toml": _CLI_MANIFEST.format(**fields),
@@ -692,13 +702,9 @@ def test_run_interactive_normalizes_a_missing_binary(tmp_path):
 
 # --- end-to-end against the released wizard ---------------------------------
 
-#: The one wizard release the prompt sequence below is verified against. The binary
-#: carries no `--version`, so the runner asserts the version through this variable.
-CERTIFIED_VERSION = "7.10.0"
-
-#: Answers for standout v7.10.0's prompt sequence, verified against the binary:
-#: project name, executable name, command, description, input count, input name,
-#: type, cardinality, sources, result shape, record fields, then the confirmation.
+#: Answers for the wizard's prompt sequence, verified against the binary: project
+#: name, executable name, command, description, input count, input name, type,
+#: cardinality, sources, result shape, record fields, then the confirmation.
 REAL_WIZARD_ANSWERS = (
     "hello\nmytool\nprocess\nProcess one document\n\ndocument\n\n\n\n\n\nyes\n"
 )
