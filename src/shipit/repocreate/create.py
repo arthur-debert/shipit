@@ -12,10 +12,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .. import execrun, git, pixienv, redact
+from . import standout
 from .errors import CreationError
-from .names import validate_name
+from .names import ProjectName, validate_name
 from .plan import CreationPlan, build_plan
-from .profiles import resolve_profiles
+from .profiles import RustProfile, RustScaffold, require_rust_only, resolve_profiles
 
 logger = logging.getLogger("shipit.repocreate")
 
@@ -26,6 +27,9 @@ CHECKS: tuple[str, ...] = ("lint", "test", "build")
 _LONG_TIMEOUT: float = pixienv.INSTALL_TIMEOUT
 
 Effect = Callable[[Path], None]
+
+#: A scaffold producer: build the Rust application tree inside a private scratch dir.
+Producer = Callable[[ProjectName, Path], RustScaffold]
 
 
 @dataclass(frozen=True)
@@ -161,6 +165,8 @@ def create_repo(
     parent: Path,
     stacks: tuple[str, ...],
     *,
+    standout_wizard: bool = False,
+    producer: Producer = standout.produce,
     installer: Effect = default_installer,
     provisioner: Effect = default_provisioner,
     verifier: Effect = default_verifier,
@@ -168,10 +174,14 @@ def create_repo(
     year: int | None = None,
 ) -> CreationResult:
     """Create, verify, and publish a new local Repo; ``year`` defaults to the creation year."""
+    if standout_wizard:
+        require_rust_only(stacks, "--standout-wizard")
     profiles = resolve_profiles(stacks)
     name = validate_name(raw_name)
     resolved_parent, dest = _preflight(parent, name.value)
     creation_year = year if year is not None else datetime.date.today().year
+    if standout_wizard:
+        profiles = (RustProfile(scaffold=_scaffold(producer, name)),)
 
     staging = Path(tempfile.mkdtemp(dir=resolved_parent, prefix=".shipit-repo-new-"))
     # `mkdtemp` hard-codes 0o700 and the rename publishes that mode verbatim, so
@@ -216,6 +226,21 @@ def create_repo(
         initial_commit=head.value,
         stacks=tuple(p.key for p in profiles),
     )
+
+
+def _scaffold(producer: Producer, name: ProjectName) -> RustScaffold:
+    """Run ``producer`` in a private scratch directory, always removed; its product is data."""
+    scratch = Path(tempfile.mkdtemp(prefix="shipit-repo-new-scaffold-"))
+    try:
+        return producer(name, scratch)
+    finally:
+        try:
+            shutil.rmtree(scratch)
+        except OSError:
+            logger.exception(
+                "failed to remove the scaffold scratch directory",
+                extra={"scratch": str(scratch)},
+            )
 
 
 def _relocate_hook_shims(staging: Path, dest: Path) -> None:

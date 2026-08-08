@@ -396,6 +396,10 @@ _Avoid_: hand-maintained canaries; modeling fleet entropy instead of Profiles.
 A shipit-owned creation-time recipe selected through `repo new --stack`, combining initial project files and declarations for one ecosystem. It is input to creation only; the completed Repo persists Toolchains and Artifacts, not a profile or project Kind.
 _Avoid_: "Toolchain" for the source-layout recipe; persisting "stack" as a Repo type or dispatch label.
 
+**Scaffold producer**:
+Whatever builds a Creation profile's application tree. A profile has a default producer that renders shipit's own templates, and may accept an alternate one — `repo new --standout-wizard` runs the Standout wizard — whose output is imported back into ordinary owned files. Choosing a producer stays inside one profile: it adds no `--stack` value and opens no registry.
+_Avoid_: "template"/"plugin" for a producer; treating an alternate producer as a new stack.
+
 **Toolchain**:
 The build, test, and provisioning ecosystem a Component's kind binds, such as Rust, npm, MkDocs, or Go. The kind names a Component's shape; the toolchain is the ecosystem it brings.
 _Avoid_: Toolchain as the unit of composition (that is the Component); "stack" or "project type" as a dispatch label.

@@ -6,6 +6,7 @@ See docs/adr/0063-creation-profiles-are-closed.md.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import ClassVar
 
 from . import tomlio
 from .errors import CreationError
@@ -29,6 +30,14 @@ class ArtifactDecl:
     name: str
     toolchain: str
     package: str
+
+
+@dataclass(frozen=True)
+class RustScaffold:
+    """A produced Rust application tree: its files and the Artifact they declare."""
+
+    owned_files: tuple[OwnedFile, ...]
+    artifact: ArtifactDecl
 
 
 @dataclass(frozen=True)
@@ -139,38 +148,66 @@ def _lib_manifest(name: ProjectName) -> str:
     )
 
 
-class RustProfile:
-    """The ``rust`` Creation profile: a virtual two-member Cargo workspace."""
-
-    key = "rust"
-
-    def contribute(self, name: ProjectName) -> Contribution:
-        ctx = {
-            "cli_pkg": name.cli_pkg,
-            "lib_pkg": name.lib_pkg,
-            "cli_crate": name.cli_crate,
-            "lib_crate": name.lib_crate,
-        }
-        cli = name.cli_pkg
-        lib = name.lib_pkg
-        owned = (
+def minimal_scaffold(name: ProjectName) -> RustScaffold:
+    """The profile's own hello-world application tree — the default producer."""
+    ctx = {
+        "cli_pkg": name.cli_pkg,
+        "lib_pkg": name.lib_pkg,
+        "cli_crate": name.cli_crate,
+        "lib_crate": name.lib_crate,
+    }
+    cli = name.cli_pkg
+    lib = name.lib_pkg
+    return RustScaffold(
+        owned_files=(
             OwnedFile("Cargo.toml", _workspace_manifest(name)),
             OwnedFile(f"crates/{cli}/Cargo.toml", _cli_manifest(name)),
             OwnedFile(f"crates/{cli}/src/main.rs", render_text(_MAIN_RS, ctx)),
             OwnedFile(f"crates/{cli}/tests/cli.rs", render_text(_TEST_RS, ctx)),
             OwnedFile(f"crates/{lib}/Cargo.toml", _lib_manifest(name)),
             OwnedFile(f"crates/{lib}/src/lib.rs", render_text(_LIB_RS, ctx)),
+        ),
+        artifact=ArtifactDecl(name=cli, toolchain="rust", package=cli),
+    )
+
+
+@dataclass(frozen=True)
+class RustProfile:
+    """The ``rust`` Creation profile: a virtual two-member Cargo workspace.
+
+    ``scaffold``, when given, supplies the application tree an alternate producer
+    already built, in place of :func:`minimal_scaffold`; the rest of the
+    contribution is the same either way. See
+    docs/adr/0086-alternate-scaffold-producers-inside-a-profile.md.
+    """
+
+    key: ClassVar[str] = "rust"
+
+    scaffold: RustScaffold | None = None
+
+    def contribute(self, name: ProjectName) -> Contribution:
+        produced = (
+            self.scaffold if self.scaffold is not None else minimal_scaffold(name)
         )
         return Contribution(
-            owned_files=owned,
+            owned_files=produced.owned_files,
             pixi_dependencies=(("cargo-nextest", "*"),),
             gitignore_lines=("/target/",),
-            artifacts=(ArtifactDecl(name=cli, toolchain="rust", package=cli),),
+            artifacts=(produced.artifact,),
         )
 
 
 #: The closed registry, keyed by ``--stack`` value.
 _REGISTRY: dict[str, RustProfile] = {"rust": RustProfile()}
+
+
+def require_rust_only(stacks: tuple[str, ...], option: str) -> None:
+    """Refuse ``option`` unless the request selects the ``rust`` profile alone."""
+    if stacks != ("rust",):
+        selected = " ".join(f"--stack {stack}" for stack in stacks) or "no --stack"
+        raise CreationError(
+            f"{option} requires exactly `--stack rust`; the request selected {selected}"
+        )
 
 
 def resolve_profiles(stacks: tuple[str, ...]) -> tuple[RustProfile, ...]:
