@@ -4,6 +4,246 @@
 
 ## Unreleased
 
+## 1.8.0 - 2026-08-11
+
+- harness: a shell command that runs a write-capable non-git command against a
+  Tree other than the caller's own is now refused (#1179). A worktree-isolated
+  Run wrote `src/shipit/git.py` into the coordinator's checkout while it sat on
+  an epic branch, and nothing stopped it: `isolation` isolates **cwd only**, so
+  the Run's `PATH`/`PIXI_*`/`CONDA_*` still named the spawning session's Tree,
+  that Tree's absolute paths surfaced in the Run's own tool output, and the agent
+  took one for its repo root and `cd`-ed there. Claude Code 2.1.220's native
+  worktree guards cover the neighbouring shapes — a cross-checkout `cd` before
+  **git**, a tool-level cwd outside the worktree, a cross-worktree edit-tool
+  `file_path` — all measured, not assumed; the one they leave open is a
+  **non-git** writer after an inline `cd`, which is exactly what did the write.
+  The new rule closes that one shape and nothing more: reads across Trees stay
+  allowed (that is how a coordinator inspects work), and `rm -rf <Tree>`,
+  `chmod` and `git -C` stay allowed because they are how Trees are reclaimed,
+  made read-only and inspected. It rides the advisory `PreToolUse` entry, so it
+  fails open, and it matches text — a path assembled at run time or a writer it
+  does not know walks past it. It is a hygiene nudge, not a security boundary;
+  ADR-0083 lists the accepted false positives and the known evasions by input.
+- harness: `SubagentStop` now reports the launch checkout's uncommitted paths as
+  a Run hands back. The original leak was caught only by a coincidental
+  `ruff format` failure on a file the coordinator never touched; a format-clean
+  leaked write left no signal at all and would have been committed onto the epic
+  branch as the coordinator's own work. The report is a poll, not an assertion —
+  a coordinator's checkout is legitimately dirty most of the time — so it names
+  the paths and never refuses anything.
+- logs: a record is now attributed to the Tree its process ran in, rather than to
+  whatever Tree the parent exported. A native subagent inherits
+  `SHIPIT_LOG_CTX_SESSION`/`_TREE` from the session that spawned it, so in the
+  incident window all 987 exec records carried the coordinator's identity —
+  including 18 whose `cwd` was the subagent's Tree — and `shipit logs --flow`
+  could not tell a Run's action from its spawner's. When the two differ, `tree`
+  and `agent` are re-keyed onto the actual Tree (`agent` takes the Tree id,
+  matching what `shipit spawn subagent` already binds), so `--agent-ids` and
+  `--agent <id>` separate them; the inherited `session` is kept, because that one
+  really is shared. **This narrows the ambiguity rather than removing it:** the
+  Tree a process runs in is the acting Run only while that Run stays in its own
+  Tree, and a cross-Tree `cd` — which is allowed — still misattributes. Read
+  `--agent-ids` as "which Tree", not "which agent", until #1191 lands a per-Run
+  identity.
+- docs: three claims that outran their evidence now say what was measured.
+  `AGENTS.lex` §1.2 kept "no bash-cwd footgun" (verified — all 228 records of the
+  incident Run carried its own Tree) but dropped "concurrent agents never collide
+  on one checkout", which is false: they collide through absolute paths.
+  ADR-0017's "no validation, no footgun" now records that the `WorktreeCreate`
+  hook can only return a cwd and has no seam for the child's env.
+  `docs/dev/pixi.lex` §7's leaked-`PIXI_*` class is closed on the
+  `shipit spawn subagent` path only — the in-CC `Agent` path has no equivalent
+  seam, measured live on 2.1.220.
+- docs: post-spike convergence for the Delivery System design — both
+  deliverability spikes passed (#1197/PR #1199, #1198/PR #1200), so the
+  design's pending-spike rows settle: `@electron/packager` + leaf dmg tools
+  and `rcodesign` flip to verified in `docs/design/delivery-system.md`
+  (adopted-tools table, Signing and Substrate sections, spike ledger), and
+  ADR-0084's Mac exception is amended — CI signing/notarization and
+  `.app`/`.dmg` packaging leave the exception (they run in Linux containers);
+  only the `xcode`-kind build legs and local GUI launch remain macOS-native.
+- delivery: deliverability spike #1 executed — electron packaging + signing
+  pipeline from Linux, on lexed including its QuickLook `.appex` (#1197). The
+  runnable pipeline lives in `docker/spike-electron-signing/` (Darwin
+  xcodebuild leg for the appex, then a Linux container for `@electron/packager`
+  .app assembly, rcodesign scoped bottom-up signing, xorrisofs+libdmg-hfsplus
+  dmg assembly, notarize + staple over the App Store Connect API, nfpm deb and
+  zip), findings in `docs/dev/delivery-spike-electron-signing.md`. Additive
+  only: nothing wires into shipit's production code paths; the design/ADR-0084
+  amendment is a coordinator follow-up after both delivery spikes conclude.
+- docs: `src/` prose cut from **35,053 lines to 2,847** (91.9%), against 38,095
+  lines of code — a prose-to-code ratio of 0.075:1, down from 0.920:1. Docstrings
+  and comments now state **what** the code does and any contract a caller cannot
+  infer from the name and signature; they no longer restate **why** a design is
+  the way it is. 1,683 `ADR-NNNN` references and 1,258 `#NNN` issue references
+  are gone from code prose, replaced by at most one `See docs/adr/…` pointer in
+  the module docstring of a module that directly implements an ADR.
+- The rationale was not deleted, it was left where it already lived: `docs/adr/`,
+  `CONTEXT.md`, `docs/dev/`, git, and the tracker. Duplicating it across every
+  call site meant N copies drifting out of step with the one authoritative home,
+  and made every one-line code change a multi-file prose edit.
+- **ADR-0079** records the decision, and the implementer role prompt no longer
+  asks for the same-diff sweep of caller and module docstrings that produced the
+  growth: the duty is now the one-line contract of what you changed. The reviewer
+  prompt's style clause cuts both ways — a terse or absent docstring is never a
+  finding, added rationale is one, and a docstring that *contradicts* its code
+  remains a correctness finding at its own severity.
+- Zero executable change: every one of the 207 touched files was verified by
+  parsing before and after, stripping all docstrings, and comparing executable
+  ASTs. Click command docstrings, which render as `--help` output, were preserved
+  throughout.
+- harness: the `PreToolUse` guard now sees `Bash`, `Agent` and `EnterWorktree`
+  calls (#1182). The managed matcher was `Edit|Write|MultiEdit|NotebookEdit`, so on
+  the Claude Code path the two deny rules written to enforce ADR-0014 — `git
+  worktree add` and `EnterWorktree` — were unreachable dead code. The managed entry
+  splits in two, letting the host's own matcher pick the failure mode: the edit
+  entry is unchanged byte for byte and still **refuses** the call when the guard
+  cannot run (ADR-0038), while a second entry matching `Bash|Agent|EnterWorktree`
+  runs `shipit hook bashguard` and **allows** it. The asymmetry is the point
+  (ADR-0080): failing closed on edits costs "you cannot edit", failing closed on
+  `Bash` would cost every shell command in the session including the ones that
+  repair pixi, and `Bash` is 100% unchecked today, so allowing is never worse than
+  the status quo. Because a rule is only as live as the matcher that routes it, the
+  tool names the rules fire on are now declared as data and a wiring-level test
+  asserts the managed matchers cover all of them — a pure-verdict test cannot catch
+  an unrouted rule, since it bypasses the matcher entirely.
+- harness: the `git worktree add` check no longer depends on where in the command
+  the invocation sits. It asked whether a command *segment* began with `git`, so
+  anything ahead of `git` defeated it: a newline (`git status\ngit worktree add x`),
+  an escaped newline, a shell keyword (`if true; then git worktree add x; fi`), or a
+  wrapper (`sudo`, `env`, `time`, `nice`, `xargs -I{}`). Six such bypasses were
+  found in minutes, and the set is not enumerable. All of them predate this
+  release; the matcher fix above is what made the rule live enough for them to
+  matter.
+  A second bypass of the same family: the check also walked `git`'s options to
+  find the subcommand, and since `-C` consumes the following token,
+  `git -C ";" worktree add ../t b` misaligned the walk. Under posix lexing a
+  quoted `";"` and an unquoted `;` produce identical token streams, so that
+  misalignment was not fixable by inspecting tokens — the information needed to
+  tell them apart is gone before the walk starts.
+  A third, from the same family: custom newline lexing (newlines forced into
+  `punctuation_chars` and out of shlex's whitespace) broke shlex's native POSIX
+  handling and needed a regex to splice `\`+newline out of the command first —
+  which let a comment swallow the line after it, so `# \<newline>git worktree add
+  x` was allowed even though bash ends a comment at the newline and runs the next
+  line.
+  All of it was fixed by deleting, never by adding cases. **Quoting already
+  supplies the discrimination the structural logic was reaching for** — a quoted
+  mention lexes to ONE word and can never match, while a real invocation is
+  adjacent words. The check now matches adjacent `worktree` `add` words with a
+  `git` word somewhere before them, counting and skipping nothing, over shlex's
+  own POSIX lexing with no pre-processing of the command string. Segment tracking,
+  the env-assignment prefix skip, the option walk, the punctuation stripping and
+  the custom newline lexing are all gone; the `git` word is kept so
+  `grep worktree add file` does not match.
+  One reconciliation remains, because shlex and the shell genuinely differ:
+  continuation characters are stripped from a word's edges. `git \<newline>worktree
+  add X` runs `git worktree add X` and creates a worktree — the space before the
+  backslash already ended the word — so it is refused, while
+  `git\<newline>worktree add X` joins into `gitworktree`, which is not a command,
+  so it is not. Both are pinned by a test citing the bash verification.
+  It remains **best-effort, and evadable by construction**: `eval`, variable
+  indirection and `sh -c` hide the words from any matcher that is not itself a
+  shell. It is a hygiene nudge that redirects a cooperating agent to `shipit tree
+  create`, not a security boundary. It errs toward denying, so an unquoted
+  `echo git worktree add` and `git config -l ; worktree add` are now refused — a
+  false positive costs one clear message, a false negative silently violates
+  ADR-0014.
+- harness: a subagent spawn for a role that requires its own Tree is refused
+  unless it passes `isolation`. Omitting the parameter runs the subagent with the
+  **caller's** checkout as its cwd, which is the wholesale-sharing failure two
+  concurrent write Runs stomp each other through. The rule is derived from the
+  `roleprofile` registry's `tree_backed` flag rather than a second hand-kept role
+  list, so `explorer` — the one role that runs in the ambient WorkingDir — passes
+  by construction. It covers shipit's five roles only: `general-purpose`,
+  `claude`, `Explore`, `Plan` and `fork` resolve to no role profile and are always
+  allowed, `fork` necessarily so, since it inherits the parent's context and
+  cannot be isolated. Only a non-blank **string** counts as isolated: a blank one
+  is refused (passing `""` is not passing it), and so is a non-string, because
+  coercing truthy junk like `{"a": 1}` or `[1]` to text would read as "isolated"
+  and fail open on exactly the rule this adds. Which isolation *modes* are valid
+  stays the harness's business, so any non-blank string is accepted, `"remote"`
+  included. Enforcement reaches the project Claude Code was launched in: a
+  subagent's own process reads that project's settings, not its Tree's, so the
+  entries are live for a Run only once installed there.
+- harness: the worktree deny rules now fire on codex too. They matched only a
+  tool named `bash`, and codex names its shell tool `exec_command` and puts the
+  command under `tool_input.cmd` rather than `tool_input.command` (both observed
+  on codex-cli 0.146.0). Tool names now come from a `_SHELL_TOOLS` registry, the
+  same shape `_EDIT_TOOLS` already used to carry codex's `apply_patch` beside
+  Claude Code's `Edit`, and the payload projection reads either command key. The
+  codex entry itself stays matcherless and fail-closed, because a wrong matcher
+  there would silently disable the codex edit guard; the remainder is tracked in
+  #1186.
+- harness: the `PreToolUse` payload's `cwd` is read for the first time and carried
+  into the deny decision and its log line, so a deny now says which checkout the
+  call came from.
+- spawn: a failed child's exit reason now reaches the operator (#1153). The
+  refusal read `stderr` only, and a headless `claude -p` reports its own errors
+  on **stdout** — which the failure path discarded entirely. Five of six
+  implementer Runs launched for one epic exited `rc=1` rendering as a bare
+  `error: claude child exited 1` with nothing else, so the coordinator learned
+  nothing about any of them; two had done correct, complete work that was
+  recovered only by hand-inspecting the Trees. A nonzero child now reports a
+  bounded tail of **both** streams, each labelled, stdout first because that is
+  where the common failure lands. A child that wrote to neither says so
+  explicitly and names the Tree to open and how long it ran before dying — 204s
+  of silence and 2s of silence are different failures, and the exit code alone
+  distinguishes neither. The `uncommitted=N` salvage note, which is what made
+  the two recoveries possible, rides alongside it unchanged; the durable record
+  gains `stdout_bytes` / `stderr_bytes` so "the child said nothing" is
+  answerable from the log without re-running anything.
+- spawn, review: measuring a child stream's size for the durable record can no
+  longer raise on undecodable output. A lone surrogate in the stream raised
+  `UnicodeEncodeError` from inside the failure handler itself, masking the child
+  failure being reported with a traceback; the same shape was live in the review
+  producer's timeout/transport handler.
+- spawn: the parent-project env scrub moved INTO `launch()`, so no launch site
+  can omit it. The reviewer producer and the calibrator both built their child
+  env straight from the backend adapter and never scrubbed, handing a child
+  rooted in its own read-only Tree a `PIXI_PROJECT_MANIFEST` naming a manifest
+  that belongs to a **different** Tree — the cross-Tree leak rooting exists to
+  prevent, visible as pixi's `WARN Using local manifest … rather than … from
+  environment variable` on every hook invocation inside the Tree. It is cosmetic
+  today only because pixi recovers by preferring the local manifest. Every
+  `launch()` caller launches a Tree-rooted child, so rooting the scrub in the
+  seam rather than in each caller is what stops the next call site
+  reintroducing it.
+- repo: `shipit repo new --stack rust --standout-wizard NAME [PARENT]` scaffolds
+  the Rust application with the released `standout new-project` wizard instead of
+  the minimal hello-world workspace (#1202). The wizard is an alternate scaffold
+  *producer* inside the closed `rust` Creation profile — no new stack, no plugin
+  or template mechanism, and the default `--stack rust` path is untouched. Shipit
+  copies no Standout templates: it resolves `standout` on your PATH (and refuses
+  with installation guidance when it is absent — it never installs it), runs the
+  wizard interactively in a scratch directory before staging exists, and imports
+  the generated tree verbatim, `<name>lib` naming, resolver 2, edition 2021, crate
+  README and all. The Artifact is derived from the generated executable package,
+  which the wizard's separate executable-name answer may spell differently from
+  the Repo name. Everything else is unchanged — shipit still owns the repository
+  files, the managed install, provisioning, the three staged Checks, the single
+  initial commit, and the atomic publication. Cancelling the wizard (it exits 0
+  and writes nothing), answering a project name other than `NAME`, generating an
+  entry shipit will not import, or failing a Check all leave the destination
+  absent and remove every scratch directory. Verified end to end against released
+  standout 7.10.1: the generated workspace passes all three staged Checks and the
+  Repo publishes, with the built binary running from the new Repo. Shipit imports
+  the generated manifests as they are and never rewrites them, so the wizard's own
+  dependency pins are what the new Repo builds against.
+- docker, lab: the container-substrate dev-loop spike (#1198, ADR-0084's
+  Suburbia Phase 2 probe) landed its surviving artifacts: the fleet rust
+  baseline image definition (`docker/rust-baseline.Dockerfile` — rust
+  toolchain, the fleet-pinned linters, gh and shipit itself baked from apt +
+  native toolchains, no pixi), the runnable measurement harness
+  (`lab/substrate-spike/spike.sh`), and the findings report
+  (`docs/dev/substrate-devloop-spike.md`). Headline: full parity — `shipit
+  lint` / `shipit test` / `shipit build` inside the container produce
+  identical findings, test results and artifact sets to today's host pixi
+  path on the same rustloc commit — with the honest ergonomics numbers
+  (cold-start, target-dir-on-mount vs named-volume build caching, file-watch
+  round-trip, gh credential passthrough) recorded for the Substrate design's
+  open items.
+
 ## 1.7.0 - 2026-07-29
 
 - install: a consumer key shadowing a managed pixi block now **refuses** instead
