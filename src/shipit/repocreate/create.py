@@ -12,10 +12,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .. import execrun, git, pixienv, redact
+from . import standout
 from .errors import CreationError
-from .names import validate_name
+from .names import ProjectName, validate_name
 from .plan import CreationPlan, build_plan
-from .profiles import resolve_profiles
+from .profiles import RustProfile, RustScaffold, require_rust_only, resolve_profiles
 
 logger = logging.getLogger("shipit.repocreate")
 
@@ -25,7 +26,14 @@ CHECKS: tuple[str, ...] = ("lint", "test", "build")
 #: Staged Checks are provisioning-shaped, so they share pixi's own budget.
 _LONG_TIMEOUT: float = pixienv.INSTALL_TIMEOUT
 
+#: How :func:`_cleanup` names each temporary directory it removes.
+_STAGING_SIBLING = "staging sibling"
+_SCAFFOLD_SCRATCH = "scaffold scratch directory"
+
 Effect = Callable[[Path], None]
+
+#: A scaffold producer: build the Rust application tree inside a private scratch dir.
+Producer = Callable[[ProjectName, Path], RustScaffold]
 
 
 @dataclass(frozen=True)
@@ -161,6 +169,8 @@ def create_repo(
     parent: Path,
     stacks: tuple[str, ...],
     *,
+    standout_wizard: bool = False,
+    producer: Producer = standout.produce,
     installer: Effect = default_installer,
     provisioner: Effect = default_provisioner,
     verifier: Effect = default_verifier,
@@ -168,10 +178,14 @@ def create_repo(
     year: int | None = None,
 ) -> CreationResult:
     """Create, verify, and publish a new local Repo; ``year`` defaults to the creation year."""
+    if standout_wizard:
+        require_rust_only(stacks, "--standout-wizard")
     profiles = resolve_profiles(stacks)
     name = validate_name(raw_name)
     resolved_parent, dest = _preflight(parent, name.value)
     creation_year = year if year is not None else datetime.date.today().year
+    if standout_wizard:
+        profiles = (RustProfile(scaffold=_scaffold(producer, name)),)
 
     staging = Path(tempfile.mkdtemp(dir=resolved_parent, prefix=".shipit-repo-new-"))
     # `mkdtemp` hard-codes 0o700 and the rename publishes that mode verbatim, so
@@ -207,15 +221,34 @@ def create_repo(
         _relocate_hook_shims(staging, dest)
         _publish(staging, dest)
     except BaseException as primary:
-        cleanup_report = _cleanup(staging)
+        cleanup_report = _cleanup(staging, _STAGING_SIBLING)
         if cleanup_report is not None:
-            primary.add_note(cleanup_report)
+            primary.add_note(f"additionally, {cleanup_report}")
         raise
     return CreationResult(
         destination=dest,
         initial_commit=head.value,
         stacks=tuple(p.key for p in profiles),
     )
+
+
+def _scaffold(producer: Producer, name: ProjectName) -> RustScaffold:
+    """Run ``producer`` in a private scratch directory, always removed; its product is data.
+
+    A scratch directory that survives removal fails the creation.
+    """
+    scratch = Path(tempfile.mkdtemp(prefix="shipit-repo-new-scaffold-"))
+    try:
+        scaffold = producer(name, scratch)
+    except BaseException as primary:
+        cleanup_report = _cleanup(scratch, _SCAFFOLD_SCRATCH)
+        if cleanup_report is not None:
+            primary.add_note(f"additionally, {cleanup_report}")
+        raise
+    cleanup_report = _cleanup(scratch, _SCAFFOLD_SCRATCH)
+    if cleanup_report is not None:
+        raise CreationError(cleanup_report)
+    return scaffold
 
 
 def _relocate_hook_shims(staging: Path, dest: Path) -> None:
@@ -246,16 +279,14 @@ def _publish(staging: Path, dest: Path) -> None:
     logger.info("published new Repo", extra={"destination": str(dest)})
 
 
-def _cleanup(staging: Path) -> str | None:
-    """Remove the temporary sibling; ``None`` when gone, else a report of why it could not be."""
+def _cleanup(directory: Path, what: str) -> str | None:
+    """Remove a temporary directory; ``None`` when gone, else a report of why it could not be."""
     try:
-        shutil.rmtree(staging, ignore_errors=False)
+        shutil.rmtree(directory, ignore_errors=False)
         return None
     except OSError as exc:
         logger.exception(
-            "failed to remove staging directory after a creation failure",
-            extra={"staging": str(staging)},
+            "failed to remove a temporary directory after a creation failure",
+            extra={"directory": str(directory), "what": what},
         )
-        return (
-            f"additionally, the staging sibling {staging} could not be removed: {exc}"
-        )
+        return f"the {what} {directory} could not be removed: {exc}"

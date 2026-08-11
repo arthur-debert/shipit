@@ -109,7 +109,9 @@ must not invalidate or roll back the usable local Repo.
 - Designing a general-purpose template marketplace or user-provided template
   language.
 - Loading external Creation profiles, remote templates, plugin directories, or
-  arbitrary template paths.
+  arbitrary template paths. `--standout-wizard` names one shipit-known executable
+  inside one profile; it is not a general "run any scaffold command" interface,
+  and shipit neither installs nor upgrades that executable.
 - Replacing `shipit install` or duplicating its managed catalog in scaffold
   templates.
 - Generating a production application architecture. The Rust and Node profiles
@@ -129,7 +131,7 @@ must not invalidate or roll back the usable local Repo.
 The public command is:
 
 ```text
-shipit repo new --stack <rust|node|svelte-app> \
+shipit repo new --stack <rust|node|svelte-app> [--standout-wizard] \
   (--no-remote | --remote-reuse OWNER/REPO | --remote-create OWNER/REPO) \
   <name> [parent]
 ```
@@ -232,6 +234,41 @@ The library supplies the hello-world value and the CLI prints it. The generated
 project contains one black-box test that runs the CLI and asserts its output,
 thereby exercising the binary, its library dependency, and the configured Rust
 test runner together.
+
+### The Standout scaffold producer
+
+`--standout-wizard` selects an alternate **scaffold producer** inside the `rust`
+profile: the released `standout new-project` wizard generates the application
+workspace in place of the minimal one described above. It is not a fourth stack,
+not a template mechanism, and not an opening of the closed registry — the flag is
+accepted only when the request selects `rust` alone, and is refused before any
+filesystem mutation otherwise.
+
+The wizard is resolved as `standout` on the caller's PATH and invoked
+interactively before staging exists; a missing executable fails with installation
+guidance and shipit never installs or upgrades it. Because the wizard has no
+destination or name injection, it runs in a private scratch directory and its
+`Project name:` answer must equal `<name>`; a mismatch refuses rather than
+creating divergent identities. The generated directory's *contents* are imported
+at the staging root, so no nested `<name>/<name>` survives, and each entry is
+validated — regular file, no symlink, decodable as UTF-8 — before it becomes an
+owned file. Cancellation (which the wizard reports by generating nothing while
+exiting 0), a nonzero exit, unsafe entries, and malformed or ambiguous manifests
+are all creation failures that publish nothing and clean every scratch directory.
+
+Standout owns the generated application files and shipit preserves them verbatim:
+`<name>lib` library naming, the richer CLI source tree with handlers, templates,
+styles, and its crate-local README, inline and `TestHarness` tests, resolver 2,
+and edition 2021. Shipit does not normalize them to the default Rust scaffold's
+resolver, edition, or workspace metadata, and copies no Standout templates. The
+hello-world scaffold is never written first and never overlaid. The profile's
+non-source contributions are retained unchanged — `cargo-nextest`, `/target/`,
+the root Rust toolchain signal that the generated root `Cargo.toml` produces, and
+one Artifact declaration — but the Artifact is derived from the generated
+workspace member that builds a binary, by its manifest's `package.name`, since
+the wizard's separate `Executable name` answer may differ from `<name>`. Zero or
+several binary members refuse. See
+[ADR-0086](../adr/0086-alternate-scaffold-producers-inside-a-profile.md).
 
 ### The Node Creation profile
 
@@ -495,6 +532,15 @@ depend on an interactive `pixi shell`.
 - Creation profiles form a closed, shipit-owned registry keyed by the accepted
   `--stack` values. Adding a profile is a reviewed shipit change with fixtures,
   not runtime plugin discovery or user-supplied template execution.
+- A profile may accept an alternate scaffold *producer* for its application tree
+  without becoming a new stack or an open registry. `--standout-wizard` is that
+  shape: one named executable, one profile, selected by a boolean flag. The
+  planner stays pure because the producer runs as an effect — alongside the
+  author reader, before staging — and its generated tree is read back into
+  ordinary owned files that the profile contributes exactly as it contributes its
+  own. The single interactive Exec this needs is the one exception to ADR-0062's
+  non-interactive boundary; certification still runs through `pixi run`. See
+  [ADR-0086](../adr/0086-alternate-scaffold-producers-inside-a-profile.md).
 - The Node profile speaks `toolchain="npm"` in its Artifact declaration. This is
   a deliberate two-vocabulary detail: the DISPATCH axis names the Node ecosystem
   `npm` (the Tool registry key, so `shipit test`/`shipit build` run `npm test` /
