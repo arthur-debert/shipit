@@ -15,11 +15,23 @@ _PORTFOLIO = {
                 {
                     "repo": "phos-editor/app",
                     "path": "phos/phos-app",
+                    "signing": "signed",
                     "expect_verify_fail": "needs sibling checkouts",
                 },
-                {"repo": "phos-editor/core", "path": "phos/phos-core"},
+                {
+                    "repo": "phos-editor/core",
+                    "path": "phos/phos-core",
+                    "signing": "not-applicable",
+                },
             ],
-            "lex": [{"repo": "lex-fmt/lex", "path": "lex-fmt/lex"}],
+            "lex": [
+                {
+                    "repo": "lex-fmt/lex",
+                    "path": "lex-fmt/lex",
+                    "signing": "unsigned",
+                    "signing_reason": "owner decision",
+                }
+            ],
         }
     }
 }
@@ -34,9 +46,13 @@ def test_load_portfolio_declaration_order_and_fields():
     ]
     assert entries[0].stack == "phos"
     assert entries[0].path == "phos/phos-app"
+    assert entries[0].signing == "signed"
+    assert entries[0].signing_reason is None
     assert entries[0].expect_verify_fail == "needs sibling checkouts"
+    assert entries[1].signing == "not-applicable"
     assert entries[1].expect_verify_fail is None
     assert entries[2].stack == "lex"
+    assert entries[2].signing_reason == "owner decision"
 
 
 def test_load_portfolio_missing_table_is_a_config_error():
@@ -46,8 +62,12 @@ def test_load_portfolio_missing_table_is_a_config_error():
         fleetsweep.load_portfolio({})
 
 
+def _entry(**overrides):
+    return {"repo": "a/b", "path": "b", "signing": "not-applicable", **overrides}
+
+
 def test_load_portfolio_reads_the_custom_alias():
-    cfg = {"custom": {"portfolio": {"s": [{"repo": "a/b", "path": "b"}]}}}
+    cfg = {"custom": {"portfolio": {"s": [_entry()]}}}
     assert fleetsweep.load_portfolio(cfg)[0].repo == "a/b"
 
 
@@ -55,10 +75,14 @@ def test_load_portfolio_reads_the_custom_alias():
     "entry",
     [
         "not-a-table",
-        {"path": "x"},
-        {"repo": "not-a-slug", "path": "x"},
-        {"repo": "a/b"},
-        {"repo": "a/b", "path": "x", "expect_verify_fail": ""},
+        {"path": "x", "signing": "signed"},
+        {"repo": "not-a-slug", "path": "x", "signing": "signed"},
+        {"repo": "a/b", "signing": "signed"},
+        _entry(expect_verify_fail=""),
+        {"repo": "a/b", "path": "x"},
+        _entry(signing="maybe"),
+        _entry(signing="unsigned"),
+        _entry(signing="unsigned", signing_reason=""),
     ],
 )
 def test_load_portfolio_malformed_entry_names_itself(entry):
@@ -69,13 +93,13 @@ def test_load_portfolio_malformed_entry_names_itself(entry):
 
 @pytest.mark.parametrize("bad", ["/abs/checkout", "../escape", "a/../../escape"])
 def test_load_portfolio_path_must_stay_under_source_root(bad):
-    cfg = {"project": {"portfolio": {"s": [{"repo": "a/b", "path": bad}]}}}
+    cfg = {"project": {"portfolio": {"s": [_entry(path=bad)]}}}
     with pytest.raises(config.ConfigError, match="repo-relative"):
         fleetsweep.load_portfolio(cfg)
 
 
 def test_load_portfolio_tolerates_unknown_keys():
-    cfg = {"project": {"portfolio": {"s": [{"repo": "a/b", "path": "b", "x": 1}]}}}
+    cfg = {"project": {"portfolio": {"s": [_entry(x=1)]}}}
     assert fleetsweep.load_portfolio(cfg)[0].repo == "a/b"
 
 
@@ -84,8 +108,8 @@ def test_load_portfolio_rejects_duplicate_repo_naming_both_sites(dup):
     cfg = {
         "project": {
             "portfolio": {
-                "s": [{"repo": "a/b", "path": "one"}],
-                "t": [{"repo": dup, "path": "two"}],
+                "s": [_entry(path="one")],
+                "t": [_entry(repo=dup, path="two")],
             }
         }
     }
@@ -194,9 +218,15 @@ def test_cell_status_declared_expectation_is_expected_fail_with_reason():
     )
 
 
-_ENTRY = fleetsweep.PortfolioEntry(stack="s", repo="a/b", path="b")
+_ENTRY = fleetsweep.PortfolioEntry(
+    stack="s", repo="a/b", path="b", signing="not-applicable"
+)
 _XENTRY = fleetsweep.PortfolioEntry(
-    stack="s", repo="c/d", path="d", expect_verify_fail="declared reason"
+    stack="s",
+    repo="c/d",
+    path="d",
+    signing="not-applicable",
+    expect_verify_fail="declared reason",
 )
 
 
@@ -529,8 +559,8 @@ def test_sweep_missing_launcher_is_a_red_cell(tmp_path):
 _TOML = """
 [project.portfolio]
 s = [
-  { repo = "a/b", path = "b" },
-  { repo = "c/d", path = "d", expect_verify_fail = "declared reason" },
+  { repo = "a/b", path = "b", signing = "not-applicable" },
+  { repo = "c/d", path = "d", signing = "signed", expect_verify_fail = "declared reason" },
 ]
 """
 

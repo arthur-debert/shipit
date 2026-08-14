@@ -36,37 +36,41 @@ required = true
 local = false
 trigger = "pr"
 
+# Each entry declares its `signing` posture — signed / unsigned / not-applicable
+# — and `shipit fleet posture` checks it against the repo's Actions secret names.
+# `signed` = the artifact declares sign = true; `unsigned` = it could sign and
+# deliberately does not (and says why); `not-applicable` = nothing signable.
 [project.portfolio]
 phos = [
-  { repo = "phos-editor/app", path = "phos/phos-app", expect_verify_fail = "the parity verify needs the phos sibling checkouts, absent in the hermetic clone" },
-  { repo = "phos-editor/core", path = "phos/phos-core" },
-  { repo = "phos-editor/phos.photo", path = "phos/phos.photo" },
+  { repo = "phos-editor/app", path = "phos/phos-app", signing = "signed", expect_verify_fail = "the parity verify needs the phos sibling checkouts, absent in the hermetic clone" },
+  { repo = "phos-editor/core", path = "phos/phos-core", signing = "not-applicable" },
+  { repo = "phos-editor/phos.photo", path = "phos/phos.photo", signing = "not-applicable" },
 ]
-burgertocow = [{ repo = "arthur-debert/burgertocow", path = "burgertocow" }]
-clapfig = [{ repo = "arthur-debert/clapfig", path = "clapfig" }]
-dodot = [{ repo = "arthur-debert/dodot", path = "dodot" }]
+burgertocow = [{ repo = "arthur-debert/burgertocow", path = "burgertocow", signing = "signed" }]
+clapfig = [{ repo = "arthur-debert/clapfig", path = "clapfig", signing = "not-applicable" }]
+dodot = [{ repo = "arthur-debert/dodot", path = "dodot", signing = "signed" }]
 lex = [
-  { repo = "lex-fmt/lex", path = "lex-fmt/lex" },
-  { repo = "lex-fmt/lexed", path = "lex-fmt/lexed" },
-  { repo = "lex-fmt/mkdocs-lex", path = "lex-fmt/mkdocs-lex" },
-  { repo = "lex-fmt/nvim", path = "lex-fmt/nvim" },
-  { repo = "lex-fmt/tree-sitter-lex", path = "lex-fmt/tree-sitter-lex" },
-  { repo = "lex-fmt/vscode", path = "lex-fmt/vscode" },
-  { repo = "lex-fmt/zed-lex", path = "lex-fmt/zed-lex" },
+  { repo = "lex-fmt/lex", path = "lex-fmt/lex", signing = "signed" },
+  { repo = "lex-fmt/lexed", path = "lex-fmt/lexed", signing = "signed" },
+  { repo = "lex-fmt/mkdocs-lex", path = "lex-fmt/mkdocs-lex", signing = "not-applicable" },
+  { repo = "lex-fmt/nvim", path = "lex-fmt/nvim", signing = "not-applicable" },
+  { repo = "lex-fmt/tree-sitter-lex", path = "lex-fmt/tree-sitter-lex", signing = "not-applicable" },
+  { repo = "lex-fmt/vscode", path = "lex-fmt/vscode", signing = "not-applicable" },
+  { repo = "lex-fmt/zed-lex", path = "lex-fmt/zed-lex", signing = "not-applicable" },
 ]
-lookma = [{ repo = "arthur-debert/lookma", path = "lookma" }]
-padz = [{ repo = "arthur-debert/padz", path = "padz" }]
-rustloc = [{ repo = "arthur-debert/rustloc", path = "rustloc" }]
+lookma = [{ repo = "arthur-debert/lookma", path = "lookma", signing = "not-applicable" }]
+padz = [{ repo = "arthur-debert/padz", path = "padz", signing = "unsigned", signing_reason = "owner decision #779 — padz ships its darwin artifacts unsigned" }]
+rustloc = [{ repo = "arthur-debert/rustloc", path = "rustloc", signing = "signed" }]
 shipit = [
-  { repo = "arthur-debert/shipit", path = "shipit" },
-  { repo = "arthur-debert/shipit-canary", path = "shipit-canary" },
+  { repo = "arthur-debert/shipit", path = "shipit", signing = "not-applicable" },
+  { repo = "arthur-debert/shipit-canary", path = "shipit-canary", signing = "not-applicable" },
 ]
 simple-gal = [
-  { repo = "arthur-debert/simple-gal", path = "simple-gal/simple-gal" },
-  { repo = "arthur-debert/simple-gal-ui", path = "simple-gal/simple-gal-ui" },
+  { repo = "arthur-debert/simple-gal", path = "simple-gal/simple-gal", signing = "signed" },
+  { repo = "arthur-debert/simple-gal-ui", path = "simple-gal/simple-gal-ui", signing = "signed" },
 ]
-standout = [{ repo = "arthur-debert/standout", path = "standout" }]
-supage = [{ repo = "arthur-debert/supage", path = "supage" }]
+standout = [{ repo = "arthur-debert/standout", path = "standout", signing = "not-applicable" }]
+supage = [{ repo = "arthur-debert/supage", path = "supage", signing = "not-applicable" }]
 
 [lint]
 ignore = [
