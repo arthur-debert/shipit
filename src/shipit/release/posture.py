@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from .secretreq import (
     APPLE_ID_NOTARY_SECRETS,
     ASC_NOTARY_SECRETS,
+    EMPTY_VALID_SECRETS,
     SIGN_MAC_CERT_SECRETS,
 )
 
@@ -24,10 +25,17 @@ POSTURE_NOT_APPLICABLE = "not-applicable"
 #: deliberately does not; ``not-applicable`` = produces nothing signable.
 POSTURES: tuple[str, ...] = (POSTURE_SIGNED, POSTURE_UNSIGNED, POSTURE_NOT_APPLICABLE)
 
-#: The full set a ``signed`` repo carries: the cert pair plus the canonical trio.
+#: The full set a ``signed`` repo may carry: the cert pair plus the canonical trio.
 CANONICAL_SIGNING_SECRETS: tuple[str, ...] = (
     *SIGN_MAC_CERT_SECRETS,
     *ASC_NOTARY_SECRETS,
+)
+
+#: The canonical names whose ABSENCE is a finding — an empty-valid name (the
+#: password of a passwordless PKCS#12) is optional for the signer, so it is
+#: recognized when present and never demanded.
+REQUIRED_SIGNING_SECRETS: tuple[str, ...] = tuple(
+    name for name in CANONICAL_SIGNING_SECRETS if name not in EMPTY_VALID_SECRETS
 )
 
 #: Pre-homogenization name -> the canonical name that replaces it.
@@ -99,7 +107,7 @@ def _signed_findings(present: Collection[str]) -> list[Finding]:
             secret=name,
             detail="required by the sign-mac stage; provision it under this canonical name",
         )
-        for name in CANONICAL_SIGNING_SECRETS
+        for name in REQUIRED_SIGNING_SECRETS
         if name not in present and name not in superseded
     )
     findings.extend(

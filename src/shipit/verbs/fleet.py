@@ -220,14 +220,23 @@ def format_posture(report: fleetposture.PostureReport) -> str:
         for row in all_rows
     )
     summaries = "\n".join(row.summary() for row in report.repos)
-    off = len(report.divergent) + len(report.unknown)
-    verdict = (
-        "homogeneous — every repo matches its declared posture"
-        if off == 0
-        else f"{off} repo(s) off-posture — homogenize, then re-run"
-    )
-    footer = f"fleet posture: {len(report.repos)} repo(s), {verdict}"
+    footer = f"fleet posture: {len(report.repos)} repo(s), {_verdict_line(report)}"
     return f"{table}\n\n{summaries}\n\n{footer}"
+
+
+def _verdict_line(report: fleetposture.PostureReport) -> str:
+    """The verdict, naming each off-posture class with the action that clears it — an unknown repo needs read access, not homogenizing."""
+    parts = []
+    if report.divergent:
+        parts.append(f"{len(report.divergent)} repo(s) off-posture — homogenize")
+    if report.unknown:
+        parts.append(
+            f"{len(report.unknown)} repo(s) unknown — their Actions secrets could "
+            f"not be listed; restore access"
+        )
+    if not parts:
+        return "homogeneous — every repo matches its declared posture"
+    return f"{'; '.join(parts)}, then re-run"
 
 
 _POSTURE_LABELS = {

@@ -63,7 +63,8 @@ def _parse_entry(where: str, stack: str, spec: object) -> PortfolioEntry:
     if not isinstance(spec, dict):
         raise config.ConfigError(
             f"{where} must be an inline table, e.g. "
-            f'{{ repo = "owner/name", path = "owner/name" }}; got {spec!r}'
+            f'{{ repo = "owner/name", path = "owner/name", '
+            f'signing = "not-applicable" }}; got {spec!r}'
         )
     repo = spec.get("repo")
     if not isinstance(repo, str) or not repo:
@@ -118,7 +119,8 @@ def _parse_signing(where: str, spec: dict) -> tuple[str, str | None]:
     if signing == posture.POSTURE_UNSIGNED and reason is None:
         raise config.ConfigError(
             f'{where}: signing = "{posture.POSTURE_UNSIGNED}" must declare '
-            f"`signing_reason` — a repo that could sign and does not records why"
+            f"`signing_reason` — a repo that could sign and deliberately does "
+            f"not records the decision that chose it"
         )
     return signing, reason
 

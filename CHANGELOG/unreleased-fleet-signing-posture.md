@@ -5,9 +5,10 @@
   accidentally divergent: an entry without a posture is a config error, never an
   inference. The verb reads each repo's Actions secret NAMES (never values) and
   reports how they diverge from the fleet's one set: a `signed` repo carries
-  `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD` and the ASC API-key trio and
-  nothing else, and an `unsigned` or `not-applicable` repo carries no signing
-  secret at all. Two divergences it exists to surface: the pre-homogenization
+  `APPLE_CERTIFICATE` and the ASC API-key trio and nothing else (plus
+  `APPLE_CERTIFICATE_PASSWORD`, optional as everywhere else in the signer since
+  a passwordless PKCS#12 has none), and an `unsigned` or `not-applicable` repo
+  carries no signing secret at all. Two divergences it exists to surface: the pre-homogenization
   `APPLE_CERTIFICATE_P12_BASE64` name (reported with the canonical name that
   replaces it) and notarization via the Apple-ID trio — the sign block keeps
   accepting either trio, but the FLEET notarizes with the machine-credential ASC

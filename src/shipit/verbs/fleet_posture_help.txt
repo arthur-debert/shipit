@@ -10,9 +10,12 @@ The check reads each repo's Actions secret NAMES (never values) and reports how
 they diverge:
 
   signed          the canonical set must be present and nothing else:
-                  APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD, and the ASC
-                  API-key trio (ASC_API_KEY_BASE64, ASC_API_KEY_ID,
-                  ASC_API_ISSUER_ID). The pre-homogenization
+                  APPLE_CERTIFICATE and the ASC API-key trio
+                  (ASC_API_KEY_BASE64, ASC_API_KEY_ID, ASC_API_ISSUER_ID),
+                  plus APPLE_CERTIFICATE_PASSWORD — optional, since a
+                  passwordless PKCS#12 has none (the signer's one empty-valid
+                  name), so it is recognized when present and never demanded.
+                  The pre-homogenization
                   APPLE_CERTIFICATE_P12_BASE64 name is reported with the
                   canonical name that replaces it. The fleet notarizes with the
                   machine-credential ASC trio only, so an Apple-ID trio

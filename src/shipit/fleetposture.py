@@ -81,6 +81,7 @@ class PostureReport:
             "kind": "fleet-posture-report",
             "postures": list(posture.POSTURES),
             "canonical_signing_secrets": list(posture.CANONICAL_SIGNING_SECRETS),
+            "required_signing_secrets": list(posture.REQUIRED_SIGNING_SECRETS),
             "divergent": [row.entry.repo for row in self.divergent],
             "unknown": [row.entry.repo for row in self.unknown],
             "repos": [row.to_dict() for row in self.repos],

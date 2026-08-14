@@ -48,8 +48,21 @@ def test_a_missing_canonical_name_is_reported_once_per_name():
     findings = posture.conformance("signed", ["APPLE_CERTIFICATE"])
     assert _kinds(findings) == [posture.KIND_MISSING]
     assert sorted(f.secret for f in findings) == sorted(
-        n for n in posture.CANONICAL_SIGNING_SECRETS if n != "APPLE_CERTIFICATE"
+        n for n in posture.REQUIRED_SIGNING_SECRETS if n != "APPLE_CERTIFICATE"
     )
+
+
+def test_a_passwordless_cert_conforms_since_the_signer_allows_an_empty_password():
+    names = [n for n in _CANONICAL if n != "APPLE_CERTIFICATE_PASSWORD"]
+    assert posture.conformance("signed", names) == ()
+    assert "APPLE_CERTIFICATE_PASSWORD" not in posture.REQUIRED_SIGNING_SECRETS
+    assert "APPLE_CERTIFICATE_PASSWORD" in posture.CANONICAL_SIGNING_SECRETS
+    # Still recognized when present: it conforms either way, and on a
+    # non-signing repo it is an unexpected leftover like any other.
+    assert posture.conformance("signed", _CANONICAL) == ()
+    assert _kinds(
+        posture.conformance("not-applicable", ["APPLE_CERTIFICATE_PASSWORD"])
+    ) == [posture.KIND_UNEXPECTED]
 
 
 def test_apple_id_notary_is_noncanonical_even_though_the_block_accepts_it():
@@ -143,6 +156,21 @@ def test_format_posture_tables_every_repo_and_states_the_verdict():
     assert "REPO" in text
     assert "a/b" in text and "c/d" in text
     assert "1 repo(s) off-posture" in text
+
+
+def test_the_verdict_tells_an_unknown_repo_apart_from_a_divergent_one():
+    def boom(repo):
+        raise execrun.ExecError(["gh", "secret", "list"], rc=1, stderr="denied")
+
+    rows = (
+        fleetposture.check_repo(_entry(), names_fn=boom),
+        fleetposture.check_repo(
+            _entry(repo="c/d"), names_fn=lambda r: list(_LEGACY_FLEET_STATE)
+        ),
+    )
+    text = fleet_verb.format_posture(fleetposture.PostureReport(repos=rows))
+    assert "1 repo(s) off-posture — homogenize" in text
+    assert "1 repo(s) unknown" in text and "restore access" in text
 
 
 def test_run_posture_checks_the_declared_portfolio(tmp_path, monkeypatch, capsys):

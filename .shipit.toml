@@ -63,7 +63,8 @@ padz = [{ repo = "arthur-debert/padz", path = "padz", signing = "unsigned", sign
 rustloc = [{ repo = "arthur-debert/rustloc", path = "rustloc", signing = "signed" }]
 shipit = [
   { repo = "arthur-debert/shipit", path = "shipit", signing = "not-applicable" },
-  { repo = "arthur-debert/shipit-canary", path = "shipit-canary", signing = "not-applicable" },
+  # The standing signed-darwin proof surface (docs/dev/workflows.lex §9).
+  { repo = "arthur-debert/shipit-canary", path = "shipit-canary", signing = "signed" },
 ]
 simple-gal = [
   { repo = "arthur-debert/simple-gal", path = "simple-gal/simple-gal", signing = "signed" },
