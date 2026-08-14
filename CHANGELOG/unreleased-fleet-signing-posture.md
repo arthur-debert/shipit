@@ -4,8 +4,9 @@
   `signing_reason`), or `not-applicable` — so a repo can no longer be
   accidentally divergent: an entry without a posture is a config error, never an
   inference. The verb reads each repo's Actions secret NAMES (never values) and
-  reports how they diverge from the fleet's one set: a `signed` repo carries
-  `APPLE_CERTIFICATE` and the ASC API-key trio and nothing else (plus
+  reports how the SIGNING ones diverge from the fleet's one set — a name outside
+  that set, like `RELEASE_TOKEN`, is not its business: a `signed` repo carries
+  `APPLE_CERTIFICATE` and the ASC API-key trio and no other signing secret (plus
   `APPLE_CERTIFICATE_PASSWORD`, optional as everywhere else in the signer since
   a passwordless PKCS#12 has none), and an `unsigned` or `not-applicable` repo
   carries no signing secret at all. Two divergences it exists to surface: the pre-homogenization

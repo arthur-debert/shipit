@@ -7,9 +7,11 @@ The registry is the portfolio itself: every `[project.portfolio]` entry declares
 no repo is accidentally divergent.
 
 The check reads each repo's Actions secret NAMES (never values) and reports how
-they diverge:
+the SIGNING ones diverge — a name outside the signing set, like RELEASE_TOKEN,
+is not this check's business:
 
-  signed          the canonical set must be present and nothing else:
+  signed          the canonical set must be present, and no other signing
+                  secret:
                   APPLE_CERTIFICATE and the ASC API-key trio
                   (ASC_API_KEY_BASE64, ASC_API_KEY_ID, ASC_API_ISSUER_ID),
                   plus APPLE_CERTIFICATE_PASSWORD — optional, since a

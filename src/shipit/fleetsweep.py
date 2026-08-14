@@ -120,7 +120,7 @@ def _parse_signing(where: str, spec: dict) -> tuple[str, str | None]:
         raise config.ConfigError(
             f'{where}: signing = "{posture.POSTURE_UNSIGNED}" must declare '
             f"`signing_reason` — a repo that could sign and deliberately does "
-            f"not records the decision that chose it"
+            f"not, records the decision that chose it"
         )
     return signing, reason
 
