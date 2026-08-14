@@ -33,6 +33,10 @@ def _kinds(findings):
     return sorted({f.kind for f in findings})
 
 
+def _unreadable(repo):
+    raise execrun.ExecError(["gh", "secret", "list"], rc=1, stderr="denied")
+
+
 def test_canonical_signed_repo_conforms():
     assert posture.conformance("signed", [*_CANONICAL, "RELEASE_TOKEN"]) == ()
 
@@ -103,10 +107,7 @@ def test_row_reports_the_findings_against_the_declared_posture():
 
 
 def test_an_unreadable_repo_is_unknown_not_a_pass():
-    def boom(repo):
-        raise execrun.ExecError(["gh", "secret", "list"], rc=1, stderr="denied")
-
-    row = fleetposture.check_repo(_entry(), names_fn=boom)
+    row = fleetposture.check_repo(_entry(), names_fn=_unreadable)
     assert row.status == fleetposture.STATUS_UNKNOWN
     assert "could not list Actions secrets" in row.summary()
     assert fleetposture.PostureReport(repos=(row,)).verdict() == 1
@@ -137,12 +138,53 @@ def test_report_json_carries_the_registry_and_the_divergent_repos():
         fleetposture.check_repo(
             _entry(repo="c/d"), names_fn=lambda r: list(_LEGACY_FLEET_STATE)
         ),
+        fleetposture.check_repo(_entry(repo="e/f"), names_fn=_unreadable),
     )
     data = fleetposture.PostureReport(repos=rows).to_dict()
     assert data["kind"] == "fleet-posture-report"
-    assert data["divergent"] == ["c/d"]
+    assert data["postures"] == list(posture.POSTURES)
     assert data["canonical_signing_secrets"] == list(posture.CANONICAL_SIGNING_SECRETS)
+    assert data["required_signing_secrets"] == list(posture.REQUIRED_SIGNING_SECRETS)
+    assert data["divergent"] == ["c/d"]
+    assert data["unknown"] == ["e/f"]
+    assert [row["repo"] for row in data["repos"]] == ["a/b", "c/d", "e/f"]
     assert json.dumps(data)
+
+
+def test_report_json_row_carries_its_state_and_only_the_optional_keys_it_has():
+    conforming = fleetposture.check_repo(
+        _entry(), names_fn=lambda r: [*_CANONICAL, "RELEASE_TOKEN"]
+    ).to_dict()
+    assert conforming["stack"] == "s"
+    assert conforming["repo"] == "a/b"
+    assert conforming["signing"] == "signed"
+    assert conforming["status"] == fleetposture.STATUS_CONFORMS
+    # Names only, and only the signing-related ones.
+    assert conforming["signing_secrets"] == sorted(_CANONICAL)
+    assert conforming["findings"] == []
+    assert "conforms" in conforming["summary"]
+    assert "signing_reason" not in conforming and "reason" not in conforming
+
+    divergent = fleetposture.check_repo(
+        _entry(repo="c/d"), names_fn=lambda r: list(_LEGACY_FLEET_STATE)
+    ).to_dict()
+    assert divergent["status"] == fleetposture.STATUS_DIVERGENT
+    assert [(f["kind"], f["secret"]) for f in divergent["findings"]] == [
+        (posture.KIND_LEGACY, "APPLE_CERTIFICATE_P12_BASE64")
+    ]
+    assert "APPLE_CERTIFICATE" in divergent["findings"][0]["detail"]
+
+    recorded = fleetposture.check_repo(
+        _entry(signing="unsigned", reason="owner decision #779"),
+        names_fn=lambda r: [],
+    ).to_dict()
+    assert recorded["signing_reason"] == "owner decision #779"
+    assert "reason" not in recorded
+
+    unknown = fleetposture.check_repo(_entry(), names_fn=_unreadable).to_dict()
+    assert unknown["status"] == fleetposture.STATUS_UNKNOWN
+    assert "could not list Actions secrets" in unknown["reason"]
+    assert unknown["signing_secrets"] == [] and unknown["findings"] == []
 
 
 def test_format_posture_tables_every_repo_and_states_the_verdict():
@@ -159,11 +201,8 @@ def test_format_posture_tables_every_repo_and_states_the_verdict():
 
 
 def test_the_verdict_tells_an_unknown_repo_apart_from_a_divergent_one():
-    def boom(repo):
-        raise execrun.ExecError(["gh", "secret", "list"], rc=1, stderr="denied")
-
     rows = (
-        fleetposture.check_repo(_entry(), names_fn=boom),
+        fleetposture.check_repo(_entry(), names_fn=_unreadable),
         fleetposture.check_repo(
             _entry(repo="c/d"), names_fn=lambda r: list(_LEGACY_FLEET_STATE)
         ),
