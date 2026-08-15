@@ -3,3 +3,6 @@
 It is for adoption and release confidence: instead of proving a change only in
 the shipit repo, it runs shipped tool verbs across the configured portfolio and
 reports the per-repo, per-tool matrix.
+
+`sweep` is that matrix. `posture` is the other fleet-wide question: whether each
+repo's signing configuration still matches the posture it declares.

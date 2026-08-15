@@ -298,6 +298,7 @@ _HELP_RESOURCES = {
     ("session", "resume"): ("shipit.verbs", "session_resume_help.txt"),
     ("fleet",): ("shipit.verbs", "fleet_help.txt"),
     ("fleet", "sweep"): ("shipit.verbs", "fleet_sweep_help.txt"),
+    ("fleet", "posture"): ("shipit.verbs", "fleet_posture_help.txt"),
     ("wf",): ("shipit.verbs", "wf_help.txt"),
     ("wf", "test"): ("shipit.verbs", "wf_test_help.txt"),
     ("wf", "verify-canary"): ("shipit.verbs", "wf_verify_canary_help.txt"),

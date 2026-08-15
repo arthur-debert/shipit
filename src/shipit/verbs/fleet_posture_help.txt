@@ -1,0 +1,31 @@
+`shipit fleet posture` checks each portfolio repo against its declared signing
+posture.
+
+The registry is the portfolio itself: every `[project.portfolio]` entry declares
+`signing` — "signed", "unsigned" (which must also record the decision in
+`signing_reason`), or "not-applicable". A posture is declared, never inferred, so
+no repo is accidentally divergent.
+
+The check reads each repo's Actions secret NAMES (never values) and reports how
+the SIGNING ones diverge — a name outside the signing set, like RELEASE_TOKEN,
+is not this check's business:
+
+  signed          the canonical set must be present, and no other signing
+                  secret:
+                  APPLE_CERTIFICATE and the ASC API-key trio
+                  (ASC_API_KEY_BASE64, ASC_API_KEY_ID, ASC_API_ISSUER_ID),
+                  plus APPLE_CERTIFICATE_PASSWORD — optional, since a
+                  passwordless PKCS#12 has none (the signer's one empty-valid
+                  name), so it is recognized when present and never demanded.
+                  The pre-homogenization
+                  APPLE_CERTIFICATE_P12_BASE64 name is reported with the
+                  canonical name that replaces it. The fleet notarizes with the
+                  machine-credential ASC trio only, so an Apple-ID trio
+                  (APPLE_ID/APPLE_PASSWORD/APPLE_TEAM_ID) is a finding here even
+                  though the sign block accepts either.
+  unsigned        a repo that could sign and deliberately does not: no signing
+                  secret should remain on it.
+  not-applicable  nothing signable is produced: same, no signing secret.
+
+A repo whose secrets cannot be listed is reported `unknown`, which fails the
+verdict — an unverifiable repo is never a silent pass.

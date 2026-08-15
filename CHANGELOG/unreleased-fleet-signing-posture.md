@@ -1,0 +1,18 @@
+- fleet: signing is now a DECLARED posture per portfolio repo, and `shipit fleet
+  posture` checks it (#901). Every `[project.portfolio]` entry declares
+  `signing` — `signed`, `unsigned` (which must also record the decision in
+  `signing_reason`), or `not-applicable` — so a repo can no longer be
+  accidentally divergent: an entry without a posture is a config error, never an
+  inference. The verb reads each repo's Actions secret NAMES (never values) and
+  reports how the SIGNING ones diverge from the fleet's one set — a name outside
+  that set, like `RELEASE_TOKEN`, is not its business: a `signed` repo carries
+  `APPLE_CERTIFICATE` and the ASC API-key trio and no other signing secret (plus
+  `APPLE_CERTIFICATE_PASSWORD`, optional as everywhere else in the signer since
+  a passwordless PKCS#12 has none), and an `unsigned` or `not-applicable` repo
+  carries no signing secret at all. Two divergences it exists to surface: the pre-homogenization
+  `APPLE_CERTIFICATE_P12_BASE64` name (reported with the canonical name that
+  replaces it) and notarization via the Apple-ID trio — the sign block keeps
+  accepting either trio, but the FLEET notarizes with the machine-credential ASC
+  trio, so an Apple-ID trio on a fleet repo is a finding. A repo whose secrets
+  cannot be listed is reported `unknown` and fails the verdict; an unverifiable
+  repo is not a pass.

@@ -13,6 +13,7 @@ from pathlib import Path
 
 from . import config, events, execrun, identity, pixienv, workenv
 from .changelog import CHANGELOG_DIR
+from .release import posture
 from .tree.create import Tree, create_from_source, new_tree_id, new_tree_naming
 from .tree.layout import TreeSpec
 
@@ -47,11 +48,13 @@ DEFAULT_SOURCE_ROOT = Path("~/h")
 
 @dataclass(frozen=True)
 class PortfolioEntry:
-    """One ``[project.portfolio]`` repo: stack, ``owner/name`` slug, source-checkout path, and any declared ``expect_verify_fail`` reason."""
+    """One ``[project.portfolio]`` repo: stack, ``owner/name`` slug, source-checkout path, signing posture, and any declared ``expect_verify_fail`` reason."""
 
     stack: str
     repo: str
     path: str
+    signing: str
+    signing_reason: str | None = None
     expect_verify_fail: str | None = None
 
 
@@ -60,7 +63,8 @@ def _parse_entry(where: str, stack: str, spec: object) -> PortfolioEntry:
     if not isinstance(spec, dict):
         raise config.ConfigError(
             f"{where} must be an inline table, e.g. "
-            f'{{ repo = "owner/name", path = "owner/name" }}; got {spec!r}'
+            f'{{ repo = "owner/name", path = "owner/name", '
+            f'signing = "not-applicable" }}; got {spec!r}'
         )
     repo = spec.get("repo")
     if not isinstance(repo, str) or not repo:
@@ -84,7 +88,41 @@ def _parse_entry(where: str, stack: str, spec: object) -> PortfolioEntry:
         raise config.ConfigError(
             f"{where}: expect_verify_fail must be a non-empty reason string"
         )
-    return PortfolioEntry(stack=stack, repo=repo, path=path, expect_verify_fail=expect)
+    signing, reason = _parse_signing(where, spec)
+    return PortfolioEntry(
+        stack=stack,
+        repo=repo,
+        path=path,
+        signing=signing,
+        signing_reason=reason,
+        expect_verify_fail=expect,
+    )
+
+
+def _parse_signing(where: str, spec: dict) -> tuple[str, str | None]:
+    """The entry's posture and its reason; every repo declares one so none is accidentally divergent, and ``unsigned`` records the decision that chose it."""
+    signing = spec.get("signing")
+    if not isinstance(signing, str) or not signing:
+        raise config.ConfigError(
+            f"{where} must declare `signing` (one of: {', '.join(posture.POSTURES)}) — "
+            f"the fleet's signing posture is declared per repo, never inferred"
+        )
+    try:
+        posture.validate_posture(signing)
+    except ValueError as exc:
+        raise config.ConfigError(f"{where}: {exc}") from exc
+    reason = spec.get("signing_reason")
+    if reason is not None and (not isinstance(reason, str) or not reason):
+        raise config.ConfigError(
+            f"{where}: signing_reason must be a non-empty reason string"
+        )
+    if signing == posture.POSTURE_UNSIGNED and reason is None:
+        raise config.ConfigError(
+            f'{where}: signing = "{posture.POSTURE_UNSIGNED}" must declare '
+            f"`signing_reason` — a repo that could sign and deliberately does "
+            f"not, records the decision that chose it"
+        )
+    return signing, reason
 
 
 def load_portfolio(cfg: dict) -> tuple[PortfolioEntry, ...]:

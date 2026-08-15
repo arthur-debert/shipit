@@ -10,7 +10,7 @@ from pathlib import Path
 
 import click
 
-from .. import buildid, config, fleetsweep, identity
+from .. import buildid, config, fleetposture, fleetsweep, identity
 from ..fleetsweep import SweepError
 from ._errors import cli_errors
 from ._params import json_option
@@ -25,7 +25,8 @@ logger = logging.getLogger("shipit.fleet")
         "Fleet-wide verification over the declared [project.portfolio].\n\n"
         "`sweep` runs every applicable tool verb in a fresh Tree per portfolio "
         "repo under the candidate shipit build and emits the per-tool x "
-        "per-repo matrix report. `--help` is the map."
+        "per-repo matrix report. `posture` checks each repo's Actions secret "
+        "NAMES against its declared signing posture. `--help` is the map."
     ),
 )
 def fleet() -> None:
@@ -113,6 +114,26 @@ def sweep_cmd(
     )
 
 
+def select_portfolio(repos: tuple[str, ...]) -> tuple[fleetsweep.PortfolioEntry, ...]:
+    """The declared portfolio, narrowed to ``repos`` when given; an unknown selector is refused rather than reconstructed (ADR-0033)."""
+    cfg = config.load(Path(config.CONFIG_NAME))
+    entries = fleetsweep.load_portfolio(cfg)
+    if not repos:
+        return entries
+    try:
+        wanted = {identity.repo_from_slug(slug).slug for slug in repos}
+    except ValueError as exc:
+        raise SweepError(f"invalid --repo selector: {exc}") from exc
+    by_slug = {identity.repo_from_slug(entry.repo).slug: entry for entry in entries}
+    unknown = sorted(wanted - by_slug.keys())
+    if unknown:
+        raise SweepError(
+            f"not in [project.portfolio]: {', '.join(unknown)} — the fleet verbs "
+            "iterate exactly the declared portfolio (ADR-0033)"
+        )
+    return tuple(entry for slug, entry in by_slug.items() if slug in wanted)
+
+
 @cli_errors
 def run_sweep(
     *,
@@ -126,21 +147,7 @@ def run_sweep(
     sweep_fn: Callable[..., fleetsweep.SweepReport] | None = None,
 ) -> int:
     """Read the portfolio → orchestrate the sweep → render + persist the report; returns 0 when no cell is red, 1 otherwise."""
-    cfg = config.load(Path(config.CONFIG_NAME))
-    entries = fleetsweep.load_portfolio(cfg)
-    if repos:
-        try:
-            wanted = {identity.repo_from_slug(slug).slug for slug in repos}
-        except ValueError as exc:
-            raise SweepError(f"invalid --repo selector: {exc}") from exc
-        by_slug = {identity.repo_from_slug(entry.repo).slug: entry for entry in entries}
-        unknown = sorted(wanted - by_slug.keys())
-        if unknown:
-            raise SweepError(
-                f"not in [project.portfolio]: {', '.join(unknown)} — the sweep "
-                "iterates exactly the declared portfolio (ADR-0033)"
-            )
-        entries = tuple(entry for slug, entry in by_slug.items() if slug in wanted)
+    entries = select_portfolio(repos)
     candidate = fleetsweep.resolve_candidate(shipit_exec)
     sha = buildid.build_sha()
     sweep_fn = sweep_fn or fleetsweep.sweep
@@ -168,6 +175,75 @@ def run_sweep(
             extra={"report_path": str(target), "red_cells": report.red_cells},
         )
     return report.verdict()
+
+
+@fleet.command(name="posture")
+@click.option(
+    "--repo",
+    "repos",
+    multiple=True,
+    metavar="OWNER/NAME",
+    help="Portfolio repo to check (repeatable). Default: every entry.",
+)
+@json_option
+def posture_cmd(repos: tuple[str, ...], as_json: bool) -> None:
+    """Check each repo's Actions secret NAMES against its declared signing posture."""
+    raise SystemExit(run_posture(repos=repos, as_json=as_json))
+
+
+@cli_errors
+def run_posture(
+    *,
+    repos: tuple[str, ...] = (),
+    as_json: bool = False,
+    names_fn: fleetposture.NamesFn | None = None,
+) -> int:
+    """Read the posture registry → check each repo → render; returns 0 only when every repo was read and conforms."""
+    report = fleetposture.check(select_portfolio(repos), names_fn=names_fn)
+    emit(report, format_posture, as_json=as_json)
+    return report.verdict()
+
+
+def format_posture(report: fleetposture.PostureReport) -> str:
+    """The pure text renderer: the posture table, the per-repo lines, and the fleet verdict."""
+    if not report.repos:
+        return "fleet posture: no portfolio repos selected."
+    headers = ["REPO", "POSTURE", "STATUS"]
+    rows = [
+        [row.entry.repo, row.entry.signing, _POSTURE_LABELS.get(row.status, row.status)]
+        for row in report.repos
+    ]
+    all_rows = [headers, *rows]
+    widths = [max(len(r[col]) for r in all_rows) for col in range(len(headers))]
+    table = "\n".join(
+        "  ".join(cell.ljust(widths[col]) for col, cell in enumerate(row)).rstrip()
+        for row in all_rows
+    )
+    summaries = "\n".join(row.summary() for row in report.repos)
+    footer = f"fleet posture: {len(report.repos)} repo(s), {_verdict_line(report)}"
+    return f"{table}\n\n{summaries}\n\n{footer}"
+
+
+def _verdict_line(report: fleetposture.PostureReport) -> str:
+    """The verdict, naming each off-posture class with the action that clears it — an unknown repo needs read access, not homogenizing."""
+    parts = []
+    if report.divergent:
+        parts.append(f"{len(report.divergent)} repo(s) off-posture — homogenize")
+    if report.unknown:
+        parts.append(
+            f"{len(report.unknown)} repo(s) unknown — their Actions secrets could "
+            f"not be listed; restore access"
+        )
+    if not parts:
+        return "homogeneous — every repo matches its declared posture"
+    return f"{'; '.join(parts)}, then re-run"
+
+
+_POSTURE_LABELS = {
+    fleetposture.STATUS_CONFORMS: "ok",
+    fleetposture.STATUS_DIVERGENT: "DIVERGENT",
+    fleetposture.STATUS_UNKNOWN: "unknown",
+}
 
 
 _STATUS_LABELS = {
